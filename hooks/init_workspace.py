@@ -215,18 +215,17 @@ def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
 def create_feature(workspace: Path, feature: str) -> Dict[str, object]:
     workspace = workspace.resolve()
     feature_dir = _resolve_feature_dir(workspace, feature)
-    existed = feature_dir.exists()
+    if feature_dir.exists():
+        print(f"ERROR: 特性已存在：{feature_dir}", file=sys.stderr)
+        sys.exit(1)
+
     ensure_dir(feature_dir)
 
     return {
         "initialized": feature_dir.is_dir(),
-        "created": [] if existed else [str(feature_dir)],
+        "created": [str(feature_dir)],
         "backup": None,
-        "message": (
-            f"Feature already exists: {feature_dir}"
-            if existed
-            else f"Feature created successfully: {feature_dir}"
-        ),
+        "message": f"Feature created successfully: {feature_dir}",
     }
 
 
