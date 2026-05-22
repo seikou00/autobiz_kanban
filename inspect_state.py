@@ -31,7 +31,7 @@ from board_core.state import (  # type: ignore[import-untyped]
     load_state_records,
 )
 from board_core.workflow import (  # type: ignore[import-untyped]
-    build_overall_status,
+    derive_current_state_id,
     build_workflow_shell,
     derive_node_state_id,
     find_current_node,
@@ -176,14 +176,13 @@ def project_mode(workspace: Path, project: str, config: dict) -> int:
         if checkpoint:
             current_idx, current_node_id = find_current_node(nodes_config, checkpoint)
 
-        overall_status = build_overall_status(checkpoint, suffix_states, current_idx)
+        current_state_id = derive_current_state_id(checkpoint, suffix_states, current_idx)
 
         runs.append({
             "featureName": feature,
             "featureId": feature,
-            "version": record.get("iteration") or "1",
-            "overallStatus": overall_status,
             "currentNodeId": current_node_id or "unknown",
+            "currentStateId": current_state_id,
         })
 
     output = {

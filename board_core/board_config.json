@@ -1,16 +1,26 @@
 {
   "schemaVersion": "harness.adapter.inspect.v1",
-  "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}\\${project}`",
   "inspectCommands": {
     "darwin": {
       "project": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
       "run": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "createProject": "python3 ${pluginPath}/hooks/init_workspace.py ${pluginWorkspace}/${project}"
+      "createProject": "python3 ${pluginPath}/hooks/init_workspace.py ${pluginWorkspace}/${project}",
+      "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
+      "plugin_dir": "${pluginWorkspace}/${project}"
+    },
+    "linux": {
+      "project": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
+      "run": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
+      "createProject": "python3 ${pluginPath}/hooks/init_workspace.py ${pluginWorkspace}/${project}",
+      "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
+      "plugin_dir": "${pluginWorkspace}/${project}"
     },
     "win32": {
       "project": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
       "run": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "createProject": "python ${pluginPath}\\hooks\\init_workspace.py ${pluginWorkspace}\\${project}"
+      "createProject": "python ${pluginPath}\\hooks\\init_workspace.py ${pluginWorkspace}\\${project}",
+      "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}\\${project}`",
+      "plugin_dir": "${pluginWorkspace}\\${project}"
     }
   },
   "workflow": {
