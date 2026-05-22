@@ -23,7 +23,6 @@ if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
 from board_core.artifacts import scan_artifacts  # type: ignore[import-untyped]
-from board_core.contracts import artifact_dicts  # type: ignore[import-untyped]
 from board_core.state import (  # type: ignore[import-untyped]
     find_feature_dir,
     list_active_feature_names,
@@ -63,7 +62,6 @@ def _watch_refs(workspace: Path, feature: str, feature_dir: Path | None = None) 
     feature_ref_dir = _feature_ref_dir(workspace, feature, feature_dir)
     return [
         {"path": ".autobizdevops/STATE.md", "purpose": "run-state"},
-        {"path": ".autobizdevops/state.json", "purpose": "run-state-json"},
         {"path": feature_ref_dir, "purpose": "artifacts"},
         {"path": f"{feature_ref_dir}/hooks.ndjson", "purpose": "hook-log"},
     ]
@@ -118,7 +116,7 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
         artifacts = scan_artifacts(
             feature_dir or (workspace / ".autobizdevops" / "features" / feature),
             workspace,
-            artifact_dicts(node, "outputs"),
+            node.get("artifactDefinitions", []),
         )
         run_nodes.append({
             "id": node["id"],

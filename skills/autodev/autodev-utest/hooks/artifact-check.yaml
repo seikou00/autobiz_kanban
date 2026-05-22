@@ -1,0 +1,9 @@
+skill: autodev-utest
+required_inputs:
+  - PRD.md
+  - design.md
+  - PLAN.md
+  - REQUIREMENTS_EVAL.md
+required_outputs:
+  - UNIT_TEST_REPORT.md
+validators:

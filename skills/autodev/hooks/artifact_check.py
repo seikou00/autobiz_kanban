@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Autodev artifact checks from board_config.json."""
+"""Run Autodev YAML artifact checks."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from common import (
+    ArtifactConfig,
     HookCheckError,
     HookContext,
     fail_line,
@@ -19,7 +20,6 @@ from common import (
     task_statuses,
     validate_required_files,
 )
-from board_core.contracts import BoardConfigError, load_repo_workflow_contracts  # noqa: E402
 
 
 PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
@@ -120,27 +120,11 @@ VALIDATORS = {
 }
 
 
-def validate_skill_config_schema(repo_root: Path, skill: str) -> None:
+def validate_config_schema(repo_root: Path, skill: str) -> None:
     config = load_artifact_config(repo_root, skill)
     for validator in config.validators:
         if validator not in VALIDATORS:
             raise HookCheckError("unknown_validator", f"{skill}:{validator}")
-
-
-def validate_config_schema(repo_root: Path, skill: str) -> None:
-    if skill != "all":
-        validate_skill_config_schema(repo_root, skill)
-        return
-
-    try:
-        contracts = load_repo_workflow_contracts(repo_root)
-    except BoardConfigError as error:
-        raise HookCheckError("invalid_board_config", str(error)) from error
-
-    for contract in contracts.skill_contracts.values():
-        for validator in contract.validators:
-            if validator not in VALIDATORS:
-                raise HookCheckError("unknown_validator", f"{contract.skill}:{validator}")
 
 
 def run_precheck(repo_root: Path, workspace_root: Path, skill: str, slug: str) -> tuple[int, str]:

@@ -8,7 +8,6 @@ autobizdevops Workspace 初始化脚本
 """
 
 import argparse
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +22,6 @@ try:
         get_issues_active_dir,
         get_issues_completed_dir,
         get_project_md_path,
-        get_state_json_path,
         get_state_md_path,
         get_workspace,
         is_initialized,
@@ -38,7 +36,6 @@ except ImportError:
         get_issues_active_dir,
         get_issues_completed_dir,
         get_project_md_path,
-        get_state_json_path,
         get_state_md_path,
         get_workspace,
         is_initialized,
@@ -61,7 +58,7 @@ def _generate_project_md(workspace_name: str) -> str:
 ## Notes
 
 - 本文件由 autobizdevops 初始化时自动生成
-- 其他流程控制以各阶段 `SKILL.md`、`.autobizdevops/STATE.md` 与 `.autobizdevops/state.json` 为准
+- 其他流程控制以各阶段 `SKILL.md` 与 `.autobizdevops/STATE.md` 为准
 """
 
 
@@ -77,29 +74,6 @@ def _generate_state_md() -> str:
 | Feature | 负责人 | checkpoint | 阶段 | 迭代 | 最后更新 |
 |---------|--------|-----------|------|------|---------|
 """
-
-
-def _generate_state_json() -> str:
-    return "{}\n"
-
-
-def _generate_state_json_from_state_md(state_md: Path) -> str:
-    if not state_md.is_file():
-        return _generate_state_json()
-
-    rows: dict[str, str] = {}
-    for raw_line in state_md.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw_line.strip()
-        if not line.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if len(cells) < 3:
-            continue
-        if cells[0] == "Feature" or all(cell and set(cell) <= {"-", ":"} for cell in cells):
-            continue
-        if cells[0] and cells[2]:
-            rows[cells[0]] = cells[2]
-    return json.dumps(dict(sorted(rows.items())), ensure_ascii=False, indent=2) + "\n"
 
 
 def _write_if_missing(path: Path, content: str, created: List[str]) -> None:
@@ -156,9 +130,6 @@ def init_workspace(workspace: Path, force: bool = False) -> Dict[str, object]:
 
     state_md = get_state_md_path(workspace)
     _write_if_missing(state_md, _generate_state_md(), result["created"])
-
-    state_json = get_state_json_path(workspace)
-    _write_if_missing(state_json, _generate_state_json_from_state_md(state_md), result["created"])
 
     result["initialized"] = is_initialized(workspace)
     if result["backup"]:

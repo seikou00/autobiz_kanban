@@ -9,29 +9,6 @@ description: 按照 autodev-plan 生成的 design.md 与 PLAN.md 逐任务执行
 工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
 ```
 
-<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->
-## 流程契约（由 board_config.json 生成）
-
-本区块由 `board_core/board_config.json` 静态编译生成，请勿手工修改；修改流程契约后运行 `python "{PLUGIN_DIR}/hooks/compile_skill_contracts.py" --write` 重新生成。
-
-- **唯一事实来源:** `{PLUGIN_DIR}/board_core/board_config.json` 中 `skill: "autodev-code"` 的节点。
-- **节点:** `dev.code`
-- **阶段:** 代码实现
-- **分组:** Dev
-- **Checkpoints:** `code_in_progress`, `code_done`
-
-### 输入产物
-- `PRD.md`：PRD文档（必需）
-- `design.md`：设计契约（必需）
-- `PLAN.md`：执行计划（必需）
-
-### 输出产物
-- `PLAN.md`：执行计划（更新）（必需）
-
-### Validators
-- `plan_finished_tasks`
-<!-- AUTOBIZDEVOPS_CONTRACT:END -->
-
 # /autodev-code — 代码执行
 
 ## 阶段定位

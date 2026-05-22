@@ -1,0 +1,8 @@
+skill: autodev-reviewer
+required_inputs:
+  - PRD.md
+  - design.md
+  - PLAN.md
+required_outputs:
+  - REQUIREMENTS_EVAL.md
+validators:

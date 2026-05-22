@@ -9,29 +9,6 @@ description: "当实现工作准备宣称完成、准备交接、准备创建 PR
 工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
 ```
 
-<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->
-## 流程契约（由 board_config.json 生成）
-
-本区块由 `board_core/board_config.json` 静态编译生成，请勿手工修改；修改流程契约后运行 `python "{PLUGIN_DIR}/hooks/compile_skill_contracts.py" --write` 重新生成。
-
-- **唯一事实来源:** `{PLUGIN_DIR}/board_core/board_config.json` 中 `skill: "autodev-reviewer"` 的节点。
-- **节点:** `dev.review`
-- **阶段:** 需求实现评审
-- **分组:** Dev
-- **Checkpoints:** `requirements_eval_in_progress`, `requirements_eval_done`
-
-### 输入产物
-- `PRD.md`：PRD文档（必需）
-- `design.md`：设计契约（必需）
-- `PLAN.md`：执行计划（必需）
-
-### 输出产物
-- `REQUIREMENTS_EVAL.md`：需求实现评审报告（必需）
-
-### Validators
-- `requirements_eval_verdict`
-<!-- AUTOBIZDEVOPS_CONTRACT:END -->
-
 # Completion Reviewer
 
 使用此技能来避免执行者自证完成。主 agent 负责写完成声明、按失败审查结论修复问题并重新发起审查；独立 reviewer 只负责用真实仓库状态核验声明并落盘需求评估。对于跨仓库任务，当前 workspace 是协调仓库，业务仓库由 proposal 中的 `affected_repositories` 显式列出；reviewer 不依赖隐式对话记忆。

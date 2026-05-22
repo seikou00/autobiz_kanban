@@ -117,11 +117,7 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 4. `needs_fix` → 终止 `--auto` 串联，按最近阶段报告中的建议回流阶段处理。
 5. `--auto` 模式下合法出口自动触发下一子技能；`verify_done` 后 Dev 阶段结束。
 
-各子技能的产物契约、validators 与 checkpoint 合法矩阵以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源；如本文静态说明与 board config 冲突，以 board config 为准。不得再新增 per-skill `artifact-check.yaml`。可运行以下只读命令查看某个子技能的当前契约：
-
-```bash
-python "{PLUGIN_DIR}/hooks/render_skill_contract.py" autodev-plan
-```
+各子技能的实际产物校验由对应 `hooks/artifact-check.yaml` 声明；根路由器不直接维护阶段产物检查规则。
 
 ---
 
