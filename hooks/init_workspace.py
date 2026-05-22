@@ -3,8 +3,8 @@
 """
 autobizdevops Workspace 初始化脚本
 用法:
-    python hooks/init_workspace.py [workspace_path]
-    # 或从其他脚本导入调用 init_workspace()
+    python hooks/init_workspace.py --mode createProject --workspace <workspace> --project <project>
+    python hooks/init_workspace.py --mode createFeature --workspace <workspace> --project <project> --feature <feature>
 """
 
 import argparse
@@ -12,7 +12,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 try:
     from paths import (
@@ -20,6 +20,7 @@ try:
         get_autobizdevops_dir,
         get_features_active_dir,
         get_features_archive_dir,
+        get_feature_active_dir,
         get_issues_active_dir,
         get_issues_completed_dir,
         get_project_md_path,
@@ -35,6 +36,7 @@ except ImportError:
         get_autobizdevops_dir,
         get_features_active_dir,
         get_features_archive_dir,
+        get_feature_active_dir,
         get_issues_active_dir,
         get_issues_completed_dir,
         get_project_md_path,
@@ -172,22 +174,81 @@ def init_workspace(workspace: Path, force: bool = False) -> Dict[str, object]:
     return result
 
 
+def _resolve_target_workspace(workspace: Path, project: Optional[str] = None) -> Path:
+    workspace = workspace.resolve()
+    if _is_skill_root(workspace):
+        workspace = workspace.parent
+    if not project:
+        return workspace
+
+    project_workspace = (workspace / project).resolve()
+    try:
+        project_workspace.relative_to(workspace)
+    except ValueError:
+        print(f"ERROR: Project path escapes workspace: {project}", file=sys.stderr)
+        sys.exit(1)
+    return project_workspace
+
+
+def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
+    feature = feature.strip()
+    if not feature:
+        print("ERROR: Feature is required for createFeature mode", file=sys.stderr)
+        sys.exit(1)
+    if "\0" in feature:
+        print("ERROR: Feature contains invalid characters", file=sys.stderr)
+        sys.exit(1)
+
+    features_dir = get_features_active_dir(workspace).resolve()
+    feature_dir = get_feature_active_dir(workspace, feature).resolve()
+    try:
+        feature_dir.relative_to(features_dir)
+    except ValueError:
+        print(f"ERROR: Feature path escapes features directory: {feature}", file=sys.stderr)
+        sys.exit(1)
+    if feature_dir == features_dir:
+        print("ERROR: Feature resolves to features directory itself", file=sys.stderr)
+        sys.exit(1)
+    return feature_dir
+
+
+def create_feature(workspace: Path, feature: str) -> Dict[str, object]:
+    workspace = workspace.resolve()
+    feature_dir = _resolve_feature_dir(workspace, feature)
+    existed = feature_dir.exists()
+    ensure_dir(feature_dir)
+
+    return {
+        "initialized": feature_dir.is_dir(),
+        "created": [] if existed else [str(feature_dir)],
+        "backup": None,
+        "message": (
+            f"Feature already exists: {feature_dir}"
+            if existed
+            else f"Feature created successfully: {feature_dir}"
+        ),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Initialize autobizdevops workspace")
-    parser.add_argument("workspace", help="Workspace path (required)")
+    parser.add_argument("--mode", choices=("createProject", "createFeature"), default="createProject")
+    parser.add_argument("--workspace", required=True, help="Workspace path")
+    parser.add_argument("--project", help="Project code under workspace")
+    parser.add_argument("--feature", help="Feature name for createFeature mode")
     parser.add_argument("--force", action="store_true", help="Force re-initialization (will backup existing)")
     args = parser.parse_args()
 
-    workspace = Path(args.workspace).resolve()
-    # 兜底：若传入的是 skill 自身根目录，自动退到父目录作为 workspace
-    if _is_skill_root(workspace):
-        workspace = workspace.parent
-
+    workspace = _resolve_target_workspace(Path(args.workspace), args.project)
     if not workspace.exists():
         print(f"ERROR: Workspace does not exist: {workspace}", file=sys.stderr)
         sys.exit(1)
 
-    result = init_workspace(workspace, force=args.force)
+    if args.mode == "createFeature":
+        result = create_feature(workspace, args.feature or "")
+    else:
+        result = init_workspace(workspace, force=args.force)
+
     print(result["message"])
     if result["backup"]:
         print(f"Backup created: {result['backup']}")
