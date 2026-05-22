@@ -30,6 +30,7 @@ from state_checkpoint import (  # noqa: E402
 
 
 STATE_RELATIVE_PATH = Path(".autobizdevops") / "STATE.md"
+STATE_JSON_RELATIVE_PATH = Path(".autobizdevops") / "state.json"
 STATE_COLUMNS = 6
 
 
@@ -37,7 +38,9 @@ STATE_COLUMNS = 6
 class CheckpointUpdate:
     ok: bool
     state_path: Path
+    state_json_path: Path
     content: str
+    state_json_content: str
     errors: tuple[str, ...]
     old_checkpoint: str | None
     new_checkpoint: str | None
@@ -152,6 +155,10 @@ def replace_feature_row(
     return new_content, []
 
 
+def state_json_content_from_rows(rows: dict[str, str]) -> str:
+    return json.dumps(dict(sorted(rows.items())), ensure_ascii=False, indent=2) + "\n"
+
+
 def prepare_checkpoint_update(
     *,
     workspace: Path,
@@ -165,11 +172,14 @@ def prepare_checkpoint_update(
 ) -> CheckpointUpdate:
     workspace = workspace.resolve()
     state_path = workspace / STATE_RELATIVE_PATH
+    state_json_path = workspace / STATE_JSON_RELATIVE_PATH
     if checkpoint not in KNOWN_CHECKPOINTS:
         return CheckpointUpdate(
             ok=False,
             state_path=state_path,
+            state_json_path=state_json_path,
             content="",
+            state_json_content="",
             errors=(f"未知 checkpoint: {checkpoint}",),
             old_checkpoint=None,
             new_checkpoint=None,
@@ -178,7 +188,9 @@ def prepare_checkpoint_update(
         return CheckpointUpdate(
             ok=False,
             state_path=state_path,
+            state_json_path=state_json_path,
             content="",
+            state_json_content="",
             errors=("feature 不能为空",),
             old_checkpoint=None,
             new_checkpoint=None,
@@ -187,7 +199,9 @@ def prepare_checkpoint_update(
         return CheckpointUpdate(
             ok=False,
             state_path=state_path,
+            state_json_path=state_json_path,
             content="",
+            state_json_content="",
             errors=(f"STATE.md 不存在: {state_path}",),
             old_checkpoint=None,
             new_checkpoint=None,
@@ -221,7 +235,9 @@ def prepare_checkpoint_update(
     return CheckpointUpdate(
         ok=not errors,
         state_path=state_path,
+        state_json_path=state_json_path,
         content=new_content,
+        state_json_content=state_json_content_from_rows(new_map) if not errors else "",
         errors=tuple(errors),
         old_checkpoint=old_map.get(feature),
         new_checkpoint=new_map.get(feature),
@@ -234,6 +250,7 @@ def write_result_json(result: CheckpointUpdate, *, feature: str, checkpoint: str
             {
                 "ok": result.ok,
                 "state_path": str(result.state_path),
+                "state_json_path": str(result.state_json_path),
                 "feature": feature,
                 "old_checkpoint": result.old_checkpoint,
                 "new_checkpoint": result.new_checkpoint,
@@ -286,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if not args.dry_run:
         result.state_path.write_text(result.content, encoding="utf-8")
+        result.state_json_path.write_text(result.state_json_content, encoding="utf-8")
     return 0
 
 
