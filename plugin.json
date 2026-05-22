@@ -1,0 +1,14 @@
+{
+  "name": "AUTOBIZDEVOPS PLUGIN",
+  "version": "1.0.0",
+  "description": "不再是自动进度流程，增强了与用户交互的过程，需要用户进行交互进行开发",
+  "author": {
+    "name": "CmbCowork Team",
+    "email": "cowork@example.com"
+  },
+  "license": "MIT",
+  "keywords": ["AUTOBIZDEVOPS"],
+  "skills": "skills",
+  "mcpServers": ".mcp.json",
+  "hooks": "hooks/hooks.json"
+}
