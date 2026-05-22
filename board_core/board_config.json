@@ -14,11 +14,70 @@
     }
   },
   "workflow": {
+    "checkpoints": {
+      "initial": [
+        "discuss_in_progress",
+        "prd_in_progress",
+        "plan_in_progress",
+        "cicd_in_progress"
+      ],
+      "transitions": {
+        "discuss_in_progress": ["discuss_done"],
+        "discuss_done": ["prd_in_progress", "plan_in_progress"],
+        "prd_in_progress": ["prd_done"],
+        "prd_done": ["plan_in_progress"],
+        "plan_in_progress": ["plan_done"],
+        "plan_done": ["code_in_progress"],
+        "code_in_progress": ["code_done"],
+        "code_done": ["requirements_eval_in_progress"],
+        "requirements_eval_in_progress": ["requirements_eval_done"],
+        "requirements_eval_done": ["unit_test_in_progress"],
+        "unit_test_in_progress": ["unit_test_done"],
+        "unit_test_done": ["e2e_in_progress"],
+        "e2e_in_progress": ["e2e_done", "needs_fix"],
+        "e2e_done": ["verify_in_progress"],
+        "verify_in_progress": ["verify_done", "needs_fix"],
+        "verify_done": ["cicd_in_progress"],
+        "cicd_in_progress": ["cicd_done"],
+        "cicd_done": ["archived"],
+        "needs_fix": [
+          "discuss_in_progress",
+          "prd_in_progress",
+          "plan_in_progress",
+          "code_in_progress",
+          "cicd_in_progress"
+        ],
+        "archived": []
+      },
+      "stageLabels": {
+        "discuss_in_progress": "Biz / 需求澄清",
+        "discuss_done": "Biz / 需求澄清",
+        "prd_in_progress": "Biz / PRD 生成",
+        "prd_done": "Biz / PRD",
+        "plan_in_progress": "Plan",
+        "plan_done": "Plan 完成",
+        "code_in_progress": "Code",
+        "code_done": "Code 完成",
+        "requirements_eval_in_progress": "Requirements Review",
+        "requirements_eval_done": "Requirements Review 完成",
+        "unit_test_in_progress": "Unit Test",
+        "unit_test_done": "Unit Test 完成",
+        "e2e_in_progress": "E2E",
+        "e2e_done": "E2E 完成",
+        "verify_in_progress": "Verify",
+        "verify_done": "Verify 完成",
+        "cicd_in_progress": "CI/CD",
+        "cicd_done": "CI/CD 完成",
+        "needs_fix": "需要修复",
+        "archived": "已归档"
+      }
+    },
     "nodes": [
       {
         "id": "biz.discuss",
         "label": "需求澄清",
         "group": "Biz",
+        "skill": "autobiz-requirement-discuss",
         "order": 10,
         "description": "沉淀需求讨论稿",
         "states": [
@@ -27,9 +86,13 @@
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["discuss_in_progress", "discuss_done"],
-        "artifactDefinitions": [
-          { "id": "prd_discuss", "label": "需求讨论稿", "kind": "file", "path": "PRD_DISCUSS.md", "required": true }
-        ],
+        "artifacts": {
+          "inputs": [],
+          "outputs": [
+            { "id": "prd_discuss", "label": "需求讨论稿", "kind": "file", "path": "PRD_DISCUSS.md", "required": true }
+          ]
+        },
+        "validators": [],
         "hookDefinitions": [
           { "id": "biz-discuss-validate", "label": "需求澄清产物校验", "event": "PostSkillUse", "required": true }
         ]
@@ -38,6 +101,7 @@
         "id": "biz.prd",
         "label": "PRD 生成",
         "group": "Biz",
+        "skill": "autobiz-prd-generate",
         "order": 20,
         "description": "生成正式 PRD 文档",
         "states": [
@@ -46,10 +110,15 @@
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
-        "artifactDefinitions": [
-          { "id": "prd_discuss", "label": "需求讨论稿", "kind": "file", "path": "PRD_DISCUSS.md", "required": true },
-          { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true }
-        ],
+        "artifacts": {
+          "inputs": [
+            { "id": "prd_discuss", "label": "需求讨论稿", "kind": "file", "path": "PRD_DISCUSS.md", "required": true }
+          ],
+          "outputs": [
+            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true }
+          ]
+        },
+        "validators": [],
         "hookDefinitions": [
           { "id": "biz-prd-validate", "label": "PRD 产物校验", "event": "PostSkillUse", "required": true }
         ]
@@ -58,24 +127,31 @@
         "id": "dev.plan",
         "label": "计划生成",
         "group": "Dev",
+        "skill": "autodev-plan",
         "order": 30,
-        "description": "生成 API Contract、执行计划和 SQL 设计",
+        "description": "生成设计契约和执行计划",
         "states": [
           { "id": "not_started", "label": "未开始", "uiKind": "pending" },
           { "id": "in_progress", "label": "进行中", "uiKind": "active" },
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["plan_in_progress", "plan_done"],
-        "artifactDefinitions": [
-          { "id": "api_contract", "label": "API Contract", "kind": "file", "path": "API_CONTRACT.openapi.yaml", "required": true },
-          { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true },
-          { "id": "sql_design", "label": "SQL设计", "kind": "file", "path": "SQL_DESIGN.md", "required": true }
-        ]
+        "artifacts": {
+          "inputs": [
+            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true }
+          ],
+          "outputs": [
+            { "id": "design", "label": "设计契约", "kind": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true }
+          ]
+        },
+        "validators": ["design_contract", "plan_initial_tasks"]
       },
       {
         "id": "dev.code",
         "label": "代码实现",
         "group": "Dev",
+        "skill": "autodev-code",
         "order": 40,
         "description": "根据计划实现代码",
         "states": [
@@ -84,14 +160,23 @@
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["code_in_progress", "code_done"],
-        "artifactDefinitions": [
-          { "id": "plan", "label": "执行计划（更新）", "kind": "file", "path": "PLAN.md", "required": true }
-        ]
+        "artifacts": {
+          "inputs": [
+            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true },
+            { "id": "design", "label": "设计契约", "kind": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true }
+          ],
+          "outputs": [
+            { "id": "plan", "label": "执行计划（更新）", "kind": "file", "path": "PLAN.md", "required": true }
+          ]
+        },
+        "validators": ["plan_finished_tasks"]
       },
       {
         "id": "dev.review",
         "label": "需求实现评审",
         "group": "Dev",
+        "skill": "autodev-reviewer",
         "order": 50,
         "description": "评审代码实现是否满足需求",
         "states": [
@@ -100,14 +185,23 @@
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["requirements_eval_in_progress", "requirements_eval_done"],
-        "artifactDefinitions": [
-          { "id": "requirements_eval", "label": "需求实现评审报告", "kind": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
-        ]
+        "artifacts": {
+          "inputs": [
+            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true },
+            { "id": "design", "label": "设计契约", "kind": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true }
+          ],
+          "outputs": [
+            { "id": "requirements_eval", "label": "需求实现评审报告", "kind": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
+          ]
+        },
+        "validators": ["requirements_eval_verdict"]
       },
       {
         "id": "dev.utest",
         "label": "单元测试",
         "group": "Dev",
+        "skill": "autodev-utest",
         "order": 60,
         "description": "单元测试编写与执行",
         "states": [
@@ -116,15 +210,25 @@
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["unit_test_in_progress", "unit_test_done"],
-        "artifactDefinitions": [
-          { "id": "unit_test_report", "label": "单元测试报告", "kind": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
-          { "id": "test_output", "label": "测试输出日志", "kind": "file", "path": "test-output.log", "required": false }
-        ]
+        "artifacts": {
+          "inputs": [
+            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true },
+            { "id": "design", "label": "设计契约", "kind": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true },
+            { "id": "requirements_eval", "label": "需求实现评审报告", "kind": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
+          ],
+          "outputs": [
+            { "id": "unit_test_report", "label": "单元测试报告", "kind": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
+            { "id": "test_output", "label": "测试输出日志", "kind": "file", "path": "test-output.log", "required": false }
+          ]
+        },
+        "validators": []
       },
       {
         "id": "dev.e2e",
         "label": "E2E 测试",
         "group": "Dev",
+        "skill": "autodev-e2e",
         "order": 70,
         "description": "端到端测试",
         "states": [
@@ -133,16 +237,27 @@
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["e2e_in_progress", "e2e_done"],
-        "artifactDefinitions": [
-          { "id": "e2e_cases", "label": "E2E 测试用例", "kind": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
-          { "id": "e2e_report", "label": "E2E 测试报告", "kind": "file", "path": "E2E_REPORT.md", "required": true },
-          { "id": "e2e_log", "label": "E2E 运行日志", "kind": "file", "path": "e2e-run.log", "required": false }
-        ]
+        "artifacts": {
+          "inputs": [
+            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true },
+            { "id": "design", "label": "设计契约", "kind": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true },
+            { "id": "requirements_eval", "label": "需求实现评审报告", "kind": "file", "path": "REQUIREMENTS_EVAL.md", "required": true },
+            { "id": "unit_test_report", "label": "单元测试报告", "kind": "file", "path": "UNIT_TEST_REPORT.md", "required": true }
+          ],
+          "outputs": [
+            { "id": "e2e_cases", "label": "E2E 测试用例", "kind": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
+            { "id": "e2e_report", "label": "E2E 测试报告", "kind": "file", "path": "E2E_REPORT.md", "required": true },
+            { "id": "e2e_log", "label": "E2E 运行日志", "kind": "file", "path": "e2e-run.log", "required": true }
+          ]
+        },
+        "validators": []
       },
       {
         "id": "dev.verify",
         "label": "验收汇总",
         "group": "Dev",
+        "skill": "autodev-verify",
         "order": 80,
         "description": "验收汇总",
         "states": [
@@ -151,14 +266,27 @@
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["verify_in_progress", "verify_done"],
-        "artifactDefinitions": [
-          { "id": "verify_report", "label": "验收报告", "kind": "file", "path": "VERIFY_REPORT.md", "required": true }
-        ]
+        "artifacts": {
+          "inputs": [
+            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true },
+            { "id": "design", "label": "设计契约", "kind": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true },
+            { "id": "unit_test_report", "label": "单元测试报告", "kind": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
+            { "id": "e2e_cases", "label": "E2E 测试用例", "kind": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
+            { "id": "e2e_report", "label": "E2E 测试报告", "kind": "file", "path": "E2E_REPORT.md", "required": true },
+            { "id": "e2e_log", "label": "E2E 运行日志", "kind": "file", "path": "e2e-run.log", "required": true }
+          ],
+          "outputs": [
+            { "id": "verify_report", "label": "验收报告", "kind": "file", "path": "VERIFY_REPORT.md", "required": true }
+          ]
+        },
+        "validators": []
       },
       {
         "id": "ops.cicd",
         "label": "CI/CD",
         "group": "Ops",
+        "skill": "autoops-cicd",
         "order": 90,
         "description": "CI/CD 流水线和 PR 准备",
         "states": [
@@ -167,15 +295,22 @@
           { "id": "done", "label": "已完成", "uiKind": "done" }
         ],
         "checkpoints": ["cicd_in_progress", "cicd_done"],
-        "artifactDefinitions": [
-          { "id": "cicd_checklist", "label": "CI/CD 清单", "kind": "file", "path": "CICD_CHECKLIST.md", "required": true },
-          { "id": "pr_body", "label": "PR 描述", "kind": "file", "path": "PR_BODY.md", "required": false }
-        ]
+        "artifacts": {
+          "inputs": [
+            { "id": "verify_report", "label": "验收报告", "kind": "file", "path": "VERIFY_REPORT.md", "required": true }
+          ],
+          "outputs": [
+            { "id": "cicd_checklist", "label": "CI/CD 清单", "kind": "file", "path": "CICD_CHECKLIST.md", "required": true },
+            { "id": "pr_body", "label": "PR 描述", "kind": "file", "path": "PR_BODY.md", "required": false }
+          ]
+        },
+        "validators": []
       },
       {
         "id": "ops.archive",
         "label": "归档",
         "group": "Ops",
+        "skill": "autoops-archive",
         "order": 100,
         "description": "Feature 归档",
         "states": [
@@ -183,7 +318,13 @@
           { "id": "archived", "label": "已归档", "uiKind": "archived" }
         ],
         "checkpoints": ["archived"],
-        "artifactDefinitions": []
+        "artifacts": {
+          "inputs": [
+            { "id": "cicd_checklist", "label": "CI/CD 清单", "kind": "file", "path": "CICD_CHECKLIST.md", "required": true }
+          ],
+          "outputs": []
+        },
+        "validators": []
       }
     ],
     "transitions": [

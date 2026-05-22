@@ -21,6 +21,7 @@ AUTODEV_HOOKS_DIR = ROOT / "skills" / "autodev" / "hooks"
 if str(AUTODEV_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS_DIR))
 
+from board_core.contracts import load_board_config, load_workflow_contracts  # noqa: E402
 from board_core.workflow import find_current_node  # noqa: E402
 from artifact_check import run_postcheck, run_precheck  # noqa: E402
 from paths import ensure_dir, get_feature_hook_log_path  # noqa: E402
@@ -33,106 +34,14 @@ MAVEN_COMPILE_TIMEOUT_SECONDS = 290
 MAVEN_OUTPUT_LIMIT = 4000
 LOG_PATH = Path(tempfile.gettempdir()) / "check_state_done_hook.log"
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
-
-KNOWN_CHECKPOINTS = {
-    "discuss_in_progress",
-    "discuss_done",
-    "prd_in_progress",
-    "prd_done",
-    "plan_in_progress",
-    "plan_done",
-    "code_in_progress",
-    "code_done",
-    "unit_test_in_progress",
-    "unit_test_done",
-    "verify_in_progress",
-    "verify_done",
-    "requirements_eval_in_progress",
-    "requirements_eval_done",
-    "e2e_in_progress",
-    "e2e_done",
-    "cicd_in_progress",
-    "cicd_done",
-    "needs_fix",
-    "archived",
-}
-
-ALLOWED_NEXT = {
-    "discuss_in_progress": {"discuss_done"},
-    "discuss_done": {"prd_in_progress", "plan_in_progress"},
-    "prd_in_progress": {"prd_done"},
-    "prd_done": {"plan_in_progress"},
-    "plan_in_progress": {"plan_done"},
-    "plan_done": {"code_in_progress"},
-    "code_in_progress": {"code_done"},
-    "code_done": {"requirements_eval_in_progress"},
-    "requirements_eval_in_progress": {"requirements_eval_done"},
-    "requirements_eval_done": {"unit_test_in_progress"},
-    "unit_test_in_progress": {"unit_test_done"},
-    "unit_test_done": {"e2e_in_progress"},
-    "verify_in_progress": {"verify_done", "needs_fix"},
-    "verify_done": {"cicd_in_progress"},
-    "e2e_in_progress": {"e2e_done", "needs_fix"},
-    "e2e_done": {"verify_in_progress"},
-    "cicd_in_progress": {"cicd_done"},
-    "cicd_done": {"archived"},
-    "needs_fix": {
-        "discuss_in_progress",
-        "prd_in_progress",
-        "plan_in_progress",
-        "code_in_progress",
-        "cicd_in_progress",
-    },
-    "archived": set(),
-}
-
-INITIAL_CHECKPOINTS = {
-    "discuss_in_progress",
-    "prd_in_progress",
-    "plan_in_progress",
-    "cicd_in_progress",
-}
-
-DEFAULT_STAGE_BY_CHECKPOINT = {
-    "discuss_in_progress": "Biz / 需求澄清",
-    "discuss_done": "Biz / 需求澄清",
-    "prd_in_progress": "Biz / PRD 生成",
-    "prd_done": "Biz / PRD",
-    "plan_in_progress": "Plan",
-    "plan_done": "Plan 完成",
-    "code_in_progress": "Code",
-    "code_done": "Code 完成",
-    "requirements_eval_in_progress": "Requirements Review",
-    "requirements_eval_done": "Requirements Review 完成",
-    "unit_test_in_progress": "Unit Test",
-    "unit_test_done": "Unit Test 完成",
-    "e2e_in_progress": "E2E",
-    "e2e_done": "E2E 完成",
-    "verify_in_progress": "Verify",
-    "verify_done": "Verify 完成",
-    "cicd_in_progress": "CI/CD",
-    "cicd_done": "CI/CD 完成",
-    "needs_fix": "需要修复",
-    "archived": "已归档",
-}
-
-START_CHECKPOINT_TO_SKILL = {
-    "plan_in_progress": "autodev-plan",
-    "code_in_progress": "autodev-code",
-    "requirements_eval_in_progress": "autodev-reviewer",
-    "unit_test_in_progress": "autodev-utest",
-    "e2e_in_progress": "autodev-e2e",
-    "verify_in_progress": "autodev-verify",
-}
-
-END_CHECKPOINT_TO_SKILL = {
-    "plan_in_progress": "autodev-plan",
-    "code_in_progress": "autodev-code",
-    "requirements_eval_in_progress": "autodev-reviewer",
-    "unit_test_in_progress": "autodev-utest",
-    "e2e_in_progress": "autodev-e2e",
-    "verify_in_progress": "autodev-verify",
-}
+DIRECT_STATE_EDIT_TOOLS = {"edit_file", "write_file", "StrReplaceFile", "WriteFile"}
+WORKFLOW_CONTRACTS = load_workflow_contracts(BOARD_CONFIG_PATH)
+KNOWN_CHECKPOINTS = WORKFLOW_CONTRACTS.known_checkpoints
+ALLOWED_NEXT = WORKFLOW_CONTRACTS.allowed_next
+INITIAL_CHECKPOINTS = WORKFLOW_CONTRACTS.initial_checkpoints
+DEFAULT_STAGE_BY_CHECKPOINT = WORKFLOW_CONTRACTS.stage_labels
+START_CHECKPOINT_TO_SKILL = WORKFLOW_CONTRACTS.start_checkpoint_to_skill
+END_CHECKPOINT_TO_SKILL = WORKFLOW_CONTRACTS.end_checkpoint_to_skill
 
 
 def is_separator_row(cells: list[str]) -> bool:
@@ -219,7 +128,7 @@ def hook_log(message: str) -> None:
 
 def load_workflow_nodes() -> list[dict]:
     try:
-        config = json.loads(BOARD_CONFIG_PATH.read_text(encoding="utf-8"))
+        config = load_board_config(BOARD_CONFIG_PATH)
         nodes = config.get("workflow", {}).get("nodes", [])
         return nodes if isinstance(nodes, list) else []
     except Exception:
@@ -541,6 +450,12 @@ def run_state_done(payload: dict) -> int:
         hook_log("not state path, skip")
         return 0
     hook_log(f"state_path={state_path}")
+
+    tool_name = payload.get("tool_name", "")
+    if tool_name in DIRECT_STATE_EDIT_TOOLS:
+        reason = "STATE.md 不允许通过 edit_file/write_file 直接修改，请使用 hooks/update_checkpoint.py 推进 checkpoint。"
+        hook_log(f"direct_state_edit_blocked tool_name={tool_name!r}")
+        return block(reason, reason)
 
     old_map, old_errors = parse_state_table(get_current_content(state_path))
     new_content, edit_errors = build_new_content(payload, state_path)
