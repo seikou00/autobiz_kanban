@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from board_core.contracts import artifact_dicts
+
 
 def extract_checkpoint_suffix(checkpoint: str) -> str | None:
     """Return the state suffix portion of a checkpoint.
@@ -99,20 +101,27 @@ def build_workflow_shell(config: dict) -> dict:
 
     Removes from output:
     - top-level ``id``, ``version``, and ``kind``
-    - ``checkpoints`` (internal checkpoint→node mapping)
-    - ``order`` from nodes and ``path``/``kind`` from each ``artifactDefinitions`` entry
+    - workflow-level ``checkpoints`` (contract-only checkpoint matrix)
+    - node-level ``checkpoints`` (internal checkpoint→node mapping)
+    - ``order``, ``skill``, ``artifacts``, and ``validators`` from nodes
+    - ``path`` from each output artifact definition
     """
-    workflow = {k: v for k, v in config["workflow"].items() if k not in {"id", "version", "kind"}}
-    workflow["states"] = build_workflow_fallback_states(config)
+    workflow = {
+        k: v
+        for k, v in config["workflow"].items()
+        if k not in {"id", "version", "kind", "checkpoints"}
+    }
     clean_nodes: list[dict] = []
     for node in workflow["nodes"]:
-        clean = {k: v for k, v in node.items() if k not in {"checkpoints", "order"}}
-        # Strip internal path from artifactDefinitions for workflow output
-        if "artifactDefinitions" in clean:
-            clean["artifactDefinitions"] = [
-                {k: v for k, v in art.items() if k not in {"path", "kind"}}
-                for art in clean["artifactDefinitions"]
-            ]
+        clean = {
+            k: v
+            for k, v in node.items()
+            if k not in {"checkpoints", "order", "skill", "artifacts", "validators"}
+        }
+        clean["artifactDefinitions"] = [
+            {k: v for k, v in art.items() if k != "path"}
+            for art in artifact_dicts(node, "outputs")
+        ]
         clean_nodes.append(clean)
     workflow["nodes"] = clean_nodes
     return workflow
