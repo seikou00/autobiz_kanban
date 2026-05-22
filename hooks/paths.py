@@ -55,6 +55,10 @@ def get_state_md_path(workspace: Optional[PathLike] = None) -> Path:
     return get_autobizdevops_dir(workspace) / "STATE.md"
 
 
+def get_state_json_path(workspace: Optional[PathLike] = None) -> Path:
+    return get_autobizdevops_dir(workspace) / "state.json"
+
+
 def get_project_md_path(workspace: Optional[PathLike] = None) -> Path:
     return get_autobizdevops_dir(workspace) / "PROJECT.md"
 

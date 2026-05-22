@@ -1,7 +1,0 @@
-skill: autodev-plan
-required_inputs:
-  - PRD.md
-required_outputs:
-  - design.md
-  - PLAN.md
-validators:

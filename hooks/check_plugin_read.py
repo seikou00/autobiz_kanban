@@ -99,14 +99,14 @@ def format_precheck_reason(result: dict) -> str:
     return "\n".join(lines)
 
 
-def block(reason: str) -> int:
+def block(reason: str, workspace: Path) -> int:
     print(reason, file=sys.stderr)
     init_script = f"{PLUGIN_ROOT}/hooks/init_workspace.py"
     json.dump(
         {
             "decision": "block",
             "reason": reason,
-            "systemMessage": f"继续任务前需要先执行python {init_script} .",
+            "systemMessage": f"继续任务前需要先执行python {init_script} {workspace}",
         },
         sys.stdout,
         ensure_ascii=False,
@@ -122,9 +122,10 @@ def main() -> int:
     payload = json.loads(raw_input)
     matches = plugin_read_paths(payload)
     if matches:
-        result = validate_precheck(workspace_from_payload(payload))
+        workspace = workspace_from_payload(payload)
+        result = validate_precheck(workspace)
         if not result.get("ok"):
-            return block(format_precheck_reason(result))
+            return block(format_precheck_reason(result), workspace)
     return 0
 
 

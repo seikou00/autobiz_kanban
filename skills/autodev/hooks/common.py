@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Shared helpers for Autodev YAML artifact checks."""
+"""Shared helpers for Autodev board_config artifact checks."""
 
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from board_core.contracts import BoardConfigError, load_repo_workflow_contracts  # noqa: E402
 
 
 BLOCK_EXIT_CODE = 2
@@ -67,86 +75,18 @@ def validate_required_files(root: Path, slug: str, file_names: Iterable[str]) ->
         raise HookCheckError("missing_required_artifacts", ", ".join(missing))
 
 
-def _strip_comment(line: str) -> str:
-    in_single = False
-    in_double = False
-    for idx, char in enumerate(line):
-        if char == "'" and not in_double:
-            in_single = not in_single
-        elif char == '"' and not in_single:
-            in_double = not in_double
-        elif char == "#" and not in_single and not in_double:
-            return line[:idx]
-    return line
-
-
-def _parse_scalar(value: str) -> str:
-    value = value.strip()
-    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-        return value[1:-1]
-    return value
-
-
-def load_simple_yaml(path: Path) -> dict[str, object]:
-    data: dict[str, object] = {}
-    current_list: str | None = None
-    for lineno, raw_line in enumerate(read_text(path).splitlines(), start=1):
-        line = _strip_comment(raw_line).rstrip()
-        if not line.strip():
-            continue
-        if line.startswith("  - "):
-            if current_list is None:
-                raise HookCheckError("invalid_yaml", f"{path}:{lineno}: list item without key")
-            data.setdefault(current_list, [])
-            value = _parse_scalar(line[4:])
-            if not value:
-                raise HookCheckError("invalid_yaml", f"{path}:{lineno}: empty list item")
-            assert isinstance(data[current_list], list)
-            data[current_list].append(value)
-            continue
-        if raw_line.startswith(" "):
-            raise HookCheckError("invalid_yaml", f"{path}:{lineno}: unsupported indentation")
-        if ":" not in line:
-            raise HookCheckError("invalid_yaml", f"{path}:{lineno}: expected key")
-        key, value = line.split(":", 1)
-        key = key.strip()
-        if not key:
-            raise HookCheckError("invalid_yaml", f"{path}:{lineno}: empty key")
-        value = value.strip()
-        if value:
-            data[key] = _parse_scalar(value)
-            current_list = None
-        else:
-            data[key] = []
-            current_list = key
-    return data
-
-
-def config_path_for_skill(repo_root: Path, skill: str) -> Path:
-    return repo_root / "skills" / "autodev" / skill / "hooks" / "artifact-check.yaml"
-
-
 def load_artifact_config(repo_root: Path, skill: str) -> ArtifactConfig:
-    path = config_path_for_skill(repo_root, skill)
-    if not path.is_file():
-        raise HookCheckError("missing_artifact_config", str(path))
-
-    data = load_simple_yaml(path)
-    config_skill = data.get("skill")
-    if config_skill != skill:
-        raise HookCheckError("invalid_artifact_config", f"{path}: skill must be {skill}")
-
-    def read_list(name: str) -> tuple[str, ...]:
-        value = data.get(name, [])
-        if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
-            raise HookCheckError("invalid_artifact_config", f"{path}: {name} must be a list")
-        return tuple(value)
+    try:
+        contracts = load_repo_workflow_contracts(repo_root)
+        contract = contracts.contract_for_skill(skill)
+    except BoardConfigError as error:
+        raise HookCheckError("invalid_board_config", str(error)) from error
 
     return ArtifactConfig(
         skill=skill,
-        required_inputs=read_list("required_inputs"),
-        required_outputs=read_list("required_outputs"),
-        validators=read_list("validators"),
+        required_inputs=contract.required_inputs,
+        required_outputs=contract.required_outputs,
+        validators=contract.validators,
     )
 
 

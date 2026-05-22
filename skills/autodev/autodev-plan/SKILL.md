@@ -9,6 +9,29 @@ description: Dev 阶段执行计划生成。读取 PRD，先探索需求和现�
 工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
 ```
 
+<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->
+## 流程契约（由 board_config.json 生成）
+
+本区块由 `board_core/board_config.json` 静态编译生成，请勿手工修改；修改流程契约后运行 `python "{PLUGIN_DIR}/hooks/compile_skill_contracts.py" --write` 重新生成。
+
+- **唯一事实来源:** `{PLUGIN_DIR}/board_core/board_config.json` 中 `skill: "autodev-plan"` 的节点。
+- **节点:** `dev.plan`
+- **阶段:** 计划生成
+- **分组:** Dev
+- **Checkpoints:** `plan_in_progress`, `plan_done`
+
+### 输入产物
+- `PRD.md`：PRD文档（必需）
+
+### 输出产物
+- `design.md`：设计契约（必需）
+- `PLAN.md`：执行计划（必需）
+
+### Validators
+- `design_contract`
+- `plan_initial_tasks`
+<!-- AUTOBIZDEVOPS_CONTRACT:END -->
+
 # /autodev-plan - Executable Task Plan
 **workflow** plan 阶段工作流: explore -> design.md -> PLAN.md
 
