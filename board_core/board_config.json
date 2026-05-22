@@ -1,16 +1,26 @@
 {
   "schemaVersion": "harness.adapter.inspect.v1",
-  "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}\\${project}`",
   "inspectCommands": {
     "darwin": {
       "project": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
       "run": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "createProject": "python3 ${pluginPath}/hooks/init_workspace.py ${pluginWorkspace}/${project}"
+      "createProject": "python3 ${pluginPath}/hooks/init_workspace.py ${pluginWorkspace}/${project}",
+      "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
+      "plugin_dir": "${pluginWorkspace}/${project}"
+    },
+    "linux": {
+      "project": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
+      "run": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
+      "createProject": "python3 ${pluginPath}/hooks/init_workspace.py ${pluginWorkspace}/${project}",
+      "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
+      "plugin_dir": "${pluginWorkspace}/${project}"
     },
     "win32": {
       "project": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
       "run": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "createProject": "python ${pluginPath}\\hooks\\init_workspace.py ${pluginWorkspace}\\${project}"
+      "createProject": "python ${pluginPath}\\hooks\\init_workspace.py ${pluginWorkspace}\\${project}",
+      "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}\\${project}`",
+      "plugin_dir": "${pluginWorkspace}\\${project}"
     }
   },
   "workflow": {
@@ -47,7 +57,6 @@
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifactDefinitions": [
-          { "id": "prd_discuss", "label": "需求讨论稿", "kind": "file", "path": "PRD_DISCUSS.md", "required": true },
           { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true }
         ],
         "hookDefinitions": [
@@ -67,9 +76,8 @@
         ],
         "checkpoints": ["plan_in_progress", "plan_done"],
         "artifactDefinitions": [
-          { "id": "api_contract", "label": "API Contract", "kind": "file", "path": "API_CONTRACT.openapi.yaml", "required": true },
           { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true },
-          { "id": "sql_design", "label": "SQL设计", "kind": "file", "path": "SQL_DESIGN.md", "required": true }
+          { "id": "design", "label": "设计文件", "kind": "file", "path": "design.md", "required": true }
         ]
       },
       {
@@ -85,7 +93,6 @@
         ],
         "checkpoints": ["code_in_progress", "code_done"],
         "artifactDefinitions": [
-          { "id": "plan", "label": "执行计划（更新）", "kind": "file", "path": "PLAN.md", "required": true }
         ]
       },
       {

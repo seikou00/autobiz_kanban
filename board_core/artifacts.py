@@ -14,12 +14,11 @@ def scan_artifacts(
         art_path = feature_dir / art["path"]
         entry: dict = {
             "id": art["id"],
-            "name": art.get("label", art.get("name", "")),
             "path": str(art_path.relative_to(workspace)),
         }
         if art_path.is_file():
-            entry["exists"] = True
+            entry["status"] = {"label": "已生成", "uiKind": "ok"}
         else:
-            entry["exists"] = False
+            entry["status"] = {"label": "未生成", "uiKind": "warning"}
         result.append(entry)
     return result

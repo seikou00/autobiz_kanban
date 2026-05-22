@@ -69,12 +69,6 @@ description: Biz 阶段需求澄清技能。读取原始需求材料，通过分
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint discuss_in_progress --allow-create
 ```
 
-Windows cmd:
-
-```bat
-"{PLUGIN_DIR}\hooks\update_checkpoint.cmd" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint discuss_in_progress --allow-create
-```
-
 ## 工作流程
 
 ### Step 1: 建立需求上下文
@@ -223,11 +217,6 @@ Expected output: `{工作目录}/PRD_DISCUSS.md` 已沉淀当前轮次的需求�
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint discuss_done
 ```
 
-Windows cmd:
-
-```bat
-"{PLUGIN_DIR}\hooks\update_checkpoint.cmd" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint discuss_done
-```
 
 ## 输出清单
 

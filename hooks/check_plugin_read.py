@@ -86,11 +86,9 @@ def plugin_read_paths(payload: dict, plugin_root: Path = PLUGIN_ROOT) -> list[Pa
 
 def workspace_from_payload(payload: dict) -> Path:
     workspace = (
-        os.environ.get("WORKSPACE_PATH")
-        or payload.get("workspace_path")
-        or payload.get("workspace")
+        os.environ.get("PLUGIN_OUTPUT_DIR")
+        or os.environ.get("WORKSPACE_PATH")
         or payload.get("cwd")
-        or Path.cwd()
     )
     return Path(workspace).resolve(strict=False)
 

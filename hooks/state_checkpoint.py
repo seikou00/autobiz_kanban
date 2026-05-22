@@ -245,7 +245,7 @@ def append_feature_hook_log(
     *,
     hook_id: str,
     label: str,
-    status: str,
+    status: dict[str, str],
     decision: str,
     exit_code: int,
     summary: str,
@@ -284,7 +284,7 @@ def append_checkpoint_hook_logs(
 ) -> None:
     if not changes:
         return
-    status = "blocked" if errors else "passed"
+    status = {"label": "已阻断", "uiKind": "blocked"} if errors else {"label": "通过", "uiKind": "ok"}
     decision = "block" if errors else "pass"
     summary = "\n".join(errors) if errors else f"{label} 通过"
     for feature, old_checkpoint, new_checkpoint in changes:
