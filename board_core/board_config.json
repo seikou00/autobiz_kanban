@@ -6,7 +6,7 @@
       "run": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "createProject": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "createFeature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "feature_create_prompt": "请为特性「${feature}」启动 AUTOBIZDEVOPS 流程，从 Biz / 需求澄清开始。",
+      "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}/${project}/features/${feature}`",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
       "plugin_dir": "${pluginWorkspace}/${project}"
     },
@@ -15,7 +15,7 @@
       "run": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "createProject": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "createFeature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "feature_create_prompt": "请为特性「${feature}」启动 AUTOBIZDEVOPS 流程，从 Biz / 需求澄清开始。",
+      "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}/${project}/features/${feature}`",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
       "plugin_dir": "${pluginWorkspace}/${project}"
     },
@@ -24,7 +24,7 @@
       "run": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "createProject": "python ${pluginPath}\\hooks\\init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "createFeature": "python ${pluginPath}\\hooks\\init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "feature_create_prompt": "请为特性「${feature}」启动 AUTOBIZDEVOPS 流程，从 Biz / 需求澄清开始。",
+      "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}\\${project}\\features\\${feature}`",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}\\${project}`",
       "plugin_dir": "${pluginWorkspace}\\${project}"
     }
