@@ -221,6 +221,12 @@ def create_feature(workspace: Path, feature: str) -> Dict[str, object]:
 
     ensure_dir(feature_dir)
 
+    state_md = get_state_md_path(workspace)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"| {feature} |  | discuss_in_progress |  |  | {now} |\n"
+    with open(state_md, "a", encoding="utf-8") as f:
+        f.write(entry)
+
     return {
         "initialized": feature_dir.is_dir(),
         "created": [str(feature_dir)],

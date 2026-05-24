@@ -26,7 +26,6 @@ from board_core.artifacts import scan_artifacts  # type: ignore[import-untyped]
 from board_core.contracts import artifact_dicts  # type: ignore[import-untyped]
 from board_core.state import (  # type: ignore[import-untyped]
     find_feature_dir,
-    list_active_feature_names,
     load_state_md,
     load_state_records,
 )
@@ -166,7 +165,7 @@ def project_mode(workspace: Path, project: str, config: dict) -> int:
     suffix_states = config["checkpointSuffixState"]
 
     state_records, _state_errors, _state_exists = load_state_records(project_workspace)
-    feature_names = sorted(set(state_records) | set(list_active_feature_names(project_workspace)))
+    feature_names = sorted(state_records.keys())
 
     runs: list[dict] = []
     for feature in feature_names:
