@@ -61,7 +61,7 @@ def _feature_ref_dir(workspace: Path, feature: str, feature_dir: Path | None) ->
 def _watch_refs(workspace: Path, feature: str, feature_dir: Path | None = None) -> list[dict]:
     feature_ref_dir = _feature_ref_dir(workspace, feature, feature_dir)
     return [
-在        {"path": ".autobizdevops/state.json", "purpose": "run-state"},
+        {"path": ".autobizdevops/state.json", "purpose": "run-state"},
         {"path": ".autobizdevops/STATE.md", "purpose": "run-state-view"},
         {"path": feature_ref_dir, "purpose": "artifacts"},
         {"path": f"{feature_ref_dir}/hooks.ndjson", "purpose": "hook-log"},
