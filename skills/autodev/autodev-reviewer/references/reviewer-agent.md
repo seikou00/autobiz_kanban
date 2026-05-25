@@ -92,7 +92,7 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 - Repositories Reviewed：每个 repo 的 id、path、source、git status、changed files、staged files。
 - Requirement Coverage：Evidence 必须带 repo 前缀，例如 `frontend: src/App.tsx` 或 `backend: app/api/orders.py`。
 - Blockers / Warnings：每条必须标明 repo id 或 `cross-repo`。
-- E2E Focus：明确跨仓库集成风险，例如 API contract、字段一致性、配置同步、迁移顺序。
+- E2E Focus：明确跨仓库集成风险，例如字段一致性、配置同步、迁移顺序。
 
 ## 返回给主 agent 的内容
 

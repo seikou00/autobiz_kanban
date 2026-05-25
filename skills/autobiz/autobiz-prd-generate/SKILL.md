@@ -1,6 +1,6 @@
 ---
 name: autobiz-prd-generate
-description: Biz 阶段 PRD 生成技能。读取已收敛的 `{工作目录}/PRD_DISCUSS.md`，按 `{PLUGIN_DIR}/templates/prd.md` 生成生成标准化 `{工作目录}/PRD.md`。适用于需求讨论完成后，输出可供下游 Plan 阶段消费的正式需求文档。
+description: Biz 阶段 PRD 生成技能。读取已收敛的 `{工作目录}/PRD_DISCUSS.md`，按 `{PLUGIN_DIR}/skills/autobiz/autobiz-prd-generate/templates/prd.md` 生成生成标准化 `{工作目录}/PRD.md`。适用于需求讨论完成后，输出可供下游 Plan 阶段消费的正式需求文档。
 ---
 
 **PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
@@ -51,7 +51,7 @@ description: Biz 阶段 PRD 生成技能。读取已收敛的 `{工作目录}/PR
    - 需求输出格式示例与结构规范
 2. `references/example_doc.md`
    - 具体案例参考
-3. `{PLUGIN_DIR}/templates/prd.md`
+3. `{PLUGIN_DIR}/skills/autobiz/autobiz-prd-generate/templates/prd.md`
    - 当前技能集合的标准 PRD 模板；生成 `PRD.md` 时必须遵循
 
 推进 checkpoint 必须使用统一脚本。
@@ -93,7 +93,7 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 
 #### `PRD.md` 结构要求
 
-最终 `PRD.md` 必须以 `{PLUGIN_DIR}/templates/prd.md` 的模板主体为基础。
+最终 `PRD.md` 必须以 `{PLUGIN_DIR}/skills/autobiz/autobiz-prd-generate/templates/prd.md` 的模板主体为基础。
 
 #### 要求
 
