@@ -2,31 +2,34 @@
   "schemaVersion": "harness.adapter.inspect.v1",
   "inspectCommands": {
     "darwin": {
-      "project": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
-      "run": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
+      "projectStatus": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
+      "featureStatus": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "createProject": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "createFeature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}/${project}/features/${feature}`",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
-      "plugin_dir": "${pluginWorkspace}/${project}"
+      "plugin_dir_hook": "${pluginWorkspace}/${project}",
+      "dialog_tips": "**${projectCode} 项目会话**\n请描述要新增或修改的特性，并说明验收标准。产物目录：`${pluginWorkspace}/${project}`"
     },
     "linux": {
-      "project": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
-      "run": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
+      "projectStatus": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
+      "featureStatus": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "createProject": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "createFeature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}/${project}/features/${feature}`",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
-      "plugin_dir": "${pluginWorkspace}/${project}"
+      "plugin_dir_hook": "${pluginWorkspace}/${project}",
+      "dialog_tips": "**${projectCode} 项目会话**\n请描述要新增或修改的特性，并说明验收标准。产物目录：`${pluginWorkspace}/${project}`"
     },
     "win32": {
-      "project": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
-      "run": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
+      "projectStatus": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
+      "featureStatus": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "createProject": "python ${pluginPath}\\hooks\\init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "createFeature": "python ${pluginPath}\\hooks\\init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}\\${project}\\features\\${feature}`",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}\\${project}`",
-      "plugin_dir": "${pluginWorkspace}\\${project}"
+      "plugin_dir_hook": "${pluginWorkspace}\\${project}",
+      "dialog_tips": "**${projectCode} 项目会话**\n请描述要新增或修改的特性，并说明验收标准。产物目录：`${pluginWorkspace}/${project}`"
     }
   },
   "workflow": {
