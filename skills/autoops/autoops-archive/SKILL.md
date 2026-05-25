@@ -18,7 +18,7 @@ author: zhangQiuFeng
 ## 合法入口
 
 - 上游入口：`checkpoint = cicd_done`
-- 恢复入口：若 `.autobizdevops/features/{slug}/` 已不存在、`.autobizdevops/archive/{slug}-iter*` 已存在且 `STATE.md` 为 `archived`，直接提示已归档并退出
+- 恢复入口：若 `.autobizdevops/features/{slug}/` 已不存在、`.autobizdevops/archive/{slug}-iter*` 已存在且 `state.json` 为 `archived`，直接提示已归档并退出
 
 其他 checkpoint 均不得执行归档。
 
@@ -34,11 +34,11 @@ author: zhangQiuFeng
 | 活跃 Feature 目录 | `.autobizdevops/features/{slug}/` |
 | 归档根目录 | `.autobizdevops/archive/` |
 | 归档目标目录 | `.autobizdevops/archive/{slug}-iter{N}/` |
-| 全局状态 | `.autobizdevops/STATE.md` |
+| 全局状态 | `.autobizdevops/state.json` |
 
 `iter{N}` 的确定规则：
 
-1. 优先读取 `STATE.md` 当前 Feature 行中的迭代列，若为有效数字则作为起始候选。
+1. 优先读取 `state.json` 当前 Feature 记录中的迭代字段，若为有效数字则作为起始候选。
 2. 若迭代列为空或不是数字，则从 `1` 开始。
 3. 若 `.autobizdevops/archive/{slug}-iter{N}/` 已存在，递增 N，直到找到不存在的目录。
 4. 禁止覆盖、合并或删除已有归档目录。
@@ -75,7 +75,7 @@ author: zhangQiuFeng
 
 ### Step 4: 更新状态
 
-使用统一脚本更新 `.autobizdevops/STATE.md` 中当前 Feature 行为 `archived`，并写入归档迭代号：
+使用统一脚本更新 `.autobizdevops/state.json` 中当前 Feature 为 `archived`，并写入归档迭代号：
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint archived --iteration "{N}"
@@ -103,7 +103,7 @@ checkpoint=archived
 - checkpoint 不是 `cicd_done`：停止，提示应先完成 `/autoops-cicd`。
 - 源目录不存在但状态仍是 `cicd_done`：停止，提示过程目录缺失，需人工确认是否已被移动。
 - 目标目录冲突：不得覆盖，递增 `iterN` 后重试。
-- 状态更新失败：停止并提示人工检查 `.autobizdevops/STATE.md`，不得删除已归档目录。
+- 状态更新失败：停止并提示人工检查 `.autobizdevops/state.json`，不得删除已归档目录。
 
 ## 输出清单
 

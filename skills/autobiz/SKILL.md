@@ -54,7 +54,7 @@ description: Biz 阶段统一入口。负责前置准入校验、流程编排、
 
 ## 关键产出物校验（强制脚本）
 
-所有产出物校验必须通过脚本执行，不得仅做 Markdown 勾选。`biz_validate.py` 在各 stage 的校验中已包含 `.autobizdevops/STATE.md` 的 checkpoint 同步检查。
+所有产出物校验必须通过脚本执行，不得仅做 Markdown 勾选。`biz_validate.py` 在各 stage 的校验中已包含 `.autobizdevops/state.json` 的 checkpoint 同步检查。
 
 ### 各阶段校验命令
 

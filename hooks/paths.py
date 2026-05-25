@@ -74,5 +74,5 @@ def is_initialized(workspace: Optional[PathLike] = None) -> bool:
     return (
         get_autobizdevops_dir(ws).exists()
         and get_project_md_path(ws).exists()
-        and get_state_md_path(ws).exists()
+        and get_state_json_path(ws).exists()
     )

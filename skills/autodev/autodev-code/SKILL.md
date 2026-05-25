@@ -47,7 +47,7 @@ description: 按照 autodev-plan 生成的 design.md 与 PLAN.md 逐任务执行
 输出契约：
 - 业务代码/测试/配置的最小必要修改。
 - `{工作目录}/PLAN.md` 中任务状态和验证证据更新。
-- `.autobizdevops/STATE.md` 中当前 feature checkpoint 推进到 `code_done`。
+- `.autobizdevops/state.json` 中当前 feature checkpoint 推进到 `code_done`。
 
 不得修改：
 - `{工作目录}/PRD.md`
@@ -178,6 +178,6 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 - 若存在「失败」任务，本 skill 不算完成，不得推进 `code_done`，必须说明阻断和建议回流阶段。
 - 所有必要验证通过。
 - 项目编译通过或外部 checkpoint 编译校验通过。
-- `.autobizdevops/STATE.md` 中当前 feature checkpoint 为 `code_done`。
+- `.autobizdevops/state.json` 中当前 feature checkpoint 为 `code_done`。
 
 **Skill 完成。** 下一步：`/autodev-reviewer --feature {slug}`

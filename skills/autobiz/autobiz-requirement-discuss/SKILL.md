@@ -231,7 +231,7 @@ python autobiz/hooks/biz_validate.py discuss --feature {slug}
 - `{工作目录}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
 - `{工作目录}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险
 - `{工作目录}/PRD_DISCUSS.md` — 完整性校验章节所有检查项均为检查通过
-- `.autobizdevops/STATE.md` — Feature 行 checkpoint 为 `discuss_done`
+- `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 
 **Skill 完成。** 下一步：`/autobiz-prd-generate`（生成正式 PRD）

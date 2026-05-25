@@ -1,4 +1,8 @@
-"""STATE.md 读取与解析 + feature 目录查找 — 复用 hooks/state_checkpoint + hooks/paths。"""
+"""State loading + feature directory lookup.
+
+The public function names are kept for compatibility, but state is now loaded
+from .autobizdevops/state.json first. STATE.md is a generated view.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +11,11 @@ from pathlib import Path
 from hooks.paths import (
     get_features_active_dir,
     get_features_archive_dir,
-    get_state_md_path,
 )
-from hooks.state_checkpoint import parse_state_record_table, parse_state_rows, parse_state_table
+from board_core.state_store import (
+    check_or_fix_state_sync,
+    state_rows_from_records,
+)
 
 
 StateResult = tuple[dict[str, str], list[str], bool]  # rows, errors, file_exists
@@ -17,45 +23,32 @@ StateRecordsResult = tuple[dict[str, dict[str, str]], list[str], bool]
 
 
 def load_state_md(workspace: Path) -> StateResult:
-    """读取 STATE.md 并返回 (feature→checkpoint 映射, 错误列表, 文件是否存在)。
+    """读取状态并返回 (feature→checkpoint 映射, 错误列表, 文件是否存在)。
 
-    内部使用 hooks/state_checkpoint.parse_state_table()，不重复实现解析逻辑。
+    兼容旧函数名；实际以 state.json 为主，并按需重生 STATE.md。
     """
-    state_path = get_state_md_path(workspace)
-    if not state_path.is_file():
-        return {}, [], False
-
-    content = state_path.read_text(encoding="utf-8")
-    rows, errors = parse_state_table(content)
-    return rows, errors, True
+    result = check_or_fix_state_sync(workspace, fix=True)
+    return state_rows_from_records(result.records), result.errors, result.state_exists
 
 
 def load_state_rows(workspace: Path) -> dict[str, str]:
-    """快速读取 STATE.md 的 feature→checkpoint 映射，忽略错误。
+    """快速读取 feature→checkpoint 映射，忽略错误。
 
     与 load_state_md 的区别：不返回错误列表，适用于不需要精确错误的场景。
-    内部使用 hooks/state_checkpoint.parse_state_rows()。
     """
-    state_path = get_state_md_path(workspace)
-    if not state_path.is_file():
+    result = check_or_fix_state_sync(workspace, fix=True)
+    if result.errors:
         return {}
-    content = state_path.read_text(encoding="utf-8")
-    return parse_state_rows(content)
+    return state_rows_from_records(result.records)
 
 
 def load_state_records(workspace: Path) -> StateRecordsResult:
-    """读取 STATE.md 并返回完整 feature 行记录。
+    """读取完整 feature 状态记录。
 
-    与 load_state_md 一样通过 hooks/state_checkpoint 解析 Markdown 表格；
-    额外保留迭代等 project 看板需要的列。
+    以 state.json 为主，额外保留迭代等 project 看板需要的列。
     """
-    state_path = get_state_md_path(workspace)
-    if not state_path.is_file():
-        return {}, [], False
-
-    content = state_path.read_text(encoding="utf-8")
-    rows, errors = parse_state_record_table(content)
-    return rows, errors, True
+    result = check_or_fix_state_sync(workspace, fix=True)
+    return result.records, result.errors, result.state_exists
 
 
 def list_active_feature_names(workspace: Path) -> list[str]:

@@ -61,8 +61,8 @@ def _feature_ref_dir(workspace: Path, feature: str, feature_dir: Path | None) ->
 def _watch_refs(workspace: Path, feature: str, feature_dir: Path | None = None) -> list[dict]:
     feature_ref_dir = _feature_ref_dir(workspace, feature, feature_dir)
     return [
-        {"path": ".autobizdevops/STATE.md", "purpose": "run-state"},
-        {"path": ".autobizdevops/state.json", "purpose": "run-state-json"},
+在        {"path": ".autobizdevops/state.json", "purpose": "run-state"},
+        {"path": ".autobizdevops/STATE.md", "purpose": "run-state-view"},
         {"path": feature_ref_dir, "purpose": "artifacts"},
         {"path": f"{feature_ref_dir}/hooks.ndjson", "purpose": "hook-log"},
     ]
@@ -81,7 +81,7 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
-    # Read STATE.md
+    # Read state.json; STATE.md is repaired as a generated view when needed.
     state_rows, state_errors, state_exists = load_state_md(workspace)
     checkpoint = state_rows.get(feature)
     feature_dir = find_feature_dir(workspace, feature)
@@ -90,15 +90,15 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     # Determine initial degraded state message
     summary_parts: list[str] = []
     if not state_exists:
-        summary_parts.append("STATE.md 未找到，project 尚未初始化")
+        summary_parts.append("state.json 未找到，project 尚未初始化")
     elif not state_rows and not state_errors:
-        summary_parts.append("STATE.md 中无 feature 记录")
+        summary_parts.append("state.json 中无 feature 记录")
     elif not state_rows and state_errors:
-        # parse_state_table filtered all rows due to errors (e.g. unknown checkpoint)
+        # State parsing filtered all rows due to errors (e.g. unknown checkpoint)
         # state_errors will be appended below, don't add a generic "无记录" message
         pass
     elif checkpoint is None:
-        summary_parts.append(f"feature '{feature}' 未在 STATE.md 中找到")
+        summary_parts.append(f"feature '{feature}' 未在 state.json 中找到")
     if state_errors:
         summary_parts.extend(state_errors)
 

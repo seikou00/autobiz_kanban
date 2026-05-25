@@ -1,5 +1,5 @@
-"""board_core — AutoBizDevOps 共享只读核心逻辑。
+"""board_core — AutoBizDevOps shared core logic.
 
 Hook 与 inspect_state.py 都通过此包读取状态、推导节点、检查产物。
-所有函数为只读、确定性、无副作用。
+状态读取会按 state.json 修复生成视图 STATE.md；其他逻辑保持确定性。
 """

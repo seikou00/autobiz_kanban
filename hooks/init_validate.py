@@ -13,12 +13,17 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from paths import (
     get_autobizdevops_dir,
     get_project_md_path,
-    get_state_md_path,
+    get_state_json_path,
     get_workspace,
 )
+from board_core.state_store import check_or_fix_state_sync  # noqa: E402
 
 BLOCK_EXIT_CODE = 2
 
@@ -48,9 +53,11 @@ def validate_precheck(workspace: Path) -> Dict[str, Any]:
     if not project_md.exists():
         errors.append(f"PROJECT.md 不存在: {project_md}")
 
-    state_md = get_state_md_path(workspace)
-    if not state_md.exists():
-        errors.append(f"STATE.md 不存在: {state_md}")
+    sync_result = check_or_fix_state_sync(workspace, fix=True)
+    if not sync_result.state_exists:
+        errors.append(f"state.json 不存在且无法从 STATE.md 迁移: {get_state_json_path(workspace)}")
+    elif sync_result.errors:
+        errors.extend(sync_result.errors)
 
     if errors:
         return _fail("前置检查未通过", {"errors": errors})

@@ -45,7 +45,7 @@ description: "编写高质量单元测试。适用于需要为现有代码编写
 - 不得把测试生成或测试修复工作委派给下级 agent或子agent。
 
 
-状态文件统一使用 `.autobizdevops/STATE.md`；每次推进 checkpoint 时，只允许更新当前 `{slug}` 对应的 Feature 行，不得改写其他 slug 的状态。
+状态文件统一使用 `.autobizdevops/state.json`；`.autobizdevops/STATE.md` 仅为自动生成视图。每次推进 checkpoint 时，只允许更新当前 `{slug}` 对应的 Feature 记录，不得改写其他 slug 的状态。
 若 checkpoint 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
 ## Step 1: 写入 Checkpoint（标记开始）
 
@@ -61,7 +61,7 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 
 - 单测报告：`.autobizdevops/features/{slug}/UNIT_TEST_REPORT.md`
 - 单测执行日志：`.autobizdevops/features/{slug}/test-output.log`
-- 全局状态：`.autobizdevops/STATE.md`
+- 全局状态：`.autobizdevops/state.json`
 - 最佳实践沉淀：`.autobizdevops/references/autodev-utest/`
 
 ## 写入 Checkpoint（标记完成）

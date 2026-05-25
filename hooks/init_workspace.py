@@ -8,11 +8,14 @@ autobizdevops Workspace 初始化脚本
 """
 
 import argparse
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 try:
     from paths import (
@@ -46,6 +49,15 @@ except ImportError:
         is_initialized,
     )
 
+from board_core.state_store import (  # noqa: E402
+    EMPTY_CELL,
+    check_or_fix_state_sync,
+    parse_state_md_records,
+    render_state_md,
+    state_json_content_from_records,
+    write_state_records,
+)
+
 
 def _generate_project_md(workspace_name: str) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -63,45 +75,26 @@ def _generate_project_md(workspace_name: str) -> str:
 ## Notes
 
 - 本文件由 autobizdevops 初始化时自动生成
-- 其他流程控制以各阶段 `SKILL.md`、`.autobizdevops/STATE.md` 与 `.autobizdevops/state.json` 为准
+- 其他流程控制以各阶段 `SKILL.md` 与 `.autobizdevops/state.json` 为准；`.autobizdevops/STATE.md` 为自动生成视图
 """
 
 
 def _generate_state_md() -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return f"""# 工程状态
-
-- **里程碑**: [待确定]
-- **最后更新**: {now}
-
-## Feature 进度
-
-| Feature | 负责人 | checkpoint | 阶段 | 迭代 | 最后更新 |
-|---------|--------|-----------|------|------|---------|
-"""
+    return render_state_md({})
 
 
 def _generate_state_json() -> str:
-    return "{}\n"
+    return state_json_content_from_records({})
 
 
 def _generate_state_json_from_state_md(state_md: Path) -> str:
     if not state_md.is_file():
         return _generate_state_json()
 
-    rows: dict[str, str] = {}
-    for raw_line in state_md.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw_line.strip()
-        if not line.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if len(cells) < 3:
-            continue
-        if cells[0] == "Feature" or all(cell and set(cell) <= {"-", ":"} for cell in cells):
-            continue
-        if cells[0] and cells[2]:
-            rows[cells[0]] = cells[2]
-    return json.dumps(dict(sorted(rows.items())), ensure_ascii=False, indent=2) + "\n"
+    records, errors = parse_state_md_records(state_md.read_text(encoding="utf-8", errors="ignore"))
+    if errors:
+        return _generate_state_json()
+    return state_json_content_from_records(records)
 
 
 def _write_if_missing(path: Path, content: str, created: List[str]) -> None:
@@ -156,11 +149,11 @@ def init_workspace(workspace: Path, force: bool = False) -> Dict[str, object]:
     project_md = get_project_md_path(workspace)
     _write_if_missing(project_md, _generate_project_md(workspace.name or "untitled"), result["created"])
 
-    state_md = get_state_md_path(workspace)
-    _write_if_missing(state_md, _generate_state_md(), result["created"])
-
     state_json = get_state_json_path(workspace)
+    state_md = get_state_md_path(workspace)
     _write_if_missing(state_json, _generate_state_json_from_state_md(state_md), result["created"])
+    _write_if_missing(state_md, _generate_state_md(), result["created"])
+    check_or_fix_state_sync(workspace, fix=True)
 
     result["initialized"] = is_initialized(workspace)
     if result["backup"]:
@@ -219,13 +212,32 @@ def create_feature(workspace: Path, feature: str) -> Dict[str, object]:
         print(f"ERROR: 特性已存在：{feature_dir}", file=sys.stderr)
         sys.exit(1)
 
+    sync_result = check_or_fix_state_sync(workspace, fix=True)
+    if not sync_result.state_exists:
+        print(f"ERROR: Workspace 未初始化，缺少 state.json: {get_state_json_path(workspace)}", file=sys.stderr)
+        sys.exit(1)
+    if sync_result.errors:
+        print("ERROR: 状态文件异常:", file=sys.stderr)
+        for error in sync_result.errors:
+            print(f"  - {error}", file=sys.stderr)
+        sys.exit(1)
+    if feature in sync_result.records:
+        print(f"ERROR: Feature 已存在于 state.json: {feature}", file=sys.stderr)
+        sys.exit(1)
+
     ensure_dir(feature_dir)
 
-    state_md = get_state_md_path(workspace)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"| {feature} |  | discuss_in_progress |  |  | {now} |\n"
-    with open(state_md, "a", encoding="utf-8") as f:
-        f.write(entry)
+    records = {slug: dict(record) for slug, record in sync_result.records.items()}
+    records[feature] = {
+        "feature": feature,
+        "owner": EMPTY_CELL,
+        "checkpoint": "discuss_in_progress",
+        "stage": "需求澄清",
+        "iteration": EMPTY_CELL,
+        "updated_at": now,
+    }
+    write_state_records(workspace, records)
 
     return {
         "initialized": feature_dir.is_dir(),

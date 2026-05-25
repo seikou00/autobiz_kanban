@@ -22,7 +22,7 @@ author: zhangQiuFeng
 
 - CI/CD 清单：`.autobizdevops/features/{slug}/CICD_CHECKLIST.md`
 - PR 描述草稿：`.autobizdevops/features/{slug}/PR_BODY.md`
-- 全局状态：`.autobizdevops/STATE.md`
+- 全局状态：`.autobizdevops/state.json`
 
 如用户额外提供 `PRD.md` 或 `design.md`，可在 `CICD_CHECKLIST.md` 中记录其来源；未提供时允许继续，但必须明确写明“需求/设计文档缺失或未提供”。
 
@@ -45,7 +45,7 @@ author: zhangQiuFeng
 1. 确定 `{slug}`，进入 `.autobizdevops/features/{slug}/`
 2. 若尚未执行 workspace 初始化，先执行 `python hooks/init_workspace.py .`
 3. 读取仓库构建配置、流水线配置、已有流程产物和用户输入，整理 CI/CD 所需上下文
-4. 使用统一脚本更新 `.autobizdevops/STATE.md` 中对应 Feature 行为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
+4. 使用统一脚本更新 `.autobizdevops/state.json` 中对应 Feature 为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint cicd_in_progress --stage "CI/CD（来源: 用户直供）" --allow-create

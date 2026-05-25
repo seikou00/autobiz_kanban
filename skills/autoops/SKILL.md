@@ -40,13 +40,13 @@ description: Autoops Ops 阶段根路由器。基于 checkpoint 自动路由到 
 ### 1.2 确定 Feature
 
 - `--feature {slug}` 优先
-- 否则从 `.autobizdevops/STATE.md` 自动选择单一进行中的 Feature，无法唯一确定时列出候选并让用户选择
+- 否则从 `.autobizdevops/state.json` 自动选择单一进行中的 Feature，无法唯一确定时列出候选并让用户选择
 
 ---
 
 ## 2. Checkpoint 路由
 
-读取 `.autobizdevops/STATE.md` 中当前 Feature 行的 checkpoint，按以下规则路由：
+读取 `.autobizdevops/state.json` 中当前 Feature 的 checkpoint，按以下规则路由：
 
 | Checkpoint | 路由 |
 |------------|------|
@@ -65,7 +65,7 @@ description: Autoops Ops 阶段根路由器。基于 checkpoint 自动路由到 
 
 子技能返回后，根路由器必须：
 
-1. 读取 `.autobizdevops/STATE.md` 中当前 Feature 行的 checkpoint。
+1. 读取 `.autobizdevops/state.json` 中当前 Feature 的 checkpoint。
 2. 对照下表确认是否为合法出口：
 
 | 子技能 | 合法出口 checkpoint |

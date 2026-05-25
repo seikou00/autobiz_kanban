@@ -43,12 +43,12 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 
 ### Checkpoint 路由映射
 
-完成前置准入后，根入口必须读取 `.autobizdevops/STATE.md` 中当前 Feature 行的 checkpoint，并按下表路由到对应阶段入口。根入口只负责选择 `/autobiz` / `/autodev` / 
+完成前置准入后，根入口必须读取 `.autobizdevops/state.json` 中当前 Feature 的 checkpoint，并按下表路由到对应阶段入口。根入口只负责选择 `/autobiz` / `/autodev` / 
 `/autoops`，不得直接跳入阶段内部子技能；阶段入口会继续按自身 `SKILL.md` 的 checkpoint 映射路由到具体子技能。
 
 ### Checkpoint 更新命令
 
-所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/STATE.md`，不得手工改表格。脚本会同步维护 `.autobizdevops/state.json`（`{feature: checkpoint}`），并在写入前复用根级 hook 的 checkpoint 流转、Autodev 产物和 `code_done` 编译校验。
+所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转、Autodev 产物和 `code_done` 编译校验。
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint {checkpoint}
