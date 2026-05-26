@@ -74,6 +74,33 @@ description: 按照 autodev-plan 生成的 design.md 与 PLAN.md 逐任务执行
 
 如果缺少任一必读文件，停止，不要生成替代文件。
 
+开始任何业务代码修改前，必须根据 AGENTS.md 与项目 manifest 生成模块编译清单：
+
+```text
+.autobizdevops/modules_compile.json
+```
+
+格式必须为：
+
+```json
+{
+  "version": 1,
+  "modules": [
+    {
+      "module": "root",
+      "path": "/absolute/path/to/code/module",
+      "compile_command": "mvn compile"
+    }
+  ]
+}
+```
+
+识别规则：
+- 优先遵守 AGENTS.md 中声明的多模块构建方式。
+- 若 AGENTS.md 未明确，但项目 manifest 明确存在单模块或多模块构建入口，则生成对应模块清单。
+- `path` 必须是模块目录的绝对路径；`compile_command` 会在该目录作为 cwd 执行，命令本身不要再写 `cd ... && ...`。
+- 无法确定模块路径或编译命令时，停止并询问用户，不得开始编码。
+
 ## 写入 checkpoint
 
 开始编码前推进到 `code_in_progress`：
@@ -145,7 +172,7 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 当 `PLAN.md` 中没有「待做」或「进行中」任务后：
 
 1. 运行项目级验证命令。优先使用 AGENTS.md 或 PLAN.md 指定命令；没有明确命令时按项目类型选择最小验证。
-2. Java/Maven 项目至少运行编译命令；`code_done` checkpoint 的前置 hook 会检查编译证据，证据通常由 execute 后置 hook 写入 `.autobizdevops/compile-evidence.ndjson`。
+2. Java/Maven 项目至少运行编译命令；`code_done` checkpoint 的前置 hook 会读取 `.autobizdevops/modules_compile.json` 并逐模块强制编译。
 3. 如果验证失败，回到相关任务继续修复；不要推进 `code_done`。
 
 验证通过后推进 checkpoint：

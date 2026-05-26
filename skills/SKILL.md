@@ -48,7 +48,7 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 
 ### Checkpoint 更新命令
 
-所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转和 Autodev 产物校验；`code_done` 的编译门禁由 hook 基于 `.autobizdevops/compile-evidence.ndjson` 等证据判断。
+所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转和 Autodev 产物校验；`code_done` 的编译门禁由 hook 基于 `.autobizdevops/modules_compile.json` 逐模块执行编译命令。
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint {checkpoint}
