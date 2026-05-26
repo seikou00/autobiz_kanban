@@ -52,7 +52,21 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 - `--feature {slug}` 优先
 - 否则从 `.autobizdevops/state.json` 列出让用户选择
 
-### 1.3 产出物校验
+### 1.3 初始化代码工作区 AGENTS.md
+
+Dev 阶段进入路由前必须确认代码工作区存在 `AGENTS.md`。系统编号只从环境变量 `projectCode` 读取；如果 `projectCode` 缺失或为空，默认使用 `lf39`。不得再从 `.autobizdevops/PROJECT.md` 或 `board_core/board_config.json` 推断系统编号。
+
+如果代码工作区没有 `AGENTS.md`，执行：
+
+```bash
+python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE}"
+```
+
+`{CODE_WORKSPACE}` 必须是明确的代码工作区路径；不得用 `{PLUGIN_OUTPUT_DIR}`、`.autobizdevops` 或插件目录代替猜测。若无法确认代码工作区，停止并让用户提供。
+
+初始化脚本会把 `{PLUGIN_DIR}/sys/{projectCode或lf39}/AGENTS.md` 复制为 `{CODE_WORKSPACE}/AGENTS.md`；目标文件已存在时不覆盖。源文件不存在或 `projectCode` 含非法路径字符时必须停止。
+
+### 1.4 产出物校验
 
 以下文件必须存在，缺失则停止：
 
