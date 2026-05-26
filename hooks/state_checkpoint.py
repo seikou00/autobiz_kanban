@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,7 @@ MAVEN_COMPILE_TIMEOUT_SECONDS = 290
 MAVEN_OUTPUT_LIMIT = 4000
 LOG_PATH = Path(tempfile.gettempdir()) / "check_state_done_hook.log"
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
+PLUGIN_ID = "AUTOBIZDEVOPS-PLUGIN"
 DIRECT_STATE_EDIT_TOOLS = {"edit_file", "write_file", "StrReplaceFile", "WriteFile"}
 WORKFLOW_CONTRACTS = load_workflow_contracts(BOARD_CONFIG_PATH)
 KNOWN_CHECKPOINTS = WORKFLOW_CONTRACTS.known_checkpoints
@@ -152,26 +154,22 @@ def append_feature_hook_log(
     feature: str,
     checkpoint: str | None,
     *,
-    hook_id: str,
-    label: str,
-    status: dict[str, str],
-    decision: str,
-    exit_code: int,
-    summary: str,
+    event_id: str,
+    result_code: str,
+    message: str,
 ) -> None:
     if not safe_feature_slug(feature):
         return
     record = {
-        "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "hook",
+        "sessionId": os.environ.get("SESSION_ID") or os.environ.get("session_id", ""),
+        "pluginId": PLUGIN_ID,
         "featureId": feature,
+        "eventId": event_id,
+        "resultCode": result_code,
+        "message": message,
         "nodeId": checkpoint_node_id(checkpoint),
-        "hookId": hook_id,
-        "label": label,
-        "event": "PreToolUse",
-        "status": status,
-        "decision": decision,
-        "exitCode": exit_code,
-        "summary": summary,
     }
     try:
         path = get_feature_hook_log_path(workspace_root, feature)
@@ -186,15 +184,18 @@ def append_checkpoint_hook_logs(
     workspace_root: Path,
     changes: list[tuple[str, str | None, str | None]],
     *,
-    hook_id: str,
+    event_id: str | None = None,
+    hook_id: str | None = None,
     label: str,
     errors: list[str],
-    exit_code: int,
+    result_code: str | None = None,
+    exit_code: int | None = None,
+    message: str | None = None,
 ) -> None:
     if not changes:
         return
-    status = {"label": "已阻断", "uiKind": "blocked"} if errors else {"label": "通过", "uiKind": "ok"}
-    decision = "block" if errors else "pass"
+    resolved_event_id = event_id or hook_id or ""
+    resolved_result_code = result_code or ("blocked" if errors else "done")
     summary = "\n".join(errors) if errors else f"{label} 通过"
     for feature, old_checkpoint, new_checkpoint in changes:
         transition = f"{old_checkpoint or 'empty'} -> {new_checkpoint or 'empty'}"
@@ -202,12 +203,9 @@ def append_checkpoint_hook_logs(
             workspace_root,
             feature,
             new_checkpoint or old_checkpoint,
-            hook_id=hook_id,
-            label=label,
-            status=status,
-            decision=decision,
-            exit_code=exit_code,
-            summary=f"{transition}: {summary}",
+            event_id=resolved_event_id,
+            result_code=resolved_result_code,
+            message=message or f"{transition}: {summary}",
         )
 
 

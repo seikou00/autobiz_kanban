@@ -21,6 +21,7 @@ from state_checkpoint import (  # noqa: E402
     DEFAULT_STAGE_BY_CHECKPOINT,
     INITIAL_CHECKPOINTS,
     KNOWN_CHECKPOINTS,
+    append_checkpoint_hook_logs,
     features_entering_code_done,
     parse_state_table,
     validate_lifecycle,
@@ -32,6 +33,11 @@ from state_checkpoint import (  # noqa: E402
 STATE_RELATIVE_PATH = Path(".autobizdevops") / "STATE.md"
 STATE_JSON_RELATIVE_PATH = Path(".autobizdevops") / "state.json"
 STATE_COLUMNS = 6
+CHECKPOINT_LOG_EVENTS = (
+    ("state-done", "STATE checkpoint 转移校验", "transition_errors"),
+    ("autodev-lifecycle", "Autodev 产物校验", "lifecycle_errors"),
+    ("code-compile", "code_done 编译校验", "compile_errors"),
+)
 
 
 @dataclass(frozen=True)
@@ -41,9 +47,16 @@ class CheckpointUpdate:
     state_json_path: Path
     content: str
     state_json_content: str
-    errors: tuple[str, ...]
+    transition_errors: tuple[str, ...]
+    lifecycle_errors: tuple[str, ...]
+    compile_errors: tuple[str, ...]
     old_checkpoint: str | None
     new_checkpoint: str | None
+    compile_features: tuple[str, ...] = ()
+
+    @property
+    def errors(self) -> tuple[str, ...]:
+        return (*self.transition_errors, *self.lifecycle_errors, *self.compile_errors)
 
 
 def split_table_cells(line: str) -> list[str]:
@@ -180,9 +193,12 @@ def prepare_checkpoint_update(
             state_json_path=state_json_path,
             content="",
             state_json_content="",
-            errors=(f"未知 checkpoint: {checkpoint}",),
+            transition_errors=(f"未知 checkpoint: {checkpoint}",),
+            lifecycle_errors=(),
+            compile_errors=(),
             old_checkpoint=None,
             new_checkpoint=None,
+            compile_features=(),
         )
     if not feature.strip():
         return CheckpointUpdate(
@@ -191,9 +207,12 @@ def prepare_checkpoint_update(
             state_json_path=state_json_path,
             content="",
             state_json_content="",
-            errors=("feature 不能为空",),
+            transition_errors=("feature 不能为空",),
+            lifecycle_errors=(),
+            compile_errors=(),
             old_checkpoint=None,
             new_checkpoint=None,
+            compile_features=(),
         )
     if not state_path.is_file():
         return CheckpointUpdate(
@@ -202,9 +221,12 @@ def prepare_checkpoint_update(
             state_json_path=state_json_path,
             content="",
             state_json_content="",
-            errors=(f"STATE.md 不存在: {state_path}",),
+            transition_errors=(f"STATE.md 不存在: {state_path}",),
+            lifecycle_errors=(),
+            compile_errors=(),
             old_checkpoint=None,
             new_checkpoint=None,
+            compile_features=(),
         )
 
     old_content = state_path.read_text(encoding="utf-8")
@@ -221,16 +243,21 @@ def prepare_checkpoint_update(
     )
     new_map, new_errors = parse_state_table(new_content)
 
-    errors = [
+    transition_errors = [
         *old_errors,
         *update_errors,
         *new_errors,
         *validate_transitions(old_map, new_map),
     ]
-    if not errors:
-        errors.extend(validate_lifecycle(workspace, old_map, new_map))
-    if not errors:
-        errors.extend(validate_maven_compile(workspace, features_entering_code_done(old_map, new_map)))
+    lifecycle_errors: list[str] = []
+    compile_errors: list[str] = []
+    compile_features = tuple(features_entering_code_done(old_map, new_map))
+    if not transition_errors:
+        lifecycle_errors.extend(validate_lifecycle(workspace, old_map, new_map))
+    if not transition_errors and not lifecycle_errors:
+        compile_errors.extend(validate_maven_compile(workspace, list(compile_features)))
+
+    errors = [*transition_errors, *lifecycle_errors, *compile_errors]
 
     return CheckpointUpdate(
         ok=not errors,
@@ -238,10 +265,72 @@ def prepare_checkpoint_update(
         state_json_path=state_json_path,
         content=new_content,
         state_json_content=state_json_content_from_rows(new_map) if not errors else "",
-        errors=tuple(errors),
+        transition_errors=tuple(transition_errors),
+        lifecycle_errors=tuple(lifecycle_errors),
+        compile_errors=tuple(compile_errors),
         old_checkpoint=old_map.get(feature),
         new_checkpoint=new_map.get(feature),
+        compile_features=compile_features,
     )
+
+
+def stage_result_code(result: CheckpointUpdate, stage: str) -> str:
+    if stage == "transition_errors":
+        return "blocked" if result.transition_errors else "done"
+    if stage == "lifecycle_errors":
+        if result.transition_errors:
+            return "skipped"
+        return "blocked" if result.lifecycle_errors else "done"
+    if stage == "compile_errors":
+        if result.transition_errors or result.lifecycle_errors:
+            return "skipped"
+        if not result.compile_features:
+            return "skipped"
+        return "blocked" if result.compile_errors else "done"
+    return "error"
+
+
+def stage_errors(result: CheckpointUpdate, stage: str) -> tuple[str, ...]:
+    if stage == "transition_errors":
+        return result.transition_errors
+    if stage == "lifecycle_errors":
+        return result.lifecycle_errors
+    if stage == "compile_errors":
+        return result.compile_errors
+    return ()
+
+
+def stage_message(result: CheckpointUpdate, *, label: str, stage: str) -> str:
+    transition = f"{result.old_checkpoint or 'empty'} -> {result.new_checkpoint or 'empty'}"
+    result_code = stage_result_code(result, stage)
+    errors = stage_errors(result, stage)
+    if result_code == "done":
+        return f"{transition}: {label} 通过"
+    if result_code == "blocked":
+        return f"{transition}: " + "\n".join(errors)
+    if stage == "lifecycle_errors":
+        return f"{transition}: {label} 未执行，因为 state-done 已阻断"
+    if stage == "compile_errors":
+        blocker = "state-done" if result.transition_errors else "autodev-lifecycle"
+        if result.transition_errors or result.lifecycle_errors:
+            return f"{transition}: {label} 未执行，因为 {blocker} 已阻断"
+        return f"{transition}: {label} 未执行，因为本次 checkpoint 不进入 code_done"
+    return f"{transition}: {label} 执行异常"
+
+
+def write_hook_logs(result: CheckpointUpdate, *, workspace: Path, feature: str) -> None:
+    changes = [(feature, result.old_checkpoint, result.new_checkpoint)]
+    for event_id, label, stage in CHECKPOINT_LOG_EVENTS:
+        append_checkpoint_hook_logs(
+            workspace,
+            changes,
+            event_id=event_id,
+            label=label,
+            errors=list(stage_errors(result, stage)),
+            result_code=stage_result_code(result, stage),
+            exit_code=0 if stage_result_code(result, stage) == "done" else 1,
+            message=stage_message(result, label=label, stage=stage),
+        )
 
 
 def write_result_json(result: CheckpointUpdate, *, feature: str, checkpoint: str, dry_run: bool) -> None:
@@ -300,10 +389,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"checkpoint updated: feature={args.feature} checkpoint={args.checkpoint}")
 
     if not result.ok:
+        if not args.dry_run:
+            write_hook_logs(result, workspace=Path(args.workspace).resolve(), feature=args.feature)
         return 1
     if not args.dry_run:
         result.state_path.write_text(result.content, encoding="utf-8")
         result.state_json_path.write_text(result.state_json_content, encoding="utf-8")
+        write_hook_logs(result, workspace=Path(args.workspace).resolve(), feature=args.feature)
     return 0
 
 
