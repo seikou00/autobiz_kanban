@@ -176,14 +176,31 @@ def parse_state_json_records(content: str) -> tuple[StateRecords, list[str]]:
     return records, errors
 
 
-def _load_state_records_result(workspace: Path) -> StateLoadResult:
+def load_state_json_records_result(workspace: Path) -> StateLoadResult:
+    """Read only .autobizdevops/state.json without fallback or repair."""
     workspace = workspace.resolve()
     state_json = get_state_json_path(workspace)
+
+    if not state_json.is_file():
+        return StateLoadResult(records={}, errors=[], exists=False, source="state.json")
+
+    records, errors = parse_state_json_records(state_json.read_text(encoding="utf-8"))
+    return StateLoadResult(records=records, errors=errors, exists=True, source="state.json")
+
+
+def load_state_json_records(workspace: Path) -> tuple[StateRecords, list[str], bool]:
+    """Read only .autobizdevops/state.json and return (records, errors, exists)."""
+    result = load_state_json_records_result(workspace)
+    return result.records, result.errors, result.exists
+
+
+def _load_state_records_result(workspace: Path) -> StateLoadResult:
+    workspace = workspace.resolve()
     state_md = get_state_path(workspace)
 
-    if state_json.is_file():
-        records, errors = parse_state_json_records(state_json.read_text(encoding="utf-8"))
-        return StateLoadResult(records=records, errors=errors, exists=True, source="state.json")
+    json_result = load_state_json_records_result(workspace)
+    if json_result.exists:
+        return json_result
 
     if state_md.is_file():
         records, errors = parse_state_md_records(state_md.read_text(encoding="utf-8"))

@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from board_core.state_store import (  # noqa: E402
     STATE_SCHEMA_VERSION,
     check_or_fix_state_sync,
+    load_state_json_records_result,
     render_state_md,
     state_json_content_from_records,
     write_state_records,
@@ -99,6 +100,29 @@ class StateStoreTests(unittest.TestCase):
             self.assertTrue(result.changed)
             self.assertEqual(migrated["features"]["alpha"]["checkpoint"], "discuss_done")
             self.assertIn("自动生成", (workspace / ".autobizdevops" / "STATE.md").read_text(encoding="utf-8"))
+
+    def test_direct_json_loader_does_not_fallback_to_state_md(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            (workspace / ".autobizdevops" / "STATE.md").write_text(
+                "\n".join(
+                    [
+                        "# 工程状态",
+                        "",
+                        "| Feature | 负责人 | checkpoint | 阶段 | 迭代 | 最后更新 |",
+                        "|---------|--------|-----------|------|------|---------|",
+                        "| alpha | owner | discuss_done | 需求澄清 | 2 | 2026-05-25 12:00:00 |",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = load_state_json_records_result(workspace)
+
+            self.assertFalse(result.exists)
+            self.assertEqual(result.records, {})
+            self.assertFalse((workspace / ".autobizdevops" / "state.json").exists())
 
     def test_json_wins_over_stale_state_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -227,6 +251,36 @@ class StateIntegrationTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["run"]["currentNodeId"], "biz.prd")
             self.assertIn("prd_done", (project / ".autobizdevops" / "STATE.md").read_text(encoding="utf-8"))
+
+    def test_read_state_json_cli_reads_specific_feature_without_repairing_md(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {"alpha": sample_record("prd_done")})
+            (workspace / ".autobizdevops" / "STATE.md").write_text("stale discuss_done\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "read_state_json.py"),
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["checkpoint"], "prd_done")
+            self.assertEqual(payload["record"]["checkpoint"], "prd_done")
+            self.assertEqual(
+                (workspace / ".autobizdevops" / "STATE.md").read_text(encoding="utf-8"),
+                "stale discuss_done\n",
+            )
 
     def test_direct_state_file_edits_are_blocked_by_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
