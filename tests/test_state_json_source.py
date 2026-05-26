@@ -253,7 +253,7 @@ class StateIntegrationTests(unittest.TestCase):
                 self.assertIn("state.json 是主事实源", result.stderr)
                 self.assertEqual(json.loads(result.stdout)["decision"], "block")
 
-    def test_code_done_still_runs_compile_guard(self) -> None:
+    def test_code_done_does_not_assume_state_workspace_is_code_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -270,8 +270,7 @@ class StateIntegrationTests(unittest.TestCase):
                 checkpoint="code_done",
             )
 
-            self.assertFalse(result.ok)
-            self.assertIn("缺少 pom.xml", "\n".join(result.errors))
+            self.assertTrue(result.ok, "\n".join(result.errors))
 
     def test_init_workspace_and_create_feature_use_json_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

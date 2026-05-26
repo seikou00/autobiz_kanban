@@ -37,6 +37,34 @@
 
         }
       ]
+    },
+    {
+      "matcher": "execute",
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "如果即将执行的命令不是 update_checkpoint.py，或目标 checkpoint 不是 code_done，直接放行。\n\n如果是 update_checkpoint.py --checkpoint code_done：\n1. 注意 --workspace 只代表插件状态/产物目录，不一定是代码工作区；payload.cwd、环境变量、当前 shell 目录也不一定可靠。不得基于这些路径自动假设代码工作区，也不得在猜测目录下编译后放行。\n2. 必须先读取 --workspace 对应目录下的 .autobizdevops/compile-evidence.ndjson（如果存在），并结合当前对话中可见的命令结果、PLAN.md 验证记录等证据判断。\n3. 只有存在最后一次代码修改之后的真实编译/构建成功证据，才能放行。证据必须包含代码工作区路径、编译命令、退出码或明确成功结果、发生在最后一次代码修改之后的依据、输出摘要。\n4. 不接受仅凭记忆、仅 lint/test/format、编译目录无法确认、编译早于最后一次代码修改、或只根据 --workspace/payload.cwd/env 猜测目录。\n5. 如果证据不足，不要执行本次 code_done；请先让用户指定代码工作区或提供编译证据，并在确认后的代码工作区运行编译/构建命令。",
+          "timeout": 3000,
+          "onBlock": {
+            "reason": "code_done 前缺少有效编译证据",
+            "systemMessage": "停止推进 code_done。需要提供最后一次代码修改之后的真实代码工作区编译成功证据。",
+            "additionalContext": "编译证据通常记录在 --workspace/.autobizdevops/compile-evidence.ndjson；注意 --workspace 不一定是代码工作区。"
+          },
+          "persistAfterInterrupt": true
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "execute",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/compile_evidence_recorder.py",
+          "timeout": 10
+        }
+      ]
     }
   ]
 }

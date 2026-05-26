@@ -23,9 +23,7 @@ from state_checkpoint import (  # noqa: E402
     DEFAULT_STAGE_BY_CHECKPOINT,
     INITIAL_CHECKPOINTS,
     KNOWN_CHECKPOINTS,
-    features_entering_code_done,
     validate_lifecycle,
-    validate_maven_compile,
     validate_transitions,
 )
 from board_core.state_store import (  # noqa: E402
@@ -197,8 +195,6 @@ def prepare_checkpoint_update(
     ]
     if not errors:
         errors.extend(validate_lifecycle(workspace, old_map, new_map))
-    if not errors:
-        errors.extend(validate_maven_compile(workspace, features_entering_code_done(old_map, new_map)))
 
     return CheckpointUpdate(
         ok=not errors,

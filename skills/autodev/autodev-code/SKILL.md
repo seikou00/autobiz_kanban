@@ -145,7 +145,7 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 当 `PLAN.md` 中没有「待做」或「进行中」任务后：
 
 1. 运行项目级验证命令。优先使用 AGENTS.md 或 PLAN.md 指定命令；没有明确命令时按项目类型选择最小验证。
-2. Java/Maven 项目至少运行编译命令；`code_done` checkpoint 也会触发外部编译校验。
+2. Java/Maven 项目至少运行编译命令；`code_done` checkpoint 的前置 hook 会检查编译证据，证据通常由 execute 后置 hook 写入 `.autobizdevops/compile-evidence.ndjson`。
 3. 如果验证失败，回到相关任务继续修复；不要推进 `code_done`。
 
 验证通过后推进 checkpoint：
