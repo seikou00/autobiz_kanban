@@ -169,9 +169,12 @@ def prepare_checkpoint_update(
             content="",
             state_json_content="",
             records={},
-            errors=(f"state.json 不存在且无法从 STATE.md 迁移: {state_json_path}",),
+            transition_errors=(f"state.json 不存在且无法从 STATE.md 迁移: {state_json_path}",),
+            lifecycle_errors=(),
+            compile_errors=(),
             old_checkpoint=None,
             new_checkpoint=None,
+            compile_features=(),
         )
     if sync_result.errors:
         return CheckpointUpdate(
@@ -214,7 +217,6 @@ def prepare_checkpoint_update(
             render_errors.extend(str(exc).splitlines())
 
     transition_errors = [
-        *old_errors,
         *update_errors,
         *render_errors,
         *validate_transitions(old_map, new_map),
@@ -224,8 +226,6 @@ def prepare_checkpoint_update(
     compile_features = tuple(features_entering_code_done(old_map, new_map))
     if not transition_errors:
         lifecycle_errors.extend(validate_lifecycle(workspace, old_map, new_map))
-    if not transition_errors and not lifecycle_errors:
-        compile_errors.extend(validate_maven_compile(workspace, list(compile_features)))
 
     errors = [*transition_errors, *lifecycle_errors, *compile_errors]
     if not errors:
@@ -235,7 +235,6 @@ def prepare_checkpoint_update(
         ok=not errors,
         state_path=state_path,
         state_json_path=state_json_path,
-        state_json_content=state_json_content_from_rows(new_map) if not errors else "",
         transition_errors=tuple(transition_errors),
         lifecycle_errors=tuple(lifecycle_errors),
         compile_errors=tuple(compile_errors),

@@ -60,6 +60,14 @@ description: Biz 阶段 PRD 生成技能。读取已收敛的 `{工作目录}/PR
 
 ### Step 1: 前置检查
 
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+```
+
+后续准入检查直接取用 `STATE.checkpoint` / `STATE.record`；若 `STATE.checkpoint` 为空、未知或 Feature 不存在，必须停止并提示用户选择 Feature。执行 `update_checkpoint.py` 后必须刷新 `STATE`。
+
 **确定工作目录：**
 
 ```
@@ -81,6 +89,7 @@ python autobiz/hooks/biz_validate.py discuss --feature {slug}
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint prd_in_progress
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 ### Step 3: 生成正式 `PRD.md`
@@ -131,6 +140,7 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint prd_done
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 ## 输出清单

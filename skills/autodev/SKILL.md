@@ -50,7 +50,19 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 ### 1.2 确定 Feature
 
 - `--feature {slug}` 优先
-- 否则从 `.autobizdevops/state.json` 列出让用户选择
+- 否则先读取全部 State 快照，再从 `STATE.records` 列出候选让用户选择：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
+```
+
+确定 `{slug}` 后，立即读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+```
+
+后续 checkpoint 路由、准入判断和执行后校验直接取用 `STATE.checkpoint` / `STATE.record`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `STATE`。
 
 ### 1.3 初始化代码工作区 AGENTS.md
 
@@ -88,7 +100,7 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE
 
 ## 2. Checkpoint 路由
 
-读取 `.autobizdevops/state.json` 中当前 Feature 的 checkpoint，按以下规则路由：
+使用 Step 1.2 获取的 `STATE.checkpoint`，按以下规则路由：
 
 所有非终止状态默认将 `/ARGUMENTS` 透传至子技能；
 
@@ -115,7 +127,7 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE
 
 子技能返回后，根路由器必须：
 
-1. 读取 `.autobizdevops/state.json` 中当前 Feature 的 checkpoint。
+1. 子技能返回后重新调用 `read_state_json.py` 刷新 `STATE`，再读取 `STATE.checkpoint`。
 2. 对照下表确认是否为合法出口：
 
 | 子技能 | 合法出口 checkpoint |

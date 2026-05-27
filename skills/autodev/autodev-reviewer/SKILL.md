@@ -36,16 +36,26 @@ description: "当实现工作准备宣称完成、准备交接、准备创建 PR
 
 使用此技能来避免执行者自证完成。主 agent 负责写完成声明、按失败审查结论修复问题并重新发起审查；独立 reviewer 只负责用真实仓库状态核验声明并落盘需求评估。对于跨仓库任务，当前 workspace 是协调仓库，业务仓库由 proposal 中的 `affected_repositories` 显式列出；reviewer 不依赖隐式对话记忆。
 
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+```
+
+后续准入和分支判断直接取用 `STATE.checkpoint` / `STATE.record`。若 `STATE.checkpoint` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+
 开始审查前，使用统一脚本写入 `requirements_eval_in_progress`：
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint requirements_eval_in_progress
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 最终 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS` 后，使用统一脚本写入 `requirements_eval_done`：
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint requirements_eval_done
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 

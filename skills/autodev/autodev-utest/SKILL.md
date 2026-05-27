@@ -46,13 +46,21 @@ description: "编写高质量单元测试。适用于需要为现有代码编写
 
 
 状态文件统一使用 `.autobizdevops/state.json`；`.autobizdevops/STATE.md` 仅为自动生成视图。每次推进 checkpoint 时，只允许更新当前 `{slug}` 对应的 Feature 记录，不得改写其他 slug 的状态。
-若 checkpoint 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+```
+
+后续准入、恢复和完成判断直接取用 `STATE.checkpoint` / `STATE.record`。若 `STATE.checkpoint` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+
 ## Step 1: 写入 Checkpoint（标记开始）
 
 使用统一脚本只更新当前 `{slug}` 对应行的 checkpoint 为 `unit_test_in_progress`：
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint unit_test_in_progress
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 ## 产物输出约定
@@ -70,6 +78,7 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint unit_test_done
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 ### 自检 — 完成状态

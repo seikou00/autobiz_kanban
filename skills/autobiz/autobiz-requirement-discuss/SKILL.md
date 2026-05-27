@@ -45,6 +45,16 @@ description: Biz 阶段需求澄清技能。读取原始需求材料，通过分
 
 ## 准备工作
 
+### State 快照读取
+
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+```
+
+后续需要当前 checkpoint 或 Feature record 时直接取用 `STATE.checkpoint` / `STATE.record`。若脚本提示 Feature 不存在，本技能允许通过下面的 `update_checkpoint.py --allow-create` 创建；创建或推进 checkpoint 后，必须再次调用 `read_state_json.py` 刷新 `STATE`。
+
 ### 加载参考文档
 
 在开始工作流程前，必须加载以下参考文档：
@@ -67,6 +77,7 @@ description: Biz 阶段需求澄清技能。读取原始需求材料，通过分
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint discuss_in_progress --allow-create
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 ## 工作流程
@@ -215,6 +226,7 @@ Expected output: `{工作目录}/PRD_DISCUSS.md` 已沉淀当前轮次的需求�
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint discuss_done
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 

@@ -110,7 +110,14 @@ description: Dev 阶段执行计划生成。读取 PRD，先探索需求和现�
 
 探索开始时，优先确认当前 Feature 和输入来源：
 
-- 若 Feature slug、工作目录或 checkpoint 为空、未知，或无法唯一确定，停止并提示用户选择 Feature。
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+```
+
+后续准入、恢复模式和来源判断直接取用 `STATE.checkpoint` / `STATE.record`。若 Feature slug、工作目录或 `STATE.checkpoint` 为空、未知，或无法唯一确定，停止并提示用户选择 Feature；若本轮是用户直供需求并允许 `plan_in_progress --allow-create` 创建状态，创建后必须刷新 `STATE`。
+
 - 读取 `{工作目录}/PRD.md`、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
 - 读取 AGENTS.md 和与本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
@@ -317,11 +324,12 @@ description: Dev 阶段执行计划生成。读取 PRD，先探索需求和现�
 > **explore 结论注入**：基于 explore 已知上下文，先生成 `design.md`，再基于 `design.md` 生成 `PLAN.md`。
 
 #### 工作目录
-若 checkpoint 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+若 `STATE.checkpoint` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature；允许新建状态的用户直供路径除外，创建后必须刷新 `STATE`。
 
 #### 写入checkpoint
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint plan_in_progress --stage "Plan（来源: Biz 交接 / 用户直供）" --allow-create
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 ---
@@ -398,6 +406,7 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 - `design.md`、`PLAN.md` 已完成
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint plan_done
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 **Skill 完成。** 下一步：`/autodev-code --feature {slug}`

@@ -53,7 +53,13 @@ description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单
 
 **当前 Feature **
 
-读取 `.autobizdevops/state.json` 中当前 Feature 的 checkpoint：
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+```
+
+后续准入、恢复和分支决策直接取用 `STATE.checkpoint` / `STATE.record`：
 
 | Checkpoint | 行为 |
 |-----------|------|
@@ -62,7 +68,7 @@ description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单
 | `unit_test_done` | ✗ 错误：E2E 阶段未执行，请先让根路由器调用上游阶段技能 `autodev-e2e` |
 | 其他 | ✗ 错误：checkpoint 异常，请检查 `state.json` |
 
-若 checkpoint 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+若 `STATE.checkpoint` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
 
 ---
 
@@ -70,6 +76,7 @@ description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint verify_in_progress
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 ## Step 3: 提取验收标准
@@ -212,10 +219,11 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 
 ### 路径 A：全部通过 → `verify_done`
 
-使用统一脚本将 `.autobizdevops/state.json` 中当前 Feature 的 checkpoint 更新为 `verify_done`。本轮验收摘要与历史证据写入 `VERIFY_REPORT.md`。
+使用统一脚本将当前 Feature 的 checkpoint 推进为 `verify_done`。本轮验收摘要与历史证据写入 `VERIFY_REPORT.md`。
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint verify_done
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 **输出提示：**
@@ -237,10 +245,11 @@ checkpoint=verify_done → Dev 阶段结束，Ops 阶段可继续调用 autoops-
 
 ### 路径 B：存在失败项 → `needs_fix`
 
-使用统一脚本将 `.autobizdevops/state.json` 中当前 Feature 的 checkpoint 更新为 `needs_fix`：
+使用统一脚本将当前 Feature 的 checkpoint 推进为 `needs_fix`：
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint needs_fix
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
 ```
 
 在 `VERIFY_REPORT.md` 的失败详情中追加：
@@ -307,7 +316,7 @@ Skill 完成前必须满足：
 
 - [ ] `{工作目录}/VERIFY_REPORT.md` 已生成
 - [ ] 报告中每项裁定都指向 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 或 `e2e-run.log` 的证据段落，或标注"需人工验证"
-- [ ] `.autobizdevops/state.json` 中当前 Feature checkpoint = `verify_done` / `needs_fix`（或路径 C 等待）
+- [ ] 刷新后的 `STATE.checkpoint` = `verify_done` / `needs_fix`（或路径 C 等待）
 - [ ] 验收摘要已写入报告（通过时）
 - [ ] 已知问题已更新（失败时）
 
@@ -319,7 +328,7 @@ Skill 完成前必须满足：
 
 本 skill 是**纯只读 + 汇总**操作：
 
-1. `.autobizdevops/state.json` 中当前 Feature checkpoint 停留在 `verify_in_progress`
+1. 刷新后的 `STATE.checkpoint` 停留在 `verify_in_progress`
 2. 重新读取 UNIT_TEST_REPORT.md、test-output.log、E2E_REPORT.md 和 e2e-run.log，重新生成 VERIFY_REPORT.md（允许覆盖）
 3. 重新做分支决策
 
