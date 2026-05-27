@@ -52,7 +52,7 @@ def _resolve_state_workspace(workspace: Path, project: str | None) -> Path:
     return project_workspace
 
 
-def _build_payload(workspace: Path, feature: str | None = None) -> tuple[dict[str, Any], int]:
+def _build_payload(workspace: Path) -> tuple[dict[str, Any], int]:
     result = load_state_json_records_result(workspace)
     state_json_path = get_state_json_path(workspace)
     errors = list(result.errors)
@@ -70,18 +70,30 @@ def _build_payload(workspace: Path, feature: str | None = None) -> tuple[dict[st
         "errors": errors,
     }
 
-    if feature:
-        record = result.records.get(feature)
-        if result.exists and not result.errors and record is None:
-            payload["ok"] = False
-            payload["errors"].append(f"feature '{feature}' 未在 state.json 中找到")
-        payload["feature"] = feature
-        payload["record"] = record
-        payload["checkpoint"] = record.get("checkpoint", "") if record else ""
-    else:
-        payload["records"] = result.records
+    payload["records"] = result.records
 
     return payload, 0 if payload["ok"] else 1
+
+
+def _read_feature_checkpoint(workspace: Path, feature: str) -> tuple[str, int]:
+    result = load_state_json_records_result(workspace)
+    state_json_path = get_state_json_path(workspace)
+
+    if not result.exists:
+        print(f"state.json 未找到: {state_json_path}", file=sys.stderr)
+        return "", 1
+
+    if result.errors:
+        for error in result.errors:
+            print(error, file=sys.stderr)
+        return "", 1
+
+    record = result.records.get(feature)
+    if record is None:
+        print(f"feature '{feature}' 未在 state.json 中找到", file=sys.stderr)
+        return "", 1
+
+    return record.get("checkpoint", ""), 0
 
 
 def main() -> int:
@@ -92,7 +104,13 @@ def main() -> int:
     args = parser.parse_args()
 
     workspace = _resolve_state_workspace(Path(args.workspace), args.project)
-    payload, exit_code = _build_payload(workspace, args.feature)
+    if args.feature is not None:
+        checkpoint, exit_code = _read_feature_checkpoint(workspace, args.feature)
+        if exit_code == 0:
+            print(checkpoint)
+        return exit_code
+
+    payload, exit_code = _build_payload(workspace)
     json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
     print()
     return exit_code

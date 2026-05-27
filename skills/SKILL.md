@@ -43,22 +43,22 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 
 ### Checkpoint 路由映射
 
-完成前置准入后，根入口必须先通过脚本读取当前 State 快照，并按 `STATE.checkpoint` 路由到对应阶段入口。根入口只负责选择 `/autobiz` / `/autodev` /
+完成前置准入后，根入口必须先通过脚本读取当前 State 快照，并按 `CHECKPOINT` 路由到对应阶段入口。根入口只负责选择 `/autobiz` / `/autodev` /
 `/autoops`，不得直接跳入阶段内部子技能；阶段入口会继续按自身 `SKILL.md` 的 checkpoint 映射路由到具体子技能。
 
 ### State 快照读取
 
-所有需要当前 Feature checkpoint 或 record 的判断，第一步必须调用脚本读取 `.autobizdevops/state.json`，并把返回 JSON 记为 `STATE`；后续直接取用 `STATE.checkpoint`、`STATE.record` 或 `STATE.records`，不得绕过脚本重新手工读取 `state.json`。
+所有需要当前 Feature checkpoint 的判断，第一步必须调用脚本读取 `.autobizdevops/state.json`：已知 Feature 时把 stdout 捕获为 `CHECKPOINT`；未知 Feature 时读取全量 JSON 并记为 `STATE`，仅用于从 `STATE.records` 选择 Feature。不得绕过脚本重新手工读取 `state.json`。
 
 ```bash
 # 已知 Feature
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 
 # 未知 Feature：先读取全部 records，再选择或要求用户选择 Feature
 python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
 ```
 
-只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用 `read_state_json.py` 刷新 `STATE`。
+只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
 
 ### Checkpoint 更新命令
 
@@ -91,4 +91,4 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 | `archived` | `/autoops` | Ops 终态，提示已归档 |
 | `needs_fix` | 停止自动路由 | 读取最近阶段报告中的建议回流阶段并提示用户 |
 
-若 `STATE.checkpoint` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature，不得猜测路由。
+若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature，不得猜测路由。

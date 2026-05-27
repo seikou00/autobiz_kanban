@@ -26,13 +26,13 @@ author: zhangQiuFeng
 
 - `--feature {slug}`（推荐）：指定当前 Feature
 
-确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
-后续准入、恢复和迭代号计算直接取用 `STATE.checkpoint` / `STATE.record`。若 `STATE.checkpoint` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+后续准入和恢复直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
 
 ## 路径约定
 
@@ -45,7 +45,7 @@ python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{s
 
 `iter{N}` 的确定规则：
 
-1. 优先读取 `STATE.record.iteration`，若为有效数字则作为起始候选。
+1. 先调用 `python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"` 读取全量 JSON，优先取 `STATE.records[{slug}].iteration`；若为有效数字则作为起始候选。
 2. 若迭代列为空或不是数字，则从 `1` 开始。
 3. 若 `.autobizdevops/archive/{slug}-iter{N}/` 已存在，递增 N，直到找到不存在的目录。
 4. 禁止覆盖、合并或删除已有归档目录。
@@ -55,7 +55,7 @@ python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{s
 ### Step 1: 前置检查
 
 1. 确定 `{slug}`。
-2. 确认 `STATE.checkpoint` 为 `cicd_done`。
+2. 确认 `CHECKPOINT` 为 `cicd_done`。
 3. 确认 `.autobizdevops/features/{slug}/` 存在。
 4. 确认 `.autobizdevops/archive/` 存在；若缺失，可创建该目录。
 
@@ -86,7 +86,7 @@ python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{s
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint archived --iteration "{N}"
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
 只允许更新当前 `{slug}` 对应的 Feature 行，不得删除该行，不得改写其他 Feature 状态。

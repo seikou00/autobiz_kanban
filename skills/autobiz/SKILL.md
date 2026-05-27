@@ -43,17 +43,17 @@ description: Biz 阶段统一入口。负责前置准入校验、流程编排、
 python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
 ```
 
-确定 `{slug}` 后，立即读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
-后续流程编排和子技能准入直接取用 `STATE.checkpoint` / `STATE.record`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `STATE`。若 `STATE` 提示 Feature 不存在，仅 `/autobiz-requirement-discuss` 可通过 `--allow-create` 创建；创建后必须刷新 `STATE`。
+后续流程编排和子技能准入直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。若脚本提示 Feature 不存在，仅 `/autobiz-requirement-discuss` 可通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
 
 ## 流程编排
 
-根据 `STATE.checkpoint` 和用户意图，路由到对应子技能：
+根据 `CHECKPOINT` 和用户意图，路由到对应子技能：
 
 | 用户意图 | 当前状态要求 | 路由目标 |
 |---------|------------|---------|

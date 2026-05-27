@@ -273,14 +273,57 @@ class StateIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            payload = json.loads(result.stdout)
-            self.assertTrue(payload["ok"])
-            self.assertEqual(payload["checkpoint"], "prd_done")
-            self.assertEqual(payload["record"]["checkpoint"], "prd_done")
+            self.assertEqual(result.stdout, "prd_done\n")
+            self.assertEqual(result.stderr, "")
             self.assertEqual(
                 (workspace / ".autobizdevops" / "STATE.md").read_text(encoding="utf-8"),
                 "stale discuss_done\n",
             )
+
+    def test_read_state_json_cli_reports_missing_feature_on_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {"alpha": sample_record("prd_done")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "read_state_json.py"),
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "beta",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("feature 'beta' 未在 state.json 中找到", result.stderr)
+
+    def test_read_state_json_cli_without_feature_keeps_records_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {"alpha": sample_record("prd_done")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "read_state_json.py"),
+                    "--workspace",
+                    str(workspace),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["records"]["alpha"]["checkpoint"], "prd_done")
 
     def test_direct_state_file_edits_are_blocked_by_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

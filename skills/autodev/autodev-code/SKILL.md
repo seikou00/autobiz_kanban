@@ -47,7 +47,7 @@ description: 按照 autodev-plan 生成的 design.md 与 PLAN.md 逐任务执行
 输出契约：
 - 业务代码/测试/配置的最小必要修改。
 - `{工作目录}/PLAN.md` 中任务状态和验证证据更新。
-- 刷新后的 `STATE.checkpoint` 推进到 `code_done`。
+- 刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
 不得修改：
 - `{工作目录}/PRD.md`
@@ -58,13 +58,13 @@ description: 按照 autodev-plan 生成的 design.md 与 PLAN.md 逐任务执行
 
 ## 准入检查
 
-确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把返回 JSON 记为 `STATE`：
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
-后续准入、恢复和完成判断直接取用 `STATE.checkpoint` / `STATE.record`。若 `STATE.checkpoint` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
 
 开始前必须确认当前 Feature 目录存在：
 
@@ -113,7 +113,7 @@ python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{s
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint code_in_progress
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
 ## 执行协议
@@ -186,7 +186,7 @@ python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{s
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint code_done
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}"
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
 ## 写入边界
@@ -213,6 +213,6 @@ python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{s
 - 若存在「失败」任务，本 skill 不算完成，不得推进 `code_done`，必须说明阻断和建议回流阶段。
 - 所有必要验证通过。
 - 项目编译通过或外部 checkpoint 编译校验通过。
-- 刷新后的 `STATE.checkpoint` 为 `code_done`。
+- 刷新后的 `CHECKPOINT` 为 `code_done`。
 
 **Skill 完成。** 下一步：`/autodev-reviewer --feature {slug}`
