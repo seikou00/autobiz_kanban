@@ -3,7 +3,7 @@
 
 Usage:
     python inspect_state.py --workspace <path> --mode run --project <name> --feature <slug>
-    python inspect_state.py --workspace <path> --mode project --project <name>
+    python inspect_state.py --workspace <path> --mode project --projects <name1> [name2 ...]
 
 Protocol: skill-board-inspect-protocol.md
 """
@@ -127,7 +127,7 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
 
     # Assemble output
     output = {
-        "schemaVersion": "harness.adapter.inspect.v1",
+        "schemaVersion": "cmbdevclaw_v1",
         "workflow": build_workflow_shell(config),
         "run": {
             "featureId": feature,
@@ -154,13 +154,8 @@ def _resolve_project_workspace(workspace: Path, project: str) -> Path:
     return project_workspace
 
 
-def project_mode(workspace: Path, project: str, config: dict) -> int:
-    """Handle --mode project."""
-    project_workspace = _resolve_project_workspace(workspace, project)
-    if not project_workspace.is_dir():
-        print(f"project 不存在: {project_workspace}", file=sys.stderr)
-        return 1
-
+def _collect_project_runs(project_workspace: Path, config: dict, project: str) -> list[dict]:
+    """返回某个 project 下所有 feature 的 runs 摘要列表（不包含 schemaVersion/workflow 外壳）"""
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
@@ -184,10 +179,24 @@ def project_mode(workspace: Path, project: str, config: dict) -> int:
             "currentStateId": current_state_id,
         })
 
+    return runs
+
+
+def project_mode(workspace: Path, projects: list[str], config: dict) -> int:
+    """Handle --mode project with one or more projects."""
+    all_projects: dict[str, dict] = {}
+    for project in projects:
+        project_workspace = _resolve_project_workspace(workspace, project)
+        if not project_workspace.is_dir():
+            print(f"project 不存在: {project_workspace}", file=sys.stderr)
+            continue
+        runs = _collect_project_runs(project_workspace, config, project)
+        all_projects[project] = {"runs": runs}
+
     output = {
-        "schemaVersion": "harness.adapter.inspect.v1",
+        "schemaVersion": "cmbdevclaw_v1",
         "workflow": build_workflow_shell(config),
-        "runs": runs,
+        "projects": all_projects,
     }
 
     json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
@@ -200,7 +209,9 @@ def main() -> int:
     parser.add_argument("--workspace", required=True, help="项目集合工作区路径")
     parser.add_argument("--mode", required=True, choices=("project", "run"), help="inspect mode")
     parser.add_argument("--feature", default=None, help="feature slug (required for run mode)")
-    parser.add_argument("--project", default=None, help="project name (required)")
+    parser.add_argument("--project", default=None, help="project name (required for --mode run)")
+    parser.add_argument("--projects", nargs="+", default=None,
+                        help="one or more project names (for --mode project)")
     args = parser.parse_args()
 
     workspace = Path(args.workspace).resolve()
@@ -223,10 +234,10 @@ def main() -> int:
             return 1
         return run_mode(project_workspace, args.feature, config)
 
-    if not args.project:
-        print("--mode project 需要 --project 参数", file=sys.stderr)
+    if not args.projects:
+        print("--mode project 需要 --projects 参数", file=sys.stderr)
         return 1
-    return project_mode(workspace, args.project, config)
+    return project_mode(workspace, args.projects, config)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
   "schemaVersion": "cmbdevclaw_v1",
   "inspectCommands": {
     "darwin": {
-      "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
+      "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectCodes...}",
       "feature_status": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "create_project": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "create_feature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
@@ -12,7 +12,7 @@
       "dialog_tips": "**${projectCode} 项目会话**\n请描述要新增或修改的特性，并说明验收标准。产物目录：`${pluginWorkspace}/${project}`"
     },
     "linux": {
-      "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
+      "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectCodes...}",
       "feature_status": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "create_project": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "create_feature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
@@ -22,7 +22,7 @@
       "dialog_tips": "**${projectCode} 项目会话**\n请描述要新增或修改的特性，并说明验收标准。产物目录：`${pluginWorkspace}/${project}`"
     },
     "win32": {
-      "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --project ${project}",
+      "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectCodes...}",
       "feature_status": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "create_project": "python ${pluginPath}\\hooks\\init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "create_feature": "python ${pluginPath}\\hooks\\init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
