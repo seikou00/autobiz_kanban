@@ -199,10 +199,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 禁止写入：
 - `PRD.md`
 - `design.md`
-- `REQUIREMENTS_EVAL.md`
-- `UNIT_TEST_REPORT.md`
-- `E2E_REPORT.md`
-- `VERIFY_REPORT.md`
+- 当前 skill 未在 `board_core/board_config.json` 输出产物中声明的其他 Feature 阶段产物。
 - 与当前任务无关的业务文件。
 
 如果为了完成任务必须修改 PLAN.md 未列出的业务文件，先确认该文件与 design.md 的集成点一致，再把文件追加到当前任务「涉及文件」或验证记录中；不要悄悄扩大范围。

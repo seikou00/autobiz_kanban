@@ -15,11 +15,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.contracts import BoardConfigError, SkillContract, WorkflowContracts, load_repo_workflow_contracts  # noqa: E402
-from render_skill_contract import render_compiled_contract  # noqa: E402
+from hooks.check_skill_artifact_drift import check_contracts_for_drift  # noqa: E402
+from hooks.render_skill_contract import render_compiled_contract  # noqa: E402
 
 
 BEGIN_MARKER = "<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->"
 END_MARKER = "<!-- AUTOBIZDEVOPS_CONTRACT:END -->"
+LEGACY_RULES_BEGIN_MARKER = "<!-- AUTOBIZDEVOPS_ARTIFACT_RULES:BEGIN -->"
+LEGACY_RULES_END_MARKER = "<!-- AUTOBIZDEVOPS_ARTIFACT_RULES:END -->"
 
 
 @dataclass(frozen=True)
@@ -39,9 +42,15 @@ def compiled_block(contract: SkillContract) -> str:
     return f"{BEGIN_MARKER}\n{body}\n{END_MARKER}\n"
 
 
-def replace_marked_block(content: str, block: str) -> tuple[str, bool]:
-    begin_count = content.count(BEGIN_MARKER)
-    end_count = content.count(END_MARKER)
+def replace_marked_block(
+    content: str,
+    block: str,
+    *,
+    begin_marker: str = BEGIN_MARKER,
+    end_marker: str = END_MARKER,
+) -> tuple[str, bool]:
+    begin_count = content.count(begin_marker)
+    end_count = content.count(end_marker)
     if begin_count != end_count:
         raise ValueError("compiled contract marker count mismatch")
     if begin_count == 0:
@@ -49,12 +58,31 @@ def replace_marked_block(content: str, block: str) -> tuple[str, bool]:
     if begin_count > 1:
         raise ValueError("multiple compiled contract blocks found")
 
-    begin_index = content.index(BEGIN_MARKER)
-    end_index = content.index(END_MARKER, begin_index)
-    end_index += len(END_MARKER)
+    begin_index = content.index(begin_marker)
+    end_index = content.index(end_marker, begin_index)
+    end_index += len(end_marker)
     if end_index < len(content) and content[end_index : end_index + 1] == "\n":
         end_index += 1
     return content[:begin_index] + block + content[end_index:], True
+
+
+def remove_legacy_artifact_rules(content: str) -> str:
+    """Remove the previously generated final artifact rules block, if present."""
+    begin_count = content.count(LEGACY_RULES_BEGIN_MARKER)
+    end_count = content.count(LEGACY_RULES_END_MARKER)
+    if begin_count != end_count:
+        raise ValueError("compiled artifact rules marker count mismatch")
+    if begin_count == 0:
+        return content
+    if begin_count > 1:
+        raise ValueError("multiple compiled artifact rules blocks found")
+
+    begin_index = content.index(LEGACY_RULES_BEGIN_MARKER)
+    end_index = content.index(LEGACY_RULES_END_MARKER, begin_index)
+    end_index += len(LEGACY_RULES_END_MARKER)
+    if end_index < len(content) and content[end_index : end_index + 1] == "\n":
+        end_index += 1
+    return content[:begin_index].rstrip() + "\n" + content[end_index:]
 
 
 def replace_old_contract_section(content: str, block: str) -> tuple[str, bool]:
@@ -99,6 +127,7 @@ def insert_after_frontmatter(content: str, block: str) -> str:
 
 
 def compile_skill_content(content: str, contract: SkillContract) -> str:
+    content = remove_legacy_artifact_rules(content)
     block = compiled_block(contract)
     updated, replaced = replace_marked_block(content, block)
     if replaced:
@@ -182,14 +211,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"SKILL_CONTRACTS_FAIL skill={result.skill} path={result.path} reason={result.error}", file=sys.stderr)
         return 1
 
+    drift_findings = check_contracts_for_drift(repo_root, selected) if args.check else []
     changed = [result for result in results if result.changed]
-    if not changed:
+    if not changed and not drift_findings:
         print("SKILL_CONTRACTS_UP_TO_DATE")
         return 0
 
     if args.check:
         for result in changed:
             print(f"STALE skill={result.skill} path={result.path}")
+        for finding in drift_findings:
+            print(finding.format(), file=sys.stderr)
         return 1
 
     for result in changed:

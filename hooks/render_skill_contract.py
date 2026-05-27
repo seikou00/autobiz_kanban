@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 
@@ -77,10 +79,26 @@ def render_compiled_contract(contract: SkillContract) -> str:
     return "\n".join(lines) + "\n"
 
 
+def contract_to_dict(contract: SkillContract) -> dict:
+    return {
+        "node_id": contract.node_id,
+        "label": contract.label,
+        "group": contract.group,
+        "skill": contract.skill,
+        "checkpoints": list(contract.checkpoints),
+        "inputs": [asdict(artifact) for artifact in contract.inputs],
+        "outputs": [asdict(artifact) for artifact in contract.outputs],
+        "required_inputs": list(contract.required_inputs),
+        "required_outputs": list(contract.required_outputs),
+        "validators": list(contract.validators),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Render a board_config-backed skill contract")
     parser.add_argument("skill", help="skill name, e.g. autodev-plan")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
+    parser.add_argument("--json", action="store_true", help="emit machine-readable contract JSON")
     args = parser.parse_args(argv)
 
     try:
@@ -89,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     except BoardConfigError as error:
         print(f"render_skill_contract failed: {error}", file=sys.stderr)
         return 1
+
+    if args.json:
+        print(json.dumps(contract_to_dict(contract), ensure_ascii=False, indent=2))
+        return 0
 
     print(render_contract(contract), end="")
     return 0
