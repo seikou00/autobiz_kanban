@@ -6,30 +6,30 @@
       "feature_status": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "create_project": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "create_feature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}/${project}/features/${feature}`",
+      "feature_create_prompt": "当前的slug是:${feature}。slug所在目录是：`${pluginWorkspace}/${project}/.autobizdevops/features/${feature}`。不得自行定义 特性/feature/slug 名称",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
       "plugin_dir_hook": "${pluginWorkspace}/${project}",
-      "dialog_tips": "**${projectCode} 项目会话**\n请描述要新增或修改的特性，并说明验收标准。产物目录：`${pluginWorkspace}/${project}`"
+      "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${project}`"
     },
     "linux": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectCodes...}",
       "feature_status": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "create_project": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "create_feature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}/${project}/features/${feature}`",
+      "feature_create_prompt": "当前的slug是:${feature}。slug所在目录是：`${pluginWorkspace}/${project}/.autobizdevops/features/${feature}`。不得自行定义特性/feature/slug 名称",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}/${project}`",
       "plugin_dir_hook": "${pluginWorkspace}/${project}",
-      "dialog_tips": "**${projectCode} 项目会话**\n请描述要新增或修改的特性，并说明验收标准。产物目录：`${pluginWorkspace}/${project}`"
+      "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${project}`"
     },
     "win32": {
       "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectCodes...}",
       "feature_status": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
       "create_project": "python ${pluginPath}\\hooks\\init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${project}",
       "create_feature": "python ${pluginPath}\\hooks\\init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${project} --feature ${feature}",
-      "feature_create_prompt": "当前FEATURE 是:${feature}。所在目录是：`${pluginWorkspace}\\${project}\\features\\${feature}`",
+      "feature_create_prompt": "当前的slug是:${feature}。slug所在目录是：`${pluginWorkspace}\\${project}\\.autobizdevops\\features\\${feature}`。不得自行定义特性/feature/slug 名称",
       "plugin_dir_prompt": "- PLUGIN_OUTPUT_DIR 目录：`${pluginWorkspace}\\${project}`",
       "plugin_dir_hook": "${pluginWorkspace}\\${project}",
-      "dialog_tips": "**${projectCode} 项目会话**\n请描述要新增或修改的特性，并说明验收标准。产物目录：`${pluginWorkspace}/${project}`"
+      "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${project}`"
     }
   },
   "workflow": {
