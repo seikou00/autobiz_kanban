@@ -18,7 +18,7 @@ except ImportError:
     from paths import get_sys_agents_md_path  # type: ignore[no-redef]
 
 
-DEFAULT_SYSTEM_NO = "lf39"
+DEFAULT_SYSTEM_NO = "lf3905"
 SYSTEM_ID_ENV = "SYSTEM_ID"
 SYSTEM_NO_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 DOCUMENT_MAP_HEADING = "## 文档地图"

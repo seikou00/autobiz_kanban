@@ -70,13 +70,13 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assertEqual(result["source"], str(source.resolve()))
             self.assertIn("sys/abc", result["message"])
 
-    def test_missing_system_id_defaults_to_lf39(self) -> None:
+    def test_missing_system_id_defaults_to_lf3905(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plugin_root = root / "plugin"
             code_workspace = root / "code"
             code_workspace.mkdir()
-            source = write_sys_agents(plugin_root, "lf39", "default rules\n")
+            source = write_sys_agents(plugin_root, "LF3905", "default rules\n")
 
             result = init_dev_agents(
                 code_workspace,
@@ -87,7 +87,7 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assertTrue(result["created"])
             self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
             self.assertEqual((code_workspace / "AGENTS.md").read_text(encoding="utf-8"), "default rules\n")
-            self.assertEqual(result["system_no"], "lf39")
+            self.assertEqual(result["system_no"], "lf3905")
 
     def test_existing_agents_is_not_overwritten_and_companions_still_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
