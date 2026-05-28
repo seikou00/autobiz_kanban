@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "cmbdevclaw_v1",
+  "apiVersion": 1,
   "inspectCommands": {
     "darwin": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectCodes...}",
