@@ -51,12 +51,12 @@ def load_sys_agents(workspace: Optional[Path] = None) -> Dict[str, object]:
         result["skipped"] = True
         result["message"] = (
             f"跳过可选系统上下文加载："
-            f"projectCode={system_no} 对应的 AGENTS.md 不存在: {agents_md}"
+            f"SYSTEM_ID={system_no} 对应的 AGENTS.md 不存在: {agents_md}"
         )
         return result
 
     result["content"] = agents_md.read_text(encoding="utf-8")
-    result["message"] = f"成功加载 sys/{system_no}/AGENTS.md ({len(result['content'])} 字符)"
+    result["message"] = f"成功加载 sys/{agents_md.parent.name}/AGENTS.md ({len(result['content'])} 字符)"
     return result
 
 

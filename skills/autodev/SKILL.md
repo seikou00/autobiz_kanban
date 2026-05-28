@@ -69,7 +69,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 ### 1.3 初始化代码工作区 AGENTS.md
 
-Dev 阶段进入路由前必须确认代码工作区存在 `AGENTS.md`。系统编号只从环境变量 `projectCode` 读取；如果 `projectCode` 缺失或为空，默认使用 `lf39`。不得再从 `.autobizdevops/PROJECT.md` 或 `board_core/board_config.json` 推断系统编号。
+Dev 阶段进入路由前必须确认代码工作区存在 `AGENTS.md`。系统编号只从环境变量 `SYSTEM_ID` 读取；如果 `SYSTEM_ID` 缺失或为空，默认使用 `lf39`。不得再从 `.autobizdevops/PROJECT.md` 或 `board_core/board_config.json` 推断系统编号。
 
 如果代码工作区没有 `AGENTS.md`，执行：
 
@@ -79,7 +79,7 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE
 
 `{CODE_WORKSPACE}` 必须是明确的代码工作区路径；不得用 `{PLUGIN_OUTPUT_DIR}`、`.autobizdevops` 或插件目录代替猜测。若无法确认代码工作区，停止并让用户提供。
 
-初始化脚本会把 `{PLUGIN_DIR}/sys/{projectCode或lf39}/AGENTS.md` 复制为 `{CODE_WORKSPACE}/AGENTS.md`；目标文件已存在时不覆盖。源文件不存在或 `projectCode` 含非法路径字符时必须停止。
+初始化脚本会把 `{PLUGIN_DIR}/sys/{SYSTEM_ID或lf39}/AGENTS.md` 以相对软链接形式链接为 `{CODE_WORKSPACE}/AGENTS.md`；匹配 sys 目录时忽略大小写，目标文件已存在时不覆盖。脚本还会解析 sys `AGENTS.md` 的“文档地图”，把其中提到的 `BACKEND_AGENTS.md`、`FRONT_AGENTS.md` 和 `references/*.md` 等 companion docs 归一链接到代码工作区根目录。源文件不存在、文档地图路径非法或 `SYSTEM_ID` 含非法路径字符时必须停止。
 
 ### 1.4 产出物校验
 
