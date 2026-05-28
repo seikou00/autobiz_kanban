@@ -10,8 +10,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.contracts import ArtifactSpec, SkillContract  # noqa: E402
-from hooks.compile_skill_contracts import END_MARKER, compile_skill_content  # noqa: E402
-from hooks.render_skill_contract import contract_to_dict  # noqa: E402
+from hooks.inspect_skill_contract import contract_to_dict  # noqa: E402
+from hooks.sync_skill_contract_hints import HINT_END_MARKER, sync_skill_content  # noqa: E402
 
 
 def make_contract(
@@ -31,8 +31,8 @@ def make_contract(
     )
 
 
-class CompileSkillContractsTests(unittest.TestCase):
-    def test_compiles_only_visible_contract_block_without_final_rules(self) -> None:
+class SyncSkillContractHintsTests(unittest.TestCase):
+    def test_inserts_static_runtime_contract_hint_without_dynamic_summary(self) -> None:
         contract = make_contract(
             inputs=(
                 ArtifactSpec(id="prd", label="PRD文档", path="PRD.md", required=True),
@@ -55,21 +55,30 @@ name: autodev-sample
 旧流程正文。
 """
 
-        compiled = compile_skill_content(content, contract)
+        compiled = sync_skill_content(content, contract)
 
-        self.assertIn("<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->", compiled)
-        self.assertIn("- `PRD.md`：PRD文档（必需）", compiled)
-        self.assertIn("- `REPORT.md`：报告（必需）", compiled)
+        self.assertIn("<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->", compiled)
+        self.assertIn('python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-sample --json', compiled)
         self.assertIn("# Body", compiled)
+        self.assertNotIn("AUTOBIZDEVOPS_CONTRACT", compiled)
         self.assertNotIn("AUTOBIZDEVOPS_ARTIFACT_RULES", compiled)
+        self.assertNotIn("- `PRD.md`：PRD文档（必需）", compiled)
+        self.assertNotIn("- `REPORT.md`：报告（必需）", compiled)
 
-    def test_recompiling_removes_legacy_artifact_rules_and_is_idempotent(self) -> None:
+    def test_recompiling_removes_legacy_contract_and_artifact_rules(self) -> None:
         first = make_contract(
             outputs=(ArtifactSpec(id="report", label="报告", path="REPORT.md", required=True),)
         )
         content = """---
 name: autodev-sample
 ---
+
+<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->
+## 流程契约（由 board_config.json 生成）
+
+### 输入产物
+- `PRD.md`：PRD文档（必需）
+<!-- AUTOBIZDEVOPS_CONTRACT:END -->
 
 # Body
 
@@ -78,11 +87,12 @@ old generated rules
 <!-- AUTOBIZDEVOPS_ARTIFACT_RULES:END -->
 """
 
-        compiled = compile_skill_content(content, first)
+        compiled = sync_skill_content(content, first)
 
+        self.assertNotIn("AUTOBIZDEVOPS_CONTRACT", compiled)
         self.assertNotIn("AUTOBIZDEVOPS_ARTIFACT_RULES", compiled)
-        self.assertTrue(compiled.index(END_MARKER) < compiled.index("# Body"))
-        self.assertEqual(compiled, compile_skill_content(compiled, first))
+        self.assertTrue(compiled.index(HINT_END_MARKER) < compiled.index("# Body"))
+        self.assertEqual(compiled, sync_skill_content(compiled, first))
 
     def test_contract_to_dict_exposes_machine_readable_contract(self) -> None:
         contract = make_contract(

@@ -8,32 +8,17 @@ description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单
 工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
 ```
 
-<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->
-## 流程契约（由 board_config.json 生成）
+<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
+## 流程契约
 
-本区块由 `board_core/board_config.json` 静态编译生成，请勿手工修改；修改流程契约后运行 `python "{PLUGIN_DIR}/hooks/compile_skill_contracts.py" --write` 重新生成。
+当前 skill 的 checkpoint、输入/输出产物和 validators 以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。
+运行前如需查看当前契约，执行：
 
-- **唯一事实来源:** `{PLUGIN_DIR}/board_core/board_config.json` 中 `skill: "autodev-verify"` 的节点。
-- **节点:** `dev.verify`
-- **阶段:** 验收汇总
-- **分组:** Dev
-- **Checkpoints:** `verify_in_progress`, `verify_done`
+```bash
+python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-verify --json
+```
+<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
-### 输入产物
-- `PRD.md`：PRD文档（必需）
-- `design.md`：设计契约（必需）
-- `PLAN.md`：执行计划（必需）
-- `UNIT_TEST_REPORT.md`：单元测试报告（必需）
-- `E2E_TEST_CASES.yaml`：E2E 测试用例（必需）
-- `E2E_REPORT.md`：E2E 测试报告（必需）
-- `e2e-run.log`：E2E 运行日志（必需）
-
-### 输出产物
-- `VERIFY_REPORT.md`：验收报告（必需）
-
-### Validators
-- 无
-<!-- AUTOBIZDEVOPS_CONTRACT:END -->
 
 # /autodev-verify — 验收汇总 + 分支决策
 

@@ -51,34 +51,6 @@ def render_contract(contract: SkillContract) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_compiled_contract(contract: SkillContract) -> str:
-    """Render the SKILL.md generated contract block body without boundary markers."""
-    checkpoints = ", ".join(f"`{item}`" for item in contract.checkpoints) or "无"
-    lines = [
-        "## 流程契约（由 board_config.json 生成）",
-        "",
-        "本区块由 `board_core/board_config.json` 静态编译生成，请勿手工修改；"
-        "修改流程契约后运行 `python \"{PLUGIN_DIR}/hooks/compile_skill_contracts.py\" --write` 重新生成。",
-        "",
-        f"- **唯一事实来源:** `{{PLUGIN_DIR}}/board_core/board_config.json` 中 `skill: \"{contract.skill}\"` 的节点。",
-        f"- **节点:** `{contract.node_id}`",
-        f"- **阶段:** {contract.label}",
-        f"- **分组:** {contract.group}",
-        f"- **Checkpoints:** {checkpoints}",
-        "",
-        *_artifact_lines("输入产物", contract.inputs, heading="###"),
-        "",
-        *_artifact_lines("输出产物", contract.outputs, heading="###"),
-        "",
-        "### Validators",
-    ]
-    if contract.validators:
-        lines.extend(f"- `{validator}`" for validator in contract.validators)
-    else:
-        lines.append("- 无")
-    return "\n".join(lines) + "\n"
-
-
 def contract_to_dict(contract: SkillContract) -> dict:
     return {
         "node_id": contract.node_id,
@@ -105,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         contracts = load_repo_workflow_contracts(Path(args.repo_root).resolve())
         contract = contracts.contract_for_skill(args.skill)
     except BoardConfigError as error:
-        print(f"render_skill_contract failed: {error}", file=sys.stderr)
+        print(f"inspect_skill_contract failed: {error}", file=sys.stderr)
         return 1
 
     if args.json:

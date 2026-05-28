@@ -146,7 +146,8 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE
 各子技能的产物契约、validators 与 checkpoint 合法矩阵以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源；如本文静态说明与 board config 冲突，以 board config 为准。不得再新增 per-skill `artifact-check.yaml`。可运行以下只读命令查看某个子技能的当前契约：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/render_skill_contract.py" autodev-plan
+python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan
+python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan --json
 ```
 
 ---
