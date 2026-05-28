@@ -19,7 +19,7 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 | `autobiz/` | Biz 阶段技能集合。存放需求澄清、PRD 生成等                                                 |
 | `autodev/` | Dev 阶段技能集合。存放计划、编码、单测、评审、验证、E2E 等                                         |
 | `autoops/` | Ops 阶段技能集合。当前含 CI/CD 流水线相关技能和归档技能。                                        |
-| `templates/` | 标准产物模板。当前包含 `prd.md`、`design.md` 与 `plan.md`，供 Biz / Dev 阶段生成 `PRD.md`、`design.md`、`PLAN.md` 时读取。 |
+| `templates/` | 标准产物模板。当前产物模板分布在各阶段 skill 内，供 Biz / Dev 阶段生成 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md` 时读取。 |
 
 
 
@@ -73,7 +73,9 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 | `discuss_in_progress` | `/autobiz` | 恢复需求澄清 |
 | `discuss_done` | `/autobiz` | 继续生成 PRD |
 | `prd_in_progress` | `/autobiz` | 恢复 PRD 生成 |
-| `prd_done` | `/autodev` | 进入 Dev 计划阶段 |
+| `prd_done` | `/autodev` | 进入 Dev Specs 阶段 |
+| `specs_in_progress` | `/autodev` | 恢复 Dev Specs |
+| `specs_done` | `/autodev` | 进入 Dev 计划阶段 |
 | `plan_in_progress` | `/autodev` | 恢复 Dev 计划 |
 | `plan_done` | `/autodev` | 进入编码阶段 |
 | `code_in_progress` | `/autodev` | 恢复编码 |

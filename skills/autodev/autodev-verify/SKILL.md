@@ -1,6 +1,6 @@
 ---
 name: autodev-verify
-description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告和 PRD 验收标准，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作、--auto（路径 C 仍需暂停；迭代上限由 max_iterations 控制）。默认由当前会话内联执行。
+description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作、--auto（路径 C 仍需暂停；迭代上限由 max_iterations 控制）。默认由当前会话内联执行。
 ---
 
 **PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
@@ -27,7 +27,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-verify --json
 
 本 skill 默认且只能由当前会话内联执行：
 
-- 当前会话直接读取 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md`、`e2e-run.log`、`PRD.md`、`design.md`，生成 `VERIFY_REPORT.md` 并做最终分支决策。
+- 当前会话直接读取 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md`、`e2e-run.log`、`proposal.md`、`specs/**/*.md`、`design.md`，生成 `VERIFY_REPORT.md` 并做最终分支决策。
 - 不得把验收汇总或分支决策委派给下级 agent或子agent。
 
 本 skill 负责记录失败事实、问题来源和建议回流阶段，不默认把问题绑定回 Biz。
@@ -64,13 +64,14 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
-## Step 3: 提取验收标准
+## Step 3: 提取验收契约
 
-从 `{工作目录}/PRD.md` 提取「验收标准」段每一项：
+从 `{工作目录}/proposal.md` 提取本轮能力边界、影响面和非目标。
+
+从 `{工作目录}/specs/**/*.md` 提取每个 Requirement / Scenario：
 
 ```
-[标准1]
-[标准2]
+specs/[capability]/spec.md / Requirement / Scenario
 ...
 ```
 
@@ -78,13 +79,14 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 同时读取 `{工作目录}/design.md`：
 
-- 从 Behavior Specs、API Decisions、Data Decisions 提取契约验证项 C1, C2, ...
+- 从 specs Requirement / Scenario 提取行为契约验证项 C1, C2, ...
+- 从 design.md 的 API Decisions、Data Decisions 提取接口/数据契约验证项。
 - 如果 API Decisions 包含 `x-auto-no-http-api: true` → 记录本轮无 HTTP/API 契约验证项。
 - 如果 Data Decisions 包含 `x-auto-no-sql: true` → 记录本轮无数据库变更验证项。
 
 ### ⛔ 步骤完成检查 — Step 3
-- [ ] 已从 PRD.md 提取所有验收标准并编号 1..m
-- [ ] 已从 design.md 提取行为/API/数据契约验证项，或确认 `x-auto-no-http-api: true` / `x-auto-no-sql: true`
+- [ ] 已从 proposal.md 与 specs/**/*.md 提取所有待验收行为并编号 1..m
+- [ ] 已从 design.md 提取 API/数据契约验证项，或确认 `x-auto-no-http-api: true` / `x-auto-no-sql: true`
 - [ ] 共 M 项已列出
 
 ---
@@ -103,8 +105,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 **从 UNIT_TEST_REPORT.md 中抽取（按 autodev-utest 的输出约定）：**
 
-- 每个验收标准对应的测试方法名 / 文件路径 / 执行结果（PASS/FAIL/SKIP）
-- 每个 design.md 契约验证项 `Cn` 对应的验证结果（如报告涵盖）
+- 每个 Requirement / Scenario 对应的测试方法名 / 文件路径 / 执行结果（PASS/FAIL/SKIP）
+- 每个 specs/design 契约验证项 `Cn` 对应的验证结果（如报告涵盖）
 - 整体通过率（P/M、P/K）
 
 **从 E2E_REPORT.md 与 e2e-run.log 中抽取（按 autodev-e2e 的输出约定）：**
@@ -125,7 +127,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 |-------------------------|------------------------|
 | PASS | ✓ 通过 |
 | FAIL / BLOCKED（有明确失败或阻断证据） | ✗ 失败 |
-| SKIP / NO_TEST（该验收标准无自动化测试） | ⚠ 需人工验证 |
+| SKIP / NO_TEST（该 Requirement / Scenario 无自动化测试） | ⚠ 需人工验证 |
 
 > 若上游报告存在但格式与约定不符（找不到结论字段等），**不要尝试用测试命令补齐**，直接在报告中标注"报告格式异常"并将相关项置为 "⚠ 需人工验证"。
 
@@ -156,33 +158,33 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 ## 验证总览
 
-| # | 验收标准 | 裁定 | 证据来源 |
+| # | Specs Requirement / Scenario | 裁定 | 证据来源 |
 |---|---------|------|---------|
-| 1 | [标准1] | ✓ 通过 | UNIT_TEST_REPORT + E2E_REPORT |
-| 2 | [标准2] | ✗ 失败 | E2E_REPORT（FAIL: AssertionError ...） |
-| 3 | [标准3] | ⚠ 需人工验证 | 报告未覆盖（UI 类） |
+| 1 | [Requirement / Scenario 1] | ✓ 通过 | UNIT_TEST_REPORT + E2E_REPORT |
+| 2 | [Requirement / Scenario 2] | ✗ 失败 | E2E_REPORT（FAIL: AssertionError ...） |
+| 3 | [Requirement / Scenario 3] | ⚠ 需人工验证 | 报告未覆盖（UI 类） |
 
 通过: N/M | 失败: K/M | 需人工验证: J/M
 
-## Design Contract 验证（若适用）
+## Specs / Design Contract 验证（若适用）
 
 | # | Contract Item | 裁定 | 证据来源 |
 |---|-----------|------|---------|
-| 1 | REQ-01 / API-01 / DATA-01 | ✓ 通过 | UNIT_TEST_REPORT §C1 + E2E_REPORT §E2E-001 |
+| 1 | specs/[capability]/spec.md / Requirement / Scenario / API-01 / DATA-01 | ✓ 通过 | UNIT_TEST_REPORT §C1 + E2E_REPORT §E2E-001 |
 
 或：本轮 `x-auto-no-http-api: true`，无 HTTP/API 契约验证项；`x-auto-no-sql: true`，无数据库变更验证项。
 
 ## 失败详情（如有）
 
-### [标准原文]
+### [Requirement / Scenario]
 - **上游测试方法:** [文件路径::方法名]
 - **失败摘要:** [错误首行 + 堆栈关键行]
 - **预期 vs 实际:** [若上游报告给出则直接引用]
-- **建议修复方向:** [由本 skill 结合 PRD 给出简短方向]
+- **建议修复方向:** [由本 skill 结合 specs/design 给出简短方向]
 
 ## 需人工验证详情（如有）
 
-### [标准原文]
+### [Requirement / Scenario]
 - **原因:** UI/UX 或业务语义类标准，自动化覆盖不足
 - **请用户手动验证:** [给出具体操作建议]
 
@@ -216,7 +218,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 ```
 ## ✓ Verify 通过
 
-所有验收标准均通过（证据由上游阶段技能 autodev-utest 与 autodev-e2e 提供）。
+所有 specs 行为契约均通过（证据由上游阶段技能 autodev-utest 与 autodev-e2e 提供）。
 VERIFY_REPORT.md 已生成。
 
 checkpoint=verify_done → Dev 阶段结束，Ops 阶段可继续调用 autoops-cicd
@@ -243,7 +245,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 ## 已知问题
 - 1 [标准简述]: 待修复 — 上游测试 [文件::方法] FAIL，[失败摘要]
 - 建议回流阶段: Plan / Code / Biz / Ops（按问题来源填写）
-- 问题来源: UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log / PRD / design.md / 人工补充说明
+- 问题来源: UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log / proposal.md / specs/**/*.md / design.md / 人工补充说明
 ```
 
 **输出提示：**
@@ -251,7 +253,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 ```
 ## ✗ 需要修复
 
-K 个验收标准未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log）。问题已记录到 VERIFY_REPORT.md。
+K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log）。问题已记录到 VERIFY_REPORT.md。
 
 → 根路由器将读取 VERIFY_REPORT.md 中记录的问题来源与建议回流阶段，再决定回到 Biz / Plan / Code / Ops
 ```

@@ -10,6 +10,7 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 ### 技能映射
 | 阶段 | 调用 Skill | 本工程文件 |
 |------|------------|------------|
+| Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
 | Code | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
 | Requirements Review | `/autodev-reviewer` | `autodev/autodev-reviewer/SKILL.md` |
@@ -20,6 +21,8 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 ### 工作流
 
 ```text
+/autodev-specs
+   ↓
 /autodev-plan
    ↓
 /autodev-code
@@ -44,7 +47,7 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 
 | 标志 | 含义 |
 |------|------|
-| `--auto` | 自动串联 Plan → Code → Review → UTest → E2E → Verify |
+| `--auto` | 自动串联 Specs → Plan → Code → Review → UTest → E2E → Verify |
 | `--feature {slug}` | 指定 Feature |
 
 ### 1.2 确定 Feature
@@ -80,18 +83,17 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE
 
 ### 1.4 产出物校验
 
-以下文件必须存在，缺失则停止：
+根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按 `{PLUGIN_DIR}/board_core/board_config.json` 校验。
 
-```
-.autobizdevops/features/{slug}/PRD.md
-```
+- `prd_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`。
+- `specs_done` 之后的 Dev 阶段不再把 `PRD.md` 作为硬输入，统一以 `proposal.md` 与 `specs/**/*.md` 作为行为契约源。
 
-**提示：** `请先使用 /autobiz 系列技能补齐 Biz 阶段产出物 PRD.md，然后重新触发 /autodev。design.md 与 PLAN.md 将由 /autodev-plan 生成。`
+**提示：** `请先使用 /autobiz 系列技能补齐 Biz 阶段产出物 PRD.md，然后重新触发 /autodev。proposal.md 与 specs/**/*.md 将由 /autodev-specs 生成，design.md 与 PLAN.md 将由 /autodev-plan 生成。`
 
 
 ### 禁止事项
 
-1. **禁止在 Dev 阶段凭空生成 PRD；只有 `/autodev-plan` 可以生成或更新 design.md 与 PLAN.md。**
+1. **禁止在 Dev 阶段凭空生成 PRD；只有 `/autodev-specs` 可以生成或更新 proposal.md 与 specs/**/*.md，只有 `/autodev-plan` 可以生成或更新 design.md 与 PLAN.md。**
 2. **禁止跳跃 checkpoint。**
 3. **在执行autobiz与子技能时，约束必须参考AGENTS.md中存在的定制约束，不能仅遵守技能的约束。**
 4. **本 skill 的规则不得覆盖 AGENTS.md；如冲突，以 AGENTS.md 中项目约束为准，除非系统级指令另有要求。**
@@ -106,7 +108,9 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE
 
 | Checkpoint | 路由 |
 |------------|------|
-| `prd_done` | `/autodev-plan` |
+| `prd_done` | `/autodev-specs` |
+| `specs_in_progress` | `/autodev-specs`（恢复） |
+| `specs_done` | `/autodev-plan` |
 | `plan_in_progress` | `/autodev-plan`（恢复） |
 | `plan_done` | `/autodev-code` |
 | `code_in_progress` | `/autodev-code`（恢复） |
@@ -132,6 +136,7 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE
 
 | 子技能 | 合法出口 checkpoint |
 |--------|-------------------|
+| `autodev-specs` | `specs_done` |
 | `autodev-plan` | `plan_done` |
 | `autodev-code` | `code_done` |
 | `autodev-reviewer` | `requirements_eval_done` |

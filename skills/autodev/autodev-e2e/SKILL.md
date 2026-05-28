@@ -33,6 +33,38 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 后续准入、恢复和分支决策直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
 
+## 输入与行为依据
+
+读取以下 feature 文档：
+
+- `.autobizdevops/features/{slug}/proposal.md`
+- `.autobizdevops/features/{slug}/specs/**/*.md`
+- `.autobizdevops/features/{slug}/design.md`
+- `.autobizdevops/features/{slug}/PLAN.md`
+- `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`
+- `.autobizdevops/features/{slug}/UNIT_TEST_REPORT.md`
+- `.autobizdevops/features/{slug}/test-output.log`
+
+用途约束：
+
+- `proposal.md`：本轮能力边界、影响面、非目标。
+- `specs/**/*.md`：Requirement / Scenario 行为契约，是 E2E pass/fail 的主要行为依据。
+- `design.md`：接口决策、数据决策、成功与失败路径、风险与待确认项。
+- `UNIT_TEST_REPORT.md` / `test-output.log`：上游单测覆盖、轻量单测命令线索和回归风险。
+- `REQUIREMENTS_EVAL.md`：需求覆盖、遗漏与风险提示。
+
+禁止写入：
+
+- 不要修改 `.autobizdevops/features/{slug}/PRD.md`（如果存在）。
+- 不要修改 `.autobizdevops/features/{slug}/proposal.md`。
+- 不要修改 `.autobizdevops/features/{slug}/specs/**/*.md`。
+- 不要修改 `.autobizdevops/features/{slug}/design.md`。
+- 不要修改 `.autobizdevops/features/{slug}/PLAN.md`。
+- 不要修改 `.autobizdevops/features/{slug}/UNIT_TEST_REPORT.md`、`test-output.log`、`REQUIREMENTS_EVAL.md`。
+- 不要为通过 E2E 而弱化断言、删除用例、伪造报告。
+
+每轮 E2E 必须优先以 specs 中属于用户主链路的 Requirement / Scenario 生成结构化测试用例；相关 API Decision 或 Data Decision 只作为执行和断言上下文。涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由、用户可见流程的 P0/P1 用例必须标记 `ui_required: true`。
+
 ## Checkpoint 写入
 
 开始 E2E 前推进到 `e2e_in_progress`，写入后立即刷新 `CHECKPOINT`：

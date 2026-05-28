@@ -1,6 +1,6 @@
 ---
 name: autodev-plan
-description: Dev 阶段执行计划生成。读取 PRD，先探索需求和现有代码，再生成 design.md 与 PLAN.md；不得修改业务代码。
+description: Dev 阶段技术设计与执行计划生成。读取 proposal.md、specs/**/*.md 和现有代码，生成 design.md 与 PLAN.md；不得修改业务代码。
 ---
 
 **PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
@@ -22,23 +22,23 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan --json
 
 
 # /autodev-plan - Executable Task Plan
-**workflow** plan 阶段工作流: explore -> design.md -> PLAN.md
+**workflow** plan 阶段工作流: proposal/specs -> design.md -> PLAN.md
 
 
 ## explore
-进入探索模式。先把需求、现状、约束和未知点想清楚，隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+进入设计探索模式。先读取 `proposal.md` 与 `specs/**/*.md`，把行为契约、现状、技术约束和未知点想清楚，隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
-**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取 AGENTS.md、PRD、已有设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
+**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取 AGENTS.md、proposal.md、specs/**/*.md、已有设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
 
-**这是一种工作姿态，不是固定流程。** 没有必须照搬的问题清单，也没有强制产物。你的任务是作为思考伙伴，把模糊需求变成可规划的上下文：明确目标、范围、现有系统约束、风险、待确认项，以及后续 Plan 可以使用的结论。
+**这是一种工作姿态，不是固定流程。** 没有必须照搬的问题清单，也没有强制产物。你的任务是作为技术设计伙伴，把 specs 中的行为契约变成可实现、可验证的设计上下文：明确接口、数据、模块边界、风险、待确认项，以及后续 Plan 可以使用的结论。
 
 ---
 
 ### 探索姿态
 
-- **好奇而不武断** - 顺着用户表达和 PRD 内容自然追问，不预设唯一答案。
+- **好奇而不武断** - 顺着用户表达、proposal 和 specs 自然追问，不预设唯一答案。
 - **展开线索而不审问** - 同时呈现几个值得看的方向，让用户选择最相关的，不要把对话压成机械问卷。
-- **扎根现实** - 优先读取 PRD、已有代码、现有接口、数据表、测试和约定；不要只做抽象讨论。
+- **扎根现实** - 优先读取 proposal、specs、已有代码、现有接口、数据表、测试和约定；不要只做抽象讨论。
 - **适度可视化** - 当结构复杂时，用 ASCII 图、列表或表格澄清模块关系、数据流、状态流、任务边界。
 - **允许不确定** - 未确认的业务语义、字段、权限、异常分支要标成待确认，不要替用户补齐。
 - **为设计和计划服务** - 探索的目标不是产出漂亮分析，而是为 `design.md` 与 `PLAN.md` 提供可靠依据。
@@ -51,10 +51,10 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan --json
 
 **探索问题空间**
 
-- 梳理 PRD 的目标、用户角色、核心流程、验收标准和非目标
-- 找出描述模糊、互相冲突、缺少边界的需求
-- 将“想做什么”改写成外部可观察行为，而不是实现猜测
-- 识别哪些内容会影响 API、数据模型、权限、配置、前端交互或验证方式
+- 梳理 proposal 的目标、范围、影响面，以及 specs 中的 Requirement / Scenario
+- 找出 specs 中描述模糊、互相冲突、缺少边界的行为
+- 将 specs 映射到接口、数据模型、权限、配置、前端交互或验证方式
+- 如果发现行为契约本身不准确，停止并建议回到 `/autodev-specs`
 
 **调查代码库**
 
@@ -68,7 +68,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan --json
 
 - 在多个方案都合理时，对比影响面、复杂度、风险和验证成本
 - 推荐更贴合现有系统的方向，但把假设和待确认项说清楚
-- 对 API/SQL/任务拆分只形成计划依据，不在探索阶段写业务实现
+- 对 API、数据和任务拆分只形成设计/计划依据，不在探索阶段写业务实现
 
 **可视化**
 ```
@@ -107,7 +107,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。若 Feature slug、工作目录或 `CHECKPOINT` 为空、未知，或无法唯一确定，停止并提示用户选择 Feature；若本轮是用户直供需求并允许 `plan_in_progress --allow-create` 创建状态，创建后必须刷新 `CHECKPOINT`。
 
-- 读取 `{工作目录}/PRD.md`、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
+- 读取 `{工作目录}/proposal.md`、`specs/**/*.md`、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
 - 读取 AGENTS.md 和与本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
 
@@ -115,8 +115,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 | 探索发现                     | 后续沉淀位置                                                 |
 | ---------------------------- | ------------------------------------------------------------ |
-| 需求目标、范围、非目标变化   | `design.md` 的 Proposal / 需求契约                           |
-| 新增或变化的外部可观察行为   | `design.md` 的 Behavior Specs / 行为规格                     |
+| 需求目标、范围、非目标变化   | 回到 `proposal.md`，或在 `design.md` 记录影响与风险           |
+| 新增或变化的外部可观察行为   | 回到 `specs/**/*.md`，不得只写入 `design.md`                  |
 | 新增或变化的 HTTP 行为       | `design.md` 的 API Decisions；无 API 写 `x-auto-no-http-api: true` |
 | 数据表/字段/索引/迁移需求    | `design.md` 的 Data Decisions；无数据变更写 `x-auto-no-sql: true` |
 | 技术方案、模块边界、集成点   | `design.md` 的 Technical Design                              |
@@ -144,7 +144,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 | DATA-01 | Data | [表/字段/状态/约束] | [建议] | [备选] | [影响任务/验收] | [问题] |
 ```
 
-约束：探索阶段可以提出“建议写入哪里”，但不要自动捕捉或落盘，除非用户明确确认进入 Plan 生成/更新。
+约束：探索阶段可以提出“建议写入哪里”，但不要自动捕捉或落盘，除非用户明确确认进入 Plan 生成/更新。行为契约变更必须回到 `/autodev-specs`，不要在 Plan 阶段偷偷改写 specs。
 
 
 ### 你不必做的事情
@@ -180,7 +180,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
           │                   │                 │
        影响任务           影响权限           影响接口/配置
 
-      PRD 里目前明确了哪几项？哪些需要我回到代码里查现有通知能力？
+      specs 里目前明确了哪几项？哪些需要我回到代码里查现有通知能力？
 ```
 
 **用户带来一个具体问题：**
@@ -219,9 +219,9 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 用户：/autodev-plan --feature export-orders
       导出接口到底要不要支持异步
 
-你：[读取 PRD、现有导出模块、已有 design.md/PLAN.md]
+你：[读取 proposal、specs、现有导出模块、已有 design.md/PLAN.md]
 
-     当前 PRD 只写了“用户可以导出订单”，没有说明数据量上限。
+     当前 specs 只写了“用户可以导出订单”，没有说明数据量上限。
      代码里已有一个同步 CSV 导出，但超过 5 万行会超时。
 
      我建议把这里作为待确认决策：
@@ -279,12 +279,13 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 **影响范围：** [模块/API/数据/权限/前端/配置]
 
-**已确认：** [用户或 PRD 已明确的信息]
+**已确认：** [用户、proposal 或 specs 已明确的信息]
 
 **待确认：** [必须追问或在 Plan 中标注的事项]
 
 **生成依据：**
-- design.md: [需求契约/行为规格/API 决策/数据决策/技术设计需要覆盖什么]
+- specs/**/*.md: [行为契约和验收场景]
+- design.md: [API 决策/数据决策/技术设计需要覆盖什么]
 - PLAN.md: [建议任务边界和验证重点]
 
 是否结束探索并进入 Plan 生成/更新？
@@ -310,14 +311,14 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 
 ### PLAN阶段
-> **explore 结论注入**：基于 explore 已知上下文，先生成 `design.md`，再基于 `design.md` 生成 `PLAN.md`。
+> **specs 驱动设计**：基于 `proposal.md`、`specs/**/*.md` 和 design exploration 结论，先生成 `design.md`，再基于 specs + design 生成 `PLAN.md`。
 
 #### 工作目录
 若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature；允许新建状态的用户直供路径除外，创建后必须刷新 `CHECKPOINT`。
 
 #### 写入checkpoint
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint plan_in_progress --stage "Plan（来源: Biz 交接 / 用户直供）" --allow-create
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
 CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
@@ -325,12 +326,12 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 #### 生成 design.md
 
-本阶段必须生成 `{工作目录}/design.md`。`design.md` 是后续编码、测试和验收的稳定设计契约，承载 OpenSpec 风格的 proposal、specs、design，但压缩在一个文件中。
+本阶段必须生成 `{工作目录}/design.md`。`design.md` 是后续编码、测试和验收的稳定技术设计契约，承载 API、数据、架构、迁移和风险决策；行为契约以 `specs/**/*.md` 为准，不在 design.md 中重复维护完整 specs。
 
 按 `{PLUGIN_DIR}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
-- **Proposal / 需求契约**：说明 Why、What Changes、Scope、Non-Scope、Impact。
-- **Behavior Specs / 行为规格**：写外部可观察行为和验收场景；每条行为必须能追溯到 PRD、用户补充或现有系统约束。
+- **Context / 输入上下文**：引用 proposal 和 specs，说明当前代码现状和约束。
+- **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。
 - **API Decisions / 接口决策**：
   - 不再生成独立接口契约文件。
   - 如本轮不涉及 HTTP/API，必须写 `x-auto-no-http-api: true` 并说明原因。
@@ -340,13 +341,13 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
   - 不再生成独立 SQL 设计文件。
   - 如本轮不涉及数据库或持久化，必须写 `x-auto-no-sql: true` 并说明原因。
   - 如涉及数据变更，记录表/模型、字段、索引、迁移、回滚和状态。
-  - PRD 明确涉及数据但字段/类型/索引缺失时，必须回到用户追问或标为待确认；不得凭空发明字段。
+  - specs 明确涉及数据但字段/类型/索引缺失时，必须回到用户追问或标为待确认；不得凭空发明字段。
 - **Technical Design / 技术设计**：记录现状、决策、备选方案、集成点和涉及路径。
 - **Risks / Open Questions**：所有未确认业务语义、技术假设、兼容风险必须落在这里。
 
 完成条件：
 - [ ] `{工作目录}/design.md` 文件已写入磁盘
-- [ ] design.md 包含 Proposal、Behavior Specs、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
+- [ ] design.md 包含 Context、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
 - [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
 - [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
 - [ ] 未确认项没有进入硬约束，已标注为待确认
@@ -355,20 +356,21 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 #### 生成 PLAN
 
-本阶段必须生成 `{工作目录}/PLAN.md`。PLAN 只承载执行任务，不再重复写需求契约或完整技术设计；如冲突，以 `design.md` 为准。
+本阶段必须生成 `{工作目录}/PLAN.md`。PLAN 只承载执行任务，不再重复写需求契约、行为规格或完整技术设计；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `{工作目录}/design.md` 对应章节，再把执行相关部分同步到 `{工作目录}/PLAN.md`。
+- 如果用户补充内容改变了外部可观察行为、验收标准或能力边界，停止并建议回到 `/autodev-specs` 更新 `proposal.md` / `specs/**/*.md`。
 - 必须在 PLAN.md 中新增或更新「用户补充说明 / 技术细节」章节。
 - 用户明确确认的内容，标记为「已确认」。
 - 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
-- 如果用户补充内容与 PRD.md、design.md 或既有系统约束冲突，必须在 design.md 与 PLAN.md 的「风险与待确认项」中记录，并回到用户确认，不得擅自覆盖 PRD。
+- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 与 PLAN.md 的「风险与待确认项」中记录，并回到用户确认，不得擅自覆盖 specs。
 - 用户补充的实现细节只能作为计划依据，不得在 Plan 阶段创建或修改业务代码文件。
 
 任务拆分粒度：
 
-- 默认按需求能力、用户主流程、PRD 验收标准或 Behavior Spec 拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件、测试文件等代码层步骤拆任务。
+- 默认按 specs 中的 Requirement / Scenario、用户主流程或验收闭环拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件、测试文件等代码层步骤拆任务。
 - 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
 - 只有在满足以下条件之一时才继续拆分：可独立验证；风险或决策明显不同；存在明确依赖顺序；可被多个需求复用的基础能力；任务过大导致执行者无法在一次编码闭环中完成。
 - 小需求通常 2-5 个任务，中等需求通常 4-8 个任务；如果超过 10 个任务，必须检查是否把代码步骤误拆成了任务，并优先合并。
@@ -376,16 +378,16 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
 - 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
 
-每个任务都要标注其涉及的既有模块路径；design.md 中的每个 Requirement、API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
+每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
 按 `{PLUGIN_DIR}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 
 完成条件：
 - [ ] `{工作目录}/PLAN.md` 文件已写入磁盘
-- [ ] PLAN.md 包含「任务 DAG」「任务总览」「任务详情」「PRD 验收标准覆盖」「设计决策覆盖」
-- [ ] 每个任务都包含「做什么」「设计依据」「验证方法」「状态: 待做」
+- [ ] PLAN.md 包含「任务 DAG」「任务总览」「任务详情」「Specs 行为覆盖」「规格与设计决策覆盖」
+- [ ] 每个任务都包含「做什么」「规格依据」「设计依据」「验证方法」「状态: 待做」
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
-- [ ] 每个 PRD 验收标准至少被一个任务覆盖
+- [ ] specs 中每个 Requirement / Scenario 至少被一个任务覆盖
 - [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
 - [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 PLAN.md 已同步记录，并更新相关任务或风险项。
 

@@ -22,6 +22,28 @@
       "required": true
     }
   ],
+  "contract_references": [
+    {
+      "path": ".autobizdevops/features/{slug}/proposal.md",
+      "type": "proposal",
+      "required": true
+    },
+    {
+      "path": ".autobizdevops/features/{slug}/specs/**/*.md",
+      "type": "specs",
+      "required": true
+    },
+    {
+      "path": ".autobizdevops/features/{slug}/design.md",
+      "type": "design",
+      "required": true
+    },
+    {
+      "path": ".autobizdevops/features/{slug}/PLAN.md",
+      "type": "plan",
+      "required": true
+    }
+  ],
   "affected_repositories": [
     {
       "id": "frontend",
@@ -31,7 +53,7 @@
       "source": "user_input",
       "source_evidence": "用户输入中提到 frontend/backend 需要共同完成。",
       "expected_changes": [
-        "实现 PRD 中的前端入口、状态展示和错误处理。"
+        "实现 specs 中的前端入口、状态展示和错误处理。"
       ]
     },
     {
@@ -91,6 +113,7 @@
 proposal 规则：
 
 - prd_references 是用户提供的原始 PRD 文件入口。主 agent 只记录路径和简短说明，不要用自己的 PRD 摘要替代文件路径。没有 PRD 时写空数组。
+- contract_references 固定记录 feature 目录中的 proposal.md、specs/**/*.md、design.md、PLAN.md。reviewer 以 specs Requirement / Scenario 作为行为验收主依据，以 design.md 作为接口、数据和技术决策依据。
 - 如果用户明确提供 PRD 路径，主 agent 必须把它写入 prd_references；遗漏用户提供的 PRD 会使完成声明不可信。
 - affected_repositories 是 v1 的扩展字段。跨仓库任务必须填写；单仓库任务可以省略或留空，reviewer 会把当前 cwd 当作唯一仓库。
 - affected_repositories[].id 是仓库稳定标识，供 files_changed[].repository_id、报告、blocker 和 warning 引用。
@@ -104,11 +127,11 @@ proposal 规则：
 - verification.commands 记录“声称运行过的验证”。如果没有真实输出证据，不要夸大，只写能确认的事实。
 - known_limitations 必须诚实。没有已知限制时才留空。
 - not_done 用来区分“明确不做”和“忘了做”。
-- reviewer 没有隐式用户对话上下文。所有可审查上下文必须来自 proposal、PRD、启动 prompt 或真实 repo 状态。若需要 reviewer 检查用户主动输入的仓库是否被遗漏，启动 prompt 必须额外提供 User repository references。
+- reviewer 没有隐式用户对话上下文。所有可审查上下文必须来自 completion proposal、proposal.md、specs、design、PLAN、可选 PRD、启动 prompt 或真实 repo 状态。若需要 reviewer 检查用户主动输入的仓库是否被遗漏，启动 prompt 必须额外提供 User repository references。
 
 ## .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md
 
-reviewer 必须直接写这个文件。它是下游 `$autodev-utest` 与 `$autodev-e2e` 的正式输入。
+reviewer 必须直接写这个文件。它是下游 `/autodev-utest` 与 `/autodev-e2e` 的正式输入。
 
 ```
 # Requirements Evaluation
@@ -126,7 +149,8 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 - Completion proposal: `.autobizdevops/features/{slug}/completion-proposal.json`
 - Git status: `git status --short`（跨仓库任务中逐仓库列出）
 - Git diff: `git diff --name-only` / `git diff --binary`（跨仓库任务中逐仓库列出）
-- PRD references: `.autobizdevops/features/{slug}/PRD.md`（没有 PRD 时写 none）
+- PRD references: 用户显式提供的 PRD 路径（没有 PRD 时写 none）
+- Contract references: `proposal.md`, `specs/**/*.md`, `design.md`, `PLAN.md`
 - Verification evidence: proposal 中声明的测试、lint、build 或手工验证证据
 
 ## Repositories Reviewed
@@ -141,7 +165,7 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 
 | Requirement | Status | Evidence | Risk |
 |---|---|---|---|
-| R1 或需求摘要 | covered / missing / risky / not_applicable | `frontend: src/example.ts` / `backend: app/api/example.py` / `cross-repo: API contract` | low / medium / high / blocker |
+| specs/[capability]/spec.md / Requirement / Scenario | covered / missing / risky / not_applicable | `frontend: src/App.tsx` / `backend: app/api/example.py` / `cross-repo: API contract` | low / medium / high / blocker |
 
 ## E2E Focus
 
@@ -158,19 +182,19 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 
 ## Required Next Action
 
-- PASS / PASS_WITH_WARNINGS: 进入 `$autodev-utest`。
-- FAIL: 主 agent 修复 blockers 或 must fix 项后，更新 `completion-proposal.json` 并重新运行 `$autodev-reviewer`。
+- PASS / PASS_WITH_WARNINGS: 进入 `/autodev-utest`。
+- FAIL: 主 agent 修复 blockers 或 must fix 项后，更新 `completion-proposal.json` 并重新运行 `/autodev-reviewer`。
 - DEGRADED: 停止并等待用户下一步指令；不要把独立审查未成立伪装成 PASS。
 ```
 
 规则：
 
 - `REQUIREMENTS_EVAL.md` 必须落盘到 `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`。
-- 不新增 `PRD.md`、`PLAN.md`、`VERIFY_REPORT.md` 等前置文件门禁；没有 PRD 时跳过 PRD 对齐评分并在文件中说明。
-- verdict 必须能追溯到 proposal、PRD、shell/git 输出和实际文件内容。
+- 不新增 `VERIFY_REPORT.md` 等后置文件门禁；没有额外 PRD 引用时不要求读取 PRD.md。
+- verdict 必须能追溯到 completion proposal、proposal.md、specs、design.md、可选 PRD、shell/git 输出和实际文件内容。
 - 跨仓库任务中，verdict 必须能追溯到每个 affected repository 的 shell/git 输出和实际文件内容。
 - `Repositories Reviewed` 必须列出每个被审查仓库的 id、path、source、git status、changed files。required 仓库不可访问、不是 git 仓库或无法获取状态时，verdict 必须为 DEGRADED。
-- `E2E Focus` 是给 `$autodev-e2e` 的交接摘要，不要复制整份 diff 或完整审查报告。
+- `E2E Focus` 是给 `/autodev-e2e` 的交接摘要，不要复制整份 diff 或完整审查报告。
 - `Requirement Coverage` 的 evidence、`Blockers` 和 `Warnings` 必须标明 repo id 或 `cross-repo`，避免下游无法定位。
 - 如果 verdict 是 FAIL，Required Next Action 必须列出需要修复后重新 review 的 blockers 或 must fix 项。
 - 如果 verdict 是 DEGRADED，Required Next Action 必须说明停止并等待用户，不得引导 agent 立即修复。
@@ -184,8 +208,8 @@ severity 规则：
 推荐 category：
 
 - **claim_mismatch**：completion proposal 和真实 git diff 不一致
-- **prd_mismatch**：实现、proposal 或验证结果和 PRD 要求不一致
-- **requirement_gap**：PRD 中的需求或验收标准未被实现或验证
+- **spec_mismatch**：实现、completion proposal 或验证结果和 specs 行为契约不一致
+- **requirement_gap**：specs 中的 Requirement / Scenario 未被实现或验证
 - **missing_evidence**：声称跑了测试/验证，但缺少证据
 - **test_gap**：测试覆盖缺口
 - **silent_failure**：吞错、假 fallback、用户不可见失败

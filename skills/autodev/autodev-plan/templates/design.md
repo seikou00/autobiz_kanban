@@ -1,55 +1,28 @@
-# 设计契约模板
+# 技术设计模板
 
-> 由 Plan 阶段生成，写入 `{工作目录}/design.md`。本文件承载需求契约、行为规格和技术设计，是后续 `PLAN.md`、编码、测试和验收的依据。
+> 由 Plan 阶段生成，写入 `{工作目录}/design.md`。本文件承载接口、数据、技术设计和风险决策；行为契约以 `{工作目录}/specs/**/*.md` 为准。
 
 ---
 
 ```markdown
-# 设计契约: [来自 PRD 的标题]
+# 技术设计: [来自 proposal/specs 的标题]
 
-来源: PRD.md + explore 阶段结论 + 现有代码/项目约束
+来源: proposal.md + specs/**/*.md + design exploration 结论 + 现有代码/项目约束
 状态: 待执行
 创建时间: [ISO 日期时间]
 
-## 1. Proposal / 需求契约
+## 1. Context / 输入上下文
 
-### Why
-[1-3 句话说明为什么要做，解决什么问题。]
+- **Feature:** {slug}
+- **Proposal:** proposal.md
+- **Specs:** specs/[capability]/spec.md
+- **当前代码现状:** [现有模块、接口、数据模型、约束，引用实际路径]
 
-### What Changes
-- [用户可见或系统外部可观察的变化]
-- [新增/修改/移除的能力]
+## 2. Spec Traceability / 规格追踪
 
-### Scope
-- 本轮包含:
-- 本轮不包含:
-
-### Impact
-- 影响模块:
-- 影响用户/角色:
-- 影响配置/权限/数据:
-
-## 2. Behavior Specs / 行为规格
-
-### ADDED Requirements
-
-#### Requirement: [能力名]
-[系统 SHALL/MUST 满足的外部可观察行为。]
-
-##### Scenario: [场景名]
-- **WHEN** [触发条件]
-- **THEN** [期望结果]
-
-### MODIFIED Requirements
-
-#### Requirement: [已有能力名]
-[如果修改已有行为，写完整的新行为。无则写“无”。]
-
-### REMOVED Requirements
-
-#### Requirement: [移除能力名]
-**Reason:** [移除原因。无则写“无”。]
-**Migration:** [迁移方式。无则写“无”。]
+| Spec | Requirement / Scenario | Design Coverage |
+|------|------------------------|-----------------|
+| specs/[capability]/spec.md | Requirement: [name] / Scenario: [name] | API-01 / DATA-01 / D-01 |
 
 ## 3. API Decisions / 接口决策
 

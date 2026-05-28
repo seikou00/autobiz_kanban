@@ -14,7 +14,7 @@
 
 1. `step4` 产出的结构化 E2E 用例
 2. 与该 feature 相关的前端页面、路由、弹窗和组件
-3. 与该 feature 相关的 Spring Boot controller、DTO、权限规则和 design.md 接口决策
+3. 与该 feature 相关的 specs 行为契约、Spring Boot controller、DTO、权限规则和 design.md 接口决策
 4. 环境说明、测试账号、seed 数据和依赖服务
 5. 现有 Playwright 配置、fixture、helper、page object 与 spec
 
