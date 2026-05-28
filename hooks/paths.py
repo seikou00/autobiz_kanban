@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Path helpers for autobizdevops workspace bootstrap hooks."""
 
+import re
 from pathlib import Path
 from typing import Optional, Union
 
 
 PathLike = Union[str, Path]
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+SYSTEM_NO_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+")
 
 
 def get_workspace(workspace: Optional[PathLike] = None) -> Path:
@@ -78,7 +80,25 @@ def get_sys_agents_md_path(system_no: str, plugin_root: Optional[PathLike] = Non
             if candidate.is_dir() and candidate.name.casefold() == folded_system_no:
                 return candidate / "AGENTS.md"
 
+        normalized_system_no = normalize_system_no(system_no)
+        if normalized_system_no:
+            for candidate in candidates:
+                if candidate.is_dir() and normalize_system_no(candidate.name) == normalized_system_no:
+                    return candidate / "AGENTS.md"
+
+            for candidate in candidates:
+                candidate_system_no = normalize_system_no(candidate.name)
+                if candidate.is_dir() and candidate_system_no and (
+                    candidate_system_no.startswith(normalized_system_no)
+                    or normalized_system_no.startswith(candidate_system_no)
+                ):
+                    return candidate / "AGENTS.md"
+
     return sys_root / system_no / "AGENTS.md"
+
+
+def normalize_system_no(system_no: str) -> str:
+    return "".join(SYSTEM_NO_TOKEN_PATTERN.findall(system_no)).casefold()
 
 
 def ensure_dir(path: PathLike) -> Path:

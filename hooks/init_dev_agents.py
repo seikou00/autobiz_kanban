@@ -12,15 +12,15 @@ from pathlib import Path
 from typing import Mapping
 
 try:
-    from paths import get_sys_agents_md_path
+    from paths import get_sys_agents_md_path, normalize_system_no
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
-    from paths import get_sys_agents_md_path  # type: ignore[no-redef]
+    from paths import get_sys_agents_md_path, normalize_system_no  # type: ignore[no-redef]
 
 
 DEFAULT_SYSTEM_NO = "lf3905"
 SYSTEM_ID_ENV = "SYSTEM_ID"
-SYSTEM_NO_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+SYSTEM_NO_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 DOCUMENT_MAP_HEADING = "## 文档地图"
 MARKDOWN_PATH_PATTERN = re.compile(r"[A-Za-z0-9_{}$./\\:-]+\.md", re.IGNORECASE)
 
@@ -38,9 +38,9 @@ def resolve_system_no(env: Mapping[str, str] | None = None) -> str:
 
 
 def validate_system_no(system_no: str) -> None:
-    if not SYSTEM_NO_PATTERN.fullmatch(system_no):
+    if not SYSTEM_NO_PATTERN.fullmatch(system_no) or not normalize_system_no(system_no):
         raise DevAgentsInitError(
-            "invalid SYSTEM_ID: only letters, digits, underscores, and hyphens are allowed"
+            "invalid SYSTEM_ID: only letters, digits, dots, underscores, and hyphens are allowed"
         )
 
 

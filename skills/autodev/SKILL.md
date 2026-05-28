@@ -69,7 +69,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 ### 1.3 初始化代码工作区 AGENTS.md
 
-Dev 阶段进入路由前必须确认代码工作区存在 `AGENTS.md`。系统编号只从环境变量 `SYSTEM_ID` 读取；如果 `SYSTEM_ID` 缺失或为空，默认使用 `lf3905`。不得再从 `.autobizdevops/PROJECT.md` 或 `board_core/board_config.json` 推断系统编号。
+Dev 阶段进入路由前必须确认代码工作区存在 `AGENTS.md`。系统编号只从环境变量 `SYSTEM_ID` 读取；如果 `SYSTEM_ID` 缺失或为空，默认使用 `lf3905`。匹配 sys 目录前会移除点号、下划线、短横线等分隔符并忽略大小写，例如 `lf39.05`、`lf39_05`、`LF39-05` 都可匹配 `sys/LF3905`。不得再从 `.autobizdevops/PROJECT.md` 或 `board_core/board_config.json` 推断系统编号。
 
 如果代码工作区没有 `AGENTS.md`，执行：
 

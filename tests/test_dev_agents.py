@@ -70,6 +70,46 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assertEqual(result["source"], str(source.resolve()))
             self.assertIn("sys/abc", result["message"])
 
+    def test_system_id_normalized_separators_match_sys_directory(self) -> None:
+        cases = ["lf3905", "lf39.05", "lf39_05", "LF39-05"]
+        for system_id in cases:
+            with self.subTest(system_id=system_id), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                plugin_root = root / "plugin"
+                code_workspace = root / "code"
+                code_workspace.mkdir()
+                source = write_sys_agents(plugin_root, "LF3905", "default rules\n")
+
+                result = init_dev_agents(
+                    code_workspace,
+                    env={"SYSTEM_ID": system_id},
+                    plugin_root=plugin_root,
+                )
+
+                self.assertTrue(result["created"])
+                self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
+                self.assertEqual(result["system_no"], system_id)
+                self.assertIn("sys/LF3905", result["message"])
+
+    def test_system_id_prefix_matches_longer_sys_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugin"
+            code_workspace = root / "code"
+            code_workspace.mkdir()
+            source = write_sys_agents(plugin_root, "LF3905", "default rules\n")
+
+            result = init_dev_agents(
+                code_workspace,
+                env={"SYSTEM_ID": "lf39"},
+                plugin_root=plugin_root,
+            )
+
+            self.assertTrue(result["created"])
+            self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
+            self.assertEqual(result["system_no"], "lf39")
+            self.assertIn("sys/LF3905", result["message"])
+
     def test_missing_system_id_defaults_to_lf3905(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -125,12 +165,14 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assert_relative_symlink(code_workspace / "BACKEND_AGENTS.md", backend)
 
     def test_invalid_system_id_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            code_workspace = Path(tmp) / "code"
-            code_workspace.mkdir()
+        cases = ["../abc", "/tmp/abc", ".", "___"]
+        for system_id in cases:
+            with self.subTest(system_id=system_id), tempfile.TemporaryDirectory() as tmp:
+                code_workspace = Path(tmp) / "code"
+                code_workspace.mkdir()
 
-            with self.assertRaisesRegex(DevAgentsInitError, "invalid SYSTEM_ID"):
-                init_dev_agents(code_workspace, env={"SYSTEM_ID": "../abc"}, plugin_root=Path(tmp))
+                with self.assertRaisesRegex(DevAgentsInitError, "invalid SYSTEM_ID"):
+                    init_dev_agents(code_workspace, env={"SYSTEM_ID": system_id}, plugin_root=Path(tmp))
 
     def test_missing_source_agents_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,6 +196,22 @@ class DevAgentsInitTests(unittest.TestCase):
             source = write_sys_agents(plugin_root, "abc", "abc rules\n")
 
             self.assertEqual(get_sys_agents_md_path("ABC", plugin_root), source.resolve())
+
+    def test_sys_agents_path_prefers_normalized_exact_before_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_root = Path(tmp) / "plugin"
+            write_sys_agents(plugin_root, "LF39", "base rules\n")
+            exact_source = write_sys_agents(plugin_root, "LF3905", "version rules\n")
+
+            self.assertEqual(get_sys_agents_md_path("lf39.05", plugin_root), exact_source.resolve())
+
+    def test_sys_agents_path_uses_sorted_first_prefix_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_root = Path(tmp) / "plugin"
+            first_source = write_sys_agents(plugin_root, "LF3905", "first rules\n")
+            write_sys_agents(plugin_root, "LF3906", "second rules\n")
+
+            self.assertEqual(get_sys_agents_md_path("lf39", plugin_root), first_source.resolve())
 
     def test_document_map_links_project_root_style_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
