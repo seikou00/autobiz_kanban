@@ -25,6 +25,57 @@ from board_core.contracts import BoardConfigError, load_repo_workflow_contracts 
 PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
 VALID_VERDICT = re.compile(r"verdict\s*[:=]\s*(PASS_WITH_WARNINGS|PASS|FAIL|DEGRADED)\b", re.IGNORECASE)
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
+UNIT_TEST_VERDICT = re.compile(
+    r"verdict\W*[:=]\W*(PASS_WITH_WARNINGS|PASS|FAIL|BLOCKED)\b",
+    re.IGNORECASE,
+)
+UNIT_TEST_PASS = {"PASS", "PASS_WITH_WARNINGS"}
+
+
+def spec_files(ctx: HookContext) -> list[Path]:
+    return sorted(
+        path
+        for path in ctx.feature_dir.glob("specs/**/*.md")
+        if path.is_file() and path.stat().st_size > 0
+    )
+
+
+def validate_proposal_contract(ctx: HookContext) -> int:
+    proposal = ctx.file("proposal.md")
+    if not is_nonempty(proposal):
+        return fail_line(ctx, "missing_proposal")
+
+    text = read_text(proposal)
+    failures = 0
+    required_sections = [
+        "Why",
+        "What Changes",
+        "Capabilities",
+        "Impact",
+        "Out of Scope",
+    ]
+    for section in required_sections:
+        if section not in text:
+            failures += fail_line(ctx, "invalid_proposal_missing_section", f" section={section!r}")
+    return failures
+
+
+def validate_specs_contract(ctx: HookContext) -> int:
+    specs = spec_files(ctx)
+    if not specs:
+        return fail_line(ctx, "missing_specs")
+
+    failures = 0
+    for spec in specs:
+        text = read_text(spec)
+        rel = spec.relative_to(ctx.feature_dir)
+        if not re.search(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", text, re.MULTILINE):
+            failures += fail_line(ctx, "invalid_spec_missing_operation_header", f" file={rel}")
+        if not re.search(r"^###\s+Requirement:\s+.+", text, re.MULTILINE):
+            failures += fail_line(ctx, "invalid_spec_missing_requirement", f" file={rel}")
+        if not re.search(r"^####\s+Scenario:\s+.+", text, re.MULTILINE):
+            failures += fail_line(ctx, "invalid_spec_missing_scenario", f" file={rel}")
+    return failures
 
 
 def repo_root_from_this_file() -> Path:
@@ -39,8 +90,8 @@ def validate_design_contract(ctx: HookContext) -> int:
     text = read_text(design)
     failures = 0
     required_sections = [
-        "Proposal",
-        "Behavior Specs",
+        "Context / 输入上下文",
+        "Spec Traceability",
         "API Decisions",
         "Data Decisions",
         "Technical Design",
@@ -50,12 +101,10 @@ def validate_design_contract(ctx: HookContext) -> int:
         if section not in text:
             failures += fail_line(ctx, "invalid_design_missing_section", f" section={section!r}")
 
-    if not re.search(r"x-auto-no-http-api\s*:\s*(true|false)", text, re.IGNORECASE):
+    if not re.search(r"x-auto-no-http-api\W*:\W*(true|false)", text, re.IGNORECASE):
         failures += fail_line(ctx, "missing_design_api_marker")
-    if not re.search(r"x-auto-no-sql\s*:\s*(true|false)", text, re.IGNORECASE):
+    if not re.search(r"x-auto-no-sql\W*:\W*(true|false)", text, re.IGNORECASE):
         failures += fail_line(ctx, "missing_design_data_marker")
-    if not re.search(r"Requirement:|REQ-[0-9]+|Scenario:", text, re.IGNORECASE):
-        failures += fail_line(ctx, "missing_design_behavior_specs")
     return failures
 
 
@@ -112,11 +161,56 @@ def validate_requirements_eval_verdict(ctx: HookContext) -> int:
     return 0
 
 
+def validate_unit_test_report_contract(ctx: HookContext) -> int:
+    report = ctx.file("UNIT_TEST_REPORT.md")
+    log = ctx.file("test-output.log")
+    failures = 0
+
+    if not is_nonempty(report):
+        return fail_line(ctx, "missing_unit_test_report")
+    if not is_nonempty(log):
+        failures += fail_line(ctx, "missing_test_output_log")
+
+    content = read_text(report)
+    required_sections = [
+        "Test Plan",
+        "Execution Summary",
+        "Coverage Matrix",
+        "Failure Analysis",
+        "Fix Attempts",
+        "Commands",
+        "Handoff",
+    ]
+    for section in required_sections:
+        if section not in content:
+            failures += fail_line(ctx, "invalid_unit_test_report_missing_section", f" section={section!r}")
+
+    if not re.search(r"verdict\W*[:=]", content, re.IGNORECASE):
+        failures += fail_line(ctx, "missing_unit_test_verdict")
+    else:
+        verdict_match = UNIT_TEST_VERDICT.search(content)
+        if not verdict_match:
+            failures += fail_line(ctx, "invalid_unit_test_verdict")
+        elif verdict_match.group(1).upper() not in UNIT_TEST_PASS:
+            failures += fail_line(ctx, "non_terminal_unit_test_verdict")
+
+    if "test-output.log" not in content:
+        failures += fail_line(ctx, "missing_test_log_reference")
+    if not re.search(r"\|\s*Source\s*\|\s*Requirement\s*\|\s*Test\s*\|\s*Result\s*\|", content):
+        failures += fail_line(ctx, "missing_coverage_matrix_table")
+    if not re.search(r"\|\s*ID\s*\|\s*Classification\s*\|\s*Files Changed\s*\|", content):
+        failures += fail_line(ctx, "missing_fix_attempts_table")
+    return failures
+
+
 VALIDATORS = {
+    "proposal_contract": validate_proposal_contract,
+    "specs_contract": validate_specs_contract,
     "design_contract": validate_design_contract,
     "plan_initial_tasks": validate_plan_initial_tasks,
     "plan_finished_tasks": validate_plan_finished_tasks,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
+    "unit_test_report_contract": validate_unit_test_report_contract,
 }
 
 

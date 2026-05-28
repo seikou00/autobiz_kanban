@@ -28,15 +28,14 @@ from artifact_check import run_postcheck, run_precheck  # noqa: E402
 from paths import ensure_dir, get_feature_hook_log_path  # noqa: E402
 
 
-STATE_PATH = Path(".autobizdevops/STATE.md")
 STATE_PATH_SUFFIX = (".autobizdevops", "STATE.md")
+STATE_JSON_PATH_SUFFIX = (".autobizdevops", "state.json")
 BLOCK_EXIT_CODE = 2
 MAVEN_COMPILE_TIMEOUT_SECONDS = 290
 MAVEN_OUTPUT_LIMIT = 4000
 LOG_PATH = Path(tempfile.gettempdir()) / "check_state_done_hook.log"
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 PLUGIN_ID = "AUTOBIZDEVOPS-PLUGIN"
-DIRECT_STATE_EDIT_TOOLS = {"edit_file", "write_file", "StrReplaceFile", "WriteFile"}
 WORKFLOW_CONTRACTS = load_workflow_contracts(BOARD_CONFIG_PATH)
 KNOWN_CHECKPOINTS = WORKFLOW_CONTRACTS.known_checkpoints
 ALLOWED_NEXT = WORKFLOW_CONTRACTS.allowed_next
@@ -217,15 +216,30 @@ def normalize_path(path: str, cwd: Path | None = None) -> Path:
     return normalized.resolve()
 
 
-def has_state_path_suffix(path: Path) -> bool:
+def has_path_suffix(path: Path, suffix: tuple[str, ...]) -> bool:
     parts = tuple(part for part in str(path).replace("\\", "/").split("/") if part and part != ".")
-    return parts[-len(STATE_PATH_SUFFIX) :] == STATE_PATH_SUFFIX
+    return parts[-len(suffix) :] == suffix
+
+
+def has_state_path_suffix(path: Path) -> bool:
+    return has_path_suffix(path, STATE_PATH_SUFFIX)
+
+
+def has_state_json_path_suffix(path: Path) -> bool:
+    return has_path_suffix(path, STATE_JSON_PATH_SUFFIX)
 
 
 def is_state_path(path: str, cwd: Path | None = None) -> bool:
     if not path:
         return False
     return has_state_path_suffix(normalize_path(path, cwd))
+
+
+def is_managed_state_path(path: str, cwd: Path | None = None) -> bool:
+    if not path:
+        return False
+    normalized = normalize_path(path, cwd)
+    return has_state_path_suffix(normalized) or has_state_json_path_suffix(normalized)
 
 
 def get_current_content(state_path: Path) -> str:
@@ -422,6 +436,15 @@ def payload_state_path(payload: dict) -> Path | None:
     return normalize_path(str(file_path), cwd)
 
 
+def payload_managed_state_path(payload: dict) -> Path | None:
+    tool_input = payload.get("tool_input", {})
+    file_path = tool_input.get("filePath") or tool_input.get("file_path") or tool_input.get("path", "")
+    cwd = Path(payload.get("cwd") or Path.cwd())
+    if not is_managed_state_path(str(file_path), cwd):
+        return None
+    return normalize_path(str(file_path), cwd)
+
+
 def block(reason: str, system_message: str) -> int:
     print(reason, file=sys.stderr)
     json.dump(
@@ -443,59 +466,18 @@ def run_state_done(payload: dict) -> int:
     hook_log(f"file_path={file_path!r}")
     hook_log(f"cwd={cwd}")
 
-    state_path = payload_state_path(payload)
-    if state_path is None:
-        hook_log("not state path, skip")
+    managed_state_path = payload_managed_state_path(payload)
+    if managed_state_path is None:
+        hook_log("not managed state path, skip")
         return 0
-    hook_log(f"state_path={state_path}")
+    hook_log(f"managed_state_path={managed_state_path}")
 
-    tool_name = payload.get("tool_name", "")
-    if tool_name in DIRECT_STATE_EDIT_TOOLS:
-        reason = "STATE.md 不允许通过 edit_file/write_file 直接修改，请使用 hooks/update_checkpoint.py 推进 checkpoint。"
-        hook_log(f"direct_state_edit_blocked tool_name={tool_name!r}")
-        return block(reason, reason)
-
-    old_map, old_errors = parse_state_table(get_current_content(state_path))
-    new_content, edit_errors = build_new_content(payload, state_path)
-    new_map, new_errors = parse_state_table(new_content)
-    changes = changed_rows(old_map, new_map)
-    hook_log(f"oldmap={old_map},new_map={new_map}")
-    errors = [*old_errors, *edit_errors, *new_errors, *validate_transitions(old_map, new_map)]
-    hook_log(f"errors_count={len(errors)}")
-
-    if errors:
-        append_checkpoint_hook_logs(
-            state_path.parent.parent,
-            changes,
-            hook_id="state-done",
-            label="STATE checkpoint 转移校验",
-            errors=errors,
-            exit_code=BLOCK_EXIT_CODE,
-        )
-        for error in errors:
-            hook_log(f"validation_error={error}")
-            print(error, file=sys.stderr)
-        json.dump(
-            {
-                "decision": "block",
-                "reason": "\n".join(errors),
-                "systemMessage": "STATE.md checkpoint 转移校验失败，请按工作流顺序更新 checkpoint。",
-            },
-            sys.stdout,
-            ensure_ascii=False,
-        )
-        return BLOCK_EXIT_CODE
-
-    append_checkpoint_hook_logs(
-        state_path.parent.parent,
-        changes,
-        hook_id="state-done",
-        label="STATE checkpoint 转移校验",
-        errors=[],
-        exit_code=0,
+    reason = (
+        "状态文件不允许通过 edit_file/write_file 直接修改；"
+        "state.json 是主事实源，STATE.md 是自动生成视图。请使用 hooks/update_checkpoint.py 推进 checkpoint。"
     )
-    hook_log("hook passed")
-    return 0
+    hook_log(f"direct_state_edit_blocked tool_name={payload.get('tool_name', '')!r}")
+    return block(reason, reason)
 
 
 def run_autodev_lifecycle(payload: dict) -> int:
@@ -524,7 +506,7 @@ def run_autodev_lifecycle(payload: dict) -> int:
         )
         return block(
             "\n".join(errors),
-            "Autodev artifact hook failed. Fix the stage artifacts, then retry STATE.md.",
+            "Autodev artifact hook failed. Fix the stage artifacts, then retry hooks/update_checkpoint.py.",
         )
     append_checkpoint_hook_logs(
         workspace_root,

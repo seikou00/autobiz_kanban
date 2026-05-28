@@ -37,6 +37,22 @@
 
         }
       ]
+    },
+    {
+      "matcher": "execute",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/code_done_compile_guard.py",
+          "timeout": 3600,
+          "onBlock": {
+            "reason": "code_done 前模块编译不通过",
+            "systemMessage": "停止推进 code_done。请修复模块编译错误后重试。",
+            "additionalContext": "模块编译清单应位于 --workspace/.autobizdevops/modules_compile.json。"
+          },
+          "persistAfterInterrupt": true
+        }
+      ]
     }
   ]
 }

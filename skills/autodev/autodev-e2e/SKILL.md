@@ -11,30 +11,77 @@ description: 对单个 feature 执行端到端测试。作为 Autodev 根流程�
 工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
 ```
 
-<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->
-## 流程契约（由 board_config.json 生成）
+<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
+## 流程契约
 
-本区块由 `board_core/board_config.json` 静态编译生成，请勿手工修改；修改流程契约后运行 `python "{PLUGIN_DIR}/hooks/compile_skill_contracts.py" --write` 重新生成。
+当前 skill 的 checkpoint、输入/输出产物和 validators 以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。
+运行前如需查看当前契约，执行：
 
-- **唯一事实来源:** `{PLUGIN_DIR}/board_core/board_config.json` 中 `skill: "autodev-e2e"` 的节点。
-- **节点:** `dev.e2e`
-- **阶段:** E2E 测试
-- **分组:** Dev
-- **Checkpoints:** `e2e_in_progress`, `e2e_done`
+```bash
+python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-e2e --json
+```
+<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
-### 输入产物
-- `PRD.md`：PRD文档（必需）
-- `design.md`：设计契约（必需）
-- `PLAN.md`：执行计划（必需）
-- `REQUIREMENTS_EVAL.md`：需求实现评审报告（必需）
-- `UNIT_TEST_REPORT.md`：单元测试报告（必需）
 
-### 输出产物
-- `E2E_TEST_CASES.yaml`：E2E 测试用例（必需）
-- `E2E_REPORT.md`：E2E 测试报告（必需）
-- `e2e-run.log`：E2E 运行日志（必需）
+## State 快照读取
 
-### Validators
-- 无
-<!-- AUTOBIZDEVOPS_CONTRACT:END -->
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
+```bash
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+```
+
+后续准入、恢复和分支决策直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+
+## 输入与行为依据
+
+读取以下 feature 文档：
+
+- `.autobizdevops/features/{slug}/proposal.md`
+- `.autobizdevops/features/{slug}/specs/**/*.md`
+- `.autobizdevops/features/{slug}/design.md`
+- `.autobizdevops/features/{slug}/PLAN.md`
+- `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`
+- `.autobizdevops/features/{slug}/UNIT_TEST_REPORT.md`
+- `.autobizdevops/features/{slug}/test-output.log`
+
+用途约束：
+
+- `proposal.md`：本轮能力边界、影响面、非目标。
+- `specs/**/*.md`：Requirement / Scenario 行为契约，是 E2E pass/fail 的主要行为依据。
+- `design.md`：接口决策、数据决策、成功与失败路径、风险与待确认项。
+- `UNIT_TEST_REPORT.md` / `test-output.log`：上游单测覆盖、轻量单测命令线索和回归风险。
+- `REQUIREMENTS_EVAL.md`：需求覆盖、遗漏与风险提示。
+
+禁止写入：
+
+- 不要修改 `.autobizdevops/features/{slug}/PRD.md`（如果存在）。
+- 不要修改 `.autobizdevops/features/{slug}/proposal.md`。
+- 不要修改 `.autobizdevops/features/{slug}/specs/**/*.md`。
+- 不要修改 `.autobizdevops/features/{slug}/design.md`。
+- 不要修改 `.autobizdevops/features/{slug}/PLAN.md`。
+- 不要修改 `.autobizdevops/features/{slug}/UNIT_TEST_REPORT.md`、`test-output.log`、`REQUIREMENTS_EVAL.md`。
+- 不要为通过 E2E 而弱化断言、删除用例、伪造报告。
+
+每轮 E2E 必须优先以 specs 中属于用户主链路的 Requirement / Scenario 生成结构化测试用例；相关 API Decision 或 Data Decision 只作为执行和断言上下文。涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由、用户可见流程的 P0/P1 用例必须标记 `ui_required: true`。
+
+## Checkpoint 写入
+
+开始 E2E 前推进到 `e2e_in_progress`，写入后立即刷新 `CHECKPOINT`：
+
+```bash
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint e2e_in_progress
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+```
+
+E2E 通过后推进到 `e2e_done`；若存在明确失败并需要回流，推进到 `needs_fix`。每次写入后都必须刷新 `CHECKPOINT`：
+
+```bash
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint e2e_done
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+```
+
+```bash
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint needs_fix
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+```

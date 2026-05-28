@@ -35,9 +35,25 @@ description: Biz 阶段统一入口。负责前置准入校验、流程编排、
 - `{slug}` 由用户指定，或从当前上下文推导
 - 若目录不存在，`init_workspace.py` 已确保 `.autobizdevops/features/` 父目录存在，可安全创建子目录
 
+### Step 2: 读取 State 快照
+
+若 `{slug}` 未确定，先读取全部 State 快照，再从 `STATE.records` 选择或要求用户选择 Feature：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
+```
+
+确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+
+```bash
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+```
+
+后续流程编排和子技能准入直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。若脚本提示 Feature 不存在，仅 `/autobiz-requirement-discuss` 可通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
+
 ## 流程编排
 
-根据当前状态和用户意图，路由到对应子技能：
+根据 `CHECKPOINT` 和用户意图，路由到对应子技能：
 
 | 用户意图 | 当前状态要求 | 路由目标 |
 |---------|------------|---------|
@@ -54,7 +70,7 @@ description: Biz 阶段统一入口。负责前置准入校验、流程编排、
 
 ## 关键产出物校验（强制脚本）
 
-所有产出物校验必须通过脚本执行，不得仅做 Markdown 勾选。`biz_validate.py` 在各 stage 的校验中已包含 `.autobizdevops/STATE.md` 的 checkpoint 同步检查。
+所有产出物校验必须通过脚本执行，不得仅做 Markdown 勾选。`biz_validate.py` 在各 stage 的校验中已包含 `.autobizdevops/state.json` 的 checkpoint 同步检查。
 
 ### 各阶段校验命令
 

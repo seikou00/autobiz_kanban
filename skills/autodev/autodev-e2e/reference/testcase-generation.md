@@ -2,33 +2,35 @@
 
 ## 输入优先级
 
-1. `PRD.md`
-2. `design.md`
-3. `UNIT_TEST_REPORT.md` / `test-output.log`
-4. `PLAN.md`
-5. 直接相关的代码与配置
+1. `proposal.md`
+2. `specs/**/*.md`
+3. `design.md`
+4. `UNIT_TEST_REPORT.md` / `test-output.log`
+5. `PLAN.md`
+6. 直接相关的代码与配置
 
 各输入用途：
 
-- `PRD.md`：提取验收标准、用户路径、边界、非目标
-- `design.md`：提取行为规格、接口决策、数据决策、成功与失败路径
+- `proposal.md`：提取能力边界、影响面、非目标
+- `specs/**/*.md`：提取 Requirement / Scenario 行为契约，作为 pass/fail 的主要行为依据
+- `design.md`：提取接口决策、数据决策、成功与失败路径
 - `UNIT_TEST_REPORT.md` / `test-output.log`：提取当前单测覆盖、失败历史、轻量单测命令线索和回归优先级
 - `PLAN.md`：只提供任务顺序和已有验证提示
 - 代码与配置：补充路由、入口 URL、测试数据、稳定断言点
 
-`PLAN.md` 和代码上下文可以影响优先级与可执行性，但永远不是 pass/fail 依据。
+`PLAN.md` 和代码上下文可以影响优先级与可执行性，但永远不是 pass/fail 依据。行为是否通过以 `specs/**/*.md` 为准。
 
 ## 硬规则
 
 - 每轮 E2E 都必须生成 `.autobizdevops/features/{slug}/E2E_TEST_CASES.yaml`
 - 每条用例都必须对应用户可见或系统外部可观察的最小操作流程
 - 不生成伪 E2E 检查，例如文件存在、函数存在、或“任务写在 PLAN 里”
-- 必须为 `PRD.md`中的每一个验收标准生成最少一条用例
-- PRD 中每个用户可见验收标准必须映射到至少一个用例
-- `design.md` 中每个关键 Behavior Spec、API Decision 或 Data Decision，如果它属于用户主链路，至少要被一条用例覆盖
+- 必须为 `specs/**/*.md` 中每个用户可见 Requirement / Scenario 生成最少一条用例
+- proposal 中每个本轮能力边界必须能追溯到至少一个 specs 场景，或明确标记不适合 E2E
+- `specs/**/*.md` 中每个属于用户主链路的 Requirement / Scenario 至少要被一条用例覆盖；API Decision 或 Data Decision 作为执行和断言上下文
 - 每个用例必须标注 `execution_mode: browser | api | mixed | database_assisted`
 - 每个用例必须标注 `ui_required: true | false`
-- 当验收标准涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由或用户可见流程时，必须设置 `ui_required: true`
+- 当 Requirement / Scenario 涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由或用户可见流程时，必须设置 `ui_required: true`
 - 涉及 UI 的 P0 主链路必须以浏览器步骤开头，并包含页面最终状态断言
 - API/database 只能作为补充证据，不能替代 UI-required 主用户路径
 - 禁止把“Controller 存在”“代码实现”“函数存在”“文件存在”作为 E2E pass 依据
@@ -69,12 +71,15 @@ ui_required: true | false
 
 source:
   feature: {slug}
-  prd_acceptance:
-    - AC-01
+  proposal_capability:
+    - comments
   design_contract:
-    - requirement: REQ-01
     - api_decision: API-01
     - data_decision: DATA-01
+  specs_contract:
+    - spec: specs/comments/spec.md
+      requirement: Requirement: comment creation
+      scenario: Scenario: create comment successfully
   regression_risks:
     - 评论创建与列表刷新链路
 
@@ -132,8 +137,9 @@ cleanup:
 `source` 用于建立用例和 feature 输入之间的追溯关系。
 
 - `feature`：必填
-- `prd_acceptance`：建议填写
-- `api_contract`：涉及 HTTP/API 时建议填写
+- `proposal_capability`：建议填写
+- `specs_contract`：建议填写，指向 specs 文件、Requirement 和 Scenario
+- `design_contract`：涉及 HTTP/API 或数据变更时建议填写 API/Data Decision
 - `regression_risks`：当该用例来自当前回归风险时建议填写
 
 ### `steps`
@@ -162,13 +168,13 @@ cleanup:
 
 以下任一情况必须写 `ui_required: true`：
 
-- 验收标准要求用户看到页面、卡片、列表、弹窗、表单、标题、提示或结果
-- 验收标准要求点击、输入、选择、提交、返回、关闭、跳转或路由变化
+- Requirement / Scenario 要求用户看到页面、卡片、列表、弹窗、表单、标题、提示或结果
+- Requirement / Scenario 要求点击、输入、选择、提交、返回、关闭、跳转或路由变化
 - 当前 feature 修改了前端页面、组件、路由、状态管理或 API client 且用户路径依赖这些改动
 
 以下情况才允许写 `ui_required: false`：
 
-- 当前 feature 是纯后端/API 能力，PRD 没有用户可见页面或交互验收
+- 当前 feature 是纯后端/API 能力，specs 没有用户可见页面或交互验收
 - 当前用例只验证外部 API、批处理、定时任务或数据库副作用
 
 即使 `ui_required: false`，用例仍必须对应外部可观察行为，不能退化成静态代码检查。
@@ -178,7 +184,7 @@ cleanup:
 生成完成前，确认：
 
 - 目标是用户可见或外部可观察行为
-- 用例能追溯到验收标准、API operation 或当前风险点
+- 用例能追溯到 specs Requirement / Scenario、API operation 或当前风险点
 - 前置条件和测试数据写清楚了
 - 每一步都有可执行断言
 - 用例足够聚焦，失败时有单一主要原因
@@ -197,12 +203,14 @@ execution_mode: mixed
 ui_required: true
 source:
   feature: comments
-  prd_acceptance:
-    - AC-01
-  api_contract:
-    - operationId: createComment
-      path: /api/comments
-      method: POST
+  proposal_capability:
+    - comments
+  specs_contract:
+    - spec: specs/comments/spec.md
+      requirement: Requirement: comment creation
+      scenario: Scenario: create comment successfully
+  design_contract:
+    - api_decision: API-01
 preconditions:
   - 用户已登录
 test_data:

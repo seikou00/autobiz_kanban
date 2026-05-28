@@ -45,6 +45,16 @@ description: Biz 阶段需求澄清技能。读取原始需求材料，通过分
 
 ## 准备工作
 
+### State 快照读取
+
+确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+
+```bash
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+```
+
+后续需要当前 checkpoint 时直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，本技能允许通过下面的 `update_checkpoint.py --allow-create` 创建；创建或推进 checkpoint 后，必须再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
+
 ### 加载参考文档
 
 在开始工作流程前，必须加载以下参考文档：
@@ -67,6 +77,7 @@ description: Biz 阶段需求澄清技能。读取原始需求材料，通过分
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint discuss_in_progress --allow-create
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
 ## 工作流程
@@ -215,6 +226,7 @@ Expected output: `{工作目录}/PRD_DISCUSS.md` 已沉淀当前轮次的需求�
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint discuss_done
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
 
@@ -231,7 +243,7 @@ python autobiz/hooks/biz_validate.py discuss --feature {slug}
 - `{工作目录}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
 - `{工作目录}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险
 - `{工作目录}/PRD_DISCUSS.md` — 完整性校验章节所有检查项均为检查通过
-- `.autobizdevops/STATE.md` — Feature 行 checkpoint 为 `discuss_done`
+- `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 
 **Skill 完成。** 下一步：`/autobiz-prd-generate`（生成正式 PRD）

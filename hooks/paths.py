@@ -7,6 +7,7 @@ from typing import Optional, Union
 
 
 PathLike = Union[str, Path]
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 
 def get_workspace(workspace: Optional[PathLike] = None) -> Path:
@@ -63,6 +64,11 @@ def get_project_md_path(workspace: Optional[PathLike] = None) -> Path:
     return get_autobizdevops_dir(workspace) / "PROJECT.md"
 
 
+def get_sys_agents_md_path(system_no: str, plugin_root: Optional[PathLike] = None) -> Path:
+    root = Path(plugin_root).resolve() if plugin_root is not None else PLUGIN_ROOT
+    return root / "sys" / system_no / "AGENTS.md"
+
+
 def ensure_dir(path: PathLike) -> Path:
     resolved = Path(path)
     resolved.mkdir(parents=True, exist_ok=True)
@@ -74,5 +80,5 @@ def is_initialized(workspace: Optional[PathLike] = None) -> bool:
     return (
         get_autobizdevops_dir(ws).exists()
         and get_project_md_path(ws).exists()
-        and get_state_md_path(ws).exists()
+        and get_state_json_path(ws).exists()
     )

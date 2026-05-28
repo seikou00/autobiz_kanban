@@ -22,7 +22,7 @@ author: zhangQiuFeng
 
 - CI/CD 清单：`.autobizdevops/features/{slug}/CICD_CHECKLIST.md`
 - PR 描述草稿：`.autobizdevops/features/{slug}/PR_BODY.md`
-- 全局状态：`.autobizdevops/STATE.md`
+- 全局状态：`.autobizdevops/state.json`
 
 如用户额外提供 `PRD.md` 或 `design.md`，可在 `CICD_CHECKLIST.md` 中记录其来源；未提供时允许继续，但必须明确写明“需求/设计文档缺失或未提供”。
 
@@ -40,15 +40,23 @@ author: zhangQiuFeng
 
 ## 执行步骤
 
-### Step 1: 标准化工作目录与状态文件
+### Step 1: 标准化工作目录与 State 快照
 
 1. 确定 `{slug}`，进入 `.autobizdevops/features/{slug}/`
-2. 若尚未执行 workspace 初始化，先执行 `python hooks/init_workspace.py .`
-3. 读取仓库构建配置、流水线配置、已有流程产物和用户输入，整理 CI/CD 所需上下文
-4. 使用统一脚本更新 `.autobizdevops/STATE.md` 中对应 Feature 行为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
+2. 调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+
+```bash
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+```
+
+3. 后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，仅用户直供 CI/CD 场景可继续通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
+4. 若尚未执行 workspace 初始化，先执行 `python hooks/init_workspace.py .`
+5. 读取仓库构建配置、流水线配置、已有流程产物和用户输入，整理 CI/CD 所需上下文
+6. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint cicd_in_progress --stage "CI/CD（来源: 用户直供）" --allow-create
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
 ### Step 2: 生成交付文档
@@ -109,6 +117,7 @@ macOS/Linux:
 
 ```bash
 python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint cicd_done
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
 ### Step 6: 是否再次执行

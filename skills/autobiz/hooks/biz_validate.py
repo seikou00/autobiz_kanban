@@ -20,38 +20,23 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from hooks.paths import (
     get_features_active_dir,
-    get_project_md_path,
-    get_state_md_path,
     get_workspace,
 )
-
-
-def _extract_state_checkpoint(state_md_content: str, feature: str) -> Optional[str]:
-    """从 STATE.md 的 Feature 进度表格中提取指定 feature 的 checkpoint。"""
-    for line in state_md_content.splitlines():
-        line = line.strip()
-        if not line.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if len(cells) < 3:
-            continue
-        if cells[0] in ("Feature", "") or set(cells[0]) <= {"-", ":", "|"}:
-            continue
-        if cells[0] == feature:
-            return cells[2] if cells[2] else None
-    return None
+from board_core.state_store import check_or_fix_state_sync, state_rows_from_records
 
 
 def _validate_state_sync(feature: str, expected_cp: str, workspace: Path, errors: List[str]) -> None:
-    state_md = get_state_md_path(workspace)
-    if not state_md.exists():
-        errors.append(f"STATE.md 不存在: {state_md}")
+    sync_result = check_or_fix_state_sync(workspace, fix=True)
+    if not sync_result.state_exists:
+        errors.append(f"state.json 不存在且无法从 STATE.md 迁移: {sync_result.state_json_path}")
         return
-    content = state_md.read_text(encoding="utf-8")
-    actual_cp = _extract_state_checkpoint(content, feature)
+    if sync_result.errors:
+        errors.extend(sync_result.errors)
+        return
+    actual_cp = state_rows_from_records(sync_result.records).get(feature)
     if actual_cp != expected_cp:
         errors.append(
-            f"STATE.md 中 Feature '{feature}' 的 checkpoint 应为 {expected_cp}，当前为: {actual_cp or '未设置'}"
+            f"state.json 中 Feature '{feature}' 的 checkpoint 应为 {expected_cp}，当前为: {actual_cp or '未设置'}"
         )
 
 

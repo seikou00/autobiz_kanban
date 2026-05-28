@@ -53,13 +53,23 @@ def is_nonempty(path: Path) -> bool:
     return path.is_file() and path.stat().st_size > 0
 
 
+def artifact_exists(feature_dir: Path, name: str) -> bool:
+    if any(char in name for char in "*?["):
+        return any(path.is_file() and path.stat().st_size > 0 for path in feature_dir.glob(name))
+
+    path = feature_dir / name
+    if path.is_dir():
+        return any(child.is_file() and child.stat().st_size > 0 for child in path.rglob("*"))
+    return is_nonempty(path)
+
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
 def missing_files(root: Path, slug: str, file_names: Iterable[str]) -> list[str]:
     feature_dir = root / ".autobizdevops" / "features" / slug
-    return [name for name in file_names if not is_nonempty(feature_dir / name)]
+    return [name for name in file_names if not artifact_exists(feature_dir, name)]
 
 
 def require_feature_dir(root: Path, slug: str) -> None:

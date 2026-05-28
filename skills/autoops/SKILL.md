@@ -40,13 +40,25 @@ description: Autoops Ops 阶段根路由器。基于 checkpoint 自动路由到 
 ### 1.2 确定 Feature
 
 - `--feature {slug}` 优先
-- 否则从 `.autobizdevops/STATE.md` 自动选择单一进行中的 Feature，无法唯一确定时列出候选并让用户选择
+- 否则先读取全部 State 快照，再从 `STATE.records` 自动选择单一进行中的 Feature；无法唯一确定时列出候选并让用户选择：
+
+```bash
+python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
+```
+
+确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+
+```bash
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+```
+
+后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。
 
 ---
 
 ## 2. Checkpoint 路由
 
-读取 `.autobizdevops/STATE.md` 中当前 Feature 行的 checkpoint，按以下规则路由：
+使用 Step 1.2 获取的 `CHECKPOINT`，按以下规则路由：
 
 | Checkpoint | 路由 |
 |------------|------|
@@ -65,7 +77,7 @@ description: Autoops Ops 阶段根路由器。基于 checkpoint 自动路由到 
 
 子技能返回后，根路由器必须：
 
-1. 读取 `.autobizdevops/STATE.md` 中当前 Feature 行的 checkpoint。
+1. 子技能返回后重新调用 `read_state_json.py` 重新捕获 `CHECKPOINT`。
 2. 对照下表确认是否为合法出口：
 
 | 子技能 | 合法出口 checkpoint |
