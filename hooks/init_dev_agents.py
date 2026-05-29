@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Mapping
@@ -166,13 +167,32 @@ def _resolve_sys_child(sys_dir: Path, relative_path: Path) -> Path:
     return current
 
 
+def _current_platform() -> str:
+    if sys.platform == "darwin":
+        return "darwin"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform == "win32":
+        return "win32"
+    return sys.platform
+
+
+def _link_relative(source: Path, target: Path) -> None:
+    relative_source = os.path.relpath(source, target.parent)
+    target.symlink_to(relative_source)
+
+
 def _create_relative_symlink(source: Path, target: Path, kind: str) -> dict[str, object]:
+    platform = _current_platform()
     link = {
         "kind": kind,
         "source": str(source),
         "target": str(target),
         "created": False,
         "skipped": False,
+        "platform": platform,
+        "link_type": "",
+        "fallback": False,
     }
 
     if target.exists() or target.is_symlink():
@@ -181,12 +201,26 @@ def _create_relative_symlink(source: Path, target: Path, kind: str) -> dict[str,
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        relative_source = os.path.relpath(source, target.parent)
-        target.symlink_to(relative_source)
-    except OSError as error:
-        raise DevAgentsInitError(f"failed to link {source} to {target}: {error}") from error
+        _link_relative(source, target)
+    except (OSError, ValueError) as symlink_error:
+        if platform != "win32":
+            raise DevAgentsInitError(f"failed to link {source} to {target}: {symlink_error}") from symlink_error
+
+        try:
+            shutil.copy2(source, target)
+        except (OSError, shutil.Error) as copy_error:
+            raise DevAgentsInitError(
+                f"failed to link or copy {source} to {target}: "
+                f"symlink failed: {symlink_error}; copy failed: {copy_error}"
+            ) from copy_error
+
+        link["created"] = True
+        link["link_type"] = "copy"
+        link["fallback"] = True
+        return link
 
     link["created"] = True
+    link["link_type"] = "symlink"
     return link
 
 

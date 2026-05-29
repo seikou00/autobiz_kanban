@@ -342,6 +342,121 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assert_relative_symlink(code_workspace / "BACKEND_AGENTS.md", backend)
             self.assert_relative_symlink(code_workspace / "references" / "BACKEND_DB_GUIDE.md", db_guide)
 
+    def test_windows_platform_records_symlink_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugin"
+            code_workspace = root / "code"
+            code_workspace.mkdir()
+            source = write_sys_agents(plugin_root, "abc", "abc rules\n")
+
+            with patch("hooks.init_dev_agents.sys.platform", "win32"):
+                result = init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
+
+            link = result["links"][0]
+            self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
+            self.assertEqual(link["platform"], "win32")
+            self.assertEqual(link["link_type"], "symlink")
+            self.assertFalse(link["fallback"])
+
+    def test_windows_platform_falls_back_to_copy_when_symlink_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugin"
+            code_workspace = root / "code"
+            code_workspace.mkdir()
+            write_sys_agents(plugin_root, "abc", "abc rules\n")
+
+            with patch("hooks.init_dev_agents.sys.platform", "win32"), patch(
+                "pathlib.Path.symlink_to",
+                side_effect=OSError("symlink denied"),
+            ):
+                result = init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
+
+            target = code_workspace / "AGENTS.md"
+            link = result["links"][0]
+            self.assertTrue(target.is_file())
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(target.read_text(encoding="utf-8"), "abc rules\n")
+            self.assertEqual(link["platform"], "win32")
+            self.assertEqual(link["link_type"], "copy")
+            self.assertTrue(link["fallback"])
+
+    def test_windows_platform_falls_back_to_copy_when_relpath_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugin"
+            code_workspace = root / "code"
+            code_workspace.mkdir()
+            write_sys_agents(plugin_root, "abc", "abc rules\n")
+
+            with patch("hooks.init_dev_agents.sys.platform", "win32"), patch(
+                "hooks.init_dev_agents.os.path.relpath",
+                side_effect=ValueError("path is on mount C:, start on mount D:"),
+            ):
+                result = init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
+
+            target = code_workspace / "AGENTS.md"
+            link = result["links"][0]
+            self.assertTrue(target.is_file())
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(target.read_text(encoding="utf-8"), "abc rules\n")
+            self.assertEqual(link["platform"], "win32")
+            self.assertEqual(link["link_type"], "copy")
+            self.assertTrue(link["fallback"])
+
+    def test_windows_platform_copy_fallback_applies_to_companion_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugin"
+            code_workspace = root / "code"
+            code_workspace.mkdir()
+            agents_content = "\n".join(
+                [
+                    "# abc",
+                    "",
+                    "## 文档地图",
+                    "- `{project_root}/AGENTS.md`: entry",
+                    "- `{project_root}/BACKEND_AGENTS.md`: backend",
+                ]
+            )
+            write_sys_agents(
+                plugin_root,
+                "abc",
+                agents_content,
+            )
+            write_sys_file(plugin_root, "abc", "BACKEND_AGENTS.md", "backend rules\n")
+
+            with patch("hooks.init_dev_agents.sys.platform", "win32"), patch(
+                "pathlib.Path.symlink_to",
+                side_effect=OSError("symlink denied"),
+            ):
+                result = init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
+
+            self.assertEqual(len(result["links"]), 2)
+            self.assertEqual({link["link_type"] for link in result["links"]}, {"copy"})
+            self.assertTrue(all(link["fallback"] for link in result["links"]))
+            self.assertEqual((code_workspace / "AGENTS.md").read_text(encoding="utf-8"), agents_content)
+            self.assertEqual((code_workspace / "BACKEND_AGENTS.md").read_text(encoding="utf-8"), "backend rules\n")
+
+    def test_posix_platforms_do_not_copy_when_symlink_fails(self) -> None:
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                plugin_root = root / "plugin"
+                code_workspace = root / "code"
+                code_workspace.mkdir()
+                write_sys_agents(plugin_root, "abc", "abc rules\n")
+
+                with patch("hooks.init_dev_agents.sys.platform", platform), patch(
+                    "pathlib.Path.symlink_to",
+                    side_effect=OSError("symlink denied"),
+                ):
+                    with self.assertRaisesRegex(DevAgentsInitError, "failed to link"):
+                        init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
+
+                self.assertFalse((code_workspace / "AGENTS.md").exists())
+
     def test_missing_document_map_source_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
