@@ -44,6 +44,18 @@ def validate_system_no(system_no: str) -> None:
         )
 
 
+def resolve_sys_agents_md_path(system_no: str, plugin_root: Path | None = None) -> tuple[Path, bool]:
+    source = get_sys_agents_md_path(system_no, plugin_root)
+    if source.is_file() or normalize_system_no(system_no) == normalize_system_no(DEFAULT_SYSTEM_NO):
+        return source, False
+
+    fallback_source = get_sys_agents_md_path(DEFAULT_SYSTEM_NO, plugin_root)
+    if fallback_source.is_file():
+        return fallback_source, True
+
+    return source, False
+
+
 def extract_document_map_paths(agents_md: Path) -> list[Path]:
     section = _extract_document_map_section(agents_md.read_text(encoding="utf-8"))
     if not section:
@@ -191,7 +203,7 @@ def init_dev_agents(
     system_no = resolve_system_no(env)
     validate_system_no(system_no)
 
-    source = get_sys_agents_md_path(system_no, plugin_root)
+    source, fallback_used = resolve_sys_agents_md_path(system_no, plugin_root)
     target = workspace / "AGENTS.md"
 
     result = {
@@ -201,6 +213,7 @@ def init_dev_agents(
         "system_no": system_no,
         "source": str(source),
         "target": str(target),
+        "fallback": fallback_used,
         "message": "",
     }
 
@@ -225,8 +238,9 @@ def init_dev_agents(
 
     created_count = sum(1 for link in links if link["created"])
     skipped_count = sum(1 for link in links if link["skipped"])
+    fallback_note = f" (fallback from SYSTEM_ID={system_no})" if fallback_used else ""
     result["message"] = (
-        f"AGENTS.md initialized from sys/{source.parent.name}: "
+        f"AGENTS.md initialized from sys/{source.parent.name}{fallback_note}: "
         f"{created_count} linked, {skipped_count} skipped"
     )
     return result

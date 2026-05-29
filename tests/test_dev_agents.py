@@ -129,6 +129,27 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assertEqual((code_workspace / "AGENTS.md").read_text(encoding="utf-8"), "default rules\n")
             self.assertEqual(result["system_no"], "lf3905")
 
+    def test_unmatched_system_id_falls_back_to_lf3905(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugin"
+            code_workspace = root / "code"
+            code_workspace.mkdir()
+            source = write_sys_agents(plugin_root, "LF3905", "default rules\n")
+
+            result = init_dev_agents(
+                code_workspace,
+                env={"SYSTEM_ID": "123"},
+                plugin_root=plugin_root,
+            )
+
+            self.assertTrue(result["created"])
+            self.assertTrue(result["fallback"])
+            self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
+            self.assertEqual(result["system_no"], "123")
+            self.assertEqual(result["source"], str(source.resolve()))
+            self.assertIn("fallback from SYSTEM_ID=123", result["message"])
+
     def test_existing_agents_is_not_overwritten_and_companions_still_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -383,8 +404,8 @@ class LoadSysAgentsTests(unittest.TestCase):
             workspace.mkdir()
 
             with patch.dict(os.environ, {"SYSTEM_ID": "abc"}), patch(
-                "hooks.load_sys_agents.get_sys_agents_md_path",
-                return_value=source,
+                "hooks.load_sys_agents.resolve_sys_agents_md_path",
+                return_value=(source, False),
             ):
                 result = load_sys_agents(workspace)
 
@@ -393,6 +414,26 @@ class LoadSysAgentsTests(unittest.TestCase):
             self.assertEqual(result["system_no"], "abc")
             self.assertEqual(result["content"], "abc rules\n")
             self.assertIn("sys/abc/AGENTS.md", result["message"])
+
+    def test_load_sys_agents_falls_back_when_system_id_is_unmatched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = write_sys_agents(root / "plugin", "LF3905", "default rules\n")
+            workspace = root / "workspace"
+            workspace.mkdir()
+
+            with patch.dict(os.environ, {"SYSTEM_ID": "123"}), patch(
+                "hooks.load_sys_agents.resolve_sys_agents_md_path",
+                return_value=(source, True),
+            ):
+                result = load_sys_agents(workspace)
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["skipped"])
+            self.assertTrue(result["fallback"])
+            self.assertEqual(result["system_no"], "123")
+            self.assertEqual(result["content"], "default rules\n")
+            self.assertIn("回退", result["message"])
 
 
 if __name__ == "__main__":
