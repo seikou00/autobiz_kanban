@@ -225,12 +225,13 @@ def _create_relative_symlink(source: Path, target: Path, kind: str) -> dict[str,
 
 
 def init_dev_agents(
-    code_workspace: Path,
+    code_workspace: Path | None = None,
     *,
     env: Mapping[str, str] | None = None,
     plugin_root: Path | None = None,
 ) -> dict[str, object]:
-    workspace = code_workspace.expanduser().resolve(strict=False)
+    workspace = Path(os.getcwd()) if code_workspace is None else code_workspace
+    workspace = workspace.expanduser().resolve(strict=False)
     if not workspace.is_dir():
         raise DevAgentsInitError(f"code workspace does not exist: {workspace}")
 
@@ -282,11 +283,14 @@ def init_dev_agents(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Initialize Dev AGENTS.md from sys SYSTEM_ID")
-    parser.add_argument("--code-workspace", required=True, help="Code workspace path")
+    parser.add_argument(
+        "--code-workspace",
+        help="Code workspace path (defaults to current working directory)",
+    )
     args = parser.parse_args()
 
     try:
-        result = init_dev_agents(Path(args.code_workspace))
+        result = init_dev_agents(Path(args.code_workspace) if args.code_workspace else None)
     except DevAgentsInitError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
