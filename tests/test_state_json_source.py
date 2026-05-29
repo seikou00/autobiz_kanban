@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from board_core.artifacts import scan_artifacts  # noqa: E402
 from board_core.state_store import (  # noqa: E402
     STATE_SCHEMA_VERSION,
     check_or_fix_state_sync,
@@ -163,6 +164,134 @@ class StateStoreTests(unittest.TestCase):
             self.assertIn("未知 checkpoint", "\n".join(result.errors))
 
 
+class ArtifactScanTests(unittest.TestCase):
+    def test_scan_file_artifact_returns_paths_array(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            (feature_dir / "PRD.md").write_text("prd", encoding="utf-8")
+
+            artifacts = scan_artifacts(
+                feature_dir,
+                workspace,
+                [{"id": "prd", "path": "PRD.md"}],
+            )
+
+            self.assertEqual(
+                artifacts,
+                [
+                    {
+                        "id": "prd",
+                        "paths": [".autobizdevops/features/alpha/PRD.md"],
+                        "status": {"label": "已生成", "uiKind": "ok"},
+                    }
+                ],
+            )
+
+    def test_scan_missing_file_artifact_keeps_expected_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+
+            artifacts = scan_artifacts(
+                feature_dir,
+                workspace,
+                [{"id": "prd", "path": "PRD.md"}],
+            )
+
+            self.assertEqual(
+                artifacts,
+                [
+                    {
+                        "id": "prd",
+                        "paths": [".autobizdevops/features/alpha/PRD.md"],
+                        "status": {"label": "未生成", "uiKind": "warning"},
+                    }
+                ],
+            )
+
+    def test_scan_specs_glob_returns_all_matching_md_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            (feature_dir / "specs" / "foo").mkdir(parents=True)
+            (feature_dir / "specs" / "bar").mkdir(parents=True)
+            (feature_dir / "specs" / "foo" / "spec.md").write_text("foo", encoding="utf-8")
+            (feature_dir / "specs" / "bar" / "spec.md").write_text("bar", encoding="utf-8")
+            (feature_dir / "specs" / "bar" / "notes.txt").write_text("skip", encoding="utf-8")
+
+            artifacts = scan_artifacts(
+                feature_dir,
+                workspace,
+                [{"id": "specs", "path": "specs/**/*.md"}],
+            )
+
+            self.assertEqual(
+                artifacts,
+                [
+                    {
+                        "id": "specs",
+                        "paths": [
+                            ".autobizdevops/features/alpha/specs/bar/spec.md",
+                            ".autobizdevops/features/alpha/specs/foo/spec.md",
+                        ],
+                        "status": {"label": "已生成", "uiKind": "ok"},
+                    }
+                ],
+            )
+
+    def test_scan_specs_glob_without_matches_returns_empty_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+
+            artifacts = scan_artifacts(
+                feature_dir,
+                workspace,
+                [{"id": "specs", "path": "specs/**/*.md"}],
+            )
+
+            self.assertEqual(
+                artifacts,
+                [
+                    {
+                        "id": "specs",
+                        "paths": [],
+                        "status": {"label": "未生成", "uiKind": "warning"},
+                    }
+                ],
+            )
+
+    def test_scan_rejects_non_specs_glob_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+
+            with self.assertRaises(ValueError):
+                scan_artifacts(
+                    feature_dir,
+                    workspace,
+                    [{"id": "logs", "path": "logs/**/*.md"}],
+                )
+
+    def test_scan_rejects_specs_glob_with_multiple_recursive_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+
+            with self.assertRaises(ValueError):
+                scan_artifacts(
+                    feature_dir,
+                    workspace,
+                    [{"id": "specs", "path": "specs/**/**/*.md"}],
+                )
+
+
 class StateIntegrationTests(unittest.TestCase):
     def test_update_checkpoint_cli_writes_json_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,6 +380,54 @@ class StateIntegrationTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["run"]["currentNodeId"], "biz.prd")
             self.assertIn("prd_done", (project / ".autobizdevops" / "STATE.md").read_text(encoding="utf-8"))
+
+    def test_inspect_run_returns_paths_for_specs_glob_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = make_workspace(root / "collection")
+            project.rename(root / "collection" / "proj")
+            project = root / "collection" / "proj"
+            feature_dir = project / ".autobizdevops" / "features" / "alpha"
+            (feature_dir / "specs" / "foo").mkdir(parents=True)
+            (feature_dir / "specs" / "bar").mkdir(parents=True)
+            (feature_dir / "proposal.md").write_text("proposal", encoding="utf-8")
+            (feature_dir / "specs" / "foo" / "spec.md").write_text("foo", encoding="utf-8")
+            (feature_dir / "specs" / "bar" / "spec.md").write_text("bar", encoding="utf-8")
+            write_state_records(project, {"alpha": sample_record("specs_done")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "inspect_state.py"),
+                    "--workspace",
+                    str(root / "collection"),
+                    "--project",
+                    "proj",
+                    "--mode",
+                    "run",
+                    "--feature",
+                    "alpha",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            nodes = {node["id"]: node for node in payload["run"]["nodes"]}
+            specs_artifact = next(
+                artifact for artifact in nodes["dev.specs"]["artifacts"] if artifact["id"] == "specs"
+            )
+            self.assertNotIn("path", specs_artifact)
+            self.assertEqual(
+                specs_artifact["paths"],
+                [
+                    ".autobizdevops/features/alpha/specs/bar/spec.md",
+                    ".autobizdevops/features/alpha/specs/foo/spec.md",
+                ],
+            )
+            self.assertEqual(specs_artifact["status"], {"label": "已生成", "uiKind": "ok"})
 
     def test_read_state_json_cli_reads_specific_feature_without_repairing_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
