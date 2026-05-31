@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.artifacts import scan_artifacts  # noqa: E402
+from board_core.contracts import BoardConfigError, load_board_config  # noqa: E402
 from board_core.state_store import (  # noqa: E402
     STATE_SCHEMA_VERSION,
     check_or_fix_state_sync,
@@ -21,6 +22,7 @@ from board_core.state_store import (  # noqa: E402
     state_json_content_from_records,
     write_state_records,
 )
+from board_core.workflow import build_workflow_shell  # noqa: E402
 from hooks.update_checkpoint import prepare_checkpoint_update  # noqa: E402
 
 
@@ -380,6 +382,63 @@ class StateIntegrationTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["run"]["currentNodeId"], "biz.prd")
             self.assertIn("prd_done", (project / ".autobizdevops" / "STATE.md").read_text(encoding="utf-8"))
+
+    def test_inspect_workflow_states_include_configured_next_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = make_workspace(root / "collection")
+            project.rename(root / "collection" / "proj")
+            project = root / "collection" / "proj"
+            write_state_records(project, {"alpha": sample_record("code_in_progress")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "inspect_state.py"),
+                    "--workspace",
+                    str(root / "collection"),
+                    "--project",
+                    "proj",
+                    "--mode",
+                    "run",
+                    "--feature",
+                    "alpha",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            workflow_nodes = {node["id"]: node for node in payload["workflow"]["nodes"]}
+
+            def next_action(node_id: str, state_id: str) -> dict:
+                states = {state["id"]: state for state in workflow_nodes[node_id]["states"]}
+                return states[state_id]["nextAction"]
+
+            self.assertEqual(
+                next_action("biz.discuss", "not_started")["slashSkill"],
+                "autobiz-requirement-discuss",
+            )
+            self.assertEqual(next_action("biz.discuss", "done")["slashSkill"], "autobiz-prd-generate")
+            self.assertEqual(next_action("dev.code", "in_progress")["slashSkill"], "autodev-code")
+            self.assertEqual(next_action("dev.code", "done")["slashSkill"], "autodev-reviewer")
+            self.assertEqual(next_action("ops.archive", "archived")["slashSkill"], "autoops-archive")
+            self.assertEqual(
+                next_action("ops.archive", "archived")["userMessage"],
+                "请使用 /autoops-archive 查看当前 Feature 的归档状态。",
+            )
+
+    def test_workflow_shell_rejects_state_missing_next_action(self) -> None:
+        config = load_board_config(ROOT / "board_core" / "board_config.json")
+        config["workflow"]["nodes"][0]["states"][0].pop("nextAction")
+
+        with self.assertRaisesRegex(
+            BoardConfigError,
+            r"biz\.discuss\.states\[0\]\.nextAction must be an object",
+        ):
+            build_workflow_shell(config)
 
     def test_inspect_run_returns_paths_for_specs_glob_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

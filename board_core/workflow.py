@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from board_core.contracts import artifact_dicts
+from board_core.contracts import BoardConfigError, artifact_dicts
+
+
+NEXT_ACTION_FIELDS = ("slashSkill", "userMessage", "dialogTips")
 
 
 def extract_checkpoint_suffix(checkpoint: str) -> str | None:
@@ -96,6 +99,37 @@ def build_workflow_fallback_states(config: dict) -> list[dict]:
     return list(by_id.values())
 
 
+def _normalize_next_action(value: object, *, context: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise BoardConfigError(f"{context}.nextAction must be an object")
+
+    next_action: dict[str, str] = {}
+    for field in NEXT_ACTION_FIELDS:
+        item = value.get(field)
+        if not isinstance(item, str) or not item.strip():
+            raise BoardConfigError(f"{context}.nextAction.{field} must be a non-empty string")
+        next_action[field] = item
+    return next_action
+
+
+def _normalize_node_states(node: dict) -> list[dict]:
+    node_id = node.get("id", "<unknown>")
+    states = node.get("states", [])
+    if not isinstance(states, list):
+        raise BoardConfigError(f"{node_id}.states must be a list")
+
+    clean_states: list[dict] = []
+    for index, state in enumerate(states):
+        context = f"{node_id}.states[{index}]"
+        if not isinstance(state, dict):
+            raise BoardConfigError(f"{context} must be an object")
+        clean_states.append({
+            **state,
+            "nextAction": _normalize_next_action(state.get("nextAction"), context=context),
+        })
+    return clean_states
+
+
 def build_workflow_shell(config: dict) -> dict:
     """Build workflow shell from config — strips internal mapping fields.
 
@@ -118,6 +152,7 @@ def build_workflow_shell(config: dict) -> dict:
             for k, v in node.items()
             if k not in {"checkpoints", "order", "skill", "artifacts", "validators"}
         }
+        clean["states"] = _normalize_node_states(node)
         clean["artifactDefinitions"] = [
             {k: v for k, v in art.items() if k != "path"}
             for art in artifact_dicts(node, "outputs")

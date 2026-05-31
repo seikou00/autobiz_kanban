@@ -106,9 +106,9 @@
         "order": 10,
         "description": "沉淀需求讨论稿",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } }
         ],
         "checkpoints": ["discuss_in_progress", "discuss_done"],
         "artifacts": {
@@ -130,9 +130,9 @@
         "order": 20,
         "description": "生成正式 PRD 文档",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "当前阶段：行为规格。" } }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {
@@ -156,9 +156,9 @@
         "order": 30,
         "description": "生成 proposal 与行为规格",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "当前阶段：行为规格。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "当前阶段：行为规格。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } }
         ],
         "checkpoints": ["specs_in_progress", "specs_done"],
         "artifacts": {
@@ -180,9 +180,9 @@
         "order": 40,
         "description": "生成技术设计和执行计划",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } }
         ],
         "checkpoints": ["plan_in_progress", "plan_done"],
         "artifacts": {
@@ -205,9 +205,9 @@
         "order": 50,
         "description": "根据规格、设计和计划实现代码",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autodev-reviewer", "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。", "dialogTips": "当前阶段：需求实现评审。" } }
         ],
         "checkpoints": ["code_in_progress", "code_done"],
         "artifacts": {
@@ -232,9 +232,9 @@
         "order": 60,
         "description": "评审代码实现是否满足规格",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autodev-reviewer", "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。", "dialogTips": "当前阶段：需求实现评审。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autodev-reviewer", "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。", "dialogTips": "当前阶段：需求实现评审。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } }
         ],
         "checkpoints": ["requirements_eval_in_progress", "requirements_eval_done"],
         "artifacts": {
@@ -259,9 +259,9 @@
         "order": 70,
         "description": "单元测试生成、验证与最小修复",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } }
         ],
         "checkpoints": ["unit_test_in_progress", "unit_test_done"],
         "artifacts": {
@@ -288,9 +288,9 @@
         "order": 80,
         "description": "端到端测试",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autodev-verify", "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。", "dialogTips": "当前阶段：验收汇总。" } }
         ],
         "checkpoints": ["e2e_in_progress", "e2e_done"],
         "artifacts": {
@@ -320,9 +320,9 @@
         "order": 90,
         "description": "验收汇总",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autodev-verify", "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。", "dialogTips": "当前阶段：验收汇总。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autodev-verify", "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。", "dialogTips": "当前阶段：验收汇总。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autoops-cicd", "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。", "dialogTips": "当前阶段：CI/CD。" } }
         ],
         "checkpoints": ["verify_in_progress", "verify_done"],
         "artifacts": {
@@ -351,9 +351,9 @@
         "order": 100,
         "description": "CI/CD 流水线和 PR 准备",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "in_progress", "label": "进行中", "uiKind": "active" },
-          { "id": "done", "label": "已完成", "uiKind": "done" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autoops-cicd", "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。", "dialogTips": "当前阶段：CI/CD。" } },
+          { "id": "in_progress", "label": "进行中", "uiKind": "active", "nextAction": { "slashSkill": "autoops-cicd", "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。", "dialogTips": "当前阶段：CI/CD。" } },
+          { "id": "done", "label": "已完成", "uiKind": "done", "nextAction": { "slashSkill": "autoops-archive", "userMessage": "请使用 /autoops-archive 继续推进当前 Feature。", "dialogTips": "当前阶段：归档。" } }
         ],
         "checkpoints": ["cicd_in_progress", "cicd_done"],
         "artifacts": {
@@ -375,8 +375,8 @@
         "order": 110,
         "description": "Feature 归档",
         "states": [
-          { "id": "not_started", "label": "未开始", "uiKind": "pending" },
-          { "id": "archived", "label": "已归档", "uiKind": "archived" }
+          { "id": "not_started", "label": "未开始", "uiKind": "pending", "nextAction": { "slashSkill": "autoops-archive", "userMessage": "请使用 /autoops-archive 继续推进当前 Feature。", "dialogTips": "当前阶段：归档。" } },
+          { "id": "archived", "label": "已归档", "uiKind": "archived", "nextAction": { "slashSkill": "autoops-archive", "userMessage": "请使用 /autoops-archive 查看当前 Feature 的归档状态。", "dialogTips": "当前阶段：归档。" } }
         ],
         "checkpoints": ["archived"],
         "artifacts": {
