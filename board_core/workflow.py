@@ -6,6 +6,24 @@ from board_core.contracts import BoardConfigError, artifact_dicts
 
 
 NEXT_ACTION_FIELDS = ("slashSkill", "userMessage", "dialogTips")
+NODE_STATUSES = {
+    "not_started",
+    "in_progress",
+    "done",
+    "blocked",
+    "skipped",
+    "archived",
+    "unknown",
+}
+DEFAULT_NODE_STATUS_LABELS = {
+    "not_started": "未开始",
+    "in_progress": "进行中",
+    "done": "已完成",
+    "blocked": "已阻塞",
+    "skipped": "已跳过",
+    "archived": "已归档",
+    "unknown": "未知",
+}
 
 
 def extract_checkpoint_suffix(checkpoint: str) -> str | None:
@@ -42,14 +60,20 @@ def find_current_node(
     return -1, None
 
 
-def derive_node_state_id(
+def _normalize_node_status(value: object) -> str:
+    if isinstance(value, str) and value in NODE_STATUSES:
+        return value
+    return "unknown"
+
+
+def derive_node_status(
     node_idx: int,
     current_idx: int,
     current_checkpoint: str,
     node: dict,
     suffix_states: dict,
 ) -> str:
-    """Return the workflow state id for a single node based on current position."""
+    """Return the board node status for a single node based on current position."""
     if current_checkpoint == "archived":
         return "archived" if node["id"] == "ops.archive" else "done"
 
@@ -62,14 +86,14 @@ def derive_node_state_id(
         return "not_started"
 
     suffix = extract_checkpoint_suffix(current_checkpoint)
-    state = suffix_states.get(suffix, {"id": "unknown"})
-    return state.get("id") or "unknown"
+    state = suffix_states.get(suffix, {"nodeStatus": "unknown"})
+    return _normalize_node_status(state.get("nodeStatus"))
 
 
-def derive_current_state_id(
+def derive_current_node_status(
     checkpoint: str, suffix_states: dict, current_idx: int,
 ) -> str:
-    """Return the current run state id for project summaries."""
+    """Return the current run node status for project summaries."""
     if checkpoint == "needs_fix":
         return "blocked"
     if checkpoint == "archived":
@@ -79,24 +103,25 @@ def derive_current_state_id(
     suffix = extract_checkpoint_suffix(checkpoint)
     if suffix is None:
         return "unknown"
-    state = suffix_states.get(suffix, {"id": "unknown"})
-    return state.get("id") or "unknown"
+    state = suffix_states.get(suffix, {"nodeStatus": "unknown"})
+    return _normalize_node_status(state.get("nodeStatus"))
 
 
 def build_workflow_fallback_states(config: dict) -> list[dict]:
     """Build workflow-level fallback states for statuses not tied to a node."""
-    by_id: dict[str, dict] = {
-        "unknown": {"id": "unknown", "label": "未知", "uiKind": "unknown"},
+    by_status: dict[str, dict] = {
+        "unknown": {
+            "nodeStatus": "unknown",
+            "label": DEFAULT_NODE_STATUS_LABELS["unknown"],
+        },
     }
     for state in config.get("checkpointSuffixState", {}).values():
-        state_id = state.get("id")
-        if state_id:
-            by_id[state_id] = {
-                "id": state_id,
-                "label": state.get("label", state_id),
-                "uiKind": state.get("uiKind", "unknown"),
-            }
-    return list(by_id.values())
+        node_status = _normalize_node_status(state.get("nodeStatus"))
+        by_status[node_status] = {
+            "nodeStatus": node_status,
+            "label": state.get("label", DEFAULT_NODE_STATUS_LABELS[node_status]),
+        }
+    return list(by_status.values())
 
 
 def _normalize_next_action(value: object, *, context: str) -> dict[str, str]:
@@ -123,8 +148,12 @@ def _normalize_node_states(node: dict) -> list[dict]:
         context = f"{node_id}.states[{index}]"
         if not isinstance(state, dict):
             raise BoardConfigError(f"{context} must be an object")
+        node_status = _normalize_node_status(state.get("nodeStatus"))
+        if node_status == "unknown" and state.get("nodeStatus") != "unknown":
+            raise BoardConfigError(f"{context}.nodeStatus must be a supported node status")
         clean_states.append({
-            **state,
+            "nodeStatus": node_status,
+            "label": state.get("label", DEFAULT_NODE_STATUS_LABELS[node_status]),
             "nextAction": _normalize_next_action(state.get("nextAction"), context=context),
         })
     return clean_states
