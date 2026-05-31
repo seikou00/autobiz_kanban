@@ -127,7 +127,6 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
 
     # Assemble output
     output = {
-        "schemaVersion": "cmbdevclaw_v1",
         "workflow": build_workflow_shell(config),
         "run": {
             "featureId": feature,
@@ -155,7 +154,7 @@ def _resolve_project_workspace(workspace: Path, project: str) -> Path:
 
 
 def _collect_project_runs(project_workspace: Path, config: dict, project: str) -> list[dict]:
-    """返回某个 project 下所有 feature 的 runs 摘要列表（不包含 schemaVersion/workflow 外壳）"""
+    """返回某个 project 下所有 feature 的 runs 摘要列表（不包含 workflow 外壳）"""
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
@@ -194,7 +193,6 @@ def project_mode(workspace: Path, projects: list[str], config: dict) -> int:
         all_projects[project] = {"runs": runs}
 
     output = {
-        "schemaVersion": "cmbdevclaw_v1",
         "workflow": build_workflow_shell(config),
         "projects": all_projects,
     }

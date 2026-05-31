@@ -136,6 +136,7 @@ def build_workflow_shell(config: dict) -> dict:
     Removes from output:
     - top-level ``id``, ``version``, and ``kind``
     - workflow-level ``checkpoints`` (contract-only checkpoint matrix)
+    - workflow-level ``transitions`` (the board currently treats nodes as a linear sequence)
     - node-level ``checkpoints`` (internal checkpoint→node mapping)
     - ``order``, ``skill``, ``artifacts``, and ``validators`` from nodes
     - ``path`` from each output artifact definition
@@ -143,7 +144,7 @@ def build_workflow_shell(config: dict) -> dict:
     workflow = {
         k: v
         for k, v in config["workflow"].items()
-        if k not in {"id", "version", "kind", "checkpoints"}
+        if k not in {"id", "version", "kind", "checkpoints", "transitions"}
     }
     clean_nodes: list[dict] = []
     for node in workflow["nodes"]:
