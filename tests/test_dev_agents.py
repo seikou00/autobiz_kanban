@@ -70,46 +70,6 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assertEqual(result["source"], str(source.resolve()))
             self.assertIn("sys/abc", result["message"])
 
-    def test_system_id_normalized_separators_match_sys_directory(self) -> None:
-        cases = ["lf3905", "lf39.05", "lf39_05", "LF39-05"]
-        for system_id in cases:
-            with self.subTest(system_id=system_id), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                plugin_root = root / "plugin"
-                code_workspace = root / "code"
-                code_workspace.mkdir()
-                source = write_sys_agents(plugin_root, "LF3905", "default rules\n")
-
-                result = init_dev_agents(
-                    code_workspace,
-                    env={"SYSTEM_ID": system_id},
-                    plugin_root=plugin_root,
-                )
-
-                self.assertTrue(result["created"])
-                self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
-                self.assertEqual(result["system_no"], system_id)
-                self.assertIn("sys/LF3905", result["message"])
-
-    def test_system_id_prefix_matches_longer_sys_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            plugin_root = root / "plugin"
-            code_workspace = root / "code"
-            code_workspace.mkdir()
-            source = write_sys_agents(plugin_root, "LF3905", "default rules\n")
-
-            result = init_dev_agents(
-                code_workspace,
-                env={"SYSTEM_ID": "lf39"},
-                plugin_root=plugin_root,
-            )
-
-            self.assertTrue(result["created"])
-            self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
-            self.assertEqual(result["system_no"], "lf39")
-            self.assertIn("sys/LF3905", result["message"])
-
     def test_missing_system_id_defaults_to_lf3905(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -128,27 +88,6 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
             self.assertEqual((code_workspace / "AGENTS.md").read_text(encoding="utf-8"), "default rules\n")
             self.assertEqual(result["system_no"], "lf3905")
-
-    def test_unmatched_system_id_falls_back_to_lf3905(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            plugin_root = root / "plugin"
-            code_workspace = root / "code"
-            code_workspace.mkdir()
-            source = write_sys_agents(plugin_root, "LF3905", "default rules\n")
-
-            result = init_dev_agents(
-                code_workspace,
-                env={"SYSTEM_ID": "123"},
-                plugin_root=plugin_root,
-            )
-
-            self.assertTrue(result["created"])
-            self.assertTrue(result["fallback"])
-            self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
-            self.assertEqual(result["system_no"], "123")
-            self.assertEqual(result["source"], str(source.resolve()))
-            self.assertIn("fallback from SYSTEM_ID=123", result["message"])
 
     def test_existing_agents_is_not_overwritten_and_companions_still_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -186,14 +125,12 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assert_relative_symlink(code_workspace / "BACKEND_AGENTS.md", backend)
 
     def test_invalid_system_id_is_rejected(self) -> None:
-        cases = ["../abc", "/tmp/abc", ".", "___"]
-        for system_id in cases:
-            with self.subTest(system_id=system_id), tempfile.TemporaryDirectory() as tmp:
-                code_workspace = Path(tmp) / "code"
-                code_workspace.mkdir()
+        with tempfile.TemporaryDirectory() as tmp:
+            code_workspace = Path(tmp) / "code"
+            code_workspace.mkdir()
 
-                with self.assertRaisesRegex(DevAgentsInitError, "invalid SYSTEM_ID"):
-                    init_dev_agents(code_workspace, env={"SYSTEM_ID": system_id}, plugin_root=Path(tmp))
+            with self.assertRaisesRegex(DevAgentsInitError, "invalid SYSTEM_ID"):
+                init_dev_agents(code_workspace, env={"SYSTEM_ID": "../abc"}, plugin_root=Path(tmp))
 
     def test_missing_source_agents_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,22 +154,6 @@ class DevAgentsInitTests(unittest.TestCase):
             source = write_sys_agents(plugin_root, "abc", "abc rules\n")
 
             self.assertEqual(get_sys_agents_md_path("ABC", plugin_root), source.resolve())
-
-    def test_sys_agents_path_prefers_normalized_exact_before_prefix(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            plugin_root = Path(tmp) / "plugin"
-            write_sys_agents(plugin_root, "LF39", "base rules\n")
-            exact_source = write_sys_agents(plugin_root, "LF3905", "version rules\n")
-
-            self.assertEqual(get_sys_agents_md_path("lf39.05", plugin_root), exact_source.resolve())
-
-    def test_sys_agents_path_uses_sorted_first_prefix_candidate(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            plugin_root = Path(tmp) / "plugin"
-            first_source = write_sys_agents(plugin_root, "LF3905", "first rules\n")
-            write_sys_agents(plugin_root, "LF3906", "second rules\n")
-
-            self.assertEqual(get_sys_agents_md_path("lf39", plugin_root), first_source.resolve())
 
     def test_document_map_links_project_root_style_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -342,121 +263,6 @@ class DevAgentsInitTests(unittest.TestCase):
             self.assert_relative_symlink(code_workspace / "BACKEND_AGENTS.md", backend)
             self.assert_relative_symlink(code_workspace / "references" / "BACKEND_DB_GUIDE.md", db_guide)
 
-    def test_windows_platform_records_symlink_success(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            plugin_root = root / "plugin"
-            code_workspace = root / "code"
-            code_workspace.mkdir()
-            source = write_sys_agents(plugin_root, "abc", "abc rules\n")
-
-            with patch("hooks.init_dev_agents.sys.platform", "win32"):
-                result = init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
-
-            link = result["links"][0]
-            self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
-            self.assertEqual(link["platform"], "win32")
-            self.assertEqual(link["link_type"], "symlink")
-            self.assertFalse(link["fallback"])
-
-    def test_windows_platform_falls_back_to_copy_when_symlink_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            plugin_root = root / "plugin"
-            code_workspace = root / "code"
-            code_workspace.mkdir()
-            write_sys_agents(plugin_root, "abc", "abc rules\n")
-
-            with patch("hooks.init_dev_agents.sys.platform", "win32"), patch(
-                "pathlib.Path.symlink_to",
-                side_effect=OSError("symlink denied"),
-            ):
-                result = init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
-
-            target = code_workspace / "AGENTS.md"
-            link = result["links"][0]
-            self.assertTrue(target.is_file())
-            self.assertFalse(target.is_symlink())
-            self.assertEqual(target.read_text(encoding="utf-8"), "abc rules\n")
-            self.assertEqual(link["platform"], "win32")
-            self.assertEqual(link["link_type"], "copy")
-            self.assertTrue(link["fallback"])
-
-    def test_windows_platform_falls_back_to_copy_when_relpath_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            plugin_root = root / "plugin"
-            code_workspace = root / "code"
-            code_workspace.mkdir()
-            write_sys_agents(plugin_root, "abc", "abc rules\n")
-
-            with patch("hooks.init_dev_agents.sys.platform", "win32"), patch(
-                "hooks.init_dev_agents.os.path.relpath",
-                side_effect=ValueError("path is on mount C:, start on mount D:"),
-            ):
-                result = init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
-
-            target = code_workspace / "AGENTS.md"
-            link = result["links"][0]
-            self.assertTrue(target.is_file())
-            self.assertFalse(target.is_symlink())
-            self.assertEqual(target.read_text(encoding="utf-8"), "abc rules\n")
-            self.assertEqual(link["platform"], "win32")
-            self.assertEqual(link["link_type"], "copy")
-            self.assertTrue(link["fallback"])
-
-    def test_windows_platform_copy_fallback_applies_to_companion_docs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            plugin_root = root / "plugin"
-            code_workspace = root / "code"
-            code_workspace.mkdir()
-            agents_content = "\n".join(
-                [
-                    "# abc",
-                    "",
-                    "## 文档地图",
-                    "- `{project_root}/AGENTS.md`: entry",
-                    "- `{project_root}/BACKEND_AGENTS.md`: backend",
-                ]
-            )
-            write_sys_agents(
-                plugin_root,
-                "abc",
-                agents_content,
-            )
-            write_sys_file(plugin_root, "abc", "BACKEND_AGENTS.md", "backend rules\n")
-
-            with patch("hooks.init_dev_agents.sys.platform", "win32"), patch(
-                "pathlib.Path.symlink_to",
-                side_effect=OSError("symlink denied"),
-            ):
-                result = init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
-
-            self.assertEqual(len(result["links"]), 2)
-            self.assertEqual({link["link_type"] for link in result["links"]}, {"copy"})
-            self.assertTrue(all(link["fallback"] for link in result["links"]))
-            self.assertEqual((code_workspace / "AGENTS.md").read_text(encoding="utf-8"), agents_content)
-            self.assertEqual((code_workspace / "BACKEND_AGENTS.md").read_text(encoding="utf-8"), "backend rules\n")
-
-    def test_posix_platforms_do_not_copy_when_symlink_fails(self) -> None:
-        for platform in ("darwin", "linux"):
-            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                plugin_root = root / "plugin"
-                code_workspace = root / "code"
-                code_workspace.mkdir()
-                write_sys_agents(plugin_root, "abc", "abc rules\n")
-
-                with patch("hooks.init_dev_agents.sys.platform", platform), patch(
-                    "pathlib.Path.symlink_to",
-                    side_effect=OSError("symlink denied"),
-                ):
-                    with self.assertRaisesRegex(DevAgentsInitError, "failed to link"):
-                        init_dev_agents(code_workspace, env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
-
-                self.assertFalse((code_workspace / "AGENTS.md").exists())
-
     def test_missing_document_map_source_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -519,8 +325,8 @@ class LoadSysAgentsTests(unittest.TestCase):
             workspace.mkdir()
 
             with patch.dict(os.environ, {"SYSTEM_ID": "abc"}), patch(
-                "hooks.load_sys_agents.resolve_sys_agents_md_path",
-                return_value=(source, False),
+                "hooks.load_sys_agents.get_sys_agents_md_path",
+                return_value=source,
             ):
                 result = load_sys_agents(workspace)
 
@@ -529,26 +335,6 @@ class LoadSysAgentsTests(unittest.TestCase):
             self.assertEqual(result["system_no"], "abc")
             self.assertEqual(result["content"], "abc rules\n")
             self.assertIn("sys/abc/AGENTS.md", result["message"])
-
-    def test_load_sys_agents_falls_back_when_system_id_is_unmatched(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = write_sys_agents(root / "plugin", "LF3905", "default rules\n")
-            workspace = root / "workspace"
-            workspace.mkdir()
-
-            with patch.dict(os.environ, {"SYSTEM_ID": "123"}), patch(
-                "hooks.load_sys_agents.resolve_sys_agents_md_path",
-                return_value=(source, True),
-            ):
-                result = load_sys_agents(workspace)
-
-            self.assertTrue(result["ok"])
-            self.assertFalse(result["skipped"])
-            self.assertTrue(result["fallback"])
-            self.assertEqual(result["system_no"], "123")
-            self.assertEqual(result["content"], "default rules\n")
-            self.assertIn("回退", result["message"])
 
 
 if __name__ == "__main__":

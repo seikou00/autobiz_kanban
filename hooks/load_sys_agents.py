@@ -13,22 +13,12 @@ from pathlib import Path
 from typing import Dict, Optional
 
 try:
-    from init_dev_agents import (
-        DevAgentsInitError,
-        resolve_sys_agents_md_path,
-        resolve_system_no,
-        validate_system_no,
-    )
-    from paths import get_workspace
+    from init_dev_agents import DevAgentsInitError, resolve_system_no, validate_system_no
+    from paths import get_sys_agents_md_path, get_workspace
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
-    from init_dev_agents import (  # type: ignore[no-redef]
-        DevAgentsInitError,
-        resolve_sys_agents_md_path,
-        resolve_system_no,
-        validate_system_no,
-    )
-    from paths import get_workspace  # type: ignore[no-redef]
+    from init_dev_agents import DevAgentsInitError, resolve_system_no, validate_system_no  # type: ignore[no-redef]
+    from paths import get_sys_agents_md_path, get_workspace  # type: ignore[no-redef]
 
 
 def load_sys_agents(workspace: Optional[Path] = None) -> Dict[str, object]:
@@ -41,7 +31,6 @@ def load_sys_agents(workspace: Optional[Path] = None) -> Dict[str, object]:
         "system_no": None,
         "agents_md_path": None,
         "content": "",
-        "fallback": False,
         "message": "",
     }
 
@@ -53,23 +42,21 @@ def load_sys_agents(workspace: Optional[Path] = None) -> Dict[str, object]:
         result["message"] = f"系统上下文加载失败：{error}"
         return result
 
-    agents_md, fallback_used = resolve_sys_agents_md_path(system_no)
+    agents_md = get_sys_agents_md_path(system_no)
     result["sysid"] = system_no
     result["system_no"] = system_no
     result["agents_md_path"] = str(agents_md)
-    result["fallback"] = fallback_used
 
     if not agents_md.exists():
         result["skipped"] = True
         result["message"] = (
             f"跳过可选系统上下文加载："
-            f"SYSTEM_ID={system_no} 对应的 AGENTS.md 不存在，且默认 SYSTEM_ID=lf3905 不可用: {agents_md}"
+            f"SYSTEM_ID={system_no} 对应的 AGENTS.md 不存在: {agents_md}"
         )
         return result
 
     result["content"] = agents_md.read_text(encoding="utf-8")
-    fallback_note = f"，由 SYSTEM_ID={system_no} 回退" if fallback_used else ""
-    result["message"] = f"成功加载 sys/{agents_md.parent.name}/AGENTS.md{fallback_note} ({len(result['content'])} 字符)"
+    result["message"] = f"成功加载 sys/{agents_md.parent.name}/AGENTS.md ({len(result['content'])} 字符)"
     return result
 
 
