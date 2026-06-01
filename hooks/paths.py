@@ -132,6 +132,10 @@ def get_project_md_path(workspace: Optional[PathLike] = None) -> Path:
     return get_autobizdevops_dir(workspace) / "PROJECT.md"
 
 
+def get_sys_agents_md_path(system_no: str, workspace: Optional[PathLike] = None) -> Path:
+    return get_workspace(workspace) / "sys" / system_no / "AGENTS.md"
+
+
 def ensure_dir(path: PathLike) -> Path:
     resolved = Path(path)
     resolved.mkdir(parents=True, exist_ok=True)

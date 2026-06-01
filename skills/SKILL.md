@@ -9,7 +9,7 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 - **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
 - **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
 - **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 # 核心工作原则
 
@@ -35,7 +35,7 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 - **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`。`CODE_WORKSPACE` 可能与 `PROJECT_PLUGIN_DIR` 相同，但不得默认把 `PROJECT_PLUGIN_DIR` 当作代码工作区。
 
-`AGENTS.md` 属于代码工作区约束文件。初始化、读取或检查 `AGENTS.md` 时，目标必须是 `{CODE_WORKSPACE}/AGENTS.md`；只有明确确认代码根目录和 `PROJECT_PLUGIN_DIR` 是同一目录时，才允许检查 `{PROJECT_PLUGIN_DIR}/AGENTS.md`。
+`AGENTS.md` 属于代码工作区约束文件。读取或检查 `AGENTS.md` 时，目标必须是 `{CODE_WORKSPACE}/AGENTS.md`；只有明确确认代码根目录和 `PROJECT_PLUGIN_DIR` 是同一目录时，才允许检查 `{PROJECT_PLUGIN_DIR}/AGENTS.md`。
 
 ## 入口约定
 
