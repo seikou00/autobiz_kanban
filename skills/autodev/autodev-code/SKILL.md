@@ -223,4 +223,4 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 - 项目编译通过或外部 checkpoint 编译校验通过。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
-**Skill 完成。** 下一步：`/autodev-reviewer --feature {slug}`
+**Skill 完成。** 下一步：`/autodev-reviewer`

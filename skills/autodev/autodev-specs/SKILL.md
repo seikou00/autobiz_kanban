@@ -151,4 +151,4 @@ python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint specs_done
 CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
-**Skill 完成。** 下一步：`/autodev-plan --feature {slug}`
+**Skill 完成。** 下一步：`/autodev-plan`

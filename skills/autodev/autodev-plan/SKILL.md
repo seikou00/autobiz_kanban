@@ -402,4 +402,4 @@ python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint plan_done
 CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
-**Skill 完成。** 下一步：`/autodev-code --feature {slug}`
+**Skill 完成。** 下一步：`/autodev-code`
