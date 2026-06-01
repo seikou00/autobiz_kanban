@@ -8,65 +8,88 @@
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Dict, Optional
 
 try:
-    from init_dev_agents import DevAgentsInitError, resolve_system_no, validate_system_no
-    from paths import get_sys_agents_md_path, get_workspace
+    from paths import get_project_md_path, get_sys_agents_md_path, get_workspace, is_initialized
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
-    from init_dev_agents import DevAgentsInitError, resolve_system_no, validate_system_no  # type: ignore[no-redef]
-    from paths import get_sys_agents_md_path, get_workspace  # type: ignore[no-redef]
+    from paths import get_project_md_path, get_sys_agents_md_path, get_workspace, is_initialized  # type: ignore[no-redef]
+
+
+def _extract_sysid(project_md_content: str) -> Optional[str]:
+    patterns = [
+        r"(?i)[-*]\s*\*\*sysid\*\*\s*[:：]\s*(.+)",
+        r"(?i)[-*]\s*sysid\s*[:：]\s*(.+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, project_md_content)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if value and not value.startswith("[") and value != "待填写":
+            return value
+    return None
 
 
 def load_sys_agents(workspace: Optional[Path] = None) -> Dict[str, object]:
-    # workspace is kept for CLI/import compatibility; sys selection no longer
-    # depends on .autobizdevops/PROJECT.md.
+    ws = (workspace or get_workspace()).resolve()
     result = {
         "ok": True,
         "skipped": False,
         "sysid": None,
-        "system_no": None,
         "agents_md_path": None,
         "content": "",
         "message": "",
     }
 
-    system_no = resolve_system_no()
-    try:
-        validate_system_no(system_no)
-    except DevAgentsInitError as error:
-        result["ok"] = False
-        result["message"] = f"系统上下文加载失败：{error}"
+    if not is_initialized(ws):
+        result["skipped"] = True
+        result["message"] = f"跳过可选系统上下文加载：Workspace 未初始化: {ws / '.autobizdevops'}"
         return result
 
-    agents_md = get_sys_agents_md_path(system_no)
-    result["sysid"] = system_no
-    result["system_no"] = system_no
+    project_md = get_project_md_path(ws)
+    if not project_md.exists():
+        result["skipped"] = True
+        result["message"] = f"跳过可选系统上下文加载：PROJECT.md 不存在: {project_md}"
+        return result
+
+    sysid = _extract_sysid(project_md.read_text(encoding="utf-8"))
+    if not sysid:
+        result["skipped"] = True
+        result["message"] = (
+            "跳过可选系统上下文加载："
+            "PROJECT.md 中未声明有效 SysId"
+        )
+        return result
+
+    agents_md = get_sys_agents_md_path(sysid, ws)
+    result["sysid"] = sysid
     result["agents_md_path"] = str(agents_md)
 
     if not agents_md.exists():
         result["skipped"] = True
         result["message"] = (
             f"跳过可选系统上下文加载："
-            f"SYSTEM_ID={system_no} 对应的 AGENTS.md 不存在: {agents_md}"
+            f"SysId={sysid} 对应的 AGENTS.md 不存在: {agents_md}"
         )
         return result
 
     result["content"] = agents_md.read_text(encoding="utf-8")
-    result["message"] = f"成功加载 sys/{agents_md.parent.name}/AGENTS.md ({len(result['content'])} 字符)"
+    result["message"] = f"成功加载 sys/{sysid}/AGENTS.md ({len(result['content'])} 字符)"
     return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Load sys AGENTS.md context")
-    parser.add_argument("workspace", nargs="?", help="Workspace path (kept for compatibility)")
+    parser.add_argument("workspace", help="Workspace path (required)")
     args = parser.parse_args()
 
-    workspace = Path(args.workspace).resolve() if args.workspace else get_workspace()
-    if args.workspace and not workspace.exists():
+    workspace = Path(args.workspace).resolve()
+    if not workspace.exists():
         print(f"ERROR: Workspace does not exist: {workspace}", file=sys.stderr)
         sys.exit(1)
 

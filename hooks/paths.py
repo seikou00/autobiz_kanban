@@ -8,7 +8,6 @@ from typing import Iterable, Mapping, Optional, Union
 
 
 PathLike = Union[str, Path]
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 
 STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR = (
@@ -131,23 +130,6 @@ def get_state_json_path(workspace: Optional[PathLike] = None) -> Path:
 
 def get_project_md_path(workspace: Optional[PathLike] = None) -> Path:
     return get_autobizdevops_dir(workspace) / "PROJECT.md"
-
-
-def get_sys_agents_md_path(system_no: str, plugin_root: Optional[PathLike] = None) -> Path:
-    root = Path(plugin_root).resolve() if plugin_root is not None else PLUGIN_ROOT
-    sys_root = root / "sys"
-    if sys_root.is_dir():
-        candidates = sorted(sys_root.iterdir(), key=lambda item: (item.name.casefold(), item.name))
-        for candidate in candidates:
-            if candidate.is_dir() and candidate.name == system_no:
-                return candidate / "AGENTS.md"
-
-        folded_system_no = system_no.casefold()
-        for candidate in candidates:
-            if candidate.is_dir() and candidate.name.casefold() == folded_system_no:
-                return candidate / "AGENTS.md"
-
-    return sys_root / system_no / "AGENTS.md"
 
 
 def ensure_dir(path: PathLike) -> Path:
