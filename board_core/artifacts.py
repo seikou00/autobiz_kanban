@@ -7,6 +7,10 @@ from pathlib import Path
 
 GLOB_CHARS = frozenset("*?[")
 SPECS_GLOB_PATH = "specs/**/*.md"
+ARTIFACT_STATUS_LABELS = {
+    "generated": "已生成",
+    "missing": "未生成",
+}
 
 
 def _has_glob(path: str) -> bool:
@@ -26,6 +30,16 @@ def _validate_specs_glob(artifact: dict, path: str) -> None:
         raise ValueError(f"specs glob path must be {SPECS_GLOB_PATH}: {path}")
 
 
+def _artifact_label(artifact: dict) -> str:
+    label = artifact.get("label")
+    return label if isinstance(label, str) and label.strip() else artifact["id"]
+
+
+def _set_artifact_status(entry: dict, status: str) -> None:
+    entry["artifactStatus"] = status
+    entry["artifactStatusLabel"] = ARTIFACT_STATUS_LABELS[status]
+
+
 def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> dict:
     path = artifact["path"]
     _validate_specs_glob(artifact, path)
@@ -36,12 +50,13 @@ def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
     )
     entry: dict = {
         "id": artifact["id"],
+        "artifactLabel": _artifact_label(artifact),
         "paths": matches,
     }
     if matches:
-        entry["artifactStatus"] = "generated"
+        _set_artifact_status(entry, "generated")
     else:
-        entry["artifactStatus"] = "missing"
+        _set_artifact_status(entry, "missing")
     return entry
 
 
@@ -49,12 +64,13 @@ def _scan_file_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
     artifact_path = feature_dir / artifact["path"]
     entry: dict = {
         "id": artifact["id"],
+        "artifactLabel": _artifact_label(artifact),
         "path": _relative_path(artifact_path, workspace),
     }
     if artifact_path.is_file():
-        entry["artifactStatus"] = "generated"
+        _set_artifact_status(entry, "generated")
     else:
-        entry["artifactStatus"] = "missing"
+        _set_artifact_status(entry, "missing")
     return entry
 
 

@@ -37,20 +37,6 @@ ARTIFACT_TYPES = {
     "virtual",
     "unknown",
 }
-ARTIFACT_STATUSES = {
-    "generated",
-    "missing",
-    "partial",
-    "invalid",
-    "unknown",
-}
-DEFAULT_ARTIFACT_STATUS_LABELS = {
-    "generated": "已生成",
-    "missing": "未生成",
-    "partial": "部分生成",
-    "invalid": "不可用",
-    "unknown": "未知",
-}
 
 
 def extract_checkpoint_suffix(checkpoint: str) -> str | None:
@@ -99,12 +85,6 @@ def _normalize_artifact_type(value: object) -> str:
     return "unknown"
 
 
-def _normalize_artifact_status(value: object) -> str:
-    if isinstance(value, str) and value in ARTIFACT_STATUSES:
-        return value
-    return "unknown"
-
-
 def derive_node_status(
     node_idx: int,
     current_idx: int,
@@ -146,19 +126,50 @@ def derive_current_node_status(
     return _normalize_node_status(state.get("nodeStatus"))
 
 
+def node_status_label(node_status: str, node: dict | None = None) -> str:
+    normalized_status = _normalize_node_status(node_status)
+    if node is not None:
+        for state in node.get("states", []):
+            if not isinstance(state, dict):
+                continue
+            if _normalize_node_status(state.get("nodeStatus")) != normalized_status:
+                continue
+            label = state.get("label")
+            if isinstance(label, str) and label.strip():
+                return label
+    return DEFAULT_NODE_STATUS_LABELS[normalized_status]
+
+
+def derive_current_node_status_label(
+    checkpoint: str,
+    suffix_states: dict,
+    current_idx: int,
+    current_node: dict | None = None,
+) -> str:
+    current_node_status = derive_current_node_status(checkpoint, suffix_states, current_idx)
+    if current_node is not None:
+        return node_status_label(current_node_status, current_node)
+
+    suffix = extract_checkpoint_suffix(checkpoint)
+    if suffix is not None:
+        state = suffix_states.get(suffix, {})
+        label = state.get("label") if isinstance(state, dict) else None
+        if isinstance(label, str) and label.strip():
+            return label
+    return DEFAULT_NODE_STATUS_LABELS[current_node_status]
+
+
 def build_workflow_fallback_states(config: dict) -> list[dict]:
     """Build workflow-level fallback states for statuses not tied to a node."""
     by_status: dict[str, dict] = {
         "unknown": {
             "nodeStatus": "unknown",
-            "label": DEFAULT_NODE_STATUS_LABELS["unknown"],
         },
     }
     for state in config.get("checkpointSuffixState", {}).values():
         node_status = _normalize_node_status(state.get("nodeStatus"))
         by_status[node_status] = {
             "nodeStatus": node_status,
-            "label": state.get("label", DEFAULT_NODE_STATUS_LABELS[node_status]),
         }
     return list(by_status.values())
 
@@ -192,40 +203,9 @@ def _normalize_node_states(node: dict) -> list[dict]:
             raise BoardConfigError(f"{context}.nodeStatus must be a supported node status")
         clean_states.append({
             "nodeStatus": node_status,
-            "label": state.get("label", DEFAULT_NODE_STATUS_LABELS[node_status]),
             "nextAction": _normalize_next_action(state.get("nextAction"), context=context),
         })
     return clean_states
-
-
-def _default_artifact_statuses() -> list[dict]:
-    return [
-        {"artifactStatus": "generated", "label": DEFAULT_ARTIFACT_STATUS_LABELS["generated"]},
-        {"artifactStatus": "missing", "label": DEFAULT_ARTIFACT_STATUS_LABELS["missing"]},
-        {"artifactStatus": "partial", "label": DEFAULT_ARTIFACT_STATUS_LABELS["partial"]},
-        {"artifactStatus": "invalid", "label": DEFAULT_ARTIFACT_STATUS_LABELS["invalid"]},
-        {"artifactStatus": "unknown", "label": DEFAULT_ARTIFACT_STATUS_LABELS["unknown"]},
-    ]
-
-
-def _normalize_artifact_statuses(artifact: dict, *, context: str) -> list[dict]:
-    statuses = artifact.get("artifactStatuses", _default_artifact_statuses())
-    if not isinstance(statuses, list):
-        raise BoardConfigError(f"{context}.artifactStatuses must be a list")
-
-    clean_statuses: list[dict] = []
-    for index, status in enumerate(statuses):
-        status_context = f"{context}.artifactStatuses[{index}]"
-        if not isinstance(status, dict):
-            raise BoardConfigError(f"{status_context} must be an object")
-        artifact_status = _normalize_artifact_status(status.get("artifactStatus"))
-        if artifact_status == "unknown" and status.get("artifactStatus") != "unknown":
-            raise BoardConfigError(f"{status_context}.artifactStatus must be a supported artifact status")
-        clean_statuses.append({
-            "artifactStatus": artifact_status,
-            "label": status.get("label", DEFAULT_ARTIFACT_STATUS_LABELS[artifact_status]),
-        })
-    return clean_statuses or _default_artifact_statuses()
 
 
 def _normalize_artifact_definitions(node: dict) -> list[dict]:
@@ -238,10 +218,8 @@ def _normalize_artifact_definitions(node: dict) -> list[dict]:
             raise BoardConfigError(f"{context}.artifactType must be a supported artifact type")
         clean_artifacts.append({
             "id": artifact.get("id"),
-            "label": artifact.get("label", artifact.get("id")),
             "artifactType": artifact_type,
             "required": artifact.get("required", False),
-            "artifactStatuses": _normalize_artifact_statuses(artifact, context=context),
         })
     return clean_artifacts
 

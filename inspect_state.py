@@ -31,9 +31,11 @@ from board_core.state import (  # type: ignore[import-untyped]
 )
 from board_core.workflow import (  # type: ignore[import-untyped]
     derive_current_node_status,
+    derive_current_node_status_label,
     build_workflow_shell,
     derive_node_status,
     find_current_node,
+    node_status_label,
 )
 
 
@@ -122,6 +124,7 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
         run_nodes.append({
             "id": node["id"],
             "nodeStatus": node_status,
+            "nodeStatusLabel": node_status_label(node_status, node),
             "artifacts": artifacts,
         })
 
@@ -170,12 +173,20 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
             current_idx, current_node_id = find_current_node(nodes_config, checkpoint)
 
         current_node_status = derive_current_node_status(checkpoint, suffix_states, current_idx)
+        current_node = nodes_config[current_idx] if 0 <= current_idx < len(nodes_config) else None
+        current_node_status_label = derive_current_node_status_label(
+            checkpoint,
+            suffix_states,
+            current_idx,
+            current_node,
+        )
 
         runs.append({
             "featureName": feature,
             "featureId": feature,
             "currentNodeId": current_node_id or "unknown",
             "currentNodeStatus": current_node_status,
+            "currentNodeStatusLabel": current_node_status_label,
         })
 
     return runs
