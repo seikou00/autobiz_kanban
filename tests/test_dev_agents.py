@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import io
 import os
-import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 
-from hooks.init_dev_agents import DevAgentsInitError, init_dev_agents, main
+from hooks.init_dev_agents import DevAgentsInitError, init_dev_agents
 from hooks.load_sys_agents import load_sys_agents
 from hooks.paths import get_sys_agents_md_path
 
@@ -31,43 +28,6 @@ class DevAgentsInitTests(unittest.TestCase):
         self.assertTrue(target.is_symlink())
         self.assertFalse(Path(os.readlink(target)).is_absolute())
         self.assertEqual(target.resolve(), source.resolve())
-
-    def test_init_dev_agents_defaults_to_os_getcwd(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            plugin_root = root / "plugin"
-            code_workspace = root / "code"
-            code_workspace.mkdir()
-            source = write_sys_agents(plugin_root, "abc", "abc rules\n")
-
-            with patch("hooks.init_dev_agents.os.getcwd", return_value=str(code_workspace)):
-                result = init_dev_agents(env={"SYSTEM_ID": "abc"}, plugin_root=plugin_root)
-
-            self.assertTrue(result["created"])
-            self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
-            self.assertEqual(result["target"], str(code_workspace.resolve(strict=False) / "AGENTS.md"))
-
-    def test_cli_uses_os_getcwd_when_code_workspace_is_omitted(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            plugin_root = root / "plugin"
-            code_workspace = root / "code"
-            code_workspace.mkdir()
-            source = write_sys_agents(plugin_root, "abc", "abc rules\n")
-
-            output = io.StringIO()
-            with (
-                patch.object(sys, "argv", ["init_dev_agents.py"]),
-                patch.dict(os.environ, {"SYSTEM_ID": "abc"}),
-                patch("hooks.init_dev_agents.os.getcwd", return_value=str(code_workspace)),
-                patch("hooks.init_dev_agents.resolve_sys_agents_md_path", return_value=(source, False)),
-                redirect_stdout(output),
-            ):
-                exit_code = main()
-
-            self.assertEqual(exit_code, 0)
-            self.assert_relative_symlink(code_workspace / "AGENTS.md", source)
-            self.assertIn("AGENTS.md initialized", output.getvalue())
 
     def test_system_id_links_matching_sys_agents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
