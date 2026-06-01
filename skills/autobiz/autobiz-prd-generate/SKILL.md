@@ -134,6 +134,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 - 讨论稿位于 `{工作目录}/PRD_DISCUSS.md`
 - 正式 PRD 位于 `{工作目录}/PRD.md`
+- 下一步必须进入 `/autodev`。
 
 ### Step 5: 更新状态（标记完成）
 
@@ -150,7 +151,7 @@ Skill 完成后，必须运行脚本校验：
 python autobiz/hooks/biz_validate.py prd --feature {slug}
 ```
 
-通过脚本检查即视为**Skill 完成。** 下一步：`/autodev-plan`
+通过脚本检查即视为**Skill 完成。** 下一步：`/autodev`
 
 ## 技能使用约束
 

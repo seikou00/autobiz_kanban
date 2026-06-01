@@ -4,6 +4,7 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 ---
 
 **PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
+**CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`。不得把 `PLUGIN_OUTPUT_DIR` 直接当作代码工作区，除非已确认二者是同一目录。
 
 ## autodev
 
@@ -69,13 +70,17 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 ### 1.3 初始化代码工作区 AGENTS.md
 
-Dev 阶段进入路由前必须执行初始化脚本：
+Dev 阶段进入路由前必须先确定 `CODE_WORKSPACE`。`CODE_WORKSPACE` 是要修改和验证的项目代码根目录，不是 `.autobizdevops/` 所在的 Feature 产物目录；如果无法从当前会话、用户项目路径或工具上下文确定，必须停止并询问用户，不能回退到 `PLUGIN_OUTPUT_DIR` 猜测。
+
+确定后执行初始化脚本，并显式传入代码工作区：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/init_dev_agents.py"
+python "{PLUGIN_DIR}/hooks/init_dev_agents.py" --code-workspace "{CODE_WORKSPACE}"
 ```
 
 如果脚本返回非 0，停止路由并按错误信息处理。
+
+初始化成功后只检查 `{CODE_WORKSPACE}/AGENTS.md` 及文档地图声明的同级约束文件是否存在；不得检查 `{PLUGIN_OUTPUT_DIR}/AGENTS.md`，除非 `CODE_WORKSPACE == PLUGIN_OUTPUT_DIR` 已被明确确认。
 
 ### 1.4 产出物校验
 

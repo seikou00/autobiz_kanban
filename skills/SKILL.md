@@ -25,7 +25,11 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 
 ### 路径概念区分
 - **PLUGIN_DIR**：本插件的根目录（即 `../`）。所有 SKILL.md 文件、校验脚本、hooks 都存放在此目录下。脚本调用路径均以此为基准。
-- **WORKSPACE**：用户项目工作空间目录（运行初始化脚本的目录）。初始化后会在该目录下创建 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/`。
+- **PLUGIN_OUTPUT_DIR**：插件流程产物目录，只用于 `.autobizdevops/` 状态、Feature 产物与插件生成文档。
+- **WORKSPACE**：当前项目的插件工作空间目录；checkpoint、state 与 Feature 产物均位于 `{WORKSPACE}/.autobizdevops/`。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`。`CODE_WORKSPACE` 可能与 `WORKSPACE` 相同，但不得默认把 `PLUGIN_OUTPUT_DIR` 当作代码工作区。
+
+`AGENTS.md` 属于代码工作区约束文件。初始化、读取或检查 `AGENTS.md` 时，目标必须是 `{CODE_WORKSPACE}/AGENTS.md`；只有明确确认代码根目录和 `PLUGIN_OUTPUT_DIR` 是同一目录时，才允许检查 `{PLUGIN_OUTPUT_DIR}/AGENTS.md`。
 
 ## 入口约定
 

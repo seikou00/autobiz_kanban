@@ -67,6 +67,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 ```
 
 - 下游子技能执行前，必须通过脚本校验上游产出物
+- Biz 阶段完成到 `prd_done` 后，跨阶段出口必须提示 `/autodev`。
 
 ## 关键产出物校验（强制脚本）
 
