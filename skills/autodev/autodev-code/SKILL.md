@@ -188,7 +188,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 当 `PLAN.md` 中没有「待做」或「进行中」任务后：
 
 1. 运行项目级验证命令。优先使用 AGENTS.md 或 PLAN.md 指定命令；没有明确命令时按项目类型选择最小验证。
-2. Java/Maven 项目至少运行编译命令；`code_done` checkpoint 的前置 hook 会读取 `.autobizdevops/modules_compile.json` 并逐模块强制编译。
+2. Java/Maven 项目至少运行编译命令。
 3. 如果验证失败，回到相关任务继续修复；不要推进 `code_done`。
 
 验证通过后推进 checkpoint：

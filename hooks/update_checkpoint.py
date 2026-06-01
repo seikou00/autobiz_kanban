@@ -35,6 +35,7 @@ from state_checkpoint import (  # noqa: E402
     validate_lifecycle,
     validate_transitions,
 )
+from code_done_compile_guard import validate_modules_compile  # noqa: E402
 from board_core.state_store import (  # noqa: E402
     EMPTY_CELL,
     StateRecords,
@@ -232,10 +233,11 @@ def prepare_checkpoint_update(
     compile_features = tuple(features_entering_code_done(old_map, new_map))
     if not transition_errors:
         lifecycle_errors.extend(validate_lifecycle(workspace, old_map, new_map))
+    if not transition_errors and not lifecycle_errors and compile_features:
+        _, module_compile_errors = validate_modules_compile(workspace, emit_success=False)
+        compile_errors.extend(module_compile_errors)
 
     errors = [*transition_errors, *lifecycle_errors, *compile_errors]
-    if not errors:
-        errors.extend(validate_lifecycle(workspace, old_map, new_map))
 
     return CheckpointUpdate(
         ok=not errors,

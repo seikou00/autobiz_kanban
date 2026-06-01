@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,17 @@ def sample_record(checkpoint: str = "discuss_in_progress") -> dict[str, str]:
         "iteration": "1",
         "updated_at": "2026-05-25 12:00:00",
     }
+
+
+def py_command(source: str) -> str:
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+
+
+def write_modules_compile(workspace: Path, modules: list[dict]) -> None:
+    (workspace / ".autobizdevops" / "modules_compile.json").write_text(
+        json.dumps({"version": 1, "modules": modules}, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 class StateStoreTests(unittest.TestCase):
@@ -365,6 +377,49 @@ class StateIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             state_json = json.loads((workspace / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "discuss_done")
+
+    def test_update_checkpoint_cli_blocks_code_done_compile_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            (feature_dir / "PLAN.md").write_text(
+                "\n".join(["### 1. Implement", "- **状态:** 完成", ""]),
+                encoding="utf-8",
+            )
+            module_dir = root / "service"
+            module_dir.mkdir()
+            write_modules_compile(
+                workspace,
+                [
+                    {
+                        "module": "service",
+                        "path": str(module_dir),
+                        "compile_command": py_command("import sys; print('compile boom'); sys.exit(9)"),
+                    }
+                ],
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "update_checkpoint.py"),
+                    "--checkpoint",
+                    "code_done",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=plugin_env(workspace),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("模块 service 编译失败", result.stderr)
+            self.assertIn("compile boom", result.stderr)
+            state_json = json.loads((workspace / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "code_in_progress")
 
     def test_update_checkpoint_cli_rejects_workspace_argument(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -804,12 +859,25 @@ class StateIntegrationTests(unittest.TestCase):
 
     def test_code_done_does_not_assume_state_workspace_is_code_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace = make_workspace(Path(tmp))
+            root = Path(tmp)
+            workspace = make_workspace(root)
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             feature_dir.mkdir(parents=True)
             (feature_dir / "PLAN.md").write_text(
                 "\n".join(["### 1. Implement", "- **状态:** 完成", ""]),
                 encoding="utf-8",
+            )
+            module_dir = root / "service"
+            module_dir.mkdir()
+            write_modules_compile(
+                workspace,
+                [
+                    {
+                        "module": "service",
+                        "path": str(module_dir),
+                        "compile_command": py_command("print('compile ok')"),
+                    }
+                ],
             )
             write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pre-execute guard that compiles declared modules before code_done."""
+"""Pre-execute guard helpers for code_done module compilation."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from typing import Any
 from paths import (
     STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR,
     contains_workspace_argument,
-    get_plugin_output_workspace,
 )
 
 
@@ -189,7 +188,7 @@ def load_modules(path: Path) -> list[CompileModule]:
         raise ValueError(f"code_done 编译校验失败: {path}: {exc}") from exc
 
 
-def run_compile(module: CompileModule) -> tuple[bool, str]:
+def run_compile(module: CompileModule, *, emit_success: bool = True) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             module.compile_command,
@@ -218,19 +217,36 @@ def run_compile(module: CompileModule) -> tuple[bool, str]:
             f"模块 {module.module} 编译失败: path={module.path} command={module.compile_command} exit_code={result.returncode}{detail}",
         )
 
-    summary = output or "(无输出)"
-    print(
-        "\n".join(
-            [
-                f"模块 {module.module} 编译通过",
-                f"path: {module.path}",
-                f"command: {module.compile_command}",
-                "输出摘要:",
-                summary,
-            ]
+    if emit_success:
+        summary = output or "(无输出)"
+        print(
+            "\n".join(
+                [
+                    f"模块 {module.module} 编译通过",
+                    f"path: {module.path}",
+                    f"command: {module.compile_command}",
+                    "输出摘要:",
+                    summary,
+                ]
+            )
         )
-    )
     return True, ""
+
+
+def validate_modules_compile(workspace: Path, *, emit_success: bool = True) -> tuple[int, list[str]]:
+    modules_path = workspace / MODULES_COMPILE_RELATIVE_PATH
+    try:
+        modules = load_modules(modules_path)
+    except ValueError as exc:
+        return 0, [str(exc)]
+
+    errors: list[str] = []
+    for module in modules:
+        ok, message = run_compile(module, emit_success=emit_success)
+        if not ok:
+            errors.append(message)
+
+    return len(modules), errors
 
 
 def run_guard(payload: dict[str, Any]) -> int:
@@ -246,27 +262,9 @@ def run_guard(payload: dict[str, Any]) -> int:
     if checkpoint_command is None:
         return 0
 
-    try:
-        workspace = get_plugin_output_workspace()
-    except ValueError as exc:
-        return block(f"code_done 编译校验失败: {exc}")
-
-    modules_path = workspace / MODULES_COMPILE_RELATIVE_PATH
-    try:
-        modules = load_modules(modules_path)
-    except ValueError as exc:
-        return block(str(exc))
-
-    errors: list[str] = []
-    for module in modules:
-        ok, message = run_compile(module)
-        if not ok:
-            errors.append(message)
-
-    if errors:
-        return block("\n\n".join(errors))
-
-    print(f"code_done 模块编译校验通过: {len(modules)} 个模块")
+    # update_checkpoint.py now owns the code_done compile gate. Keeping this
+    # execute hook non-blocking isolates hook runner environment issues from
+    # checkpoint state transitions while preserving --workspace misuse checks.
     return 0
 
 

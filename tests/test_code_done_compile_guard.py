@@ -12,6 +12,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "hooks" / "code_done_compile_guard.py"
+HOOKS_DIR = ROOT / "hooks"
+if str(HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIR))
+
+from code_done_compile_guard import validate_modules_compile  # noqa: E402
 
 
 def plugin_env(workspace: Path, *, feature: str = "alpha") -> dict[str, str]:
@@ -101,38 +106,36 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                     self.assertIn("不接受 --workspace/-w", result.stderr)
                     self.assertEqual(json.loads(result.stdout)["decision"], "block")
 
-    def test_code_done_missing_modules_compile_blocks(self) -> None:
+    def test_modules_compile_missing_manifest_reports_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
-            command = "python hooks/update_checkpoint.py --checkpoint code_done"
 
-            result = run_guard(execute_payload(command, Path(tmp)), env=plugin_env(workspace))
+            _, errors = validate_modules_compile(workspace, emit_success=False)
 
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("缺少模块编译清单", result.stderr)
-            self.assertEqual(json.loads(result.stdout)["decision"], "block")
+            self.assertTrue(errors)
+            self.assertIn("缺少模块编译清单", "\n".join(errors))
 
-    def test_code_done_missing_plugin_workspace_blocks(self) -> None:
+    def test_code_done_hook_missing_plugin_workspace_is_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             command = "python hooks/update_checkpoint.py --checkpoint code_done"
 
             result = run_guard(execute_payload(command, Path(tmp)), env=env_without(workspace, "PLUGIN_WORKSPACE"))
 
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("PLUGIN_WORKSPACE 未设置", result.stderr)
-            self.assertEqual(json.loads(result.stdout)["decision"], "block")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(result.stdout, "")
 
-    def test_code_done_missing_project_code_blocks(self) -> None:
+    def test_code_done_hook_missing_project_code_is_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             command = "python hooks/update_checkpoint.py --checkpoint code_done"
 
             result = run_guard(execute_payload(command, Path(tmp)), env=env_without(workspace, "PROJECT_CODE"))
 
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("PROJECT_CODE 未设置", result.stderr)
-            self.assertEqual(json.loads(result.stdout)["decision"], "block")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(result.stdout, "")
 
     def test_invalid_modules_compile_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,12 +144,10 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                 json.dumps({"version": 1, "modules": [{"module": "root", "path": str(workspace)}]}),
                 encoding="utf-8",
             )
-            command = "python hooks/update_checkpoint.py --checkpoint=code_done"
+            _, errors = validate_modules_compile(workspace, emit_success=False)
 
-            result = run_guard(execute_payload(command, Path(tmp)), env=plugin_env(workspace))
-
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("compile_command 缺失", result.stderr)
+            self.assertTrue(errors)
+            self.assertIn("compile_command 缺失", "\n".join(errors))
 
     def test_missing_module_path_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -156,12 +157,10 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                 workspace,
                 [{"module": "missing", "path": str(missing), "compile_command": "echo ok"}],
             )
-            command = "python hooks/update_checkpoint.py --checkpoint code_done"
+            _, errors = validate_modules_compile(workspace, emit_success=False)
 
-            result = run_guard(execute_payload(command, Path(tmp)), env=plugin_env(workspace))
-
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("不存在或不是目录", result.stderr)
+            self.assertTrue(errors)
+            self.assertIn("不存在或不是目录", "\n".join(errors))
 
     def test_multiple_modules_compile_successfully(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -186,14 +185,10 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                     },
                 ],
             )
-            command = "/bin/zsh -lc 'python hooks/update_checkpoint.py --checkpoint code_done'"
+            module_count, errors = validate_modules_compile(workspace, emit_success=False)
 
-            result = run_guard(execute_payload(command, root), env=plugin_env(workspace))
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("service", result.stdout)
-            self.assertIn("web warning", result.stdout)
-            self.assertIn("code_done 模块编译校验通过: 2 个模块", result.stdout)
+            self.assertEqual(errors, [])
+            self.assertEqual(module_count, 2)
 
     def test_compile_failure_blocks_with_module_command_and_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -206,15 +201,12 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                 workspace,
                 [{"module": "service", "path": str(service), "compile_command": command_text}],
             )
-            command = "python hooks/update_checkpoint.py --checkpoint code_done"
+            _, errors = validate_modules_compile(workspace, emit_success=False)
 
-            result = run_guard(execute_payload(command, root), env=plugin_env(workspace))
-
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("service", result.stderr)
-            self.assertIn(command_text, result.stderr)
-            self.assertIn("boom output", result.stderr)
-            self.assertEqual(json.loads(result.stdout)["decision"], "block")
+            joined_errors = "\n".join(errors)
+            self.assertIn("service", joined_errors)
+            self.assertIn(command_text, joined_errors)
+            self.assertIn("boom output", joined_errors)
 
 
 if __name__ == "__main__":
