@@ -57,6 +57,7 @@ from board_core.state_store import (  # noqa: E402
     state_json_content_from_records,
     write_state_records,
 )
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
 
 
 def _generate_project_md(workspace_name: str) -> str:
@@ -205,7 +206,7 @@ def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
     return feature_dir
 
 
-def create_feature(workspace: Path, feature: str) -> Dict[str, object]:
+def create_feature(workspace: Path, feature: str, workflow_profile: str = BASE_WORKFLOW_PROFILE) -> Dict[str, object]:
     workspace = workspace.resolve()
     feature_dir = _resolve_feature_dir(workspace, feature)
     if feature_dir.exists():
@@ -236,6 +237,7 @@ def create_feature(workspace: Path, feature: str) -> Dict[str, object]:
         "stage": "需求澄清",
         "iteration": EMPTY_CELL,
         "updated_at": now,
+        "workflowProfile": workflow_profile,
     }
     write_state_records(workspace, records)
 
@@ -253,6 +255,7 @@ def main() -> None:
     parser.add_argument("--workspace", required=True, help="Workspace path")
     parser.add_argument("--project", help="Project code under workspace")
     parser.add_argument("--feature", help="Feature name for createFeature mode")
+    parser.add_argument("--workflow-profile", default=BASE_WORKFLOW_PROFILE, help="Workflow profile for createFeature")
     parser.add_argument("--force", action="store_true", help="Force re-initialization (will backup existing)")
     args = parser.parse_args()
 
@@ -262,7 +265,7 @@ def main() -> None:
         sys.exit(1)
 
     if args.mode == "createFeature":
-        result = create_feature(workspace, args.feature or "")
+        result = create_feature(workspace, args.feature or "", args.workflow_profile)
     else:
         result = init_workspace(workspace, force=args.force)
 

@@ -222,7 +222,8 @@
             { "id": "plan", "label": "执行计划（更新）", "kind": "file", "path": "PLAN.md", "required": true }
           ]
         },
-        "validators": ["plan_finished_tasks"]
+        "validators": ["plan_finished_tasks"],
+        "guards": ["code_compile"]
       },
       {
         "id": "dev.review",

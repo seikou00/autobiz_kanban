@@ -22,7 +22,8 @@ AUTODEV_HOOKS_DIR = ROOT / "skills" / "autodev" / "hooks"
 if str(AUTODEV_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS_DIR))
 
-from board_core.contracts import load_board_config, load_workflow_contracts  # noqa: E402
+from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts, load_workflow_contracts  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
 from board_core.workflow import find_current_node  # noqa: E402
 from artifact_check import run_postcheck, run_precheck  # noqa: E402
 from paths import ensure_dir, get_feature_hook_log_path  # noqa: E402
@@ -127,7 +128,22 @@ def hook_log(message: str) -> None:
         pass
 
 
-def load_workflow_nodes() -> list[dict]:
+def load_workflow_nodes(
+    *,
+    workspace_root: Path | None = None,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> list[dict]:
+    if workspace_root is not None or workflow_profile != BASE_WORKFLOW_PROFILE:
+        try:
+            return list(
+                load_repo_workflow_contracts(
+                    ROOT,
+                    workspace=workspace_root,
+                    profile=workflow_profile,
+                ).nodes
+            )
+        except BoardConfigError:
+            return []
     try:
         config = load_board_config(BOARD_CONFIG_PATH)
         nodes = config.get("workflow", {}).get("nodes", [])
@@ -136,10 +152,21 @@ def load_workflow_nodes() -> list[dict]:
         return []
 
 
-def checkpoint_node_id(checkpoint: str | None) -> str:
+def checkpoint_node_id(
+    checkpoint: str | None,
+    *,
+    workspace_root: Path | None = None,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> str:
     if not checkpoint:
         return ""
-    _, node_id = find_current_node(load_workflow_nodes(), checkpoint)
+    _, node_id = find_current_node(
+        load_workflow_nodes(
+            workspace_root=workspace_root,
+            workflow_profile=workflow_profile,
+        ),
+        checkpoint,
+    )
     return node_id or ""
 
 
@@ -156,6 +183,7 @@ def append_feature_hook_log(
     event_id: str,
     result_code: str,
     message: str,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
 ) -> None:
     if not safe_feature_slug(feature):
         return
@@ -168,7 +196,11 @@ def append_feature_hook_log(
         "eventId": event_id,
         "resultCode": result_code,
         "message": message,
-        "nodeId": checkpoint_node_id(checkpoint),
+        "nodeId": checkpoint_node_id(
+            checkpoint,
+            workspace_root=workspace_root,
+            workflow_profile=workflow_profile,
+        ),
     }
     try:
         path = get_feature_hook_log_path(workspace_root, feature)
@@ -190,6 +222,7 @@ def append_checkpoint_hook_logs(
     result_code: str | None = None,
     exit_code: int | None = None,
     message: str | None = None,
+    workflow_profiles: dict[str, str] | None = None,
 ) -> None:
     if not changes:
         return
@@ -205,6 +238,7 @@ def append_checkpoint_hook_logs(
             event_id=resolved_event_id,
             result_code=resolved_result_code,
             message=message or f"{transition}: {summary}",
+            workflow_profile=(workflow_profiles or {}).get(feature, BASE_WORKFLOW_PROFILE),
         )
 
 
@@ -290,16 +324,59 @@ def build_new_content(
     return "", []
 
 
-def validate_transitions(old_map: dict[str, str], new_map: dict[str, str]) -> list[str]:
+def _record_profile(
+    feature: str,
+    old_records: dict[str, dict[str, str]] | None,
+    new_records: dict[str, dict[str, str]] | None,
+) -> str:
+    for records in (new_records, old_records):
+        if not records:
+            continue
+        record = records.get(feature, {})
+        profile = record.get("workflowProfile")
+        if profile:
+            return profile
+    return BASE_WORKFLOW_PROFILE
+
+
+def _contracts_for_profile(
+    workspace_root: Path | None,
+    workflow_profile: str,
+    repo_root: Path,
+):
+    if workspace_root is None and workflow_profile == BASE_WORKFLOW_PROFILE:
+        return WORKFLOW_CONTRACTS
+    return load_repo_workflow_contracts(
+        repo_root,
+        workspace=workspace_root,
+        profile=workflow_profile,
+    )
+
+
+def validate_transitions(
+    old_map: dict[str, str],
+    new_map: dict[str, str],
+    *,
+    workspace_root: Path | None = None,
+    old_records: dict[str, dict[str, str]] | None = None,
+    new_records: dict[str, dict[str, str]] | None = None,
+    repo_root: Path = ROOT,
+) -> list[str]:
     errors: list[str] = []
 
     for feature in sorted(set(old_map) | set(new_map)):
         old_cp = old_map.get(feature)
         new_cp = new_map.get(feature)
+        workflow_profile = _record_profile(feature, old_records, new_records)
+        try:
+            contracts = _contracts_for_profile(workspace_root, workflow_profile, repo_root)
+        except BoardConfigError as exc:
+            errors.append(f"Feature '{feature}' workflow profile '{workflow_profile}' 无法编译: {exc}")
+            continue
 
         if old_cp is None:
-            if new_cp not in INITIAL_CHECKPOINTS:
-                allowed = " / ".join(sorted(INITIAL_CHECKPOINTS))
+            if new_cp not in contracts.initial_checkpoints:
+                allowed = " / ".join(sorted(contracts.initial_checkpoints))
                 errors.append(f"Feature '{feature}' 是新增行，只允许从空状态进入 {allowed}，当前为 {new_cp}")
             continue
 
@@ -310,7 +387,7 @@ def validate_transitions(old_map: dict[str, str], new_map: dict[str, str]) -> li
         if old_cp == new_cp:
             continue
 
-        allowed_next = ALLOWED_NEXT.get(old_cp, set())
+        allowed_next = contracts.allowed_next.get(old_cp, set())
         if new_cp not in allowed_next:
             allowed = ", ".join(sorted(allowed_next)) if allowed_next else "无"
             errors.append(f"Feature '{feature}' 非法转移: {old_cp} -> {new_cp}；允许的下一个状态: {allowed}")
@@ -328,17 +405,43 @@ def changed_rows(old_rows: dict[str, str], new_rows: dict[str, str]) -> list[tup
     return changes
 
 
-def check_stage_inputs(root: Path, slug: str, skill: str, repo_root: Path = ROOT) -> str | None:
-    code, message = run_precheck(repo_root, root, skill, slug)
+def check_stage_inputs(
+    root: Path,
+    slug: str,
+    skill: str,
+    repo_root: Path = ROOT,
+    *,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> str | None:
+    code, message = run_precheck(
+        repo_root,
+        root,
+        skill,
+        slug,
+        workflow_profile=workflow_profile,
+    )
     if code != 0:
         return message
     return None
 
 
-def check_stage_outputs(root: Path, slug: str, skill: str, repo_root: Path = ROOT) -> str | None:
+def check_stage_outputs(
+    root: Path,
+    slug: str,
+    skill: str,
+    repo_root: Path = ROOT,
+    *,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> str | None:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        code, message = run_postcheck(repo_root, root, skill, slug)
+        code, message = run_postcheck(
+            repo_root,
+            root,
+            skill,
+            slug,
+            workflow_profile=workflow_profile,
+        )
     if code != 0:
         detail = output.getvalue().strip()
         return f"{message}\n{detail}" if detail else message
@@ -350,20 +453,41 @@ def validate_lifecycle(
     old_rows: dict[str, str],
     new_rows: dict[str, str],
     repo_root: Path = ROOT,
+    *,
+    old_records: dict[str, dict[str, str]] | None = None,
+    new_records: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     for slug, old_checkpoint, new_checkpoint in changed_rows(old_rows, new_rows):
+        workflow_profile = _record_profile(slug, old_records, new_records)
+        try:
+            contracts = _contracts_for_profile(root, workflow_profile, repo_root)
+        except BoardConfigError as exc:
+            errors.append(f"Feature '{slug}' workflow profile '{workflow_profile}' 无法编译: {exc}")
+            continue
         if new_checkpoint:
-            start_skill = START_CHECKPOINT_TO_SKILL.get(new_checkpoint)
+            start_skill = contracts.start_checkpoint_to_skill.get(new_checkpoint)
             if start_skill:
-                error = check_stage_inputs(root, slug, start_skill, repo_root)
+                error = check_stage_inputs(
+                    root,
+                    slug,
+                    start_skill,
+                    repo_root,
+                    workflow_profile=workflow_profile,
+                )
                 if error:
                     errors.append(error)
 
         if old_checkpoint and old_checkpoint != new_checkpoint:
-            end_skill = END_CHECKPOINT_TO_SKILL.get(old_checkpoint)
+            end_skill = contracts.end_checkpoint_to_skill.get(old_checkpoint)
             if end_skill:
-                error = check_stage_outputs(root, slug, end_skill, repo_root)
+                error = check_stage_outputs(
+                    root,
+                    slug,
+                    end_skill,
+                    repo_root,
+                    workflow_profile=workflow_profile,
+                )
                 if error:
                     errors.append(error)
 

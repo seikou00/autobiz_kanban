@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.contracts import BoardConfigError, load_repo_workflow_contracts  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
 
 
 BLOCK_EXIT_CODE = 2
@@ -79,15 +80,28 @@ def require_feature_dir(root: Path, slug: str) -> None:
 
 
 def validate_required_files(root: Path, slug: str, file_names: Iterable[str]) -> None:
+    file_names = tuple(file_names)
+    if not file_names:
+        return
     require_feature_dir(root, slug)
     missing = missing_files(root, slug, file_names)
     if missing:
         raise HookCheckError("missing_required_artifacts", ", ".join(missing))
 
 
-def load_artifact_config(repo_root: Path, skill: str) -> ArtifactConfig:
+def load_artifact_config(
+    repo_root: Path,
+    skill: str,
+    *,
+    workspace_root: Path | None = None,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> ArtifactConfig:
     try:
-        contracts = load_repo_workflow_contracts(repo_root)
+        contracts = load_repo_workflow_contracts(
+            repo_root,
+            workspace=workspace_root,
+            profile=workflow_profile,
+        )
         contract = contracts.contract_for_skill(skill)
     except BoardConfigError as error:
         raise HookCheckError("invalid_board_config", str(error)) from error

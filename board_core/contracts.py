@@ -1,4 +1,4 @@
-"""Workflow contract helpers backed by board_config.json."""
+"""Workflow contract helpers backed by effective workflow config."""
 
 from __future__ import annotations
 
@@ -6,6 +6,13 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+from board_core.workflow_compiler import (
+    ALLOWED_GUARDS,
+    BASE_WORKFLOW_PROFILE,
+    WorkflowCompileError,
+    load_effective_board_config,
+)
 
 
 class BoardConfigError(Exception):
@@ -19,6 +26,7 @@ class ArtifactSpec:
     path: str
     kind: str = "file"
     required: bool = True
+    external: bool = False
 
 
 @dataclass(frozen=True)
@@ -31,6 +39,7 @@ class SkillContract:
     inputs: tuple[ArtifactSpec, ...]
     outputs: tuple[ArtifactSpec, ...]
     validators: tuple[str, ...]
+    guards: tuple[str, ...] = ()
 
     @property
     def required_inputs(self) -> tuple[str, ...]:
@@ -44,6 +53,7 @@ class SkillContract:
 @dataclass(frozen=True)
 class WorkflowContracts:
     nodes: tuple[dict, ...]
+    profile: str
     skill_contracts: dict[str, SkillContract]
     known_checkpoints: frozenset[str]
     initial_checkpoints: frozenset[str]
@@ -121,12 +131,15 @@ def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, 
         label = item.get("label", item.get("name", artifact_id))
         kind = item.get("kind", "file")
         required = item.get("required", True)
+        external = item.get("external", False)
         if not isinstance(label, str):
             raise BoardConfigError(f"{item_context}.label must be a string")
         if not isinstance(kind, str) or not kind:
             raise BoardConfigError(f"{item_context}.kind must be a non-empty string")
         if not isinstance(required, bool):
             raise BoardConfigError(f"{item_context}.required must be a boolean")
+        if not isinstance(external, bool):
+            raise BoardConfigError(f"{item_context}.external must be a boolean")
 
         specs.append(
             ArtifactSpec(
@@ -135,6 +148,7 @@ def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, 
                 path=path,
                 kind=kind,
                 required=required,
+                external=external,
             )
         )
     return tuple(specs)
@@ -147,13 +161,28 @@ def _flatten_transition_values(transitions: dict[str, Iterable[str]]) -> set[str
     return result
 
 
-def _node_uses_autodev_lifecycle(node: dict) -> bool:
-    skill = node.get("skill", "")
-    return node.get("group") == "Dev" and isinstance(skill, str) and skill.startswith("autodev-")
+def _node_uses_lifecycle(node: dict) -> bool:
+    return isinstance(node.get("skill"), str) and bool(node.get("skill"))
 
 
-def load_workflow_contracts(config_path: Path | None = None) -> WorkflowContracts:
-    config = load_board_config(config_path)
+def load_workflow_contracts(
+    config_path: Path | None = None,
+    *,
+    repo_root: Path | None = None,
+    workspace: Path | None = None,
+    profile: str = BASE_WORKFLOW_PROFILE,
+    overlays: list[dict] | None = None,
+) -> WorkflowContracts:
+    try:
+        config = load_effective_board_config(
+            config_path,
+            repo_root=repo_root,
+            workspace=workspace,
+            profile=profile,
+            overlays=overlays,
+        )
+    except WorkflowCompileError as exc:
+        raise BoardConfigError(str(exc)) from exc
     workflow = config.get("workflow")
     if not isinstance(workflow, dict):
         raise BoardConfigError("workflow must be an object")
@@ -220,6 +249,10 @@ def load_workflow_contracts(config_path: Path | None = None) -> WorkflowContract
         inputs = _read_artifact_specs(artifact_dicts(node, "inputs"), context=f"{node_id}.artifacts.inputs")
         outputs = _read_artifact_specs(artifact_dicts(node, "outputs"), context=f"{node_id}.artifacts.outputs")
         validators = _read_string_list(node.get("validators", []), context=f"{node_id}.validators")
+        guards = _read_string_list(node.get("guards", []), context=f"{node_id}.guards")
+        unknown_guards = sorted(set(guards) - ALLOWED_GUARDS)
+        if unknown_guards:
+            raise BoardConfigError(f"{node_id}.guards contains unknown guard: {', '.join(unknown_guards)}")
 
         if skill:
             if skill in skill_contracts:
@@ -233,9 +266,10 @@ def load_workflow_contracts(config_path: Path | None = None) -> WorkflowContract
                 inputs=inputs,
                 outputs=outputs,
                 validators=validators,
+                guards=guards,
             )
 
-            if _node_uses_autodev_lifecycle(node):
+            if _node_uses_lifecycle(node):
                 for checkpoint in checkpoints:
                     if checkpoint.endswith("_in_progress"):
                         start_checkpoint_to_skill[checkpoint] = skill
@@ -266,6 +300,7 @@ def load_workflow_contracts(config_path: Path | None = None) -> WorkflowContract
 
     return WorkflowContracts(
         nodes=tuple(nodes),
+        profile=profile,
         skill_contracts=skill_contracts,
         known_checkpoints=known_checkpoints,
         initial_checkpoints=initial,
@@ -276,5 +311,17 @@ def load_workflow_contracts(config_path: Path | None = None) -> WorkflowContract
     )
 
 
-def load_repo_workflow_contracts(repo_root: Path) -> WorkflowContracts:
-    return load_workflow_contracts(config_path_for_repo(repo_root))
+def load_repo_workflow_contracts(
+    repo_root: Path,
+    *,
+    workspace: Path | None = None,
+    profile: str = BASE_WORKFLOW_PROFILE,
+    overlays: list[dict] | None = None,
+) -> WorkflowContracts:
+    return load_workflow_contracts(
+        config_path_for_repo(repo_root),
+        repo_root=repo_root,
+        workspace=workspace,
+        profile=profile,
+        overlays=overlays,
+    )

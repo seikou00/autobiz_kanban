@@ -20,6 +20,7 @@ from common import (
     validate_required_files,
 )
 from board_core.contracts import BoardConfigError, load_repo_workflow_contracts  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
 
 
 PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
@@ -214,20 +215,46 @@ VALIDATORS = {
 }
 
 
-def validate_skill_config_schema(repo_root: Path, skill: str) -> None:
-    config = load_artifact_config(repo_root, skill)
+def validate_skill_config_schema(
+    repo_root: Path,
+    skill: str,
+    *,
+    workspace_root: Path | None = None,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> None:
+    config = load_artifact_config(
+        repo_root,
+        skill,
+        workspace_root=workspace_root,
+        workflow_profile=workflow_profile,
+    )
     for validator in config.validators:
         if validator not in VALIDATORS:
             raise HookCheckError("unknown_validator", f"{skill}:{validator}")
 
 
-def validate_config_schema(repo_root: Path, skill: str) -> None:
+def validate_config_schema(
+    repo_root: Path,
+    skill: str,
+    *,
+    workspace_root: Path | None = None,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> None:
     if skill != "all":
-        validate_skill_config_schema(repo_root, skill)
+        validate_skill_config_schema(
+            repo_root,
+            skill,
+            workspace_root=workspace_root,
+            workflow_profile=workflow_profile,
+        )
         return
 
     try:
-        contracts = load_repo_workflow_contracts(repo_root)
+        contracts = load_repo_workflow_contracts(
+            repo_root,
+            workspace=workspace_root,
+            profile=workflow_profile,
+        )
     except BoardConfigError as error:
         raise HookCheckError("invalid_board_config", str(error)) from error
 
@@ -237,9 +264,21 @@ def validate_config_schema(repo_root: Path, skill: str) -> None:
                 raise HookCheckError("unknown_validator", f"{contract.skill}:{validator}")
 
 
-def run_precheck(repo_root: Path, workspace_root: Path, skill: str, slug: str) -> tuple[int, str]:
+def run_precheck(
+    repo_root: Path,
+    workspace_root: Path,
+    skill: str,
+    slug: str,
+    *,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> tuple[int, str]:
     try:
-        config = load_artifact_config(repo_root, skill)
+        config = load_artifact_config(
+            repo_root,
+            skill,
+            workspace_root=workspace_root,
+            workflow_profile=workflow_profile,
+        )
         validate_required_files(workspace_root, slug, config.required_inputs)
     except HookCheckError as error:
         reason = f"{skill} precheck failed for {slug}: {error.reason}"
@@ -249,9 +288,21 @@ def run_precheck(repo_root: Path, workspace_root: Path, skill: str, slug: str) -
     return 0, f"PRE_SKILL_PASS skill={skill}"
 
 
-def run_postcheck(repo_root: Path, workspace_root: Path, skill: str, slug: str) -> tuple[int, str]:
+def run_postcheck(
+    repo_root: Path,
+    workspace_root: Path,
+    skill: str,
+    slug: str,
+    *,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> tuple[int, str]:
     try:
-        config = load_artifact_config(repo_root, skill)
+        config = load_artifact_config(
+            repo_root,
+            skill,
+            workspace_root=workspace_root,
+            workflow_profile=workflow_profile,
+        )
         validate_required_files(workspace_root, slug, config.required_outputs)
         for validator in config.validators:
             if validator not in VALIDATORS:
@@ -271,11 +322,31 @@ def run_postcheck(repo_root: Path, workspace_root: Path, skill: str, slug: str) 
     return 0, f"POST_SKILL_PASS skill={skill}"
 
 
-def run_check(kind: str, repo_root: Path, workspace_root: Path, skill: str, slug: str) -> int:
+def run_check(
+    kind: str,
+    repo_root: Path,
+    workspace_root: Path,
+    skill: str,
+    slug: str,
+    *,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+) -> int:
     if kind == "precheck":
-        code, message = run_precheck(repo_root, workspace_root, skill, slug)
+        code, message = run_precheck(
+            repo_root,
+            workspace_root,
+            skill,
+            slug,
+            workflow_profile=workflow_profile,
+        )
     elif kind == "postcheck":
-        code, message = run_postcheck(repo_root, workspace_root, skill, slug)
+        code, message = run_postcheck(
+            repo_root,
+            workspace_root,
+            skill,
+            slug,
+            workflow_profile=workflow_profile,
+        )
     else:
         print(f"UNKNOWN_CHECK kind={kind}", file=sys.stderr)
         return 1
@@ -290,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("slug", nargs="?")
     parser.add_argument("--repo-root", default=str(repo_root_from_this_file()))
     parser.add_argument("--workspace-root", default=str(Path.cwd().resolve()))
+    parser.add_argument("--workflow-profile", default=BASE_WORKFLOW_PROFILE)
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
@@ -297,7 +369,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.kind == "schema":
         try:
-            validate_config_schema(repo_root, args.skill)
+            validate_config_schema(
+                repo_root,
+                args.skill,
+                workspace_root=workspace_root,
+                workflow_profile=args.workflow_profile,
+            )
         except HookCheckError as error:
             detail = f" detail={error.detail}" if error.detail else ""
             print(f"SCHEMA_FAIL skill={args.skill} reason={error.reason}{detail}")
@@ -308,7 +385,14 @@ def main(argv: list[str] | None = None) -> int:
     if not args.slug:
         print(f"{args.kind.upper()}_FAIL skill={args.skill} reason=missing_slug_argument")
         return 1
-    return run_check(args.kind, repo_root, workspace_root, args.skill, args.slug)
+    return run_check(
+        args.kind,
+        repo_root,
+        workspace_root,
+        args.skill,
+        args.slug,
+        workflow_profile=args.workflow_profile,
+    )
 
 
 if __name__ == "__main__":

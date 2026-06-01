@@ -24,6 +24,10 @@ if str(HOOKS_DIR) not in sys.path:
 
 from board_core.artifacts import scan_artifacts  # type: ignore[import-untyped]
 from board_core.contracts import artifact_dicts  # type: ignore[import-untyped]
+from board_core.workflow_compiler import (  # type: ignore[import-untyped]
+    BASE_WORKFLOW_PROFILE,
+    load_effective_board_config,
+)
 from board_core.state import (  # type: ignore[import-untyped]
     find_feature_dir,
     load_state_md,
@@ -47,6 +51,15 @@ def _load_board_config() -> dict:
         print(f"board_config.json not found: {BOARD_CONFIG_PATH}", file=sys.stderr)
         sys.exit(1)
     return json.loads(BOARD_CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def _load_effective_config(workspace: Path, profile: str) -> dict:
+    return load_effective_board_config(
+        BOARD_CONFIG_PATH,
+        repo_root=ROOT,
+        workspace=workspace,
+        profile=profile,
+    )
 
 
 def _feature_ref_dir(workspace: Path, feature: str, feature_dir: Path | None) -> str:
@@ -78,6 +91,10 @@ def _hook_log_refs(workspace: Path, feature: str, feature_dir: Path | None = Non
 
 def run_mode(workspace: Path, feature: str, config: dict) -> int:
     """Handle --mode run."""
+    state_records, state_record_errors, _state_record_exists = load_state_records(workspace)
+    workflow_profile = state_records.get(feature, {}).get("workflowProfile", BASE_WORKFLOW_PROFILE)
+    if workflow_profile != BASE_WORKFLOW_PROFILE:
+        config = _load_effective_config(workspace, workflow_profile)
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
@@ -101,6 +118,8 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
         summary_parts.append(f"feature '{feature}' 未在 state.json 中找到")
     if state_errors:
         summary_parts.extend(state_errors)
+    if state_record_errors:
+        summary_parts.extend(state_record_errors)
 
     # If there's no checkpoint, degrade gracefully: best-effort scan
     current_idx, current_node_id = -1, None
@@ -132,6 +151,7 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
         "run": {
             "featureId": feature,
             "featureName": feature,
+            "workflowProfile": workflow_profile,
             "hookLogRefs": _hook_log_refs(workspace, feature, feature_dir),
             "watchRefs": _watch_refs(workspace, feature, feature_dir),
             "currentNodeId": current_node_id or "unknown",
@@ -165,6 +185,12 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
     runs: list[dict] = []
     for feature in feature_names:
         record = state_records.get(feature, {})
+        workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
+        run_config = config
+        if workflow_profile != BASE_WORKFLOW_PROFILE:
+            run_config = _load_effective_config(project_workspace, workflow_profile)
+        nodes_config = run_config["workflow"]["nodes"]
+        suffix_states = run_config["checkpointSuffixState"]
         checkpoint = record.get("checkpoint", "")
         current_idx, current_node_id = (-1, None)
         if checkpoint:
@@ -175,6 +201,7 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
         runs.append({
             "featureName": feature,
             "featureId": feature,
+            "workflowProfile": workflow_profile,
             "currentNodeId": current_node_id or "unknown",
             "currentStateId": current_state_id,
         })

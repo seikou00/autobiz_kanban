@@ -8,12 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from board_core.contracts import load_workflow_contracts
+from board_core.contracts import BoardConfigError, load_repo_workflow_contracts, load_workflow_contracts
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
-STATE_SCHEMA_VERSION = "autobizdevops.state.v2"
+STATE_SCHEMA_VERSION = "autobizdevops.state.v3"
 STATE_RELATIVE_PATH = Path(".autobizdevops") / "STATE.md"
 STATE_JSON_RELATIVE_PATH = Path(".autobizdevops") / "state.json"
 STATE_COLUMNS = ("Feature", "负责人", "checkpoint", "阶段", "迭代", "最后更新")
@@ -69,7 +70,23 @@ def _split_table_cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-def _normalize_record(feature: str, raw: Any, errors: list[str], *, context: str) -> StateRecord | None:
+def _contracts_for_profile(workspace: Path | None, workflow_profile: str):
+    if workspace is None or workflow_profile == BASE_WORKFLOW_PROFILE:
+        return WORKFLOW_CONTRACTS
+    try:
+        return load_repo_workflow_contracts(ROOT, workspace=workspace, profile=workflow_profile)
+    except BoardConfigError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _normalize_record(
+    feature: str,
+    raw: Any,
+    errors: list[str],
+    *,
+    context: str,
+    workspace: Path | None = None,
+) -> StateRecord | None:
     feature = _clean(feature)
     if not feature:
         errors.append(f"{context}: feature 不能为空")
@@ -88,12 +105,19 @@ def _normalize_record(feature: str, raw: Any, errors: list[str], *, context: str
         errors.append(f"{context}: Feature key '{feature}' 与记录 feature '{record_feature}' 不一致")
         return None
 
+    workflow_profile = _clean(raw_record.get("workflowProfile"), BASE_WORKFLOW_PROFILE)
+    try:
+        contracts = _contracts_for_profile(workspace, workflow_profile)
+    except ValueError as exc:
+        errors.append(f"{context}: Feature '{feature}' 的 workflowProfile 无效: {exc}")
+        return None
+
     checkpoint = _clean(raw_record.get("checkpoint"))
-    if checkpoint not in KNOWN_CHECKPOINTS:
+    if checkpoint not in contracts.known_checkpoints:
         errors.append(f"{context}: Feature '{feature}' 使用了未知 checkpoint: {checkpoint or '未设置'}")
         return None
 
-    stage = _clean(raw_record.get("stage"), DEFAULT_STAGE_BY_CHECKPOINT.get(checkpoint, ""))
+    stage = _clean(raw_record.get("stage"), contracts.stage_labels.get(checkpoint, ""))
     return {
         "feature": feature,
         "owner": _clean(raw_record.get("owner"), EMPTY_CELL),
@@ -101,14 +125,20 @@ def _normalize_record(feature: str, raw: Any, errors: list[str], *, context: str
         "stage": stage,
         "iteration": _clean(raw_record.get("iteration"), EMPTY_CELL),
         "updated_at": _clean(raw_record.get("updated_at"), EMPTY_CELL),
+        "workflowProfile": workflow_profile,
     }
 
 
-def normalize_state_records(records: dict[str, Any], *, context: str = "state records") -> tuple[StateRecords, list[str]]:
+def normalize_state_records(
+    records: dict[str, Any],
+    *,
+    context: str = "state records",
+    workspace: Path | None = None,
+) -> tuple[StateRecords, list[str]]:
     normalized: StateRecords = {}
     errors: list[str] = []
     for feature in sorted(records):
-        record = _normalize_record(feature, records[feature], errors, context=context)
+        record = _normalize_record(feature, records[feature], errors, context=context, workspace=workspace)
         if record is not None:
             normalized[feature] = record
     return normalized, errors
@@ -144,6 +174,7 @@ def parse_state_md_records(content: str) -> tuple[StateRecords, list[str]]:
             "stage": cells[3] if len(cells) > 3 else "",
             "iteration": cells[4] if len(cells) > 4 else EMPTY_CELL,
             "updated_at": cells[5] if len(cells) > 5 else EMPTY_CELL,
+            "workflowProfile": BASE_WORKFLOW_PROFILE,
         }
         record = _normalize_record(feature, raw_record, errors, context=f"STATE.md line {lineno}")
         if record is not None:
@@ -152,7 +183,7 @@ def parse_state_md_records(content: str) -> tuple[StateRecords, list[str]]:
     return records, errors
 
 
-def parse_state_json_records(content: str) -> tuple[StateRecords, list[str]]:
+def parse_state_json_records(content: str, *, workspace: Path | None = None) -> tuple[StateRecords, list[str]]:
     errors: list[str] = []
     try:
         payload = json.loads(content)
@@ -166,12 +197,16 @@ def parse_state_json_records(content: str) -> tuple[StateRecords, list[str]]:
         features = payload.get("features")
         if not isinstance(features, dict):
             return {}, ["state.json.features 必须是对象"]
-        records, record_errors = normalize_state_records(features, context="state.json.features")
+        records, record_errors = normalize_state_records(
+            features,
+            context="state.json.features",
+            workspace=workspace,
+        )
         errors.extend(record_errors)
         return records, errors
 
     # Legacy migration format: {"feature": "checkpoint"}.
-    records, record_errors = normalize_state_records(payload, context="state.json legacy map")
+    records, record_errors = normalize_state_records(payload, context="state.json legacy map", workspace=workspace)
     errors.extend(record_errors)
     return records, errors
 
@@ -184,7 +219,7 @@ def load_state_json_records_result(workspace: Path) -> StateLoadResult:
     if not state_json.is_file():
         return StateLoadResult(records={}, errors=[], exists=False, source="state.json")
 
-    records, errors = parse_state_json_records(state_json.read_text(encoding="utf-8"))
+    records, errors = parse_state_json_records(state_json.read_text(encoding="utf-8"), workspace=workspace)
     return StateLoadResult(records=records, errors=errors, exists=True, source="state.json")
 
 
@@ -218,8 +253,8 @@ def state_rows_from_records(records: StateRecords) -> dict[str, str]:
     return {feature: record["checkpoint"] for feature, record in sorted(records.items())}
 
 
-def state_json_content_from_records(records: StateRecords) -> str:
-    normalized, errors = normalize_state_records(records)
+def state_json_content_from_records(records: StateRecords, *, workspace: Path | None = None) -> str:
+    normalized, errors = normalize_state_records(records, workspace=workspace)
     if errors:
         raise ValueError("\n".join(errors))
     payload = {
@@ -232,8 +267,8 @@ def state_json_content_from_records(records: StateRecords) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
-def render_state_md(records: StateRecords) -> str:
-    normalized, errors = normalize_state_records(records)
+def render_state_md(records: StateRecords, *, workspace: Path | None = None) -> str:
+    normalized, errors = normalize_state_records(records, workspace=workspace)
     if errors:
         raise ValueError("\n".join(errors))
 
@@ -294,8 +329,8 @@ def write_state_records(workspace: Path, records: StateRecords) -> None:
     workspace = workspace.resolve()
     state_json = get_state_json_path(workspace)
     state_md = get_state_path(workspace)
-    _atomic_write_text(state_json, state_json_content_from_records(records))
-    _atomic_write_text(state_md, render_state_md(records))
+    _atomic_write_text(state_json, state_json_content_from_records(records, workspace=workspace))
+    _atomic_write_text(state_md, render_state_md(records, workspace=workspace))
 
 
 def check_or_fix_state_sync(workspace: Path, *, fix: bool = True) -> StateSyncResult:
@@ -324,8 +359,8 @@ def check_or_fix_state_sync(workspace: Path, *, fix: bool = True) -> StateSyncRe
             state_json_path=state_json,
         )
 
-    expected_json = state_json_content_from_records(result.records)
-    expected_md = render_state_md(result.records)
+    expected_json = state_json_content_from_records(result.records, workspace=workspace)
+    expected_md = render_state_md(result.records, workspace=workspace)
     errors: list[str] = []
     changed = False
 

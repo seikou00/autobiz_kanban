@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.contracts import BoardConfigError, SkillContract, load_repo_workflow_contracts  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
 
 
 def _artifact_lines(title: str, artifacts: tuple, *, heading: str = "##") -> list[str]:
@@ -63,6 +64,7 @@ def contract_to_dict(contract: SkillContract) -> dict:
         "required_inputs": list(contract.required_inputs),
         "required_outputs": list(contract.required_outputs),
         "validators": list(contract.validators),
+        "guards": list(contract.guards),
     }
 
 
@@ -70,11 +72,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Render a board_config-backed skill contract")
     parser.add_argument("skill", help="skill name, e.g. autodev-plan")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
+    parser.add_argument("--workspace", help="project workspace for profile overlays")
+    parser.add_argument("--workflow-profile", default=BASE_WORKFLOW_PROFILE)
     parser.add_argument("--json", action="store_true", help="emit machine-readable contract JSON")
     args = parser.parse_args(argv)
 
     try:
-        contracts = load_repo_workflow_contracts(Path(args.repo_root).resolve())
+        contracts = load_repo_workflow_contracts(
+            Path(args.repo_root).resolve(),
+            workspace=Path(args.workspace).resolve() if args.workspace else None,
+            profile=args.workflow_profile,
+        )
         contract = contracts.contract_for_skill(args.skill)
     except BoardConfigError as error:
         print(f"inspect_skill_contract failed: {error}", file=sys.stderr)

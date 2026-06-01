@@ -6,6 +6,16 @@ from board_core.contracts import BoardConfigError, artifact_dicts
 
 
 NEXT_ACTION_FIELDS = ("slashSkill", "userMessage", "dialogTips")
+NODE_INTERNAL_FIELDS = {
+    "checkpoints",
+    "order",
+    "skill",
+    "artifacts",
+    "validators",
+    "guards",
+    "_dynamic",
+    "_nextActionOverride",
+}
 
 
 def extract_checkpoint_suffix(checkpoint: str) -> str | None:
@@ -137,7 +147,7 @@ def build_workflow_shell(config: dict) -> dict:
     - top-level ``id``, ``version``, and ``kind``
     - workflow-level ``checkpoints`` (contract-only checkpoint matrix)
     - node-level ``checkpoints`` (internal checkpoint→node mapping)
-    - ``order``, ``skill``, ``artifacts``, and ``validators`` from nodes
+    - ``order``, ``skill``, ``artifacts``, ``validators``, and guards/internal fields from nodes
     - ``path`` from each output artifact definition
     """
     workflow = {
@@ -150,7 +160,7 @@ def build_workflow_shell(config: dict) -> dict:
         clean = {
             k: v
             for k, v in node.items()
-            if k not in {"checkpoints", "order", "skill", "artifacts", "validators"}
+            if k not in NODE_INTERNAL_FIELDS
         }
         clean["states"] = _normalize_node_states(node)
         clean["artifactDefinitions"] = [
