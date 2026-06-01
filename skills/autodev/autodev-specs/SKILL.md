@@ -4,18 +4,21 @@ description: Dev 阶段行为规格生成。读取 PRD，探索需求、现有�
 ---
 
 **路径变量约定（必须区分）：**
-- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。
+当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
 运行前如需查看当前契约，执行：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-specs --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-specs --json
 ```
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
@@ -42,7 +45,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-specs --json
 FEATURE_DIR：
 
 ```text
-FEATURE_DIR = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}
+FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 ```
 
 必读输入：
@@ -69,8 +72,8 @@ FEATURE_DIR = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}
 开始生成规格前推进到 `specs_in_progress`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint specs_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint specs_in_progress
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ## Explore 协议
@@ -108,7 +111,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 
 ## 生成 proposal.md
 
-按 `{PLUGIN_DIR}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
+按 `$PLUGIN_ROOT/skills/autodev/autodev-specs/templates/proposal.md` 输出。
 
 必须包含：
 
@@ -120,7 +123,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 
 ## 生成 specs/**/*.md
 
-按 `{PLUGIN_DIR}/skills/autodev/autodev-specs/templates/spec.md` 输出。
+按 `$PLUGIN_ROOT/skills/autodev/autodev-specs/templates/spec.md` 输出。
 
 规则：
 
@@ -144,8 +147,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 完成后推进 checkpoint：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint specs_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint specs_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 **Skill 完成。** 下一步：`/autodev-plan --feature {slug}`

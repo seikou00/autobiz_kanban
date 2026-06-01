@@ -4,8 +4,11 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 ---
 
 **路径变量约定（必须区分）：**
-- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 # 核心工作原则
@@ -28,11 +31,11 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 
 ### 路径概念区分
 - **PLUGIN_DIR**：本插件的根目录（即 `../`）。所有 SKILL.md 文件、校验脚本、hooks 都存放在此目录下。脚本调用路径均以此为基准。
-- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`。`CODE_WORKSPACE` 可能与 `WORKSPACE` 相同，但不得默认把 `PLUGIN_OUTPUT_DIR` 当作代码工作区。
+- **PROJECT_PLUGIN_DIR**：项目插件根目录，固定为 `{PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`。`CODE_WORKSPACE` 可能与 `PROJECT_PLUGIN_DIR` 相同，但不得默认把 `PROJECT_PLUGIN_DIR` 当作代码工作区。
 
-`AGENTS.md` 属于代码工作区约束文件。初始化、读取或检查 `AGENTS.md` 时，目标必须是 `{CODE_WORKSPACE}/AGENTS.md`；只有明确确认代码根目录和 `PLUGIN_OUTPUT_DIR` 是同一目录时，才允许检查 `{PLUGIN_OUTPUT_DIR}/AGENTS.md`。
+`AGENTS.md` 属于代码工作区约束文件。初始化、读取或检查 `AGENTS.md` 时，目标必须是 `{CODE_WORKSPACE}/AGENTS.md`；只有明确确认代码根目录和 `PROJECT_PLUGIN_DIR` 是同一目录时，才允许检查 `{PROJECT_PLUGIN_DIR}/AGENTS.md`。
 
 ## 入口约定
 
@@ -55,14 +58,14 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 
 ### State 快照读取
 
-所有需要当前 Feature checkpoint 的判断，第一步必须调用脚本读取 `.autobizdevops/state.json`：已知 Feature 时把 stdout 捕获为 `CHECKPOINT`；未知 Feature 时读取全量 JSON 并记为 `STATE`，仅用于从 `STATE.records` 选择 Feature。不得绕过脚本重新手工读取 `state.json`。
+所有需要当前 FEATURE_ID checkpoint 的判断，第一步必须调用脚本读取 `.autobizdevops/state.json`：已知 Feature 时把 stdout 捕获为 `CHECKPOINT`；未知 Feature 时读取全量 JSON 并记为 `STATE`，仅用于从 `STATE.records` 选择 Feature。不得绕过脚本重新手工读取 `state.json`。
 
 ```bash
 # 已知 Feature
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 # 未知 Feature：先读取全部 records，再选择或要求用户选择 Feature
-python "{PLUGIN_DIR}/read_state_json.py"
+python "$PLUGIN_ROOT/read_state_json.py"
 ```
 
 只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
@@ -72,7 +75,7 @@ python "{PLUGIN_DIR}/read_state_json.py"
 所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转和 Autodev 产物校验；`code_done` 的编译门禁由 hook 基于 `.autobizdevops/modules_compile.json` 逐模块执行编译命令。
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint {checkpoint}
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint {checkpoint}
 ```
 
 | Checkpoint | 根路由目标 | 说明 |

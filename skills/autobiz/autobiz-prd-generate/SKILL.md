@@ -1,11 +1,14 @@
 ---
 name: autobiz-prd-generate
-description: Biz 阶段 PRD 生成技能。读取已收敛的 `{FEATURE_DIR}/PRD_DISCUSS.md`，按 `{PLUGIN_DIR}/skills/autobiz/autobiz-prd-generate/templates/prd.md` 生成生成标准化 `{FEATURE_DIR}/PRD.md`。适用于需求讨论完成后，输出可供下游 Plan 阶段消费的正式需求文档。
+description: Biz 阶段 PRD 生成技能。读取已收敛的 `{FEATURE_DIR}/PRD_DISCUSS.md`，按 `$PLUGIN_ROOT/skills/autobiz/autobiz-prd-generate/templates/prd.md` 生成生成标准化 `{FEATURE_DIR}/PRD.md`。适用于需求讨论完成后，输出可供下游 Plan 阶段消费的正式需求文档。
 ---
 
 **路径变量约定（必须区分）：**
-- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 # /autobiz-prd-generate — Biz 阶段 PRD 生成技能
@@ -52,7 +55,7 @@ description: Biz 阶段 PRD 生成技能。读取已收敛的 `{FEATURE_DIR}/PRD
    - 需求输出格式示例与结构规范
 2. `references/example_doc.md`
    - 具体案例参考
-3. `{PLUGIN_DIR}/skills/autobiz/autobiz-prd-generate/templates/prd.md`
+3. `$PLUGIN_ROOT/skills/autobiz/autobiz-prd-generate/templates/prd.md`
    - 当前技能集合的标准 PRD 模板；生成 `PRD.md` 时必须遵循
 
 推进 checkpoint 必须使用统一脚本。
@@ -64,7 +67,7 @@ description: Biz 阶段 PRD 生成技能。读取已收敛的 `{FEATURE_DIR}/PRD
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 后续准入检查直接取用 `CHECKPOINT`；若 `CHECKPOINT` 为空、未知或 Feature 不存在，必须停止并提示用户选择 Feature。执行 `update_checkpoint.py` 后必须刷新 `CHECKPOINT`。
@@ -72,7 +75,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 **确定 FEATURE_DIR：**
 
 ```
-FEATURE_DIR = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}
+FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 ```
 
 由父级入口统一调用脚本校验上游产物：
@@ -89,8 +92,8 @@ python autobiz/hooks/biz_validate.py discuss --feature {slug}
 ### Step 2: 更新状态
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint prd_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint prd_in_progress
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ### Step 3: 生成正式 `PRD.md`
@@ -103,7 +106,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 
 #### `PRD.md` 结构要求
 
-最终 `PRD.md` 必须以 `{PLUGIN_DIR}/skills/autobiz/autobiz-prd-generate/templates/prd.md` 的模板主体为基础。
+最终 `PRD.md` 必须以 `$PLUGIN_ROOT/skills/autobiz/autobiz-prd-generate/templates/prd.md` 的模板主体为基础。
 
 #### 要求
 
@@ -140,8 +143,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ### Step 5: 更新状态（标记完成）
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint prd_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint prd_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ## 输出清单

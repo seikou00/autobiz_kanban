@@ -2,8 +2,8 @@
 """Read .autobizdevops/state.json without falling back to STATE.md.
 
 Usage:
-    PLUGIN_OUTPUT_DIR=<project-workspace> python read_state_json.py
-    PLUGIN_OUTPUT_DIR=<project-workspace> python read_state_json.py --feature <slug>
+    PLUGIN_WORKSPACE=<collection-workspace> PROJECT_CODE=<project> python read_state_json.py
+    PLUGIN_WORKSPACE=<collection-workspace> PROJECT_CODE=<project> FEATURE_ID=<slug> python read_state_json.py --feature <slug>
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from hooks.paths import (  # type: ignore[import-untyped]
     STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR,
     contains_workspace_argument,
     get_plugin_output_workspace,
+    resolve_env_feature,
 )
 from board_core.state_store import (  # type: ignore[import-untyped]
     get_state_json_path,
@@ -92,12 +93,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         workspace = get_plugin_output_workspace()
+        feature = resolve_env_feature(args.feature, required=True) if args.feature is not None else None
     except ValueError as exc:
         print(f"state.json 读取失败: {exc}", file=sys.stderr)
         return 1
 
-    if args.feature is not None:
-        checkpoint, exit_code = _read_feature_checkpoint(workspace, args.feature)
+    if feature is not None:
+        checkpoint, exit_code = _read_feature_checkpoint(workspace, feature)
         if exit_code == 0:
             print(checkpoint)
         return exit_code

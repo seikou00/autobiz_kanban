@@ -48,7 +48,7 @@
           "onBlock": {
             "reason": "code_done 前模块编译不通过",
             "systemMessage": "停止推进 code_done。请修复模块编译错误后重试。",
-            "additionalContext": "模块编译清单应位于 PLUGIN_OUTPUT_DIR/.autobizdevops/modules_compile.json。"
+            "additionalContext": "模块编译清单应位于 PLUGIN_WORKSPACE/PROJECT_CODE/.autobizdevops/modules_compile.json。"
           },
           "persistAfterInterrupt": true
         }

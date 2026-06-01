@@ -23,6 +23,7 @@ from hooks.paths import (  # noqa: E402
     STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR,
     contains_workspace_argument,
     get_plugin_output_workspace,
+    resolve_env_feature,
 )
 from state_checkpoint import (  # noqa: E402
     DEFAULT_STAGE_BY_CHECKPOINT,
@@ -342,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Safely update .autobizdevops/state.json checkpoint",
         allow_abbrev=False,
     )
-    parser.add_argument("--feature", "-f", required=True, help="feature slug")
+    parser.add_argument("--feature", "-f", help="feature slug; defaults to FEATURE_ID")
     parser.add_argument("--checkpoint", "-c", required=True, help="target checkpoint")
     parser.add_argument("--stage", help="stage column override")
     parser.add_argument("--owner", help="owner column override")
@@ -354,13 +355,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         workspace = get_plugin_output_workspace()
+        feature = resolve_env_feature(args.feature, required=True)
     except ValueError as exc:
         print(f"checkpoint 更新失败: {exc}", file=sys.stderr)
         return 1
 
     result = prepare_checkpoint_update(
         workspace=workspace,
-        feature=args.feature,
+        feature=feature,
         checkpoint=args.checkpoint,
         stage=args.stage,
         owner=args.owner,
@@ -369,27 +371,27 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.json:
-        write_result_json(result, feature=args.feature, checkpoint=args.checkpoint, dry_run=args.dry_run)
+        write_result_json(result, feature=feature, checkpoint=args.checkpoint, dry_run=args.dry_run)
     elif not result.ok:
         print("checkpoint 更新失败:", file=sys.stderr)
         for error in result.errors:
             print(f"  - {error}", file=sys.stderr)
     elif args.dry_run:
-        print(f"DRY_RUN checkpoint update: feature={args.feature} checkpoint={args.checkpoint}")
+        print(f"DRY_RUN checkpoint update: feature={feature} checkpoint={args.checkpoint}")
         print("--- state.json ---")
         print(result.state_json_content, end="")
         print("--- STATE.md ---")
         print(result.content, end="")
     else:
-        print(f"checkpoint updated: feature={args.feature} checkpoint={args.checkpoint}")
+        print(f"checkpoint updated: feature={feature} checkpoint={args.checkpoint}")
 
     if not result.ok:
         if not args.dry_run:
-            write_hook_logs(result, workspace=workspace, feature=args.feature)
+            write_hook_logs(result, workspace=workspace, feature=feature)
         return 1
     if not args.dry_run:
         write_state_records(workspace, result.records)
-        write_hook_logs(result, workspace=workspace, feature=args.feature)
+        write_hook_logs(result, workspace=workspace, feature=feature)
     return 0
 
 

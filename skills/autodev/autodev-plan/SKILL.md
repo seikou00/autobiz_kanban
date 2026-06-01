@@ -4,18 +4,21 @@ description: Dev 阶段技术设计与执行计划生成。读取 proposal.md、
 ---
 
 **路径变量约定（必须区分）：**
-- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。
+当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
 运行前如需查看当前契约，执行：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 ```
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
@@ -101,7 +104,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan --json
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。若 Feature slug、工作目录或 `CHECKPOINT` 为空、未知，或无法唯一确定，停止并提示用户选择 Feature；若本轮是用户直供需求并允许 `plan_in_progress --allow-create` 创建状态，创建后必须刷新 `CHECKPOINT`。
@@ -317,8 +320,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 
 #### 写入checkpoint
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ---
@@ -327,7 +330,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 
 本阶段必须生成 `{FEATURE_DIR}/design.md`。`design.md` 是后续编码、测试和验收的稳定技术设计契约，承载 API、数据、架构、迁移和风险决策；行为契约以 `specs/**/*.md` 为准，不在 design.md 中重复维护完整 specs。
 
-按 `{PLUGIN_DIR}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
+按 `$PLUGIN_ROOT/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
 - **Context / 输入上下文**：引用 proposal 和 specs，说明当前代码现状和约束。
 - **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。
@@ -379,7 +382,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 
 每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
-按 `{PLUGIN_DIR}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
+按 `$PLUGIN_ROOT/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 
 完成条件：
 - [ ] `{FEATURE_DIR}/PLAN.md` 文件已写入磁盘
@@ -395,8 +398,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ## 整体完成条件
 - `design.md`、`PLAN.md` 已完成
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint plan_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint plan_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 **Skill 完成。** 下一步：`/autodev-code --feature {slug}`

@@ -14,7 +14,7 @@ SYSTEM_NO_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+")
 
 
 STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR = (
-    "状态读写脚本不接受 --workspace/-w；请删除该参数，路径由 PLUGIN_OUTPUT_DIR 环境变量决定。"
+    "状态读写脚本不接受 --workspace/-w；请删除该参数，路径由 PLUGIN_WORKSPACE/PROJECT_CODE 环境变量决定。"
 )
 
 
@@ -29,16 +29,56 @@ def contains_workspace_argument(args: Iterable[str]) -> bool:
     return False
 
 
+def _env_value(values: Mapping[str, str], name: str) -> str:
+    return str(values.get(name, "") or "").strip()
+
+
 def get_plugin_output_workspace(env: Optional[Mapping[str, str]] = None) -> Path:
     values = os.environ if env is None else env
-    raw = values.get("PLUGIN_OUTPUT_DIR", "")
-    if not raw.strip():
-        raise ValueError("PLUGIN_OUTPUT_DIR 未设置；状态读写脚本必须由插件环境提供项目插件根目录")
+    plugin_workspace_raw = _env_value(values, "PLUGIN_WORKSPACE")
+    project_code = _env_value(values, "PROJECT_CODE")
 
-    workspace = Path(raw).expanduser().resolve(strict=False)
+    missing = [name for name, value in (("PLUGIN_WORKSPACE", plugin_workspace_raw), ("PROJECT_CODE", project_code)) if not value]
+    if missing:
+        raise ValueError(f"{', '.join(missing)} 未设置；状态脚本必须由插件环境提供 PLUGIN_WORKSPACE 和 PROJECT_CODE")
+    if "/" in project_code or "\\" in project_code:
+        raise ValueError(f"PROJECT_CODE 不能包含路径分隔符: {project_code}")
+
+    plugin_workspace = Path(plugin_workspace_raw).expanduser().resolve(strict=False)
+    if not plugin_workspace.is_dir():
+        raise ValueError(f"PLUGIN_WORKSPACE 指向的目录不存在: {plugin_workspace}")
+
+    workspace = (plugin_workspace / project_code).resolve(strict=False)
     if not workspace.is_dir():
-        raise ValueError(f"PLUGIN_OUTPUT_DIR 指向的目录不存在: {workspace}")
+        raise ValueError(f"PROJECT_CODE 对应的项目插件目录不存在: {workspace}")
+
+    state_json_path = workspace / ".autobizdevops" / "state.json"
+    if not state_json_path.is_file():
+        raise ValueError(f"state.json 未找到: {state_json_path}")
     return workspace
+
+
+def resolve_env_feature(
+    feature: Optional[str],
+    *,
+    required: bool,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    values = os.environ if env is None else env
+    provided = (feature or "").strip()
+    env_feature = _env_value(values, "FEATURE_ID")
+
+    if required and not env_feature:
+        raise ValueError("FEATURE_ID 未设置；当前 Feature 必须由插件环境提供")
+    if provided and env_feature and provided != env_feature:
+        raise ValueError(f"--feature 与 FEATURE_ID 不一致: --feature={provided} FEATURE_ID={env_feature}")
+    if provided:
+        return provided
+    if env_feature:
+        return env_feature
+    if required:
+        raise ValueError("feature 不能为空")
+    return None
 
 
 def get_workspace(workspace: Optional[PathLike] = None) -> Path:

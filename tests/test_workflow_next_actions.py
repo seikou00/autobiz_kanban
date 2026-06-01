@@ -32,7 +32,10 @@ class WorkflowNextActionsTest(unittest.TestCase):
         for platform, commands in config["inspectCommands"].items():
             with self.subTest(platform=platform):
                 prompt = commands["system_prompt_inject"]
-                self.assertIn("PLUGIN_OUTPUT_DIR", prompt)
+                self.assertIn("PLUGIN_WORKSPACE", prompt)
+                self.assertIn("PROJECT_CODE", prompt)
+                self.assertIn("FEATURE_ID", prompt)
+                self.assertIn("PROJECT_PLUGIN_DIR", prompt)
                 self.assertIn("FEATURE_DIR", prompt)
                 self.assertIn("不接受 `--workspace/-w`", prompt)
                 self.assertIn("不得把 FEATURE_DIR", prompt)
@@ -44,7 +47,11 @@ class WorkflowNextActionsTest(unittest.TestCase):
         for path in (ROOT / "skills").rglob("SKILL.md"):
             with self.subTest(path=path.relative_to(ROOT).as_posix()):
                 content = path.read_text(encoding="utf-8")
-                self.assertIn("PLUGIN_OUTPUT_DIR", content)
+                self.assertIn("PLUGIN_WORKSPACE", content)
+                self.assertIn("PROJECT_CODE", content)
+                self.assertIn("FEATURE_ID", content)
+                self.assertIn("PROJECT_PLUGIN_DIR", content)
+                self.assertNotIn("PLUGIN_OUTPUT_DIR", content)
                 self.assertIn("FEATURE_DIR", content)
                 self.assertNotIn('read_state_json.py" --workspace', content)
                 self.assertNotIn('update_checkpoint.py" --workspace', content)

@@ -33,15 +33,20 @@ def make_workspace(root: Path) -> Path:
     return workspace
 
 
-def plugin_env(workspace: Path) -> dict[str, str]:
+def plugin_env(workspace: Path, *, feature: str = "alpha") -> dict[str, str]:
     env = os.environ.copy()
-    env["PLUGIN_OUTPUT_DIR"] = str(workspace)
+    env["PLUGIN_ROOT"] = str(ROOT)
+    env["PLUGIN_WORKSPACE"] = str(workspace.parent)
+    env["PROJECT_CODE"] = workspace.name
+    env["FEATURE_ID"] = feature
+    env.pop("PLUGIN_OUTPUT_DIR", None)
     return env
 
 
-def without_plugin_output_dir() -> dict[str, str]:
-    env = os.environ.copy()
-    env.pop("PLUGIN_OUTPUT_DIR", None)
+def env_without(workspace: Path, *keys: str) -> dict[str, str]:
+    env = plugin_env(workspace)
+    for key in keys:
+        env.pop(key, None)
     return env
 
 
@@ -319,8 +324,6 @@ class StateIntegrationTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(ROOT / "hooks" / "update_checkpoint.py"),
-                    "--feature",
-                    "alpha",
                     "--checkpoint",
                     "discuss_in_progress",
                     "--allow-create",
@@ -350,8 +353,6 @@ class StateIntegrationTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(ROOT / "hooks" / "update_checkpoint.py"),
-                    "--feature",
-                    "alpha",
                     "--checkpoint",
                     "discuss_done",
                 ],
@@ -409,11 +410,79 @@ class StateIntegrationTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
-                env=without_plugin_output_dir(),
+                env=env_without(workspace, "PLUGIN_WORKSPACE"),
             )
 
             self.assertEqual(result.returncode, 1)
-            self.assertIn("PLUGIN_OUTPUT_DIR 未设置", result.stderr)
+            self.assertIn("PLUGIN_WORKSPACE 未设置", result.stderr)
+
+    def test_update_checkpoint_cli_requires_project_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "update_checkpoint.py"),
+                    "--checkpoint",
+                    "discuss_in_progress",
+                    "--allow-create",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env_without(workspace, "PROJECT_CODE"),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("PROJECT_CODE 未设置", result.stderr)
+
+    def test_update_checkpoint_cli_requires_feature_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "update_checkpoint.py"),
+                    "--checkpoint",
+                    "discuss_in_progress",
+                    "--allow-create",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env_without(workspace, "FEATURE_ID"),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("FEATURE_ID 未设置", result.stderr)
+
+    def test_update_checkpoint_cli_rejects_feature_id_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "update_checkpoint.py"),
+                    "--feature",
+                    "beta",
+                    "--checkpoint",
+                    "discuss_in_progress",
+                    "--allow-create",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=plugin_env(workspace, feature="alpha"),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("--feature 与 FEATURE_ID 不一致", result.stderr)
 
     def test_inspect_uses_json_when_markdown_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -594,7 +663,7 @@ class StateIntegrationTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
-                env=plugin_env(workspace),
+                env=plugin_env(workspace, feature="beta"),
             )
 
             self.assertEqual(result.returncode, 1)
@@ -660,11 +729,53 @@ class StateIntegrationTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
-                env=without_plugin_output_dir(),
+                env=env_without(workspace, "PLUGIN_WORKSPACE"),
             )
 
             self.assertEqual(result.returncode, 1)
-            self.assertIn("PLUGIN_OUTPUT_DIR 未设置", result.stderr)
+            self.assertIn("PLUGIN_WORKSPACE 未设置", result.stderr)
+
+    def test_read_state_json_cli_requires_feature_id_when_feature_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {"alpha": sample_record("prd_done")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "read_state_json.py"),
+                    "--feature",
+                    "alpha",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env_without(workspace, "FEATURE_ID"),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("FEATURE_ID 未设置", result.stderr)
+
+    def test_read_state_json_cli_rejects_feature_id_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {"alpha": sample_record("prd_done")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "read_state_json.py"),
+                    "--feature",
+                    "beta",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=plugin_env(workspace, feature="alpha"),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("--feature 与 FEATURE_ID 不一致", result.stderr)
 
     def test_direct_state_file_edits_are_blocked_by_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

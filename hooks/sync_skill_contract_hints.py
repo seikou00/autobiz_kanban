@@ -24,7 +24,7 @@ LEGACY_RULES_END_MARKER = "<!-- AUTOBIZDEVOPS_ARTIFACT_RULES:END -->"
 HINT_BEGIN_MARKER = "<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->"
 HINT_END_MARKER = "<!-- AUTODEV_RUNTIME_CONTRACT:END -->"
 LEGACY_FEATURE_DIR_LINE = "工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/"
-FEATURE_DIR_LINE = "FEATURE_DIR = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}"
+FEATURE_DIR_LINE = "FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}"
 
 
 @dataclass(frozen=True)
@@ -46,11 +46,11 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "## 流程契约",
             "",
             "当前 skill 的 checkpoint、输入/输出产物和 validators 以 "
-            "`{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。",
+            "`$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。",
             "运行前如需查看当前契约，执行：",
             "",
             "```bash",
-            f'python "{{PLUGIN_DIR}}/hooks/inspect_skill_contract.py" {contract.skill} --json',
+            f'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" {contract.skill} --json',
             "```",
             HINT_END_MARKER,
             "",
