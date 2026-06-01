@@ -3,11 +3,10 @@ name: autodev-code
 description: 按照 autodev-specs 与 autodev-plan 产物逐任务执行代码。读取 proposal.md、specs/**/*.md、design.md、PLAN.md 和 AGENTS.md，以 specs 为行为契约、design 为实现决策、PLAN 为执行队列，做最小实现、逐项验证、更新 PLAN.md 任务状态，并在全部任务完成后推进 code_done。支持中断恢复、--feature 多人协作、--auto 自动衔接 /autodev-reviewer。
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-
-```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
-```
+**路径变量约定（必须区分）：**
+- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约
@@ -28,22 +27,22 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-code --json
 `autodev-code` 只负责把 `/autodev-specs` 确认的行为契约和 `/autodev-plan` 确认的技术设计落成代码。
 
 输入契约：
-- `{工作目录}/proposal.md`：本轮变更目标、能力边界、影响面和非目标。
-- `{工作目录}/specs/**/*.md`：Requirement / Scenario 行为契约，是实现和验收的最高行为依据。
-- `{工作目录}/design.md`：API Decisions、Data Decisions、Technical Design、风险与待确认项。
-- `{工作目录}/PLAN.md`：任务 DAG、任务总览、任务详情、验证方法、覆盖矩阵；代码文件由任务、specs、design.md 和代码库探索共同定位。
+- `{FEATURE_DIR}/proposal.md`：本轮变更目标、能力边界、影响面和非目标。
+- `{FEATURE_DIR}/specs/**/*.md`：Requirement / Scenario 行为契约，是实现和验收的最高行为依据。
+- `{FEATURE_DIR}/design.md`：API Decisions、Data Decisions、Technical Design、风险与待确认项。
+- `{FEATURE_DIR}/PLAN.md`：任务 DAG、任务总览、任务详情、验证方法、覆盖矩阵；代码文件由任务、specs、design.md 和代码库探索共同定位。
 - `AGENTS.md`：项目级工程约束；如与本技能冲突，以 AGENTS.md 为准，除非系统级指令另有要求。
 
 输出契约：
 - 业务代码/测试/配置的最小必要修改。
-- `{工作目录}/PLAN.md` 中任务状态和验证证据更新。
+- `{FEATURE_DIR}/PLAN.md` 中任务状态和验证证据更新。
 - 刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
 不得修改：
-- `{工作目录}/PRD.md`（如果存在）
-- `{工作目录}/proposal.md`
-- `{工作目录}/specs/**/*.md`
-- `{工作目录}/design.md`
+- `{FEATURE_DIR}/PRD.md`（如果存在）
+- `{FEATURE_DIR}/proposal.md`
+- `{FEATURE_DIR}/specs/**/*.md`
+- `{FEATURE_DIR}/design.md`
 - 其他阶段报告文件
 
 如果发现 `specs/**/*.md` 与 proposal、代码现实或 PLAN 任务冲突，停止编码，报告需要回到 `/autodev-specs` 更新行为契约；如果发现 `design.md` 与 specs、代码现实或 PLAN 任务冲突，停止编码，报告需要回到 `/autodev-plan` 更新设计。不要在 code 阶段偷偷修规格或设计。`PRD.md` 只允许作为排查上游规格缺口的可选参考，不能覆盖 specs。
@@ -53,7 +52,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-code --json
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
@@ -61,14 +60,14 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 开始前必须确认当前 Feature 目录存在：
 
 ```text
-.autobizdevops/features/{slug}/
+{FEATURE_DIR}/
 ```
 
 必须读取：
-- `.autobizdevops/features/{slug}/proposal.md`
-- `.autobizdevops/features/{slug}/specs/**/*.md`
-- `.autobizdevops/features/{slug}/design.md`
-- `.autobizdevops/features/{slug}/PLAN.md`
+- `{FEATURE_DIR}/proposal.md`
+- `{FEATURE_DIR}/specs/**/*.md`
+- `{FEATURE_DIR}/design.md`
+- `{FEATURE_DIR}/PLAN.md`
 - AGENTS.md（如果存在）
 
 如果缺少任一必读文件，停止，不要生成替代文件。
@@ -105,8 +104,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 开始编码前推进到 `code_in_progress`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint code_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint code_in_progress
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 ## 执行协议
@@ -192,8 +191,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 验证通过后推进 checkpoint：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint code_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint code_done
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 ## 写入边界
@@ -221,4 +220,4 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 - 项目编译通过或外部 checkpoint 编译校验通过。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
-**Skill 完成。** 下一步：`/autodev-reviewer`
+**Skill 完成。** 下一步：`/autodev-reviewer --feature {slug}`

@@ -2,14 +2,43 @@
 # -*- coding: utf-8 -*-
 """Path helpers for autobizdevops workspace bootstrap hooks."""
 
+import os
 import re
 from pathlib import Path
-from typing import Optional, Union
+from typing import Iterable, Mapping, Optional, Union
 
 
 PathLike = Union[str, Path]
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_NO_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+")
+
+
+STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR = (
+    "状态读写脚本不接受 --workspace/-w；请删除该参数，路径由 PLUGIN_OUTPUT_DIR 环境变量决定。"
+)
+
+
+def contains_workspace_argument(args: Iterable[str]) -> bool:
+    for arg in args:
+        if arg in {"--workspace", "-w"}:
+            return True
+        if arg.startswith("--workspace="):
+            return True
+        if arg.startswith("-w") and arg != "-w":
+            return True
+    return False
+
+
+def get_plugin_output_workspace(env: Optional[Mapping[str, str]] = None) -> Path:
+    values = os.environ if env is None else env
+    raw = values.get("PLUGIN_OUTPUT_DIR", "")
+    if not raw.strip():
+        raise ValueError("PLUGIN_OUTPUT_DIR 未设置；状态读写脚本必须由插件环境提供项目插件根目录")
+
+    workspace = Path(raw).expanduser().resolve(strict=False)
+    if not workspace.is_dir():
+        raise ValueError(f"PLUGIN_OUTPUT_DIR 指向的目录不存在: {workspace}")
+    return workspace
 
 
 def get_workspace(workspace: Optional[PathLike] = None) -> Path:

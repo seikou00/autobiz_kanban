@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -13,7 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "hooks" / "code_done_compile_guard.py"
 
 
-def run_guard(payload: dict | str) -> subprocess.CompletedProcess:
+def plugin_env(workspace: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PLUGIN_OUTPUT_DIR"] = str(workspace)
+    return env
+
+
+def run_guard(payload: dict | str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     raw_input = payload if isinstance(payload, str) else json.dumps(payload)
     return subprocess.run(
         [sys.executable, str(GUARD)],
@@ -21,6 +28,7 @@ def run_guard(payload: dict | str) -> subprocess.CompletedProcess:
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
 
 
@@ -57,30 +65,50 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "")
 
-    def test_update_checkpoint_non_code_done_passes(self) -> None:
+    def test_update_checkpoint_non_code_done_passes_without_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace = make_workspace(Path(tmp))
-            command = (
-                f"python hooks/update_checkpoint.py --workspace {workspace} "
-                "--feature alpha --checkpoint code_in_progress"
-            )
+            command = "python hooks/update_checkpoint.py --feature alpha --checkpoint code_in_progress"
 
             result = run_guard(execute_payload(command, Path(tmp)))
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_state_script_workspace_argument_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            commands = [
+                f"python hooks/update_checkpoint.py --workspace {workspace} --feature alpha --checkpoint code_in_progress",
+                f"python read_state_json.py --workspace {workspace} --feature alpha",
+            ]
+            for command in commands:
+                with self.subTest(command=command):
+                    result = run_guard(execute_payload(command, Path(tmp)), env=plugin_env(workspace))
+
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("不接受 --workspace/-w", result.stderr)
+                    self.assertEqual(json.loads(result.stdout)["decision"], "block")
+
     def test_code_done_missing_modules_compile_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
-            command = (
-                f"python hooks/update_checkpoint.py --workspace {workspace} "
-                "--feature alpha --checkpoint code_done"
-            )
+            command = "python hooks/update_checkpoint.py --feature alpha --checkpoint code_done"
 
-            result = run_guard(execute_payload(command, Path(tmp)))
+            result = run_guard(execute_payload(command, Path(tmp)), env=plugin_env(workspace))
 
             self.assertEqual(result.returncode, 2)
             self.assertIn("缺少模块编译清单", result.stderr)
+            self.assertEqual(json.loads(result.stdout)["decision"], "block")
+
+    def test_code_done_missing_plugin_output_dir_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env.pop("PLUGIN_OUTPUT_DIR", None)
+            command = "python hooks/update_checkpoint.py --feature alpha --checkpoint code_done"
+
+            result = run_guard(execute_payload(command, Path(tmp)), env=env)
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("PLUGIN_OUTPUT_DIR 未设置", result.stderr)
             self.assertEqual(json.loads(result.stdout)["decision"], "block")
 
     def test_invalid_modules_compile_blocks(self) -> None:
@@ -90,12 +118,9 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                 json.dumps({"version": 1, "modules": [{"module": "root", "path": str(workspace)}]}),
                 encoding="utf-8",
             )
-            command = (
-                f"python hooks/update_checkpoint.py --workspace={workspace} "
-                "--feature=alpha --checkpoint=code_done"
-            )
+            command = "python hooks/update_checkpoint.py --feature=alpha --checkpoint=code_done"
 
-            result = run_guard(execute_payload(command, Path(tmp)))
+            result = run_guard(execute_payload(command, Path(tmp)), env=plugin_env(workspace))
 
             self.assertEqual(result.returncode, 2)
             self.assertIn("compile_command 缺失", result.stderr)
@@ -108,12 +133,9 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                 workspace,
                 [{"module": "missing", "path": str(missing), "compile_command": "echo ok"}],
             )
-            command = (
-                f"python hooks/update_checkpoint.py --workspace {workspace} "
-                "--feature alpha --checkpoint code_done"
-            )
+            command = "python hooks/update_checkpoint.py --feature alpha --checkpoint code_done"
 
-            result = run_guard(execute_payload(command, Path(tmp)))
+            result = run_guard(execute_payload(command, Path(tmp)), env=plugin_env(workspace))
 
             self.assertEqual(result.returncode, 2)
             self.assertIn("不存在或不是目录", result.stderr)
@@ -141,12 +163,9 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                     },
                 ],
             )
-            command = (
-                f"/bin/zsh -lc 'python hooks/update_checkpoint.py --workspace {workspace} "
-                "--feature alpha --checkpoint code_done'"
-            )
+            command = "/bin/zsh -lc 'python hooks/update_checkpoint.py --feature alpha --checkpoint code_done'"
 
-            result = run_guard(execute_payload(command, root))
+            result = run_guard(execute_payload(command, root), env=plugin_env(workspace))
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("service", result.stdout)
@@ -164,12 +183,9 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                 workspace,
                 [{"module": "service", "path": str(service), "compile_command": command_text}],
             )
-            command = (
-                f"python hooks/update_checkpoint.py --workspace {workspace} "
-                "--feature alpha --checkpoint code_done"
-            )
+            command = "python hooks/update_checkpoint.py --feature alpha --checkpoint code_done"
 
-            result = run_guard(execute_payload(command, root))
+            result = run_guard(execute_payload(command, root), env=plugin_env(workspace))
 
             self.assertEqual(result.returncode, 2)
             self.assertIn("service", result.stderr)

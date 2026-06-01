@@ -19,6 +19,11 @@ if str(ROOT) not in sys.path:
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
+from hooks.paths import (  # noqa: E402
+    STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR,
+    contains_workspace_argument,
+    get_plugin_output_workspace,
+)
 from state_checkpoint import (  # noqa: E402
     DEFAULT_STAGE_BY_CHECKPOINT,
     INITIAL_CHECKPOINTS,
@@ -328,8 +333,15 @@ def write_result_json(result: CheckpointUpdate, *, feature: str, checkpoint: str
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Safely update .autobizdevops/state.json checkpoint")
-    parser.add_argument("--workspace", "-w", required=True, help="workspace path")
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if contains_workspace_argument(raw_args):
+        print(STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR, file=sys.stderr)
+        return 2
+
+    parser = argparse.ArgumentParser(
+        description="Safely update .autobizdevops/state.json checkpoint",
+        allow_abbrev=False,
+    )
     parser.add_argument("--feature", "-f", required=True, help="feature slug")
     parser.add_argument("--checkpoint", "-c", required=True, help="target checkpoint")
     parser.add_argument("--stage", help="stage column override")
@@ -338,10 +350,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-create", action="store_true", help="allow creating a new feature row")
     parser.add_argument("--dry-run", action="store_true", help="validate and print target content without writing")
     parser.add_argument("--json", action="store_true", help="print JSON result")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_args)
+
+    try:
+        workspace = get_plugin_output_workspace()
+    except ValueError as exc:
+        print(f"checkpoint 更新失败: {exc}", file=sys.stderr)
+        return 1
 
     result = prepare_checkpoint_update(
-        workspace=Path(args.workspace),
+        workspace=workspace,
         feature=args.feature,
         checkpoint=args.checkpoint,
         stage=args.stage,
@@ -367,11 +385,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if not result.ok:
         if not args.dry_run:
-            write_hook_logs(result, workspace=Path(args.workspace).resolve(), feature=args.feature)
+            write_hook_logs(result, workspace=workspace, feature=args.feature)
         return 1
     if not args.dry_run:
-        write_state_records(Path(args.workspace), result.records)
-        write_hook_logs(result, workspace=Path(args.workspace).resolve(), feature=args.feature)
+        write_state_records(workspace, result.records)
+        write_hook_logs(result, workspace=workspace, feature=args.feature)
     return 0
 
 

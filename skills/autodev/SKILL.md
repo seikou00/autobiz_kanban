@@ -3,8 +3,10 @@ name: autodev
 description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到对应子技能；各子技能独立负责准入检查与产物自检。
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-**CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`。不得把 `PLUGIN_OUTPUT_DIR` 直接当作代码工作区，除非已确认二者是同一目录。
+**路径变量约定（必须区分）：**
+- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 ## autodev
 
@@ -57,13 +59,13 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 - 否则先读取全部 State 快照，再从 `STATE.records` 列出候选让用户选择：
 
 ```bash
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
+python "{PLUGIN_DIR}/read_state_json.py"
 ```
 
 确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。

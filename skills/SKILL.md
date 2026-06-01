@@ -3,7 +3,10 @@ name: autobizdevops
 description: 完成项目研发的全流程，按 biz / dev / ops 三个可独立起步的阶段组织
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
+**路径变量约定（必须区分）：**
+- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 # 核心工作原则
 
@@ -25,8 +28,8 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 
 ### 路径概念区分
 - **PLUGIN_DIR**：本插件的根目录（即 `../`）。所有 SKILL.md 文件、校验脚本、hooks 都存放在此目录下。脚本调用路径均以此为基准。
-- **PLUGIN_OUTPUT_DIR**：插件流程产物目录，只用于 `.autobizdevops/` 状态、Feature 产物与插件生成文档。
-- **WORKSPACE**：当前项目的插件工作空间目录；checkpoint、state 与 Feature 产物均位于 `{WORKSPACE}/.autobizdevops/`。
+- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`。`CODE_WORKSPACE` 可能与 `WORKSPACE` 相同，但不得默认把 `PLUGIN_OUTPUT_DIR` 当作代码工作区。
 
 `AGENTS.md` 属于代码工作区约束文件。初始化、读取或检查 `AGENTS.md` 时，目标必须是 `{CODE_WORKSPACE}/AGENTS.md`；只有明确确认代码根目录和 `PLUGIN_OUTPUT_DIR` 是同一目录时，才允许检查 `{PLUGIN_OUTPUT_DIR}/AGENTS.md`。
@@ -56,10 +59,10 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 
 ```bash
 # 已知 Feature
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 
 # 未知 Feature：先读取全部 records，再选择或要求用户选择 Feature
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
+python "{PLUGIN_DIR}/read_state_json.py"
 ```
 
 只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
@@ -69,7 +72,7 @@ python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
 所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转和 Autodev 产物校验；`code_done` 的编译门禁由 hook 基于 `.autobizdevops/modules_compile.json` 逐模块执行编译命令。
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint {checkpoint}
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint {checkpoint}
 ```
 
 | Checkpoint | 根路由目标 | 说明 |

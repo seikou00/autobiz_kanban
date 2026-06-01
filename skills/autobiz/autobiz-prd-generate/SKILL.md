@@ -1,12 +1,13 @@
 ---
 name: autobiz-prd-generate
-description: Biz 阶段 PRD 生成技能。读取已收敛的 `{工作目录}/PRD_DISCUSS.md`，按 `{PLUGIN_DIR}/skills/autobiz/autobiz-prd-generate/templates/prd.md` 生成生成标准化 `{工作目录}/PRD.md`。适用于需求讨论完成后，输出可供下游 Plan 阶段消费的正式需求文档。
+description: Biz 阶段 PRD 生成技能。读取已收敛的 `{FEATURE_DIR}/PRD_DISCUSS.md`，按 `{PLUGIN_DIR}/skills/autobiz/autobiz-prd-generate/templates/prd.md` 生成生成标准化 `{FEATURE_DIR}/PRD.md`。适用于需求讨论完成后，输出可供下游 Plan 阶段消费的正式需求文档。
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
-```
+**路径变量约定（必须区分）：**
+- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
+
 # /autobiz-prd-generate — Biz 阶段 PRD 生成技能
 
 > 本技能专注将讨论稿生成为正式 PRD，不负责需求澄清循环。
@@ -34,10 +35,10 @@ description: Biz 阶段 PRD 生成技能。读取已收敛的 `{工作目录}/PR
 
 优先读取以下输入，按可信度从高到低使用：
 
-1. `{工作目录}/PRD_DISCUSS.md`
+1. `{FEATURE_DIR}/PRD_DISCUSS.md`
 2. 用户明确给出的已确认需求结论、功能范围、验收标准
 
-`{工作目录}/PRD_DISCUSS.md` 是 `/autobiz-requirement-discuss` 的中间讨论稿，必须在需求已收敛的前提下使用。
+`{FEATURE_DIR}/PRD_DISCUSS.md` 是 `/autobiz-requirement-discuss` 的中间讨论稿，必须在需求已收敛的前提下使用。
 
 如果当前没有 `PRD_DISCUSS.md`，或需求尚未收敛（仍有大量 P0 / P1 未解决），先回到 `/autobiz-requirement-discuss` 完成需求澄清。
 
@@ -63,15 +64,15 @@ description: Biz 阶段 PRD 生成技能。读取已收敛的 `{工作目录}/PR
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 后续准入检查直接取用 `CHECKPOINT`；若 `CHECKPOINT` 为空、未知或 Feature 不存在，必须停止并提示用户选择 Feature。执行 `update_checkpoint.py` 后必须刷新 `CHECKPOINT`。
 
-**确定工作目录：**
+**确定 FEATURE_DIR：**
 
 ```
-工作目录 = .autobizdevops/features/{slug}/
+FEATURE_DIR = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}
 ```
 
 由父级入口统一调用脚本校验上游产物：
@@ -80,7 +81,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 python autobiz/hooks/biz_validate.py discuss --feature {slug}
 ```
 
-脚本通过后，读取 `{工作目录}/PRD_DISCUSS.md`，检查讨论稿的收敛状态：
+脚本通过后，读取 `{FEATURE_DIR}/PRD_DISCUSS.md`，检查讨论稿的收敛状态：
 
 - 若仍有大量 P0 / P1 未解决：提示用户先回到 `/autobiz-requirement-discuss` 继续澄清
 - 若已收敛或只剩可接受的 P2：继续执行
@@ -88,8 +89,8 @@ python autobiz/hooks/biz_validate.py discuss --feature {slug}
 ### Step 2: 更新状态
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint prd_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint prd_in_progress
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 ### Step 3: 生成正式 `PRD.md`
@@ -115,32 +116,32 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 #### 输出文件
 
-- 输入稿：`{工作目录}/PRD_DISCUSS.md`
-- 正式稿：`{工作目录}/PRD.md`
+- 输入稿：`{FEATURE_DIR}/PRD_DISCUSS.md`
+- 正式稿：`{FEATURE_DIR}/PRD.md`
 - 格式：Markdown
 
 ### Step 4: 最终检查与交接
 
 完成 PRD 生成后，检查以下事项：
 
-- `{工作目录}/PRD_DISCUSS.md` 已存在，且保留了完整收敛过程
-- `{工作目录}/PRD.md` 已存在，且内容已从讨论稿生成为正式交付文档
-- `{工作目录}/PRD.md` 不再包含开放式问题、原始追问对话、未决候选方案
+- `{FEATURE_DIR}/PRD_DISCUSS.md` 已存在，且保留了完整收敛过程
+- `{FEATURE_DIR}/PRD.md` 已存在，且内容已从讨论稿生成为正式交付文档
+- `{FEATURE_DIR}/PRD.md` 不再包含开放式问题、原始追问对话、未决候选方案
 - 正式 PRD 足以支撑后续 Dev 阶段工作
 
 若存在待确认项，列成清单，避免 Dev 把假设当事实。
 
 向用户明确说明：
 
-- 讨论稿位于 `{工作目录}/PRD_DISCUSS.md`
-- 正式 PRD 位于 `{工作目录}/PRD.md`
+- 讨论稿位于 `{FEATURE_DIR}/PRD_DISCUSS.md`
+- 正式 PRD 位于 `{FEATURE_DIR}/PRD.md`
 - 下一步必须进入 `/autodev`。
 
 ### Step 5: 更新状态（标记完成）
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint prd_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint prd_done
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 ## 输出清单

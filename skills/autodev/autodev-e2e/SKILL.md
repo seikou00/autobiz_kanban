@@ -3,12 +3,15 @@ name: autodev-e2e
 description: 对单个 feature 执行端到端测试。作为 Autodev 根流程中的正式阶段，承接 autodev-utest 产物，输出 E2E_REPORT.md / e2e-run.log，并按 checkpoint 做 e2e_done / needs_fix 分支决策。默认由当前会话内联执行；可使用后台进程启动服务或运行长时间测试命令。
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
+**路径变量约定（必须区分）：**
+- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 # autodev-e2e — E2E 阶段技能
 
 ```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
+FEATURE_DIR = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}
 ```
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
@@ -28,7 +31,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-e2e --json
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 后续准入、恢复和分支决策直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
@@ -37,13 +40,13 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 读取以下 feature 文档：
 
-- `.autobizdevops/features/{slug}/proposal.md`
-- `.autobizdevops/features/{slug}/specs/**/*.md`
-- `.autobizdevops/features/{slug}/design.md`
-- `.autobizdevops/features/{slug}/PLAN.md`
-- `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`
-- `.autobizdevops/features/{slug}/UNIT_TEST_REPORT.md`
-- `.autobizdevops/features/{slug}/test-output.log`
+- `{FEATURE_DIR}/proposal.md`
+- `{FEATURE_DIR}/specs/**/*.md`
+- `{FEATURE_DIR}/design.md`
+- `{FEATURE_DIR}/PLAN.md`
+- `{FEATURE_DIR}/REQUIREMENTS_EVAL.md`
+- `{FEATURE_DIR}/UNIT_TEST_REPORT.md`
+- `{FEATURE_DIR}/test-output.log`
 
 用途约束：
 
@@ -55,12 +58,12 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 禁止写入：
 
-- 不要修改 `.autobizdevops/features/{slug}/PRD.md`（如果存在）。
-- 不要修改 `.autobizdevops/features/{slug}/proposal.md`。
-- 不要修改 `.autobizdevops/features/{slug}/specs/**/*.md`。
-- 不要修改 `.autobizdevops/features/{slug}/design.md`。
-- 不要修改 `.autobizdevops/features/{slug}/PLAN.md`。
-- 不要修改 `.autobizdevops/features/{slug}/UNIT_TEST_REPORT.md`、`test-output.log`、`REQUIREMENTS_EVAL.md`。
+- 不要修改 `{FEATURE_DIR}/PRD.md`（如果存在）。
+- 不要修改 `{FEATURE_DIR}/proposal.md`。
+- 不要修改 `{FEATURE_DIR}/specs/**/*.md`。
+- 不要修改 `{FEATURE_DIR}/design.md`。
+- 不要修改 `{FEATURE_DIR}/PLAN.md`。
+- 不要修改 `{FEATURE_DIR}/UNIT_TEST_REPORT.md`、`test-output.log`、`REQUIREMENTS_EVAL.md`。
 - 不要为通过 E2E 而弱化断言、删除用例、伪造报告。
 
 每轮 E2E 必须优先以 specs 中属于用户主链路的 Requirement / Scenario 生成结构化测试用例；相关 API Decision 或 Data Decision 只作为执行和断言上下文。涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由、用户可见流程的 P0/P1 用例必须标记 `ui_required: true`。
@@ -70,18 +73,18 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 开始 E2E 前推进到 `e2e_in_progress`，写入后立即刷新 `CHECKPOINT`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint e2e_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint e2e_in_progress
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 E2E 通过后推进到 `e2e_done`；若存在明确失败并需要回流，推进到 `needs_fix`。每次写入后都必须刷新 `CHECKPOINT`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint e2e_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint e2e_done
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint needs_fix
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint needs_fix
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```

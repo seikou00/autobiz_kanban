@@ -3,11 +3,10 @@ name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。读取 proposal.md、specs/**/*.md 和现有代码，生成 design.md 与 PLAN.md；不得修改业务代码。
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-
-```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
-```
+**路径变量约定（必须区分）：**
+- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约
@@ -102,12 +101,12 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan --json
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。若 Feature slug、工作目录或 `CHECKPOINT` 为空、未知，或无法唯一确定，停止并提示用户选择 Feature；若本轮是用户直供需求并允许 `plan_in_progress --allow-create` 创建状态，创建后必须刷新 `CHECKPOINT`。
 
-- 读取 `{工作目录}/proposal.md`、`specs/**/*.md`、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
+- 读取 `{FEATURE_DIR}/proposal.md`、`specs/**/*.md`、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
 - 读取 AGENTS.md 和与本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
 
@@ -318,15 +317,15 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 #### 写入checkpoint
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 ---
 
 #### 生成 design.md
 
-本阶段必须生成 `{工作目录}/design.md`。`design.md` 是后续编码、测试和验收的稳定技术设计契约，承载 API、数据、架构、迁移和风险决策；行为契约以 `specs/**/*.md` 为准，不在 design.md 中重复维护完整 specs。
+本阶段必须生成 `{FEATURE_DIR}/design.md`。`design.md` 是后续编码、测试和验收的稳定技术设计契约，承载 API、数据、架构、迁移和风险决策；行为契约以 `specs/**/*.md` 为准，不在 design.md 中重复维护完整 specs。
 
 按 `{PLUGIN_DIR}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
@@ -346,7 +345,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 - **Risks / Open Questions**：所有未确认业务语义、技术假设、兼容风险必须落在这里。
 
 完成条件：
-- [ ] `{工作目录}/design.md` 文件已写入磁盘
+- [ ] `{FEATURE_DIR}/design.md` 文件已写入磁盘
 - [ ] design.md 包含 Context、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
 - [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
 - [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
@@ -356,10 +355,10 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 #### 生成 PLAN
 
-本阶段必须生成 `{工作目录}/PLAN.md`。PLAN 只承载执行任务，不再重复写需求契约、行为规格或完整技术设计；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成 `{FEATURE_DIR}/PLAN.md`。PLAN 只承载执行任务，不再重复写需求契约、行为规格或完整技术设计；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 用户补充信息沉淀规则：
-- 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `{工作目录}/design.md` 对应章节，再把执行相关部分同步到 `{工作目录}/PLAN.md`。
+- 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `{FEATURE_DIR}/design.md` 对应章节，再把执行相关部分同步到 `{FEATURE_DIR}/PLAN.md`。
 - 如果用户补充内容改变了外部可观察行为、验收标准或能力边界，停止并建议回到 `/autodev-specs` 更新 `proposal.md` / `specs/**/*.md`。
 - 必须在 PLAN.md 中新增或更新「用户补充说明 / 技术细节」章节。
 - 用户明确确认的内容，标记为「已确认」。
@@ -383,7 +382,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 按 `{PLUGIN_DIR}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 
 完成条件：
-- [ ] `{工作目录}/PLAN.md` 文件已写入磁盘
+- [ ] `{FEATURE_DIR}/PLAN.md` 文件已写入磁盘
 - [ ] PLAN.md 包含「任务 DAG」「任务总览」「任务详情」「Specs 行为覆盖」「规格与设计决策覆盖」
 - [ ] 每个任务都包含「做什么」「规格依据」「设计依据」「验证方法」「状态: 待做」
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
@@ -396,8 +395,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 ## 整体完成条件
 - `design.md`、`PLAN.md` 已完成
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint plan_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --feature "{slug}" --checkpoint plan_done
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
-**Skill 完成。** 下一步：`/autodev-code`
+**Skill 完成。** 下一步：`/autodev-code --feature {slug}`

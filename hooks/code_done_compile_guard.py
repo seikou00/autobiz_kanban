@@ -13,6 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from paths import (
+    STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR,
+    contains_workspace_argument,
+    get_plugin_output_workspace,
+)
+
 
 BLOCK_EXIT_CODE = 2
 MODULES_COMPILE_RELATIVE_PATH = Path(".autobizdevops") / "modules_compile.json"
@@ -22,7 +28,6 @@ OUTPUT_TAIL_LIMIT = 4000
 
 @dataclass(frozen=True)
 class CheckpointCommand:
-    workspace: Path
     checkpoint: str
 
 
@@ -95,28 +100,21 @@ def option_value(tokens: list[str], *names: str) -> str:
     return ""
 
 
-def parse_checkpoint_command(command: str, cwd: Path) -> CheckpointCommand | None:
+def parse_checkpoint_command(command: str) -> CheckpointCommand | None:
+    state_scripts = {"read_state_json.py", "update_checkpoint.py"}
     for variant in command_variants(command):
         tokens = command_words(variant)
-        if not any(Path(token).name == "update_checkpoint.py" for token in tokens):
+        script_names = {Path(token).name for token in tokens}
+        if script_names & state_scripts and contains_workspace_argument(tokens):
+            raise ValueError(STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR)
+        if "update_checkpoint.py" not in script_names:
             continue
 
         checkpoint = option_value(tokens, "--checkpoint", "-c")
         if checkpoint != "code_done":
             return None
 
-        workspace = option_value(tokens, "--workspace", "-w")
-        if not workspace:
-            raise ValueError("code_done 编译校验失败: update_checkpoint.py 缺少 --workspace 参数")
-
-        workspace_path = Path(workspace).expanduser()
-        if not workspace_path.is_absolute():
-            workspace_path = cwd / workspace_path
-
-        return CheckpointCommand(
-            workspace=workspace_path.resolve(strict=False),
-            checkpoint=checkpoint,
-        )
+        return CheckpointCommand(checkpoint=checkpoint)
     return None
 
 
@@ -240,16 +238,20 @@ def run_guard(payload: dict[str, Any]) -> int:
     if not command:
         return 0
 
-    cwd = extract_cwd(payload)
     try:
-        checkpoint_command = parse_checkpoint_command(command, cwd)
+        checkpoint_command = parse_checkpoint_command(command)
     except ValueError as exc:
         return block(str(exc))
 
     if checkpoint_command is None:
         return 0
 
-    modules_path = checkpoint_command.workspace / MODULES_COMPILE_RELATIVE_PATH
+    try:
+        workspace = get_plugin_output_workspace()
+    except ValueError as exc:
+        return block(f"code_done 编译校验失败: {exc}")
+
+    modules_path = workspace / MODULES_COMPILE_RELATIVE_PATH
     try:
         modules = load_modules(modules_path)
     except ValueError as exc:

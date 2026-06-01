@@ -3,10 +3,11 @@ name: autobiz
 description: Biz 阶段统一入口。负责前置准入校验、流程编排、子技能路由与关键产出物脚本校验。所有 Biz 阶段工作应通过本入口进入。
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
-```
+**路径变量约定（必须区分）：**
+- **PLUGIN_OUTPUT_DIR**：项目插件根目录环境变量，必须指向包含 `.autobizdevops/state.json` 的目录；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现、验证和 `init_dev_agents.py --code-workspace`。
+
 # /autobiz — Biz 阶段统一入口
 
 > 本技能是 Biz 阶段的唯一统一入口，负责 workspace 前置准入、流程编排和产出物脚本校验。
@@ -22,7 +23,7 @@ description: Biz 阶段统一入口。负责前置准入校验、流程编排、
 - 用户要求进入 Biz 阶段（需求澄清、PRD 生成）
 - 用户提到"完善需求""整理 PRD"
 - 用户从其他阶段（如 Dev）回溯到 Biz 阶段
-- 任何需要操作 `.autobizdevops/features/{slug}/` 目录的场景
+- 任何需要操作 `{FEATURE_DIR}/` 目录的场景
 
 ## 前置准入条件
 
@@ -40,13 +41,13 @@ description: Biz 阶段统一入口。负责前置准入校验、流程编排、
 若 `{slug}` 未确定，先读取全部 State 快照，再从 `STATE.records` 选择或要求用户选择 Feature：
 
 ```bash
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
+python "{PLUGIN_DIR}/read_state_json.py"
 ```
 
 确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --feature "{slug}")
 ```
 
 后续流程编排和子技能准入直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。若脚本提示 Feature 不存在，仅 `/autobiz-requirement-discuss` 可通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
