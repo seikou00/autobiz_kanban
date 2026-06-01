@@ -221,4 +221,4 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 - 项目编译通过或外部 checkpoint 编译校验通过。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
-**Skill 完成。** 下一步：`/autodev-reviewer --feature {slug}`
+**Skill 完成。** 下一步：`/autodev-reviewer`

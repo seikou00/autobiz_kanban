@@ -134,7 +134,6 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 - 讨论稿位于 `{工作目录}/PRD_DISCUSS.md`
 - 正式 PRD 位于 `{工作目录}/PRD.md`
-- 下一步可进入 `/autodev-plan`
 
 ### Step 5: 更新状态（标记完成）
 

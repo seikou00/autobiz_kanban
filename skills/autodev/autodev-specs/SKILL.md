@@ -149,4 +149,4 @@ python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --fea
 CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
 ```
 
-**Skill 完成。** 下一步：`/autodev-plan --feature {slug}`
+**Skill 完成。** 下一步：`/autodev-plan`
