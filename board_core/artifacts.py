@@ -39,9 +39,9 @@ def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
         "paths": matches,
     }
     if matches:
-        entry["status"] = {"label": "已生成", "uiKind": "ok"}
+        entry["artifactStatus"] = "generated"
     else:
-        entry["status"] = {"label": "未生成", "uiKind": "warning"}
+        entry["artifactStatus"] = "missing"
     return entry
 
 
@@ -49,12 +49,12 @@ def _scan_file_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
     artifact_path = feature_dir / artifact["path"]
     entry: dict = {
         "id": artifact["id"],
-        "paths": [_relative_path(artifact_path, workspace)],
+        "path": _relative_path(artifact_path, workspace),
     }
     if artifact_path.is_file():
-        entry["status"] = {"label": "已生成", "uiKind": "ok"}
+        entry["artifactStatus"] = "generated"
     else:
-        entry["status"] = {"label": "未生成", "uiKind": "warning"}
+        entry["artifactStatus"] = "missing"
     return entry
 
 

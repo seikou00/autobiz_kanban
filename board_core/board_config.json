@@ -114,7 +114,7 @@
         "artifacts": {
           "inputs": [],
           "outputs": [
-            { "id": "prd_discuss", "label": "需求讨论稿", "kind": "file", "path": "PRD_DISCUSS.md", "required": true }
+            { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true }
           ]
         },
         "validators": [],
@@ -137,10 +137,10 @@
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {
           "inputs": [
-            { "id": "prd_discuss", "label": "需求讨论稿", "kind": "file", "path": "PRD_DISCUSS.md", "required": true }
+            { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true }
           ],
           "outputs": [
-            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true }
+            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
           ]
         },
         "validators": [],
@@ -163,11 +163,11 @@
         "checkpoints": ["specs_in_progress", "specs_done"],
         "artifacts": {
           "inputs": [
-            { "id": "prd", "label": "PRD文档", "kind": "file", "path": "PRD.md", "required": true }
+            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
           ],
           "outputs": [
-            { "id": "proposal", "label": "变更提案", "kind": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "kind": "file", "path": "specs/**/*.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true }
           ]
         },
         "validators": ["proposal_contract", "specs_contract"]
@@ -187,12 +187,12 @@
         "checkpoints": ["plan_in_progress", "plan_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "kind": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "kind": "file", "path": "specs/**/*.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true }
           ],
           "outputs": [
-            { "id": "design", "label": "技术设计", "kind": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true }
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
           ]
         },
         "validators": ["design_contract", "plan_initial_tasks"]
@@ -212,14 +212,14 @@
         "checkpoints": ["code_in_progress", "code_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "kind": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "kind": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "prd_optional", "label": "PRD参考", "kind": "file", "path": "PRD.md", "required": false },
-            { "id": "design", "label": "技术设计", "kind": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
           ],
           "outputs": [
-            { "id": "plan", "label": "执行计划（更新）", "kind": "file", "path": "PLAN.md", "required": true }
+            { "id": "plan", "label": "执行计划（更新）", "artifactType": "file", "path": "PLAN.md", "required": true }
           ]
         },
         "validators": ["plan_finished_tasks"]
@@ -239,14 +239,14 @@
         "checkpoints": ["requirements_eval_in_progress", "requirements_eval_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "kind": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "kind": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "prd_optional", "label": "PRD参考", "kind": "file", "path": "PRD.md", "required": false },
-            { "id": "design", "label": "技术设计", "kind": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
           ],
           "outputs": [
-            { "id": "requirements_eval", "label": "需求实现评审报告", "kind": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
           ]
         },
         "validators": ["requirements_eval_verdict"]
@@ -266,16 +266,16 @@
         "checkpoints": ["unit_test_in_progress", "unit_test_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "kind": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "kind": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "prd_optional", "label": "PRD参考", "kind": "file", "path": "PRD.md", "required": false },
-            { "id": "design", "label": "技术设计", "kind": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true },
-            { "id": "requirements_eval", "label": "需求实现评审报告", "kind": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
           ],
           "outputs": [
-            { "id": "unit_test_report", "label": "单元测试报告", "kind": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
-            { "id": "test_output", "label": "测试输出日志", "kind": "file", "path": "test-output.log", "required": true }
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
+            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": true }
           ]
         },
         "validators": ["unit_test_report_contract"]
@@ -295,19 +295,19 @@
         "checkpoints": ["e2e_in_progress", "e2e_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "kind": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "kind": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "prd_optional", "label": "PRD参考", "kind": "file", "path": "PRD.md", "required": false },
-            { "id": "design", "label": "技术设计", "kind": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true },
-            { "id": "requirements_eval", "label": "需求实现评审报告", "kind": "file", "path": "REQUIREMENTS_EVAL.md", "required": true },
-            { "id": "unit_test_report", "label": "单元测试报告", "kind": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
-            { "id": "test_output", "label": "测试输出日志", "kind": "file", "path": "test-output.log", "required": false }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true },
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
+            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false }
           ],
           "outputs": [
-            { "id": "e2e_cases", "label": "E2E 测试用例", "kind": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
-            { "id": "e2e_report", "label": "E2E 测试报告", "kind": "file", "path": "E2E_REPORT.md", "required": true },
-            { "id": "e2e_log", "label": "E2E 运行日志", "kind": "file", "path": "e2e-run.log", "required": true }
+            { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
+            { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true },
+            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true }
           ]
         },
         "validators": []
@@ -327,18 +327,18 @@
         "checkpoints": ["verify_in_progress", "verify_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "kind": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "kind": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "design", "label": "技术设计", "kind": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "kind": "file", "path": "PLAN.md", "required": true },
-            { "id": "unit_test_report", "label": "单元测试报告", "kind": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
-            { "id": "test_output", "label": "测试输出日志", "kind": "file", "path": "test-output.log", "required": false },
-            { "id": "e2e_cases", "label": "E2E 测试用例", "kind": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
-            { "id": "e2e_report", "label": "E2E 测试报告", "kind": "file", "path": "E2E_REPORT.md", "required": true },
-            { "id": "e2e_log", "label": "E2E 运行日志", "kind": "file", "path": "e2e-run.log", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
+            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false },
+            { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
+            { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true },
+            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true }
           ],
           "outputs": [
-            { "id": "verify_report", "label": "验收报告", "kind": "file", "path": "VERIFY_REPORT.md", "required": true }
+            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true }
           ]
         },
         "validators": []
@@ -358,11 +358,11 @@
         "checkpoints": ["cicd_in_progress", "cicd_done"],
         "artifacts": {
           "inputs": [
-            { "id": "verify_report", "label": "验收报告", "kind": "file", "path": "VERIFY_REPORT.md", "required": true }
+            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true }
           ],
           "outputs": [
-            { "id": "cicd_checklist", "label": "CI/CD 清单", "kind": "file", "path": "CICD_CHECKLIST.md", "required": true },
-            { "id": "pr_body", "label": "PR 描述", "kind": "file", "path": "PR_BODY.md", "required": false }
+            { "id": "cicd_checklist", "label": "CI/CD 清单", "artifactType": "file", "path": "CICD_CHECKLIST.md", "required": true },
+            { "id": "pr_body", "label": "PR 描述", "artifactType": "file", "path": "PR_BODY.md", "required": false }
           ]
         },
         "validators": []
@@ -381,7 +381,7 @@
         "checkpoints": ["archived"],
         "artifacts": {
           "inputs": [
-            { "id": "cicd_checklist", "label": "CI/CD 清单", "kind": "file", "path": "CICD_CHECKLIST.md", "required": true }
+            { "id": "cicd_checklist", "label": "CI/CD 清单", "artifactType": "file", "path": "CICD_CHECKLIST.md", "required": true }
           ],
           "outputs": []
         },

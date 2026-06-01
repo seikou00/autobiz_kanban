@@ -119,12 +119,12 @@ def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, 
         seen_paths.add(path)
 
         label = item.get("label", item.get("name", artifact_id))
-        kind = item.get("kind", "file")
+        kind = item.get("artifactType", "file")
         required = item.get("required", True)
         if not isinstance(label, str):
             raise BoardConfigError(f"{item_context}.label must be a string")
         if not isinstance(kind, str) or not kind:
-            raise BoardConfigError(f"{item_context}.kind must be a non-empty string")
+            raise BoardConfigError(f"{item_context}.artifactType must be a non-empty string")
         if not isinstance(required, bool):
             raise BoardConfigError(f"{item_context}.required must be a boolean")
 

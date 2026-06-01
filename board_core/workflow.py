@@ -24,6 +24,33 @@ DEFAULT_NODE_STATUS_LABELS = {
     "archived": "已归档",
     "unknown": "未知",
 }
+ARTIFACT_TYPES = {
+    "file",
+    "directory",
+    "markdown",
+    "text",
+    "log",
+    "yaml",
+    "json",
+    "report",
+    "external",
+    "virtual",
+    "unknown",
+}
+ARTIFACT_STATUSES = {
+    "generated",
+    "missing",
+    "partial",
+    "invalid",
+    "unknown",
+}
+DEFAULT_ARTIFACT_STATUS_LABELS = {
+    "generated": "已生成",
+    "missing": "未生成",
+    "partial": "部分生成",
+    "invalid": "不可用",
+    "unknown": "未知",
+}
 
 
 def extract_checkpoint_suffix(checkpoint: str) -> str | None:
@@ -62,6 +89,18 @@ def find_current_node(
 
 def _normalize_node_status(value: object) -> str:
     if isinstance(value, str) and value in NODE_STATUSES:
+        return value
+    return "unknown"
+
+
+def _normalize_artifact_type(value: object) -> str:
+    if isinstance(value, str) and value in ARTIFACT_TYPES:
+        return value
+    return "unknown"
+
+
+def _normalize_artifact_status(value: object) -> str:
+    if isinstance(value, str) and value in ARTIFACT_STATUSES:
         return value
     return "unknown"
 
@@ -159,6 +198,54 @@ def _normalize_node_states(node: dict) -> list[dict]:
     return clean_states
 
 
+def _default_artifact_statuses() -> list[dict]:
+    return [
+        {"artifactStatus": "generated", "label": DEFAULT_ARTIFACT_STATUS_LABELS["generated"]},
+        {"artifactStatus": "missing", "label": DEFAULT_ARTIFACT_STATUS_LABELS["missing"]},
+        {"artifactStatus": "partial", "label": DEFAULT_ARTIFACT_STATUS_LABELS["partial"]},
+        {"artifactStatus": "invalid", "label": DEFAULT_ARTIFACT_STATUS_LABELS["invalid"]},
+        {"artifactStatus": "unknown", "label": DEFAULT_ARTIFACT_STATUS_LABELS["unknown"]},
+    ]
+
+
+def _normalize_artifact_statuses(artifact: dict, *, context: str) -> list[dict]:
+    statuses = artifact.get("artifactStatuses", _default_artifact_statuses())
+    if not isinstance(statuses, list):
+        raise BoardConfigError(f"{context}.artifactStatuses must be a list")
+
+    clean_statuses: list[dict] = []
+    for index, status in enumerate(statuses):
+        status_context = f"{context}.artifactStatuses[{index}]"
+        if not isinstance(status, dict):
+            raise BoardConfigError(f"{status_context} must be an object")
+        artifact_status = _normalize_artifact_status(status.get("artifactStatus"))
+        if artifact_status == "unknown" and status.get("artifactStatus") != "unknown":
+            raise BoardConfigError(f"{status_context}.artifactStatus must be a supported artifact status")
+        clean_statuses.append({
+            "artifactStatus": artifact_status,
+            "label": status.get("label", DEFAULT_ARTIFACT_STATUS_LABELS[artifact_status]),
+        })
+    return clean_statuses or _default_artifact_statuses()
+
+
+def _normalize_artifact_definitions(node: dict) -> list[dict]:
+    node_id = node.get("id", "<unknown>")
+    clean_artifacts: list[dict] = []
+    for index, artifact in enumerate(artifact_dicts(node, "outputs")):
+        context = f"{node_id}.artifactDefinitions[{index}]"
+        artifact_type = _normalize_artifact_type(artifact.get("artifactType"))
+        if artifact_type == "unknown" and artifact.get("artifactType") != "unknown":
+            raise BoardConfigError(f"{context}.artifactType must be a supported artifact type")
+        clean_artifacts.append({
+            "id": artifact.get("id"),
+            "label": artifact.get("label", artifact.get("id")),
+            "artifactType": artifact_type,
+            "required": artifact.get("required", False),
+            "artifactStatuses": _normalize_artifact_statuses(artifact, context=context),
+        })
+    return clean_artifacts
+
+
 def build_workflow_shell(config: dict) -> dict:
     """Build workflow shell from config — strips internal mapping fields.
 
@@ -183,10 +270,7 @@ def build_workflow_shell(config: dict) -> dict:
             if k not in {"checkpoints", "order", "skill", "artifacts", "validators"}
         }
         clean["states"] = _normalize_node_states(node)
-        clean["artifactDefinitions"] = [
-            {k: v for k, v in art.items() if k != "path"}
-            for art in artifact_dicts(node, "outputs")
-        ]
+        clean["artifactDefinitions"] = _normalize_artifact_definitions(node)
         clean_nodes.append(clean)
     workflow["nodes"] = clean_nodes
     return workflow

@@ -247,19 +247,19 @@ def prepare_checkpoint_update(
     )
 
 
-def stage_result_code(result: CheckpointUpdate, stage: str) -> str:
+def stage_event_status(result: CheckpointUpdate, stage: str) -> str:
     if stage == "transition_errors":
-        return "blocked" if result.transition_errors else "done"
+        return "blocked" if result.transition_errors else "success"
     if stage == "lifecycle_errors":
         if result.transition_errors:
             return "skipped"
-        return "blocked" if result.lifecycle_errors else "done"
+        return "blocked" if result.lifecycle_errors else "success"
     if stage == "compile_errors":
         if result.transition_errors or result.lifecycle_errors:
             return "skipped"
         if not result.compile_features:
             return "skipped"
-        return "blocked" if result.compile_errors else "done"
+        return "blocked" if result.compile_errors else "success"
     return "error"
 
 
@@ -275,11 +275,11 @@ def stage_errors(result: CheckpointUpdate, stage: str) -> tuple[str, ...]:
 
 def stage_message(result: CheckpointUpdate, *, label: str, stage: str) -> str:
     transition = f"{result.old_checkpoint or 'empty'} -> {result.new_checkpoint or 'empty'}"
-    result_code = stage_result_code(result, stage)
+    event_status = stage_event_status(result, stage)
     errors = stage_errors(result, stage)
-    if result_code == "done":
+    if event_status == "success":
         return f"{transition}: {label} 通过"
-    if result_code == "blocked":
+    if event_status == "blocked":
         return f"{transition}: " + "\n".join(errors)
     if stage == "lifecycle_errors":
         return f"{transition}: {label} 未执行，因为 state-done 已阻断"
@@ -294,14 +294,15 @@ def stage_message(result: CheckpointUpdate, *, label: str, stage: str) -> str:
 def write_hook_logs(result: CheckpointUpdate, *, workspace: Path, feature: str) -> None:
     changes = [(feature, result.old_checkpoint, result.new_checkpoint)]
     for event_id, label, stage in CHECKPOINT_LOG_EVENTS:
+        event_status = stage_event_status(result, stage)
         append_checkpoint_hook_logs(
             workspace,
             changes,
             event_id=event_id,
             label=label,
             errors=list(stage_errors(result, stage)),
-            result_code=stage_result_code(result, stage),
-            exit_code=0 if stage_result_code(result, stage) == "done" else 1,
+            event_status=event_status,
+            exit_code=0 if event_status == "success" else 1,
             message=stage_message(result, label=label, stage=stage),
         )
 

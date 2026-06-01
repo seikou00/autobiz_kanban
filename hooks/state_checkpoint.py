@@ -154,7 +154,7 @@ def append_feature_hook_log(
     checkpoint: str | None,
     *,
     event_id: str,
-    result_code: str,
+    event_status: str,
     message: str,
 ) -> None:
     if not safe_feature_slug(feature):
@@ -166,7 +166,7 @@ def append_feature_hook_log(
         "pluginId": PLUGIN_ID,
         "featureId": feature,
         "eventId": event_id,
-        "resultCode": result_code,
+        "eventStatus": event_status,
         "message": message,
         "nodeId": checkpoint_node_id(checkpoint),
     }
@@ -187,14 +187,14 @@ def append_checkpoint_hook_logs(
     hook_id: str | None = None,
     label: str,
     errors: list[str],
-    result_code: str | None = None,
+    event_status: str | None = None,
     exit_code: int | None = None,
     message: str | None = None,
 ) -> None:
     if not changes:
         return
     resolved_event_id = event_id or hook_id or ""
-    resolved_result_code = result_code or ("blocked" if errors else "done")
+    resolved_event_status = event_status or ("blocked" if errors else "success")
     summary = "\n".join(errors) if errors else f"{label} 通过"
     for feature, old_checkpoint, new_checkpoint in changes:
         transition = f"{old_checkpoint or 'empty'} -> {new_checkpoint or 'empty'}"
@@ -203,7 +203,7 @@ def append_checkpoint_hook_logs(
             feature,
             new_checkpoint or old_checkpoint,
             event_id=resolved_event_id,
-            result_code=resolved_result_code,
+            event_status=resolved_event_status,
             message=message or f"{transition}: {summary}",
         )
 
