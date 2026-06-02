@@ -221,7 +221,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 - `PLAN.md` 中所有任务状态均为「完成」。
 - 若存在「失败」任务，本 skill 不算完成，不得推进 `code_done`，必须说明阻断和建议回流阶段。
 - 所有必要验证通过。
-- 项目编译通过或外部 checkpoint 编译校验通过。
+- 项目编译通过；code_done execute hook 会额外记录模块编译结果，但不作为 checkpoint 推进阻断。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
 **Skill 完成。** 下一步：`/autodev-reviewer`

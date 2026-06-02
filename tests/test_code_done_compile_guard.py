@@ -13,10 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "hooks" / "code_done_compile_guard.py"
 HOOKS_DIR = ROOT / "hooks"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
 from code_done_compile_guard import validate_modules_compile  # noqa: E402
+from board_core.state_store import write_state_records  # noqa: E402
 
 
 def plugin_env(workspace: Path, *, feature: str = "alpha") -> dict[str, str]:
@@ -64,6 +67,17 @@ def make_workspace(root: Path) -> Path:
     return workspace
 
 
+def sample_record(checkpoint: str = "code_in_progress") -> dict[str, str]:
+    return {
+        "feature": "alpha",
+        "owner": "owner",
+        "checkpoint": checkpoint,
+        "stage": "代码实现",
+        "iteration": "1",
+        "updated_at": "2026-05-25 12:00:00",
+    }
+
+
 def write_modules(workspace: Path, modules: list[dict]) -> None:
     (workspace / ".autobizdevops" / "modules_compile.json").write_text(
         json.dumps({"version": 1, "modules": modules}, ensure_ascii=False),
@@ -73,6 +87,13 @@ def write_modules(workspace: Path, modules: list[dict]) -> None:
 
 def py_command(source: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+
+
+def read_hook_events(workspace: Path, feature: str = "alpha") -> list[dict]:
+    path = workspace / ".autobizdevops" / "features" / feature / "hooks.ndjson"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 class CodeDoneCompileGuardTest(unittest.TestCase):
@@ -137,7 +158,111 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
             self.assertEqual(result.stderr, "")
             self.assertEqual(result.stdout, "")
 
-    def test_invalid_modules_compile_blocks(self) -> None:
+    def test_code_done_hook_compile_failure_logs_warning_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
+            service = root / "service"
+            service.mkdir()
+            command_text = py_command("import sys; print('boom output'); sys.exit(7)")
+            write_modules(
+                workspace,
+                [{"module": "service", "path": str(service), "compile_command": command_text}],
+            )
+
+            result = run_guard(
+                execute_payload("python hooks/update_checkpoint.py --checkpoint code_done", Path(tmp)),
+                env=plugin_env(workspace),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(result.stdout, "")
+            events = read_hook_events(workspace)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["eventId"], "code-compile")
+            self.assertEqual(events[0]["eventStatus"], "warning")
+            self.assertIn("模块 service 编译失败", events[0]["message"])
+            self.assertIn("boom output", events[0]["message"])
+
+    def test_code_done_hook_compile_success_logs_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
+            service = root / "service"
+            service.mkdir()
+            write_modules(
+                workspace,
+                [{"module": "service", "path": str(service), "compile_command": py_command("print('ok')")}],
+            )
+
+            result = run_guard(
+                execute_payload("python hooks/update_checkpoint.py --checkpoint code_done", Path(tmp)),
+                env=plugin_env(workspace),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            events = read_hook_events(workspace)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["eventId"], "code-compile")
+            self.assertEqual(events[0]["eventStatus"], "success")
+            self.assertIn("code_done 编译校验通过", events[0]["message"])
+
+    def test_code_done_hook_skips_when_feature_is_not_in_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            write_state_records(workspace, {"alpha": sample_record("plan_done")})
+            service = root / "service"
+            service.mkdir()
+            write_modules(
+                workspace,
+                [
+                    {
+                        "module": "service",
+                        "path": str(service),
+                        "compile_command": py_command("import sys; print('should not run'); sys.exit(7)"),
+                    }
+                ],
+            )
+
+            result = run_guard(
+                execute_payload("python hooks/update_checkpoint.py --checkpoint code_done", Path(tmp)),
+                env=plugin_env(workspace),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_hook_events(workspace), [])
+
+    def test_code_done_hook_skips_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
+            service = root / "service"
+            service.mkdir()
+            write_modules(
+                workspace,
+                [
+                    {
+                        "module": "service",
+                        "path": str(service),
+                        "compile_command": py_command("import sys; print('should not run'); sys.exit(7)"),
+                    }
+                ],
+            )
+
+            result = run_guard(
+                execute_payload("python hooks/update_checkpoint.py --checkpoint code_done --dry-run", Path(tmp)),
+                env=plugin_env(workspace),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(read_hook_events(workspace), [])
+
+    def test_invalid_modules_compile_reports_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             (workspace / ".autobizdevops" / "modules_compile.json").write_text(
@@ -149,7 +274,7 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
             self.assertTrue(errors)
             self.assertIn("compile_command 缺失", "\n".join(errors))
 
-    def test_missing_module_path_blocks(self) -> None:
+    def test_missing_module_path_reports_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             missing = Path(tmp) / "missing"
@@ -190,7 +315,7 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(module_count, 2)
 
-    def test_compile_failure_blocks_with_module_command_and_output(self) -> None:
+    def test_compile_failure_reports_module_command_and_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace = make_workspace(root)

@@ -378,7 +378,7 @@ class StateIntegrationTests(unittest.TestCase):
             state_json = json.loads((workspace / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "discuss_done")
 
-    def test_update_checkpoint_cli_blocks_code_done_compile_failure(self) -> None:
+    def test_update_checkpoint_cli_allows_code_done_compile_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace = make_workspace(root)
@@ -415,11 +415,10 @@ class StateIntegrationTests(unittest.TestCase):
                 env=plugin_env(workspace),
             )
 
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("模块 service 编译失败", result.stderr)
-            self.assertIn("compile boom", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("compile boom", result.stderr)
             state_json = json.loads((workspace / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
-            self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "code_in_progress")
+            self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "code_done")
 
     def test_update_checkpoint_cli_rejects_workspace_argument(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

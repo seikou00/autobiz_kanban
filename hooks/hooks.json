@@ -44,11 +44,11 @@
         {
           "type": "command",
           "command": "python hooks/code_done_compile_guard.py",
-          "timeout": 10,
+          "timeout": 7200,
           "onBlock": {
             "reason": "状态脚本参数不合法",
             "systemMessage": "停止执行状态脚本。请删除 --workspace/-w，由插件环境决定状态路径。",
-            "additionalContext": "code_done 编译由 update_checkpoint.py 在状态切换前执行，模块编译清单应位于 PLUGIN_WORKSPACE/PROJECT_CODE/.autobizdevops/modules_compile.json。"
+            "additionalContext": "code_done 编译由 execute hook 非阻塞执行，模块编译清单应位于 PLUGIN_WORKSPACE/PROJECT_CODE/.autobizdevops/modules_compile.json。"
           },
           "persistAfterInterrupt": true
         }

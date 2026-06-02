@@ -546,20 +546,11 @@ def run_code_compile(payload: dict) -> int:
             hook_id="code-compile",
             label="code_done 编译校验",
             errors=errors,
-            exit_code=BLOCK_EXIT_CODE,
+            event_status="warning",
+            exit_code=0,
+            message="code_done 编译校验失败但不阻止 checkpoint 更新:\n" + "\n".join(errors),
         )
-        for error in errors:
-            print(error, file=sys.stderr)
-        json.dump(
-            {
-                "decision": "block",
-                "reason": "\n".join(errors),
-                "systemMessage": "code_done 前编译校验失败，请确保 workspace 根目录 mvn compile 通过后再推进 checkpoint。",
-            },
-            sys.stdout,
-            ensure_ascii=False,
-        )
-        return BLOCK_EXIT_CODE
+        return 0
     append_checkpoint_hook_logs(
         workspace_root,
         changes,

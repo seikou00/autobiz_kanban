@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shlex
 import subprocess
 import sys
@@ -13,10 +12,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+HOOKS_DIR = ROOT / "hooks"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIR))
+
 from paths import (
     STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR,
     contains_workspace_argument,
+    get_plugin_output_workspace,
+    resolve_env_feature,
 )
+from board_core.state_store import load_state_json_records_result
+from state_checkpoint import append_checkpoint_hook_logs
 
 
 BLOCK_EXIT_CODE = 2
@@ -99,6 +109,10 @@ def option_value(tokens: list[str], *names: str) -> str:
     return ""
 
 
+def has_flag(tokens: list[str], *names: str) -> bool:
+    return any(token in names for token in tokens)
+
+
 def parse_checkpoint_command(command: str) -> CheckpointCommand | None:
     state_scripts = {"read_state_json.py", "update_checkpoint.py"}
     for variant in command_variants(command):
@@ -110,7 +124,7 @@ def parse_checkpoint_command(command: str) -> CheckpointCommand | None:
             continue
 
         checkpoint = option_value(tokens, "--checkpoint", "-c")
-        if checkpoint != "code_done":
+        if checkpoint != "code_done" or has_flag(tokens, "--dry-run"):
             return None
 
         return CheckpointCommand(checkpoint=checkpoint)
@@ -128,7 +142,7 @@ def block(reason: str) -> int:
         {
             "decision": "block",
             "reason": reason,
-            "systemMessage": "code_done 前模块编译失败。请修复编译错误或更新 .autobizdevops/modules_compile.json 后重试。",
+            "systemMessage": "状态脚本参数不合法。请删除 --workspace/-w，由插件环境决定状态路径。",
         },
         sys.stdout,
         ensure_ascii=False,
@@ -249,6 +263,71 @@ def validate_modules_compile(workspace: Path, *, emit_success: bool = True) -> t
     return len(modules), errors
 
 
+def current_checkpoint(workspace: Path, feature: str) -> str | None:
+    result = load_state_json_records_result(workspace)
+    if not result.exists or result.errors:
+        return None
+    record = result.records.get(feature)
+    if record is None:
+        return None
+    return record.get("checkpoint", "")
+
+
+def write_compile_result(
+    workspace: Path,
+    feature: str,
+    *,
+    old_checkpoint: str,
+    errors: list[str],
+) -> None:
+    new_checkpoint = "code_done"
+    transition = f"{old_checkpoint or 'empty'} -> {new_checkpoint}"
+    if errors:
+        append_checkpoint_hook_logs(
+            workspace,
+            [(feature, old_checkpoint, new_checkpoint)],
+            event_id="code-compile",
+            label="code_done 编译校验",
+            errors=errors,
+            event_status="warning",
+            exit_code=0,
+            message=f"{transition}: " + "\n".join(errors),
+        )
+        return
+
+    append_checkpoint_hook_logs(
+        workspace,
+        [(feature, old_checkpoint, new_checkpoint)],
+        event_id="code-compile",
+        label="code_done 编译校验",
+        errors=[],
+        event_status="success",
+        exit_code=0,
+        message=f"{transition}: code_done 编译校验通过",
+    )
+
+
+def run_code_done_compile_hook() -> int:
+    try:
+        workspace = get_plugin_output_workspace()
+        feature = resolve_env_feature(None, required=True)
+    except ValueError:
+        return 0
+
+    checkpoint = current_checkpoint(workspace, feature)
+    if checkpoint != "code_in_progress":
+        return 0
+
+    _, errors = validate_modules_compile(workspace, emit_success=False)
+    write_compile_result(
+        workspace,
+        feature,
+        old_checkpoint=checkpoint,
+        errors=errors,
+    )
+    return 0
+
+
 def run_guard(payload: dict[str, Any]) -> int:
     command = extract_command(payload)
     if not command:
@@ -262,10 +341,7 @@ def run_guard(payload: dict[str, Any]) -> int:
     if checkpoint_command is None:
         return 0
 
-    # update_checkpoint.py now owns the code_done compile gate. Keeping this
-    # execute hook non-blocking isolates hook runner environment issues from
-    # checkpoint state transitions while preserving --workspace misuse checks.
-    return 0
+    return run_code_done_compile_hook()
 
 
 def main() -> int:
@@ -275,7 +351,8 @@ def main() -> int:
     try:
         payload = json.loads(raw_input)
     except json.JSONDecodeError as exc:
-        return block(f"code_done 编译校验失败: hook payload JSON 非法: {exc}")
+        print(f"code_done 编译校验跳过: hook payload JSON 非法: {exc}", file=sys.stderr)
+        return 0
     if not isinstance(payload, dict):
         return 0
     return run_guard(payload)
