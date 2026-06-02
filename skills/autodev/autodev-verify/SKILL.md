@@ -1,6 +1,6 @@
 ---
 name: autodev-verify
-description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作、--auto（路径 C 仍需暂停；迭代上限由 max_iterations 控制）。默认由当前会话内联执行。
+description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作。默认由当前会话内联执行。
 version: v1.1.0_v0602
 ---
 
@@ -264,9 +264,6 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 
 **Skill 完成。** 下一步由路由器决定：`needs_fix` → 按 `VERIFY_REPORT.md` 中的建议回流阶段处理。
 
-> 🚀 **--auto 例外：**
-> - 直接返回路由器，由路由器根据 `VERIFY_REPORT.md` 中的建议回流阶段决定下一跳，不等用户输入。
-
 ---
 
 ### 路径 C：存在需人工验证项
@@ -286,14 +283,6 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 等待用户回复：
 - 回复"通过" → 标记为通过；若全部通过 → 路径 A
 - 回复问题描述 → 标记为失败 → 路径 B
-
-> ⚠️ **--auto 下本路径仍必须暂停。** 这是安全边界：AI 不能替代人眼验证 UI/手感/业务语义类标准。
-> `--auto` 模式下打印：
-> ```
-> ⚠️ --auto 模式遇到需人工验证的验收项，已暂停。
->    请逐项回复「通过」或描述实际问题。
-> ```
-> 然后停止输出等待用户回复。
 
 ### ⛔ 步骤完成检查 — Step 6
 - [ ] 通过：验收摘要已写入 `VERIFY_REPORT.md`

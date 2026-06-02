@@ -1,6 +1,6 @@
 ---
 name: autodev
-description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到对应子技能；各子技能独立负责准入检查与产物自检。
+description: Autodev Dev 阶段根路由器。基于 checkpoint 路由到对应子技能；各子技能独立负责准入检查与产物自检。
 version: v1.1.0_v0602
 ---
 
@@ -54,7 +54,6 @@ version: v1.1.0_v0602
 
 | 标志 | 含义 |
 |------|------|
-| `--auto` | 自动串联 Specs → Plan → Code → Review → UTest → E2E → Verify |
 | `--feature {slug}` | 指定 Feature |
 
 ### 1.2 确定 Feature
@@ -116,7 +115,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 | `e2e_done` | `/autodev-verify` |
 | `verify_in_progress` | `/autodev-verify`（恢复） |
 | `verify_done` | **Dev 阶段结束** |
-| `needs_fix` | **停止串联**，读取最近阶段报告中的建议回流阶段并提示用户 |
+| `needs_fix` | **停止**，读取最近阶段报告中的建议回流阶段并提示用户 |
 
 ---
 
@@ -138,8 +137,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 | `autodev-verify` | `verify_done` / `needs_fix` |
 
 3. 出口不合法 → 保持原状态并告警，不推进。
-4. `needs_fix` → 终止 `--auto` 串联，按最近阶段报告中的建议回流阶段处理。
-5. `--auto` 模式下合法出口自动触发下一子技能；`verify_done` 后 Dev 阶段结束。
+4. `needs_fix` → 按最近阶段报告中的建议回流阶段处理。
+5. 合法出口只更新当前阶段结果；后续阶段需由用户再次触发根路由器或指定子技能继续执行。
 
 各子技能的产物契约、validators 与 checkpoint 合法矩阵以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源；如本文静态说明与 board config 冲突，以 board config 为准。不得再新增 per-skill `artifact-check.yaml`。可运行以下只读命令查看某个子技能的当前契约：
 

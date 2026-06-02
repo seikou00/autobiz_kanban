@@ -1,6 +1,6 @@
 ---
 name: autodev-code
-description: 按照 autodev-specs 与 autodev-plan 产物逐任务执行代码。读取 proposal.md、specs/**/*.md、design.md、PLAN.md 和 AGENTS.md，以 specs 为行为契约、design 为实现决策、PLAN 为执行队列，做最小实现、逐项验证、更新 PLAN.md 任务状态，并在全部任务完成后推进 code_done。支持中断恢复、--feature 多人协作、--auto 自动衔接 /autodev-reviewer。
+description: 按照 autodev-specs 与 autodev-plan 产物逐任务执行代码。读取 proposal.md、specs/**/*.md、design.md、PLAN.md 和 AGENTS.md，以 specs 为行为契约、design 为实现决策、PLAN 为执行队列，做最小实现、逐项验证、更新 PLAN.md 任务状态，并在全部任务完成后推进 code_done。支持中断恢复、--feature 多人协作。
 version: v1.1.0_v0602
 ---
 

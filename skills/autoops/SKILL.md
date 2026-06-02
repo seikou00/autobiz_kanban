@@ -1,6 +1,6 @@
 ---
 name: autoops
-description: Autoops Ops 阶段根路由器。基于 checkpoint 自动路由到 CI/CD 或归档子技能，负责 Ops 阶段准入、技能调度与终态识别。
+description: Autoops Ops 阶段根路由器。基于 checkpoint 路由到 CI/CD 或归档子技能，负责 Ops 阶段准入、技能调度与终态识别。
 version: v1.1.0_v0602
 ---
 
@@ -45,7 +45,7 @@ version: v1.1.0_v0602
 ### 1.2 确定 Feature
 
 - `--feature {slug}` 优先
-- 否则先读取全部 State 快照，再从 `STATE.records` 自动选择单一进行中的 Feature；无法唯一确定时列出候选并让用户选择：
+- 否则先读取全部 State 快照，再从 `STATE.records` 优先选择单一进行中的 Feature；无法唯一确定时列出候选并让用户选择：
 
 ```bash
 python "$PLUGIN_ROOT/read_state_json.py"
@@ -71,7 +71,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 | `cicd_in_progress` | `/autoops-cicd`（恢复） |
 | `cicd_done` | `/autoops-archive` |
 | `archived` | Ops 终态，提示已归档并输出归档位置（如可定位） |
-| `needs_fix` | 停止串联，读取最近阶段报告中的建议回流阶段并提示用户 |
+| `needs_fix` | 停止，读取最近阶段报告中的建议回流阶段并提示用户 |
 | 其他 | 停止并提示 checkpoint 不属于 Ops 阶段 |
 
 所有非终止状态默认将 `$ARGUMENTS` 透传至子技能。

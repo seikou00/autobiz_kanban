@@ -40,7 +40,7 @@ version: v1.1.0_v0602
 
 ## 入口约定
 
-以下三个为 `autobizdevops` 的唯一直接入口。所有 Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口自动路由，不允许跳过前置准入直接调用子技能。
+以下三个为 `autobizdevops` 的唯一直接入口。所有 Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口按 checkpoint 路由，不允许跳过前置准入直接调用子技能。
 **本 skill 的规则不得覆盖 AGENTS.md；如冲突，以 AGENTS.md 中项目约束为准，除非系统级指令另有要求。**
 **在执行autobiz和autodev技能时，约束必须参考AGENTS.md中存在的定制约束，不能仅遵守技能的约束。**
 
@@ -102,6 +102,6 @@ python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint {checkpoint}
 | `cicd_in_progress` | `/autoops` | 恢复 CI/CD |
 | `cicd_done` | `/autoops` | 进入归档 |
 | `archived` | `/autoops` | Ops 终态，提示已归档 |
-| `needs_fix` | 停止自动路由 | 读取最近阶段报告中的建议回流阶段并提示用户 |
+| `needs_fix` | 停止 | 读取最近阶段报告中的建议回流阶段并提示用户 |
 
 若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature，不得猜测路由。
