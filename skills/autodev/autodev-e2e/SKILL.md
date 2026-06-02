@@ -1,6 +1,7 @@
 ---
 name: autodev-e2e
 description: 对单个 feature 执行端到端测试。作为 Autodev 根流程中的正式阶段，承接 autodev-utest 产物，输出 E2E_REPORT.md / e2e-run.log，并按 checkpoint 做 e2e_done / needs_fix 分支决策。默认由当前会话内联执行；可使用后台进程启动服务或运行长时间测试命令。
+version: v1.1.0_v0602
 ---
 
 **路径变量约定（必须区分）：**

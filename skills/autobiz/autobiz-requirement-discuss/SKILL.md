@@ -1,6 +1,7 @@
 ---
 name: autobiz-requirement-discuss
 description: Biz 阶段需求澄清技能。读取原始需求材料，通过分析评估、问题清单、对话循环收敛需求，沉淀中间讨论稿 `{FEATURE_DIR}/PRD_DISCUSS.md`。适用于需求评审、需求完善、协助 PM 补齐信息。
+version: v1.1.0_v0602
 ---
 
 **路径变量约定（必须区分）：**

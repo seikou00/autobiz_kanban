@@ -1,6 +1,7 @@
 ---
 name: autobiz-prd-generate
 description: Biz 阶段 PRD 生成技能。读取已收敛的 `{FEATURE_DIR}/PRD_DISCUSS.md`，按 `$PLUGIN_ROOT/skills/autobiz/autobiz-prd-generate/templates/prd.md` 生成生成标准化 `{FEATURE_DIR}/PRD.md`。适用于需求讨论完成后，输出可供下游 Plan 阶段消费的正式需求文档。
+version: v1.1.0_v0602
 ---
 
 **路径变量约定（必须区分）：**

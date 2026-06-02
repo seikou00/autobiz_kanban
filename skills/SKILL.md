@@ -1,6 +1,7 @@
 ---
 name: autobizdevops
 description: 完成项目研发的全流程，按 biz / dev / ops 三个可独立起步的阶段组织
+version: v1.1.0_v0602
 ---
 
 **路径变量约定（必须区分）：**

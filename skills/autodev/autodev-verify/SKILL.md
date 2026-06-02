@@ -1,6 +1,7 @@
 ---
 name: autodev-verify
 description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作、--auto（路径 C 仍需暂停；迭代上限由 max_iterations 控制）。默认由当前会话内联执行。
+version: v1.1.0_v0602
 ---
 
 **路径变量约定（必须区分）：**

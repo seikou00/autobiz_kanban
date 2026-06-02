@@ -1,7 +1,7 @@
 ---
 name: autoops-cicd
 description: CI/CD 阶段技能。支持承接 Dev 产物，或在已有代码仓库中直接进入流水线准备与阻断问题记录。
-version: 1.1.0
+version: v1.1.0_v0602
 author: zhangQiuFeng
 ---
 

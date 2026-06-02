@@ -1,6 +1,7 @@
 ---
 name: autodev-utest
 description: "Dev 阶段单元测试生成与单测驱动最小修复技能。读取 proposal.md、specs/**/*.md、design.md、PLAN.md 与 REQUIREMENTS_EVAL，按 specs 行为契约生成单测、执行验证、归因失败，并在当前 feature 范围内做最小测试代码或业务代码修复。默认由当前会话内联执行。"
+version: v1.1.0_v0602
 ---
 
 **路径变量约定（必须区分）：**

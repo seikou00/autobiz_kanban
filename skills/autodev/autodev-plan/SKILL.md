@@ -1,6 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。读取 proposal.md、specs/**/*.md 和现有代码，生成 design.md 与 PLAN.md；不得修改业务代码。
+version: v1.1.0_v0602
 ---
 
 **路径变量约定（必须区分）：**
