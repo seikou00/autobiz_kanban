@@ -16,6 +16,37 @@ NODE_INTERNAL_FIELDS = {
     "_dynamic",
     "_nextActionOverride",
 }
+NODE_STATUSES = {
+    "not_started",
+    "in_progress",
+    "done",
+    "blocked",
+    "skipped",
+    "archived",
+    "unknown",
+}
+DEFAULT_NODE_STATUS_LABELS = {
+    "not_started": "未开始",
+    "in_progress": "进行中",
+    "done": "已完成",
+    "blocked": "已阻塞",
+    "skipped": "已跳过",
+    "archived": "已归档",
+    "unknown": "未知",
+}
+ARTIFACT_TYPES = {
+    "file",
+    "directory",
+    "markdown",
+    "text",
+    "log",
+    "yaml",
+    "json",
+    "report",
+    "external",
+    "virtual",
+    "unknown",
+}
 
 
 def extract_checkpoint_suffix(checkpoint: str) -> str | None:
@@ -52,14 +83,26 @@ def find_current_node(
     return -1, None
 
 
-def derive_node_state_id(
+def _normalize_node_status(value: object) -> str:
+    if isinstance(value, str) and value in NODE_STATUSES:
+        return value
+    return "unknown"
+
+
+def _normalize_artifact_type(value: object) -> str:
+    if isinstance(value, str) and value in ARTIFACT_TYPES:
+        return value
+    return "unknown"
+
+
+def derive_node_status(
     node_idx: int,
     current_idx: int,
     current_checkpoint: str,
     node: dict,
     suffix_states: dict,
 ) -> str:
-    """Return the workflow state id for a single node based on current position."""
+    """Return the board node status for a single node based on current position."""
     if current_checkpoint == "archived":
         return "archived" if node["id"] == "ops.archive" else "done"
 
@@ -72,14 +115,14 @@ def derive_node_state_id(
         return "not_started"
 
     suffix = extract_checkpoint_suffix(current_checkpoint)
-    state = suffix_states.get(suffix, {"id": "unknown"})
-    return state.get("id") or "unknown"
+    state = suffix_states.get(suffix, {"nodeStatus": "unknown"})
+    return _normalize_node_status(state.get("nodeStatus"))
 
 
-def derive_current_state_id(
+def derive_current_node_status(
     checkpoint: str, suffix_states: dict, current_idx: int,
 ) -> str:
-    """Return the current run state id for project summaries."""
+    """Return the current run node status for project summaries."""
     if checkpoint == "needs_fix":
         return "blocked"
     if checkpoint == "archived":
@@ -89,24 +132,57 @@ def derive_current_state_id(
     suffix = extract_checkpoint_suffix(checkpoint)
     if suffix is None:
         return "unknown"
-    state = suffix_states.get(suffix, {"id": "unknown"})
-    return state.get("id") or "unknown"
+    state = suffix_states.get(suffix, {"nodeStatus": "unknown"})
+    return _normalize_node_status(state.get("nodeStatus"))
+
+
+def node_status_label(node_status: str, node: dict | None = None) -> str:
+    normalized_status = _normalize_node_status(node_status)
+    if node is not None:
+        for state in node.get("states", []):
+            if not isinstance(state, dict):
+                continue
+            raw_status = state.get("nodeStatus", state.get("id"))
+            if _normalize_node_status(raw_status) != normalized_status:
+                continue
+            label = state.get("label")
+            if isinstance(label, str) and label.strip():
+                return label
+    return DEFAULT_NODE_STATUS_LABELS[normalized_status]
+
+
+def derive_current_node_status_label(
+    checkpoint: str,
+    suffix_states: dict,
+    current_idx: int,
+    current_node: dict | None = None,
+) -> str:
+    current_node_status = derive_current_node_status(checkpoint, suffix_states, current_idx)
+    if current_node is not None:
+        return node_status_label(current_node_status, current_node)
+
+    suffix = extract_checkpoint_suffix(checkpoint)
+    if suffix is not None:
+        state = suffix_states.get(suffix, {})
+        label = state.get("label") if isinstance(state, dict) else None
+        if isinstance(label, str) and label.strip():
+            return label
+    return DEFAULT_NODE_STATUS_LABELS[current_node_status]
 
 
 def build_workflow_fallback_states(config: dict) -> list[dict]:
     """Build workflow-level fallback states for statuses not tied to a node."""
-    by_id: dict[str, dict] = {
-        "unknown": {"id": "unknown", "label": "未知", "uiKind": "unknown"},
+    by_status: dict[str, dict] = {
+        "unknown": {
+            "nodeStatus": "unknown",
+        },
     }
     for state in config.get("checkpointSuffixState", {}).values():
-        state_id = state.get("id")
-        if state_id:
-            by_id[state_id] = {
-                "id": state_id,
-                "label": state.get("label", state_id),
-                "uiKind": state.get("uiKind", "unknown"),
-            }
-    return list(by_id.values())
+        node_status = _normalize_node_status(state.get("nodeStatus"))
+        by_status[node_status] = {
+            "nodeStatus": node_status,
+        }
+    return list(by_status.values())
 
 
 def _normalize_next_action(value: object, *, context: str) -> dict[str, str]:
@@ -133,11 +209,36 @@ def _normalize_node_states(node: dict) -> list[dict]:
         context = f"{node_id}.states[{index}]"
         if not isinstance(state, dict):
             raise BoardConfigError(f"{context} must be an object")
-        clean_states.append({
-            **state,
+        raw_status = state.get("nodeStatus", state.get("id"))
+        node_status = _normalize_node_status(raw_status)
+        if node_status == "unknown" and raw_status != "unknown":
+            raise BoardConfigError(f"{context}.nodeStatus must be a supported node status")
+        clean_state = {
+            "id": node_status,
+            "nodeStatus": node_status,
             "nextAction": _normalize_next_action(state.get("nextAction"), context=context),
-        })
+        }
+        label = state.get("label")
+        if isinstance(label, str) and label.strip():
+            clean_state["label"] = label
+        clean_states.append(clean_state)
     return clean_states
+
+
+def _normalize_artifact_definitions(node: dict) -> list[dict]:
+    node_id = node.get("id", "<unknown>")
+    clean_artifacts: list[dict] = []
+    for index, artifact in enumerate(artifact_dicts(node, "outputs")):
+        context = f"{node_id}.artifactDefinitions[{index}]"
+        artifact_type = _normalize_artifact_type(artifact.get("artifactType"))
+        if artifact_type == "unknown" and artifact.get("artifactType") != "unknown":
+            raise BoardConfigError(f"{context}.artifactType must be a supported artifact type")
+        clean_artifacts.append({
+            "id": artifact.get("id"),
+            "artifactType": artifact_type,
+            "required": artifact.get("required", False),
+        })
+    return clean_artifacts
 
 
 def build_workflow_shell(config: dict) -> dict:
@@ -146,6 +247,7 @@ def build_workflow_shell(config: dict) -> dict:
     Removes from output:
     - top-level ``id``, ``version``, and ``kind``
     - workflow-level ``checkpoints`` (contract-only checkpoint matrix)
+    - workflow-level ``transitions`` (the board currently treats nodes as a linear sequence)
     - node-level ``checkpoints`` (internal checkpoint→node mapping)
     - ``order``, ``skill``, ``artifacts``, ``validators``, and guards/internal fields from nodes
     - ``path`` from each output artifact definition
@@ -153,7 +255,7 @@ def build_workflow_shell(config: dict) -> dict:
     workflow = {
         k: v
         for k, v in config["workflow"].items()
-        if k not in {"id", "version", "kind", "checkpoints"}
+        if k not in {"id", "version", "kind", "checkpoints", "transitions"}
     }
     clean_nodes: list[dict] = []
     for node in workflow["nodes"]:
@@ -163,10 +265,7 @@ def build_workflow_shell(config: dict) -> dict:
             if k not in NODE_INTERNAL_FIELDS
         }
         clean["states"] = _normalize_node_states(node)
-        clean["artifactDefinitions"] = [
-            {k: v for k, v in art.items() if k != "path"}
-            for art in artifact_dicts(node, "outputs")
-        ]
+        clean["artifactDefinitions"] = _normalize_artifact_definitions(node)
         clean_nodes.append(clean)
     workflow["nodes"] = clean_nodes
     return workflow

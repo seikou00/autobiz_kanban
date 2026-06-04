@@ -1,0 +1,156 @@
+---
+name: autodev-detail-design
+description: Optional Autodev readable detailed design artifact generator. Use after `PLAN.md` exists, usually between /autodev-plan and /autodev-code, to write `DETAIL_DESIGN.md` with file-level change design, implementation logic, and overall flow. This skill does not update checkpoints, does not participate in board workflow gates, and must not modify business code.
+version: v1.1.1604
+---
+**路径变量约定（必须区分）：**
+
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 $PLUGIN_ROOT/...。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 .autobizdevops/state.json。
+- **PROJECT_CODE**：当前项目目录名；PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}，必须包含 .autobizdevops/state.json。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 --feature 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}；只用于读写 PRD、proposal、specs、design、PLAN、DETAIL_DESIGN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索，不得在本 skill 中修改业务代码。
+
+# /autodev-detail-design - 详细计划
+
+## 阶段定位
+
+autodev-detail-design 是一个可选的用户可读产物技能，通常在 /autodev-plan 已生成 `PLAN.md` 后、进入 /autodev-code 前手动调用。
+
+本 skill 只回答：
+
+- 本次实现预计新增、修改或删除哪些文件。
+- 每个文件的改动逻辑是什么。
+- 模块之间如何调用。
+- 接口、数据、状态和异常流程如何串起来。
+- 后续编码时应重点遵守哪些设计约束。
+
+本 skill 不做：
+
+- 不更新 checkpoint。
+- 不修改 board_core/board_config.json。
+- 不参与看板节点、artifact gate 或 validators。
+- 不修改业务代码、测试代码、配置、迁移脚本或已有阶段产物。
+- 不重写 `proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md`。
+
+输出产物：
+
+- {FEATURE_DIR}/DETAIL_DESIGN.md
+
+## 准入与上下文
+
+确定 {FEATURE_ID} 后，可以读取当前 Feature 快照辅助判断，但不得推进状态：
+
+```
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+```
+
+必须读取：
+
+- {FEATURE_DIR}/proposal.md
+- {FEATURE_DIR}/specs/**/*.md
+- {FEATURE_DIR}/design.md
+- {FEATURE_DIR}/PLAN.md
+- {CODE_WORKSPACE}/AGENTS.md（如存在）
+- 与本 Feature 相关的现有业务代码、测试、配置和接口定义
+
+如果 `PLAN.md` 不存在，停止并提示先完成 /autodev-plan。如果 `design.md` 不存在，也停止；本 skill 不补写上游设计契约。
+
+## 工作原则
+
+- **扎根代码现实。** 文件清单必须来自实际代码探索、PLAN.md 任务、design.md 决策和现有项目结构，不要凭空发明路径。
+- **比 PLAN 更具体，但仍不编码。** 可以写文件级改动说明、伪代码、流程图和调用链；不得直接改实现文件。
+- **保留不确定性。** 无法确认的文件路径、接口字段、权限、数据模型、状态流必须标为待确认，不要写成硬结论。
+- **面向读者。**DETAIL_DESIGN.md 是给用户和后续编码者读的，应清楚说明“为什么改这里、怎么改、怎么流转、怎么验证”。
+- **不改变流程。** 完成后不调用 update_checkpoint.py，不要求用户必须运行本 skill 才能进入 code。
+
+## 生成 DETAIL_DESIGN.md
+
+写入 {FEATURE_DIR}/DETAIL_DESIGN.md，建议结构如下：
+
+````
+# 详细设计: [Feature 名称]
+
+来源: proposal.md + specs/**/*.md + design.md + PLAN.md + 现有代码探索
+状态: 可选设计产物
+创建时间: [ISO 日期时间]
+
+## 1. 设计目标
+
+- **Feature:** {FEATURE_ID}
+- **目标:** [本次改动要达成的结果]
+- **规格依据:** [列出 specs 中的 Requirement / Scenario]
+- **计划依据:** [列出 PLAN.md 中相关任务]
+
+## 2. 整体实现流程
+
+[用文字、ASCII 图或 mermaid 描述用户操作、入口、服务处理、数据读写、返回结果、异步/异常分支。]
+
+## 3. 文件改动清单
+
+| 类型 | 文件 | 改动说明 | 关联规格/设计/任务 | 状态 |
+|------|------|----------|--------------------|------|
+| 修改 | path/to/file | [改什么逻辑] | REQ- / API- / DATA- / D- / Task | 已确认/待确认 |
+| 新增 | path/to/file | [新增职责] | REQ- / API- / DATA- / D- / Task | 已确认/待确认 |
+| 删除 | path/to/file | [删除原因与兼容处理] | REQ- / API- / DATA- / D- / Task | 已确认/待确认 |
+
+## 4. 详细逻辑设计
+
+### 4.1 path/to/file
+
+**当前逻辑:**
+- [现有行为、关键函数、调用关系]
+
+**目标逻辑:**
+- [新增/修改的判断、分支、调用、返回结果]
+
+**伪代码:**
+```text
+[伪代码]
+```
+
+**异常与边界:**
+
+- [错误码、权限、租户、审计、幂等、兼容性、空值、并发等]
+
+**验证点:**
+
+- [单测/集成/E2E/手工验证建议]
+
+## 5. 模块调用关系
+
+[说明入口 -> service -> repository/client -> response 的调用链，或前端 -> API -> 后端 -> 数据的链路。]
+
+## 6. 数据、状态与接口流转
+
+- **接口流转:** [请求/响应/错误处理]
+- **数据流转:** [读写模型、字段、迁移、回滚；无数据变更则说明无]
+- **状态流转:** [状态机、枚举、缓存、异步任务；无状态变更则说明无]
+
+## 7. 测试设计
+
+| 场景       | 建议测试文件 | 验证点     | 覆盖规格/任务 |
+| ---------- | ------------ | ---------- | ------------- |
+| [主流程]   | path/to/test | [预期结果] | REQ- / Task   |
+| [异常流程] | path/to/test | [预期结果] | REQ- / Task   |
+
+## 8. 风险与待确认
+
+| ID    | 类型        | 描述   | 影响   | 下一步     |
+| ----- | ----------- | ------ | ------ | ---------- |
+| DD-01 | 待确认/风险 | [描述] | [影响] | [确认方式] |
+
+````
+
+## 完成条件
+
+- `{FEATURE_DIR}/DETAIL_DESIGN.md` 已写入。
+- 文件改动清单覆盖 `PLAN.md` 中所有待编码任务，或明确说明某任务无需文件改动。
+- 每个文件级改动都能追溯到 specs、design 或 PLAN。
+- 仍不确定的路径、字段、接口、权限、数据或状态流已标为待确认。
+- 未调用 `update_checkpoint.py`，未修改业务代码。
+
+**Skill 完成。** 下一步通常是用户确认后继续 `/autodev-code`，但本产物不是进入 code 的强制门禁。
+
+$ARGUMENTS

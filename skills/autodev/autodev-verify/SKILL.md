@@ -1,21 +1,25 @@
 ---
 name: autodev-verify
-description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作、--auto（路径 C 仍需暂停；迭代上限由 max_iterations 控制）。默认由当前会话内联执行。
+description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作。默认由当前会话内联执行。
+version: v1.1.1604
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
-```
+**路径变量约定（必须区分）：**
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。
+当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
 运行前如需查看当前契约，执行：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-verify --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-verify --json
 ```
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
@@ -41,7 +45,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-verify --json
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 后续准入、恢复和分支决策直接取用 `CHECKPOINT`：
@@ -60,15 +64,15 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 ## Step 2: 写入 Checkpoint（标记开始）
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint verify_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint verify_in_progress
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ## Step 3: 提取验收契约
 
-从 `{工作目录}/proposal.md` 提取本轮能力边界、影响面和非目标。
+从 `{FEATURE_DIR}/proposal.md` 提取本轮能力边界、影响面和非目标。
 
-从 `{工作目录}/specs/**/*.md` 提取每个 Requirement / Scenario：
+从 `{FEATURE_DIR}/specs/**/*.md` 提取每个 Requirement / Scenario：
 
 ```
 specs/[capability]/spec.md / Requirement / Scenario
@@ -77,7 +81,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 共 M 项待裁决。
 
-同时读取 `{工作目录}/design.md`：
+同时读取 `{FEATURE_DIR}/design.md`：
 
 - 从 specs Requirement / Scenario 提取行为契约验证项 C1, C2, ...
 - 从 design.md 的 API Decisions、Data Decisions 提取接口/数据契约验证项。
@@ -97,11 +101,11 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 **必读文件：**
 
-1. `{工作目录}/UNIT_TEST_REPORT.md` — 上游阶段技能 `autodev-utest` 产出的结构化单测报告。
-2. `{工作目录}/test-output.log` — 单测执行的原始日志（通过/失败数量、失败堆栈；缺失时记录）。
-3. `{工作目录}/E2E_TEST_CASES.yaml` — 上游阶段技能 `autodev-e2e` 产出的结构化 E2E 用例。
-4. `{工作目录}/E2E_REPORT.md` — E2E 结果、失败归因、修复尝试与重跑摘要。
-5. `{工作目录}/e2e-run.log` — E2E 原始运行日志、服务/鉴权/UI 执行证据。
+1. `{FEATURE_DIR}/UNIT_TEST_REPORT.md` — 上游阶段技能 `autodev-utest` 产出的结构化单测报告。
+2. `{FEATURE_DIR}/test-output.log` — 单测执行的原始日志（通过/失败数量、失败堆栈；缺失时记录）。
+3. `{FEATURE_DIR}/E2E_TEST_CASES.yaml` — 上游阶段技能 `autodev-e2e` 产出的结构化 E2E 用例。
+4. `{FEATURE_DIR}/E2E_REPORT.md` — E2E 结果、失败归因、修复尝试与重跑摘要。
+5. `{FEATURE_DIR}/e2e-run.log` — E2E 原始运行日志、服务/鉴权/UI 执行证据。
 
 **从 UNIT_TEST_REPORT.md 中抽取（按 autodev-utest 的输出约定）：**
 
@@ -133,7 +137,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ### ⛔ 步骤完成检查 — Step 4
 - [ ] 已读取 `UNIT_TEST_REPORT.md`（若存在）
-- [ ] 已读取 `{工作目录}/test-output.log`（若存在；缺失已记录）
+- [ ] 已读取 `{FEATURE_DIR}/test-output.log`（若存在；缺失已记录）
 - [ ] 已读取 `E2E_TEST_CASES.yaml`、`E2E_REPORT.md` 与 `e2e-run.log`
 - [ ] 已为每个步骤建立 PASS / FAIL / 需人工验证 的裁定
 - [ ] 未执行任何测试命令、未启动任何本地服务、未生成任何测试文件
@@ -142,7 +146,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ## Step 5: 生成 VERIFY_REPORT.md（纯汇总）
 
-将裁定结果写入 `{工作目录}/VERIFY_REPORT.md`。**不得**在 VERIFY_REPORT.md 中夹带新的命令输出、新的测试代码、新的 HTTP 响应证据——这些应由 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 与 `e2e-run.log` 提供，VERIFY_REPORT.md 只做"映射 + 归档"。
+将裁定结果写入 `{FEATURE_DIR}/VERIFY_REPORT.md`。**不得**在 VERIFY_REPORT.md 中夹带新的命令输出、新的测试代码、新的 HTTP 响应证据——这些应由 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 与 `e2e-run.log` 提供，VERIFY_REPORT.md 只做"映射 + 归档"。
 
 **模板：**
 
@@ -151,10 +155,10 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 - **Feature:** {slug}
 - **验证时间:** [当前时间]
-- **上游单测报告:** {工作目录}/UNIT_TEST_REPORT.md
-- **上游单测日志:** {工作目录}/test-output.log
-- **上游 E2E 报告:** {工作目录}/E2E_REPORT.md
-- **上游 E2E 日志:** {工作目录}/e2e-run.log
+- **上游单测报告:** {FEATURE_DIR}/UNIT_TEST_REPORT.md
+- **上游单测日志:** {FEATURE_DIR}/test-output.log
+- **上游 E2E 报告:** {FEATURE_DIR}/E2E_REPORT.md
+- **上游 E2E 日志:** {FEATURE_DIR}/e2e-run.log
 
 ## 验证总览
 
@@ -195,7 +199,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 ```
 
 ### ⛔ 步骤完成检查 — Step 5
-- [ ] `{工作目录}/VERIFY_REPORT.md` 已写入
+- [ ] `{FEATURE_DIR}/VERIFY_REPORT.md` 已写入
 - [ ] 报告中每项都标注了证据来源（指向 UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log 的段落或说明为何需人工验证）
 - [ ] 报告**不包含**本 skill 自行执行的测试命令输出或服务启动日志
 - [ ] 报告已展示给用户
@@ -209,8 +213,8 @@ specs/[capability]/spec.md / Requirement / Scenario
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `verify_done`。本轮验收摘要与历史证据写入 `VERIFY_REPORT.md`。
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint verify_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint verify_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 **输出提示：**
@@ -235,8 +239,8 @@ checkpoint=verify_done → Dev 阶段结束，Ops 阶段可继续调用 autoops-
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `needs_fix`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint needs_fix
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint needs_fix
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 在 `VERIFY_REPORT.md` 的失败详情中追加：
@@ -260,9 +264,6 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 
 **Skill 完成。** 下一步由路由器决定：`needs_fix` → 按 `VERIFY_REPORT.md` 中的建议回流阶段处理。
 
-> 🚀 **--auto 例外：**
-> - 直接返回路由器，由路由器根据 `VERIFY_REPORT.md` 中的建议回流阶段决定下一跳，不等用户输入。
-
 ---
 
 ### 路径 C：存在需人工验证项
@@ -283,14 +284,6 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 - 回复"通过" → 标记为通过；若全部通过 → 路径 A
 - 回复问题描述 → 标记为失败 → 路径 B
 
-> ⚠️ **--auto 下本路径仍必须暂停。** 这是安全边界：AI 不能替代人眼验证 UI/手感/业务语义类标准。
-> `--auto` 模式下打印：
-> ```
-> ⚠️ --auto 模式遇到需人工验证的验收项，已暂停。
->    请逐项回复「通过」或描述实际问题。
-> ```
-> 然后停止输出等待用户回复。
-
 ### ⛔ 步骤完成检查 — Step 6
 - [ ] 通过：验收摘要已写入 `VERIFY_REPORT.md`
 - [ ] 失败：已知问题已更新，失败详情已记录（引用 UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log 段落）
@@ -301,7 +294,7 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 
 Skill 完成前必须满足：
 
-- [ ] `{工作目录}/VERIFY_REPORT.md` 已生成
+- [ ] `{FEATURE_DIR}/VERIFY_REPORT.md` 已生成
 - [ ] 报告中每项裁定都指向 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 或 `e2e-run.log` 的证据段落，或标注"需人工验证"
 - [ ] 刷新后的 `CHECKPOINT` = `verify_done` / `needs_fix`（或路径 C 等待）
 - [ ] 验收摘要已写入报告（通过时）

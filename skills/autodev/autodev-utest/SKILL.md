@@ -1,22 +1,25 @@
 ---
 name: autodev-utest
 description: "Dev 阶段单元测试生成与单测驱动最小修复技能。读取 proposal.md、specs/**/*.md、design.md、PLAN.md 与 REQUIREMENTS_EVAL，按 specs 行为契约生成单测、执行验证、归因失败，并在当前 feature 范围内做最小测试代码或业务代码修复。默认由当前会话内联执行。"
+version: v1.1.1604
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-
-```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
-```
+**路径变量约定（必须区分）：**
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。
+当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
 运行前如需查看当前契约，执行：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-utest --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-utest --json
 ```
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
@@ -49,7 +52,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-utest --json
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
@@ -71,36 +74,36 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 ## 输入与产物
 
-工作目录：
+FEATURE_DIR：
 
 ```text
-.autobizdevops/features/{slug}/
+FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 ```
 
 必读输入：
 
-- `{工作目录}/proposal.md`
-- `{工作目录}/specs/**/*.md`
-- `{工作目录}/design.md`
-- `{工作目录}/PLAN.md`
-- `{工作目录}/REQUIREMENTS_EVAL.md`
+- `{FEATURE_DIR}/proposal.md`
+- `{FEATURE_DIR}/specs/**/*.md`
+- `{FEATURE_DIR}/design.md`
+- `{FEATURE_DIR}/PLAN.md`
+- `{FEATURE_DIR}/REQUIREMENTS_EVAL.md`
 - `AGENTS.md` 与项目内相关约束
 - 与当前 feature 相关的源码、已有测试、构建配置
 
 输出产物：
 
-- `{工作目录}/UNIT_TEST_REPORT.md`
-- `{工作目录}/test-output.log`
+- `{FEATURE_DIR}/UNIT_TEST_REPORT.md`
+- `{FEATURE_DIR}/test-output.log`
 - `.autobizdevops/state.json` 与自动生成视图 `.autobizdevops/STATE.md`
 
 禁止修改：
 
-- `{工作目录}/PRD.md`（如果存在）
-- `{工作目录}/proposal.md`
-- `{工作目录}/specs/**/*.md`
-- `{工作目录}/design.md`
-- `{工作目录}/PLAN.md`
-- `{工作目录}/REQUIREMENTS_EVAL.md`
+- `{FEATURE_DIR}/PRD.md`（如果存在）
+- `{FEATURE_DIR}/proposal.md`
+- `{FEATURE_DIR}/specs/**/*.md`
+- `{FEATURE_DIR}/design.md`
+- `{FEATURE_DIR}/PLAN.md`
+- `{FEATURE_DIR}/REQUIREMENTS_EVAL.md`
 - E2E / Verify 阶段产物
 - 与当前 feature 无关的业务代码
 - 生产代码中的测试专用入口、测试专用分支、伪造实现
@@ -153,8 +156,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 ### Step 2: 写入开始 checkpoint
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint unit_test_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ### Step 3: 建立单测计划
@@ -216,7 +219,7 @@ pytest tests/test_foo.py::test_rejects_empty_name
 所有命令输出必须追加到：
 
 ```text
-{工作目录}/test-output.log
+{FEATURE_DIR}/test-output.log
 ```
 
 日志中至少保留：
@@ -316,8 +319,8 @@ pytest tests/test_foo.py::test_rejects_empty_name
 推进命令：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint unit_test_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint unit_test_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 若存在 `FAIL`、`BLOCKED`、未归因失败、合同缺口或超过最大修复次数，保持 `unit_test_in_progress`，向用户报告阻断。只有根路由或后续验收阶段需要统一回流时，才使用 `needs_fix`。

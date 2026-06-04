@@ -19,10 +19,18 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from hooks.paths import (
+    contains_workspace_argument,
     get_features_active_dir,
-    get_workspace,
+    get_plugin_output_workspace,
 )
 from board_core.state_store import check_or_fix_state_sync, state_rows_from_records
+
+
+BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR = (
+    "biz_validate.py 不接受 --workspace/-w；路径由 PLUGIN_WORKSPACE/PROJECT_CODE 环境变量决定。"
+)
+FORMAL_PRD_TITLE = "# 需求正式稿"
+FORBIDDEN_PRD_SECTION_TITLES = ("审理提炼", "待确认事项", "待确认项", "外部依赖", "第三方依赖")
 
 
 def _validate_state_sync(feature: str, expected_cp: str, workspace: Path, errors: List[str]) -> None:
@@ -91,6 +99,10 @@ def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     return _ok("discuss 阶段产出物校验通过", {"feature": feature_dir.name})
 
 
+def _markdown_headings(content: str) -> List[str]:
+    return re.findall(r"^#{1,6}\s+(.+?)\s*$", content, re.MULTILINE)
+
+
 def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     feature_dir = _get_feature_dir(feature, workspace)
     if not feature_dir:
@@ -106,23 +118,31 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
         errors.append(f"PRD.md 不存在: {prd_md}")
     else:
         content = prd_md.read_text(encoding="utf-8")
-        required_sections = [
-            "目标", "核心价值", "具体要求", "非目标",
-            "边界说明", "验收标准", "关键约束", "风险与假设",
-        ]
-        # 检查 Markdown 标题或加粗文本
-        headings = re.findall(r"^#{1,3}\s+(.+)$", content, re.MULTILINE)
+        first_line = content.splitlines()[0].strip() if content.splitlines() else ""
+        if first_line != FORMAL_PRD_TITLE:
+            errors.append(f"PRD.md 必须以 {FORMAL_PRD_TITLE} 开头")
+
+        required_sections = ["用户故事", "验收口径", "验收标准", "关键约束"]
+        headings = _markdown_headings(content)
         bolds = re.findall(r"\*\*(.+?)\*\*", content)
-        all_markers = headings + bolds
-        missing = [s for s in required_sections if not any(s in m for m in all_markers)]
+        markers = headings + bolds
+        missing = [s for s in required_sections if not any(s in m for m in markers)]
         if missing:
             errors.append(f"PRD.md 缺少必要段落: {', '.join(missing)}")
 
-        # 粗略检查开放式问题残留
-        open_indicators = ["开放式问题", "原始追问", "未决候选方案", "待讨论"]
-        found = [i for i in open_indicators if i in content]
-        if found:
-            errors.append(f"PRD.md 可能残留开放式内容标记: {', '.join(found)}")
+        discussion_headings = [
+            heading for heading in headings
+            if "历次讨论记录" in heading or "讨论记录" in heading
+        ]
+        if discussion_headings:
+            errors.append(f"PRD.md 不应包含讨论记录标题: {', '.join(discussion_headings)}")
+
+        forbidden_headings = [
+            heading for heading in headings
+            if any(marker in heading for marker in FORBIDDEN_PRD_SECTION_TITLES)
+        ]
+        if forbidden_headings:
+            errors.append(f"PRD.md 不应包含正式稿禁用标题: {', '.join(forbidden_headings)}")
 
     _validate_state_sync(feature_dir.name, "prd_done", workspace, errors)
 
@@ -131,7 +151,12 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     return _ok("prd 阶段产出物校验通过", {"feature": feature_dir.name})
 
 
-def main() -> int:
+def main(argv: Optional[List[str]] = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if contains_workspace_argument(raw_args):
+        print(BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR, file=sys.stderr)
+        return 2
+
     parser = argparse.ArgumentParser(description="autobiz 统一校验脚本")
     parser.add_argument(
         "stage",
@@ -139,11 +164,14 @@ def main() -> int:
         help="校验阶段",
     )
     parser.add_argument("--feature", "-f", default=None, help="feature slug（如不传则自动检测）")
-    parser.add_argument("--workspace", "-w", default=".", help="workspace 路径（默认当前目录）")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON，不输出可读文本")
-    args = parser.parse_args()
+    args = parser.parse_args(raw_args)
 
-    workspace = get_workspace(args.workspace)
+    try:
+        workspace = get_plugin_output_workspace()
+    except ValueError as exc:
+        print(f"biz_validate.py 校验失败: {exc}", file=sys.stderr)
+        return 1
 
     if args.stage == "discuss":
         result = validate_discuss(args.feature, workspace)

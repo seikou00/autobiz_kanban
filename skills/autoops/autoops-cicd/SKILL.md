@@ -1,11 +1,17 @@
 ---
 name: autoops-cicd
 description: CI/CD 阶段技能。支持承接 Dev 产物，或在已有代码仓库中直接进入流水线准备与阻断问题记录。
-version: 1.1.0
+version: v1.1.1604
 author: zhangQiuFeng
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
+**路径变量约定（必须区分）：**
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 # /autoops-cicd — CI/CD 清单与流水线阻断处理
 
@@ -20,8 +26,8 @@ author: zhangQiuFeng
 
 如本技能为某个 Feature 生成交付物，产物统一写入最外层工作目录 `.autobizdevops`：
 
-- CI/CD 清单：`.autobizdevops/features/{slug}/CICD_CHECKLIST.md`
-- PR 描述草稿：`.autobizdevops/features/{slug}/PR_BODY.md`
+- CI/CD 清单：`{FEATURE_DIR}/CICD_CHECKLIST.md`
+- PR 描述草稿：`{FEATURE_DIR}/PR_BODY.md`
 - 全局状态：`.autobizdevops/state.json`
 
 如用户额外提供 `PRD.md` 或 `design.md`，可在 `CICD_CHECKLIST.md` 中记录其来源；未提供时允许继续，但必须明确写明“需求/设计文档缺失或未提供”。
@@ -42,11 +48,11 @@ author: zhangQiuFeng
 
 ### Step 1: 标准化工作目录与 State 快照
 
-1. 确定 `{slug}`，进入 `.autobizdevops/features/{slug}/`
+1. 确定 `{slug}`，进入 `{FEATURE_DIR}/`
 2. 调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 3. 后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，仅用户直供 CI/CD 场景可继续通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
@@ -55,14 +61,14 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 6. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint cicd_in_progress --stage "CI/CD（来源: 用户直供）" --allow-create
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint cicd_in_progress --stage "CI/CD（来源: 用户直供）" --allow-create
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ### Step 2: 生成交付文档
 
-1. 生成 `{工作目录}/CICD_CHECKLIST.md`
-2. 生成 `{工作目录}/PR_BODY.md`
+1. 生成 `{FEATURE_DIR}/CICD_CHECKLIST.md`
+2. 生成 `{FEATURE_DIR}/PR_BODY.md`
 3. 若已知 PRD 或 API 来源，在 `CICD_CHECKLIST.md` 或 `PR_BODY.md` 中标注引用路径
 4. 若需求文档缺失，必须在 `CICD_CHECKLIST.md` 中记录：
 
@@ -116,8 +122,8 @@ python hooks/poll_pipeline_status.py --pipelineCode <pipeline_code> --pipelineNu
 macOS/Linux:
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint cicd_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint cicd_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ### Step 6: 是否再次执行

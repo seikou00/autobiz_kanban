@@ -34,10 +34,12 @@ from board_core.state import (  # type: ignore[import-untyped]
     load_state_records,
 )
 from board_core.workflow import (  # type: ignore[import-untyped]
-    derive_current_state_id,
+    derive_current_node_status,
+    derive_current_node_status_label,
     build_workflow_shell,
-    derive_node_state_id,
+    derive_node_status,
     find_current_node,
+    node_status_label,
 )
 
 
@@ -132,7 +134,7 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     # Build nodes
     run_nodes: list[dict] = []
     for idx, node in enumerate(nodes_config):
-        state_id = derive_node_state_id(idx, current_idx, checkpoint or "", node, suffix_states)
+        node_status = derive_node_status(idx, current_idx, checkpoint or "", node, suffix_states)
         artifacts = scan_artifacts(
             feature_dir or (workspace / ".autobizdevops" / "features" / feature),
             workspace,
@@ -140,13 +142,13 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
         )
         run_nodes.append({
             "id": node["id"],
-            "stateId": state_id,
+            "nodeStatus": node_status,
+            "nodeStatusLabel": node_status_label(node_status, node),
             "artifacts": artifacts,
         })
 
     # Assemble output
     output = {
-        "schemaVersion": "cmbdevclaw_v1",
         "workflow": build_workflow_shell(config),
         "run": {
             "featureId": feature,
@@ -175,7 +177,7 @@ def _resolve_project_workspace(workspace: Path, project: str) -> Path:
 
 
 def _collect_project_runs(project_workspace: Path, config: dict, project: str) -> list[dict]:
-    """返回某个 project 下所有 feature 的 runs 摘要列表（不包含 schemaVersion/workflow 外壳）"""
+    """返回某个 project 下所有 feature 的 runs 摘要列表（不包含 workflow 外壳）"""
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
@@ -196,14 +198,22 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
         if checkpoint:
             current_idx, current_node_id = find_current_node(nodes_config, checkpoint)
 
-        current_state_id = derive_current_state_id(checkpoint, suffix_states, current_idx)
+        current_node_status = derive_current_node_status(checkpoint, suffix_states, current_idx)
+        current_node = nodes_config[current_idx] if 0 <= current_idx < len(nodes_config) else None
+        current_node_status_label = derive_current_node_status_label(
+            checkpoint,
+            suffix_states,
+            current_idx,
+            current_node,
+        )
 
         runs.append({
             "featureName": feature,
             "featureId": feature,
             "workflowProfile": workflow_profile,
             "currentNodeId": current_node_id or "unknown",
-            "currentStateId": current_state_id,
+            "currentNodeStatus": current_node_status,
+            "currentNodeStatusLabel": current_node_status_label,
         })
 
     return runs
@@ -221,7 +231,6 @@ def project_mode(workspace: Path, projects: list[str], config: dict) -> int:
         all_projects[project] = {"runs": runs}
 
     output = {
-        "schemaVersion": "cmbdevclaw_v1",
         "workflow": build_workflow_shell(config),
         "projects": all_projects,
     }

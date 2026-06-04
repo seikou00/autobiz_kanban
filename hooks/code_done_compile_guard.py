@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pre-execute guard that compiles declared modules before code_done."""
+"""Pre-execute guard helpers for code_done module compilation."""
 
 from __future__ import annotations
 
 import json
-import re
 import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+HOOKS_DIR = ROOT / "hooks"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIR))
+
+from paths import (
+    STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR,
+    contains_workspace_argument,
+    get_plugin_output_workspace,
+    resolve_env_feature,
+)
+from board_core.state_store import load_state_json_records_result
+from state_checkpoint import append_checkpoint_hook_logs
 
 
 BLOCK_EXIT_CODE = 2
@@ -22,7 +37,6 @@ OUTPUT_TAIL_LIMIT = 4000
 
 @dataclass(frozen=True)
 class CheckpointCommand:
-    workspace: Path
     checkpoint: str
 
 
@@ -95,28 +109,25 @@ def option_value(tokens: list[str], *names: str) -> str:
     return ""
 
 
-def parse_checkpoint_command(command: str, cwd: Path) -> CheckpointCommand | None:
+def has_flag(tokens: list[str], *names: str) -> bool:
+    return any(token in names for token in tokens)
+
+
+def parse_checkpoint_command(command: str) -> CheckpointCommand | None:
+    state_scripts = {"read_state_json.py", "update_checkpoint.py"}
     for variant in command_variants(command):
         tokens = command_words(variant)
-        if not any(Path(token).name == "update_checkpoint.py" for token in tokens):
+        script_names = {Path(token).name for token in tokens}
+        if script_names & state_scripts and contains_workspace_argument(tokens):
+            raise ValueError(STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR)
+        if "update_checkpoint.py" not in script_names:
             continue
 
         checkpoint = option_value(tokens, "--checkpoint", "-c")
-        if checkpoint != "code_done":
+        if checkpoint != "code_done" or has_flag(tokens, "--dry-run"):
             return None
 
-        workspace = option_value(tokens, "--workspace", "-w")
-        if not workspace:
-            raise ValueError("code_done 编译校验失败: update_checkpoint.py 缺少 --workspace 参数")
-
-        workspace_path = Path(workspace).expanduser()
-        if not workspace_path.is_absolute():
-            workspace_path = cwd / workspace_path
-
-        return CheckpointCommand(
-            workspace=workspace_path.resolve(strict=False),
-            checkpoint=checkpoint,
-        )
+        return CheckpointCommand(checkpoint=checkpoint)
     return None
 
 
@@ -131,7 +142,7 @@ def block(reason: str) -> int:
         {
             "decision": "block",
             "reason": reason,
-            "systemMessage": "code_done 前模块编译失败。请修复编译错误或更新 .autobizdevops/modules_compile.json 后重试。",
+            "systemMessage": "状态脚本参数不合法。请删除 --workspace/-w，由插件环境决定状态路径。",
         },
         sys.stdout,
         ensure_ascii=False,
@@ -191,7 +202,7 @@ def load_modules(path: Path) -> list[CompileModule]:
         raise ValueError(f"code_done 编译校验失败: {path}: {exc}") from exc
 
 
-def run_compile(module: CompileModule) -> tuple[bool, str]:
+def run_compile(module: CompileModule, *, emit_success: bool = True) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             module.compile_command,
@@ -220,19 +231,101 @@ def run_compile(module: CompileModule) -> tuple[bool, str]:
             f"模块 {module.module} 编译失败: path={module.path} command={module.compile_command} exit_code={result.returncode}{detail}",
         )
 
-    summary = output or "(无输出)"
-    print(
-        "\n".join(
-            [
-                f"模块 {module.module} 编译通过",
-                f"path: {module.path}",
-                f"command: {module.compile_command}",
-                "输出摘要:",
-                summary,
-            ]
+    if emit_success:
+        summary = output or "(无输出)"
+        print(
+            "\n".join(
+                [
+                    f"模块 {module.module} 编译通过",
+                    f"path: {module.path}",
+                    f"command: {module.compile_command}",
+                    "输出摘要:",
+                    summary,
+                ]
+            )
         )
-    )
     return True, ""
+
+
+def validate_modules_compile(workspace: Path, *, emit_success: bool = True) -> tuple[int, list[str]]:
+    modules_path = workspace / MODULES_COMPILE_RELATIVE_PATH
+    try:
+        modules = load_modules(modules_path)
+    except ValueError as exc:
+        return 0, [str(exc)]
+
+    errors: list[str] = []
+    for module in modules:
+        ok, message = run_compile(module, emit_success=emit_success)
+        if not ok:
+            errors.append(message)
+
+    return len(modules), errors
+
+
+def current_checkpoint(workspace: Path, feature: str) -> str | None:
+    result = load_state_json_records_result(workspace)
+    if not result.exists or result.errors:
+        return None
+    record = result.records.get(feature)
+    if record is None:
+        return None
+    return record.get("checkpoint", "")
+
+
+def write_compile_result(
+    workspace: Path,
+    feature: str,
+    *,
+    old_checkpoint: str,
+    errors: list[str],
+) -> None:
+    new_checkpoint = "code_done"
+    transition = f"{old_checkpoint or 'empty'} -> {new_checkpoint}"
+    if errors:
+        append_checkpoint_hook_logs(
+            workspace,
+            [(feature, old_checkpoint, new_checkpoint)],
+            event_id="code-compile",
+            label="code_done 编译校验",
+            errors=errors,
+            event_status="warning",
+            exit_code=0,
+            message=f"{transition}: " + "\n".join(errors),
+        )
+        return
+
+    append_checkpoint_hook_logs(
+        workspace,
+        [(feature, old_checkpoint, new_checkpoint)],
+        event_id="code-compile",
+        label="code_done 编译校验",
+        errors=[],
+        event_status="success",
+        exit_code=0,
+        message=f"{transition}: code_done 编译校验通过",
+    )
+
+
+def run_code_done_compile_hook() -> int:
+    try:
+        workspace = get_plugin_output_workspace()
+        feature = resolve_env_feature(None, required=True)
+    except ValueError:
+        return 0
+
+    checkpoint = current_checkpoint(workspace, feature)
+    if checkpoint != "code_in_progress":
+        return 0
+
+    _, errors = validate_modules_compile(workspace, emit_success=False)
+    write_compile_result(
+        workspace,
+        feature,
+        old_checkpoint=checkpoint,
+        errors=errors,
+    )
+    return 0
 
 
 def run_guard(payload: dict[str, Any]) -> int:
@@ -240,32 +333,15 @@ def run_guard(payload: dict[str, Any]) -> int:
     if not command:
         return 0
 
-    cwd = extract_cwd(payload)
     try:
-        checkpoint_command = parse_checkpoint_command(command, cwd)
+        checkpoint_command = parse_checkpoint_command(command)
     except ValueError as exc:
         return block(str(exc))
 
     if checkpoint_command is None:
         return 0
 
-    modules_path = checkpoint_command.workspace / MODULES_COMPILE_RELATIVE_PATH
-    try:
-        modules = load_modules(modules_path)
-    except ValueError as exc:
-        return block(str(exc))
-
-    errors: list[str] = []
-    for module in modules:
-        ok, message = run_compile(module)
-        if not ok:
-            errors.append(message)
-
-    if errors:
-        return block("\n\n".join(errors))
-
-    print(f"code_done 模块编译校验通过: {len(modules)} 个模块")
-    return 0
+    return run_code_done_compile_hook()
 
 
 def main() -> int:
@@ -275,7 +351,8 @@ def main() -> int:
     try:
         payload = json.loads(raw_input)
     except json.JSONDecodeError as exc:
-        return block(f"code_done 编译校验失败: hook payload JSON 非法: {exc}")
+        print(f"code_done 编译校验跳过: hook payload JSON 非法: {exc}", file=sys.stderr)
+        return 0
     if not isinstance(payload, dict):
         return 0
     return run_guard(payload)

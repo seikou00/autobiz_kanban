@@ -1,9 +1,16 @@
 ---
 name: autodev
-description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到对应子技能；各子技能独立负责准入检查与产物自检。
+description: Autodev Dev 阶段根路由器。基于 checkpoint 路由到对应子技能；各子技能独立负责准入检查与产物自检。
+version: v1.1.1604
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
+**路径变量约定（必须区分）：**
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 ## autodev
 
@@ -47,7 +54,6 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 
 | 标志 | 含义 |
 |------|------|
-| `--auto` | 自动串联 Specs → Plan → Code → Review → UTest → E2E → Verify |
 | `--feature {slug}` | 指定 Feature |
 
 ### 1.2 确定 Feature
@@ -56,30 +62,20 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 自动路由到�
 - 否则先读取全部 State 快照，再从 `STATE.records` 列出候选让用户选择：
 
 ```bash
-python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}"
+python "$PLUGIN_ROOT/read_state_json.py"
 ```
 
 确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。
 
-### 1.3 初始化代码工作区 AGENTS.md
+### 1.3 产出物校验
 
-Dev 阶段进入路由前必须执行初始化脚本：
-
-```bash
-python "{PLUGIN_DIR}/hooks/init_dev_agents.py"
-```
-
-如果脚本返回非 0，停止路由并按错误信息处理。
-
-### 1.4 产出物校验
-
-根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按 `{PLUGIN_DIR}/board_core/board_config.json` 校验。
+根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按 `$PLUGIN_ROOT/board_core/board_config.json` 校验。
 
 - `prd_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`。
 - `specs_done` 之后的 Dev 阶段不再把 `PRD.md` 作为硬输入，统一以 `proposal.md` 与 `specs/**/*.md` 作为行为契约源。
@@ -119,7 +115,7 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py"
 | `e2e_done` | `/autodev-verify` |
 | `verify_in_progress` | `/autodev-verify`（恢复） |
 | `verify_done` | **Dev 阶段结束** |
-| `needs_fix` | **停止串联**，读取最近阶段报告中的建议回流阶段并提示用户 |
+| `needs_fix` | **停止**，读取最近阶段报告中的建议回流阶段并提示用户 |
 
 ---
 
@@ -141,14 +137,14 @@ python "{PLUGIN_DIR}/hooks/init_dev_agents.py"
 | `autodev-verify` | `verify_done` / `needs_fix` |
 
 3. 出口不合法 → 保持原状态并告警，不推进。
-4. `needs_fix` → 终止 `--auto` 串联，按最近阶段报告中的建议回流阶段处理。
-5. `--auto` 模式下合法出口自动触发下一子技能；`verify_done` 后 Dev 阶段结束。
+4. `needs_fix` → 按最近阶段报告中的建议回流阶段处理。
+5. 合法出口只更新当前阶段结果；后续阶段需由用户再次触发根路由器或指定子技能继续执行。
 
-各子技能的产物契约、validators 与 checkpoint 合法矩阵以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源；如本文静态说明与 board config 冲突，以 board config 为准。不得再新增 per-skill `artifact-check.yaml`。可运行以下只读命令查看某个子技能的当前契约：
+各子技能的产物契约、validators 与 checkpoint 合法矩阵以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源；如本文静态说明与 board config 冲突，以 board config 为准。不得再新增 per-skill `artifact-check.yaml`。可运行以下只读命令查看某个子技能的当前契约：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan
-python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-plan --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 ```
 
 ---

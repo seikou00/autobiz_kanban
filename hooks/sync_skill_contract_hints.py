@@ -23,6 +23,8 @@ LEGACY_RULES_BEGIN_MARKER = "<!-- AUTOBIZDEVOPS_ARTIFACT_RULES:BEGIN -->"
 LEGACY_RULES_END_MARKER = "<!-- AUTOBIZDEVOPS_ARTIFACT_RULES:END -->"
 HINT_BEGIN_MARKER = "<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->"
 HINT_END_MARKER = "<!-- AUTODEV_RUNTIME_CONTRACT:END -->"
+LEGACY_FEATURE_DIR_LINE = "工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/"
+FEATURE_DIR_LINE = "FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}"
 
 
 @dataclass(frozen=True)
@@ -44,11 +46,11 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "## 流程契约",
             "",
             "当前 skill 的 checkpoint、输入/输出产物和 validators 以 "
-            "`{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。",
+            "`$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。",
             "运行前如需查看当前契约，执行：",
             "",
             "```bash",
-            f'python "{{PLUGIN_DIR}}/hooks/inspect_skill_contract.py" {contract.skill} --json',
+            f'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" {contract.skill} --json',
             "```",
             HINT_END_MARKER,
             "",
@@ -126,12 +128,16 @@ def replace_old_contract_section(content: str, block: str) -> tuple[str, bool]:
     return content[:start] + block + content[end:], True
 
 
-def insert_after_workspace_block(content: str, block: str) -> tuple[str, bool]:
-    workspace_index = content.find("工作目录 = ")
-    if workspace_index < 0:
+def normalize_legacy_feature_dir_line(content: str) -> str:
+    return content.replace(LEGACY_FEATURE_DIR_LINE, FEATURE_DIR_LINE)
+
+
+def insert_after_feature_dir_block(content: str, block: str) -> tuple[str, bool]:
+    feature_dir_index = content.find(FEATURE_DIR_LINE)
+    if feature_dir_index < 0:
         return content, False
 
-    fence_end = content.find("```", workspace_index)
+    fence_end = content.find("```", feature_dir_index)
     if fence_end < 0:
         return content, False
 
@@ -159,6 +165,7 @@ def insert_after_frontmatter(content: str, block: str) -> str:
 
 def sync_skill_content(content: str, contract: SkillContract) -> str:
     content = remove_legacy_contract_blocks(content)
+    content = normalize_legacy_feature_dir_line(content)
     block = runtime_contract_hint_block(contract)
     updated, replaced = replace_marked_block(content, block)
     if replaced:
@@ -168,7 +175,7 @@ def sync_skill_content(content: str, contract: SkillContract) -> str:
     if replaced:
         return updated
 
-    updated, inserted = insert_after_workspace_block(content, block)
+    updated, inserted = insert_after_feature_dir_block(content, block)
     if inserted:
         return updated
 

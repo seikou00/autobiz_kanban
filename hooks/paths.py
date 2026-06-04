@@ -2,14 +2,80 @@
 # -*- coding: utf-8 -*-
 """Path helpers for autobizdevops workspace bootstrap hooks."""
 
-import re
+import os
 from pathlib import Path
-from typing import Optional, Union
+from typing import Iterable, Mapping, Optional, Union
 
 
 PathLike = Union[str, Path]
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-SYSTEM_NO_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+")
+
+
+STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR = (
+    "状态读写脚本不接受 --workspace/-w；请删除该参数，路径由 PLUGIN_WORKSPACE/PROJECT_CODE 环境变量决定。"
+)
+
+
+def contains_workspace_argument(args: Iterable[str]) -> bool:
+    for arg in args:
+        if arg in {"--workspace", "-w"}:
+            return True
+        if arg.startswith("--workspace="):
+            return True
+        if arg.startswith("-w") and arg != "-w":
+            return True
+    return False
+
+
+def _env_value(values: Mapping[str, str], name: str) -> str:
+    return str(values.get(name, "") or "").strip()
+
+
+def get_plugin_output_workspace(env: Optional[Mapping[str, str]] = None) -> Path:
+    values = os.environ if env is None else env
+    plugin_workspace_raw = _env_value(values, "PLUGIN_WORKSPACE")
+    project_code = _env_value(values, "PROJECT_CODE")
+
+    missing = [name for name, value in (("PLUGIN_WORKSPACE", plugin_workspace_raw), ("PROJECT_CODE", project_code)) if not value]
+    if missing:
+        raise ValueError(f"{', '.join(missing)} 未设置；状态脚本必须由插件环境提供 PLUGIN_WORKSPACE 和 PROJECT_CODE")
+    if "/" in project_code or "\\" in project_code:
+        raise ValueError(f"PROJECT_CODE 不能包含路径分隔符: {project_code}")
+
+    plugin_workspace = Path(plugin_workspace_raw).expanduser().resolve(strict=False)
+    if not plugin_workspace.is_dir():
+        raise ValueError(f"PLUGIN_WORKSPACE 指向的目录不存在: {plugin_workspace}")
+
+    workspace = (plugin_workspace / project_code).resolve(strict=False)
+    if not workspace.is_dir():
+        raise ValueError(f"PROJECT_CODE 对应的项目插件目录不存在: {workspace}")
+
+    state_json_path = workspace / ".autobizdevops" / "state.json"
+    if not state_json_path.is_file():
+        raise ValueError(f"state.json 未找到: {state_json_path}")
+    return workspace
+
+
+def resolve_env_feature(
+    feature: Optional[str],
+    *,
+    required: bool,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    values = os.environ if env is None else env
+    provided = (feature or "").strip()
+    env_feature = _env_value(values, "FEATURE_ID")
+
+    if required and not env_feature:
+        raise ValueError("FEATURE_ID 未设置；当前 Feature 必须由插件环境提供")
+    if provided and env_feature and provided != env_feature:
+        raise ValueError(f"--feature 与 FEATURE_ID 不一致: --feature={provided} FEATURE_ID={env_feature}")
+    if provided:
+        return provided
+    if env_feature:
+        return env_feature
+    if required:
+        raise ValueError("feature 不能为空")
+    return None
 
 
 def get_workspace(workspace: Optional[PathLike] = None) -> Path:
@@ -66,39 +132,8 @@ def get_project_md_path(workspace: Optional[PathLike] = None) -> Path:
     return get_autobizdevops_dir(workspace) / "PROJECT.md"
 
 
-def get_sys_agents_md_path(system_no: str, plugin_root: Optional[PathLike] = None) -> Path:
-    root = Path(plugin_root).resolve() if plugin_root is not None else PLUGIN_ROOT
-    sys_root = root / "sys"
-    if sys_root.is_dir():
-        candidates = sorted(sys_root.iterdir(), key=lambda item: (item.name.casefold(), item.name))
-        for candidate in candidates:
-            if candidate.is_dir() and candidate.name == system_no:
-                return candidate / "AGENTS.md"
-
-        folded_system_no = system_no.casefold()
-        for candidate in candidates:
-            if candidate.is_dir() and candidate.name.casefold() == folded_system_no:
-                return candidate / "AGENTS.md"
-
-        normalized_system_no = normalize_system_no(system_no)
-        if normalized_system_no:
-            for candidate in candidates:
-                if candidate.is_dir() and normalize_system_no(candidate.name) == normalized_system_no:
-                    return candidate / "AGENTS.md"
-
-            for candidate in candidates:
-                candidate_system_no = normalize_system_no(candidate.name)
-                if candidate.is_dir() and candidate_system_no and (
-                    candidate_system_no.startswith(normalized_system_no)
-                    or normalized_system_no.startswith(candidate_system_no)
-                ):
-                    return candidate / "AGENTS.md"
-
-    return sys_root / system_no / "AGENTS.md"
-
-
-def normalize_system_no(system_no: str) -> str:
-    return "".join(SYSTEM_NO_TOKEN_PATTERN.findall(system_no)).casefold()
+def get_sys_agents_md_path(system_no: str, workspace: Optional[PathLike] = None) -> Path:
+    return get_workspace(workspace) / "sys" / system_no / "AGENTS.md"
 
 
 def ensure_dir(path: PathLike) -> Path:

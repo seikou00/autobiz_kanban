@@ -1,22 +1,25 @@
 ---
 name: autodev-reviewer
 description: "当实现工作准备宣称完成、准备交接、准备创建 PR，或用户要求独立只读 review 时使用此技能。该技能将完成流程封装为生产级两阶段协议：主 agent 只写结构化 completion proposal，然后必须启动独立 reviewer agent（子代理或任务）；reviewer 自己通过 shell/git 获取真实仓库状态，读取 proposal.md、specs/**/*.md、design.md、PLAN.md，并按需读取用户提供的 PRD 引用，核对 completion proposal、真实 diff 与行为规格是否一致，直接产出 feature 级 REQUIREMENTS_EVAL.md。适用于单仓库或跨多个 git 仓库共同完成的代码修改、bug 修复、重构、测试、多文件变更、按规格验收，以及任何自评不可靠的开发任务。默认通过独立 reviewer 子代理执行"
+version: v1.1.1604
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-
-```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
-```
+**路径变量约定（必须区分）：**
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。
+当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
 运行前如需查看当前契约，执行：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-reviewer --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-reviewer --json
 ```
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
@@ -28,7 +31,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-reviewer --json
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 后续准入和分支判断直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
@@ -36,36 +39,36 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 开始审查前，使用统一脚本写入 `requirements_eval_in_progress`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint requirements_eval_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint requirements_eval_in_progress
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 最终 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS` 后，使用统一脚本写入 `requirements_eval_done`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint requirements_eval_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint requirements_eval_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 
 ## 核心协议
 
-1. **主 agent 写 completion proposal。**按 references/schemas.md 创建 `.autobizdevops/features/{slug}/completion-proposal.json`。proposal 应描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。跨仓库任务必须写 `affected_repositories`；单仓库任务可以省略该字段。
+1. **主 agent 写 completion proposal。**按 references/schemas.md 创建 `{FEATURE_DIR}/completion-proposal.json`。proposal 应描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。跨仓库任务必须写 `affected_repositories`；单仓库任务可以省略该字段。
 2. **主 agent 启动独立 reviewer agent。**使用 subagent 机制启动独立 reviewer。启动子代理，并把 references/reviewer-agent.md 中的 reviewer 指令作为 prompt。启动子agent附带用户提供的原始 PRD 路径列表；没有则写 none，供 reviewer 与 proposal.prd_references 交叉核对。如果流程希望 reviewer 核对用户主动输入的仓库是否被遗漏，启动 prompt 还必须附带 `User repository references`；否则 reviewer 只以 completion proposal、proposal.md、specs、design、PLAN、可选 PRD 和真实仓库状态为依据。
 3. **reviewer 自己获取真实状态。**reviewer 必须自行通过工具获取仓库状态，并读取 feature 目录中的 proposal.md、specs/**/*.md、design.md、PLAN.md；PRD 只在用户或 completion proposal 显式引用时读取。若 completion proposal 有 `affected_repositories`，reviewer 必须对每个仓库逐个执行 git status/diff/log 等只读检查；若没有，则按旧流程把当前 cwd 当作唯一仓库。不要依赖主 agent 预先生成的 diff snapshot 或规格摘要。
-4. **reviewer 直接写需求评估文件。**reviewer 必须直接写入 `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`。
+4. **reviewer 直接写需求评估文件。**reviewer 必须直接写入 `{FEATURE_DIR}/REQUIREMENTS_EVAL.md`。
 5. **主 agent 读取 verdict 并分支。**如果 verdict 是 `PASS` 或 `PASS_WITH_WARNINGS`，报告 verdict 与 `REQUIREMENTS_EVAL.md` 路径后结束本阶段。如果 verdict 是 `FAIL`，主 agent 必须按 `REQUIREMENTS_EVAL.md` 中的 blockers 做最小修复，更新 `completion-proposal.json`，重新启动独立 reviewer，直到 verdict 变为 `PASS` 或 `PASS_WITH_WARNINGS`。如果 verdict 是 `DEGRADED`，停止并报告独立审查未成立。
 
 ## 严格职责边界
 
 | 角色                | 职责                                                         | 禁止                                                         |
 | ------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| 主 agent / Executor | 写 `.autobizdevops/features/{slug}/completion-proposal.json`；启动 reviewer；FAIL 时修复 blockers 并重新 review；最后摘要 verdict | 自己给 PASS；替 reviewer 改评估；未经重新 review 就宣称完成 |
+| 主 agent / Executor | 写 `{FEATURE_DIR}/completion-proposal.json`；启动 reviewer；FAIL 时修复 blockers 并重新 review；最后摘要 verdict | 自己给 PASS；替 reviewer 改评估；未经重新 review 就宣称完成 |
 | Reviewer agent      | 通过 shell/git/read/search 独立核验 proposal；写 REQUIREMENTS_EVAL.md | 修改源码、测试、配置、依赖文件、锁文件；运行 commit/push/deploy；修复问题 |
 
 reviewer 可以使用 Write，但只允许写协调仓库中的：
 
-.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md
+{FEATURE_DIR}/REQUIREMENTS_EVAL.md
 
 reviewer 可以使用 shell/Bash 获取只读证据，但只能运行读操作。跨仓库任务中，以下命令必须在每个 `affected_repositories[].path` 对应的仓库内逐个执行。允许示例：
 
@@ -101,7 +104,7 @@ npm install
 
 `affected_repositories` 用于声明本次完成声明涉及哪些 git 仓库，以及这些仓库为什么应被纳入审查。
 
-跨仓库任务中，主 agent 必须在 `.autobizdevops/features/{slug}/completion-proposal.json` 写入 `affected_repositories`：
+跨仓库任务中，主 agent 必须在 `{FEATURE_DIR}/completion-proposal.json` 写入 `affected_repositories`：
 
 ```json
 {
@@ -138,7 +141,7 @@ reviewer 没有隐式用户对话上下文。所有可审查上下文必须来�
 
 PRD 是可选输入，不是使用本 skill 的前置条件。
 
-当用户使用 skill 时提供 PRD 文件路径，例如“参考 .autobizdevops/features/feat-demo/PRD.md 做完成审查”，主 agent 必须把路径原样写入 `.autobizdevops/features/{slug}/completion-proposal.json` 的 prd_references。支持多个本地文件；没有 PRD 时写空数组。
+当用户使用 skill 时提供 PRD 文件路径，例如“参考 .autobizdevops/features/feat-demo/PRD.md 做完成审查”，主 agent 必须把路径原样写入 `{FEATURE_DIR}/completion-proposal.json` 的 prd_references。支持多个本地文件；没有 PRD 时写空数组。
 
 没有 PRD 时，主 agent 启动 reviewer 的 prompt 中写明 User PRD references: none；reviewer 跳过 PRD 额外验收，仍以 specs 计算 `spec_alignment`。
 
@@ -163,11 +166,11 @@ reviewer 必须读取每个 prd_references[].path，并把 PRD 纳入审查依�
 
 ## Review-Fix-Review 闭环
 
-每轮 reviewer 写完 `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md` 后，主 agent 必须读取其中的 verdict：
+每轮 reviewer 写完 `{FEATURE_DIR}/REQUIREMENTS_EVAL.md` 后，主 agent 必须读取其中的 verdict：
 
 - `PASS`：结束 review 阶段，允许根路由进入 `/autodev-utest`。
 - `PASS_WITH_WARNINGS`：结束 review 阶段，允许根路由进入 `/autodev-utest`，但最终回复必须摘要 warnings。
-- `FAIL`：不得进入 `/autodev-utest`。主 agent 必须读取 blockers，修复必须修复项，更新 `.autobizdevops/features/{slug}/completion-proposal.json`，然后重新启动独立 reviewer 覆盖更新 `REQUIREMENTS_EVAL.md`。
+- `FAIL`：不得进入 `/autodev-utest`。主 agent 必须读取 blockers，修复必须修复项，更新 `{FEATURE_DIR}/completion-proposal.json`，然后重新启动独立 reviewer 覆盖更新 `REQUIREMENTS_EVAL.md`。
 - `DEGRADED`：停止当前阶段，说明独立审查未成立；不要把 DEGRADED 当作可修复代码问题自动处理。
 
 FAIL 修复规则：
@@ -183,7 +186,7 @@ FAIL 修复规则：
 审查已完成。
 Verdict: <PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED>
 交接文件:
-- .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md
+- {FEATURE_DIR}/REQUIREMENTS_EVAL.md
 摘要: <一句话说明最终结果；如 PASS_WITH_WARNINGS，摘要 warnings>
 
 <PASS/PASS_WITH_WARNINGS 时说明 review 已收敛；FAIL/DEGRADED 时说明为什么无法继续>
@@ -216,7 +219,7 @@ Verdict: <PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED>
 
 reviewer 必须按 references/schemas.md 直接写入：
 
-- .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md
+- {FEATURE_DIR}/REQUIREMENTS_EVAL.md
 
 不要接受自由文本的 “looks good” 作为 review 结果。verdict 必须能追溯到 completion proposal、proposal.md、specs、design.md、可选 PRD、每个受影响仓库的 shell/git 输出和实际文件内容。
 

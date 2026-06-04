@@ -26,6 +26,14 @@ def _validate_specs_glob(artifact: dict, path: str) -> None:
         raise ValueError(f"specs glob path must be {SPECS_GLOB_PATH}: {path}")
 
 
+def _set_artifact_status(entry: dict, status: str) -> None:
+    label = "已生成" if status == "generated" else "未生成"
+    entry["status"] = {
+        "label": label,
+        "uiKind": "ok" if status == "generated" else "warning",
+    }
+
+
 def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> dict:
     path = artifact["path"]
     _validate_specs_glob(artifact, path)
@@ -39,9 +47,9 @@ def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
         "paths": matches,
     }
     if matches:
-        entry["status"] = {"label": "已生成", "uiKind": "ok"}
+        _set_artifact_status(entry, "generated")
     else:
-        entry["status"] = {"label": "未生成", "uiKind": "warning"}
+        _set_artifact_status(entry, "missing")
     return entry
 
 
@@ -52,9 +60,9 @@ def _scan_file_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
         "paths": [_relative_path(artifact_path, workspace)],
     }
     if artifact_path.is_file():
-        entry["status"] = {"label": "已生成", "uiKind": "ok"}
+        _set_artifact_status(entry, "generated")
     else:
-        entry["status"] = {"label": "未生成", "uiKind": "warning"}
+        _set_artifact_status(entry, "missing")
     return entry
 
 

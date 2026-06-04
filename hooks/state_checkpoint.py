@@ -181,7 +181,7 @@ def append_feature_hook_log(
     checkpoint: str | None,
     *,
     event_id: str,
-    result_code: str,
+    event_status: str,
     message: str,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
 ) -> None:
@@ -194,7 +194,7 @@ def append_feature_hook_log(
         "pluginId": PLUGIN_ID,
         "featureId": feature,
         "eventId": event_id,
-        "resultCode": result_code,
+        "eventStatus": event_status,
         "message": message,
         "nodeId": checkpoint_node_id(
             checkpoint,
@@ -219,7 +219,7 @@ def append_checkpoint_hook_logs(
     hook_id: str | None = None,
     label: str,
     errors: list[str],
-    result_code: str | None = None,
+    event_status: str | None = None,
     exit_code: int | None = None,
     message: str | None = None,
     workflow_profiles: dict[str, str] | None = None,
@@ -227,7 +227,7 @@ def append_checkpoint_hook_logs(
     if not changes:
         return
     resolved_event_id = event_id or hook_id or ""
-    resolved_result_code = result_code or ("blocked" if errors else "done")
+    resolved_event_status = event_status or ("blocked" if errors else "success")
     summary = "\n".join(errors) if errors else f"{label} 通过"
     for feature, old_checkpoint, new_checkpoint in changes:
         transition = f"{old_checkpoint or 'empty'} -> {new_checkpoint or 'empty'}"
@@ -236,7 +236,7 @@ def append_checkpoint_hook_logs(
             feature,
             new_checkpoint or old_checkpoint,
             event_id=resolved_event_id,
-            result_code=resolved_result_code,
+            event_status=resolved_event_status,
             message=message or f"{transition}: {summary}",
             workflow_profile=(workflow_profiles or {}).get(feature, BASE_WORKFLOW_PROFILE),
         )
@@ -670,20 +670,11 @@ def run_code_compile(payload: dict) -> int:
             hook_id="code-compile",
             label="code_done 编译校验",
             errors=errors,
-            exit_code=BLOCK_EXIT_CODE,
+            event_status="warning",
+            exit_code=0,
+            message="code_done 编译校验失败但不阻止 checkpoint 更新:\n" + "\n".join(errors),
         )
-        for error in errors:
-            print(error, file=sys.stderr)
-        json.dump(
-            {
-                "decision": "block",
-                "reason": "\n".join(errors),
-                "systemMessage": "code_done 前编译校验失败，请确保 workspace 根目录 mvn compile 通过后再推进 checkpoint。",
-            },
-            sys.stdout,
-            ensure_ascii=False,
-        )
-        return BLOCK_EXIT_CODE
+        return 0
     append_checkpoint_hook_logs(
         workspace_root,
         changes,

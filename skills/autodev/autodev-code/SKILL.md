@@ -1,22 +1,25 @@
 ---
 name: autodev-code
-description: 按照 autodev-specs 与 autodev-plan 产物逐任务执行代码。读取 proposal.md、specs/**/*.md、design.md、PLAN.md 和 AGENTS.md，以 specs 为行为契约、design 为实现决策、PLAN 为执行队列，做最小实现、逐项验证、更新 PLAN.md 任务状态，并在全部任务完成后推进 code_done。支持中断恢复、--feature 多人协作、--auto 自动衔接 /autodev-reviewer。
+description: 按照 autodev-specs 与 autodev-plan 产物逐任务执行代码。读取 proposal.md、specs/**/*.md、design.md、PLAN.md 和 AGENTS.md，以 specs 为行为契约、design 为实现决策、PLAN 为执行队列，做最小实现、逐项验证、更新 PLAN.md 任务状态，并在全部任务完成后推进 code_done。支持中断恢复、--feature 多人协作。
+version: v1.1.1604
 ---
 
-**PLUGIN_OUTPUT_DIR**：插件产物的目录。SKILL生产的任务产物都只能写入或读取这个位置。
-
-```
-工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/
-```
+**路径变量约定（必须区分）：**
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `{PLUGIN_DIR}/board_core/board_config.json` 为唯一事实来源。
+当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
 运行前如需查看当前契约，执行：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-code --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-code --json
 ```
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
@@ -28,22 +31,22 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-code --json
 `autodev-code` 只负责把 `/autodev-specs` 确认的行为契约和 `/autodev-plan` 确认的技术设计落成代码。
 
 输入契约：
-- `{工作目录}/proposal.md`：本轮变更目标、能力边界、影响面和非目标。
-- `{工作目录}/specs/**/*.md`：Requirement / Scenario 行为契约，是实现和验收的最高行为依据。
-- `{工作目录}/design.md`：API Decisions、Data Decisions、Technical Design、风险与待确认项。
-- `{工作目录}/PLAN.md`：任务 DAG、任务总览、任务详情、验证方法、覆盖矩阵；代码文件由任务、specs、design.md 和代码库探索共同定位。
+- `{FEATURE_DIR}/proposal.md`：本轮变更目标、能力边界、影响面和非目标。
+- `{FEATURE_DIR}/specs/**/*.md`：Requirement / Scenario 行为契约，是实现和验收的最高行为依据。
+- `{FEATURE_DIR}/design.md`：API Decisions、Data Decisions、Technical Design、风险与待确认项。
+- `{FEATURE_DIR}/PLAN.md`：任务 DAG、任务总览、任务详情、验证方法、覆盖矩阵；代码文件由任务、specs、design.md 和代码库探索共同定位。
 - `AGENTS.md`：项目级工程约束；如与本技能冲突，以 AGENTS.md 为准，除非系统级指令另有要求。
 
 输出契约：
 - 业务代码/测试/配置的最小必要修改。
-- `{工作目录}/PLAN.md` 中任务状态和验证证据更新。
+- `{FEATURE_DIR}/PLAN.md` 中任务状态和验证证据更新。
 - 刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
 不得修改：
-- `{工作目录}/PRD.md`（如果存在）
-- `{工作目录}/proposal.md`
-- `{工作目录}/specs/**/*.md`
-- `{工作目录}/design.md`
+- `{FEATURE_DIR}/PRD.md`（如果存在）
+- `{FEATURE_DIR}/proposal.md`
+- `{FEATURE_DIR}/specs/**/*.md`
+- `{FEATURE_DIR}/design.md`
 - 其他阶段报告文件
 
 如果发现 `specs/**/*.md` 与 proposal、代码现实或 PLAN 任务冲突，停止编码，报告需要回到 `/autodev-specs` 更新行为契约；如果发现 `design.md` 与 specs、代码现实或 PLAN 任务冲突，停止编码，报告需要回到 `/autodev-plan` 更新设计。不要在 code 阶段偷偷修规格或设计。`PRD.md` 只允许作为排查上游规格缺口的可选参考，不能覆盖 specs。
@@ -53,7 +56,7 @@ python "{PLUGIN_DIR}/hooks/inspect_skill_contract.py" autodev-code --json
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
@@ -61,14 +64,14 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 开始前必须确认当前 Feature 目录存在：
 
 ```text
-.autobizdevops/features/{slug}/
+{FEATURE_DIR}/
 ```
 
 必须读取：
-- `.autobizdevops/features/{slug}/proposal.md`
-- `.autobizdevops/features/{slug}/specs/**/*.md`
-- `.autobizdevops/features/{slug}/design.md`
-- `.autobizdevops/features/{slug}/PLAN.md`
+- `{FEATURE_DIR}/proposal.md`
+- `{FEATURE_DIR}/specs/**/*.md`
+- `{FEATURE_DIR}/design.md`
+- `{FEATURE_DIR}/PLAN.md`
 - AGENTS.md（如果存在）
 
 如果缺少任一必读文件，停止，不要生成替代文件。
@@ -105,8 +108,8 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 开始编码前推进到 `code_in_progress`：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint code_in_progress
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint code_in_progress
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ## 执行协议
@@ -156,13 +159,21 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 
 1. 将任务状态改为「进行中」，并保留原任务内容。
 2. 读取任务的「做什么」「规格依据」「设计依据」「验证方法」和覆盖矩阵，先用 `specs/**/*.md` 确认行为，再结合 `design.md` 定位接口、数据模型、模块边界和验证重点。
-3. 使用 `rg`、项目结构、AGENTS.md 和既有代码约定定位实际需要修改的文件。若 PLAN 明确列出模块路径或涉及文件，优先读取；若路径不存在，先定位真实路径，仍无法定位则停止并记录阻断，不要凭空创建疑似路径。
+3. 在修改任何业务代码前，先做 scoped exploration（有界代码探索），定位实际需要修改的文件和既有实现模式：
+   - 只读取由 `PLAN.md`、`design.md`、`specs/**/*.md`、AGENTS.md 直接指向的文件，或通过有针对性的 `rg` 搜索定位到的相关文件。
+   - 先识别当前项目已有的分层、命名、错误处理、校验、日志和测试风格，再决定如何修改。
+   - 先形成简短的修改映射：规格/设计依据、拟修改文件、复用的既有模式、需要执行的验证命令；完成该映射后再进入代码修改。
+   - 若 PLAN 明确列出模块路径或涉及文件，优先读取；若路径不存在，先定位真实路径；若真实入口、集成点或既有模式仍无法定位，停止并记录阻断，不要凭空创建疑似路径或引入猜测性抽象。
 4. 对照 `specs/**/*.md` 与 `design.md`：
    - 行为实现必须满足 specs 中对应 Requirement / Scenario；不得把 PLAN 任务说明当作覆盖 specs 的理由。
    - 涉及接口时，只实现 API Decisions 中已确认的入口和行为；若 `x-auto-no-http-api: true`，不得新增 HTTP/API。
    - 涉及数据时，只实现 Data Decisions 中已确认的数据变更；若 `x-auto-no-sql: true`，不得新增数据库表、字段或迁移。
    - 涉及架构/模块边界时，遵守 Technical Design 的集成点和方案取舍。
-5. 做最小必要代码修改，不做无关重构。
+   - 不得为了通过验证削弱校验、安全检查、日志或错误处理。
+5. 做满足当前 specs/design 引用的最小必要代码修改，保持当前需求范围外的既有行为不变；只有在消除真实重复、降低当前实现复杂度，或符合项目既有模式时，才新增抽象。
+   - 修改前先观察当前文件的局部格式风格；新增或修改代码必须保持一致。
+   - 只做最小必要 patch，不重排、不重缩进、不格式化与当前任务无关的代码。
+   - 当前任务完成前快速检查本轮 diff；若发现无关格式变化，先还原再验证。
 6. 补充必要注释：
    - 对重要业务逻辑、非显然分支、边界处理、权限/租户/审计/幂等/状态流等关键约束，添加简洁注释说明“为什么这样处理”。
    - 对新增或修改的 PO、DTO、Entity、VO 等对象，按项目既有风格补充类注释和关键字段注释，说明业务含义、取值范围、单位、是否必填、状态枚举或兼容约束。
@@ -186,14 +197,14 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 当 `PLAN.md` 中没有「待做」或「进行中」任务后：
 
 1. 运行项目级验证命令。优先使用 AGENTS.md 或 PLAN.md 指定命令；没有明确命令时按项目类型选择最小验证。
-2. Java/Maven 项目至少运行编译命令；`code_done` checkpoint 的前置 hook 会读取 `.autobizdevops/modules_compile.json` 并逐模块强制编译。
+2. Java/Maven 项目至少运行编译命令。
 3. 如果验证失败，回到相关任务继续修复；不要推进 `code_done`。
 
 验证通过后推进 checkpoint：
 
 ```bash
-python "{PLUGIN_DIR}/hooks/update_checkpoint.py" --workspace "{WORKSPACE}" --feature "{slug}" --checkpoint code_done
-CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" --feature "{slug}")
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint code_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
 ## 写入边界
@@ -218,7 +229,7 @@ CHECKPOINT=$(python "{PLUGIN_DIR}/read_state_json.py" --workspace "{WORKSPACE}" 
 - `PLAN.md` 中所有任务状态均为「完成」。
 - 若存在「失败」任务，本 skill 不算完成，不得推进 `code_done`，必须说明阻断和建议回流阶段。
 - 所有必要验证通过。
-- 项目编译通过或外部 checkpoint 编译校验通过。
+- 项目编译通过；code_done execute hook 会额外记录模块编译结果，但不作为 checkpoint 推进阻断。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
-**Skill 完成。** 下一步：`/autodev-reviewer --feature {slug}`
+**Skill 完成。** 下一步：`/autodev-reviewer`
