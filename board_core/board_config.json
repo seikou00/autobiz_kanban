@@ -179,7 +179,7 @@
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
-          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } }
+          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。如果需要code前的详细设计，可以先使用/autodev-detail-design生成详细设计方案。" } }
         ],
         "checkpoints": ["plan_in_progress", "plan_done"],
         "artifacts": {
@@ -202,7 +202,7 @@
         "order": 50,
         "description": "根据规格、设计和计划实现代码",
         "states": [
-          { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。如果需要code前的详细设计，可以先使用/autodev-detail-design生成详细设计方案。" } },
+          { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
           { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-reviewer", "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。", "dialogTips": "当前阶段：需求实现评审。" } }
         ],
