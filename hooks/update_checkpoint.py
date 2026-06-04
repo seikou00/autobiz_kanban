@@ -40,7 +40,7 @@ from board_core.state_store import (  # noqa: E402
     state_rows_from_records,
     write_state_records,
 )
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, normalize_workflow_profile  # noqa: E402
 
 
 STATE_RELATIVE_PATH = Path(".autobizdevops") / "STATE.md"
@@ -89,11 +89,14 @@ def replace_feature_record(
     new_records: StateRecords = {slug: dict(record) for slug, record in records.items()}
     if feature in new_records:
         record = dict(new_records[feature])
-        old_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
+        old_profile = normalize_workflow_profile(record.get("workflowProfile", BASE_WORKFLOW_PROFILE))
         if old_profile != workflow_profile:
-            return records, [
-                f"Feature '{feature}' 已绑定 workflowProfile={old_profile}，不能改为 {workflow_profile}"
-            ]
+            old_checkpoint = record.get("checkpoint", "")
+            if old_checkpoint != "prd_done":
+                return records, [
+                    f"Feature '{feature}' 已绑定 workflowProfile={old_profile}，不能在 {old_checkpoint} 改为 {workflow_profile}"
+                ]
+            record["workflowProfile"] = workflow_profile
         record["feature"] = feature
         record["checkpoint"] = checkpoint
         record["stage"] = resolved_stage
@@ -188,8 +191,10 @@ def prepare_checkpoint_update(
     old_records = sync_result.records
     old_map = state_rows_from_records(old_records)
     old_record = old_records.get(feature)
-    resolved_profile = workflow_profile or (
-        old_record.get("workflowProfile", BASE_WORKFLOW_PROFILE) if old_record else BASE_WORKFLOW_PROFILE
+    resolved_profile = normalize_workflow_profile(
+        workflow_profile or (
+            old_record.get("workflowProfile", BASE_WORKFLOW_PROFILE) if old_record else BASE_WORKFLOW_PROFILE
+        )
     )
     try:
         contracts = load_repo_workflow_contracts(ROOT, workspace=workspace, profile=resolved_profile)

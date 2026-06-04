@@ -17,6 +17,7 @@ version: v1.1.1604
 ### 技能映射
 | 阶段 | 调用 Skill | 本工程文件 |
 |------|------------|------------|
+| Frontend（profile 可选） | `/autodev-frontend` | `autodev/autodev-frontend/SKILL.md` |
 | Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
 | Code | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
@@ -28,6 +29,8 @@ version: v1.1.1604
 ### 工作流
 
 ```text
+/autodev-frontend（仅 frontend_before_specs profile）
+   ↓
 /autodev-specs
    ↓
 /autodev-plan
@@ -73,6 +76,14 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。
 
+随后调用动态路由脚本读取 board_config 派生出的下一步：
+
+```bash
+python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
+```
+
+若脚本返回 `requiresProfileChoice: true`，必须让用户在 `profileChoices` 中选择 workflow profile。选择 `standard` 时推进到 `specs_in_progress`；选择 `frontend_before_specs` 时推进到 `frontend_in_progress`，并在命令中传入 `--workflow-profile`。
+
 ### 1.3 产出物校验
 
 根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按 `$PLUGIN_ROOT/board_core/board_config.json` 校验。
@@ -94,28 +105,13 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 ## 2. Checkpoint 路由
 
-使用 Step 1.2 获取的 `CHECKPOINT`，按以下规则路由：
+使用 `resolve_next_skill.py --json` 的返回结果路由：
 
-所有非终止状态默认将 `/ARGUMENTS` 透传至子技能；
-
-| Checkpoint | 路由 |
-|------------|------|
-| `prd_done` | `/autodev-specs` |
-| `specs_in_progress` | `/autodev-specs`（恢复） |
-| `specs_done` | `/autodev-plan` |
-| `plan_in_progress` | `/autodev-plan`（恢复） |
-| `plan_done` | `/autodev-code` |
-| `code_in_progress` | `/autodev-code`（恢复） |
-| `code_done` | `/autodev-reviewer` |
-| `requirements_eval_in_progress` | `/autodev-reviewer`（恢复） |
-| `requirements_eval_done` | `/autodev-utest` |
-| `unit_test_in_progress` | `/autodev-utest`（恢复） |
-| `unit_test_done` | `/autodev-e2e` |
-| `e2e_in_progress` | `/autodev-e2e`（恢复） |
-| `e2e_done` | `/autodev-verify` |
-| `verify_in_progress` | `/autodev-verify`（恢复） |
-| `verify_done` | **Dev 阶段结束** |
-| `needs_fix` | **停止**，读取最近阶段报告中的建议回流阶段并提示用户 |
+- `requiresProfileChoice: true`：先完成 workflow profile 选择并写入 checkpoint。
+- `recommendedNextSkill` 非空：调用对应子技能，所有非终止状态默认将 `/ARGUMENTS` 透传至子技能。
+- `recommendedNextSkill` 为空且当前 checkpoint 为 `verify_done`：Dev 阶段结束，进入 Ops。
+- `checkpoint` 为 `needs_fix`：停止，读取最近阶段报告中的建议回流阶段并提示用户。
+- `ok: false`：展示 `errors` 并停止。
 
 ---
 
@@ -124,21 +120,9 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 子技能返回后，根路由器必须：
 
 1. 子技能返回后重新调用 `read_state_json.py` 重新捕获 `CHECKPOINT`。
-2. 对照下表确认是否为合法出口：
-
-| 子技能 | 合法出口 checkpoint |
-|--------|-------------------|
-| `autodev-specs` | `specs_done` |
-| `autodev-plan` | `plan_done` |
-| `autodev-code` | `code_done` |
-| `autodev-reviewer` | `requirements_eval_done` |
-| `autodev-utest` | `unit_test_done` |
-| `autodev-e2e` | `e2e_done` / `needs_fix` |
-| `autodev-verify` | `verify_done` / `needs_fix` |
-
-3. 出口不合法 → 保持原状态并告警，不推进。
-4. `needs_fix` → 按最近阶段报告中的建议回流阶段处理。
-5. 合法出口只更新当前阶段结果；后续阶段需由用户再次触发根路由器或指定子技能继续执行。
+2. 重新调用 `resolve_next_skill.py --json`，若返回 `ok: false` 或 checkpoint 不在 board_config 当前 profile 的合法矩阵中，保持原状态并告警。
+3. `needs_fix` → 按最近阶段报告中的建议回流阶段处理。
+4. 合法出口只更新当前阶段结果；后续阶段需由用户再次触发根路由器或指定子技能继续执行。
 
 各子技能的产物契约、validators 与 checkpoint 合法矩阵以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源；如本文静态说明与 board config 冲突，以 board config 为准。不得再新增 per-skill `artifact-check.yaml`。可运行以下只读命令查看某个子技能的当前契约：
 

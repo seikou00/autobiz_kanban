@@ -30,6 +30,34 @@
     }
   },
   "workflow": {
+    "profiles": {
+      "standard": {
+        "label": "标准 Dev 流程",
+        "description": "PRD 完成后直接进入行为规格。"
+      },
+      "frontend_before_specs": {
+        "label": "Spec 前前端实现",
+        "description": "PRD 完成后先执行前端实现，再进入行为规格。",
+        "nodes": [
+          {
+            "id": "dev.frontend",
+            "phase": "Dev",
+            "label": "前端实现",
+            "skill": "autodev-frontend",
+            "insertBefore": "dev.specs",
+            "checkpointPrefix": "frontend",
+            "description": "基于 PRD/HTML 进行前端实现",
+            "artifacts": {
+              "inputs": [
+                { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
+              ],
+              "outputs": []
+            },
+            "validators": []
+          }
+        ]
+      }
+    },
     "checkpoints": {
       "initial": [
         "discuss_in_progress",
@@ -40,9 +68,9 @@
       ],
       "transitions": {
         "discuss_in_progress": ["discuss_done"],
-        "discuss_done": ["prd_in_progress", "plan_in_progress"],
+        "discuss_done": ["prd_in_progress"],
         "prd_in_progress": ["prd_done"],
-        "prd_done": ["specs_in_progress", "plan_in_progress"],
+        "prd_done": ["specs_in_progress"],
         "specs_in_progress": ["specs_done"],
         "specs_done": ["plan_in_progress"],
         "plan_in_progress": ["plan_done"],

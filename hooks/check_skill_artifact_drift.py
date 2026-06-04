@@ -19,8 +19,10 @@ from board_core.contracts import (  # noqa: E402
     BoardConfigError,
     SkillContract,
     WorkflowContracts,
+    load_board_config,
     load_repo_workflow_contracts,
 )
+from board_core.workflow_compiler import configured_profile_names  # noqa: E402
 
 
 CONTRACT_BEGIN_MARKER = "<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->"
@@ -110,14 +112,44 @@ def autodev_contracts(contracts: WorkflowContracts) -> list[SkillContract]:
     return result
 
 
-def selected_contracts(contracts: WorkflowContracts, skill: str | None) -> list[SkillContract]:
-    if skill is None:
-        return autodev_contracts(contracts)
+def profile_contracts(repo_root: Path) -> list[WorkflowContracts]:
+    profiles = configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json"))
+    return [
+        load_repo_workflow_contracts(repo_root, profile=profile)
+        for profile in profiles
+    ]
 
-    contract = contracts.contract_for_skill(skill)
-    if not is_autodev_contract(contract):
-        raise BoardConfigError(f"skill is outside artifact drift scope: {skill}")
-    return [contract]
+
+def unique_contracts(contracts: list[SkillContract]) -> list[SkillContract]:
+    result: list[SkillContract] = []
+    seen: set[str] = set()
+    for contract in contracts:
+        if contract.skill in seen:
+            continue
+        seen.add(contract.skill)
+        result.append(contract)
+    return result
+
+
+def selected_contracts(contract_sets: list[WorkflowContracts], skill: str | None) -> list[SkillContract]:
+    if skill is None:
+        return unique_contracts([
+            contract
+            for contracts in contract_sets
+            for contract in autodev_contracts(contracts)
+        ])
+
+    last_error: BoardConfigError | None = None
+    for contracts in contract_sets:
+        try:
+            contract = contracts.contract_for_skill(skill)
+        except BoardConfigError as error:
+            last_error = error
+            continue
+        if not is_autodev_contract(contract):
+            raise BoardConfigError(f"skill is outside artifact drift scope: {skill}")
+        return [contract]
+    raise last_error or BoardConfigError(f"unknown skill in board_config.json: {skill}")
 
 
 def remove_marked_section(content: str, begin_marker: str, end_marker: str) -> str:
@@ -218,8 +250,10 @@ def detect_artifact_drift_in_content(
 
 
 def check_contracts_for_drift(repo_root: Path, contracts: Iterable[SkillContract]) -> list[ArtifactDriftFinding]:
-    workflow_contracts = load_repo_workflow_contracts(repo_root)
-    known_artifact_paths = all_workflow_artifact_paths(workflow_contracts)
+    workflow_contracts = profile_contracts(repo_root)
+    known_artifact_paths: set[str] = set(DEFAULT_FORMAL_ARTIFACT_PATHS)
+    for contract_set in workflow_contracts:
+        known_artifact_paths.update(all_workflow_artifact_paths(contract_set))
     findings: list[ArtifactDriftFinding] = []
 
     for contract in contracts:
@@ -246,8 +280,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = Path(args.repo_root).resolve()
     try:
-        contracts = load_repo_workflow_contracts(repo_root)
-        selected = selected_contracts(contracts, args.skill)
+        selected = selected_contracts(profile_contracts(repo_root), args.skill)
         findings = check_contracts_for_drift(repo_root, selected)
     except (BoardConfigError, ValueError) as error:
         print(f"ARTIFACT_DRIFT_FAIL {error}", file=sys.stderr)

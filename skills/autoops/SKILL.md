@@ -59,20 +59,22 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。
 
+随后调用动态路由脚本读取 board_config 派生出的下一步：
+
+```bash
+python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
+```
+
 ---
 
 ## 2. Checkpoint 路由
 
-使用 Step 1.2 获取的 `CHECKPOINT`，按以下规则路由：
+使用 Step 1.2 获取的 `CHECKPOINT` 和 `resolve_next_skill.py --json` 的返回结果路由。`recommendedNextSkill`、`allowedNextCheckpoints` 与 `nextAction` 均以 `$PLUGIN_ROOT/board_core/board_config.json` 的有效 workflow 为准。
 
-| Checkpoint | 路由 |
-|------------|------|
-| `verify_done` | `/autoops-cicd` |
-| `cicd_in_progress` | `/autoops-cicd`（恢复） |
-| `cicd_done` | `/autoops-archive` |
-| `archived` | Ops 终态，提示已归档并输出归档位置（如可定位） |
-| `needs_fix` | 停止，读取最近阶段报告中的建议回流阶段并提示用户 |
-| 其他 | 停止并提示 checkpoint 不属于 Ops 阶段 |
+- `recommendedNextSkill` 为 `autoops-cicd` 或 `autoops-archive` 时，调用对应子技能。
+- `checkpoint` 为 `archived` 时，Ops 终态，提示已归档并输出归档位置（如可定位）。
+- `checkpoint` 为 `needs_fix` 时，停止，读取最近阶段报告中的建议回流阶段并提示用户。
+- `ok: false` 或 `recommendedNextSkill` 不属于 Ops skill 时，停止并展示脚本返回的错误或当前 checkpoint。
 
 所有非终止状态默认将 `$ARGUMENTS` 透传至子技能。
 
@@ -83,16 +85,9 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 子技能返回后，根路由器必须：
 
 1. 子技能返回后重新调用 `read_state_json.py` 重新捕获 `CHECKPOINT`。
-2. 对照下表确认是否为合法出口：
-
-| 子技能 | 合法出口 checkpoint |
-|--------|-------------------|
-| `autoops-cicd` | `cicd_done` / `cicd_in_progress` |
-| `autoops-archive` | `archived` |
-
+2. 重新调用 `resolve_next_skill.py --json`，确认出口仍在当前 profile 的合法矩阵中。
 3. 出口不合法时保持原状态并告警，不继续推进。
-4. `cicd_done` 后自动触发 `/autoops-archive`。
-5. `archived` 后 Ops 阶段结束。
+4. 若脚本推荐 `/autoops-archive`，继续归档；`archived` 后 Ops 阶段结束。
 
 ---
 

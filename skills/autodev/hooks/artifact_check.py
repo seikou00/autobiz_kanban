@@ -19,8 +19,8 @@ from common import (
     task_statuses,
     validate_required_files,
 )
-from board_core.contracts import BoardConfigError, load_repo_workflow_contracts  # noqa: E402
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
+from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
 
 
 PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
@@ -250,18 +250,27 @@ def validate_config_schema(
         return
 
     try:
-        contracts = load_repo_workflow_contracts(
-            repo_root,
-            workspace=workspace_root,
-            profile=workflow_profile,
+        profiles = (
+            configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json"))
+            if workflow_profile == BASE_WORKFLOW_PROFILE
+            else (workflow_profile,)
         )
     except BoardConfigError as error:
         raise HookCheckError("invalid_board_config", str(error)) from error
 
-    for contract in contracts.skill_contracts.values():
-        for validator in contract.validators:
-            if validator not in VALIDATORS:
-                raise HookCheckError("unknown_validator", f"{contract.skill}:{validator}")
+    try:
+        for profile in profiles:
+            contracts = load_repo_workflow_contracts(
+                repo_root,
+                workspace=workspace_root,
+                profile=profile,
+            )
+            for contract in contracts.skill_contracts.values():
+                for validator in contract.validators:
+                    if validator not in VALIDATORS:
+                        raise HookCheckError("unknown_validator", f"{contract.skill}:{validator}")
+    except BoardConfigError as error:
+        raise HookCheckError("invalid_board_config", str(error)) from error
 
 
 def run_precheck(

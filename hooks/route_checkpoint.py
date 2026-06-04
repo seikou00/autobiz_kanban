@@ -13,12 +13,19 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from board_core.contracts import load_repo_workflow_contracts  # noqa: E402
 from board_core.state_store import get_state_json_path, load_state_json_records_result  # noqa: E402
 from board_core.workflow import derive_node_status, find_current_node  # noqa: E402
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, load_effective_board_config  # noqa: E402
+from board_core.workflow_compiler import (  # noqa: E402
+    BASE_WORKFLOW_PROFILE,
+    configured_profile_options,
+    load_effective_board_config,
+    read_json,
+)
 
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
+PROFILE_CHOICE_CHECKPOINT = "prd_done"
 
 
 def _state_next_action(node: dict, node_status: str) -> dict[str, str]:
@@ -27,6 +34,58 @@ def _state_next_action(node: dict, node_status: str) -> dict[str, str]:
             action = state.get("nextAction", {})
             return action if isinstance(action, dict) else {}
     return {}
+
+
+def _profile_options() -> list[dict[str, str]]:
+    return configured_profile_options(read_json(BOARD_CONFIG_PATH))
+
+
+def _allowed_next(config: dict, checkpoint: str) -> list[str]:
+    transitions = config.get("workflow", {}).get("checkpoints", {}).get("transitions", {})
+    if not isinstance(transitions, dict):
+        return []
+    targets = transitions.get(checkpoint, [])
+    if not isinstance(targets, list):
+        return []
+    return [target for target in targets if isinstance(target, str)]
+
+
+def _recommended_next_skill(workspace: Path, workflow_profile: str, allowed_next: list[str]) -> str:
+    if not allowed_next:
+        return ""
+    try:
+        contracts = load_repo_workflow_contracts(ROOT, workspace=workspace, profile=workflow_profile)
+    except Exception:
+        return ""
+    for checkpoint in allowed_next:
+        skill = contracts.start_checkpoint_to_skill.get(checkpoint)
+        if skill:
+            return skill
+    return ""
+
+
+def _profile_choice_payload(workspace: Path, checkpoint: str) -> list[dict[str, object]]:
+    choices: list[dict[str, object]] = []
+    if checkpoint != PROFILE_CHOICE_CHECKPOINT:
+        return choices
+    for option in _profile_options():
+        profile = option["id"]
+        try:
+            config = load_effective_board_config(
+                BOARD_CONFIG_PATH,
+                repo_root=ROOT,
+                workspace=workspace,
+                profile=profile,
+            )
+        except Exception:
+            continue
+        allowed_next = _allowed_next(config, checkpoint)
+        choices.append({
+            **option,
+            "allowedNextCheckpoints": allowed_next,
+            "recommendedNextSkill": _recommended_next_skill(workspace, profile, allowed_next),
+        })
+    return choices
 
 
 def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
@@ -78,6 +137,8 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         config["checkpointSuffixState"],
     )
     next_action = _state_next_action(nodes[current_idx], node_status)
+    allowed_next = _allowed_next(config, checkpoint)
+    profile_choices = _profile_choice_payload(workspace, checkpoint)
     return {
         "ok": True,
         "feature": feature,
@@ -86,6 +147,10 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         "currentNodeId": current_node_id,
         "currentNodeStatus": node_status,
         "currentStateId": node_status,
+        "allowedNextCheckpoints": allowed_next,
+        "recommendedNextSkill": _recommended_next_skill(workspace, workflow_profile, allowed_next),
+        "requiresProfileChoice": checkpoint == PROFILE_CHOICE_CHECKPOINT and len(profile_choices) > 1,
+        "profileChoices": profile_choices,
         "nextAction": next_action,
     }, 0
 

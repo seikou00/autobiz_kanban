@@ -54,8 +54,7 @@ version: v1.1.1604
 
 ### Checkpoint 路由映射
 
-完成前置准入后，根入口必须先通过脚本读取当前 State 快照，并按 `CHECKPOINT` 路由到对应阶段入口。根入口只负责选择 `/autobiz` / `/autodev` /
-`/autoops`，不得直接跳入阶段内部子技能；阶段入口会继续按自身 `SKILL.md` 的 checkpoint 映射路由到具体子技能。
+完成前置准入后，根入口必须先通过脚本读取当前 State 快照，并调用动态路由脚本解析当前 workflow profile 下的下一步。根入口只负责选择 `/autobiz` / `/autodev` / `/autoops`，不得直接跳入阶段内部子技能；阶段入口会继续按 `resolve_next_skill.py` 的返回结果路由到具体子技能。
 
 ### State 快照读取
 
@@ -71,6 +70,19 @@ python "$PLUGIN_ROOT/read_state_json.py"
 
 只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
 
+### 动态路由读取
+
+所有根路由判断必须以 `$PLUGIN_ROOT/board_core/board_config.json` 编译后的有效 workflow 为准：
+
+```bash
+python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
+```
+
+- `currentNodeId` 所属 group 为 `Biz` 时，进入 `/autobiz`。
+- `currentNodeId` 所属 group 为 `Dev`，或 `checkpoint` 为 `prd_done` 且脚本返回 Dev profile 选择时，进入 `/autodev`。
+- `currentNodeId` 所属 group 为 `Ops`，或 `checkpoint` 为 `verify_done` / `cicd_done` 时，进入 `/autoops`。
+- `ok: false`、checkpoint 为空/未知，或无法唯一确定当前 Feature 时，必须停止并提示用户选择或修复状态。
+
 ### Checkpoint 更新命令
 
 所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转和 Autodev 产物校验；进入 `code_done` 时，execute hook 会基于 `.autobizdevops/modules_compile.json` 非阻塞执行编译并写入 hook 日志，编译失败不阻止 checkpoint 更新。
@@ -79,29 +91,4 @@ python "$PLUGIN_ROOT/read_state_json.py"
 python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint {checkpoint}
 ```
 
-| Checkpoint | 根路由目标 | 说明 |
-|------------|------------|------|
-| `discuss_in_progress` | `/autobiz` | 恢复需求澄清 |
-| `discuss_done` | `/autobiz` | 继续生成 PRD |
-| `prd_in_progress` | `/autobiz` | 恢复 PRD 生成 |
-| `prd_done` | `/autodev` | 进入 Dev Specs 阶段 |
-| `specs_in_progress` | `/autodev` | 恢复 Dev Specs |
-| `specs_done` | `/autodev` | 进入 Dev 计划阶段 |
-| `plan_in_progress` | `/autodev` | 恢复 Dev 计划 |
-| `plan_done` | `/autodev` | 进入编码阶段 |
-| `code_in_progress` | `/autodev` | 恢复编码 |
-| `code_done` | `/autodev` | 进入需求实现评审 |
-| `requirements_eval_in_progress` | `/autodev` | 恢复需求实现评审 |
-| `requirements_eval_done` | `/autodev` | 进入单元测试 |
-| `unit_test_in_progress` | `/autodev` | 恢复单元测试 |
-| `unit_test_done` | `/autodev` | 进入 E2E |
-| `e2e_in_progress` | `/autodev` | 恢复 E2E |
-| `e2e_done` | `/autodev` | 进入验收汇总 |
-| `verify_in_progress` | `/autodev` | 恢复验收汇总 |
-| `verify_done` | `/autoops` | 进入 Ops CI/CD |
-| `cicd_in_progress` | `/autoops` | 恢复 CI/CD |
-| `cicd_done` | `/autoops` | 进入归档 |
-| `archived` | `/autoops` | Ops 终态，提示已归档 |
-| `needs_fix` | 停止 | 读取最近阶段报告中的建议回流阶段并提示用户 |
-
-若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature，不得猜测路由。
+静态 checkpoint 表不得作为事实源；如本文与 `resolve_next_skill.py --json` 输出冲突，以脚本输出为准。

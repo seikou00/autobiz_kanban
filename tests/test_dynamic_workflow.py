@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,7 +14,8 @@ if str(ROOT) not in sys.path:
 
 from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts  # noqa: E402
 from board_core.state_store import write_state_records  # noqa: E402
-from board_core.workflow_compiler import compile_board_config  # noqa: E402
+from board_core.workflow import build_workflow_shell  # noqa: E402
+from board_core.workflow_compiler import compile_board_config, load_effective_board_config  # noqa: E402
 from hooks.route_checkpoint import resolve_route  # noqa: E402
 from hooks.update_checkpoint import prepare_checkpoint_update, write_hook_logs  # noqa: E402
 
@@ -91,6 +93,13 @@ def make_workspace(root: Path) -> Path:
     return workspace
 
 
+def make_collection_project(root: Path) -> tuple[Path, Path]:
+    collection = root / "collection"
+    project = collection / "proj"
+    (project / ".autobizdevops" / "features" / "alpha").mkdir(parents=True)
+    return collection, project
+
+
 def write_overlay(workspace: Path, profile: str, overlay: dict) -> None:
     overlay_dir = workspace / ".autobizdevops" / "workflow.d"
     overlay_dir.mkdir(parents=True, exist_ok=True)
@@ -110,6 +119,21 @@ def record(checkpoint: str, *, profile: str = "quality") -> dict[str, str]:
 
 
 class DynamicWorkflowCompilerTests(unittest.TestCase):
+    def test_frontend_profile_changes_workflow_shell_nodes(self) -> None:
+        standard = load_effective_board_config(ROOT / "board_core" / "board_config.json", repo_root=ROOT)
+        frontend = load_effective_board_config(
+            ROOT / "board_core" / "board_config.json",
+            repo_root=ROOT,
+            profile="frontend_before_specs",
+        )
+
+        standard_nodes = [node["id"] for node in build_workflow_shell(standard)["nodes"]]
+        frontend_nodes = [node["id"] for node in build_workflow_shell(frontend)["nodes"]]
+
+        self.assertNotIn("dev.frontend", standard_nodes)
+        self.assertLess(frontend_nodes.index("biz.prd"), frontend_nodes.index("dev.frontend"))
+        self.assertLess(frontend_nodes.index("dev.frontend"), frontend_nodes.index("dev.specs"))
+
     def test_dev_overlay_inserts_node_and_derives_route_contracts(self) -> None:
         config = compile_board_config(
             load_board_config(ROOT / "board_core" / "board_config.json"),
@@ -151,6 +175,168 @@ class DynamicWorkflowCompilerTests(unittest.TestCase):
 
 
 class DynamicWorkflowRuntimeTests(unittest.TestCase):
+    def test_route_checkpoint_requires_profile_choice_at_prd_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            (feature_dir / "PRD.md").write_text("prd", encoding="utf-8")
+            write_state_records(workspace, {"alpha": record("prd_done", profile="standard")})
+
+            payload, exit_code = resolve_route(workspace, "alpha")
+
+            self.assertEqual(exit_code, 0, payload)
+            self.assertTrue(payload["requiresProfileChoice"])
+            choices = {choice["id"]: choice for choice in payload["profileChoices"]}
+            self.assertEqual(choices["standard"]["recommendedNextSkill"], "autodev-specs")
+            self.assertEqual(choices["frontend_before_specs"]["recommendedNextSkill"], "autodev-frontend")
+
+    def test_resolve_next_skill_cli_outputs_route_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            (feature_dir / "PRD.md").write_text("prd", encoding="utf-8")
+            write_state_records(workspace, {"alpha": record("prd_done", profile="standard")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "resolve_next_skill.py"),
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                    "--json",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["recommendedNextSkill"], "autodev-specs")
+            self.assertTrue(payload["requiresProfileChoice"])
+
+    def test_standard_profile_allows_specs_and_rejects_frontend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            (feature_dir / "PRD.md").write_text("prd", encoding="utf-8")
+            write_state_records(workspace, {"alpha": record("prd_done", profile="standard")})
+
+            specs = prepare_checkpoint_update(
+                workspace=workspace,
+                feature="alpha",
+                checkpoint="specs_in_progress",
+            )
+            frontend = prepare_checkpoint_update(
+                workspace=workspace,
+                feature="alpha",
+                checkpoint="frontend_in_progress",
+            )
+
+            self.assertTrue(specs.ok, specs.errors)
+            self.assertFalse(frontend.ok)
+            self.assertIn("未知 checkpoint: frontend_in_progress", "\n".join(frontend.errors))
+
+    def test_frontend_profile_requires_frontend_before_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            (feature_dir / "PRD.md").write_text("prd", encoding="utf-8")
+            write_state_records(workspace, {"alpha": record("prd_done", profile="frontend_before_specs")})
+
+            skipped = prepare_checkpoint_update(
+                workspace=workspace,
+                feature="alpha",
+                checkpoint="specs_in_progress",
+            )
+            started = prepare_checkpoint_update(
+                workspace=workspace,
+                feature="alpha",
+                checkpoint="frontend_in_progress",
+            )
+            self.assertFalse(skipped.ok)
+            self.assertIn("prd_done -> specs_in_progress", "\n".join(skipped.errors))
+            self.assertTrue(started.ok, started.errors)
+
+            write_state_records(workspace, started.records)
+            finished = prepare_checkpoint_update(
+                workspace=workspace,
+                feature="alpha",
+                checkpoint="frontend_done",
+            )
+            self.assertTrue(finished.ok, finished.errors)
+            write_state_records(workspace, finished.records)
+            specs = prepare_checkpoint_update(
+                workspace=workspace,
+                feature="alpha",
+                checkpoint="specs_in_progress",
+            )
+            self.assertTrue(specs.ok, specs.errors)
+
+    def test_inspect_hides_frontend_node_for_standard_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            collection, project = make_collection_project(Path(tmp))
+            (project / ".autobizdevops" / "features" / "alpha" / "PRD.md").write_text("prd", encoding="utf-8")
+            write_state_records(project, {"alpha": record("prd_done", profile="standard")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "inspect_state.py"),
+                    "--workspace",
+                    str(collection),
+                    "--project",
+                    "proj",
+                    "--mode",
+                    "run",
+                    "--feature",
+                    "alpha",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            workflow_nodes = [node["id"] for node in payload["workflow"]["nodes"]]
+            run_nodes = [node["id"] for node in payload["run"]["nodes"]]
+            self.assertNotIn("dev.frontend", workflow_nodes)
+            self.assertNotIn("dev.frontend", run_nodes)
+
+    def test_inspect_shows_frontend_node_for_frontend_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            collection, project = make_collection_project(Path(tmp))
+            (project / ".autobizdevops" / "features" / "alpha" / "PRD.md").write_text("prd", encoding="utf-8")
+            write_state_records(project, {"alpha": record("frontend_in_progress", profile="frontend_before_specs")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "inspect_state.py"),
+                    "--workspace",
+                    str(collection),
+                    "--project",
+                    "proj",
+                    "--mode",
+                    "run",
+                    "--feature",
+                    "alpha",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            workflow_nodes = [node["id"] for node in payload["workflow"]["nodes"]]
+            self.assertIn("dev.frontend", workflow_nodes)
+            self.assertEqual(payload["run"]["currentNodeId"], "dev.frontend")
+
     def test_route_checkpoint_uses_feature_workflow_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))

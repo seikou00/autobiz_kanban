@@ -56,9 +56,15 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 后续流程编排和子技能准入直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。若脚本提示 Feature 不存在，仅 `/autobiz-requirement-discuss` 可通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
 
+随后调用动态路由脚本读取 board_config 派生出的下一步：
+
+```bash
+python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
+```
+
 ## 流程编排
 
-根据 `CHECKPOINT` 和用户意图，路由到对应子技能：
+根据 `CHECKPOINT`、用户意图和 `resolve_next_skill.py --json` 结果路由到对应子技能。`recommendedNextSkill` 和 `nextAction` 均来自 `$PLUGIN_ROOT/board_core/board_config.json` 的有效 workflow；静态说明不得覆盖脚本结果。
 
 | 用户意图 | 当前状态要求 | 路由目标 |
 |---------|------------|---------|

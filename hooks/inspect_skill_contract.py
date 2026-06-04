@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.contracts import BoardConfigError, SkillContract, load_repo_workflow_contracts  # noqa: E402
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names, read_json  # noqa: E402
 
 
 def _artifact_lines(title: str, artifacts: tuple, *, heading: str = "##") -> list[str]:
@@ -68,6 +68,31 @@ def contract_to_dict(contract: SkillContract) -> dict:
     }
 
 
+def _profile_names(repo_root: Path) -> tuple[str, ...]:
+    return configured_profile_names(read_json(repo_root / "board_core" / "board_config.json"))
+
+
+def _find_contract(
+    repo_root: Path,
+    *,
+    skill: str,
+    workspace: Path | None,
+    workflow_profile: str,
+) -> SkillContract:
+    profiles = (workflow_profile,)
+    if workspace is None and workflow_profile == BASE_WORKFLOW_PROFILE:
+        profiles = _profile_names(repo_root)
+
+    last_error: BoardConfigError | None = None
+    for profile in profiles:
+        try:
+            contracts = load_repo_workflow_contracts(repo_root, workspace=workspace, profile=profile)
+            return contracts.contract_for_skill(skill)
+        except BoardConfigError as error:
+            last_error = error
+    raise last_error or BoardConfigError(f"unknown skill in board_config.json: {skill}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Render a board_config-backed skill contract")
     parser.add_argument("skill", help="skill name, e.g. autodev-plan")
@@ -78,12 +103,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        contracts = load_repo_workflow_contracts(
-            Path(args.repo_root).resolve(),
-            workspace=Path(args.workspace).resolve() if args.workspace else None,
-            profile=args.workflow_profile,
+        repo_root = Path(args.repo_root).resolve()
+        workspace = Path(args.workspace).resolve() if args.workspace else None
+        contract = _find_contract(
+            repo_root,
+            skill=args.skill,
+            workspace=workspace,
+            workflow_profile=args.workflow_profile,
         )
-        contract = contracts.contract_for_skill(args.skill)
     except BoardConfigError as error:
         print(f"inspect_skill_contract failed: {error}", file=sys.stderr)
         return 1

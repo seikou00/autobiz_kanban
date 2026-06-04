@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from board_core.contracts import BoardConfigError, load_repo_workflow_contracts, load_workflow_contracts
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, normalize_workflow_profile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,7 +105,7 @@ def _normalize_record(
         errors.append(f"{context}: Feature key '{feature}' 与记录 feature '{record_feature}' 不一致")
         return None
 
-    workflow_profile = _clean(raw_record.get("workflowProfile"), BASE_WORKFLOW_PROFILE)
+    workflow_profile = normalize_workflow_profile(_clean(raw_record.get("workflowProfile"), BASE_WORKFLOW_PROFILE))
     try:
         contracts = _contracts_for_profile(workspace, workflow_profile)
     except ValueError as exc:

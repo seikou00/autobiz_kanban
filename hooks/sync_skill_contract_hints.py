@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from board_core.contracts import BoardConfigError, SkillContract, WorkflowContracts, load_repo_workflow_contracts  # noqa: E402
+from board_core.contracts import BoardConfigError, SkillContract, WorkflowContracts, load_board_config, load_repo_workflow_contracts  # noqa: E402
+from board_core.workflow_compiler import configured_profile_names  # noqa: E402
 from hooks.check_skill_artifact_drift import check_contracts_for_drift  # noqa: E402
 
 
@@ -198,14 +199,44 @@ def autodev_contracts(contracts: WorkflowContracts) -> list[SkillContract]:
     return result
 
 
-def selected_contracts(contracts: WorkflowContracts, skill: str | None) -> list[SkillContract]:
-    if skill is None:
-        return autodev_contracts(contracts)
+def profile_contracts(repo_root: Path) -> list[WorkflowContracts]:
+    profiles = configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json"))
+    return [
+        load_repo_workflow_contracts(repo_root, profile=profile)
+        for profile in profiles
+    ]
 
-    contract = contracts.contract_for_skill(skill)
-    if not is_autodev_contract(contract):
-        raise BoardConfigError(f"skill is outside static compile scope: {skill}")
-    return [contract]
+
+def unique_contracts(contracts: list[SkillContract]) -> list[SkillContract]:
+    result: list[SkillContract] = []
+    seen: set[str] = set()
+    for contract in contracts:
+        if contract.skill in seen:
+            continue
+        seen.add(contract.skill)
+        result.append(contract)
+    return result
+
+
+def selected_contracts(contract_sets: list[WorkflowContracts], skill: str | None) -> list[SkillContract]:
+    if skill is None:
+        return unique_contracts([
+            contract
+            for contracts in contract_sets
+            for contract in autodev_contracts(contracts)
+        ])
+
+    last_error: BoardConfigError | None = None
+    for contracts in contract_sets:
+        try:
+            contract = contracts.contract_for_skill(skill)
+        except BoardConfigError as error:
+            last_error = error
+            continue
+        if not is_autodev_contract(contract):
+            raise BoardConfigError(f"skill is outside static compile scope: {skill}")
+        return [contract]
+    raise last_error or BoardConfigError(f"unknown skill in board_config.json: {skill}")
 
 
 def sync_contract_hint(repo_root: Path, contract: SkillContract, *, write: bool) -> SyncResult:
@@ -236,8 +267,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = Path(args.repo_root).resolve()
     try:
-        contracts = load_repo_workflow_contracts(repo_root)
-        selected = selected_contracts(contracts, args.skill)
+        selected = selected_contracts(profile_contracts(repo_root), args.skill)
     except BoardConfigError as error:
         print(f"SKILL_CONTRACT_HINTS_FAIL {error}", file=sys.stderr)
         return 1

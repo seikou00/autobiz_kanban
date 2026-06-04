@@ -57,7 +57,7 @@ from board_core.state_store import (  # noqa: E402
     state_json_content_from_records,
     write_state_records,
 )
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, normalize_workflow_profile  # noqa: E402
 
 
 def _generate_project_md(workspace_name: str) -> str:
@@ -208,6 +208,7 @@ def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
 
 def create_feature(workspace: Path, feature: str, workflow_profile: str = BASE_WORKFLOW_PROFILE) -> Dict[str, object]:
     workspace = workspace.resolve()
+    workflow_profile = normalize_workflow_profile(workflow_profile)
     feature_dir = _resolve_feature_dir(workspace, feature)
     if feature_dir.exists():
         print(f"ERROR: 特性已存在：{feature_dir}", file=sys.stderr)

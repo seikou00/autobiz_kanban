@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Iterable
 
 
-BASE_WORKFLOW_PROFILE = "base"
+BASE_WORKFLOW_PROFILE = "standard"
+LEGACY_BASE_WORKFLOW_PROFILE = "base"
 DEFAULT_ENABLED_DYNAMIC_PHASES = frozenset({"Biz", "Dev"})
 ALLOWED_PHASES = frozenset({"Biz", "Dev", "Ops"})
 ALLOWED_GUARDS = frozenset({"code_compile"})
@@ -69,7 +70,69 @@ def _overlay_for_profile(payload: dict, path: Path, profile: str) -> dict | None
     return None
 
 
+def normalize_workflow_profile(profile: str | None) -> str:
+    if profile is None:
+        return BASE_WORKFLOW_PROFILE
+    cleaned = str(profile).strip()
+    if not cleaned or cleaned == LEGACY_BASE_WORKFLOW_PROFILE:
+        return BASE_WORKFLOW_PROFILE
+    return cleaned
+
+
+def _configured_profile_overlay(base_config: dict, profile: str) -> dict | None:
+    workflow = base_config.get("workflow")
+    if not isinstance(workflow, dict):
+        return None
+    profiles = workflow.get("profiles")
+    if not isinstance(profiles, dict):
+        return None
+    selected = profiles.get(profile)
+    if selected is None:
+        return None
+    if not isinstance(selected, dict):
+        raise WorkflowCompileError(f"workflow.profiles.{profile} must be an object")
+    if profile == BASE_WORKFLOW_PROFILE and not selected.get("nodes"):
+        return None
+    return selected
+
+
+def configured_profile_names(base_config: dict) -> tuple[str, ...]:
+    workflow = base_config.get("workflow")
+    if not isinstance(workflow, dict):
+        return (BASE_WORKFLOW_PROFILE,)
+    profiles = workflow.get("profiles")
+    if not isinstance(profiles, dict):
+        return (BASE_WORKFLOW_PROFILE,)
+    names = [
+        name
+        for name in profiles
+        if isinstance(name, str) and name.strip()
+    ]
+    if BASE_WORKFLOW_PROFILE not in names:
+        names.insert(0, BASE_WORKFLOW_PROFILE)
+    return tuple(dict.fromkeys(names))
+
+
+def configured_profile_options(base_config: dict) -> list[dict[str, str]]:
+    workflow = base_config.get("workflow")
+    profiles = workflow.get("profiles", {}) if isinstance(workflow, dict) else {}
+    profiles = profiles if isinstance(profiles, dict) else {}
+    result: list[dict[str, str]] = []
+    for profile in configured_profile_names(base_config):
+        raw = profiles.get(profile, {})
+        raw = raw if isinstance(raw, dict) else {}
+        label = raw.get("label", profile)
+        description = raw.get("description", "")
+        result.append({
+            "id": profile,
+            "label": label if isinstance(label, str) and label.strip() else profile,
+            "description": description if isinstance(description, str) else "",
+        })
+    return result
+
+
 def load_profile_overlays(repo_root: Path, workspace: Path | None, profile: str) -> list[dict]:
+    profile = normalize_workflow_profile(profile)
     if profile == BASE_WORKFLOW_PROFILE:
         return []
 
@@ -449,13 +512,18 @@ def compile_board_config(
     overlays: list[dict] | None = None,
 ) -> dict:
     """Compile a profile-specific effective workflow config."""
+    profile = normalize_workflow_profile(profile)
     effective = copy.deepcopy(base_config)
     loaded_overlays = overlays
     if loaded_overlays is None:
         root = repo_root
         if root is None:
             root = repo_root_for_config_path(default_config_path())
-        loaded_overlays = load_profile_overlays(root, workspace, profile)
+        loaded_overlays = []
+        configured_overlay = _configured_profile_overlay(base_config, profile)
+        if configured_overlay is not None:
+            loaded_overlays.append(configured_overlay)
+        loaded_overlays.extend(load_profile_overlays(root, workspace, profile))
 
     if not loaded_overlays:
         effective["workflowProfile"] = profile

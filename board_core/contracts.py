@@ -12,6 +12,7 @@ from board_core.workflow_compiler import (
     BASE_WORKFLOW_PROFILE,
     WorkflowCompileError,
     load_effective_board_config,
+    normalize_workflow_profile,
 )
 
 
@@ -173,6 +174,7 @@ def load_workflow_contracts(
     profile: str = BASE_WORKFLOW_PROFILE,
     overlays: list[dict] | None = None,
 ) -> WorkflowContracts:
+    profile = normalize_workflow_profile(profile)
     try:
         config = load_effective_board_config(
             config_path,
