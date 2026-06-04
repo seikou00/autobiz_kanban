@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,7 +13,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.state_store import write_state_records  # noqa: E402
-from skills.autobiz.hooks.biz_validate import validate_prd  # noqa: E402
+from skills.autobiz.hooks.biz_validate import (  # noqa: E402
+    BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR,
+    validate_prd,
+)
 
 
 def sample_record(checkpoint: str = "prd_done") -> dict[str, str]:
@@ -91,6 +96,74 @@ class BizValidatePrdTests(unittest.TestCase):
         (feature_dir / "PRD.md").write_text(prd_content, encoding="utf-8")
         write_state_records(workspace, {"alpha": sample_record("prd_done")})
         return workspace
+
+    def plugin_env(self, workspace: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        env["PLUGIN_WORKSPACE"] = str(workspace.parent)
+        env["PROJECT_CODE"] = workspace.name
+        env["FEATURE_ID"] = "alpha"
+        env.pop("PLUGIN_OUTPUT_DIR", None)
+        return env
+
+    def run_biz_validate(
+        self,
+        *args: str,
+        workspace: Path,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        command = [
+            sys.executable,
+            str(ROOT / "skills" / "autobiz" / "hooks" / "biz_validate.py"),
+            *args,
+        ]
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            cwd=str(cwd or ROOT),
+            env=env or self.plugin_env(workspace),
+        )
+
+    def test_cli_uses_plugin_workspace_and_project_code_from_any_cwd(self) -> None:
+        workspace = self.make_workspace(VALID_PRD)
+        unrelated = tempfile.TemporaryDirectory()
+        self.addCleanup(unrelated.cleanup)
+
+        result = self.run_biz_validate(
+            "prd",
+            "--feature",
+            "alpha",
+            workspace=workspace,
+            cwd=Path(unrelated.name),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("prd 阶段产出物校验通过", result.stdout)
+
+    def test_cli_requires_plugin_workspace_and_project_code(self) -> None:
+        workspace = self.make_workspace(VALID_PRD)
+
+        for key in ("PLUGIN_WORKSPACE", "PROJECT_CODE"):
+            with self.subTest(key=key):
+                env = self.plugin_env(workspace)
+                env.pop(key)
+
+                result = self.run_biz_validate("prd", "--feature", "alpha", workspace=workspace, env=env)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"{key} 未设置", result.stderr)
+
+    def test_cli_rejects_workspace_argument(self) -> None:
+        workspace = self.make_workspace(VALID_PRD)
+
+        for args in (("--workspace", str(workspace)), ("-w", str(workspace))):
+            with self.subTest(args=args):
+                result = self.run_biz_validate("prd", "--feature", "alpha", *args, workspace=workspace)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR, result.stderr)
 
     def test_accepts_new_prd_sections_without_legacy_template(self) -> None:
         workspace = self.make_workspace(VALID_PRD)

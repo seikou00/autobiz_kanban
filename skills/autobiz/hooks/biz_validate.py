@@ -19,10 +19,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from hooks.paths import (
+    contains_workspace_argument,
     get_features_active_dir,
-    get_workspace,
+    get_plugin_output_workspace,
 )
 from board_core.state_store import check_or_fix_state_sync, state_rows_from_records
+
+
+BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR = (
+    "biz_validate.py 不接受 --workspace/-w；路径由 PLUGIN_WORKSPACE/PROJECT_CODE 环境变量决定。"
+)
 
 
 def _validate_state_sync(feature: str, expected_cp: str, workspace: Path, errors: List[str]) -> None:
@@ -157,7 +163,12 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     return _ok("prd 阶段产出物校验通过", {"feature": feature_dir.name})
 
 
-def main() -> int:
+def main(argv: Optional[List[str]] = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if contains_workspace_argument(raw_args):
+        print(BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR, file=sys.stderr)
+        return 2
+
     parser = argparse.ArgumentParser(description="autobiz 统一校验脚本")
     parser.add_argument(
         "stage",
@@ -165,11 +176,14 @@ def main() -> int:
         help="校验阶段",
     )
     parser.add_argument("--feature", "-f", default=None, help="feature slug（如不传则自动检测）")
-    parser.add_argument("--workspace", "-w", default=".", help="workspace 路径（默认当前目录）")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON，不输出可读文本")
-    args = parser.parse_args()
+    args = parser.parse_args(raw_args)
 
-    workspace = get_workspace(args.workspace)
+    try:
+        workspace = get_plugin_output_workspace()
+    except ValueError as exc:
+        print(f"biz_validate.py 校验失败: {exc}", file=sys.stderr)
+        return 1
 
     if args.stage == "discuss":
         result = validate_discuss(args.feature, workspace)

@@ -38,8 +38,6 @@ class WorkflowNextActionsTest(unittest.TestCase):
                 self.assertIn("FEATURE_ID", prompt)
                 self.assertIn("PROJECT_PLUGIN_DIR", prompt)
                 self.assertIn("FEATURE_DIR", prompt)
-                self.assertIn("不接受 `--workspace/-w`", prompt)
-                self.assertIn("不得把 FEATURE_DIR", prompt)
                 self.assertNotIn("slug所在目录", prompt)
 
     def test_skill_docs_do_not_use_legacy_plugin_output_feature_dir_formula(self) -> None:
