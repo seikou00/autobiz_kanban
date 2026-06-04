@@ -29,6 +29,8 @@ from board_core.state_store import check_or_fix_state_sync, state_rows_from_reco
 BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR = (
     "biz_validate.py 不接受 --workspace/-w；路径由 PLUGIN_WORKSPACE/PROJECT_CODE 环境变量决定。"
 )
+FORMAL_PRD_TITLE = "# 需求正式稿"
+FORBIDDEN_PRD_SECTION_TITLES = ("审理提炼", "待确认事项", "待确认项", "外部依赖", "第三方依赖")
 
 
 def _validate_state_sync(feature: str, expected_cp: str, workspace: Path, errors: List[str]) -> None:
@@ -101,14 +103,6 @@ def _markdown_headings(content: str) -> List[str]:
     return re.findall(r"^#{1,6}\s+(.+?)\s*$", content, re.MULTILINE)
 
 
-def _discussion_record_heading_match(content: str) -> Optional[re.Match[str]]:
-    for match in re.finditer(r"^#{1,6}\s+(.+?)\s*$", content, re.MULTILINE):
-        heading = match.group(1)
-        if "历次讨论记录" in heading or "讨论记录" in heading:
-            return match
-    return None
-
-
 def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     feature_dir = _get_feature_dir(feature, workspace)
     if not feature_dir:
@@ -117,44 +111,38 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     errors: List[str] = []
     discuss_md = feature_dir / "PRD_DISCUSS.md"
     prd_md = feature_dir / "PRD.md"
-    expected_prefix: Optional[str] = None
     if not discuss_md.exists():
         errors.append(f"PRD_DISCUSS.md 不存在: {discuss_md}")
-    else:
-        discuss_content = discuss_md.read_text(encoding="utf-8")
-        discussion_match = _discussion_record_heading_match(discuss_content)
-        if discussion_match is None:
-            errors.append("PRD_DISCUSS.md 缺少讨论记录标题，无法确认 PRD 原文复制区截断点")
-        else:
-            expected_prefix = discuss_content[:discussion_match.start()]
 
     if not prd_md.exists():
         errors.append(f"PRD.md 不存在: {prd_md}")
     else:
         content = prd_md.read_text(encoding="utf-8")
-        suffix = content
-        if expected_prefix is not None:
-            if not content.startswith(expected_prefix):
-                errors.append("PRD.md 原文复制区与 PRD_DISCUSS.md 截断前内容不一致")
-            else:
-                suffix = content[len(expected_prefix):]
+        first_line = content.splitlines()[0].strip() if content.splitlines() else ""
+        if first_line != FORMAL_PRD_TITLE:
+            errors.append(f"PRD.md 必须以 {FORMAL_PRD_TITLE} 开头")
 
         required_sections = ["用户故事", "验收口径", "验收标准", "关键约束"]
-        # 追加区才是审理提炼区，复制区里的同名文字不算通过。
-        suffix_headings = _markdown_headings(suffix)
-        suffix_bolds = re.findall(r"\*\*(.+?)\*\*", suffix)
-        suffix_markers = suffix_headings + suffix_bolds
-        missing = [s for s in required_sections if not any(s in m for m in suffix_markers)]
+        headings = _markdown_headings(content)
+        bolds = re.findall(r"\*\*(.+?)\*\*", content)
+        markers = headings + bolds
+        missing = [s for s in required_sections if not any(s in m for m in markers)]
         if missing:
             errors.append(f"PRD.md 缺少必要段落: {', '.join(missing)}")
 
-        headings = _markdown_headings(content)
         discussion_headings = [
             heading for heading in headings
             if "历次讨论记录" in heading or "讨论记录" in heading
         ]
         if discussion_headings:
             errors.append(f"PRD.md 不应包含讨论记录标题: {', '.join(discussion_headings)}")
+
+        forbidden_headings = [
+            heading for heading in headings
+            if any(marker in heading for marker in FORBIDDEN_PRD_SECTION_TITLES)
+        ]
+        if forbidden_headings:
+            errors.append(f"PRD.md 不应包含正式稿禁用标题: {', '.join(forbidden_headings)}")
 
     _validate_state_sync(feature_dir.name, "prd_done", workspace, errors)
 

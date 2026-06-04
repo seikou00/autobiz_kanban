@@ -28,7 +28,12 @@ def sample_record(checkpoint: str = "prd_done") -> dict[str, str]:
     }
 
 
-DISCUSS_WITH_HISTORY = """# 支付审批优化
+DISCUSS_DRAFT_INTRO = "本文档为需求讨论中间稿，用于记录需求讨论过程和结论"
+
+
+DISCUSS_WITH_HISTORY = f"""# 需求讨论稿
+
+{DISCUSS_DRAFT_INTRO}
 
 ## 需求摘要
 
@@ -46,6 +51,10 @@ DISCUSS_WITH_HISTORY = """# 支付审批优化
 
 - 待确认上线窗口。
 
+## 外部依赖
+
+- 风控系统提供异常标记字段。
+
 ## 假设与风险
 
 - 假设异常标记由后端字段提供。
@@ -58,26 +67,30 @@ DISCUSS_WITH_HISTORY = """# 支付审批优化
 
 
 DISCUSS_PREFIX = DISCUSS_WITH_HISTORY.split("## 历次讨论记录", 1)[0]
+FORMAL_PREFIX = DISCUSS_PREFIX.replace("# 需求讨论稿", "# 需求正式稿", 1).replace(
+    f"\n{DISCUSS_DRAFT_INTRO}\n\n",
+    "\n",
+)
+FORMAL_PREFIX = FORMAL_PREFIX.replace("## 待确认事项\n\n- 待确认上线窗口。\n\n", "")
+FORMAL_PREFIX = FORMAL_PREFIX.replace("## 外部依赖\n\n- 风控系统提供异常标记字段。\n\n", "")
 
 
-VALID_PRD = DISCUSS_PREFIX + """## 审理提炼
-
-### 用户故事
+VALID_PRD = FORMAL_PREFIX + """## 用户故事
 
 - 作为财务审批人，我希望在支付审批列表中识别异常单据，以便优先处理高风险付款。
 
-### 验收口径
+## 验收口径
 
 - 用户视角：审批人能看到异常标记。
 - 工程视角：接口返回异常标记字段。
 - 回归视角：原有审批状态和分页不受影响。
 
-### 验收标准
+## 验收标准
 
 - 当单据满足异常条件时，列表展示异常标记。
 - 当按异常标记筛选时，只返回符合条件的单据。
 
-### 关键约束
+## 关键约束
 
 | 类别 | 约束 | 来源/原因 |
 |------|------|-----------|
@@ -172,45 +185,90 @@ class BizValidatePrdTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
 
+    def test_accepts_discuss_pending_and_dependency_sections_filtered_from_prd(self) -> None:
+        workspace = self.make_workspace(VALID_PRD)
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("待确认事项", VALID_PRD)
+        self.assertNotIn("外部依赖", VALID_PRD)
+
+    def test_accepts_discuss_without_h1(self) -> None:
+        discuss_without_h1 = DISCUSS_WITH_HISTORY.replace("# 需求讨论稿\n\n", "", 1)
+        workspace = self.make_workspace(VALID_PRD, discuss_without_h1)
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertTrue(result["ok"], result)
+
+    def test_rejects_prd_without_formal_title(self) -> None:
+        workspace = self.make_workspace(VALID_PRD.replace("# 需求正式稿", "# 需求讨论稿", 1))
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("# 需求正式稿", "\n".join(result["errors"]))
+
+    def test_accepts_prd_body_different_from_discuss_content(self) -> None:
+        prd_with_intro = VALID_PRD.replace(
+            "# 需求正式稿\n\n## 需求摘要",
+            f"# 需求正式稿\n\n{DISCUSS_DRAFT_INTRO}\n\n## 需求摘要",
+            1,
+        )
+        workspace = self.make_workspace(prd_with_intro)
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertTrue(result["ok"], result)
+
+    def test_rejects_forbidden_formal_prd_headings(self) -> None:
+        for heading in ("审理提炼", "待确认事项", "待确认项", "外部依赖", "第三方依赖"):
+            with self.subTest(heading=heading):
+                prd_content = FORMAL_PREFIX + f"## {heading}\n\n- 不应进入正式 PRD。\n\n" + VALID_PRD[len(FORMAL_PREFIX):]
+                workspace = self.make_workspace(prd_content)
+
+                result = validate_prd("alpha", workspace)
+
+                self.assertFalse(result["ok"])
+                self.assertIn("禁用标题", "\n".join(result["errors"]))
+
     def test_rejects_missing_new_required_section(self) -> None:
-        workspace = self.make_workspace(VALID_PRD.replace("### 关键约束", "### 约束"))
+        workspace = self.make_workspace(VALID_PRD.replace("## 关键约束", "## 约束"))
 
         result = validate_prd("alpha", workspace)
 
         self.assertFalse(result["ok"])
         self.assertIn("关键约束", "\n".join(result["errors"]))
 
-    def test_rejects_modified_copied_prefix(self) -> None:
+    def test_accepts_modified_prd_body_when_structure_is_valid(self) -> None:
         workspace = self.make_workspace(
             VALID_PRD.replace("审批人需要快速识别异常付款。", "审批人需要识别异常付款。", 1)
         )
 
         result = validate_prd("alpha", workspace)
 
-        self.assertFalse(result["ok"])
-        self.assertIn("原文复制区与 PRD_DISCUSS.md 截断前内容不一致", "\n".join(result["errors"]))
+        self.assertTrue(result["ok"], result)
 
-    def test_rejects_required_sections_only_in_copied_prefix(self) -> None:
+    def test_accepts_required_sections_anywhere_in_prd(self) -> None:
         discuss_with_section_names = DISCUSS_WITH_HISTORY.replace(
             "## 假设与风险",
-            "## 用户故事\n\n复制区里的同名章节不算追加区。\n\n"
-            "## 验收口径\n\n复制区里的同名章节不算追加区。\n\n"
-            "## 验收标准\n\n复制区里的同名章节不算追加区。\n\n"
-            "## 关键约束\n\n复制区里的同名章节不算追加区。\n\n"
+            "## 用户故事\n\n正式稿正文里的同名章节也算有效章节。\n\n"
+            "## 验收口径\n\n正式稿正文里的同名章节也算有效章节。\n\n"
+            "## 验收标准\n\n正式稿正文里的同名章节也算有效章节。\n\n"
+            "## 关键约束\n\n正式稿正文里的同名章节也算有效章节。\n\n"
             "## 假设与风险",
         )
         prd_without_suffix_sections = discuss_with_section_names.split("## 历次讨论记录", 1)[0]
-        prd_without_suffix_sections += "## 审理提炼\n\n- 追加区没有必需段落。\n"
+        prd_without_suffix_sections = prd_without_suffix_sections.replace("# 需求讨论稿", "# 需求正式稿", 1)
+        prd_without_suffix_sections = prd_without_suffix_sections.replace(f"\n{DISCUSS_DRAFT_INTRO}\n\n", "\n")
+        prd_without_suffix_sections = prd_without_suffix_sections.replace("## 待确认事项\n\n- 待确认上线窗口。\n\n", "")
+        prd_without_suffix_sections = prd_without_suffix_sections.replace("## 外部依赖\n\n- 风控系统提供异常标记字段。\n\n", "")
         workspace = self.make_workspace(prd_without_suffix_sections, discuss_with_section_names)
 
         result = validate_prd("alpha", workspace)
 
-        self.assertFalse(result["ok"])
-        errors = "\n".join(result["errors"])
-        self.assertIn("用户故事", errors)
-        self.assertIn("验收口径", errors)
-        self.assertIn("验收标准", errors)
-        self.assertIn("关键约束", errors)
+        self.assertTrue(result["ok"], result)
 
     def test_rejects_prd_with_discussion_record_heading(self) -> None:
         workspace = self.make_workspace(VALID_PRD + "\n## 历次讨论记录\n\n- 不应进入正式 PRD。\n")
@@ -220,14 +278,13 @@ class BizValidatePrdTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("不应包含讨论记录标题", "\n".join(result["errors"]))
 
-    def test_rejects_discuss_without_copy_cutoff_heading(self) -> None:
+    def test_accepts_discuss_without_discussion_record_heading(self) -> None:
         discuss_without_history = DISCUSS_WITH_HISTORY.replace("## 历次讨论记录", "## 沟通纪要")
         workspace = self.make_workspace(VALID_PRD, discuss_without_history)
 
         result = validate_prd("alpha", workspace)
 
-        self.assertFalse(result["ok"])
-        self.assertIn("缺少讨论记录标题", "\n".join(result["errors"]))
+        self.assertTrue(result["ok"], result)
 
 
 if __name__ == "__main__":
