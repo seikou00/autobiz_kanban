@@ -1,7 +1,7 @@
 ---
 name: autodev-reviewer
 description: "当实现工作准备宣称完成、准备交接、准备创建 PR，或用户要求独立只读 review 时使用此技能。该技能将完成流程封装为生产级两阶段协议：主 agent 只写结构化 completion proposal，然后必须启动独立 reviewer agent（子代理或任务）；reviewer 自己通过 shell/git 获取真实仓库状态，读取 proposal.md、specs/**/*.md、design.md、PLAN.md，并按需读取用户提供的 PRD 引用，核对 completion proposal、真实 diff 与行为规格是否一致，直接产出 feature 级 REQUIREMENTS_EVAL.md。适用于单仓库或跨多个 git 仓库共同完成的代码修改、bug 修复、重构、测试、多文件变更、按规格验收，以及任何自评不可靠的开发任务。默认通过独立 reviewer 子代理执行"
-version: v1.1.0_v0602
+version: v1.1.1604
 ---
 
 **路径变量约定（必须区分）：**

@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。读取 PRD，探索需求、现有代码和隐性约束，与用户确认行为/API/数据边界后生成 proposal.md 与 specs/**/*.md；不得生成技术设计、任务计划或修改业务代码。
-version: v1.1.0_v0602
+version: v1.1.1604
 ---
 
 **路径变量约定（必须区分）：**

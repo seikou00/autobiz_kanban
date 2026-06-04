@@ -1,7 +1,7 @@
 ---
 name: autoops-archive
 description: Ops 归档阶段技能。负责在 CI/CD 完成后将当前 Feature 过程目录移入 archive，并把 checkpoint 从 cicd_done 推进到 archived。
-version: v1.1.0_v0602
+version: v1.1.1604
 author: zhangQiuFeng
 ---
 

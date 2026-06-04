@@ -1,7 +1,7 @@
 ---
 name: autobiz-prd-generate
 description: Biz 阶段 PRD 生成技能。读取已收敛的 `{FEATURE_DIR}/PRD_DISCUSS.md`，先原样复制讨论记录标题之前的内容，再追加用户故事、验收口径、验收标准和关键约束审理提炼，生成 `{FEATURE_DIR}/PRD.md`。适用于需求讨论完成后，输出可供下游阶段消费的正式需求文档。
-version: v1.1.1_v0603
+version: v1.1.1604
 ---
 
 **路径变量约定（必须区分）：**

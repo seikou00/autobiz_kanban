@@ -1,7 +1,7 @@
 ---
 name: autodev-detail-design
 description: Optional Autodev readable detailed design artifact generator. Use after `PLAN.md` exists, usually between /autodev-plan and /autodev-code, to write `DETAIL_DESIGN.md` with file-level change design, implementation logic, and overall flow. This skill does not update checkpoints, does not participate in board workflow gates, and must not modify business code.
-version: v1.1.0_v0602
+version: v1.1.1604
 ---
 **路径变量约定（必须区分）：**
 

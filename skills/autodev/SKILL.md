@@ -1,7 +1,7 @@
 ---
 name: autodev
 description: Autodev Dev 阶段根路由器。基于 checkpoint 路由到对应子技能；各子技能独立负责准入检查与产物自检。
-version: v1.1.0_v0602
+version: v1.1.1604
 ---
 
 **路径变量约定（必须区分）：**
