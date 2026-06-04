@@ -77,11 +77,28 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按 `$PLUGIN_ROOT/board_core/board_config.json` 校验。
 
-- `prd_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`。
+- `prd_done` / `html_frontend_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`。
 - `specs_done` 之后的 Dev 阶段不再把 `PRD.md` 作为硬输入，统一以 `proposal.md` 与 `specs/**/*.md` 作为行为契约源。
 
 **提示：** `请先使用 /autobiz 系列技能补齐 Biz 阶段产出物 PRD.md，然后重新触发 /autodev。proposal.md 与 specs/**/*.md 将由 /autodev-specs 生成，design.md 与 PLAN.md 将由 /autodev-plan 生成。`
 
+### 1.4 交互确认（prd_done 阶段）
+
+当 checkpoint 为 `prd_done` 时，必须询问用户是否需要执行 HTML→前端代码生成阶段：
+
+- **如果用户选择"是"**：提示用户先执行 `/html-frontend` 技能，完成后再回到 Dev 阶段
+- **如果用户选择"否"**：继续路由到 `/autodev-specs`
+
+```
+用户：触发 /autodev
+    ↓
+检测到 checkpoint = prd_done
+    ↓
+询问：是否需要先执行 HTML→前端代码生成？（提供高保真 HTML）
+    ↓
+    ├─ 是 → 提示执行 /html-frontend → 用户执行完毕后再触发 /autodev
+    └─ 否 → 继续路由到 /autodev-specs
+```
 
 ### 禁止事项
 
@@ -100,6 +117,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 | Checkpoint | 路由 |
 |------------|------|
+| `html_frontend_done` | `/autodev-specs` |
 | `prd_done` | `/autodev-specs` |
 | `specs_in_progress` | `/autodev-specs`（恢复） |
 | `specs_done` | `/autodev-plan` |

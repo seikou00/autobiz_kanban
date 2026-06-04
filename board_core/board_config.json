@@ -34,6 +34,7 @@
       "initial": [
         "discuss_in_progress",
         "prd_in_progress",
+        "html_frontend_in_progress",
         "specs_in_progress",
         "plan_in_progress",
         "cicd_in_progress"
@@ -42,7 +43,9 @@
         "discuss_in_progress": ["discuss_done"],
         "discuss_done": ["prd_in_progress", "plan_in_progress"],
         "prd_in_progress": ["prd_done"],
-        "prd_done": ["specs_in_progress", "plan_in_progress"],
+        "prd_done": ["html_frontend_in_progress", "specs_in_progress", "plan_in_progress"],
+        "html_frontend_in_progress": ["html_frontend_done"],
+        "html_frontend_done": ["specs_in_progress"],
         "specs_in_progress": ["specs_done"],
         "specs_done": ["plan_in_progress"],
         "plan_in_progress": ["plan_done"],
@@ -62,6 +65,7 @@
         "needs_fix": [
           "discuss_in_progress",
           "prd_in_progress",
+          "html_frontend_in_progress",
           "specs_in_progress",
           "plan_in_progress",
           "code_in_progress",
@@ -74,6 +78,8 @@
         "discuss_done": "Biz / 需求澄清",
         "prd_in_progress": "Biz / PRD 生成",
         "prd_done": "Biz / PRD",
+        "html_frontend_in_progress": "HTML→前端代码生成",
+        "html_frontend_done": "HTML→前端代码完成",
         "specs_in_progress": "Specs",
         "specs_done": "Specs 完成",
         "plan_in_progress": "Plan",
@@ -143,6 +149,32 @@
         "validators": [],
         "hookDefinitions": [
           { "id": "biz-prd-validate", "label": "PRD 产物校验", "event": "PostSkillUse", "required": true }
+        ]
+      },
+      {
+        "id": "html.frontend",
+        "label": "HTML→前端代码生成",
+        "group": "HtmlFrontend",
+        "skill": "html-frontend",
+        "order": 25,
+        "description": "高保真 HTML 转前端代码实现",
+        "states": [
+          { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "html-frontend", "userMessage": "请使用 /html-frontend 继续推进当前 Feature。", "dialogTips": "当前阶段：HTML→前端代码生成。请提供高保真 HTML。" } },
+          { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "html-frontend", "userMessage": "请使用 /html-frontend 继续推进当前 Feature。", "dialogTips": "当前阶段：HTML→前端代码生成。" } },
+          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev", "userMessage": "请使用 /autodev 继续推进当前 Feature。", "dialogTips": "当前阶段：进入 Dev，路由到行为规格。" } }
+        ],
+        "checkpoints": ["html_frontend_in_progress", "html_frontend_done"],
+        "artifacts": {
+          "inputs": [
+            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
+          ],
+          "outputs": [
+            { "id": "html_analysis", "label": "HTML分析产物", "artifactType": "file", "path": "output/html-analysis/**/*.md", "required": true }
+          ]
+        },
+        "validators": ["html_frontend_analysis"],
+        "hookDefinitions": [
+          { "id": "html-frontend-validate", "label": "HTML→前端产物校验", "event": "PostSkillUse", "required": true }
         ]
       },
       {

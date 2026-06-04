@@ -203,6 +203,18 @@ def validate_unit_test_report_contract(ctx: HookContext) -> int:
     return failures
 
 
+def validate_html_frontend_analysis(ctx: HookContext) -> int:
+    """校验 html-frontend 阶段的分析产物。"""
+    failures = 0
+    analysis_dir = ctx.feature_dir / "output" / "html-analysis"
+    if not analysis_dir.exists():
+        return fail_line(ctx, "missing_html_analysis_dir")
+    md_files = sorted(analysis_dir.glob("*.md"))
+    if not md_files:
+        return fail_line(ctx, "missing_html_analysis_files")
+    return failures
+
+
 VALIDATORS = {
     "proposal_contract": validate_proposal_contract,
     "specs_contract": validate_specs_contract,
@@ -211,6 +223,7 @@ VALIDATORS = {
     "plan_finished_tasks": validate_plan_finished_tasks,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
     "unit_test_report_contract": validate_unit_test_report_contract,
+    "html_frontend_analysis": validate_html_frontend_analysis,
 }
 
 

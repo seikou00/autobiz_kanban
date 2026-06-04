@@ -14,7 +14,7 @@ version: v1.1.1604
 
 # 核心工作原则
 
-- 根工作目录总入口，分为 `biz`、`dev`、`ops` 三个阶段。完整链路 `biz -> dev -> ops`，每个阶段执行完成后必须由用户确认后继续执行。
+- 根工作目录总入口，分为 `html-frontend`、`biz`、`dev`、`ops` 四个阶段。完整链路 `[html-frontend] -> biz -> dev -> ops`，html-frontend 阶段为可选（无 HTML 时可跳过），每个阶段执行完成后必须由用户确认后继续执行。
 - Dev 阶段除 `/autodev-reviewer` 可启动独立只读 reviewer 外，其余阶段均由当前会话内联执行，不得委派给下级 agent。
 
 ## 目录结构与路径约定
@@ -26,6 +26,7 @@ version: v1.1.1604
 | `autobiz/` | Biz 阶段技能集合。存放需求澄清、PRD 生成等                                                 |
 | `autodev/` | Dev 阶段技能集合。存放计划、编码、单测、评审、验证、E2E 等                                         |
 | `autoops/` | Ops 阶段技能集合。当前含 CI/CD 流水线相关技能和归档技能。                                        |
+| `html-frontend/` | HTML→前端代码生成阶段技能集合。存放高保真 HTML 转前端代码相关技能。 |
 | `templates/` | 标准产物模板。当前产物模板分布在各阶段 skill 内，供 Biz / Dev 阶段生成 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md` 时读取。 |
 
 
@@ -40,21 +41,22 @@ version: v1.1.1604
 
 ## 入口约定
 
-以下三个为 `autobizdevops` 的唯一直接入口。所有 Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口按 checkpoint 路由，不允许跳过前置准入直接调用子技能。
+以下四个为 `autobizdevops` 的唯一直接入口。所有 HTML→前端 / Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口按 checkpoint 路由，不允许跳过前置准入直接调用子技能。
 **本 skill 的规则不得覆盖 AGENTS.md；如冲突，以 AGENTS.md 中项目约束为准，除非系统级指令另有要求。**
 **在执行autobiz和autodev技能时，约束必须参考AGENTS.md中存在的定制约束，不能仅遵守技能的约束。**
 
 ### 技能映射
-| 阶段                  | 调用 Skill   | 本工程文件                               |
-|---------------------|------------|-------------------------------------|
-| autobiz             | `/autobiz` | `autobiz/SKILL.md`                  |
+| 阶段                  | 调用 Skill        | 本工程文件                               |
+|---------------------|-----------------|-------------------------------------|
+| html-frontend       | `/html-frontend` | `html-frontend/SKILL.md`            |
+| autobiz             | `/autobiz`       | `autobiz/SKILL.md`                  |
 | autodev             | `/autodev` | `autodev/SKILL.md`                  |
 | autoops             | `/autoops` | `autoops/SKILL.md`                  |
 
 
 ### Checkpoint 路由映射
 
-完成前置准入后，根入口必须先通过脚本读取当前 State 快照，并按 `CHECKPOINT` 路由到对应阶段入口。根入口只负责选择 `/autobiz` / `/autodev` /
+完成前置准入后，根入口必须先通过脚本读取当前 State 快照，并按 `CHECKPOINT` 路由到对应阶段入口。根入口只负责选择 `/html-frontend` / `/autobiz` / `/autodev` /
 `/autoops`，不得直接跳入阶段内部子技能；阶段入口会继续按自身 `SKILL.md` 的 checkpoint 映射路由到具体子技能。
 
 ### State 快照读取
@@ -81,6 +83,8 @@ python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint {checkpoint}
 
 | Checkpoint | 根路由目标 | 说明 |
 |------------|------------|------|
+| `html_frontend_in_progress` | `/html-frontend` | 恢复 HTML→前端代码生成 |
+| `html_frontend_done` | `/autobiz` | 进入 Biz 需求澄清阶段 |
 | `discuss_in_progress` | `/autobiz` | 恢复需求澄清 |
 | `discuss_done` | `/autobiz` | 继续生成 PRD |
 | `prd_in_progress` | `/autobiz` | 恢复 PRD 生成 |

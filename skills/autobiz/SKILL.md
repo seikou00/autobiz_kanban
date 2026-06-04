@@ -26,8 +26,8 @@ version: v1.1.1604
 
 - 用户要求进入 Biz 阶段（需求澄清、PRD 生成）
 - 用户提到"完善需求""整理 PRD"
-- 用户从其他阶段（如 Dev）回溯到 Biz 阶段
-- 任何需要操作 `{FEATURE_DIR}/` 目录的场景
+- 用户从其他阶段（如 HTML→前端、Dev）回溯到 Biz 阶段
+- checkpoint 为 `discuss_in_progress` 时恢复执行
 
 ## 前置准入条件
 
