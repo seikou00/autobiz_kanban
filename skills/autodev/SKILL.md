@@ -17,6 +17,7 @@ version: v1.1.1604
 ### 技能映射
 | 阶段 | 调用 Skill | 本工程文件 |
 |------|------------|------------|
+| HTML→前端代码生成 | `/autodev-html-frontend` | `autodev/autodev-html-frontend/SKILL.md` |
 | Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
 | Code | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
@@ -28,6 +29,8 @@ version: v1.1.1604
 ### 工作流
 
 ```text
+[/autodev-html-frontend]  ← 可选（checkpoint = prd_done 时询问用户）
+   ↓
 /autodev-specs
    ↓
 /autodev-plan
@@ -86,7 +89,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 当 checkpoint 为 `prd_done` 时，必须询问用户是否需要执行 HTML→前端代码生成阶段：
 
-- **如果用户选择"是"**：提示用户先执行 `/html-frontend` 技能，完成后再回到 Dev 阶段
+- **如果用户选择"是"**：路由到 `/autodev-html-frontend`，完成后再继续 Dev 阶段流程
 - **如果用户选择"否"**：继续路由到 `/autodev-specs`
 
 ```
@@ -96,7 +99,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
     ↓
 询问：是否需要先执行 HTML→前端代码生成？（提供高保真 HTML）
     ↓
-    ├─ 是 → 提示执行 /html-frontend → 用户执行完毕后再触发 /autodev
+    ├─ 是 → 路由到 /autodev-html-frontend → 执行完成后继续 Dev 流程
     └─ 否 → 继续路由到 /autodev-specs
 ```
 
@@ -117,8 +120,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 | Checkpoint | 路由 |
 |------------|------|
+| `html_frontend_in_progress` | `/autodev-html-frontend`（恢复） |
 | `html_frontend_done` | `/autodev-specs` |
-| `prd_done` | `/autodev-specs` |
 | `specs_in_progress` | `/autodev-specs`（恢复） |
 | `specs_done` | `/autodev-plan` |
 | `plan_in_progress` | `/autodev-plan`（恢复） |
@@ -146,6 +149,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 | 子技能 | 合法出口 checkpoint |
 |--------|-------------------|
+| `autodev-html-frontend` | `html_frontend_done` |
 | `autodev-specs` | `specs_done` |
 | `autodev-plan` | `plan_done` |
 | `autodev-code` | `code_done` |

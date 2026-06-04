@@ -20,7 +20,7 @@ version: v1.0.0
 - 用户提供高保真 HTML（上传 `.html` / `.htm` 文件或粘贴 HTML 内容）
 - 用户要求从 HTML 生成前端代码
 - 用户提到"autobizdevops"且涉及 HTML、前端代码生成或页面还原
-- Biz 阶段（PRD 生成）完成后，checkpoint 为 `prd_done` 时自动进入
+- 由 autodev 在 checkpoint 为 `prd_done` 时询问用户后路由进入
 - 用户从其他阶段（如 Dev）回溯到 HTML→前端阶段
 - checkpoint 为 `html_frontend_in_progress` 时恢复执行
 
@@ -64,7 +64,7 @@ Biz 阶段（PRD 生成完成）→ /auto-html-to-frontend → Dev 阶段（Spec
 ### 校验命令
 
 ```bash
-set PYTHONIOENCODING=utf-8 && python autodev/autodev-html-frontend/hooks/html_frontend_validate.py --feature {slug}
+set PYTHONIOENCODING=utf-8 && python "$PLUGIN_ROOT/autodev/autodev-html-frontend/hooks/html_frontend_validate.py" --feature {slug}
 ```
 
 ### 校验不通过时的处理
