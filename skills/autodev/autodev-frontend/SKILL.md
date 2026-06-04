@@ -1,5 +1,5 @@
 ---
-name: html-to-frontend
+name: autodev-frontend
 description: 将当前工作区的高保真 HTML 转换为前端实现任务，并按可用情况同时使用 `prd.md` 与本地接口说明文档校正文案、字段和交互边界。适用于已有前端工程中，需要先读取项目 `architecture/` 说明，再基于 HTML 做整页还原、局部组件替换和代码落地的场景。
 ---
 
