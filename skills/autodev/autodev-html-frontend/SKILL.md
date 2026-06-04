@@ -64,7 +64,7 @@ Biz 阶段（PRD 生成完成）→ /auto-html-to-frontend → Dev 阶段（Spec
 ### 校验命令
 
 ```bash
-set PYTHONIOENCODING=utf-8 && python html-frontend/hooks/html_frontend_validate.py --feature {slug}
+set PYTHONIOENCODING=utf-8 && python autodev/autodev-html-frontend/hooks/html_frontend_validate.py --feature {slug}
 ```
 
 ### 校验不通过时的处理

@@ -26,7 +26,6 @@ version: v1.1.1604
 | `autobiz/` | Biz 阶段技能集合。存放需求澄清、PRD 生成等                                                 |
 | `autodev/` | Dev 阶段技能集合。存放计划、编码、单测、评审、验证、E2E 等                                         |
 | `autoops/` | Ops 阶段技能集合。当前含 CI/CD 流水线相关技能和归档技能。                                        |
-| `html-frontend/` | HTML→前端代码生成阶段技能集合。存放高保真 HTML 转前端代码相关技能。 |
 | `templates/` | 标准产物模板。当前产物模板分布在各阶段 skill 内，供 Biz / Dev 阶段生成 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md` 时读取。 |
 
 
@@ -48,7 +47,6 @@ version: v1.1.1604
 ### 技能映射
 | 阶段                  | 调用 Skill        | 本工程文件                               |
 |---------------------|-----------------|-------------------------------------|
-| html-frontend       | `/html-frontend` | `html-frontend/SKILL.md`            |
 | autobiz             | `/autobiz`       | `autobiz/SKILL.md`                  |
 | autodev             | `/autodev` | `autodev/SKILL.md`                  |
 | autoops             | `/autoops` | `autoops/SKILL.md`                  |

@@ -3,7 +3,7 @@
 """
 html-frontend 统一校验脚本
 用法:
-    python html-frontend/hooks/html_frontend_validate.py --feature <slug>
+    python autodev/autodev-html-frontend/hooks/html_frontend_validate.py --feature <slug>
 """
 
 import argparse
