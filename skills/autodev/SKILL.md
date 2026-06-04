@@ -17,6 +17,7 @@ version: v1.1.1604
 ### 技能映射
 | 阶段 | 调用 Skill | 本工程文件 |
 |------|------------|------------|
+| HTML→Frontend（可选） | `prd_done` 时询问 | `autodev/autodev-frontend/SKILL.md` |
 | Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
 | Code | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
@@ -28,19 +29,23 @@ version: v1.1.1604
 ### 工作流
 
 ```text
-/autodev-specs
-   ↓
-/autodev-plan
-   ↓
-/autodev-code
-   ↓
-/autodev-reviewer
-   ↓
-/autodev-utest
-   ↓
-/autodev-e2e
-   ↓
-/autodev-verify
+prd_done → [是否需要 HTML 转前端?]
+            ├── 是 → /autodev-frontend ────────────────────────┐
+            └── 否 ──────────────────────────────────────────┤
+                                                            ↓
+                                                      /autodev-specs
+                                                         ↓
+                                                      /autodev-plan
+                                                         ↓
+                                                      /autodev-code
+                                                         ↓
+                                                      /autodev-reviewer
+                                                         ↓
+                                                      /autodev-utest
+                                                         ↓
+                                                      /autodev-e2e
+                                                         ↓
+                                                      /autodev-verify
 ```
 
 
@@ -100,7 +105,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 | Checkpoint | 路由 |
 |------------|------|
-| `prd_done` | `/autodev-specs` |
+| `prd_done` | 先询问用户是否需要执行 HTML 转前端 → 是则执行 `autodev-frontend` 技能 → 完成后进入 `/autodev-specs`；否则直接进入 `/autodev-specs` |
 | `specs_in_progress` | `/autodev-specs`（恢复） |
 | `specs_done` | `/autodev-plan` |
 | `plan_in_progress` | `/autodev-plan`（恢复） |
@@ -146,6 +151,25 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan
 python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 ```
+
+---
+
+## 4. HTML 转前端（可选步骤）
+
+在 `prd_done` checkpoint 到达 `/autodev-specs` 前：
+
+1. **询问用户**："是否需要将已有的高保真 HTML 转换为前端代码后再进入 Specs 阶段？（是/否）"
+2. **用户选择"是"**：
+   - 引导用户使用 `/autodev-frontend` 技能，按 `route/route-with-html.md` 流程将 HTML 转换为前端代码并写入项目
+   - 转换完成后，再次询问用户是否继续进入 Specs 阶段
+3. **用户选择"否"**：按原流程进入 `/autodev-specs`
+
+### 约束
+
+- HTML 转换**不创建也不推进 checkpoint**，它是在 `prd_done` 停留期间的可选前置操作
+- 转换不影响 Specs 阶段的输入产物要求（`PRD.md` 仍为必需输入）
+- 如果用户选择转换但完成后不想继续，允许停留在当前 `prd_done` checkpoint
+- 本步骤纯属交互决策，不涉及脚本校验或状态变更
 
 ---
 

@@ -84,7 +84,7 @@ python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint {checkpoint}
 | `discuss_in_progress` | `/autobiz` | 恢复需求澄清 |
 | `discuss_done` | `/autobiz` | 继续生成 PRD |
 | `prd_in_progress` | `/autobiz` | 恢复 PRD 生成 |
-| `prd_done` | `/autodev` | 进入 Dev Specs 阶段 |
+| `prd_done` | `/autodev` | 进入 Dev 阶段，先询问是否需要 HTML 转前端，再进入 Specs |
 | `specs_in_progress` | `/autodev` | 恢复 Dev Specs |
 | `specs_done` | `/autodev` | 进入 Dev 计划阶段 |
 | `plan_in_progress` | `/autodev` | 恢复 Dev 计划 |
