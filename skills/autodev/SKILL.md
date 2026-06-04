@@ -17,7 +17,7 @@ version: v1.1.1604
 ### 技能映射
 | 阶段 | 调用 Skill | 本工程文件 |
 |------|------------|------------|
-| Frontend（profile 可选） | `/autodev-frontend` | `autodev/autodev-frontend/SKILL.md` |
+| Frontend（`frontend_before_specs` profile） | `/autodev-frontend` | `autodev/autodev-frontend/SKILL.md` |
 | Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
 | Code | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
@@ -29,21 +29,23 @@ version: v1.1.1604
 ### 工作流
 
 ```text
-/autodev-frontend（仅 frontend_before_specs profile）
-   ↓
-/autodev-specs
-   ↓
-/autodev-plan
-   ↓
-/autodev-code
-   ↓
-/autodev-reviewer
-   ↓
-/autodev-utest
-   ↓
-/autodev-e2e
-   ↓
-/autodev-verify
+prd_done → resolve_next_skill.py --json
+            ├── standard → /autodev-specs
+            └── frontend_before_specs → /autodev-frontend
+                                             ↓
+                                      /autodev-specs
+                                             ↓
+                                      /autodev-plan
+                                             ↓
+                                      /autodev-code
+                                             ↓
+                                      /autodev-reviewer
+                                             ↓
+                                      /autodev-utest
+                                             ↓
+                                      /autodev-e2e
+                                             ↓
+                                      /autodev-verify
 ```
 
 
@@ -130,6 +132,23 @@ python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_D
 python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan
 python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 ```
+
+---
+
+## 4. HTML 转前端（`frontend_before_specs` profile）
+
+在 `prd_done` checkpoint 进入 Dev 阶段时，若 `resolve_next_skill.py --json` 返回 `requiresProfileChoice: true`：
+
+1. 让用户在 `profileChoices` 中选择 workflow profile。
+2. 选择 `standard` 时，推进到 `specs_in_progress` 并进入 `/autodev-specs`。
+3. 选择 `frontend_before_specs` 时，使用 `--workflow-profile frontend_before_specs` 推进到 `frontend_in_progress`，进入 `/autodev-frontend`。
+4. `/autodev-frontend` 按 `route/route-with-html.md` 的 HTML-first 流程将高保真 HTML 转换为前端代码；完成后推进到 `frontend_done`，根路由器再次刷新状态并进入 `/autodev-specs`。
+
+### 约束
+
+- HTML 转换是 `frontend_before_specs` profile 的正式 Dev 节点，不是停留在 `prd_done` 的无状态临时步骤。
+- 转换不影响 Specs 阶段的输入产物要求，`PRD.md` 仍为 `/autodev-specs` 的必需输入。
+- 未选择 `frontend_before_specs` 时，不得直接调用 `/autodev-frontend` 绕过 workflow profile。
 
 ---
 
