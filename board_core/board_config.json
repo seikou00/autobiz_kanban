@@ -32,12 +32,12 @@
   "workflow": {
     "profiles": {
       "standard": {
-        "label": "标准 Dev 流程",
-        "description": "PRD 完成后直接进入行为规格。"
+        "label": "不需要，进入 autodev-specs",
+        "description": "不先转换 HTML 设计稿，直接进入 autodev-specs。"
       },
       "frontend_before_specs": {
-        "label": "Spec 前前端实现",
-        "description": "PRD 完成后先执行前端实现，再进入行为规格。",
+        "label": "需要，进入 autodev-frontend",
+        "description": "先将 HTML 设计稿转换为项目内工程文件，再进入后续阶段。",
         "nodes": [
           {
             "id": "dev.frontend",
@@ -157,7 +157,7 @@
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
-          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev", "userMessage": "请使用 /autodev 继续推进当前 Feature。", "dialogTips": "当前阶段：路由到行为规格。如需 HTML 转前端，请在 /autodev 的 workflow profile 中选择 frontend_before_specs。" } }
+          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev", "userMessage": "请使用 /autodev 继续推进当前 Feature。", "dialogTips": "是否需要将 HTML 设计稿转换为项目内工程文件？需要则先进入 autodev-frontend 阶段，不需要则直接进入 autodev-specs 阶段。" } }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {

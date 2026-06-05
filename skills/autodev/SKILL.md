@@ -84,7 +84,11 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
 ```
 
-若脚本返回 `requiresProfileChoice: true`，必须让用户在 `profileChoices` 中选择 workflow profile。选择 `standard` 时推进到 `specs_in_progress`；选择 `frontend_before_specs` 时推进到 `frontend_in_progress`，并在命令中传入 `--workflow-profile`。
+若脚本返回 `requiresProfileChoice: true`，按用户表达选择是否需要 HTML 设计稿转换：
+
+- 用户说 `/autodev-frontend`、需要进入、需要先转 HTML、先把设计稿转工程文件等，视为需要转换：推进到 `frontend_in_progress`，并传入 `--workflow-profile frontend_before_specs`。
+- 用户说不需要、直接进规格、先走 `autodev-specs` 等，视为不需要转换：推进到 `specs_in_progress`。
+- 如果用户只触发 `/autodev`，且没有表达需要或不需要，简短询问：`是否需要将 HTML 设计稿转换为项目内工程文件？需要则先进入 autodev-frontend 阶段，不需要则直接进入 autodev-specs 阶段。`
 
 ### 1.3 产出物校验
 
@@ -139,9 +143,9 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 
 在 `prd_done` checkpoint 进入 Dev 阶段时，若 `resolve_next_skill.py --json` 返回 `requiresProfileChoice: true`：
 
-1. 让用户在 `profileChoices` 中选择 workflow profile。
-2. 选择 `standard` 时，推进到 `specs_in_progress` 并进入 `/autodev-specs`。
-3. 选择 `frontend_before_specs` 时，使用 `--workflow-profile frontend_before_specs` 推进到 `frontend_in_progress`，进入 `/autodev-frontend`。
+1. 根据用户表达判断是否需要将 HTML 设计稿转换为项目内工程文件；若不明确，使用上面的简短问题确认。
+2. 不需要转换时，推进到 `specs_in_progress` 并进入 `/autodev-specs`。
+3. 需要转换时，使用 `--workflow-profile frontend_before_specs` 推进到 `frontend_in_progress`，进入 `/autodev-frontend`。
 4. `/autodev-frontend` 按 `route/route-with-html.md` 的 HTML-first 流程将高保真 HTML 转换为前端代码；完成后推进到 `frontend_done`，根路由器再次刷新状态并进入 `/autodev-specs`。
 
 ### 约束
