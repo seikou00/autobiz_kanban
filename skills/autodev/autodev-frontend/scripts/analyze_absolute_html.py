@@ -3236,9 +3236,9 @@ def build_manifest(html_file: Path, project_root: Path | None = None) -> dict[st
     for item in items:
         item["kind"] = infer_kind(item["text"])
     canvas = canvas_size(nodes)
-    fields = infer_fields(items)
-    regions = infer_regions(items, canvas)
     visual_boxes = extract_visual_boxes(nodes)
+    fields = infer_fields(items, visual_boxes)
+    regions = infer_regions(items, canvas)
     table_structures = detect_table_grid(items, visual_boxes)
     sections = infer_sections(items, visual_boxes, canvas)
     sections = apply_table_context_to_sections(sections, table_structures)
