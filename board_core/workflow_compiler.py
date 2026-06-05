@@ -13,6 +13,10 @@ LEGACY_BASE_WORKFLOW_PROFILE = "base"
 DEFAULT_ENABLED_DYNAMIC_PHASES = frozenset({"Biz", "Dev"})
 ALLOWED_PHASES = frozenset({"Biz", "Dev", "Ops"})
 ALLOWED_GUARDS = frozenset({"code_compile"})
+ALLOWED_WORKFLOW_DECISIONS = frozenset({"enabled", "skipped"})
+ALLOWED_DYNAMIC_STAGE_DEFAULTS = frozenset({"pending", "skip"})
+ENABLED_WORKFLOW_DECISION = "enabled"
+SKIPPED_WORKFLOW_DECISION = "skipped"
 OVERLAY_RELATIVE_DIR = Path(".autobizdevops") / "workflow.d"
 PLUGIN_OVERLAY_DIR_NAME = "workflow.d"
 NEXT_ACTION_FIELDS = ("slashSkill", "userMessage", "dialogTips")
@@ -129,6 +133,111 @@ def configured_profile_options(base_config: dict) -> list[dict[str, str]]:
             "description": description if isinstance(description, str) else "",
         })
     return result
+
+
+def normalize_workflow_decisions(decisions: object | None) -> dict[str, str]:
+    if decisions is None:
+        return {}
+    if not isinstance(decisions, dict):
+        raise WorkflowCompileError("workflowDecisions must be an object")
+
+    normalized: dict[str, str] = {}
+    for stage_id, decision in decisions.items():
+        if not isinstance(stage_id, str) or not stage_id.strip():
+            raise WorkflowCompileError("workflowDecisions keys must be non-empty strings")
+        if not isinstance(decision, str) or not decision.strip():
+            raise WorkflowCompileError(f"workflowDecisions.{stage_id} must be a non-empty string")
+        cleaned_decision = decision.strip()
+        if cleaned_decision not in ALLOWED_WORKFLOW_DECISIONS:
+            allowed = ", ".join(sorted(ALLOWED_WORKFLOW_DECISIONS))
+            raise WorkflowCompileError(f"workflowDecisions.{stage_id} must be one of: {allowed}")
+        normalized[stage_id.strip()] = cleaned_decision
+    return normalized
+
+
+def _dynamic_stage_anchor(spec: dict, *, context: str) -> tuple[str, str]:
+    insert_after = spec.get("insertAfter")
+    insert_before = spec.get("insertBefore")
+    if bool(insert_after) == bool(insert_before):
+        raise WorkflowCompileError(f"{context} must declare exactly one of insertAfter or insertBefore")
+    if insert_after:
+        return "insertAfter", _read_string(insert_after, context=f"{context}.insertAfter")
+    return "insertBefore", _read_string(insert_before, context=f"{context}.insertBefore")
+
+
+def _read_dynamic_stage(spec: object, *, context: str) -> dict:
+    if not isinstance(spec, dict):
+        raise WorkflowCompileError(f"{context} must be an object")
+
+    stage_id = _read_string(spec.get("id"), context=f"{context}.id")
+    phase = _read_string(spec.get("phase", "Dev"), context=f"{context}.phase")
+    if phase != "Dev":
+        raise WorkflowCompileError(f"{context}.phase currently only supports Dev")
+    anchor_field, anchor_id = _dynamic_stage_anchor(spec, context=context)
+    default_decision = spec.get("defaultDecision", "pending")
+    if not isinstance(default_decision, str) or default_decision not in ALLOWED_DYNAMIC_STAGE_DEFAULTS:
+        allowed = ", ".join(sorted(ALLOWED_DYNAMIC_STAGE_DEFAULTS))
+        raise WorkflowCompileError(f"{context}.defaultDecision must be one of: {allowed}")
+
+    raw_nodes = spec.get("nodes")
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        raise WorkflowCompileError(f"{context}.nodes must be a non-empty list")
+
+    order = spec.get("order", 1000)
+    if not isinstance(order, int):
+        raise WorkflowCompileError(f"{context}.order must be an integer")
+
+    return {
+        "id": stage_id,
+        "phase": phase,
+        "label": spec.get("label", stage_id) if isinstance(spec.get("label", stage_id), str) else stage_id,
+        "description": spec.get("description", "") if isinstance(spec.get("description", ""), str) else "",
+        "choiceCheckpoint": _read_string(spec.get("choiceCheckpoint"), context=f"{context}.choiceCheckpoint"),
+        "defaultDecision": default_decision,
+        "enableTargetCheckpoint": _read_string(
+            spec.get("enableTargetCheckpoint"),
+            context=f"{context}.enableTargetCheckpoint",
+        ),
+        "skipTargetCheckpoint": _read_string(spec.get("skipTargetCheckpoint"), context=f"{context}.skipTargetCheckpoint"),
+        "enableLabel": spec.get("enableLabel", "需要") if isinstance(spec.get("enableLabel", "需要"), str) else "需要",
+        "skipLabel": spec.get("skipLabel", "不需要") if isinstance(spec.get("skipLabel", "不需要"), str) else "不需要",
+        "enableDescription": (
+            spec.get("enableDescription", "")
+            if isinstance(spec.get("enableDescription", ""), str)
+            else ""
+        ),
+        "skipDescription": (
+            spec.get("skipDescription", "")
+            if isinstance(spec.get("skipDescription", ""), str)
+            else ""
+        ),
+        "order": order,
+        "insertAnchorField": anchor_field,
+        "insertAnchorId": anchor_id,
+        "nodes": copy.deepcopy(raw_nodes),
+    }
+
+
+def configured_dynamic_stages(base_config: dict) -> tuple[dict, ...]:
+    workflow = base_config.get("workflow")
+    if not isinstance(workflow, dict):
+        return ()
+    raw_stages = workflow.get("dynamicStages", [])
+    if raw_stages is None:
+        return ()
+    if not isinstance(raw_stages, list):
+        raise WorkflowCompileError("workflow.dynamicStages must be a list")
+
+    stages: list[dict] = []
+    seen: set[str] = set()
+    for index, raw_stage in enumerate(raw_stages):
+        stage = _read_dynamic_stage(raw_stage, context=f"workflow.dynamicStages[{index}]")
+        stage_id = stage["id"]
+        if stage_id in seen:
+            raise WorkflowCompileError(f"duplicate dynamic stage id: {stage_id}")
+        seen.add(stage_id)
+        stages.append(stage)
+    return tuple(sorted(stages, key=lambda stage: (stage["order"], stage["id"])))
 
 
 def load_profile_overlays(repo_root: Path, workspace: Path | None, profile: str) -> list[dict]:
@@ -263,6 +372,7 @@ def _build_dynamic_node(spec: dict, *, repo_root: Path | None, context: str) -> 
         },
         "validators": _read_string_list(spec.get("validators"), context=f"{context}.validators"),
         "guards": list(guards),
+        "hookDefinitions": copy.deepcopy(spec.get("hookDefinitions", [])),
         "_dynamic": True,
         "_nextActionOverride": _read_next_action_override(spec.get("nextAction"), context=context),
     }
@@ -280,6 +390,23 @@ def _insert_dynamic_node(nodes: list[dict], node: dict, spec: dict, *, context: 
             nodes.insert(index + 1 if insert_after else index, node)
             return
     raise WorkflowCompileError(f"{context} references unknown insert anchor: {anchor_id}")
+
+
+def _dynamic_stage_overlay(stage: dict) -> dict:
+    nodes: list[dict] = []
+    previous_node_id = ""
+    for index, raw_node in enumerate(stage["nodes"]):
+        if not isinstance(raw_node, dict):
+            raise WorkflowCompileError(f"dynamicStage {stage['id']}.nodes[{index}] must be an object")
+        node = copy.deepcopy(raw_node)
+        if "insertAfter" not in node and "insertBefore" not in node:
+            if index == 0:
+                node[stage["insertAnchorField"]] = stage["insertAnchorId"]
+            else:
+                node["insertAfter"] = previous_node_id
+        previous_node_id = _read_string(node.get("id"), context=f"dynamicStage {stage['id']}.nodes[{index}].id")
+        nodes.append(node)
+    return {"nodes": nodes}
 
 
 def _state_template(node: dict, state_id: str) -> dict:
@@ -439,6 +566,66 @@ def _derive_ui_transitions(nodes: list[dict]) -> list[dict]:
     return transitions
 
 
+def _validate_dynamic_stage_targets(nodes: list[dict], transitions: dict[str, list[str]], stages: Iterable[dict]) -> None:
+    checkpoint_to_node = {
+        checkpoint: node
+        for node in nodes
+        for checkpoint in node.get("checkpoints", [])
+        if isinstance(checkpoint, str)
+    }
+    for stage in stages:
+        enable_target = stage["enableTargetCheckpoint"]
+        if enable_target not in checkpoint_to_node:
+            raise WorkflowCompileError(
+                f"dynamic stage {stage['id']} enableTargetCheckpoint is not declared: {enable_target}"
+            )
+        allowed = transitions.get(stage["choiceCheckpoint"], [])
+        if enable_target not in allowed:
+            allowed_text = ", ".join(allowed) if allowed else "none"
+            raise WorkflowCompileError(
+                f"dynamic stage {stage['id']} choiceCheckpoint {stage['choiceCheckpoint']} "
+                f"does not transition to {enable_target}; allowed: {allowed_text}"
+            )
+
+
+def _validate_dynamic_stage_definitions(
+    nodes: list[dict],
+    dynamic_stages: Iterable[dict],
+    *,
+    repo_root: Path | None,
+) -> None:
+    node_ids = {node.get("id") for node in nodes if isinstance(node.get("id"), str)}
+    known_checkpoints = {
+        checkpoint
+        for node in nodes
+        for checkpoint in node.get("checkpoints", [])
+        if isinstance(checkpoint, str)
+    }
+
+    for stage in dynamic_stages:
+        if stage["insertAnchorId"] not in node_ids:
+            raise WorkflowCompileError(
+                f"dynamic stage {stage['id']} references unknown insert anchor: {stage['insertAnchorId']}"
+            )
+        for field in ("choiceCheckpoint", "skipTargetCheckpoint"):
+            checkpoint = stage[field]
+            if checkpoint not in known_checkpoints:
+                raise WorkflowCompileError(f"dynamic stage {stage['id']} {field} is not declared: {checkpoint}")
+
+        overlay = _dynamic_stage_overlay(stage)
+        built_nodes = [
+            _build_dynamic_node(raw_node, repo_root=repo_root, context=f"dynamic stage {stage['id']}.nodes[{index}]")
+            for index, raw_node in enumerate(overlay["nodes"])
+        ]
+        enable_target = stage["enableTargetCheckpoint"]
+        first_start = _start_checkpoint(built_nodes[0]) if built_nodes else None
+        if enable_target != first_start:
+            raise WorkflowCompileError(
+                f"dynamic stage {stage['id']} enableTargetCheckpoint must match first node start checkpoint: "
+                f"{first_start or 'none'}"
+            )
+
+
 def _validate_unique_nodes_and_checkpoints(nodes: list[dict]) -> None:
     seen_nodes: set[str] = set()
     seen_checkpoints: dict[str, str] = {}
@@ -509,10 +696,18 @@ def compile_board_config(
     repo_root: Path | None = None,
     workspace: Path | None = None,
     profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
 ) -> dict:
     """Compile a profile-specific effective workflow config."""
     profile = normalize_workflow_profile(profile)
+    decisions = normalize_workflow_decisions(workflow_decisions)
+    dynamic_stages = configured_dynamic_stages(base_config)
+    stage_by_id = {stage["id"]: stage for stage in dynamic_stages}
+    unknown_decisions = sorted(set(decisions) - set(stage_by_id))
+    if unknown_decisions:
+        raise WorkflowCompileError(f"workflowDecisions contains unknown stage: {', '.join(unknown_decisions)}")
+
     effective = copy.deepcopy(base_config)
     loaded_overlays = overlays
     if loaded_overlays is None:
@@ -524,9 +719,20 @@ def compile_board_config(
         if configured_overlay is not None:
             loaded_overlays.append(configured_overlay)
         loaded_overlays.extend(load_profile_overlays(root, workspace, profile))
+        loaded_overlays.extend(
+            _dynamic_stage_overlay(stage)
+            for stage in dynamic_stages
+            if decisions.get(stage["id"]) == ENABLED_WORKFLOW_DECISION
+        )
 
     if not loaded_overlays:
+        workflow = effective.get("workflow")
+        nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+        if not isinstance(nodes, list):
+            raise WorkflowCompileError("workflow.nodes must be a list")
+        _validate_dynamic_stage_definitions(nodes, dynamic_stages, repo_root=repo_root)
         effective["workflowProfile"] = profile
+        effective["workflowDecisions"] = decisions
         return effective
 
     workflow = effective.get("workflow")
@@ -552,6 +758,7 @@ def compile_board_config(
                 )
             _insert_dynamic_node(nodes, dynamic_node, spec, context=context)
 
+    _validate_dynamic_stage_definitions(nodes, dynamic_stages, repo_root=repo_root)
     _validate_unique_nodes_and_checkpoints(nodes)
     _validate_artifact_dependencies(nodes)
     _renumber_nodes(nodes)
@@ -567,8 +774,15 @@ def compile_board_config(
         "transitions": _derive_checkpoint_transitions(nodes, checkpoint_config),
         "stageLabels": _derive_stage_labels(nodes, base_labels),
     }
+    enabled_stages = [
+        stage
+        for stage in dynamic_stages
+        if decisions.get(stage["id"]) == ENABLED_WORKFLOW_DECISION
+    ]
+    _validate_dynamic_stage_targets(nodes, workflow["checkpoints"]["transitions"], enabled_stages)
     workflow["transitions"] = _derive_ui_transitions(nodes)
     effective["workflowProfile"] = profile
+    effective["workflowDecisions"] = decisions
     return effective
 
 
@@ -578,6 +792,7 @@ def load_effective_board_config(
     repo_root: Path | None = None,
     workspace: Path | None = None,
     profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
 ) -> dict:
     path = config_path or default_config_path()
@@ -588,5 +803,6 @@ def load_effective_board_config(
         repo_root=resolved_repo_root,
         workspace=workspace,
         profile=profile,
+        workflow_decisions=workflow_decisions,
         overlays=overlays,
     )

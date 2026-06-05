@@ -1,6 +1,6 @@
 ---
 name: autodev-detail-design
-description: Optional Autodev readable detailed design artifact generator. Use after `PLAN.md` exists, usually between /autodev-plan and /autodev-code, to write `DETAIL_DESIGN.md` with file-level change design, implementation logic, and overall flow. This skill does not update checkpoints, does not participate in board workflow gates, and must not modify business code.
+description: Autodev dynamic detailed design node. When the `detail_design_before_code` workflow decision is enabled at `plan_done`, use after /autodev-plan and before /autodev-code to write `DETAIL_DESIGN.md` with file-level change design, implementation logic, and overall flow. This skill updates detail_design checkpoints but must not modify business code.
 version: v1.1.1604
 ---
 **路径变量约定（必须区分）：**
@@ -16,7 +16,7 @@ version: v1.1.1604
 
 ## 阶段定位
 
-autodev-detail-design 是一个可选的用户可读产物技能，通常在 /autodev-plan 已生成 `PLAN.md` 后、进入 /autodev-code 前手动调用。
+autodev-detail-design 是 `detail_design_before_code` dynamic stage 启用后的正式 Dev 节点，通常在 /autodev-plan 已生成 `PLAN.md` 后、进入 /autodev-code 前调用。
 
 本 skill 只回答：
 
@@ -28,9 +28,7 @@ autodev-detail-design 是一个可选的用户可读产物技能，通常在 /au
 
 本 skill 不做：
 
-- 不更新 checkpoint。
 - 不修改 board_core/board_config.json。
-- 不参与看板节点、artifact gate 或 validators。
 - 不修改业务代码、测试代码、配置、迁移脚本或已有阶段产物。
 - 不重写 `proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md`。
 
@@ -40,10 +38,22 @@ autodev-detail-design 是一个可选的用户可读产物技能，通常在 /au
 
 ## 准入与上下文
 
-确定 {FEATURE_ID} 后，可以读取当前 Feature 快照辅助判断，但不得推进状态：
+确定 {FEATURE_ID} 后，读取当前 Feature 快照判断是否已进入本动态节点：
 
 ```
 CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+```
+
+如当前 checkpoint 仍为 `plan_done` 且用户选择需要详细设计，先使用统一状态脚本启用 dynamic stage 并进入本节点：
+
+```
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled
+```
+
+可查看动态节点契约：
+
+```
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --json
 ```
 
 必须读取：
@@ -63,7 +73,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 - **比 PLAN 更具体，但仍不编码。** 可以写文件级改动说明、伪代码、流程图和调用链；不得直接改实现文件。
 - **保留不确定性。** 无法确认的文件路径、接口字段、权限、数据模型、状态流必须标为待确认，不要写成硬结论。
 - **面向读者。**DETAIL_DESIGN.md 是给用户和后续编码者读的，应清楚说明“为什么改这里、怎么改、怎么流转、怎么验证”。
-- **不改变流程。** 完成后不调用 update_checkpoint.py，不要求用户必须运行本 skill 才能进入 code。
+- **按动态节点推进流程。** 完成后必须调用 update_checkpoint.py 推进到 `detail_design_done`；若用户不需要详细设计，应在 `plan_done` 选择 skip 并直接进入 code，而不是进入本 skill。
 
 ## 生成 DETAIL_DESIGN.md
 
@@ -149,8 +159,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 - 文件改动清单覆盖 `PLAN.md` 中所有待编码任务，或明确说明某任务无需文件改动。
 - 每个文件级改动都能追溯到 specs、design 或 PLAN。
 - 仍不确定的路径、字段、接口、权限、数据或状态流已标为待确认。
-- 未调用 `update_checkpoint.py`，未修改业务代码。
+- 已调用 `python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
 
-**Skill 完成。** 下一步通常是用户确认后继续 `/autodev-code`，但本产物不是进入 code 的强制门禁。
+**Skill 完成。** 下一步通常是继续 `/autodev-code`。
 
 $ARGUMENTS

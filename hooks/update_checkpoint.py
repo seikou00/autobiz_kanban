@@ -30,7 +30,7 @@ from state_checkpoint import (  # noqa: E402
     validate_lifecycle,
     validate_transitions,
 )
-from board_core.contracts import BoardConfigError, load_repo_workflow_contracts  # noqa: E402
+from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts  # noqa: E402
 from board_core.state_store import (  # noqa: E402
     EMPTY_CELL,
     StateRecords,
@@ -40,7 +40,13 @@ from board_core.state_store import (  # noqa: E402
     state_rows_from_records,
     write_state_records,
 )
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, normalize_workflow_profile  # noqa: E402
+from board_core.workflow_compiler import (  # noqa: E402
+    BASE_WORKFLOW_PROFILE,
+    WorkflowCompileError,
+    configured_dynamic_stages,
+    normalize_workflow_decisions,
+    normalize_workflow_profile,
+)
 
 
 STATE_RELATIVE_PATH = Path(".autobizdevops") / "STATE.md"
@@ -64,6 +70,7 @@ class CheckpointUpdate:
     old_checkpoint: str | None
     new_checkpoint: str | None
     workflow_profile: str = BASE_WORKFLOW_PROFILE
+    workflow_decisions: dict[str, str] | None = None
 
     @property
     def errors(self) -> tuple[str, ...]:
@@ -81,6 +88,7 @@ def replace_feature_record(
     allow_create: bool,
     updated_at: str,
     workflow_profile: str,
+    workflow_decisions: dict[str, str],
     stage_labels: dict[str, str],
     initial_checkpoints: frozenset[str],
 ) -> tuple[StateRecords, list[str]]:
@@ -100,6 +108,7 @@ def replace_feature_record(
         record["feature"] = feature
         record["checkpoint"] = checkpoint
         record["stage"] = resolved_stage
+        record["workflowDecisions"] = dict(workflow_decisions)
         if owner is not None:
             record["owner"] = owner
         if iteration is not None:
@@ -123,9 +132,52 @@ def replace_feature_record(
             "iteration": iteration if iteration is not None else EMPTY_CELL,
             "updated_at": updated_at,
             "workflowProfile": workflow_profile,
+            "workflowDecisions": dict(workflow_decisions),
         }
 
     return new_records, []
+
+
+def parse_workflow_decision_args(items: list[str] | None) -> tuple[dict[str, str], tuple[str, ...]]:
+    updates: dict[str, str] = {}
+    errors: list[str] = []
+    for raw in items or []:
+        if "=" not in raw:
+            errors.append(f"--workflow-decision 必须使用 stage=enabled|skipped 格式: {raw}")
+            continue
+        stage_id, decision = raw.split("=", 1)
+        stage_id = stage_id.strip()
+        decision = decision.strip()
+        if not stage_id or not decision:
+            errors.append(f"--workflow-decision 必须使用 stage=enabled|skipped 格式: {raw}")
+            continue
+        updates[stage_id] = decision
+    try:
+        return normalize_workflow_decisions(updates), tuple(errors)
+    except WorkflowCompileError as exc:
+        return {}, (*errors, str(exc))
+
+
+def validate_workflow_decision_updates(
+    *,
+    old_checkpoint: str | None,
+    updates: dict[str, str],
+) -> tuple[str, ...]:
+    if not updates:
+        return ()
+    stage_by_id = {stage["id"]: stage for stage in configured_dynamic_stages(load_board_config(ROOT / "board_core" / "board_config.json"))}
+    errors: list[str] = []
+    for stage_id in sorted(updates):
+        stage = stage_by_id.get(stage_id)
+        if stage is None:
+            errors.append(f"未知 workflow dynamic stage: {stage_id}")
+            continue
+        choice_checkpoint = stage["choiceCheckpoint"]
+        if old_checkpoint != choice_checkpoint:
+            errors.append(
+                f"workflow decision '{stage_id}' 只能在 {choice_checkpoint} 设置，当前 checkpoint 为 {old_checkpoint or 'empty'}"
+            )
+    return tuple(errors)
 
 
 def prepare_checkpoint_update(
@@ -139,6 +191,7 @@ def prepare_checkpoint_update(
     allow_create: bool = False,
     updated_at: str | None = None,
     workflow_profile: str | None = None,
+    workflow_decision_updates: dict[str, str] | None = None,
 ) -> CheckpointUpdate:
     workspace = workspace.resolve()
     state_path = workspace / STATE_RELATIVE_PATH
@@ -156,6 +209,7 @@ def prepare_checkpoint_update(
             old_checkpoint=None,
             new_checkpoint=None,
             workflow_profile=workflow_profile or BASE_WORKFLOW_PROFILE,
+            workflow_decisions=workflow_decision_updates or {},
         )
 
     sync_result = check_or_fix_state_sync(workspace, fix=True)
@@ -172,6 +226,7 @@ def prepare_checkpoint_update(
             old_checkpoint=None,
             new_checkpoint=None,
             workflow_profile=workflow_profile or BASE_WORKFLOW_PROFILE,
+            workflow_decisions=workflow_decision_updates or {},
         )
     if sync_result.errors:
         return CheckpointUpdate(
@@ -186,6 +241,7 @@ def prepare_checkpoint_update(
             old_checkpoint=None,
             new_checkpoint=None,
             workflow_profile=workflow_profile or BASE_WORKFLOW_PROFILE,
+            workflow_decisions=workflow_decision_updates or {},
         )
 
     old_records = sync_result.records
@@ -197,7 +253,50 @@ def prepare_checkpoint_update(
         )
     )
     try:
-        contracts = load_repo_workflow_contracts(ROOT, workspace=workspace, profile=resolved_profile)
+        old_decisions = normalize_workflow_decisions(old_record.get("workflowDecisions", {}) if old_record else {})
+        decision_updates = normalize_workflow_decisions(workflow_decision_updates or {})
+    except WorkflowCompileError as exc:
+        return CheckpointUpdate(
+            ok=False,
+            state_path=state_path,
+            state_json_path=state_json_path,
+            content="",
+            state_json_content="",
+            transition_errors=(f"workflowDecisions 无效: {exc}",),
+            lifecycle_errors=(),
+            records={},
+            old_checkpoint=old_map.get(feature),
+            new_checkpoint=None,
+            workflow_profile=resolved_profile,
+            workflow_decisions={},
+        )
+    decision_errors = validate_workflow_decision_updates(
+        old_checkpoint=old_map.get(feature),
+        updates=decision_updates,
+    )
+    if decision_errors:
+        return CheckpointUpdate(
+            ok=False,
+            state_path=state_path,
+            state_json_path=state_json_path,
+            content="",
+            state_json_content="",
+            transition_errors=decision_errors,
+            lifecycle_errors=(),
+            records={},
+            old_checkpoint=old_map.get(feature),
+            new_checkpoint=None,
+            workflow_profile=resolved_profile,
+            workflow_decisions=old_decisions,
+        )
+    resolved_decisions = {**old_decisions, **decision_updates}
+    try:
+        contracts = load_repo_workflow_contracts(
+            ROOT,
+            workspace=workspace,
+            profile=resolved_profile,
+            workflow_decisions=resolved_decisions,
+        )
     except BoardConfigError as exc:
         return CheckpointUpdate(
             ok=False,
@@ -211,6 +310,7 @@ def prepare_checkpoint_update(
             old_checkpoint=old_map.get(feature),
             new_checkpoint=None,
             workflow_profile=resolved_profile,
+            workflow_decisions=resolved_decisions,
         )
     if checkpoint not in contracts.known_checkpoints:
         return CheckpointUpdate(
@@ -225,6 +325,7 @@ def prepare_checkpoint_update(
             old_checkpoint=old_map.get(feature),
             new_checkpoint=None,
             workflow_profile=resolved_profile,
+            workflow_decisions=resolved_decisions,
         )
     new_records, update_errors = replace_feature_record(
         old_records,
@@ -236,6 +337,7 @@ def prepare_checkpoint_update(
         allow_create=allow_create,
         updated_at=updated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         workflow_profile=resolved_profile,
+        workflow_decisions=resolved_decisions,
         stage_labels=contracts.stage_labels,
         initial_checkpoints=contracts.initial_checkpoints,
     )
@@ -288,6 +390,7 @@ def prepare_checkpoint_update(
         old_checkpoint=old_map.get(feature),
         new_checkpoint=new_map.get(feature),
         workflow_profile=resolved_profile,
+        workflow_decisions=resolved_decisions,
     )
 
 
@@ -336,6 +439,7 @@ def write_hook_logs(result: CheckpointUpdate, *, workspace: Path, feature: str) 
             exit_code=0 if event_status == "success" else 1,
             message=stage_message(result, label=label, stage=stage),
             workflow_profiles={feature: result.workflow_profile},
+            workflow_decisions={feature: result.workflow_decisions or {}},
         )
 
 
@@ -351,6 +455,7 @@ def write_result_json(result: CheckpointUpdate, *, feature: str, checkpoint: str
                 "new_checkpoint": result.new_checkpoint,
                 "requested_checkpoint": checkpoint,
                 "workflow_profile": result.workflow_profile,
+                "workflow_decisions": result.workflow_decisions or {},
                 "dry_run": dry_run,
                 "errors": list(result.errors),
             },
@@ -376,6 +481,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--owner", help="owner column override")
     parser.add_argument("--iteration", help="iteration column override")
     parser.add_argument("--workflow-profile", help="workflow profile for a new feature row")
+    parser.add_argument(
+        "--workflow-decision",
+        action="append",
+        default=[],
+        help="workflow decision in stage=enabled|skipped form; may be repeated",
+    )
     parser.add_argument("--allow-create", action="store_true", help="allow creating a new feature row")
     parser.add_argument("--dry-run", action="store_true", help="validate and print target content without writing")
     parser.add_argument("--json", action="store_true", help="print JSON result")
@@ -388,16 +499,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"checkpoint 更新失败: {exc}", file=sys.stderr)
         return 1
 
-    result = prepare_checkpoint_update(
-        workspace=workspace,
-        feature=feature,
-        checkpoint=args.checkpoint,
-        stage=args.stage,
-        owner=args.owner,
-        iteration=args.iteration,
-        allow_create=args.allow_create,
-        workflow_profile=args.workflow_profile,
-    )
+    workflow_decision_updates, decision_arg_errors = parse_workflow_decision_args(args.workflow_decision)
+    if decision_arg_errors:
+        result = CheckpointUpdate(
+            ok=False,
+            state_path=workspace / STATE_RELATIVE_PATH,
+            state_json_path=workspace / STATE_JSON_RELATIVE_PATH,
+            content="",
+            state_json_content="",
+            records={},
+            transition_errors=decision_arg_errors,
+            lifecycle_errors=(),
+            old_checkpoint=None,
+            new_checkpoint=None,
+            workflow_profile=args.workflow_profile or BASE_WORKFLOW_PROFILE,
+            workflow_decisions={},
+        )
+    else:
+        result = prepare_checkpoint_update(
+            workspace=workspace,
+            feature=feature,
+            checkpoint=args.checkpoint,
+            stage=args.stage,
+            owner=args.owner,
+            iteration=args.iteration,
+            allow_create=args.allow_create,
+            workflow_profile=args.workflow_profile,
+            workflow_decision_updates=workflow_decision_updates,
+        )
 
     if args.json:
         write_result_json(result, feature=feature, checkpoint=args.checkpoint, dry_run=args.dry_run)

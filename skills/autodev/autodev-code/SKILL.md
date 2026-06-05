@@ -35,6 +35,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-code --json
 - `{FEATURE_DIR}/specs/**/*.md`：Requirement / Scenario 行为契约，是实现和验收的最高行为依据。
 - `{FEATURE_DIR}/design.md`：API Decisions、Data Decisions、Technical Design、风险与待确认项。
 - `{FEATURE_DIR}/PLAN.md`：任务 DAG、任务总览、任务详情、验证方法、覆盖矩阵；代码文件由任务、specs、design.md 和代码库探索共同定位。
+- `{FEATURE_DIR}/DETAIL_DESIGN.md`：如果存在，作为文件级实现设计的补充上下文；不得覆盖 specs/design/PLAN 的硬契约。
 - `AGENTS.md`：项目级工程约束；如与本技能冲突，以 AGENTS.md 为准，除非系统级指令另有要求。
 
 输出契约：
@@ -71,6 +72,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 - `{FEATURE_DIR}/proposal.md`
 - `{FEATURE_DIR}/specs/**/*.md`
 - `{FEATURE_DIR}/design.md`
+- `{FEATURE_DIR}/DETAIL_DESIGN.md`（如果存在）
 - `{FEATURE_DIR}/PLAN.md`
 - AGENTS.md（如果存在）
 

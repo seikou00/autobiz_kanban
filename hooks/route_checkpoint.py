@@ -18,8 +18,13 @@ from board_core.state_store import get_state_json_path, load_state_json_records_
 from board_core.workflow import derive_node_status, find_current_node  # noqa: E402
 from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_PROFILE,
+    ENABLED_WORKFLOW_DECISION,
+    SKIPPED_WORKFLOW_DECISION,
+    WorkflowCompileError,
+    configured_dynamic_stages,
     configured_profile_options,
     load_effective_board_config,
+    normalize_workflow_decisions,
     read_json,
 )
 
@@ -50,11 +55,21 @@ def _allowed_next(config: dict, checkpoint: str) -> list[str]:
     return [target for target in targets if isinstance(target, str)]
 
 
-def _recommended_next_skill(workspace: Path, workflow_profile: str, allowed_next: list[str]) -> str:
+def _recommended_next_skill(
+    workspace: Path,
+    workflow_profile: str,
+    allowed_next: list[str],
+    workflow_decisions: dict[str, str] | None = None,
+) -> str:
     if not allowed_next:
         return ""
     try:
-        contracts = load_repo_workflow_contracts(ROOT, workspace=workspace, profile=workflow_profile)
+        contracts = load_repo_workflow_contracts(
+            ROOT,
+            workspace=workspace,
+            profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
+        )
     except Exception:
         return ""
     for checkpoint in allowed_next:
@@ -88,6 +103,66 @@ def _profile_choice_payload(workspace: Path, checkpoint: str) -> list[dict[str, 
     return choices
 
 
+def _pending_dynamic_stage(checkpoint: str, workflow_decisions: dict[str, str]) -> dict | None:
+    for stage in configured_dynamic_stages(read_json(BOARD_CONFIG_PATH)):
+        if stage["choiceCheckpoint"] != checkpoint:
+            continue
+        if stage["id"] in workflow_decisions:
+            continue
+        if stage["defaultDecision"] == "skip":
+            continue
+        return stage
+    return None
+
+
+def _workflow_choice_payload(
+    workspace: Path,
+    workflow_profile: str,
+    workflow_decisions: dict[str, str],
+    checkpoint: str,
+) -> list[dict[str, object]]:
+    stage = _pending_dynamic_stage(checkpoint, workflow_decisions)
+    if stage is None:
+        return []
+
+    choices: list[dict[str, object]] = []
+    for decision, label_key, description_key, target_key in (
+        (ENABLED_WORKFLOW_DECISION, "enableLabel", "enableDescription", "enableTargetCheckpoint"),
+        (SKIPPED_WORKFLOW_DECISION, "skipLabel", "skipDescription", "skipTargetCheckpoint"),
+    ):
+        next_decisions = {**workflow_decisions, stage["id"]: decision}
+        target = stage[target_key]
+        allowed_next: list[str] = []
+        try:
+            config = load_effective_board_config(
+                BOARD_CONFIG_PATH,
+                repo_root=ROOT,
+                workspace=workspace,
+                profile=workflow_profile,
+                workflow_decisions=next_decisions,
+            )
+            allowed_next = _allowed_next(config, checkpoint)
+        except Exception:
+            allowed_next = []
+        choices.append({
+            "id": decision,
+            "stageId": stage["id"],
+            "stageLabel": stage["label"],
+            "decision": decision,
+            "label": stage[label_key],
+            "description": stage[description_key],
+            "targetCheckpoint": target,
+            "allowedNextCheckpoints": allowed_next,
+            "recommendedNextSkill": _recommended_next_skill(
+                workspace,
+                workflow_profile,
+                [target],
+                next_decisions,
+            ),
+        })
+    return choices
+
+
 def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
     workspace = workspace.resolve()
     result = load_state_json_records_result(workspace)
@@ -101,6 +176,16 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         return {"ok": False, "feature": feature, "errors": errors}, 1
 
     workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
+    try:
+        workflow_decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
+    except WorkflowCompileError as exc:
+        return {
+            "ok": False,
+            "feature": feature,
+            "workflowProfile": workflow_profile,
+            "checkpoint": record.get("checkpoint", ""),
+            "errors": [f"workflowDecisions 无效: {exc}"],
+        }, 1
     checkpoint = record.get("checkpoint", "")
     try:
         config = load_effective_board_config(
@@ -108,12 +193,14 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
             repo_root=ROOT,
             workspace=workspace,
             profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
     except Exception as exc:
         return {
             "ok": False,
             "feature": feature,
             "workflowProfile": workflow_profile,
+            "workflowDecisions": workflow_decisions,
             "checkpoint": checkpoint,
             "errors": [str(exc)],
         }, 1
@@ -125,6 +212,7 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
             "ok": False,
             "feature": feature,
             "workflowProfile": workflow_profile,
+            "workflowDecisions": workflow_decisions,
             "checkpoint": checkpoint,
             "errors": [f"未知 checkpoint: {checkpoint}"],
         }, 1
@@ -139,18 +227,22 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
     next_action = _state_next_action(nodes[current_idx], node_status)
     allowed_next = _allowed_next(config, checkpoint)
     profile_choices = _profile_choice_payload(workspace, checkpoint)
+    workflow_choices = _workflow_choice_payload(workspace, workflow_profile, workflow_decisions, checkpoint)
     return {
         "ok": True,
         "feature": feature,
         "workflowProfile": workflow_profile,
+        "workflowDecisions": workflow_decisions,
         "checkpoint": checkpoint,
         "currentNodeId": current_node_id,
         "currentNodeStatus": node_status,
         "currentStateId": node_status,
         "allowedNextCheckpoints": allowed_next,
-        "recommendedNextSkill": _recommended_next_skill(workspace, workflow_profile, allowed_next),
+        "recommendedNextSkill": _recommended_next_skill(workspace, workflow_profile, allowed_next, workflow_decisions),
         "requiresProfileChoice": checkpoint == PROFILE_CHOICE_CHECKPOINT and len(profile_choices) > 1,
         "profileChoices": profile_choices,
+        "requiresWorkflowChoice": bool(workflow_choices),
+        "workflowChoices": workflow_choices,
         "nextAction": next_action,
     }, 0
 

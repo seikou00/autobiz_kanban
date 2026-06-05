@@ -58,6 +58,46 @@
         ]
       }
     },
+    "dynamicStages": [
+      {
+        "id": "detail_design_before_code",
+        "phase": "Dev",
+        "label": "详细设计",
+        "description": "在进入代码实现前生成更细的文件级详细设计。",
+        "order": 100,
+        "choiceCheckpoint": "plan_done",
+        "defaultDecision": "pending",
+        "insertAfter": "dev.plan",
+        "enableTargetCheckpoint": "detail_design_in_progress",
+        "skipTargetCheckpoint": "code_in_progress",
+        "enableLabel": "需要，生成详细设计",
+        "skipLabel": "不需要，直接编码",
+        "enableDescription": "先进入 autodev-detail-design，生成 DETAIL_DESIGN.md 后再进入代码实现。",
+        "skipDescription": "不生成 DETAIL_DESIGN.md，直接进入 autodev-code。",
+        "nodes": [
+          {
+            "id": "dev.detail_design",
+            "phase": "Dev",
+            "label": "详细设计",
+            "skill": "autodev-detail-design",
+            "checkpointPrefix": "detail_design",
+            "description": "生成代码实现前的文件级详细设计",
+            "artifacts": {
+              "inputs": [
+                { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
+                { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+                { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
+                { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
+              ],
+              "outputs": [
+                { "id": "detail_design", "label": "详细设计", "artifactType": "file", "path": "DETAIL_DESIGN.md", "required": true }
+              ]
+            },
+            "validators": []
+          }
+        ]
+      }
+    ],
     "checkpoints": {
       "initial": [
         "discuss_in_progress",
@@ -157,7 +197,7 @@
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
-          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev", "userMessage": "请使用 /autodev 继续推进当前 Feature。", "dialogTips": "是否需要将 HTML 设计稿转换为项目内工程文件？需要则先进入 autodev-frontend 阶段，不需要则直接进入 autodev-specs 阶段。" } }
+          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev", "userMessage": "请使用 /autodev 继续推进当前 Feature。", "dialogTips": "通过 /autodev 路由到行为规格；是否需要将 HTML 设计稿转换为项目内工程文件？需要则先进入 autodev-frontend 阶段，不需要则直接进入 autodev-specs 阶段。" } }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {

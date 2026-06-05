@@ -38,6 +38,14 @@ def _print_text(payload: dict) -> None:
                 + f"{choice.get('id')}: {choice.get('label')} "
                 + f"-> {choice.get('recommendedNextSkill') or 'none'}"
             )
+    if payload.get("requiresWorkflowChoice"):
+        print("requiresWorkflowChoice: true")
+        for choice in payload.get("workflowChoices", []):
+            print(
+                "- "
+                + f"{choice.get('stageId')}={choice.get('decision')}: {choice.get('label')} "
+                + f"-> {choice.get('recommendedNextSkill') or 'none'}"
+            )
 
 
 def main(argv: list[str] | None = None) -> int:

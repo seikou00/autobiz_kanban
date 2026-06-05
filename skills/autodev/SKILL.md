@@ -20,6 +20,7 @@ version: v1.1.1604
 | Frontend（`frontend_before_specs` profile） | `/autodev-frontend` | `autodev/autodev-frontend/SKILL.md` |
 | Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
+| Detail Design（dynamic stage） | `/autodev-detail-design` | `autodev/autodev-detail-design/SKILL.md` |
 | Code | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
 | Requirements Review | `/autodev-reviewer` | `autodev/autodev-reviewer/SKILL.md` |
 | Unit Test | `/autodev-utest` | `autodev/autodev-utest/SKILL.md` |
@@ -35,11 +36,13 @@ prd_done → resolve_next_skill.py --json
                                              ↓
                                       /autodev-specs
                                              ↓
-                                      /autodev-plan
-                                             ↓
-                                      /autodev-code
-                                             ↓
-                                      /autodev-reviewer
+	                                      /autodev-plan
+	                                             ↓
+	                         plan_done → detail_design_before_code choice
+	                                      ├── enabled → /autodev-detail-design
+	                                      └── skipped → /autodev-code
+	                                             ↓
+	                                      /autodev-reviewer
                                              ↓
                                       /autodev-utest
                                              ↓
@@ -90,6 +93,12 @@ python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_D
 - 用户说不需要、直接进规格、先走 `autodev-specs` 等，视为不需要转换：推进到 `specs_in_progress`。
 - 如果用户只触发 `/autodev`，且没有表达需要或不需要，简短询问：`是否需要将 HTML 设计稿转换为项目内工程文件？需要则先进入 autodev-frontend 阶段，不需要则直接进入 autodev-specs 阶段。`
 
+若脚本返回 `requiresWorkflowChoice: true`，读取 `workflowChoices` 中的 `stageId`、`decision` 和 `targetCheckpoint`，按用户表达选择 dynamic stage：
+
+- 对 `detail_design_before_code`，用户说需要详细设计、先出详细设计、code 前设计等，视为启用：推进到 `detail_design_in_progress`，并传入 `--workflow-decision detail_design_before_code=enabled`。
+- 用户说不需要、直接编码、跳过详细设计等，视为跳过：推进到 `code_in_progress`，并传入 `--workflow-decision detail_design_before_code=skipped`。
+- 如果用户只触发 `/autodev`，且没有表达需要或不需要，简短询问：`是否需要在代码实现前生成 DETAIL_DESIGN.md？需要则进入 autodev-detail-design，不需要则直接进入 autodev-code。`
+
 ### 1.3 产出物校验
 
 根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按 `$PLUGIN_ROOT/board_core/board_config.json` 校验。
@@ -114,6 +123,7 @@ python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_D
 使用 `resolve_next_skill.py --json` 的返回结果路由：
 
 - `requiresProfileChoice: true`：先完成 workflow profile 选择并写入 checkpoint。
+- `requiresWorkflowChoice: true`：先完成 dynamic stage 选择，使用 `--workflow-decision {stageId}=enabled|skipped` 写入 state.json 后再路由。
 - `recommendedNextSkill` 非空：调用对应子技能，所有非终止状态默认将 `/ARGUMENTS` 透传至子技能。
 - `recommendedNextSkill` 为空且当前 checkpoint 为 `verify_done`：Dev 阶段结束，进入 Ops。
 - `checkpoint` 为 `needs_fix`：停止，读取最近阶段报告中的建议回流阶段并提示用户。
@@ -153,6 +163,29 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 - HTML 转换是 `frontend_before_specs` profile 的正式 Dev 节点，不是停留在 `prd_done` 的无状态临时步骤。
 - 转换不影响 Specs 阶段的输入产物要求，`PRD.md` 仍为 `/autodev-specs` 的必需输入。
 - 未选择 `frontend_before_specs` 时，不得直接调用 `/autodev-frontend` 绕过 workflow profile。
+
+---
+
+## 5. 动态 Dev 阶段
+
+Dev 阶段的可选步骤由 `$PLUGIN_ROOT/board_core/board_config.json` 的 `workflow.dynamicStages` 声明，运行态选择写入 `.autobizdevops/state.json` 的 `workflowDecisions`。根路由器不得硬编码某个可选节点的流程结构，应以 `resolve_next_skill.py --json` 的 `workflowChoices` 为准。
+
+### 详细设计（`detail_design_before_code` dynamic stage）
+
+在 `plan_done` checkpoint 若脚本返回 `requiresWorkflowChoice: true`：
+
+1. 根据用户表达判断是否需要在 code 前生成 `DETAIL_DESIGN.md`。
+2. 不需要时，推进到 `code_in_progress`：
+   `python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
+3. 需要时，推进到 `detail_design_in_progress`：
+   `python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled`
+4. `/autodev-detail-design` 生成 `DETAIL_DESIGN.md` 后推进到 `detail_design_done`，根路由器再次刷新状态并进入 `/autodev-code`。
+
+### 约束
+
+- dynamic stage 必须先在 board_config 的 `workflow.dynamicStages` 声明，不得由根 skill 临时发明节点。
+- 未写入对应 `workflowDecisions` 时，不得直接跳入动态节点 checkpoint。
+- 已启用的 dynamic stage 与 `workflowProfile` 叠加生效；例如先走过 `frontend_before_specs` 的 Feature，启用详细设计后仍必须保留 frontend 节点历史。
 
 ---
 

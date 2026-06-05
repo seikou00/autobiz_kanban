@@ -7,6 +7,7 @@ from .autobizdevops/state.json first. STATE.md is a generated view.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from hooks.paths import (
     get_features_active_dir,
@@ -19,7 +20,7 @@ from board_core.state_store import (
 
 
 StateResult = tuple[dict[str, str], list[str], bool]  # rows, errors, file_exists
-StateRecordsResult = tuple[dict[str, dict[str, str]], list[str], bool]
+StateRecordsResult = tuple[dict[str, dict[str, Any]], list[str], bool]
 
 
 def load_state_md(workspace: Path) -> StateResult:

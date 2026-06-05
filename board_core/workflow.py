@@ -255,7 +255,7 @@ def build_workflow_shell(config: dict) -> dict:
     workflow = {
         k: v
         for k, v in config["workflow"].items()
-        if k not in {"id", "version", "kind", "checkpoints", "transitions", "profiles"}
+            if k not in {"id", "version", "kind", "checkpoints", "transitions", "profiles", "dynamicStages"}
     }
     clean_nodes: list[dict] = []
     for node in workflow["nodes"]:

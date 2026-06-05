@@ -95,12 +95,14 @@ def load_artifact_config(
     *,
     workspace_root: Path | None = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> ArtifactConfig:
     try:
         contracts = load_repo_workflow_contracts(
             repo_root,
             workspace=workspace_root,
             profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
         contract = contracts.contract_for_skill(skill)
     except BoardConfigError as error:

@@ -23,7 +23,7 @@ if str(AUTODEV_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS_DIR))
 
 from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts, load_workflow_contracts  # noqa: E402
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
+from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, normalize_workflow_decisions  # noqa: E402
 from board_core.workflow import find_current_node  # noqa: E402
 from artifact_check import run_postcheck, run_precheck  # noqa: E402
 from paths import ensure_dir, get_feature_hook_log_path  # noqa: E402
@@ -132,14 +132,16 @@ def load_workflow_nodes(
     *,
     workspace_root: Path | None = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> list[dict]:
-    if workspace_root is not None or workflow_profile != BASE_WORKFLOW_PROFILE:
+    if workspace_root is not None or workflow_profile != BASE_WORKFLOW_PROFILE or workflow_decisions:
         try:
             return list(
                 load_repo_workflow_contracts(
                     ROOT,
                     workspace=workspace_root,
                     profile=workflow_profile,
+                    workflow_decisions=workflow_decisions,
                 ).nodes
             )
         except BoardConfigError:
@@ -157,6 +159,7 @@ def checkpoint_node_id(
     *,
     workspace_root: Path | None = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> str:
     if not checkpoint:
         return ""
@@ -164,6 +167,7 @@ def checkpoint_node_id(
         load_workflow_nodes(
             workspace_root=workspace_root,
             workflow_profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         ),
         checkpoint,
     )
@@ -184,6 +188,7 @@ def append_feature_hook_log(
     event_status: str,
     message: str,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> None:
     if not safe_feature_slug(feature):
         return
@@ -200,6 +205,7 @@ def append_feature_hook_log(
             checkpoint,
             workspace_root=workspace_root,
             workflow_profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         ),
     }
     try:
@@ -223,6 +229,7 @@ def append_checkpoint_hook_logs(
     exit_code: int | None = None,
     message: str | None = None,
     workflow_profiles: dict[str, str] | None = None,
+    workflow_decisions: dict[str, dict[str, str]] | None = None,
 ) -> None:
     if not changes:
         return
@@ -239,6 +246,7 @@ def append_checkpoint_hook_logs(
             event_status=resolved_event_status,
             message=message or f"{transition}: {summary}",
             workflow_profile=(workflow_profiles or {}).get(feature, BASE_WORKFLOW_PROFILE),
+            workflow_decisions=(workflow_decisions or {}).get(feature),
         )
 
 
@@ -339,17 +347,35 @@ def _record_profile(
     return BASE_WORKFLOW_PROFILE
 
 
+def _record_workflow_decisions(
+    feature: str,
+    old_records: dict[str, dict] | None,
+    new_records: dict[str, dict] | None,
+) -> dict[str, str]:
+    for records in (new_records, old_records):
+        if not records:
+            continue
+        record = records.get(feature, {})
+        try:
+            return normalize_workflow_decisions(record.get("workflowDecisions", {}))
+        except Exception:
+            return {}
+    return {}
+
+
 def _contracts_for_profile(
     workspace_root: Path | None,
     workflow_profile: str,
     repo_root: Path,
+    workflow_decisions: dict[str, str] | None = None,
 ):
-    if workspace_root is None and workflow_profile == BASE_WORKFLOW_PROFILE:
+    if workspace_root is None and workflow_profile == BASE_WORKFLOW_PROFILE and not workflow_decisions:
         return WORKFLOW_CONTRACTS
     return load_repo_workflow_contracts(
         repo_root,
         workspace=workspace_root,
         profile=workflow_profile,
+        workflow_decisions=workflow_decisions,
     )
 
 
@@ -368,8 +394,9 @@ def validate_transitions(
         old_cp = old_map.get(feature)
         new_cp = new_map.get(feature)
         workflow_profile = _record_profile(feature, old_records, new_records)
+        workflow_decisions = _record_workflow_decisions(feature, old_records, new_records)
         try:
-            contracts = _contracts_for_profile(workspace_root, workflow_profile, repo_root)
+            contracts = _contracts_for_profile(workspace_root, workflow_profile, repo_root, workflow_decisions)
         except BoardConfigError as exc:
             errors.append(f"Feature '{feature}' workflow profile '{workflow_profile}' 无法编译: {exc}")
             continue
@@ -412,6 +439,7 @@ def check_stage_inputs(
     repo_root: Path = ROOT,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> str | None:
     code, message = run_precheck(
         repo_root,
@@ -419,6 +447,7 @@ def check_stage_inputs(
         skill,
         slug,
         workflow_profile=workflow_profile,
+        workflow_decisions=workflow_decisions,
     )
     if code != 0:
         return message
@@ -432,6 +461,7 @@ def check_stage_outputs(
     repo_root: Path = ROOT,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> str | None:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
@@ -441,6 +471,7 @@ def check_stage_outputs(
             skill,
             slug,
             workflow_profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
     if code != 0:
         detail = output.getvalue().strip()
@@ -460,8 +491,9 @@ def validate_lifecycle(
     errors: list[str] = []
     for slug, old_checkpoint, new_checkpoint in changed_rows(old_rows, new_rows):
         workflow_profile = _record_profile(slug, old_records, new_records)
+        workflow_decisions = _record_workflow_decisions(slug, old_records, new_records)
         try:
-            contracts = _contracts_for_profile(root, workflow_profile, repo_root)
+            contracts = _contracts_for_profile(root, workflow_profile, repo_root, workflow_decisions)
         except BoardConfigError as exc:
             errors.append(f"Feature '{slug}' workflow profile '{workflow_profile}' 无法编译: {exc}")
             continue
@@ -474,6 +506,7 @@ def validate_lifecycle(
                     start_skill,
                     repo_root,
                     workflow_profile=workflow_profile,
+                    workflow_decisions=workflow_decisions,
                 )
                 if error:
                     errors.append(error)
@@ -487,6 +520,7 @@ def validate_lifecycle(
                     end_skill,
                     repo_root,
                     workflow_profile=workflow_profile,
+                    workflow_decisions=workflow_decisions,
                 )
                 if error:
                     errors.append(error)

@@ -15,7 +15,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.contracts import BoardConfigError, SkillContract, load_repo_workflow_contracts  # noqa: E402
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names, read_json  # noqa: E402
+from board_core.workflow_compiler import (  # noqa: E402
+    BASE_WORKFLOW_PROFILE,
+    WorkflowCompileError,
+    configured_profile_names,
+    normalize_workflow_decisions,
+    read_json,
+)
 
 
 def _artifact_lines(title: str, artifacts: tuple, *, heading: str = "##") -> list[str]:
@@ -78,15 +84,21 @@ def _find_contract(
     skill: str,
     workspace: Path | None,
     workflow_profile: str,
+    workflow_decisions: dict[str, str],
 ) -> SkillContract:
     profiles = (workflow_profile,)
-    if workspace is None and workflow_profile == BASE_WORKFLOW_PROFILE:
+    if workspace is None and workflow_profile == BASE_WORKFLOW_PROFILE and not workflow_decisions:
         profiles = _profile_names(repo_root)
 
     last_error: BoardConfigError | None = None
     for profile in profiles:
         try:
-            contracts = load_repo_workflow_contracts(repo_root, workspace=workspace, profile=profile)
+            contracts = load_repo_workflow_contracts(
+                repo_root,
+                workspace=workspace,
+                profile=profile,
+                workflow_decisions=workflow_decisions,
+            )
             return contracts.contract_for_skill(skill)
         except BoardConfigError as error:
             last_error = error
@@ -99,18 +111,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
     parser.add_argument("--workspace", help="project workspace for profile overlays")
     parser.add_argument("--workflow-profile", default=BASE_WORKFLOW_PROFILE)
+    parser.add_argument(
+        "--workflow-decision",
+        action="append",
+        default=[],
+        help="workflow decision in stage=enabled|skipped form; may be repeated",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable contract JSON")
     args = parser.parse_args(argv)
 
     try:
         repo_root = Path(args.repo_root).resolve()
         workspace = Path(args.workspace).resolve() if args.workspace else None
+        workflow_decisions = {}
+        for raw_decision in args.workflow_decision:
+            if "=" not in raw_decision:
+                raise BoardConfigError(f"invalid workflow decision: {raw_decision}")
+            stage_id, decision = raw_decision.split("=", 1)
+            workflow_decisions[stage_id.strip()] = decision.strip()
+        workflow_decisions = normalize_workflow_decisions(workflow_decisions)
         contract = _find_contract(
             repo_root,
             skill=args.skill,
             workspace=workspace,
             workflow_profile=args.workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
+    except WorkflowCompileError as error:
+        print(f"inspect_skill_contract failed: {error}", file=sys.stderr)
+        return 1
     except BoardConfigError as error:
         print(f"inspect_skill_contract failed: {error}", file=sys.stderr)
         return 1

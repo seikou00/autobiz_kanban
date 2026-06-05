@@ -221,12 +221,14 @@ def validate_skill_config_schema(
     *,
     workspace_root: Path | None = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> None:
     config = load_artifact_config(
         repo_root,
         skill,
         workspace_root=workspace_root,
         workflow_profile=workflow_profile,
+        workflow_decisions=workflow_decisions,
     )
     for validator in config.validators:
         if validator not in VALIDATORS:
@@ -239,6 +241,7 @@ def validate_config_schema(
     *,
     workspace_root: Path | None = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> None:
     if skill != "all":
         validate_skill_config_schema(
@@ -246,6 +249,7 @@ def validate_config_schema(
             skill,
             workspace_root=workspace_root,
             workflow_profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
         return
 
@@ -264,6 +268,7 @@ def validate_config_schema(
                 repo_root,
                 workspace=workspace_root,
                 profile=profile,
+                workflow_decisions=workflow_decisions,
             )
             for contract in contracts.skill_contracts.values():
                 for validator in contract.validators:
@@ -280,6 +285,7 @@ def run_precheck(
     slug: str,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     try:
         config = load_artifact_config(
@@ -287,6 +293,7 @@ def run_precheck(
             skill,
             workspace_root=workspace_root,
             workflow_profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
         validate_required_files(workspace_root, slug, config.required_inputs)
     except HookCheckError as error:
@@ -304,6 +311,7 @@ def run_postcheck(
     slug: str,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     try:
         config = load_artifact_config(
@@ -311,6 +319,7 @@ def run_postcheck(
             skill,
             workspace_root=workspace_root,
             workflow_profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
         validate_required_files(workspace_root, slug, config.required_outputs)
         for validator in config.validators:
@@ -339,6 +348,7 @@ def run_check(
     slug: str,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: dict[str, str] | None = None,
 ) -> int:
     if kind == "precheck":
         code, message = run_precheck(
@@ -347,6 +357,7 @@ def run_check(
             skill,
             slug,
             workflow_profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
     elif kind == "postcheck":
         code, message = run_postcheck(
@@ -355,6 +366,7 @@ def run_check(
             skill,
             slug,
             workflow_profile=workflow_profile,
+            workflow_decisions=workflow_decisions,
         )
     else:
         print(f"UNKNOWN_CHECK kind={kind}", file=sys.stderr)
@@ -371,10 +383,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", default=str(repo_root_from_this_file()))
     parser.add_argument("--workspace-root", default=str(Path.cwd().resolve()))
     parser.add_argument("--workflow-profile", default=BASE_WORKFLOW_PROFILE)
+    parser.add_argument(
+        "--workflow-decision",
+        action="append",
+        default=[],
+        help="workflow decision in stage=enabled|skipped form; may be repeated",
+    )
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
     workspace_root = Path(args.workspace_root).resolve()
+    workflow_decisions: dict[str, str] = {}
+    for raw_decision in args.workflow_decision:
+        if "=" not in raw_decision:
+            print(f"SCHEMA_FAIL skill={args.skill} reason=invalid_workflow_decision detail={raw_decision}")
+            return 1
+        stage_id, decision = raw_decision.split("=", 1)
+        workflow_decisions[stage_id.strip()] = decision.strip()
 
     if args.kind == "schema":
         try:
@@ -383,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.skill,
                 workspace_root=workspace_root,
                 workflow_profile=args.workflow_profile,
+                workflow_decisions=workflow_decisions,
             )
         except HookCheckError as error:
             detail = f" detail={error.detail}" if error.detail else ""
@@ -401,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
         args.skill,
         args.slug,
         workflow_profile=args.workflow_profile,
+        workflow_decisions=workflow_decisions,
     )
 
 

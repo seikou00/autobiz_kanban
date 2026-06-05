@@ -27,6 +27,7 @@ from board_core.contracts import artifact_dicts  # type: ignore[import-untyped]
 from board_core.workflow_compiler import (  # type: ignore[import-untyped]
     BASE_WORKFLOW_PROFILE,
     load_effective_board_config,
+    normalize_workflow_decisions,
 )
 from board_core.state import (  # type: ignore[import-untyped]
     find_feature_dir,
@@ -55,12 +56,13 @@ def _load_board_config() -> dict:
     return json.loads(BOARD_CONFIG_PATH.read_text(encoding="utf-8"))
 
 
-def _load_effective_config(workspace: Path, profile: str) -> dict:
+def _load_effective_config(workspace: Path, profile: str, workflow_decisions: dict[str, str] | None = None) -> dict:
     return load_effective_board_config(
         BOARD_CONFIG_PATH,
         repo_root=ROOT,
         workspace=workspace,
         profile=profile,
+        workflow_decisions=workflow_decisions,
     )
 
 
@@ -94,9 +96,11 @@ def _hook_log_refs(workspace: Path, feature: str, feature_dir: Path | None = Non
 def run_mode(workspace: Path, feature: str, config: dict) -> int:
     """Handle --mode run."""
     state_records, state_record_errors, _state_record_exists = load_state_records(workspace)
-    workflow_profile = state_records.get(feature, {}).get("workflowProfile", BASE_WORKFLOW_PROFILE)
-    if workflow_profile != BASE_WORKFLOW_PROFILE:
-        config = _load_effective_config(workspace, workflow_profile)
+    record = state_records.get(feature, {})
+    workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
+    workflow_decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
+    if workflow_profile != BASE_WORKFLOW_PROFILE or workflow_decisions:
+        config = _load_effective_config(workspace, workflow_profile, workflow_decisions)
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
@@ -154,6 +158,7 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
             "featureId": feature,
             "featureName": feature,
             "workflowProfile": workflow_profile,
+            "workflowDecisions": workflow_decisions,
             "hookLogRefs": _hook_log_refs(workspace, feature, feature_dir),
             "watchRefs": _watch_refs(workspace, feature, feature_dir),
             "currentNodeId": current_node_id or "unknown",
@@ -188,9 +193,10 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
     for feature in feature_names:
         record = state_records.get(feature, {})
         workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
+        workflow_decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
         run_config = config
-        if workflow_profile != BASE_WORKFLOW_PROFILE:
-            run_config = _load_effective_config(project_workspace, workflow_profile)
+        if workflow_profile != BASE_WORKFLOW_PROFILE or workflow_decisions:
+            run_config = _load_effective_config(project_workspace, workflow_profile, workflow_decisions)
         nodes_config = run_config["workflow"]["nodes"]
         suffix_states = run_config["checkpointSuffixState"]
         checkpoint = record.get("checkpoint", "")
@@ -211,6 +217,7 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
             "featureName": feature,
             "featureId": feature,
             "workflowProfile": workflow_profile,
+            "workflowDecisions": workflow_decisions,
             "currentNodeId": current_node_id or "unknown",
             "currentNodeStatus": current_node_status,
             "currentNodeStatusLabel": current_node_status_label,

@@ -172,6 +172,7 @@ def load_workflow_contracts(
     repo_root: Path | None = None,
     workspace: Path | None = None,
     profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
 ) -> WorkflowContracts:
     profile = normalize_workflow_profile(profile)
@@ -181,6 +182,7 @@ def load_workflow_contracts(
             repo_root=repo_root,
             workspace=workspace,
             profile=profile,
+            workflow_decisions=workflow_decisions,
             overlays=overlays,
         )
     except WorkflowCompileError as exc:
@@ -318,6 +320,7 @@ def load_repo_workflow_contracts(
     *,
     workspace: Path | None = None,
     profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
 ) -> WorkflowContracts:
     return load_workflow_contracts(
@@ -325,5 +328,6 @@ def load_repo_workflow_contracts(
         repo_root=repo_root,
         workspace=workspace,
         profile=profile,
+        workflow_decisions=workflow_decisions,
         overlays=overlays,
     )
