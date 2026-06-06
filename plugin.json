@@ -10,5 +10,6 @@
   "keywords": ["AUTOBIZDEVOPS","kanban"],
   "skills": "skills",
   "mcpServers": ".mcp.json",
-  "hooks": "hooks/hooks.json"
+  "hooks": "hooks/hooks.json",
+  "useScenario": "应用开发"
 }
