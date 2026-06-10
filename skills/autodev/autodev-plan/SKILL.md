@@ -1,6 +1,6 @@
 ---
 name: autodev-plan
-description: Dev 阶段技术设计与执行计划生成。读取 proposal.md、specs/**/*.md 和现有代码，生成 design.md 与 PLAN.md；不得修改业务代码。
+description: Dev 阶段技术设计与执行计划生成。按上游产物契约（Source Bundle）读取输入原件（标准链为 proposal.md、specs/**/*.md）和现有代码，生成 design.md 与 PLAN.md；不得修改业务代码。
 version: v1.1.1604
 ---
 
@@ -13,14 +13,21 @@ version: v1.1.1604
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约
+## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
-运行前如需查看当前契约，执行：
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --feature "$FEATURE_ID" --json
 ```
+
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
+- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+
+无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -29,7 +36,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 
 
 ## explore
-进入设计探索模式。先读取 `proposal.md` 与 `specs/**/*.md`，把行为契约、现状、技术约束和未知点想清楚，隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+进入设计探索模式。先按「流程契约」一节取本 Feature 的 Source Bundle，读取契约列出的上游产物原件（标准链为 `proposal.md` 与 `specs/**/*.md`），按各自 `extract` 抽取重点，把行为契约、现状、技术约束和未知点想清楚；契约未提供的上游产物按其 `extract.degrade` 处理（如基于用户直供需求建立上下文），不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
 **重要：探索模式用于澄清和调研，不用于实现。** 你可以读取 AGENTS.md、proposal.md、specs/**/*.md、已有设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
 
@@ -110,7 +117,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。若 Feature slug、工作目录或 `CHECKPOINT` 为空、未知，或无法唯一确定，停止并提示用户选择 Feature；若本轮是用户直供需求并允许 `plan_in_progress --allow-create` 创建状态，创建后必须刷新 `CHECKPOINT`。
 
-- 读取 `{FEATURE_DIR}/proposal.md`、`specs/**/*.md`、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
+- 按 Source Bundle 读取上游产物原件（标准链为 `{FEATURE_DIR}/proposal.md`、`specs/**/*.md`）、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。契约未提供的上游产物按其降级读法处理，不要硬等。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
 - 读取 AGENTS.md 和与本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
 
@@ -403,4 +410,10 @@ python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint plan_done
 CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ```
 
-**Skill 完成。** 下一步：`/autodev-code`
+**Skill 完成。** 下一步以当前 Feature 的工作流为准：
+
+```bash
+python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PLUGIN_WORKSPACE/$PROJECT_CODE" --feature "$FEATURE_ID"
+```
+
+标准链下一步为 `/autodev-code`。

@@ -10,6 +10,8 @@ from typing import Iterable
 
 BASE_WORKFLOW_PROFILE = "standard"
 LEGACY_BASE_WORKFLOW_PROFILE = "base"
+BASE_WORKFLOW_TEMPLATE = "standard"
+ALLOWED_TEMPLATE_KINDS = frozenset({"profile", "nodeSubset", "custom"})
 DEFAULT_ENABLED_DYNAMIC_PHASES = frozenset({"Biz", "Dev"})
 ALLOWED_PHASES = frozenset({"Biz", "Dev", "Ops"})
 ALLOWED_GUARDS = frozenset({"code_compile"})
@@ -134,6 +136,116 @@ def configured_profile_options(base_config: dict) -> list[dict[str, str]]:
             "description": description if isinstance(description, str) else "",
         })
     return result
+
+
+def normalize_workflow_template(template: str | None) -> str:
+    if template is None:
+        return BASE_WORKFLOW_TEMPLATE
+    cleaned = str(template).strip()
+    return cleaned or BASE_WORKFLOW_TEMPLATE
+
+
+def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
+    """Validated workflow.templates registry; standard is always present."""
+    workflow = base_config.get("workflow")
+    raw = workflow.get("templates", {}) if isinstance(workflow, dict) else {}
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise WorkflowCompileError("workflow.templates must be an object")
+
+    templates: dict[str, dict] = {}
+    for template_id, spec in raw.items():
+        if not isinstance(template_id, str) or not template_id.strip():
+            raise WorkflowCompileError("workflow.templates keys must be non-empty strings")
+        if not isinstance(spec, dict):
+            raise WorkflowCompileError(f"workflow.templates.{template_id} must be an object")
+        kind = spec.get("kind", "profile")
+        if kind not in ALLOWED_TEMPLATE_KINDS:
+            allowed = ", ".join(sorted(ALLOWED_TEMPLATE_KINDS))
+            raise WorkflowCompileError(f"workflow.templates.{template_id}.kind must be one of: {allowed}")
+        nodes = spec.get("nodes")
+        if kind == "nodeSubset":
+            if not isinstance(nodes, list) or not nodes or any(not isinstance(item, str) or not item for item in nodes):
+                raise WorkflowCompileError(
+                    f"workflow.templates.{template_id}.nodes must be a non-empty list of node ids"
+                )
+        elif nodes is not None:
+            raise WorkflowCompileError(f"workflow.templates.{template_id}.nodes is only allowed for nodeSubset")
+        templates[template_id.strip()] = {
+            "id": template_id.strip(),
+            "kind": kind,
+            "label": spec.get("label", template_id) if isinstance(spec.get("label", template_id), str) else template_id,
+            "description": spec.get("description", "") if isinstance(spec.get("description", ""), str) else "",
+            "nodes": list(nodes) if isinstance(nodes, list) else [],
+        }
+
+    templates.setdefault(
+        BASE_WORKFLOW_TEMPLATE,
+        {
+            "id": BASE_WORKFLOW_TEMPLATE,
+            "kind": "profile",
+            "label": "标准",
+            "description": "完整主干流程。",
+            "nodes": [],
+        },
+    )
+    return templates
+
+
+def configured_template_options(base_config: dict) -> list[dict[str, str]]:
+    templates = configured_workflow_templates(base_config)
+    ordered = [BASE_WORKFLOW_TEMPLATE] + [name for name in templates if name != BASE_WORKFLOW_TEMPLATE]
+    return [
+        {
+            "id": templates[name]["id"],
+            "kind": templates[name]["kind"],
+            "label": templates[name]["label"],
+            "description": templates[name]["description"],
+        }
+        for name in ordered
+    ]
+
+
+def resolve_template_subset(
+    base_config: dict,
+    template: str | None,
+    *,
+    workflow_nodes: object = None,
+    workflow_externalized: object = None,
+) -> tuple[list[str], dict[str, list[str]]] | None:
+    """Resolve a template to its node subset, or None for full-workflow templates.
+
+    nodeSubset templates take nodes from the registry; custom templates take
+    them from the per-feature record (workflow_nodes / workflow_externalized).
+    """
+    template = normalize_workflow_template(template)
+    registry = configured_workflow_templates(base_config)
+    spec = registry.get(template)
+    if spec is None:
+        known = ", ".join(sorted(registry))
+        raise WorkflowCompileError(f"unknown workflow template: {template}; known: {known}")
+
+    if spec["kind"] == "profile":
+        return None
+    if spec["kind"] == "nodeSubset":
+        return list(spec["nodes"]), {}
+
+    if not isinstance(workflow_nodes, list) or not workflow_nodes or any(
+        not isinstance(item, str) or not item.strip() for item in workflow_nodes
+    ):
+        raise WorkflowCompileError(f"workflow template {template} requires workflowNodes to be a non-empty list")
+    externalized: dict[str, list[str]] = {}
+    if workflow_externalized is not None:
+        if not isinstance(workflow_externalized, dict):
+            raise WorkflowCompileError("workflowExternalized must be an object of node id -> path list")
+        for node_id, paths in workflow_externalized.items():
+            if not isinstance(node_id, str) or not node_id.strip():
+                raise WorkflowCompileError("workflowExternalized keys must be non-empty strings")
+            if not isinstance(paths, list) or any(not isinstance(item, str) or not item for item in paths):
+                raise WorkflowCompileError(f"workflowExternalized.{node_id} must be a list of paths")
+            externalized[node_id.strip()] = list(paths)
+    return [item.strip() for item in workflow_nodes], externalized
 
 
 def normalize_workflow_decisions(decisions: object | None) -> dict[str, str]:
@@ -771,6 +883,43 @@ def _enabled_phases(overlays: Iterable[dict]) -> set[str]:
     return enabled
 
 
+def _assemble_effective(
+    effective: dict,
+    workflow: dict,
+    nodes: list[dict],
+    *,
+    profile: str,
+    decisions: dict[str, str],
+    enabled_stages: list[dict] | None = None,
+) -> dict:
+    """Validate nodes and derive states/checkpoints/transitions into the effective config.
+
+    enabled_stages=None skips dynamic-stage target validation (subset workflows
+    do not support dynamic stages).
+    """
+    _validate_unique_nodes_and_checkpoints(nodes)
+    _validate_artifact_dependencies(nodes)
+    _renumber_nodes(nodes)
+    _derive_node_states(nodes)
+
+    checkpoint_config = workflow.get("checkpoints", {})
+    checkpoint_config = checkpoint_config if isinstance(checkpoint_config, dict) else {}
+    base_labels = checkpoint_config.get("stageLabels", {})
+    base_labels = base_labels if isinstance(base_labels, dict) else {}
+    workflow["nodes"] = nodes
+    workflow["checkpoints"] = {
+        "initial": _derive_initial_checkpoints(nodes, checkpoint_config),
+        "transitions": _derive_checkpoint_transitions(nodes, checkpoint_config),
+        "stageLabels": _derive_stage_labels(nodes, base_labels),
+    }
+    if enabled_stages is not None:
+        _validate_dynamic_stage_targets(nodes, workflow["checkpoints"]["transitions"], enabled_stages)
+    workflow["transitions"] = _derive_ui_transitions(nodes)
+    effective["workflowProfile"] = profile
+    effective["workflowDecisions"] = decisions
+    return effective
+
+
 def compile_board_config(
     base_config: dict,
     *,
@@ -840,30 +989,151 @@ def compile_board_config(
             _insert_dynamic_node(nodes, dynamic_node, spec, context=context)
 
     _validate_dynamic_stage_definitions(nodes, dynamic_stages, repo_root=repo_root)
-    _validate_unique_nodes_and_checkpoints(nodes)
-    _validate_artifact_dependencies(nodes)
-    _renumber_nodes(nodes)
-    _derive_node_states(nodes)
-
-    checkpoint_config = workflow.get("checkpoints", {})
-    checkpoint_config = checkpoint_config if isinstance(checkpoint_config, dict) else {}
-    base_labels = checkpoint_config.get("stageLabels", {})
-    base_labels = base_labels if isinstance(base_labels, dict) else {}
-    workflow["nodes"] = nodes
-    workflow["checkpoints"] = {
-        "initial": _derive_initial_checkpoints(nodes, checkpoint_config),
-        "transitions": _derive_checkpoint_transitions(nodes, checkpoint_config),
-        "stageLabels": _derive_stage_labels(nodes, base_labels),
-    }
     enabled_stages = [
         stage
         for stage in dynamic_stages
         if decisions.get(stage["id"]) == ENABLED_WORKFLOW_DECISION
     ]
-    _validate_dynamic_stage_targets(nodes, workflow["checkpoints"]["transitions"], enabled_stages)
-    workflow["transitions"] = _derive_ui_transitions(nodes)
-    effective["workflowProfile"] = profile
-    effective["workflowDecisions"] = decisions
+    return _assemble_effective(
+        effective,
+        workflow,
+        nodes,
+        profile=profile,
+        decisions=decisions,
+        enabled_stages=enabled_stages,
+    )
+
+
+def _externalize_broken_inputs(nodes: list[dict], forced: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
+    """Mark required inputs whose producer is not in the node list as external.
+
+    Externalized inputs also become optional: they are not produced in-workflow,
+    so prechecks must not block on them; skills fall back to the input's
+    extract.degrade reading. forced maps node id -> input paths to externalize
+    regardless of producers. Returns the externalized paths per node id.
+    """
+    forced = forced or {}
+    available: set[str] = set()
+    externalized: dict[str, list[str]] = {}
+    for node in nodes:
+        node_id = str(node.get("id", ""))
+        forced_paths = set(forced.get(node_id, []))
+        for artifact in _artifact_dicts(node, "inputs"):
+            if not isinstance(artifact, dict):
+                continue
+            path = artifact.get("path")
+            if not isinstance(path, str):
+                continue
+            if artifact.get("external", False):
+                continue
+            broken = artifact.get("required", True) and path not in available
+            if broken or path in forced_paths:
+                artifact["external"] = True
+                artifact["required"] = False
+                externalized.setdefault(node_id, []).append(path)
+        for artifact in _artifact_dicts(node, "outputs"):
+            if isinstance(artifact, dict) and isinstance(artifact.get("path"), str):
+                available.add(artifact["path"])
+    return externalized
+
+
+def _filter_checkpoint_config(workflow: dict, nodes: list[dict]) -> None:
+    """Restrict base checkpoint config to checkpoints declared by the given nodes.
+
+    Keeps needs_fix so the shared repair checkpoint stays usable in every template.
+    """
+    checkpoint_config = workflow.get("checkpoints", {})
+    checkpoint_config = checkpoint_config if isinstance(checkpoint_config, dict) else {}
+    keep = {
+        checkpoint
+        for node in nodes
+        for checkpoint in node.get("checkpoints", [])
+        if isinstance(checkpoint, str)
+    }
+    keep.add("needs_fix")
+
+    initial = checkpoint_config.get("initial", [])
+    initial = initial if isinstance(initial, list) else []
+    transitions = checkpoint_config.get("transitions", {})
+    transitions = transitions if isinstance(transitions, dict) else {}
+    stage_labels = checkpoint_config.get("stageLabels", {})
+    stage_labels = stage_labels if isinstance(stage_labels, dict) else {}
+
+    workflow["checkpoints"] = {
+        "initial": [checkpoint for checkpoint in initial if checkpoint in keep],
+        "transitions": {
+            checkpoint: [target for target in targets if target in keep]
+            for checkpoint, targets in transitions.items()
+            if checkpoint in keep and isinstance(targets, list)
+        },
+        "stageLabels": {
+            checkpoint: label
+            for checkpoint, label in stage_labels.items()
+            if checkpoint in keep
+        },
+    }
+
+
+def compile_node_subset(
+    base_config: dict,
+    node_ids: Iterable[str],
+    *,
+    profile: str = BASE_WORKFLOW_PROFILE,
+    workflow_decisions: object | None = None,
+    externalized_inputs: dict[str, list[str]] | None = None,
+) -> dict:
+    """Compile an effective workflow keeping only the selected base nodes.
+
+    Nodes keep base array order; required inputs whose producer was dropped are
+    externalized. Dynamic stages and profile overlays are not applied to subset
+    workflows.
+    """
+    profile = normalize_workflow_profile(profile)
+    decisions = normalize_workflow_decisions(workflow_decisions)
+
+    requested = [str(node_id).strip() for node_id in node_ids if str(node_id).strip()]
+    if not requested:
+        raise WorkflowCompileError("node subset must contain at least one node id")
+
+    effective = copy.deepcopy(base_config)
+    workflow = effective.get("workflow")
+    if not isinstance(workflow, dict):
+        raise WorkflowCompileError("workflow must be an object")
+    base_nodes = workflow.get("nodes")
+    if not isinstance(base_nodes, list):
+        raise WorkflowCompileError("workflow.nodes must be a list")
+
+    known_ids = {
+        str(node.get("id", ""))
+        for node in base_nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    unknown = sorted(set(requested) - known_ids)
+    if unknown:
+        raise WorkflowCompileError(f"node subset references unknown nodes: {', '.join(unknown)}")
+
+    selected = set(requested)
+    nodes = [
+        copy.deepcopy(node)
+        for node in base_nodes
+        if isinstance(node, dict) and str(node.get("id", "")) in selected
+    ]
+
+    externalized = _externalize_broken_inputs(nodes, externalized_inputs)
+    _filter_checkpoint_config(workflow, nodes)
+
+    effective = _assemble_effective(
+        effective,
+        workflow,
+        nodes,
+        profile=profile,
+        decisions=decisions,
+        enabled_stages=None,
+    )
+    effective["workflowNodeSubset"] = [str(node.get("id", "")) for node in nodes]
+    effective["workflowExternalizedInputs"] = {
+        node_id: list(paths) for node_id, paths in externalized.items()
+    }
     return effective
 
 
@@ -887,3 +1157,40 @@ def load_effective_board_config(
         workflow_decisions=workflow_decisions,
         overlays=overlays,
     )
+
+
+def load_record_effective_board_config(
+    config_path: Path | None = None,
+    *,
+    repo_root: Path | None = None,
+    workspace: Path | None = None,
+    record: dict,
+) -> dict:
+    """Compile the effective workflow config for a state record (template-aware)."""
+    if not isinstance(record, dict):
+        raise WorkflowCompileError("workflow record must be an object")
+    path = config_path or default_config_path()
+    base_config = read_json(path)
+    profile = normalize_workflow_profile(record.get("workflowProfile"))
+    decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
+    template = normalize_workflow_template(record.get("workflowTemplate"))
+    subset = resolve_template_subset(
+        base_config,
+        template,
+        workflow_nodes=record.get("workflowNodes"),
+        workflow_externalized=record.get("workflowExternalized"),
+    )
+    if subset is None:
+        return compile_board_config(
+            base_config,
+            repo_root=repo_root or repo_root_for_config_path(path),
+            workspace=workspace,
+            profile=profile,
+            workflow_decisions=decisions,
+        )
+    if profile != BASE_WORKFLOW_PROFILE:
+        raise WorkflowCompileError(f"workflow template {template} 不支持 workflowProfile={profile}")
+    if decisions:
+        raise WorkflowCompileError(f"workflow template {template} 不支持 workflowDecisions")
+    node_ids, externalized = subset
+    return compile_node_subset(base_config, node_ids, externalized_inputs=externalized)

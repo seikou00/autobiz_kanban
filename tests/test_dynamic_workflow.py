@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,31 @@ from hooks.update_checkpoint import prepare_checkpoint_update, write_hook_logs  
 
 
 DYNAMIC_SKILL = "autodev-dynamic-quality-gate"
+DYNAMIC_SKILL_DIR = ROOT / "skills" / "autodev" / DYNAMIC_SKILL
+_created_dynamic_skill_fixture = False
+
+
+def setUpModule() -> None:
+    """Provision the dynamic-skill fixture so the repo need not ship it."""
+    global _created_dynamic_skill_fixture
+    skill_md = DYNAMIC_SKILL_DIR / "SKILL.md"
+    if not skill_md.exists():
+        DYNAMIC_SKILL_DIR.mkdir(parents=True, exist_ok=True)
+        skill_md.write_text(
+            "---\n"
+            f"name: {DYNAMIC_SKILL}\n"
+            "description: 测试夹具：动态质量门禁节点，仅供 test_dynamic_workflow 使用。\n"
+            "---\n"
+            "\n"
+            "# 测试夹具\n",
+            encoding="utf-8",
+        )
+        _created_dynamic_skill_fixture = True
+
+
+def tearDownModule() -> None:
+    if _created_dynamic_skill_fixture:
+        shutil.rmtree(DYNAMIC_SKILL_DIR, ignore_errors=True)
 
 
 def quality_overlay(*, phase: str = "Dev", insert_after: str = "dev.plan") -> dict:

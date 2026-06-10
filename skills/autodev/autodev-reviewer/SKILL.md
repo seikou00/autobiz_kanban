@@ -13,14 +13,21 @@ version: v1.1.1604
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约
+## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
-运行前如需查看当前契约，执行：
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-reviewer --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-reviewer --feature "$FEATURE_ID" --json
 ```
+
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
+- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+
+无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -55,7 +62,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 1. **主 agent 写 completion proposal。**按 references/schemas.md 创建 `{FEATURE_DIR}/completion-proposal.json`。proposal 应描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。跨仓库任务必须写 `affected_repositories`；单仓库任务可以省略该字段。
 2. **主 agent 启动独立 reviewer agent。**使用 subagent 机制启动独立 reviewer。启动子代理，并把 references/reviewer-agent.md 中的 reviewer 指令作为 prompt。启动子agent附带用户提供的原始 PRD 路径列表；没有则写 none，供 reviewer 与 proposal.prd_references 交叉核对。如果流程希望 reviewer 核对用户主动输入的仓库是否被遗漏，启动 prompt 还必须附带 `User repository references`；否则 reviewer 只以 completion proposal、proposal.md、specs、design、PLAN、可选 PRD 和真实仓库状态为依据。
-3. **reviewer 自己获取真实状态。**reviewer 必须自行通过工具获取仓库状态，并读取 feature 目录中的 proposal.md、specs/**/*.md、design.md、PLAN.md；PRD 只在用户或 completion proposal 显式引用时读取。若 completion proposal 有 `affected_repositories`，reviewer 必须对每个仓库逐个执行 git status/diff/log 等只读检查；若没有，则按旧流程把当前 cwd 当作唯一仓库。不要依赖主 agent 预先生成的 diff snapshot 或规格摘要。
+3. **reviewer 自己获取真实状态。**reviewer 必须自行通过工具获取仓库状态，并读取 feature 目录中的 proposal.md、specs/**/*.md，以及 design.md、PLAN.md（如果存在；当前 Feature 工作流契约未提供时跳过并在评估中标注基准缺失）；PRD 只在用户或 completion proposal 显式引用时读取。若 completion proposal 有 `affected_repositories`，reviewer 必须对每个仓库逐个执行 git status/diff/log 等只读检查；若没有，则按旧流程把当前 cwd 当作唯一仓库。不要依赖主 agent 预先生成的 diff snapshot 或规格摘要。
 4. **reviewer 直接写需求评估文件。**reviewer 必须直接写入 `{FEATURE_DIR}/REQUIREMENTS_EVAL.md`。
 5. **主 agent 读取 verdict 并分支。**如果 verdict 是 `PASS` 或 `PASS_WITH_WARNINGS`，报告 verdict 与 `REQUIREMENTS_EVAL.md` 路径后结束本阶段。如果 verdict 是 `FAIL`，主 agent 必须按 `REQUIREMENTS_EVAL.md` 中的 blockers 做最小修复，更新 `completion-proposal.json`，重新启动独立 reviewer，直到 verdict 变为 `PASS` 或 `PASS_WITH_WARNINGS`。如果 verdict 是 `DEGRADED`，停止并报告独立审查未成立。
 
@@ -201,7 +208,7 @@ Verdict: <PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED>
 1. **声明准确性**：proposal 中的 affected_repositories、files_changed、summary、behavior_changed 是否匹配每个仓库的真实 git status 和 git diff。
 2. **证据可信度**：proposal 中声称的测试、lint、build、手工验证是否有足够证据；证据不足要降分或给 warning。
 3. **规格对齐度**：真实 diff 和 completion proposal 是否满足 proposal.md、specs/**/*.md 中的能力边界、Requirement / Scenario、约束和非目标；如用户提供 PRD，再检查 PRD 与 specs 的上游一致性。
-4. **代码现实**：每个仓库的真实 diff 是否实现了 completion proposal 声称的行为，并与 design.md 的接口/数据/技术决策一致。
+4. **代码现实**：每个仓库的真实 diff 是否实现了 completion proposal 声称的行为；如有 design.md，是否与其接口/数据/技术决策一致。
 5. **风险诚实度**：known_limitations 是否遗漏了 diff、specs、design 或可选 PRD 中可见的明显风险。
 6. **一致性**：API、routes、config、types、tests、docs 是否在单仓库内及跨仓库之间同步。
 7. **未完成痕迹**：是否存在未解释的 TODO/FIXME/HACK、stub、mock、dead code、disabled tests 或 silent failures。

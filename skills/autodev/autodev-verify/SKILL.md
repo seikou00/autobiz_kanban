@@ -13,14 +13,21 @@ version: v1.1.1604
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约
+## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
-运行前如需查看当前契约，执行：
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-verify --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-verify --feature "$FEATURE_ID" --json
 ```
+
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
+- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+
+无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -70,6 +77,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 ## Step 3: 提取验收契约
 
+按「流程契约」一节取本 Feature 的 Source Bundle，对其中每个输入按 `extract` 抽取；契约未提供（`external: true`）的输入按其降级读法处理并在报告中标注基准缺失。
+
 从 `{FEATURE_DIR}/proposal.md` 提取本轮能力边界、影响面和非目标。
 
 从 `{FEATURE_DIR}/specs/**/*.md` 提取每个 Requirement / Scenario：
@@ -81,7 +90,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 共 M 项待裁决。
 
-同时读取 `{FEATURE_DIR}/design.md`：
+bundle 含 `design.md` 时同时读取：
 
 - 从 specs Requirement / Scenario 提取行为契约验证项 C1, C2, ...
 - 从 design.md 的 API Decisions、Data Decisions 提取接口/数据契约验证项。
@@ -90,7 +99,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ### ⛔ 步骤完成检查 — Step 3
 - [ ] 已从 proposal.md 与 specs/**/*.md 提取所有待验收行为并编号 1..m
-- [ ] 已从 design.md 提取 API/数据契约验证项，或确认 `x-auto-no-http-api: true` / `x-auto-no-sql: true`
+- [ ] bundle 含 design.md 时：已提取 API/数据契约验证项，或确认 `x-auto-no-http-api: true` / `x-auto-no-sql: true`；不含时已标注设计基准缺失
 - [ ] 共 M 项已列出
 
 ---
@@ -99,7 +108,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 > ✋ **本步骤严格只读。** 不得运行 `npm test` / `pytest` / `mvn test` / Playwright 等任何测试命令，不得启动任何服务，不得再生成新的测试代码。所有测试证据来自上游阶段产物。
 
-**必读文件：**
+**证据文件（以 bundle 为准；契约未提供的在报告中记为缺项）：**
 
 1. `{FEATURE_DIR}/UNIT_TEST_REPORT.md` — 上游阶段技能 `autodev-utest` 产出的结构化单测报告。
 2. `{FEATURE_DIR}/test-output.log` — 单测执行的原始日志（通过/失败数量、失败堆栈；缺失时记录）。

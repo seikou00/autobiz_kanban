@@ -17,7 +17,7 @@ version: v1.1.1604
 ### 技能映射
 | 阶段 | 调用 Skill | 本工程文件 |
 |------|------------|------------|
-| Frontend（`frontend_before_specs` profile） | `/autodev-frontend` | `autodev/autodev-frontend/SKILL.md` |
+| Frontend（`frontend_before_specs` profile） | `/autodev-frontend`（按 HTML 格式可分流到 `/html-to-react`） | `autodev/autodev-frontend/SKILL.md`、`autodev/autodev-html-to-react/SKILL.md` |
 | Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
 | Detail Design（dynamic stage） | `/autodev-detail-design` | `autodev/autodev-detail-design/SKILL.md` |
@@ -33,6 +33,8 @@ version: v1.1.1604
 prd_done → resolve_next_skill.py --json
             ├── standard → /autodev-specs
             └── frontend_before_specs → /autodev-frontend
+                                      ├── 高保真/绝对定位 HTML → autodev-frontend route-with-html
+                                      └── 普通静态/拷贝 HTML → html-to-react
                                              ↓
                                       /autodev-specs
                                              ↓
@@ -87,11 +89,11 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
 ```
 
-若脚本返回 `requiresProfileChoice: true`，按用户表达选择是否需要 HTML 设计稿转换：
+若脚本返回 `requiresProfileChoice: true`，按用户表达选择是否需要 HTML 转前端：
 
-- 用户说 `/autodev-frontend`、需要进入、需要先转 HTML、先把设计稿转工程文件等，视为需要转换：推进到 `frontend_in_progress`，并传入 `--workflow-profile frontend_before_specs`。
+- 用户说 `/autodev-frontend`、`/html-to-react`、需要进入、需要先转 HTML、先把设计稿转工程文件、HTML 转 React、静态 HTML 转前端代码等，视为需要转换：推进到 `frontend_in_progress`，并传入 `--workflow-profile frontend_before_specs`。
 - 用户说不需要、直接进规格、先走 `autodev-specs` 等，视为不需要转换：推进到 `specs_in_progress`。
-- 如果用户只触发 `/autodev`，且没有表达需要或不需要，简短询问：`是否需要将 HTML 设计稿转换为项目内工程文件？需要则先进入 autodev-frontend 阶段，不需要则直接进入 autodev-specs 阶段。`
+- 如果用户只触发 `/autodev`，且没有表达需要或不需要，简短询问：`是否需要先将 HTML 转换为项目内工程文件？需要则进入 HTML 转前端阶段，并按 HTML 格式分流到 autodev-frontend 或 html-to-react；不需要则直接进入 autodev-specs 阶段。`
 
 若脚本返回 `requiresWorkflowChoice: true`，读取 `workflowChoices` 中的 `stageId`、`decision` 和 `targetCheckpoint`，按用户表达选择 dynamic stage：
 
@@ -101,12 +103,12 @@ python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_D
 
 ### 1.3 产出物校验
 
-根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按 `$PLUGIN_ROOT/board_core/board_config.json` 校验。
+根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按本 Feature 的工作流契约（Source Bundle，`inspect_skill_contract.py --feature` 输出）校验。
 
-- `prd_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`。
+- 标准链下，`prd_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`；精简链（lean）等无 Biz 阶段的工作流中，PRD 为外部输入，`/autodev-specs` 基于用户描述直接澄清，不得因缺 PRD 阻断。
 - `specs_done` 之后的 Dev 阶段不再把 `PRD.md` 作为硬输入，统一以 `proposal.md` 与 `specs/**/*.md` 作为行为契约源。
 
-**提示：** `请先使用 /autobiz 系列技能补齐 Biz 阶段产出物 PRD.md，然后重新触发 /autodev。proposal.md 与 specs/**/*.md 将由 /autodev-specs 生成，design.md 与 PLAN.md 将由 /autodev-plan 生成。`
+**提示（仅标准链缺 PRD 时）：** `请先使用 /autobiz 系列技能补齐 Biz 阶段产出物 PRD.md，然后重新触发 /autodev。proposal.md 与 specs/**/*.md 将由 /autodev-specs 生成，design.md 与 PLAN.md 将由 /autodev-plan 生成。`
 
 
 ### 禁止事项
@@ -153,16 +155,17 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 
 在 `prd_done` checkpoint 进入 Dev 阶段时，若 `resolve_next_skill.py --json` 返回 `requiresProfileChoice: true`：
 
-1. 根据用户表达判断是否需要将 HTML 设计稿转换为项目内工程文件；若不明确，使用上面的简短问题确认。
+1. 根据用户表达判断是否需要将 HTML 转换为项目内工程文件；若不明确，使用上面的简短问题确认。
 2. 不需要转换时，推进到 `specs_in_progress` 并进入 `/autodev-specs`。
-3. 需要转换时，使用 `--workflow-profile frontend_before_specs` 推进到 `frontend_in_progress`，进入 `/autodev-frontend`。
-4. `/autodev-frontend` 按 `route/route-with-html.md` 的 HTML-first 流程将高保真 HTML 转换为前端代码；完成后推进到 `frontend_done`，根路由器再次刷新状态并进入 `/autodev-specs`。
+3. 需要转换时，使用 `--workflow-profile frontend_before_specs` 推进到 `frontend_in_progress`，进入 `/autodev-frontend` 这个工作流节点。
+4. 工作流节点内按 HTML 格式分流：高保真/绝对定位/Figma 导出的 HTML 继续走 `/autodev-frontend` 的 `route/route-with-html.md`；普通静态 HTML、复制的 DOM 片段、小型静态站点或用户明确说 HTML 转 React 时，走 `/html-to-react` 的转换规则。
+5. 任一入口完成后都推进到 `frontend_done`，根路由器再次刷新状态并进入 `/autodev-specs`。
 
 ### 约束
 
-- HTML 转换是 `frontend_before_specs` profile 的正式 Dev 节点，不是停留在 `prd_done` 的无状态临时步骤。
+- HTML 转换是 `frontend_before_specs` profile 的正式 Dev 节点，不是停留在 `prd_done` 的无状态临时步骤；`/autodev-frontend` 与 `/html-to-react` 只是同一节点下的两种入口。
 - 转换不影响 Specs 阶段的输入产物要求，`PRD.md` 仍为 `/autodev-specs` 的必需输入。
-- 未选择 `frontend_before_specs` 时，不得直接调用 `/autodev-frontend` 绕过 workflow profile。
+- 未选择 `frontend_before_specs` 时，不得直接调用 `/autodev-frontend` 或 `/html-to-react` 绕过 workflow profile。
 
 ---
 

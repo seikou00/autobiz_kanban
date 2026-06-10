@@ -19,14 +19,21 @@ FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 ```
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约
+## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
-运行前如需查看当前契约，执行：
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-e2e --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-e2e --feature "$FEATURE_ID" --json
 ```
+
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
+- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+
+无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -42,23 +49,15 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 ## 输入与行为依据
 
-读取以下 feature 文档：
+消费 Source Bundle：按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的产物原件（标准链为 proposal.md、specs/**/*.md、design.md、PLAN.md、REQUIREMENTS_EVAL.md、UNIT_TEST_REPORT.md、test-output.log），按各自 `extract`（focus/method/degrade）决定读取重点；契约未提供的输入按降级读法继续，不要硬等。
 
-- `{FEATURE_DIR}/proposal.md`
-- `{FEATURE_DIR}/specs/**/*.md`
-- `{FEATURE_DIR}/design.md`
-- `{FEATURE_DIR}/PLAN.md`
-- `{FEATURE_DIR}/REQUIREMENTS_EVAL.md`
-- `{FEATURE_DIR}/UNIT_TEST_REPORT.md`
-- `{FEATURE_DIR}/test-output.log`
-
-用途约束：
+标准链下的用途约束：
 
 - `proposal.md`：本轮能力边界、影响面、非目标。
 - `specs/**/*.md`：Requirement / Scenario 行为契约，是 E2E pass/fail 的主要行为依据。
-- `design.md`：接口决策、数据决策、成功与失败路径、风险与待确认项。
-- `UNIT_TEST_REPORT.md` / `test-output.log`：上游单测覆盖、轻量单测命令线索和回归风险。
-- `REQUIREMENTS_EVAL.md`：需求覆盖、遗漏与风险提示。
+- `design.md`（如在 bundle 中）：接口决策、数据决策、成功与失败路径、风险与待确认项。
+- `UNIT_TEST_REPORT.md` / `test-output.log`（如在 bundle 中）：上游单测覆盖、轻量单测命令线索和回归风险。
+- `REQUIREMENTS_EVAL.md`（如在 bundle 中）：需求覆盖、遗漏与风险提示。
 
 禁止写入：
 

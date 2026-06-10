@@ -12,6 +12,7 @@ from common import (
     HookCheckError,
     HookContext,
     fail_line,
+    info,
     is_nonempty,
     load_artifact_config,
     read_text,
@@ -130,6 +131,11 @@ def validate_plan_initial_tasks(ctx: HookContext) -> int:
 def validate_plan_finished_tasks(ctx: HookContext) -> int:
     plan = ctx.file("PLAN.md")
     if not is_nonempty(plan):
+        # PLAN.md externalized by the current workflow (e.g. lean): degrade,
+        # task closure lives in the completion summary instead.
+        if not ctx.requires_artifact("PLAN.md"):
+            info(ctx, "plan_externalized_degrade")
+            return 0
         return fail_line(ctx, "missing_plan")
     failures = 0
     if task_count(plan) <= 0:
@@ -286,6 +292,7 @@ def run_precheck(
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: dict[str, str] | None = None,
+    workflow_record: dict | None = None,
 ) -> tuple[int, str]:
     try:
         config = load_artifact_config(
@@ -294,6 +301,7 @@ def run_precheck(
             workspace_root=workspace_root,
             workflow_profile=workflow_profile,
             workflow_decisions=workflow_decisions,
+            workflow_record=workflow_record,
         )
         validate_required_files(workspace_root, slug, config.required_inputs)
     except HookCheckError as error:
@@ -312,6 +320,7 @@ def run_postcheck(
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: dict[str, str] | None = None,
+    workflow_record: dict | None = None,
 ) -> tuple[int, str]:
     try:
         config = load_artifact_config(
@@ -320,6 +329,7 @@ def run_postcheck(
             workspace_root=workspace_root,
             workflow_profile=workflow_profile,
             workflow_decisions=workflow_decisions,
+            workflow_record=workflow_record,
         )
         validate_required_files(workspace_root, slug, config.required_outputs)
         for validator in config.validators:
@@ -331,7 +341,13 @@ def run_postcheck(
             reason = f"{reason} ({error.detail})"
         return 1, reason
 
-    ctx = HookContext(skill=skill, slug=slug, root=workspace_root)
+    ctx = HookContext(
+        skill=skill,
+        slug=slug,
+        root=workspace_root,
+        required_inputs=config.required_inputs,
+        required_outputs=config.required_outputs,
+    )
     failures = 0
     for validator in config.validators:
         failures += VALIDATORS[validator](ctx)

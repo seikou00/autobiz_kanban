@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from board_core.contracts import BoardConfigError, load_repo_workflow_contracts  # noqa: E402
+from board_core.contracts import BoardConfigError, load_record_workflow_contracts, load_repo_workflow_contracts  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
 
 
@@ -41,6 +41,11 @@ class HookContext:
     skill: str
     slug: str
     root: Path
+    required_inputs: tuple[str, ...] = ()
+    required_outputs: tuple[str, ...] = ()
+
+    def requires_artifact(self, name: str) -> bool:
+        return name in self.required_inputs or name in self.required_outputs
 
     @property
     def feature_dir(self) -> Path:
@@ -96,14 +101,22 @@ def load_artifact_config(
     workspace_root: Path | None = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: dict[str, str] | None = None,
+    workflow_record: dict | None = None,
 ) -> ArtifactConfig:
     try:
-        contracts = load_repo_workflow_contracts(
-            repo_root,
-            workspace=workspace_root,
-            profile=workflow_profile,
-            workflow_decisions=workflow_decisions,
-        )
+        if workflow_record is not None:
+            contracts = load_record_workflow_contracts(
+                repo_root,
+                workflow_record,
+                workspace=workspace_root,
+            )
+        else:
+            contracts = load_repo_workflow_contracts(
+                repo_root,
+                workspace=workspace_root,
+                profile=workflow_profile,
+                workflow_decisions=workflow_decisions,
+            )
         contract = contracts.contract_for_skill(skill)
     except BoardConfigError as error:
         raise HookCheckError("invalid_board_config", str(error)) from error

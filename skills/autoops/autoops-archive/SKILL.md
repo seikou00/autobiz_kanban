@@ -1,9 +1,28 @@
 ---
 name: autoops-archive
-description: Ops 归档阶段技能。负责在 CI/CD 完成后将当前 Feature 过程目录移入 archive，并把 checkpoint 从 cicd_done 推进到 archived。
+description: Ops 归档阶段技能。负责在上游阶段完成后将当前 Feature 过程目录移入 archive，并把 checkpoint 从上游 done checkpoint（标准链为 cicd_done；精简链为 code_done）推进到 archived。
 version: v1.1.1604
 author: zhangQiuFeng
 ---
+
+<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
+## 流程契约（Source Bundle + Method Bundle）
+
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+
+```bash
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autoops-archive --feature "$FEATURE_ID" --json
+```
+
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
+- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+
+无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+<!-- AUTODEV_RUNTIME_CONTRACT:END -->
+
 
 **路径变量约定（必须区分）：**
 - **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
@@ -21,7 +40,7 @@ author: zhangQiuFeng
 
 ## 合法入口
 
-- 上游入口：`checkpoint = cicd_done`
+- 上游入口：当前工作流中允许转移到 `archived` 的上游 done checkpoint（标准链为 `cicd_done`；精简链为 `code_done`；以本 Feature 工作流契约的转移表为准，`update_checkpoint.py` 会强制校验）
 - 恢复入口：若 `{FEATURE_DIR}/` 已不存在、`.autobizdevops/archive/{slug}-iter*` 已存在且 `state.json` 为 `archived`，直接提示已归档并退出
 
 其他 checkpoint 均不得执行归档。
@@ -59,7 +78,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ### Step 1: 前置检查
 
 1. 确定 `{slug}`。
-2. 确认 `CHECKPOINT` 为 `cicd_done`。
+2. 确认 `CHECKPOINT` 为当前工作流中允许进入 `archived` 的上游 done checkpoint（标准链为 `cicd_done`；精简链为 `code_done`）。
 3. 确认 `{FEATURE_DIR}/` 存在。
 4. 确认 `.autobizdevops/archive/` 存在；若缺失，可创建该目录。
 
@@ -112,8 +131,8 @@ checkpoint=archived
 
 ## 失败处理
 
-- checkpoint 不是 `cicd_done`：停止，提示应先完成 `/autoops-cicd`。
-- 源目录不存在但状态仍是 `cicd_done`：停止，提示过程目录缺失，需人工确认是否已被移动。
+- checkpoint 不是合法上游 done checkpoint：停止，提示应先完成当前工作流的上游阶段（标准链为 `/autoops-cicd`）。
+- 源目录不存在但状态仍是上游 done checkpoint：停止，提示过程目录缺失，需人工确认是否已被移动。
 - 目标目录冲突：不得覆盖，递增 `iterN` 后重试。
 - 状态更新失败：停止并提示人工检查 `.autobizdevops/state.json`，不得删除已归档目录。
 

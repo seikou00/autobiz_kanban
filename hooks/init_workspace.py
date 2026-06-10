@@ -7,6 +7,8 @@ autobizdevops Workspace 初始化脚本
     python hooks/init_workspace.py --mode createFeature --workspace <workspace> --project <project> --feature <feature>
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 from datetime import datetime
@@ -49,6 +51,11 @@ except ImportError:
         is_initialized,
     )
 
+from board_core.contracts import (  # noqa: E402
+    BoardConfigError,
+    load_board_config,
+    load_record_workflow_contracts,
+)
 from board_core.state_store import (  # noqa: E402
     EMPTY_CELL,
     check_or_fix_state_sync,
@@ -57,7 +64,16 @@ from board_core.state_store import (  # noqa: E402
     state_json_content_from_records,
     write_state_records,
 )
-from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, normalize_workflow_profile  # noqa: E402
+from board_core.workflow_closure import solve_node_closure  # noqa: E402
+from board_core.workflow_compiler import (  # noqa: E402
+    BASE_WORKFLOW_PROFILE,
+    BASE_WORKFLOW_TEMPLATE,
+    WorkflowCompileError,
+    normalize_workflow_profile,
+    normalize_workflow_template,
+)
+
+BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 
 
 def _generate_project_md(workspace_name: str) -> str:
@@ -206,13 +222,59 @@ def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
     return feature_dir
 
 
-def create_feature(workspace: Path, feature: str, workflow_profile: str = BASE_WORKFLOW_PROFILE) -> Dict[str, object]:
+def create_feature(
+    workspace: Path,
+    feature: str,
+    workflow_profile: str = BASE_WORKFLOW_PROFILE,
+    *,
+    workflow_template: str = BASE_WORKFLOW_TEMPLATE,
+    workflow_nodes: list[str] | None = None,
+) -> Dict[str, object]:
     workspace = workspace.resolve()
     workflow_profile = normalize_workflow_profile(workflow_profile)
+    workflow_template = normalize_workflow_template(workflow_template)
     feature_dir = _resolve_feature_dir(workspace, feature)
     if feature_dir.exists():
         print(f"ERROR: 特性已存在：{feature_dir}", file=sys.stderr)
         sys.exit(1)
+
+    record: Dict[str, object] = {
+        "feature": feature,
+        "owner": EMPTY_CELL,
+        "iteration": EMPTY_CELL,
+        "workflowProfile": workflow_profile,
+        "workflowDecisions": {},
+        "workflowTemplate": workflow_template,
+    }
+    if workflow_template != BASE_WORKFLOW_TEMPLATE and workflow_profile != BASE_WORKFLOW_PROFILE:
+        print(f"ERROR: workflow template {workflow_template} 不支持 workflowProfile={workflow_profile}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        if workflow_nodes:
+            closure = solve_node_closure(load_board_config(BOARD_CONFIG_PATH), workflow_nodes)
+            record["workflowNodes"] = list(closure.nodes)
+            record["workflowExternalized"] = {
+                node_id: list(paths) for node_id, paths in closure.externalized.items()
+            }
+        contracts = load_record_workflow_contracts(ROOT, record, workspace=workspace)
+    except (BoardConfigError, WorkflowCompileError) as exc:
+        print(f"ERROR: workflow template 无法编译: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    initial_checkpoint = next(
+        (
+            checkpoint
+            for node in contracts.nodes
+            for checkpoint in node.get("checkpoints", [])
+            if checkpoint in contracts.initial_checkpoints
+        ),
+        "",
+    )
+    if not initial_checkpoint:
+        print("ERROR: workflow template 没有可用的初始 checkpoint", file=sys.stderr)
+        sys.exit(1)
+    record["checkpoint"] = initial_checkpoint
+    record["stage"] = contracts.stage_labels.get(initial_checkpoint, "")
 
     sync_result = check_or_fix_state_sync(workspace, fix=True)
     if not sync_result.state_exists:
@@ -229,17 +291,9 @@ def create_feature(workspace: Path, feature: str, workflow_profile: str = BASE_W
 
     ensure_dir(feature_dir)
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    records = {slug: dict(record) for slug, record in sync_result.records.items()}
-    records[feature] = {
-        "feature": feature,
-        "owner": EMPTY_CELL,
-        "checkpoint": "discuss_in_progress",
-        "stage": "需求澄清",
-        "iteration": EMPTY_CELL,
-        "updated_at": now,
-        "workflowProfile": workflow_profile,
-    }
+    record["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    records = {slug: dict(existing) for slug, existing in sync_result.records.items()}
+    records[feature] = record
     write_state_records(workspace, records)
 
     return {
@@ -257,6 +311,16 @@ def main() -> None:
     parser.add_argument("--project", help="Project code under workspace")
     parser.add_argument("--feature", help="Feature name for createFeature mode")
     parser.add_argument("--workflow-profile", default=BASE_WORKFLOW_PROFILE, help="Workflow profile for createFeature")
+    parser.add_argument(
+        "--workflow-template",
+        default=BASE_WORKFLOW_TEMPLATE,
+        help="Workflow template for createFeature: standard | lean | custom",
+    )
+    parser.add_argument(
+        "--workflow-nodes",
+        default=None,
+        help="Comma-separated node ids for custom template, e.g. dev.specs,dev.code,ops.archive",
+    )
     parser.add_argument("--force", action="store_true", help="Force re-initialization (will backup existing)")
     args = parser.parse_args()
 
@@ -266,7 +330,14 @@ def main() -> None:
         sys.exit(1)
 
     if args.mode == "createFeature":
-        result = create_feature(workspace, args.feature or "", args.workflow_profile)
+        workflow_nodes = [item.strip() for item in (args.workflow_nodes or "").split(",") if item.strip()]
+        result = create_feature(
+            workspace,
+            args.feature or "",
+            args.workflow_profile,
+            workflow_template=args.workflow_template,
+            workflow_nodes=workflow_nodes or None,
+        )
     else:
         result = init_workspace(workspace, force=args.force)
 

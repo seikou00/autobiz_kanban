@@ -111,4 +111,4 @@ set PYTHONIOENCODING=utf-8 && python autobiz/hooks/biz_validate.py prd --feature
 
 1. 不允许跳过前置准入直接调用子技能
 2. 不允许仅通过 Markdown 勾选替代脚本校验
-3. 不允许在 `PRD_DISCUSS.md` 缺失时进入 `/autobiz-prd-generate`
+3. 不允许在 `PRD_DISCUSS.md` 缺失时进入 `/autobiz-prd-generate`（除非当前 Feature 工作流契约把它标记为外部输入，此时按其降级读法先完成需求澄清）

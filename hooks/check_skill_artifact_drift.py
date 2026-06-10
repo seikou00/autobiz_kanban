@@ -92,22 +92,27 @@ class ArtifactDriftFinding:
         )
 
 
+SKILL_GROUP_DIRS = {"Biz": "autobiz", "Dev": "autodev", "Ops": "autoops"}
+
+
 def skill_file_for_contract(repo_root: Path, contract: SkillContract) -> Path:
-    return repo_root / "skills" / "autodev" / contract.skill / "SKILL.md"
+    group_dir = SKILL_GROUP_DIRS.get(contract.group, "autodev")
+    return repo_root / "skills" / group_dir / contract.skill / "SKILL.md"
 
 
-def is_autodev_contract(contract: SkillContract) -> bool:
-    return contract.group == "Dev" and contract.skill.startswith("autodev-")
+def is_managed_contract(contract: SkillContract) -> bool:
+    group_dir = SKILL_GROUP_DIRS.get(contract.group)
+    return group_dir is not None and contract.skill.startswith(f"{group_dir}-")
 
 
-def autodev_contracts(contracts: WorkflowContracts) -> list[SkillContract]:
+def managed_contracts(contracts: WorkflowContracts) -> list[SkillContract]:
     result: list[SkillContract] = []
     for node in sorted(contracts.nodes, key=lambda item: item.get("order", 0)):
         skill = node.get("skill")
         if not isinstance(skill, str):
             continue
         contract = contracts.skill_contracts.get(skill)
-        if contract and is_autodev_contract(contract):
+        if contract and is_managed_contract(contract):
             result.append(contract)
     return result
 
@@ -136,7 +141,7 @@ def selected_contracts(contract_sets: list[WorkflowContracts], skill: str | None
         return unique_contracts([
             contract
             for contracts in contract_sets
-            for contract in autodev_contracts(contracts)
+            for contract in managed_contracts(contracts)
         ])
 
     last_error: BoardConfigError | None = None
@@ -146,7 +151,7 @@ def selected_contracts(contract_sets: list[WorkflowContracts], skill: str | None
         except BoardConfigError as error:
             last_error = error
             continue
-        if not is_autodev_contract(contract):
+        if not is_managed_contract(contract):
             raise BoardConfigError(f"skill is outside artifact drift scope: {skill}")
         return [contract]
     raise last_error or BoardConfigError(f"unknown skill in board_config.json: {skill}")
@@ -273,9 +278,9 @@ def check_contracts_for_drift(repo_root: Path, contracts: Iterable[SkillContract
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Check Autodev SKILL.md artifact drift")
+    parser = argparse.ArgumentParser(description="Check SKILL.md artifact drift for Biz/Dev/Ops node skills")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
-    parser.add_argument("--skill", help="check a single Autodev skill, e.g. autodev-plan")
+    parser.add_argument("--skill", help="check a single node skill, e.g. autodev-plan / autobiz-prd-generate")
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()

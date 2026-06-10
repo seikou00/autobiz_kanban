@@ -60,7 +60,12 @@ name: autodev-sample
         self.assertIn("<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->", compiled)
         self.assertIn("FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}", compiled)
         self.assertNotIn("工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/", compiled)
-        self.assertIn('python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-sample --json', compiled)
+        self.assertIn(
+            'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-sample --feature "$FEATURE_ID" --json',
+            compiled,
+        )
+        self.assertIn("Source Bundle", compiled)
+        self.assertIn("Method Bundle", compiled)
         self.assertIn("# Body", compiled)
         self.assertNotIn("AUTOBIZDEVOPS_CONTRACT", compiled)
         self.assertNotIn("AUTOBIZDEVOPS_ARTIFACT_RULES", compiled)

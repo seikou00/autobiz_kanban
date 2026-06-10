@@ -11,13 +11,27 @@ from board_core.workflow_compiler import (
     ALLOWED_GUARDS,
     BASE_WORKFLOW_PROFILE,
     WorkflowCompileError,
+    compile_node_subset,
     load_effective_board_config,
+    normalize_workflow_decisions,
     normalize_workflow_profile,
+    normalize_workflow_template,
+    read_json,
+    resolve_template_subset,
 )
 
 
 class BoardConfigError(Exception):
     """Raised when board_config.json cannot be used as a workflow contract."""
+
+
+@dataclass(frozen=True)
+class ExtractSpec:
+    """Method Bundle: how to read an input artifact (which parts, how, degrade path)."""
+
+    focus: tuple[str, ...] = ()
+    method: str = ""
+    degrade: str = ""
 
 
 @dataclass(frozen=True)
@@ -28,6 +42,7 @@ class ArtifactSpec:
     kind: str = "file"
     required: bool = True
     external: bool = False
+    extract: ExtractSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +123,23 @@ def _read_string_list(value: object, *, context: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _read_extract_spec(value: object, *, context: str) -> ExtractSpec | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise BoardConfigError(f"{context}.extract must be an object")
+    focus = value.get("focus", [])
+    if not isinstance(focus, list) or any(not isinstance(item, str) or not item for item in focus):
+        raise BoardConfigError(f"{context}.extract.focus must be a list of non-empty strings")
+    method = value.get("method", "")
+    degrade = value.get("degrade", "")
+    if not isinstance(method, str):
+        raise BoardConfigError(f"{context}.extract.method must be a string")
+    if not isinstance(degrade, str):
+        raise BoardConfigError(f"{context}.extract.degrade must be a string")
+    return ExtractSpec(focus=tuple(focus), method=method, degrade=degrade)
+
+
 def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, ...]:
     if not isinstance(items, list):
         raise BoardConfigError(f"{context} must be a list")
@@ -141,6 +173,7 @@ def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, 
             raise BoardConfigError(f"{item_context}.required must be a boolean")
         if not isinstance(external, bool):
             raise BoardConfigError(f"{item_context}.external must be a boolean")
+        extract = _read_extract_spec(item.get("extract"), context=item_context)
 
         specs.append(
             ArtifactSpec(
@@ -150,6 +183,7 @@ def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, 
                 kind=kind,
                 required=required,
                 external=external,
+                extract=extract,
             )
         )
     return tuple(specs)
@@ -174,17 +208,28 @@ def load_workflow_contracts(
     profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
+    node_subset: list[str] | tuple[str, ...] | None = None,
+    externalized_inputs: dict[str, list[str]] | None = None,
 ) -> WorkflowContracts:
     profile = normalize_workflow_profile(profile)
     try:
-        config = load_effective_board_config(
-            config_path,
-            repo_root=repo_root,
-            workspace=workspace,
-            profile=profile,
-            workflow_decisions=workflow_decisions,
-            overlays=overlays,
-        )
+        if node_subset is not None:
+            config = compile_node_subset(
+                read_json(config_path or default_config_path()),
+                node_subset,
+                profile=profile,
+                workflow_decisions=workflow_decisions,
+                externalized_inputs=externalized_inputs,
+            )
+        else:
+            config = load_effective_board_config(
+                config_path,
+                repo_root=repo_root,
+                workspace=workspace,
+                profile=profile,
+                workflow_decisions=workflow_decisions,
+                overlays=overlays,
+            )
     except WorkflowCompileError as exc:
         raise BoardConfigError(str(exc)) from exc
     workflow = config.get("workflow")
@@ -322,6 +367,8 @@ def load_repo_workflow_contracts(
     profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
+    node_subset: list[str] | tuple[str, ...] | None = None,
+    externalized_inputs: dict[str, list[str]] | None = None,
 ) -> WorkflowContracts:
     return load_workflow_contracts(
         config_path_for_repo(repo_root),
@@ -330,4 +377,57 @@ def load_repo_workflow_contracts(
         profile=profile,
         workflow_decisions=workflow_decisions,
         overlays=overlays,
+        node_subset=node_subset,
+        externalized_inputs=externalized_inputs,
+    )
+
+
+def load_record_workflow_contracts(
+    repo_root: Path,
+    record: dict,
+    *,
+    workspace: Path | None = None,
+) -> WorkflowContracts:
+    """Resolve contracts from a state record's workflow fields (template-aware).
+
+    Reads workflowProfile/workflowDecisions/workflowTemplate plus, for custom
+    templates, workflowNodes/workflowExternalized. nodeSubset and custom
+    templates reject non-standard profiles and workflow decisions.
+    """
+    if not isinstance(record, dict):
+        raise BoardConfigError("workflow record must be an object")
+    profile = normalize_workflow_profile(record.get("workflowProfile"))
+    template = normalize_workflow_template(record.get("workflowTemplate"))
+    config_path = config_path_for_repo(repo_root)
+    try:
+        decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
+        subset = resolve_template_subset(
+            load_board_config(config_path),
+            template,
+            workflow_nodes=record.get("workflowNodes"),
+            workflow_externalized=record.get("workflowExternalized"),
+        )
+    except WorkflowCompileError as exc:
+        raise BoardConfigError(str(exc)) from exc
+
+    if subset is None:
+        return load_workflow_contracts(
+            config_path,
+            repo_root=repo_root,
+            workspace=workspace,
+            profile=profile,
+            workflow_decisions=decisions,
+        )
+
+    if profile != BASE_WORKFLOW_PROFILE:
+        raise BoardConfigError(f"workflow template {template} 不支持 workflowProfile={profile}")
+    if decisions:
+        raise BoardConfigError(f"workflow template {template} 不支持 workflowDecisions")
+    node_ids, externalized = subset
+    return load_workflow_contracts(
+        config_path,
+        repo_root=repo_root,
+        workspace=workspace,
+        node_subset=node_ids,
+        externalized_inputs=externalized,
     )

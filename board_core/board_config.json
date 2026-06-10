@@ -30,14 +30,32 @@
     }
   },
   "workflow": {
+    "templates": {
+      "standard": {
+        "kind": "profile",
+        "label": "标准",
+        "description": "完整主干流程（Biz→Dev→Ops），不含可选动态节点；动态节点可在流程中按需开启。"
+      },
+      "lean": {
+        "kind": "nodeSubset",
+        "label": "精简路线",
+        "description": "修接口 / 小需求：specs（轻量）→ code → 归档；design/PLAN 缺省时按降级读法执行。",
+        "nodes": ["dev.specs", "dev.code", "ops.archive"]
+      },
+      "custom": {
+        "kind": "custom",
+        "label": "自定义",
+        "description": "自由选择并串联节点；所选节点的必需输入会自动补全上游或标记为外部输入。"
+      }
+    },
     "profiles": {
       "standard": {
         "label": "不需要，进入 autodev-specs",
         "description": "不先转换 HTML 设计稿，直接进入 autodev-specs。"
       },
       "frontend_before_specs": {
-        "label": "需要，进入 autodev-frontend",
-        "description": "先将 HTML 设计稿转换为项目内工程文件，再进入后续阶段。",
+        "label": "需要，进入 HTML 转前端",
+        "description": "先将 HTML 转换为项目内工程文件；根据 HTML 格式走 autodev-frontend 或 html-to-react 入口，再进入后续阶段。",
         "nodes": [
           {
             "id": "dev.frontend",
@@ -46,10 +64,15 @@
             "skill": "autodev-frontend",
             "insertBefore": "dev.specs",
             "checkpointPrefix": "frontend",
-            "description": "基于 PRD/HTML 进行前端实现",
+            "description": "基于 PRD/HTML 进行前端实现，并按 HTML 格式分流到 autodev-frontend 或 html-to-react",
             "artifacts": {
               "inputs": [
-                { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
+                { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
+                  "extract": {
+                    "focus": ["页面/交互需求与验收标准", "HTML 设计稿的引用与格式"],
+                    "method": "按 HTML 格式分流转换入口，再以 PRD 验收标准核对前端实现",
+                    "degrade": "无 PRD 时基于用户提供的 HTML 与描述实现，并记录验收基准缺失"
+                  } }
               ],
               "outputs": []
             },
@@ -84,10 +107,30 @@
             "description": "生成代码实现前的文件级详细设计",
             "artifacts": {
               "inputs": [
-                { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-                { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
-                { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-                { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
+                { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
+                  "extract": {
+                    "focus": ["本轮目标与能力边界"],
+                    "method": "约束详细设计的范围",
+                    "degrade": "无 proposal 时以 specs 与 design 界定范围"
+                  } },
+                { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
+                  "extract": {
+                    "focus": ["Requirement / Scenario 行为契约"],
+                    "method": "确保文件级设计满足全部外部可观察行为",
+                    "degrade": "无 specs 时与用户确认行为预期"
+                  } },
+                { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
+                  "extract": {
+                    "focus": ["API / Data / Technical Decisions", "模块边界与集成点"],
+                    "method": "把设计决策细化到文件级修改方案，不得覆盖已确认决策",
+                    "degrade": "无 design 时基于现有代码模式细化方案，并记录设计基准缺失"
+                  } },
+                { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+                  "extract": {
+                    "focus": ["任务边界与涉及文件"],
+                    "method": "按任务组织文件级设计",
+                    "degrade": "无 PLAN 时按 specs 能力组织设计"
+                  } }
               ],
               "outputs": [
                 { "id": "detail_design", "label": "详细设计", "artifactType": "file", "path": "DETAIL_DESIGN.md", "required": true }
@@ -197,12 +240,17 @@
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
-          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev", "userMessage": "请使用 /autodev 继续推进当前 Feature。", "dialogTips": "通过 /autodev 路由到行为规格；是否需要将 HTML 设计稿转换为项目内工程文件？需要则先进入 autodev-frontend 阶段，不需要则直接进入 autodev-specs 阶段。" } }
+          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev", "userMessage": "请使用 /autodev 继续推进当前 Feature。", "dialogTips": "通过 /autodev 路由到行为规格；是否需要先将 HTML 转换为项目内工程文件？需要则进入 HTML 转前端阶段，并按 HTML 格式分流到 autodev-frontend 或 html-to-react；不需要则直接进入 autodev-specs 阶段。" } }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {
           "inputs": [
-            { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true }
+            { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true,
+              "extract": {
+                "focus": ["已澄清的需求结论与边界", "未决问题与待确认项"],
+                "method": "把讨论稿中已确认的结论转写为正式 PRD 结构；未决问题显式保留，不要替用户补齐",
+                "degrade": "无讨论稿时先与用户完成需求澄清，再生成 PRD"
+              } }
           ],
           "outputs": [
             { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
@@ -228,7 +276,12 @@
         "checkpoints": ["specs_in_progress", "specs_done"],
         "artifacts": {
           "inputs": [
-            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
+            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
+              "extract": {
+                "focus": ["业务目标与用户场景", "验收标准与能力边界"],
+                "method": "作为行为契约的上游依据；规格缺口处回到用户澄清，不要凭空补齐行为",
+                "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs（轻量路径）"
+              } }
           ],
           "outputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
@@ -252,8 +305,18 @@
         "checkpoints": ["plan_in_progress", "plan_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
+              "extract": {
+                "focus": ["本轮目标、范围、影响面", "非目标与 Open Questions"],
+                "method": "作为设计上下文与能力边界，约束 design 与 PLAN 的范围",
+                "degrade": "无 proposal 时基于用户直供需求与代码探索建立上下文，并把边界假设记入 design.md 风险"
+              } },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
+              "extract": {
+                "focus": ["每个 capability 的 Requirement / Scenario", "验收场景、边界条件与失败路径"],
+                "method": "specs 驱动设计：先确认行为契约，再生成 design.md 与 PLAN.md；行为缺口回到 /autodev-specs",
+                "degrade": "无 specs 时与用户确认行为预期后再设计，未确认行为全部记为待确认风险"
+              } }
           ],
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
@@ -277,11 +340,36 @@
         "checkpoints": ["code_in_progress", "code_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false },
-            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
+              "extract": {
+                "focus": ["本轮目标、能力边界、影响面", "非目标与 Open Questions"],
+                "method": "抽取并记住本轮变更的范围约束，作为任务边界依据，不在范围外扩大修改",
+                "degrade": "无 proposal 时以用户直供需求与 specs 作为范围依据"
+              } },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
+              "extract": {
+                "focus": ["每个 capability 的 Requirement / Scenario", "ADDED / MODIFIED / REMOVED 行为变化", "SHALL/MUST 约束、边界条件、失败路径", "权限/租户/审计/幂等/异步等外部可观察行为"],
+                "method": "以 specs 为最高行为依据先确认行为，再结合 design 定位实现；specs 冲突时停止并回流 /autodev-specs",
+                "degrade": "无 specs 时以 proposal 与用户确认的行为预期为依据，并在完成摘要中记录行为假设"
+              } },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
+              "extract": {
+                "focus": ["排查上游规格缺口时的业务背景"],
+                "method": "只作可选参考，不得覆盖 specs",
+                "degrade": "无 PRD 时直接跳过，不影响执行"
+              } },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
+              "extract": {
+                "focus": ["Spec Traceability", "API Decisions（API-*、x-auto-no-http-api）", "Data Decisions（DATA-*、x-auto-no-sql）", "Technical Design（D-*、模块边界、集成点）", "Risks / Open Questions"],
+                "method": "把设计决策映射到接口、数据模型与模块边界，限定实现选型；design 冲突时停止并回流 /autodev-plan",
+                "degrade": "无 design 契约时基于 proposal+specs 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
+              } },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+              "extract": {
+                "focus": ["任务 DAG 与依赖顺序", "每个任务的做什么/规格依据/设计依据/验证方法/状态", "specs 行为覆盖与设计决策覆盖"],
+                "method": "作为执行队列逐任务推进，并就地更新任务状态与验证证据",
+                "degrade": "无 PLAN 契约时从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务），逐项实现并在完成摘要中记录任务与验证结果"
+              } }
           ],
           "outputs": [
           ]
@@ -304,11 +392,36 @@
         "checkpoints": ["requirements_eval_in_progress", "requirements_eval_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false },
-            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
+              "extract": {
+                "focus": ["本轮目标、能力边界与非目标"],
+                "method": "作为评审范围基准，判断实现是否越界或遗漏",
+                "degrade": "无 proposal 时以 specs 与用户需求描述界定评审范围"
+              } },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
+              "extract": {
+                "focus": ["Requirement / Scenario 的外部可观察行为", "SHALL/MUST 约束与失败路径"],
+                "method": "作为最高行为基准，对照代码实现逐项核对覆盖与偏差",
+                "degrade": "无 specs 时对照 proposal 与用户确认的行为预期评审，并在报告中标注基准缺失"
+              } },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
+              "extract": {
+                "focus": ["业务意图核对"],
+                "method": "只作可选参考，不得覆盖 specs",
+                "degrade": "无 PRD 时直接跳过"
+              } },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
+              "extract": {
+                "focus": ["API / Data / Technical Decisions 的落实情况"],
+                "method": "核对实现是否遵守已确认的设计决策与集成点",
+                "degrade": "无 design 时按现有代码模式评审实现合理性，并在报告中记录设计基准缺失"
+              } },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+              "extract": {
+                "focus": ["任务完成状态与验证证据", "覆盖矩阵"],
+                "method": "核对任务闭环与验证证据是否完整",
+                "degrade": "无 PLAN 时以代码 diff 与提交记录核对实现闭环"
+              } }
           ],
           "outputs": [
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
@@ -331,12 +444,42 @@
         "checkpoints": ["unit_test_in_progress", "unit_test_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false },
-            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
-            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
+              "extract": {
+                "focus": ["本轮变更范围与影响面"],
+                "method": "界定单测覆盖的变更范围",
+                "degrade": "无 proposal 时以本轮代码 diff 界定测试范围"
+              } },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
+              "extract": {
+                "focus": ["Requirement / Scenario 的行为与边界条件", "失败路径与异常分支"],
+                "method": "把行为契约转化为测试用例的预期断言",
+                "degrade": "无 specs 时以现有实现行为与用户确认预期生成测试，并标注行为基准缺失"
+              } },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
+              "extract": {
+                "focus": ["业务语义核对"],
+                "method": "只作可选参考",
+                "degrade": "无 PRD 时直接跳过"
+              } },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
+              "extract": {
+                "focus": ["模块边界与集成点", "数据决策中的约束"],
+                "method": "定位被测单元与隔离边界（mock/stub 的切点）",
+                "degrade": "无 design 时按现有代码结构定位被测单元"
+              } },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+              "extract": {
+                "focus": ["各任务的验证方法与涉及文件"],
+                "method": "作为测试定位线索，核对每个任务的验证闭环",
+                "degrade": "无 PLAN 时以代码 diff 推导待测变更清单"
+              } },
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true,
+              "extract": {
+                "focus": ["评审结论与发现项", "风险点"],
+                "method": "针对评审发现的风险点优先补强测试",
+                "degrade": "无评审报告时按 specs 覆盖优先级安排测试"
+              } }
           ],
           "outputs": [
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
@@ -360,14 +503,54 @@
         "checkpoints": ["e2e_in_progress", "e2e_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false },
-            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
-            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true },
-            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
-            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
+              "extract": {
+                "focus": ["用户可感知的能力与主链路"],
+                "method": "界定 E2E 主链路场景范围",
+                "degrade": "无 proposal 时以 specs 场景界定主链路"
+              } },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
+              "extract": {
+                "focus": ["端到端可验证的 Scenario", "跨模块/跨接口的行为约束"],
+                "method": "把验收场景转化为 E2E 用例与断言",
+                "degrade": "无 specs 时与用户确认主链路预期后生成用例"
+              } },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
+              "extract": {
+                "focus": ["业务主流程核对"],
+                "method": "只作可选参考",
+                "degrade": "无 PRD 时直接跳过"
+              } },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
+              "extract": {
+                "focus": ["接口入口、集成点与环境依赖"],
+                "method": "定位 E2E 驱动入口与环境准备要求",
+                "degrade": "无 design 时从现有路由/入口探索驱动方式"
+              } },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+              "extract": {
+                "focus": ["任务覆盖与既有验证方法"],
+                "method": "避免与已验证项重复，聚焦端到端闭环",
+                "degrade": "无 PLAN 时以 specs 场景为唯一覆盖基准"
+              } },
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true,
+              "extract": {
+                "focus": ["评审发现的风险与薄弱点"],
+                "method": "优先覆盖评审标记的高风险链路",
+                "degrade": "无评审报告时按 specs 场景优先级覆盖"
+              } },
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true,
+              "extract": {
+                "focus": ["单测覆盖结论与未覆盖区域"],
+                "method": "E2E 聚焦单测未覆盖的集成与主链路",
+                "degrade": "无单测报告时按全量主链路覆盖"
+              } },
+            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
+              "extract": {
+                "focus": ["失败/跳过用例线索"],
+                "method": "只在排查时按需查看",
+                "degrade": "缺失时跳过"
+              } }
           ],
           "outputs": [
             { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
@@ -392,15 +575,60 @@
         "checkpoints": ["verify_in_progress", "verify_done"],
         "artifacts": {
           "inputs": [
-            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
-            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
-            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
-            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false },
-            { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
-            { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true },
-            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true }
+            { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
+              "extract": {
+                "focus": ["验收范围与非目标"],
+                "method": "作为验收汇总的范围基准",
+                "degrade": "无 proposal 时以 specs 与实际交付物界定验收范围"
+              } },
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
+              "extract": {
+                "focus": ["全部 Requirement / Scenario 验收项"],
+                "method": "逐项核对行为验收覆盖与结论",
+                "degrade": "无 specs 时以各阶段报告结论汇总验收，并标注行为基准缺失"
+              } },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
+              "extract": {
+                "focus": ["设计决策落实与遗留风险"],
+                "method": "核对设计决策闭环与 Open Questions 处置",
+                "degrade": "无 design 时跳过设计核对，记录基准缺失"
+              } },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+              "extract": {
+                "focus": ["任务状态与验证证据"],
+                "method": "核对全部任务闭环",
+                "degrade": "无 PLAN 时以代码与报告核对交付闭环"
+              } },
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true,
+              "extract": {
+                "focus": ["verdict 与未覆盖风险"],
+                "method": "提取测试结论纳入验收汇总",
+                "degrade": "缺失时在验收报告中记为缺项"
+              } },
+            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
+              "extract": {
+                "focus": ["失败用例证据"],
+                "method": "只在核对证据时按需查看",
+                "degrade": "缺失时跳过"
+              } },
+            { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true,
+              "extract": {
+                "focus": ["用例与 specs 场景的对应关系"],
+                "method": "核对场景覆盖完整性",
+                "degrade": "缺失时在验收报告中记为缺项"
+              } },
+            { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true,
+              "extract": {
+                "focus": ["verdict 与失败项"],
+                "method": "提取 E2E 结论纳入验收汇总",
+                "degrade": "缺失时在验收报告中记为缺项"
+              } },
+            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true,
+              "extract": {
+                "focus": ["运行证据与异常"],
+                "method": "只在核对证据时按需查看",
+                "degrade": "缺失时在验收报告中记为缺项"
+              } }
           ],
           "outputs": [
             { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true }
@@ -423,7 +651,24 @@
         "checkpoints": ["cicd_in_progress", "cicd_done"],
         "artifacts": {
           "inputs": [
-            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true }
+            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true,
+              "extract": {
+                "focus": ["验收 verdict 与遗留风险", "交付物清单"],
+                "method": "确认验收通过后再准备流水线与 PR；遗留风险写入 PR 描述",
+                "degrade": "无验收报告时基于代码 diff 与可用阶段报告整理交付说明，并标注验收缺项"
+              } },
+            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
+              "extract": {
+                "focus": ["交付说明的业务背景"],
+                "method": "只作可选参考，在 CICD_CHECKLIST.md 中记录来源",
+                "degrade": "未提供时允许继续，写明需求文档缺失或未提供"
+              } },
+            { "id": "design_optional", "label": "技术设计参考", "artifactType": "file", "path": "design.md", "required": false,
+              "extract": {
+                "focus": ["交付说明的设计背景"],
+                "method": "只作可选参考，在 CICD_CHECKLIST.md 中记录来源",
+                "degrade": "未提供时允许继续，写明设计文档缺失或未提供"
+              } }
           ],
           "outputs": [
             { "id": "cicd_checklist", "label": "CI/CD 清单", "artifactType": "file", "path": "CICD_CHECKLIST.md", "required": true },
@@ -446,7 +691,12 @@
         "checkpoints": ["archived"],
         "artifacts": {
           "inputs": [
-            { "id": "cicd_checklist", "label": "CI/CD 清单", "artifactType": "file", "path": "CICD_CHECKLIST.md", "required": true }
+            { "id": "cicd_checklist", "label": "CI/CD 清单", "artifactType": "file", "path": "CICD_CHECKLIST.md", "required": true,
+              "extract": {
+                "focus": ["清单完成项与未完成项"],
+                "method": "核对交付闭环后归档；未完成项记录到归档说明",
+                "degrade": "无清单时按 Feature 目录现有产物核对后归档，并标注缺项"
+              } }
           ],
           "outputs": []
         },

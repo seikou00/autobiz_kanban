@@ -13,14 +13,21 @@ version: v1.1.1604
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约
+## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。
-运行前如需查看当前契约，执行：
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-utest --json
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-utest --feature "$FEATURE_ID" --json
 ```
+
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
+- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+
+无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -80,13 +87,10 @@ FEATURE_DIR：
 FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 ```
 
-必读输入：
+读取输入（消费 Source Bundle）：
 
-- `{FEATURE_DIR}/proposal.md`
-- `{FEATURE_DIR}/specs/**/*.md`
-- `{FEATURE_DIR}/design.md`
-- `{FEATURE_DIR}/PLAN.md`
-- `{FEATURE_DIR}/REQUIREMENTS_EVAL.md`
+- 按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的上游产物原件（标准链为 proposal.md、specs/**/*.md、design.md、PLAN.md、REQUIREMENTS_EVAL.md），按各自 `extract` 抽取重点。
+- 契约未提供（`external: true`）的输入缺失时按其 `extract.degrade` 继续，不要硬等。
 - `AGENTS.md` 与项目内相关约束
 - 与当前 feature 相关的源码、已有测试、构建配置
 
@@ -146,12 +150,12 @@ FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 ### Step 1: 前置检查
 
 1. 确定 `{slug}` 与工作目录。
-2. 检查当前 checkpoint 应为 `requirements_eval_done` 或 `unit_test_in_progress`。
-3. 确认必读输入存在。
+2. 检查当前 checkpoint 应为本节点的准入 checkpoint（标准链为 `requirements_eval_done` 或 `unit_test_in_progress`，以契约为准）。
+3. 确认 `required_inputs` 中的产物存在。
 4. 读取 `AGENTS.md` 与项目测试约定。
 5. 识别构建工具：Maven、Gradle、npm、pnpm、yarn、pytest、go test 等。不要假设一定是 Java/Maven。
 
-缺少任一必读输入时，保持 checkpoint 不变，向用户列出缺失文件后结束。
+`required_inputs` 中任一产物缺失时，保持 checkpoint 不变，向用户列出缺失文件后结束；`external: true` 的输入缺失不阻断。
 
 ### Step 2: 写入开始 checkpoint
 
@@ -162,11 +166,11 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 ### Step 3: 建立单测计划
 
-从输入产物中提取：
+按 Method Bundle（各输入的 `extract`）从输入产物中提取，标准链下通常包括：
 
 - `proposal.md` 中的能力边界、影响面和非目标。
 - `specs/**/*.md` 中的 Requirement / Scenario、ADDED / MODIFIED / REMOVED 行为变化。
-- `design.md` 中的 API Decisions、Data Decisions、Technical Design。
+- `design.md`（如在 bundle 中）中的 API Decisions、Data Decisions、Technical Design。
 - `REQUIREMENTS_EVAL.md` 中的风险、遗漏、建议重点覆盖项。
 - `PLAN.md` 中已完成任务和受影响模块。
 

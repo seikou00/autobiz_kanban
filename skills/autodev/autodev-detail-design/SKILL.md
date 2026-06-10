@@ -56,16 +56,13 @@ python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint detail_design_in_p
 python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --json
 ```
 
-必须读取：
+读取输入（消费 Source Bundle）：
 
-- {FEATURE_DIR}/proposal.md
-- {FEATURE_DIR}/specs/**/*.md
-- {FEATURE_DIR}/design.md
-- {FEATURE_DIR}/PLAN.md
+- 按契约 `sourceBundle` 读取上游产物原件（本节点为 proposal.md、specs/**/*.md、design.md、PLAN.md），按各自 `extract` 抽取重点。
 - {CODE_WORKSPACE}/AGENTS.md（如存在）
 - 与本 Feature 相关的现有业务代码、测试、配置和接口定义
 
-如果 `PLAN.md` 不存在，停止并提示先完成 /autodev-plan。如果 `design.md` 不存在，也停止；本 skill 不补写上游设计契约。
+`required_inputs` 中任一产物缺失时停止并提示先完成对应上游阶段（本节点仅在标准链启用 detail_design 决策后插入，design.md/PLAN.md 均为必需）；本 skill 不补写上游设计契约。
 
 ## 工作原则
 

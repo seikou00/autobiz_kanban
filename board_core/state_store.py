@@ -8,12 +8,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from board_core.contracts import BoardConfigError, load_repo_workflow_contracts, load_workflow_contracts
+from board_core.contracts import (
+    BoardConfigError,
+    load_board_config,
+    load_record_workflow_contracts,
+    load_workflow_contracts,
+)
 from board_core.workflow_compiler import (
     BASE_WORKFLOW_PROFILE,
+    BASE_WORKFLOW_TEMPLATE,
     WorkflowCompileError,
+    configured_workflow_templates,
     normalize_workflow_decisions,
     normalize_workflow_profile,
+    normalize_workflow_template,
 )
 
 
@@ -28,6 +36,7 @@ EMPTY_CELL = "—"
 WORKFLOW_CONTRACTS = load_workflow_contracts(BOARD_CONFIG_PATH)
 KNOWN_CHECKPOINTS = WORKFLOW_CONTRACTS.known_checkpoints
 DEFAULT_STAGE_BY_CHECKPOINT = WORKFLOW_CONTRACTS.stage_labels
+WORKFLOW_TEMPLATES = configured_workflow_templates(load_board_config(BOARD_CONFIG_PATH))
 
 StateRecord = dict[str, Any]
 StateRecords = dict[str, StateRecord]
@@ -75,17 +84,15 @@ def _split_table_cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-def _contracts_for_profile(workspace: Path | None, workflow_profile: str, workflow_decisions: dict[str, str] | None = None):
-    if workspace is None or workflow_profile == BASE_WORKFLOW_PROFILE:
-        if not workflow_decisions:
+def _contracts_for_record(workspace: Path | None, record: dict):
+    workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
+    workflow_template = record.get("workflowTemplate", BASE_WORKFLOW_TEMPLATE)
+    workflow_decisions = record.get("workflowDecisions") or {}
+    if workflow_template == BASE_WORKFLOW_TEMPLATE and not workflow_decisions:
+        if workspace is None or workflow_profile == BASE_WORKFLOW_PROFILE:
             return WORKFLOW_CONTRACTS
     try:
-        return load_repo_workflow_contracts(
-            ROOT,
-            workspace=workspace,
-            profile=workflow_profile,
-            workflow_decisions=workflow_decisions,
-        )
+        return load_record_workflow_contracts(ROOT, record, workspace=workspace)
     except BoardConfigError as exc:
         raise ValueError(str(exc)) from exc
 
@@ -117,15 +124,23 @@ def _normalize_record(
         return None
 
     workflow_profile = normalize_workflow_profile(_clean(raw_record.get("workflowProfile"), BASE_WORKFLOW_PROFILE))
+    workflow_template = normalize_workflow_template(_clean(raw_record.get("workflowTemplate"), BASE_WORKFLOW_TEMPLATE))
     try:
         workflow_decisions = normalize_workflow_decisions(raw_record.get("workflowDecisions", {}))
     except WorkflowCompileError as exc:
         errors.append(f"{context}: Feature '{feature}' 的 workflowDecisions 无效: {exc}")
         return None
+    resolved_record = {
+        "workflowProfile": workflow_profile,
+        "workflowDecisions": workflow_decisions,
+        "workflowTemplate": workflow_template,
+        "workflowNodes": raw_record.get("workflowNodes"),
+        "workflowExternalized": raw_record.get("workflowExternalized"),
+    }
     try:
-        contracts = _contracts_for_profile(workspace, workflow_profile, workflow_decisions)
+        contracts = _contracts_for_record(workspace, resolved_record)
     except ValueError as exc:
-        errors.append(f"{context}: Feature '{feature}' 的 workflowProfile 无效: {exc}")
+        errors.append(f"{context}: Feature '{feature}' 的 workflow 配置无效: {exc}")
         return None
 
     checkpoint = _clean(raw_record.get("checkpoint"))
@@ -134,7 +149,7 @@ def _normalize_record(
         return None
 
     stage = _clean(raw_record.get("stage"), contracts.stage_labels.get(checkpoint, ""))
-    return {
+    record: StateRecord = {
         "feature": feature,
         "owner": _clean(raw_record.get("owner"), EMPTY_CELL),
         "checkpoint": checkpoint,
@@ -143,7 +158,16 @@ def _normalize_record(
         "updated_at": _clean(raw_record.get("updated_at"), EMPTY_CELL),
         "workflowProfile": workflow_profile,
         "workflowDecisions": workflow_decisions,
+        "workflowTemplate": workflow_template,
     }
+    if WORKFLOW_TEMPLATES.get(workflow_template, {}).get("kind") == "custom":
+        record["workflowNodes"] = [str(item).strip() for item in raw_record.get("workflowNodes", [])]
+        externalized = raw_record.get("workflowExternalized") or {}
+        record["workflowExternalized"] = {
+            str(node_id): [str(path) for path in paths]
+            for node_id, paths in externalized.items()
+        } if isinstance(externalized, dict) else {}
+    return record
 
 
 def normalize_state_records(
@@ -193,6 +217,7 @@ def parse_state_md_records(content: str) -> tuple[StateRecords, list[str]]:
             "updated_at": cells[5] if len(cells) > 5 else EMPTY_CELL,
             "workflowProfile": BASE_WORKFLOW_PROFILE,
             "workflowDecisions": {},
+            "workflowTemplate": BASE_WORKFLOW_TEMPLATE,
         }
         record = _normalize_record(feature, raw_record, errors, context=f"STATE.md line {lineno}")
         if record is not None:

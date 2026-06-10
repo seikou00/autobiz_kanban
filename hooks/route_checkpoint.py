@@ -13,18 +13,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from board_core.contracts import load_repo_workflow_contracts  # noqa: E402
+from board_core.contracts import load_record_workflow_contracts, load_repo_workflow_contracts  # noqa: E402
 from board_core.state_store import get_state_json_path, load_state_json_records_result  # noqa: E402
 from board_core.workflow import derive_node_status, find_current_node  # noqa: E402
 from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_PROFILE,
+    BASE_WORKFLOW_TEMPLATE,
     ENABLED_WORKFLOW_DECISION,
     SKIPPED_WORKFLOW_DECISION,
     WorkflowCompileError,
     configured_dynamic_stages,
     configured_profile_options,
     load_effective_board_config,
+    load_record_effective_board_config,
     normalize_workflow_decisions,
+    normalize_workflow_template,
     read_json,
 )
 
@@ -70,6 +73,20 @@ def _recommended_next_skill(
             profile=workflow_profile,
             workflow_decisions=workflow_decisions,
         )
+    except Exception:
+        return ""
+    for checkpoint in allowed_next:
+        skill = contracts.start_checkpoint_to_skill.get(checkpoint)
+        if skill:
+            return skill
+    return ""
+
+
+def _recommended_next_skill_for_record(workspace: Path, record: dict, allowed_next: list[str]) -> str:
+    if not allowed_next:
+        return ""
+    try:
+        contracts = load_record_workflow_contracts(ROOT, record, workspace=workspace)
     except Exception:
         return ""
     for checkpoint in allowed_next:
@@ -176,6 +193,7 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         return {"ok": False, "feature": feature, "errors": errors}, 1
 
     workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
+    workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
     try:
         workflow_decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
     except WorkflowCompileError as exc:
@@ -183,23 +201,24 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
             "ok": False,
             "feature": feature,
             "workflowProfile": workflow_profile,
+            "workflowTemplate": workflow_template,
             "checkpoint": record.get("checkpoint", ""),
             "errors": [f"workflowDecisions 无效: {exc}"],
         }, 1
     checkpoint = record.get("checkpoint", "")
     try:
-        config = load_effective_board_config(
+        config = load_record_effective_board_config(
             BOARD_CONFIG_PATH,
             repo_root=ROOT,
             workspace=workspace,
-            profile=workflow_profile,
-            workflow_decisions=workflow_decisions,
+            record=record,
         )
     except Exception as exc:
         return {
             "ok": False,
             "feature": feature,
             "workflowProfile": workflow_profile,
+            "workflowTemplate": workflow_template,
             "workflowDecisions": workflow_decisions,
             "checkpoint": checkpoint,
             "errors": [str(exc)],
@@ -212,6 +231,7 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
             "ok": False,
             "feature": feature,
             "workflowProfile": workflow_profile,
+            "workflowTemplate": workflow_template,
             "workflowDecisions": workflow_decisions,
             "checkpoint": checkpoint,
             "errors": [f"未知 checkpoint: {checkpoint}"],
@@ -226,19 +246,26 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
     )
     next_action = _state_next_action(nodes[current_idx], node_status)
     allowed_next = _allowed_next(config, checkpoint)
-    profile_choices = _profile_choice_payload(workspace, checkpoint)
-    workflow_choices = _workflow_choice_payload(workspace, workflow_profile, workflow_decisions, checkpoint)
+    # Subset templates have a fixed chain: no profile or dynamic-stage choices.
+    is_standard_template = workflow_template == BASE_WORKFLOW_TEMPLATE
+    profile_choices = _profile_choice_payload(workspace, checkpoint) if is_standard_template else []
+    workflow_choices = (
+        _workflow_choice_payload(workspace, workflow_profile, workflow_decisions, checkpoint)
+        if is_standard_template
+        else []
+    )
     return {
         "ok": True,
         "feature": feature,
         "workflowProfile": workflow_profile,
+        "workflowTemplate": workflow_template,
         "workflowDecisions": workflow_decisions,
         "checkpoint": checkpoint,
         "currentNodeId": current_node_id,
         "currentNodeStatus": node_status,
         "currentStateId": node_status,
         "allowedNextCheckpoints": allowed_next,
-        "recommendedNextSkill": _recommended_next_skill(workspace, workflow_profile, allowed_next, workflow_decisions),
+        "recommendedNextSkill": _recommended_next_skill_for_record(workspace, record, allowed_next),
         "requiresProfileChoice": checkpoint == PROFILE_CHOICE_CHECKPOINT and len(profile_choices) > 1,
         "profileChoices": profile_choices,
         "requiresWorkflowChoice": bool(workflow_choices),

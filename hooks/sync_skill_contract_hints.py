@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Maintain static Autodev SKILL.md runtime contract lookup hints."""
+"""Maintain SKILL.md runtime contract lookup hints for Biz/Dev/Ops node skills."""
 
 from __future__ import annotations
 
@@ -15,7 +15,12 @@ if str(ROOT) not in sys.path:
 
 from board_core.contracts import BoardConfigError, SkillContract, WorkflowContracts, load_board_config, load_repo_workflow_contracts  # noqa: E402
 from board_core.workflow_compiler import configured_profile_names  # noqa: E402
-from hooks.check_skill_artifact_drift import check_contracts_for_drift  # noqa: E402
+from hooks.check_skill_artifact_drift import (  # noqa: E402
+    check_contracts_for_drift,
+    is_managed_contract,
+    managed_contracts,
+    skill_file_for_contract,
+)
 
 
 LEGACY_CONTRACT_BEGIN_MARKER = "<!-- AUTOBIZDEVOPS_CONTRACT:BEGIN -->"
@@ -36,23 +41,30 @@ class SyncResult:
     error: str = ""
 
 
-def skill_file_for_contract(repo_root: Path, contract: SkillContract) -> Path:
-    return repo_root / "skills" / "autodev" / contract.skill / "SKILL.md"
-
-
 def runtime_contract_hint_block(contract: SkillContract) -> str:
     return "\n".join(
         [
             HINT_BEGIN_MARKER,
-            "## 流程契约",
+            "## 流程契约（Source Bundle + Method Bundle）",
             "",
-            "当前 skill 的 checkpoint、输入/输出产物和 validators 以 "
-            "`$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源。",
-            "运行前如需查看当前契约，执行：",
+            "当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 "
+            "`$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；"
+            "本文档不维护产物清单，不要依赖文中写死的文件名。",
+            "进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：",
             "",
             "```bash",
-            f'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" {contract.skill} --json',
+            f'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" {contract.skill} --feature "$FEATURE_ID" --json',
             "```",
+            "",
+            "- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下"
+            "要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。",
+            "- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、"
+            "读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。",
+            "- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。",
+            "- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` "
+            "的退化读法继续执行，不要因缺失而停止。",
+            "",
+            "无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。",
             HINT_END_MARKER,
             "",
         ]
@@ -183,22 +195,6 @@ def sync_skill_content(content: str, contract: SkillContract) -> str:
     return insert_after_frontmatter(content, block)
 
 
-def is_autodev_contract(contract: SkillContract) -> bool:
-    return contract.group == "Dev" and contract.skill.startswith("autodev-")
-
-
-def autodev_contracts(contracts: WorkflowContracts) -> list[SkillContract]:
-    result: list[SkillContract] = []
-    for node in sorted(contracts.nodes, key=lambda item: item.get("order", 0)):
-        skill = node.get("skill")
-        if not isinstance(skill, str):
-            continue
-        contract = contracts.skill_contracts.get(skill)
-        if contract and is_autodev_contract(contract):
-            result.append(contract)
-    return result
-
-
 def profile_contracts(repo_root: Path) -> list[WorkflowContracts]:
     profiles = configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json"))
     return [
@@ -223,7 +219,7 @@ def selected_contracts(contract_sets: list[WorkflowContracts], skill: str | None
         return unique_contracts([
             contract
             for contracts in contract_sets
-            for contract in autodev_contracts(contracts)
+            for contract in managed_contracts(contracts)
         ])
 
     last_error: BoardConfigError | None = None
@@ -233,7 +229,7 @@ def selected_contracts(contract_sets: list[WorkflowContracts], skill: str | None
         except BoardConfigError as error:
             last_error = error
             continue
-        if not is_autodev_contract(contract):
+        if not is_managed_contract(contract):
             raise BoardConfigError(f"skill is outside static compile scope: {skill}")
         return [contract]
     raise last_error or BoardConfigError(f"unknown skill in board_config.json: {skill}")
@@ -257,11 +253,11 @@ def sync_contract_hint(repo_root: Path, contract: SkillContract, *, write: bool)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sync Autodev runtime contract lookup hints")
+    parser = argparse.ArgumentParser(description="Sync runtime contract lookup hints for Biz/Dev/Ops node skills")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="check generated contract blocks without writing")
     mode.add_argument("--write", action="store_true", help="write generated contract blocks")
-    parser.add_argument("--skill", help="sync a single Autodev skill hint, e.g. autodev-plan")
+    parser.add_argument("--skill", help="sync a single node skill hint, e.g. autodev-plan / autobiz-prd-generate")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
     args = parser.parse_args(argv)
 

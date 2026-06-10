@@ -30,7 +30,7 @@ from state_checkpoint import (  # noqa: E402
     validate_lifecycle,
     validate_transitions,
 )
-from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts  # noqa: E402
+from board_core.contracts import BoardConfigError, load_board_config, load_record_workflow_contracts  # noqa: E402
 from board_core.state_store import (  # noqa: E402
     EMPTY_CELL,
     StateRecords,
@@ -42,6 +42,7 @@ from board_core.state_store import (  # noqa: E402
 )
 from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_PROFILE,
+    BASE_WORKFLOW_TEMPLATE,
     WorkflowCompileError,
     configured_dynamic_stages,
     normalize_workflow_decisions,
@@ -133,6 +134,7 @@ def replace_feature_record(
             "updated_at": updated_at,
             "workflowProfile": workflow_profile,
             "workflowDecisions": dict(workflow_decisions),
+            "workflowTemplate": BASE_WORKFLOW_TEMPLATE,
         }
 
     return new_records, []
@@ -252,6 +254,7 @@ def prepare_checkpoint_update(
             old_record.get("workflowProfile", BASE_WORKFLOW_PROFILE) if old_record else BASE_WORKFLOW_PROFILE
         )
     )
+    resolved_template = (old_record or {}).get("workflowTemplate", BASE_WORKFLOW_TEMPLATE)
     try:
         old_decisions = normalize_workflow_decisions(old_record.get("workflowDecisions", {}) if old_record else {})
         decision_updates = normalize_workflow_decisions(workflow_decision_updates or {})
@@ -290,13 +293,15 @@ def prepare_checkpoint_update(
             workflow_decisions=old_decisions,
         )
     resolved_decisions = {**old_decisions, **decision_updates}
+    workflow_record = {
+        "workflowProfile": resolved_profile,
+        "workflowDecisions": resolved_decisions,
+        "workflowTemplate": resolved_template,
+        "workflowNodes": (old_record or {}).get("workflowNodes"),
+        "workflowExternalized": (old_record or {}).get("workflowExternalized"),
+    }
     try:
-        contracts = load_repo_workflow_contracts(
-            ROOT,
-            workspace=workspace,
-            profile=resolved_profile,
-            workflow_decisions=resolved_decisions,
-        )
+        contracts = load_record_workflow_contracts(ROOT, workflow_record, workspace=workspace)
     except BoardConfigError as exc:
         return CheckpointUpdate(
             ok=False,

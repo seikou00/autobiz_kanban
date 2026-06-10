@@ -3,6 +3,14 @@ name: html-to-react
 description: Convert HTML, static pages, copied markup, or small static sites into a working React project or React components, including recognition of HTML UI patterns that should become Ant Design components. Use when Codex is asked to turn HTML code/files into React, JSX, TSX, a Vite/Next React app, componentized frontend code, or when migrating static HTML/CSS/JS into reusable React engineering code with built-in craft, extract, layout, and publish phases.
 ---
 
+**路径变量约定（必须区分）：**
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；用于前端代码探索、实现和验证。
+
 # HTML To React
 
 ## Overview
@@ -15,6 +23,29 @@ This skill is self-contained. Do not require or call another design skill to per
 - **extract**: identify reusable components, data arrays, props, and design tokens.
 - **layout**: preserve or improve spatial hierarchy, responsiveness, and visual rhythm.
 - **publish**: run the app, verify visually, and deliver the project with clear entry points.
+
+## AutobizDevOps Workflow Integration
+
+This skill is an alternative entry for the existing `frontend_before_specs` frontend node. It does not introduce a second frontend stage or new checkpoints. When invoked inside an AutobizDevOps Feature, it shares the same lifecycle as `autodev-frontend`:
+
+- If the current checkpoint is `prd_done`, first enter the frontend node:
+
+```bash
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+```
+
+- If the current checkpoint is already `frontend_in_progress`, continue without changing the workflow profile.
+- After implementation and verification, finish the shared frontend node:
+
+```bash
+python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint frontend_done
+CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+```
+
+- Report changed files, verification commands, unresolved risks, and prompt the user to continue with `/autodev-specs`.
+
+Use this entry when the source is normal static HTML, copied DOM markup, semantic HTML/CSS/JS, a small static site, or the user explicitly asks for HTML to React/JSX/TSX/Vite/Next conversion. Do not use this entry for Figma/low-code high-fidelity HTML with absolute positioning, dense inline styles, pixel coordinates, or pure-div visual exports; those belong to `../autodev-frontend/SKILL.md` and its `route/route-with-html.md` pipeline.
 
 ## Workflow
 
