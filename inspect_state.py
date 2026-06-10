@@ -28,6 +28,7 @@ from board_core.workflow_compiler import (  # type: ignore[import-untyped]
     BASE_WORKFLOW_PROFILE,
     load_effective_board_config,
     normalize_workflow_decisions,
+    normalize_workflow_profile,
 )
 from board_core.state import (  # type: ignore[import-untyped]
     find_feature_dir,
@@ -45,6 +46,9 @@ from board_core.workflow import (  # type: ignore[import-untyped]
 
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
+BASE_WORKFLOW_ID = "base"
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -64,6 +68,24 @@ def _load_effective_config(workspace: Path, profile: str, workflow_decisions: di
         profile=profile,
         workflow_decisions=workflow_decisions,
     )
+
+
+def workflow_marker(profile: str, decisions: object | None) -> tuple[str, str, dict[str, str]]:
+    workflow_profile = normalize_workflow_profile(profile)
+    workflow_decisions = normalize_workflow_decisions(decisions)
+    sorted_decisions = {
+        stage_id: workflow_decisions[stage_id]
+        for stage_id in sorted(workflow_decisions)
+    }
+    if workflow_profile == BASE_WORKFLOW_PROFILE and not sorted_decisions:
+        return BASE_WORKFLOW_ID, workflow_profile, sorted_decisions
+    if not sorted_decisions:
+        return workflow_profile, workflow_profile, sorted_decisions
+    decision_parts = [
+        f"{stage_id}_{decision}"
+        for stage_id, decision in sorted_decisions.items()
+    ]
+    return "__".join([workflow_profile, *decision_parts]), workflow_profile, sorted_decisions
 
 
 def _feature_ref_dir(workspace: Path, feature: str, feature_dir: Path | None) -> str:
@@ -181,7 +203,12 @@ def _resolve_project_workspace(workspace: Path, project: str) -> Path:
     return project_workspace
 
 
-def _collect_project_runs(project_workspace: Path, config: dict, project: str) -> list[dict]:
+def _collect_project_runs(
+    project_workspace: Path,
+    config: dict,
+    project: str,
+    dynamic_workflows: dict[str, dict],
+) -> list[dict]:
     """返回某个 project 下所有 feature 的 runs 摘要列表（不包含 workflow 外壳）"""
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
@@ -192,11 +219,15 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
     runs: list[dict] = []
     for feature in feature_names:
         record = state_records.get(feature, {})
-        workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
-        workflow_decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
+        workflow_id, workflow_profile, workflow_decisions = workflow_marker(
+            record.get("workflowProfile", BASE_WORKFLOW_PROFILE),
+            record.get("workflowDecisions", {}),
+        )
         run_config = config
-        if workflow_profile != BASE_WORKFLOW_PROFILE or workflow_decisions:
+        if workflow_id != BASE_WORKFLOW_ID:
             run_config = _load_effective_config(project_workspace, workflow_profile, workflow_decisions)
+            if workflow_id not in dynamic_workflows:
+                dynamic_workflows[workflow_id] = build_workflow_shell(run_config)
         nodes_config = run_config["workflow"]["nodes"]
         suffix_states = run_config["checkpointSuffixState"]
         checkpoint = record.get("checkpoint", "")
@@ -213,15 +244,16 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
             current_node,
         )
 
-        runs.append({
+        run_summary = {
             "featureName": feature,
             "featureId": feature,
-            "workflowProfile": workflow_profile,
-            "workflowDecisions": workflow_decisions,
             "currentNodeId": current_node_id or "unknown",
             "currentNodeStatus": current_node_status,
             "currentNodeStatusLabel": current_node_status_label,
-        })
+        }
+        if workflow_id != BASE_WORKFLOW_ID:
+            run_summary["workflowId"] = workflow_id
+        runs.append(run_summary)
 
     return runs
 
@@ -229,16 +261,18 @@ def _collect_project_runs(project_workspace: Path, config: dict, project: str) -
 def project_mode(workspace: Path, projects: list[str], config: dict) -> int:
     """Handle --mode project with one or more projects."""
     all_projects: dict[str, dict] = {}
+    dynamic_workflows: dict[str, dict] = {}
     for project in projects:
         project_workspace = _resolve_project_workspace(workspace, project)
         if not project_workspace.is_dir():
             print(f"project 不存在: {project_workspace}", file=sys.stderr)
             continue
-        runs = _collect_project_runs(project_workspace, config, project)
+        runs = _collect_project_runs(project_workspace, config, project, dynamic_workflows)
         all_projects[project] = {"runs": runs}
 
     output = {
         "workflow": build_workflow_shell(config),
+        "dynamicWorkflows": dynamic_workflows,
         "projects": all_projects,
     }
 

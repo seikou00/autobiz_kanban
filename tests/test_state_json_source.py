@@ -197,7 +197,7 @@ class StateStoreTests(unittest.TestCase):
 
 
 class ArtifactScanTests(unittest.TestCase):
-    def test_scan_file_artifact_returns_paths_array(self) -> None:
+    def test_scan_file_artifact_returns_flat_status_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -207,7 +207,7 @@ class ArtifactScanTests(unittest.TestCase):
             artifacts = scan_artifacts(
                 feature_dir,
                 workspace,
-                [{"id": "prd", "path": "PRD.md"}],
+                [{"id": "prd", "label": "PRD文档", "path": "PRD.md"}],
             )
 
             self.assertEqual(
@@ -215,8 +215,10 @@ class ArtifactScanTests(unittest.TestCase):
                 [
                     {
                         "id": "prd",
-                        "paths": [".autobizdevops/features/alpha/PRD.md"],
-                        "status": {"label": "已生成", "uiKind": "ok"},
+                        "artifactLabel": "PRD文档",
+                        "path": ".autobizdevops/features/alpha/PRD.md",
+                        "artifactStatus": "generated",
+                        "artifactStatusLabel": "已生成",
                     }
                 ],
             )
@@ -230,7 +232,7 @@ class ArtifactScanTests(unittest.TestCase):
             artifacts = scan_artifacts(
                 feature_dir,
                 workspace,
-                [{"id": "prd", "path": "PRD.md"}],
+                [{"id": "prd", "label": "PRD文档", "path": "PRD.md"}],
             )
 
             self.assertEqual(
@@ -238,8 +240,10 @@ class ArtifactScanTests(unittest.TestCase):
                 [
                     {
                         "id": "prd",
-                        "paths": [".autobizdevops/features/alpha/PRD.md"],
-                        "status": {"label": "未生成", "uiKind": "warning"},
+                        "artifactLabel": "PRD文档",
+                        "path": ".autobizdevops/features/alpha/PRD.md",
+                        "artifactStatus": "missing",
+                        "artifactStatusLabel": "未生成",
                     }
                 ],
             )
@@ -257,7 +261,7 @@ class ArtifactScanTests(unittest.TestCase):
             artifacts = scan_artifacts(
                 feature_dir,
                 workspace,
-                [{"id": "specs", "path": "specs/**/*.md"}],
+                [{"id": "specs", "label": "行为规格", "path": "specs/**/*.md"}],
             )
 
             self.assertEqual(
@@ -265,11 +269,13 @@ class ArtifactScanTests(unittest.TestCase):
                 [
                     {
                         "id": "specs",
+                        "artifactLabel": "行为规格",
                         "paths": [
                             ".autobizdevops/features/alpha/specs/bar/spec.md",
                             ".autobizdevops/features/alpha/specs/foo/spec.md",
                         ],
-                        "status": {"label": "已生成", "uiKind": "ok"},
+                        "artifactStatus": "generated",
+                        "artifactStatusLabel": "已生成",
                     }
                 ],
             )
@@ -283,7 +289,7 @@ class ArtifactScanTests(unittest.TestCase):
             artifacts = scan_artifacts(
                 feature_dir,
                 workspace,
-                [{"id": "specs", "path": "specs/**/*.md"}],
+                [{"id": "specs", "label": "行为规格", "path": "specs/**/*.md"}],
             )
 
             self.assertEqual(
@@ -291,8 +297,10 @@ class ArtifactScanTests(unittest.TestCase):
                 [
                     {
                         "id": "specs",
+                        "artifactLabel": "行为规格",
                         "paths": [],
-                        "status": {"label": "未生成", "uiKind": "warning"},
+                        "artifactStatus": "missing",
+                        "artifactStatusLabel": "未生成",
                     }
                 ],
             )
@@ -666,6 +674,7 @@ class StateIntegrationTests(unittest.TestCase):
                 artifact for artifact in nodes["dev.specs"]["artifacts"] if artifact["id"] == "specs"
             )
             self.assertNotIn("path", specs_artifact)
+            self.assertEqual(specs_artifact["artifactLabel"], "行为规格")
             self.assertEqual(
                 specs_artifact["paths"],
                 [
@@ -673,7 +682,8 @@ class StateIntegrationTests(unittest.TestCase):
                     ".autobizdevops/features/alpha/specs/foo/spec.md",
                 ],
             )
-            self.assertEqual(specs_artifact["status"], {"label": "已生成", "uiKind": "ok"})
+            self.assertEqual(specs_artifact["artifactStatus"], "generated")
+            self.assertEqual(specs_artifact["artifactStatusLabel"], "已生成")
 
     def test_read_state_json_cli_reads_specific_feature_without_repairing_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

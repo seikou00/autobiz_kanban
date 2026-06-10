@@ -165,6 +165,10 @@ def record(checkpoint: str, *, profile: str = "quality") -> dict[str, str]:
     }
 
 
+def states_by_id(node: dict) -> dict[str, dict]:
+    return {state["id"]: state for state in node["states"]}
+
+
 class DynamicWorkflowCompilerTests(unittest.TestCase):
     def test_frontend_profile_changes_workflow_shell_nodes(self) -> None:
         standard = load_effective_board_config(ROOT / "board_core" / "board_config.json", repo_root=ROOT)
@@ -180,6 +184,105 @@ class DynamicWorkflowCompilerTests(unittest.TestCase):
         self.assertNotIn("dev.frontend", standard_nodes)
         self.assertLess(frontend_nodes.index("biz.prd"), frontend_nodes.index("dev.frontend"))
         self.assertLess(frontend_nodes.index("dev.frontend"), frontend_nodes.index("dev.specs"))
+
+    def test_profile_insert_preserves_compatible_state_content(self) -> None:
+        base_config = copy.deepcopy(load_board_config(ROOT / "board_core" / "board_config.json"))
+        nodes = {node["id"]: node for node in base_config["workflow"]["nodes"]}
+        plan_done = [
+            state
+            for state in nodes["dev.plan"]["states"]
+            if state["nodeStatus"] == "done"
+        ][0]
+        plan_done["dialogMode"] = "workflow-choice"
+        plan_done["metadata"] = {"choiceStage": "detail_design_before_code"}
+
+        config = compile_board_config(
+            base_config,
+            repo_root=ROOT,
+            profile="frontend_before_specs",
+        )
+        compiled_nodes = {node["id"]: node for node in config["workflow"]["nodes"]}
+        compiled_plan_done = states_by_id(compiled_nodes["dev.plan"])["done"]
+
+        self.assertEqual(compiled_plan_done["dialogMode"], "workflow-choice")
+        self.assertEqual(compiled_plan_done["metadata"], {"choiceStage": "detail_design_before_code"})
+        self.assertIn("/autodev-detail-design", compiled_plan_done["nextAction"]["dialogTips"])
+
+        shell_nodes = {node["id"]: node for node in build_workflow_shell(config)["nodes"]}
+        shell_plan_done = states_by_id(shell_nodes["dev.plan"])["done"]
+        self.assertEqual(shell_plan_done["dialogMode"], "workflow-choice")
+        self.assertEqual(shell_plan_done["metadata"], {"choiceStage": "detail_design_before_code"})
+
+    def test_profile_insert_regenerates_changed_target_state(self) -> None:
+        config = load_effective_board_config(
+            ROOT / "board_core" / "board_config.json",
+            repo_root=ROOT,
+            profile="frontend_before_specs",
+        )
+        nodes = {node["id"]: node for node in config["workflow"]["nodes"]}
+        prd_done = states_by_id(nodes["biz.prd"])["done"]
+
+        self.assertEqual(prd_done["nextAction"]["slashSkill"], "autodev-frontend")
+        self.assertEqual(prd_done["nextAction"]["dialogTips"], "当前阶段：前端实现。")
+        self.assertNotIn("是否需要将 HTML", prd_done["nextAction"]["dialogTips"])
+
+    def test_inserted_node_preserves_custom_states_when_target_skill_matches(self) -> None:
+        overlay = quality_overlay()
+        overlay["nodes"][0]["artifacts"]["outputs"][0]["artifactType"] = "file"
+        overlay["nodes"][0]["states"] = [
+            {
+                "nodeStatus": "not_started",
+                "label": "待质量门禁",
+                "uiKind": "custom-pending",
+                "customHint": "quality gate not started",
+                "nextAction": {
+                    "slashSkill": DYNAMIC_SKILL,
+                    "userMessage": "请使用质量门禁继续推进。",
+                    "dialogTips": "自定义质量门禁提示。",
+                },
+            },
+            {
+                "nodeStatus": "done",
+                "label": "质量门禁完成",
+                "customHint": "quality gate done",
+                "nextAction": {
+                    "slashSkill": "autodev-code",
+                    "userMessage": "请继续编码。",
+                    "dialogTips": "自定义编码提示。",
+                },
+            },
+        ]
+        config = compile_board_config(
+            load_board_config(ROOT / "board_core" / "board_config.json"),
+            repo_root=ROOT,
+            profile="quality",
+            overlays=[overlay],
+        )
+
+        nodes = {node["id"]: node for node in config["workflow"]["nodes"]}
+        quality_states = states_by_id(nodes["dev.quality"])
+        self.assertEqual(quality_states["not_started"]["customHint"], "quality gate not started")
+        self.assertEqual(quality_states["not_started"]["nextAction"]["dialogTips"], "自定义质量门禁提示。")
+        self.assertEqual(quality_states["done"]["customHint"], "quality gate done")
+        self.assertEqual(quality_states["done"]["nextAction"]["slashSkill"], "autodev-code")
+
+        shell_nodes = {node["id"]: node for node in build_workflow_shell(config)["nodes"]}
+        shell_quality_states = states_by_id(shell_nodes["dev.quality"])
+        self.assertEqual(shell_quality_states["not_started"]["uiKind"], "custom-pending")
+        self.assertEqual(shell_quality_states["done"]["customHint"], "quality gate done")
+
+    def test_enabled_dynamic_stage_regenerates_plan_done_state(self) -> None:
+        config = load_effective_board_config(
+            ROOT / "board_core" / "board_config.json",
+            repo_root=ROOT,
+            profile="standard",
+            workflow_decisions={"detail_design_before_code": "enabled"},
+        )
+        nodes = {node["id"]: node for node in config["workflow"]["nodes"]}
+        plan_done = states_by_id(nodes["dev.plan"])["done"]
+
+        self.assertEqual(plan_done["nextAction"]["slashSkill"], "autodev-detail-design")
+        self.assertEqual(plan_done["nextAction"]["dialogTips"], "当前阶段：详细设计。")
 
     def test_dynamic_stage_decision_inserts_configured_node(self) -> None:
         base_config = config_with_dynamic_stage(dynamic_quality_stage())
@@ -470,6 +573,18 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             self.assertEqual(choices["skipped"]["targetCheckpoint"], "code_in_progress")
             self.assertEqual(choices["skipped"]["recommendedNextSkill"], "autodev-code")
 
+    def test_route_checkpoint_preserves_workflow_choice_tip_after_profile_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {"alpha": record("plan_done", profile="frontend_before_specs")})
+
+            payload, exit_code = resolve_route(workspace, "alpha")
+
+            self.assertEqual(exit_code, 0, payload)
+            self.assertTrue(payload["requiresWorkflowChoice"])
+            self.assertEqual(payload["nextAction"]["slashSkill"], "autodev-code")
+            self.assertIn("/autodev-detail-design", payload["nextAction"]["dialogTips"])
+
     def test_workflow_decision_skip_goes_directly_to_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
@@ -561,6 +676,151 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             self.assertIn("dev.frontend", workflow_nodes)
             self.assertIn("dev.detail_design", workflow_nodes)
             self.assertEqual(payload["run"]["currentNodeId"], "dev.detail_design")
+
+    def test_project_inspect_exposes_frontend_dynamic_workflow_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            collection, project = make_collection_project(Path(tmp))
+            write_state_records(project, {"alpha": record("frontend_in_progress", profile="frontend_before_specs")})
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "inspect_state.py"),
+                    "--workspace",
+                    str(collection),
+                    "--mode",
+                    "project",
+                    "--projects",
+                    "proj",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            run = payload["projects"]["proj"]["runs"][0]
+            self.assertEqual(run["workflowId"], "frontend_before_specs")
+            self.assertNotIn("workflowProfile", run)
+            self.assertNotIn("workflowDecisions", run)
+            self.assertIn("frontend_before_specs", payload["dynamicWorkflows"])
+            self.assertNotIn("dev.frontend", [node["id"] for node in payload["workflow"]["nodes"]])
+
+            restored = payload["dynamicWorkflows"]["frontend_before_specs"]
+            self.assertIn("nodes", restored)
+            self.assertNotIn("workflowDelta", restored)
+            self.assertNotIn("workflow", restored)
+            self.assertIn("dev.frontend", [node["id"] for node in restored["nodes"]])
+            self.assertEqual(run["currentNodeId"], "dev.frontend")
+
+    def test_project_inspect_restores_dynamic_decision_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            collection, project = make_collection_project(Path(tmp))
+            feature_dir = project / ".autobizdevops" / "features" / "alpha"
+            write_plan_artifacts(feature_dir)
+            write_state_records(
+                project,
+                {
+                    "alpha": {
+                        **record("detail_design_in_progress", profile="standard"),
+                        "workflowDecisions": {"detail_design_before_code": "enabled"},
+                    }
+                },
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "inspect_state.py"),
+                    "--workspace",
+                    str(collection),
+                    "--mode",
+                    "project",
+                    "--projects",
+                    "proj",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            workflow_id = "standard__detail_design_before_code_enabled"
+            run = payload["projects"]["proj"]["runs"][0]
+            self.assertEqual(run["workflowId"], workflow_id)
+            self.assertNotIn("workflowProfile", run)
+            self.assertNotIn("workflowDecisions", run)
+            self.assertEqual(run["currentNodeId"], "dev.detail_design")
+
+            restored = payload["dynamicWorkflows"][workflow_id]
+            self.assertIn("nodes", restored)
+            self.assertNotIn("workflowDelta", restored)
+            self.assertNotIn("workflow", restored)
+            workflow_nodes = [node["id"] for node in restored["nodes"]]
+            self.assertLess(workflow_nodes.index("dev.plan"), workflow_nodes.index("dev.detail_design"))
+            self.assertLess(workflow_nodes.index("dev.detail_design"), workflow_nodes.index("dev.code"))
+
+    def test_project_inspect_run_workflow_ids_resolve_current_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            collection, project = make_collection_project(Path(tmp))
+            write_state_records(
+                project,
+                {
+                    "alpha": record("discuss_in_progress", profile="standard"),
+                    "beta": {
+                        **record("frontend_in_progress", profile="frontend_before_specs"),
+                        "feature": "beta",
+                    },
+                    "gamma": {
+                        **record("detail_design_in_progress", profile="standard"),
+                        "feature": "gamma",
+                        "workflowDecisions": {"detail_design_before_code": "enabled"},
+                    },
+                },
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "inspect_state.py"),
+                    "--workspace",
+                    str(collection),
+                    "--mode",
+                    "project",
+                    "--projects",
+                    "proj",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(
+                set(payload["dynamicWorkflows"]),
+                {"frontend_before_specs", "standard__detail_design_before_code_enabled"},
+            )
+            runs_by_feature = {
+                run["featureId"]: run
+                for run in payload["projects"]["proj"]["runs"]
+            }
+            self.assertNotIn("workflowId", runs_by_feature["alpha"])
+            self.assertEqual(runs_by_feature["beta"]["workflowId"], "frontend_before_specs")
+            self.assertEqual(
+                runs_by_feature["gamma"]["workflowId"],
+                "standard__detail_design_before_code_enabled",
+            )
+
+            for run in payload["projects"]["proj"]["runs"]:
+                if "workflowId" in run:
+                    workflow = payload["dynamicWorkflows"][run["workflowId"]]
+                else:
+                    workflow = payload["workflow"]
+                workflow_node_ids = {node["id"] for node in workflow["nodes"]}
+                self.assertIn(run["currentNodeId"], workflow_node_ids)
 
     def test_dynamic_lifecycle_checks_outputs_and_logs_dynamic_node_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

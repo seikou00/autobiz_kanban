@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 from board_core.contracts import BoardConfigError, artifact_dicts
 
 
@@ -214,13 +216,13 @@ def _normalize_node_states(node: dict) -> list[dict]:
         if node_status == "unknown" and raw_status != "unknown":
             raise BoardConfigError(f"{context}.nodeStatus must be a supported node status")
         clean_state = {
-            "id": node_status,
-            "nodeStatus": node_status,
-            "nextAction": _normalize_next_action(state.get("nextAction"), context=context),
+            k: copy.deepcopy(v)
+            for k, v in state.items()
+            if k not in {"id", "nodeStatus", "nextAction"}
         }
-        label = state.get("label")
-        if isinstance(label, str) and label.strip():
-            clean_state["label"] = label
+        clean_state["id"] = node_status
+        clean_state["nodeStatus"] = node_status
+        clean_state["nextAction"] = _normalize_next_action(state.get("nextAction"), context=context)
         clean_states.append(clean_state)
     return clean_states
 

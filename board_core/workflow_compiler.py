@@ -20,6 +20,7 @@ SKIPPED_WORKFLOW_DECISION = "skipped"
 OVERLAY_RELATIVE_DIR = Path(".autobizdevops") / "workflow.d"
 PLUGIN_OVERLAY_DIR_NAME = "workflow.d"
 NEXT_ACTION_FIELDS = ("slashSkill", "userMessage", "dialogTips")
+DERIVED_STATE_IDS = frozenset({"not_started", "in_progress", "done", "archived"})
 
 
 class WorkflowCompileError(Exception):
@@ -359,6 +360,12 @@ def _build_dynamic_node(spec: dict, *, repo_root: Path | None, context: str) -> 
     if not isinstance(artifacts, dict):
         raise WorkflowCompileError(f"{context}.artifacts must be an object")
 
+    states = spec.get("states", [])
+    if states is None:
+        states = []
+    if not isinstance(states, list):
+        raise WorkflowCompileError(f"{context}.states must be a list")
+
     return {
         "id": node_id,
         "label": label,
@@ -373,6 +380,7 @@ def _build_dynamic_node(spec: dict, *, repo_root: Path | None, context: str) -> 
         "validators": _read_string_list(spec.get("validators"), context=f"{context}.validators"),
         "guards": list(guards),
         "hookDefinitions": copy.deepcopy(spec.get("hookDefinitions", [])),
+        "states": copy.deepcopy(states),
         "_dynamic": True,
         "_nextActionOverride": _read_next_action_override(spec.get("nextAction"), context=context),
     }
@@ -409,10 +417,28 @@ def _dynamic_stage_overlay(stage: dict) -> dict:
     return {"nodes": nodes}
 
 
-def _state_template(node: dict, state_id: str) -> dict:
+def _state_id(state: dict) -> str:
+    raw_status = state.get("nodeStatus", state.get("id"))
+    if isinstance(raw_status, str) and raw_status in DERIVED_STATE_IDS:
+        return raw_status
+    return ""
+
+
+def _find_state(node: dict, state_id: str) -> dict | None:
     for state in node.get("states", []):
-        if isinstance(state, dict) and state.get("id") == state_id:
-            return {k: copy.deepcopy(v) for k, v in state.items() if k != "nextAction"}
+        if isinstance(state, dict) and _state_id(state) == state_id:
+            return state
+    return None
+
+
+def _normalize_state_identity(state: dict, state_id: str) -> dict:
+    normalized = copy.deepcopy(state)
+    normalized["id"] = state_id
+    normalized["nodeStatus"] = state_id
+    return normalized
+
+
+def _default_state(state_id: str) -> dict:
     defaults = {
         "not_started": {"id": "not_started", "label": "未开始", "uiKind": "pending"},
         "in_progress": {"id": "in_progress", "label": "进行中", "uiKind": "active"},
@@ -420,6 +446,60 @@ def _state_template(node: dict, state_id: str) -> dict:
         "archived": {"id": "archived", "label": "已归档", "uiKind": "archived"},
     }
     return copy.deepcopy(defaults[state_id])
+
+
+def _state_template(node: dict, state_id: str) -> dict:
+    state = _find_state(node, state_id)
+    if state is None:
+        return _default_state(state_id)
+    template = _normalize_state_identity(state, state_id)
+    template.pop("nextAction", None)
+    return template
+
+
+def _compatible_state(node: dict, state_id: str, target_skill: str) -> dict | None:
+    state = _find_state(node, state_id)
+    if state is None:
+        return None
+    action = state.get("nextAction")
+    if not isinstance(action, dict) or action.get("slashSkill") != target_skill:
+        return None
+    return _normalize_state_identity(state, state_id)
+
+
+def _build_archived_next_action(skill: str, label: str) -> dict[str, str]:
+    return {
+        "slashSkill": skill,
+        "userMessage": f"请使用 /{skill} 查看当前 Feature 的归档状态。",
+        "dialogTips": f"当前阶段：{label}。",
+    }
+
+
+def _derive_state(
+    node: dict,
+    state_id: str,
+    target_skill: str,
+    target_label: str,
+    overrides: dict[str, dict[str, str]],
+    *,
+    archived: bool = False,
+) -> dict:
+    if state_id in overrides:
+        state = _state_template(node, state_id)
+        state["nextAction"] = overrides[state_id]
+        return state
+
+    compatible = _compatible_state(node, state_id, target_skill)
+    if compatible is not None:
+        return compatible
+
+    state = _default_state(state_id)
+    state["nextAction"] = (
+        _build_archived_next_action(target_skill, target_label)
+        if archived
+        else _build_next_action(target_skill, target_label)
+    )
+    return state
 
 
 def _next_node_skill(nodes: list[dict], index: int) -> tuple[str, str]:
@@ -440,13 +520,16 @@ def _derive_node_states(nodes: list[dict]) -> None:
         overrides = node.pop("_nextActionOverride", {})
         checkpoints = node.get("checkpoints", [])
         if checkpoints == ["archived"]:
-            archived = _state_template(node, "archived")
-            archived["nextAction"] = overrides.get("archived") or {
-                "slashSkill": skill,
-                "userMessage": f"请使用 /{skill} 查看当前 Feature 的归档状态。",
-                "dialogTips": f"当前阶段：{label}。",
-            }
-            node["states"] = [archived]
+            node["states"] = [
+                _derive_state(
+                    node,
+                    "archived",
+                    skill,
+                    label,
+                    overrides,
+                    archived=True,
+                )
+            ]
             continue
 
         next_skill, next_label = _next_node_skill(nodes, index)
@@ -456,9 +539,7 @@ def _derive_node_states(nodes: list[dict]) -> None:
             ("in_progress", skill, label),
             ("done", next_skill, next_label),
         ):
-            state = _state_template(node, state_id)
-            state["nextAction"] = overrides.get(state_id) or _build_next_action(target_skill, target_label)
-            states.append(state)
+            states.append(_derive_state(node, state_id, target_skill, target_label, overrides))
         node["states"] = states
 
 
