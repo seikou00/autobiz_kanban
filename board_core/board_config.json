@@ -45,7 +45,8 @@
       "custom": {
         "kind": "custom",
         "label": "自定义",
-        "description": "自由选择并串联节点；所选节点的必需输入会自动补全上游或标记为外部输入。"
+        "description": "自由选择并串联节点（必含代码实现与归档）；缺失的必需输入默认标记为外部输入并按降级读法执行，可按建议选择性补充上游节点。",
+        "requiredNodes": ["dev.code", "ops.archive"]
       }
     },
     "profiles": {

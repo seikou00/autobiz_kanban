@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Expose workflow template catalog, custom node catalog, and closure solving for the UI."""
+"""Expose the workflow template + node catalog and closure solving for the UI.
+
+templates mode returns both the template options and the custom-selectable node
+catalog in one call; closure mode solves a node selection interactively.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from board_core.workflow_compiler import (  # noqa: E402
     WorkflowCompileError,
     compile_node_subset,
     configured_template_options,
+    configured_workflow_templates,
 )
 
 
@@ -82,9 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect workflow templates / node catalog / closure")
     parser.add_argument(
         "--mode",
-        choices=("templates", "nodes", "closure"),
+        choices=("templates", "closure"),
         default="templates",
-        help="templates: 模板清单; nodes: 自定义可选节点目录; closure: 依赖闭包求解",
+        help="templates: 模板清单 + 自定义可选节点目录（一次返回）; closure: 依赖闭包求解",
     )
     parser.add_argument(
         "--nodes",
@@ -96,6 +101,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="closure 模式下自动补全上游 producer（默认不补全：缺失输入外部化并返回 suggestions 供 UI 可选添加）",
     )
+    parser.add_argument(
+        "--template",
+        default=None,
+        help="closure 模式下并集该模板的 requiredNodes（如 custom 必含 dev.code/ops.archive），保证预览与创建一致",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -103,12 +113,16 @@ def main(argv: list[str] | None = None) -> int:
         payload: dict = {"schemaVersion": SCHEMA_VERSION, "mode": args.mode, "ok": True}
         if args.mode == "templates":
             payload["templates"] = configured_template_options(base_config)
-        elif args.mode == "nodes":
             payload["nodes"] = _node_catalog(base_config)
         else:
             node_ids = [item.strip() for item in (args.nodes or "").split(",") if item.strip()]
+            if args.template:
+                template_spec = configured_workflow_templates(base_config).get(args.template.strip(), {})
+                for required_id in template_spec.get("requiredNodes", []):
+                    if required_id not in node_ids:
+                        node_ids.append(required_id)
             if not node_ids:
-                print("closure 模式需要 --nodes", file=sys.stderr)
+                print("closure 模式需要 --nodes（或 --template 含 requiredNodes 的模板）", file=sys.stderr)
                 return 2
             payload["closure"] = _closure_payload(
                 base_config,

@@ -175,8 +175,18 @@ class WorkflowTemplateTest(unittest.TestCase):
         self.assertEqual(templates["lean"]["kind"], "nodeSubset")
         self.assertEqual(templates["lean"]["nodes"], LEAN_NODE_IDS)
         self.assertEqual(templates["custom"]["kind"], "custom")
-        options = configured_template_options(base_config())
-        self.assertEqual(options[0]["id"], "standard")
+        options = {option["id"]: option for option in configured_template_options(base_config())}
+        self.assertEqual(list(options)[0], "standard")
+        self.assertEqual(options["standard"]["templateType"], "classical")
+        self.assertEqual(options["lean"]["templateType"], "nodeSubset")
+        self.assertEqual(options["custom"]["templateType"], "custom")
+        self.assertEqual(len(options["standard"]["nodes"]), 11)
+        self.assertEqual(options["lean"]["nodes"], LEAN_NODE_IDS)
+        self.assertEqual(options["custom"]["nodes"], [])
+        self.assertEqual(options["custom"]["requiredNodes"], ["dev.code", "ops.archive"])
+        self.assertNotIn("requiredNodes", options["standard"])
+        self.assertNotIn("requiredNodes", options["lean"])
+        self.assertTrue(all("kind" not in option for option in options.values()))
 
     def test_resolve_template_subset(self) -> None:
         self.assertIsNone(resolve_template_subset(base_config(), "standard"))
@@ -185,12 +195,13 @@ class WorkflowTemplateTest(unittest.TestCase):
         custom = resolve_template_subset(
             base_config(),
             "custom",
-            workflow_nodes=["dev.code"],
+            workflow_nodes=["dev.specs"],
             workflow_externalized={"dev.code": ["PLAN.md"]},
         )
-        self.assertEqual(custom, (["dev.code"], {"dev.code": ["PLAN.md"]}))
-        with self.assertRaises(WorkflowCompileError):
-            resolve_template_subset(base_config(), "custom")
+        # custom 强制并集 requiredNodes（必含 dev.code 与 ops.archive）。
+        self.assertEqual(custom, (["dev.specs", "dev.code", "ops.archive"], {"dev.code": ["PLAN.md"]}))
+        baseline = resolve_template_subset(base_config(), "custom")
+        self.assertEqual(baseline, (["dev.code", "ops.archive"], {}))
         with self.assertRaises(WorkflowCompileError):
             resolve_template_subset(base_config(), "nope")
 

@@ -69,6 +69,7 @@ from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_PROFILE,
     BASE_WORKFLOW_TEMPLATE,
     WorkflowCompileError,
+    configured_workflow_templates,
     normalize_workflow_profile,
     normalize_workflow_template,
 )
@@ -250,8 +251,14 @@ def create_feature(
         print(f"ERROR: workflow template {workflow_template} 不支持 workflowProfile={workflow_profile}", file=sys.stderr)
         sys.exit(1)
     try:
-        if workflow_nodes:
-            closure = solve_node_closure(load_board_config(BOARD_CONFIG_PATH), workflow_nodes)
+        base_config = load_board_config(BOARD_CONFIG_PATH)
+        template_spec = configured_workflow_templates(base_config).get(workflow_template, {})
+        effective_nodes = list(workflow_nodes or [])
+        for required_id in template_spec.get("requiredNodes", []):
+            if required_id not in effective_nodes:
+                effective_nodes.append(required_id)
+        if effective_nodes:
+            closure = solve_node_closure(base_config, effective_nodes)
             record["workflowNodes"] = list(closure.nodes)
             record["workflowExternalized"] = {
                 node_id: list(paths) for node_id, paths in closure.externalized.items()
