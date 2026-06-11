@@ -119,24 +119,43 @@ class CompileNodeSubsetTest(unittest.TestCase):
 
 
 class SolveNodeClosureTest(unittest.TestCase):
-    def test_selecting_prd_pulls_discuss(self) -> None:
-        result = solve_node_closure(base_config(), ["biz.prd"])
-        self.assertEqual(result.nodes, ("biz.discuss", "biz.prd"))
-        self.assertEqual(result.added, ("biz.discuss",))
-        self.assertEqual(result.externalized, {})
-
-    def test_no_auto_include_marks_entry_and_externalizes(self) -> None:
-        result = solve_node_closure(base_config(), ["dev.code"], auto_include_producers=False)
+    def test_default_keeps_selection_and_externalizes_with_suggestions(self) -> None:
+        result = solve_node_closure(base_config(), ["dev.code"])
         self.assertEqual(result.nodes, ("dev.code",))
+        self.assertEqual(result.added, ())
         self.assertEqual(
             result.externalized,
             {"dev.code": ("proposal.md", "specs/**/*.md", "design.md", "PLAN.md")},
         )
         self.assertEqual(result.entry_nodes, ("dev.code",))
+        self.assertEqual(
+            result.suggestions,
+            {
+                "dev.code": {
+                    "proposal.md": "dev.specs",
+                    "specs/**/*.md": "dev.specs",
+                    "design.md": "dev.plan",
+                    "PLAN.md": "dev.plan",
+                }
+            },
+        )
+
+    def test_default_selecting_prd_externalizes_discuss_draft(self) -> None:
+        result = solve_node_closure(base_config(), ["biz.prd"])
+        self.assertEqual(result.nodes, ("biz.prd",))
+        self.assertEqual(result.externalized, {"biz.prd": ("PRD_DISCUSS.md",)})
+        self.assertEqual(result.suggestions, {"biz.prd": {"PRD_DISCUSS.md": "biz.discuss"}})
+
+    def test_auto_include_pulls_producers_transitively(self) -> None:
+        result = solve_node_closure(base_config(), ["biz.prd"], auto_include_producers=True)
+        self.assertEqual(result.nodes, ("biz.discuss", "biz.prd"))
+        self.assertEqual(result.added, ("biz.discuss",))
+        self.assertEqual(result.externalized, {})
+        self.assertEqual(result.suggestions, {})
 
     def test_closure_result_compiles_as_subset(self) -> None:
         base = base_config()
-        result = solve_node_closure(base, ["dev.code"], auto_include_producers=False)
+        result = solve_node_closure(base, ["dev.code"])
         effective = compile_node_subset(
             base,
             list(result.nodes),
