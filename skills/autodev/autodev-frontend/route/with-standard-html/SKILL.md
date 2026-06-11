@@ -3,21 +3,13 @@ name: route-with-standard-html
 description: 处理标准 DOM / 语义明确 HTML 的独立 route 技能。适用于标准 DOM、`<style>`、class 命名清晰、表单/按钮/label/flex 结构明显的 HTML 输入；既覆盖普通 HTML，也覆盖结构标准但视觉仍要求高保真的 HTML。
 ---
 
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；用于前端代码探索、实现和验证。
-
 # 标准 HTML 路线
 
 这是独立的标准 HTML route 技能目录。
 
 - 当前 route 技能入口：`SKILL.md`
 - 当前 route 技能依赖：`deps/`
-- 当前 route 技能脚本：`scripts/`
+- 当前 route 技能参考：`references/`
 
 本文中提到的 `SKILL.md` 均指仓库根技能 `../../SKILL.md`。
 
@@ -50,11 +42,8 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 技能。适�
 ## 2. 读取顺序
 
 1. 读取原始 HTML
-2. 运行标准分析脚本：
-   - `SKILL_ROOT` 目录：`python route/with-standard-html/scripts/analyze_standard_html.py <html-file> --project-root <project-root> --out-dir output/html-analysis --output-name task-{N}`
-   - `route/with-standard-html/` 目录：`python scripts/analyze_standard_html.py <html-file> --project-root <project-root> --out-dir output/html-analysis --output-name task-{N}`
-3. 读取 `output/html-analysis/task-{N}.json`
-4. 转交给 `deps/standard-html-parser.md`
+2. 读取项目 `AGENTS.md`、`architecture/`、组件说明、相似页面和真实源码证据
+3. 转交给 `deps/standard-html-parser.md`
    - 该依赖已作为 `standard-html-parser` 承载标准 HTML 转 React 工程代码能力，是本路线主执行入口
    - 如决定使用 Ant Design，按需读取 `references/ant-design-conversion.md`
 
@@ -63,3 +52,4 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 技能。适�
 - 本路线只负责标准 DOM / 语义明确 HTML
 - 不修改原有绝对定位高保真路线
 - 不依赖 `route/with-absolute-html/` 下的 absolute 分析脚本
+- 不依赖标准 HTML 分析脚本或 `output/html-analysis/*.json` 前置产物
