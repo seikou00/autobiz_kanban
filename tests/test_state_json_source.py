@@ -943,6 +943,56 @@ class StateIntegrationTests(unittest.TestCase):
             self.assertEqual(state_json["features"]["beta"]["checkpoint"], "discuss_in_progress")
             self.assertIn("beta", (project / ".autobizdevops" / "STATE.md").read_text(encoding="utf-8"))
 
+    def test_create_feature_accepts_workflow_nodes_json_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "proj"
+            project.mkdir()
+
+            init_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "init_workspace.py"),
+                    "--mode",
+                    "createProject",
+                    "--workspace",
+                    str(project),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(init_result.returncode, 0, init_result.stderr)
+
+            create_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "init_workspace.py"),
+                    "--mode",
+                    "createFeature",
+                    "--workspace",
+                    str(root),
+                    "--project",
+                    "proj",
+                    "--feature",
+                    "beta",
+                    "--workflow-template",
+                    "custom",
+                    "--workflow-nodes",
+                    json.dumps(["dev.specs"], ensure_ascii=False),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(create_result.returncode, 0, create_result.stderr)
+            state_json = json.loads((project / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                state_json["features"]["beta"]["workflowNodes"],
+                ["dev.specs", "dev.code", "ops.archive"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

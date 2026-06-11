@@ -5,11 +5,13 @@ autobizdevops Workspace 初始化脚本
 用法:
     python hooks/init_workspace.py --mode createProject --workspace <workspace> --project <project>
     python hooks/init_workspace.py --mode createFeature --workspace <workspace> --project <project> --feature <feature>
+    python hooks/init_workspace.py --mode createFeature --workspace <workspace> --project <project> --feature <feature> --workflow-nodes '["dev.specs","dev.code"]'
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -223,6 +225,25 @@ def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
     return feature_dir
 
 
+def _parse_workflow_nodes(raw_value: str) -> list[str]:
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(
+            "--workflow-nodes must be a JSON list, e.g. '[\"dev.specs\",\"dev.code\"]'"
+        ) from exc
+
+    if not isinstance(value, list):
+        raise argparse.ArgumentTypeError("--workflow-nodes must be a JSON list of node ids")
+
+    nodes: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise argparse.ArgumentTypeError("--workflow-nodes must contain only non-empty string node ids")
+        nodes.append(item.strip())
+    return nodes
+
+
 def create_feature(
     workspace: Path,
     feature: str,
@@ -326,7 +347,8 @@ def main() -> None:
     parser.add_argument(
         "--workflow-nodes",
         default=None,
-        help="Comma-separated node ids for custom template, e.g. dev.specs,dev.code,ops.archive",
+        type=_parse_workflow_nodes,
+        help="JSON list of node ids, e.g. '[\"dev.specs\",\"dev.code\"]'",
     )
     parser.add_argument("--force", action="store_true", help="Force re-initialization (will backup existing)")
     args = parser.parse_args()
@@ -337,13 +359,12 @@ def main() -> None:
         sys.exit(1)
 
     if args.mode == "createFeature":
-        workflow_nodes = [item.strip() for item in (args.workflow_nodes or "").split(",") if item.strip()]
         result = create_feature(
             workspace,
             args.feature or "",
             args.workflow_profile,
             workflow_template=args.workflow_template,
-            workflow_nodes=workflow_nodes or None,
+            workflow_nodes=args.workflow_nodes or None,
         )
     else:
         result = init_workspace(workspace, force=args.force)
