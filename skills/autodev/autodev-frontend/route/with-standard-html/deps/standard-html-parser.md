@@ -15,9 +15,8 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 
 1. 明确把输入判定为 `standard-html`，即标准 DOM、语义结构、表单 / 表格 / flex / grid / class 规则较清晰。
 2. 确认未命中 `../../with-absolute-html/SKILL.md` 定义的强制绝对定位 / 设计导出稿信号。
-3. 运行 `scripts/analyze_standard_html.py`。
-4. 生成并读取 `output/html-analysis/task-{N}.json`。
-5. 保留原始 HTML 作为最终视觉与内容事实源；脚本产物只作为结构盘点和组件候选辅助。
+3. 准备原始 HTML 与目标工程上下文。
+4. 保留原始 HTML 作为最终视觉与内容事实源。
 
 ## 2. 核心定位
 
@@ -34,12 +33,11 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 ## 3. 读取顺序
 
 1. 读取原始 HTML 文件或用户提供的 HTML 内容。
-2. 读取 `output/html-analysis/task-{N}.json`。
-3. 从 HTML 来源目录和目标工程目录向上查找并读取 `AGENT.md` / `AGENTS.md`，更近的规则优先。
-4. 读取项目 `architecture/`、组件说明、API 说明和相似页面。
-5. 扫描真实源码确认导入路径、组件导出、组件用法、样式方案、路由结构、包管理器和已安装依赖。
-6. 如决定使用 Ant Design，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
-7. 如涉及真实接口，优先读取项目内接口说明文档或项目 API helper。
+2. 从 HTML 来源目录和目标工程目录向上查找并读取 `AGENT.md` / `AGENTS.md`，更近的规则优先。
+3. 读取项目 `architecture/`、组件说明、API 说明和相似页面。
+4. 扫描真实源码确认导入路径、组件导出、组件用法、样式方案、路由结构、包管理器和已安装依赖。
+5. 如决定使用 Ant Design，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
+6. 如涉及 YAPI 或真实接口，读取顶层 `../../../deps/yapi-fetcher.md` 的产物或项目 API helper。
 
 ## 4. Craft：编码前简报
 
@@ -58,7 +56,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 
 ## 5. Parse And Normalize
 
-优先用结构化解析、DOM 观察或脚本分析结果理解 HTML，不要只靠正则替换。
+优先用结构化解析、DOM 观察和项目上下文理解 HTML，不要只靠正则替换。
 
 转换时必须处理：
 
