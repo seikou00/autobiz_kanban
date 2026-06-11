@@ -193,8 +193,23 @@ def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
     return templates
 
 
-def configured_template_options(base_config: dict) -> list[dict[str, str]]:
+def configured_template_options(base_config: dict) -> list[dict[str, object]]:
     templates = configured_workflow_templates(base_config)
+    workflow = base_config.get("workflow")
+    base_nodes = workflow.get("nodes", []) if isinstance(workflow, dict) else []
+    base_node_ids = [
+        node["id"]
+        for node in base_nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    ]
+
+    def _display_nodes(template: dict) -> list[str]:
+        if template["kind"] == "nodeSubset":
+            return list(template["nodes"])
+        if template["kind"] == "profile":
+            return list(base_node_ids)
+        return []  # custom: 由用户选择，UI 走 nodes/closure 端点
+
     ordered = [BASE_WORKFLOW_TEMPLATE] + [name for name in templates if name != BASE_WORKFLOW_TEMPLATE]
     return [
         {
@@ -202,6 +217,7 @@ def configured_template_options(base_config: dict) -> list[dict[str, str]]:
             "kind": templates[name]["kind"],
             "label": templates[name]["label"],
             "description": templates[name]["description"],
+            "nodes": _display_nodes(templates[name]),
         }
         for name in ordered
     ]

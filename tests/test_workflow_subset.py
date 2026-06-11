@@ -175,8 +175,11 @@ class WorkflowTemplateTest(unittest.TestCase):
         self.assertEqual(templates["lean"]["kind"], "nodeSubset")
         self.assertEqual(templates["lean"]["nodes"], LEAN_NODE_IDS)
         self.assertEqual(templates["custom"]["kind"], "custom")
-        options = configured_template_options(base_config())
-        self.assertEqual(options[0]["id"], "standard")
+        options = {option["id"]: option for option in configured_template_options(base_config())}
+        self.assertEqual(list(options)[0], "standard")
+        self.assertEqual(len(options["standard"]["nodes"]), 11)
+        self.assertEqual(options["lean"]["nodes"], LEAN_NODE_IDS)
+        self.assertEqual(options["custom"]["nodes"], [])
 
     def test_resolve_template_subset(self) -> None:
         self.assertIsNone(resolve_template_subset(base_config(), "standard"))
