@@ -12,6 +12,8 @@ BASE_WORKFLOW_PROFILE = "standard"
 LEGACY_BASE_WORKFLOW_PROFILE = "base"
 BASE_WORKFLOW_TEMPLATE = "standard"
 ALLOWED_TEMPLATE_KINDS = frozenset({"profile", "nodeSubset", "custom"})
+# 对外展示的模板类型名（内部 kind 保留编译语义，profile 对外呈现为 classical）。
+TEMPLATE_TYPE_BY_KIND = {"profile": "classical"}
 DEFAULT_ENABLED_DYNAMIC_PHASES = frozenset({"Biz", "Dev"})
 ALLOWED_PHASES = frozenset({"Biz", "Dev", "Ops"})
 ALLOWED_GUARDS = frozenset({"code_compile"})
@@ -172,12 +174,25 @@ def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
                 )
         elif nodes is not None:
             raise WorkflowCompileError(f"workflow.templates.{template_id}.nodes is only allowed for nodeSubset")
+        required_nodes = spec.get("requiredNodes")
+        if required_nodes is not None:
+            if kind != "custom":
+                raise WorkflowCompileError(
+                    f"workflow.templates.{template_id}.requiredNodes is only allowed for custom"
+                )
+            if not isinstance(required_nodes, list) or any(
+                not isinstance(item, str) or not item for item in required_nodes
+            ):
+                raise WorkflowCompileError(
+                    f"workflow.templates.{template_id}.requiredNodes must be a list of node ids"
+                )
         templates[template_id.strip()] = {
             "id": template_id.strip(),
             "kind": kind,
             "label": spec.get("label", template_id) if isinstance(spec.get("label", template_id), str) else template_id,
             "description": spec.get("description", "") if isinstance(spec.get("description", ""), str) else "",
             "nodes": list(nodes) if isinstance(nodes, list) else [],
+            "requiredNodes": list(required_nodes) if isinstance(required_nodes, list) else [],
         }
 
     templates.setdefault(
@@ -188,6 +203,7 @@ def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
             "label": "标准",
             "description": "完整主干流程。",
             "nodes": [],
+            "requiredNodes": [],
         },
     )
     return templates
@@ -211,16 +227,21 @@ def configured_template_options(base_config: dict) -> list[dict[str, object]]:
         return []  # custom: 由用户选择，UI 走 nodes/closure 端点
 
     ordered = [BASE_WORKFLOW_TEMPLATE] + [name for name in templates if name != BASE_WORKFLOW_TEMPLATE]
-    return [
-        {
-            "id": templates[name]["id"],
-            "kind": templates[name]["kind"],
-            "label": templates[name]["label"],
-            "description": templates[name]["description"],
-            "nodes": _display_nodes(templates[name]),
+    options: list[dict[str, object]] = []
+    for name in ordered:
+        template = templates[name]
+        option: dict[str, object] = {
+            "id": template["id"],
+            "templateType": TEMPLATE_TYPE_BY_KIND.get(template["kind"], template["kind"]),
+            "label": template["label"],
+            "description": template["description"],
+            "nodes": _display_nodes(template),
         }
-        for name in ordered
-    ]
+        # 固定链模板（standard/lean）用 nodes 即可；只有 custom 需要锁定项。
+        if template["kind"] == "custom":
+            option["requiredNodes"] = list(template.get("requiredNodes", []))
+        options.append(option)
+    return options
 
 
 def resolve_template_subset(
@@ -247,9 +268,17 @@ def resolve_template_subset(
     if spec["kind"] == "nodeSubset":
         return list(spec["nodes"]), {}
 
-    if not isinstance(workflow_nodes, list) or not workflow_nodes or any(
+    if workflow_nodes is None:
+        workflow_nodes = []
+    if not isinstance(workflow_nodes, list) or any(
         not isinstance(item, str) or not item.strip() for item in workflow_nodes
     ):
+        raise WorkflowCompileError(f"workflow template {template} requires workflowNodes to be a list of node ids")
+    merged_nodes = [item.strip() for item in workflow_nodes]
+    for required_id in spec.get("requiredNodes", []):
+        if required_id not in merged_nodes:
+            merged_nodes.append(required_id)
+    if not merged_nodes:
         raise WorkflowCompileError(f"workflow template {template} requires workflowNodes to be a non-empty list")
     externalized: dict[str, list[str]] = {}
     if workflow_externalized is not None:
@@ -261,7 +290,7 @@ def resolve_template_subset(
             if not isinstance(paths, list) or any(not isinstance(item, str) or not item for item in paths):
                 raise WorkflowCompileError(f"workflowExternalized.{node_id} must be a list of paths")
             externalized[node_id.strip()] = list(paths)
-    return [item.strip() for item in workflow_nodes], externalized
+    return merged_nodes, externalized
 
 
 def normalize_workflow_decisions(decisions: object | None) -> dict[str, str]:
