@@ -104,7 +104,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 | 6 | 大页面和大模块优先使用可伸缩布局，不要层层写死宽高。 |
 | 7 | 图标属于页面语义的一部分，默认检测与生成。 |
 | 8 | 图表必须用真实图表库实现；具体来源、询问、兜底和交付状态见 §图表来源顺序。 |
-| 9 | HTML 路线默认先执行对应脚本，用于分析加速、内容盘点和组件候选识别；脚本产物不得压过原始 HTML。 |
+| 9 | HTML 路线里仅 `with-absolute-html` 默认先执行对应分析脚本；`with-standard-html` 直接进入 `standard-html-parser`，不要求标准 HTML 分析脚本或 `output/html-analysis/*.json` 前置产物。脚本产物不得压过原始 HTML，当两者冲突时，以原始 HTML 为准 |
 | 10 | 主线交付总结不是整轮终点；交付总结后必须执行 §回检决策规则。 |
 
 ## 全局优先级

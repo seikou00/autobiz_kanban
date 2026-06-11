@@ -46,13 +46,26 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 1. 源 HTML 范围、依赖、外部资源和可用资产。
 2. 目标工程位置、路由位置和文件组织。
 3. 组件边界与抽取标准。
-4. 项目组件 / Ant Design / 原生 HTML 的映射计划。
+4. 项目组件 / Ant Design / 原生 HTML 的映射计划；当 Ant Design 适用或可能适用时，必须补充 Ant Design 映射矩阵。
 5. 样式策略：CSS Modules、Less、Tailwind、普通 CSS、styled-components 或项目既有方案。
 6. 需要保留或重建的交互：tab、展开收起、表单提交、分页、筛选、弹窗、上传、排序等。
 7. 需要支持的状态：默认、loading、empty、error、disabled、hover/focus、responsive。
 8. 验证计划：静态检查、构建、运行、浏览器预览、响应式检查。
 
 若用户要求像素级或高保真迁移，源 HTML 就是设计简报；不要主动归一化成 AntD 默认外观。若用户要求工程化清理或后台产品 UI，允许在不丢失语义和业务层级的前提下把标准控件映射到项目组件或 Ant Design。
+
+### 4.1 Ant Design 映射矩阵
+
+当 Ant Design 适用或可能适用时，编码前创建 Ant Design 映射矩阵。小页面保持紧凑，复杂后台 / 产品 UI 需要覆盖全部候选结构：
+
+| 源 HTML | 意图 | Ant Design 组件 | 转换? | 原因 |
+| --- | --- | --- | --- | --- |
+| `<button class="primary">` | 主操作 | `Button type="primary"` | yes | 行为型控件 |
+| `<table>` | 记录表格 | `Table` | yes | 结构化行列数据 |
+| `<select>` | 单选选择 | `Select` | yes | 产品表单控件 |
+| 品牌视觉容器 | 自定义视觉布局 | 原生 React / CSS | no | 保真优先 |
+
+把矩阵作为转换清单使用。每个产品 UI 控件、数据面、导航模式、反馈元素、overlay、表单控件候选，都要进入矩阵并给出 convert / keep 决策。
 
 ## 5. Parse And Normalize
 
@@ -179,7 +192,30 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 
 稳定 key 来源优先级：源 id、`name`、`value`、`href`、`data-*`、业务行 id、标签 slug；数组 index 只能最后兜底。
 
-### 7.5 禁止误用
+### 7.5 覆盖审计
+
+当 Ant Design 被用户要求、被本路线选择，或被后台 / 产品 UI 强烈暗示时，实现后必须做 Ant Design 覆盖审计。
+
+审计 JSX / TSX 源码，不审计浏览器运行时 DOM；Ant Design 组件自身会渲染原生 `button`、`input`、`table` 等 DOM，不能据此误判。
+
+重点检查源码中残留的原生产品 UI 候选：`button`、`input`、`textarea`、`select`、`option`、`form`、`table`、`thead`、`tbody`、`tr`、`td`、`dialog`、`details`、`summary`、`progress`、`meter`、tablist、modal、alert、pagination、upload、menu、filter、validation hint。
+
+每个剩余候选必须二选一：
+
+- 转换成合适的项目组件或 Ant Design 组件。
+- 明确说明保留 native/custom 的原因，例如自定义视觉、编辑内容、可访问性 / 保真约束、项目依赖不可用。
+
+从本技能仓库根目录运行：
+
+```bash
+python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+```
+
+脚本只扫描 `.tsx` / `.jsx` 源码。退出码 `0` 表示未发现候选项；退出码 `1` 表示发现可能遗漏的 Ant Design 转换候选项，应把输出作为待处理清单继续转换或说明，不视为脚本故障。
+
+如果候选必须保留原生实现，在附近添加 `antd-audit-ignore` 注释并写明原因。本路线不要求新增前置 JSON 或 HTML 分析脚本。
+
+### 7.6 禁止误用
 
 - 不要把每个区域都转成 `Card`。
 - 不要用 `Space` / `Flex` 替代页面级布局。
@@ -187,6 +223,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 - 不要把简单营销 / 文章内容强行转成 AntD Typography。
 - 不要把对比型静态内容表误转成复杂 `Table`，除非它是记录数据表。
 - 不要为了“组件化”降低源 HTML 的视觉结构和业务层级。
+- 不要在 Ant Design 转换后留下未审计 / 未说明的原生产品控件或数据面。
 
 ## 8. 图标与图表
 
@@ -251,6 +288,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 - 前端任务要启动 dev server，并用浏览器确认页面非空白、资源加载、布局无明显错位。
 - 检查桌面和移动视口：溢出、裁切、文本重叠、按钮挤压、表格横向滚动。
 - Ant Design 场景检查：样式是否加载、版本 API 是否正确、Form 默认值与校验、Radio/Checkbox/Select/Tabs 状态、Table `rowKey`、Modal/Drawer open/close、feedback API provider context。
+- Ant Design 转换被请求或被选择时，运行 `python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
 - 检查图标 / 图表来源层级和可访问性。
 - 回查页面主区域、字段、标题、按钮、表格列、tab、展开收起区、图标、图表和明显交互是否有增减或丢失。
 
@@ -261,6 +299,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 - 页面名称与页面位置。
 - 变更文件。
 - 使用的项目组件 / Ant Design / 原生自定义结构映射。
+- Ant Design 映射矩阵与覆盖审计结论（仅在 Ant Design 适用、被请求或被选择时）。
 - 图标来源层级与关键映射。
 - 图表来源层级、类型映射、是否触发 ECharts 兜底、新增依赖。
 - 联调状态：真实接口 / YAPI / API helper / Mock。
@@ -277,6 +316,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 - 不要把绝对定位 / Figma 导出稿误走本依赖；命中强信号时返回 `../../with-absolute-html/SKILL.md`。
 - 不要静默新增依赖；缺少组件库、图标库或图表库时按根技能确认规则执行。
 - 不要保留明显可转为项目组件 / AntD 的后台产品控件为裸 HTML，除非保真或项目规则要求。
+- 不要在 AntD 转换后留下未审计 / 未说明的原生产品控件、表单、表格、弹窗、反馈、分页、上传、导航或数据面。
 - 不要把自定义视觉内容强行 AntD 化。
 - 不要丢失资产、字段、状态、交互和数据列。
 - 不要使用不稳定 index key，除非没有更稳定来源。

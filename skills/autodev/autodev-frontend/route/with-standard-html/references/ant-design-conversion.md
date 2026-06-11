@@ -2,6 +2,17 @@
 
 本参考供 `../deps/standard-html-parser.md` 在决定生成 Ant Design 代码时读取。只支持 Ant Design v4 和 v5。转换时按语义意图判断，不按标签名机械替换；先保留源行为，再选择能表达该行为的最小 Ant Design 组件。
 
+## 内容目录
+
+- 版本门槛
+- Ant Design 映射矩阵
+- 数据模型
+- 通用规则
+- 常见组件映射
+- 覆盖审计
+- Provider
+- 验证清单
+
 ## 1. 版本门槛
 
 - 从 `package.json`、lockfile、imports 和现有源码中检测 Ant Design major 版本。
@@ -11,7 +22,20 @@
 - 项目已有 Ant Design wrapper 时使用 wrapper，不直接导入裸组件。
 - `@ant-design/icons` 版本和使用方式要匹配项目已有约定。
 
-## 2. 数据模型
+## 2. Ant Design 映射矩阵
+
+当 Ant Design 适用或可能适用时，编码前先建立映射矩阵。小页面可以很短，复杂后台 / 产品 UI 必须覆盖全部候选控件和数据面。
+
+| 源 HTML | 意图 | Ant Design 组件 | 转换? | 原因 |
+| --- | --- | --- | --- | --- |
+| `<button class="primary">` | 主操作 | `Button type="primary"` | yes | 行为型控件 |
+| `<table>` | 记录表格 | `Table` | yes | 结构化行列数据 |
+| `<select>` | 单选选择 | `Select` | yes | 产品表单控件 |
+| 品牌视觉容器 | 自定义视觉布局 | 原生 React / CSS | no | 保真优先 |
+
+把矩阵作为编码清单使用。每个产品 UI 控件、数据面、导航模式、反馈元素、overlay、表单控件候选，都要进入矩阵并给出 convert / keep 决策。
+
+## 3. 数据模型
 
 写 JSX 前先抽取结构化数据：
 
@@ -24,7 +48,7 @@
 
 稳定 key 优先来自源 id、`name`、`value`、`href`、`data-*`、业务行 id、标签 slug；数组 index 只能最后兜底。
 
-## 3. 通用规则
+## 4. 通用规则
 
 - 优先遵循项目现有 imports、文件位置、样式、wrapper 和版本 API。
 - 文章、装饰、营销视觉、插画和高度自定义布局保留 native/custom React markup。
@@ -33,7 +57,7 @@
 - TypeScript 中数据类型明显时不要使用 `any`。
 - 不要把每个区域都包成 `Card`，不要用 `Space` 或 `Layout` 解决所有布局问题。
 
-## 4. 常见组件映射
+## 5. 常见组件映射
 
 ### Button / Icon
 
@@ -126,13 +150,29 @@
 - loading 转 `Spin`，骨架转 `Skeleton`，进度转 `Progress`。
 - 整页成功 / 错误 / 空结果转 `Result`。
 
-## 5. Provider
+## 6. 覆盖审计
+
+当 Ant Design 被请求、被选择，或被后台 / 产品 UI 强烈暗示时，实现后必须审计 JSX / TSX 源码。不要审计运行时 DOM，因为 Ant Design 组件自身会渲染原生 `button`、`input`、`table` 等节点。
+
+从本技能仓库根目录运行：
+
+```bash
+python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+```
+
+退出码 `0` 表示未发现候选项；退出码 `1` 表示发现可能遗漏的转换候选项，应把输出作为待处理清单继续处理，不视为脚本故障。
+
+重点检查源码中残留的原生产品 UI 候选：`button`、`input`、`textarea`、`select`、`option`、`form`、`table`、`thead`、`tbody`、`tr`、`td`、`dialog`、`details`、`summary`、`progress`、`meter`、tablist、modal、alert、pagination、upload、menu、filter、validation hint。
+
+每个剩余候选必须转换成合适的项目组件 / Ant Design 组件，或说明保留 native/custom 的原因。保留原生实现时，在附近添加 `antd-audit-ignore` 注释并写明原因。
+
+## 7. Provider
 
 - 只有主题、locale、组件配置、prefix、direction 或项目既有根配置需要时才添加 `ConfigProvider`。
 - v5 中使用 contextual feedback API 时添加 Ant Design `App` provider。
 - provider 放在项目根或既有 wrapper，不要在叶子组件重复包。
 
-## 6. 验证清单
+## 8. 验证清单
 
 - build 通过，无 unresolved Ant Design imports。
 - 样式按安装版本正确加载。
@@ -143,3 +183,4 @@
 - Menu / Tabs / Breadcrumb 表达正确导航类型。
 - Modal / Drawer / Dropdown / Popconfirm 打开关闭正常。
 - Loading、empty、error、success 状态明确。
+- Ant Design 覆盖审计完成；没有未审计 / 未说明的原生产品控件、表单、表格、弹窗、反馈、分页、上传、导航或数据面残留。

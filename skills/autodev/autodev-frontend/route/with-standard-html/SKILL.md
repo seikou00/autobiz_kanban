@@ -10,6 +10,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 技能。适�
 - 当前 route 技能入口：`SKILL.md`
 - 当前 route 技能依赖：`deps/`
 - 当前 route 技能参考：`references/`
+- 当前 route 技能脚本：`scripts/`
 
 本文中提到的 `SKILL.md` 均指仓库根技能 `../../SKILL.md`。
 
@@ -45,11 +46,12 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 技能。适�
 2. 读取项目 `AGENTS.md`、`architecture/`、组件说明、相似页面和真实源码证据
 3. 转交给 `deps/standard-html-parser.md`
    - 该依赖已作为 `standard-html-parser` 承载标准 HTML 转 React 工程代码能力，是本路线主执行入口
-   - 如决定使用 Ant Design，按需读取 `references/ant-design-conversion.md`
+   - 如决定使用或可能使用 Ant Design，按需读取 `references/ant-design-conversion.md`，并由 `standard-html-parser` 在编码前完成映射矩阵、实现后完成覆盖审计
+   - 覆盖审计使用 `scripts/audit_antd_coverage.py`，它只扫描 JSX / TSX 源码；发现候选项时退出码为 1，表示待处理清单，不表示脚本故障
 
 ## 3. 边界
 
 - 本路线只负责标准 DOM / 语义明确 HTML
 - 不修改原有绝对定位高保真路线
 - 不依赖 `route/with-absolute-html/` 下的 absolute 分析脚本
-- 不依赖标准 HTML 分析脚本或 `output/html-analysis/*.json` 前置产物
+- 不依赖标准 HTML 分析脚本或 `output/html-analysis/*.json` 前置产物；`scripts/audit_antd_coverage.py` 只在 Ant Design 转换后做源码覆盖审计，不作为 HTML 解析前置步骤
