@@ -72,6 +72,7 @@ def _closure_payload(base_config: dict, node_ids: list[str], *, auto_include: bo
         "added": list(result.added),
         "entryNodes": list(result.entry_nodes),
         "externalized": externalized,
+        "suggestions": {node_id: dict(hints) for node_id, hints in result.suggestions.items()},
         "initialCheckpoints": checkpoints.get("initial", []),
         "transitions": checkpoints.get("transitions", {}),
     }
@@ -91,9 +92,9 @@ def main(argv: list[str] | None = None) -> int:
         help="closure 模式的选中节点，逗号分隔，如 dev.specs,dev.code,ops.archive",
     )
     parser.add_argument(
-        "--no-auto-include",
+        "--auto-include",
         action="store_true",
-        help="closure 模式下不自动补全上游 producer，缺失输入直接外部化",
+        help="closure 模式下自动补全上游 producer（默认不补全：缺失输入外部化并返回 suggestions 供 UI 可选添加）",
     )
     args = parser.parse_args(argv)
 
@@ -112,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
             payload["closure"] = _closure_payload(
                 base_config,
                 node_ids,
-                auto_include=not args.no_auto_include,
+                auto_include=args.auto_include,
             )
     except (BoardConfigError, WorkflowCompileError) as exc:
         json.dump(

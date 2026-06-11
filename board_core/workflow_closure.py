@@ -12,15 +12,18 @@ class ClosureResult:
     """Closure outcome over the base node array.
 
     nodes: closed selection in base array order.
-    added: producer nodes pulled in to satisfy required inputs.
+    added: producer nodes pulled in to satisfy required inputs (auto mode only).
     entry_nodes: chain head plus nodes left with externalized required inputs.
     externalized: node id -> required input paths to mark external.
+    suggestions: node id -> {externalized input path -> producer node id};
+        advisory only, the UI may offer these as optional upstream additions.
     """
 
     nodes: tuple[str, ...]
     added: tuple[str, ...]
     entry_nodes: tuple[str, ...]
     externalized: dict[str, tuple[str, ...]]
+    suggestions: dict[str, dict[str, str]]
 
 
 def _base_nodes(base_config: dict) -> list[dict]:
@@ -59,14 +62,16 @@ def solve_node_closure(
     base_config: dict,
     selected_node_ids: object,
     *,
-    auto_include_producers: bool = True,
+    auto_include_producers: bool = False,
 ) -> ClosureResult:
-    """Close a custom node selection over its required-input dependencies.
+    """Resolve a custom node selection against its required-input dependencies.
 
-    With auto_include_producers, picking a node pulls in the producers of its
-    required inputs transitively (选了 PRD 就必须选 prd_discuss). Without it, or
-    when no base node produces an input, the input is externalized and its node
-    becomes an entry point.
+    Upstream nodes are never hard dependencies: every input has an
+    extract.degrade reading, so missing producers are externalized by default
+    and the node becomes an entry point. suggestions reports which base node
+    would produce each externalized input, for the UI to offer as optional
+    additions. With auto_include_producers the solver instead pulls producers
+    in transitively (opt-in full-chain mode).
     """
     if not isinstance(selected_node_ids, (list, tuple)):
         raise WorkflowCompileError("selected nodes must be a list of node ids")
@@ -99,9 +104,12 @@ def solve_node_closure(
 
     ordered = [node_id for node_id in node_order if node_id in selected]
 
-    # Anything still unsatisfied after closure gets externalized; its node is an entry.
+    # Anything still unsatisfied gets externalized; its node is an entry. For
+    # each externalized input with an in-base producer, record a suggestion.
+    producers = _producer_index(nodes)
     available: set[str] = set()
     externalized: dict[str, tuple[str, ...]] = {}
+    suggestions: dict[str, dict[str, str]] = {}
     entry_nodes: list[str] = [ordered[0]] if ordered else []
     for node_id in ordered:
         node = node_by_id[node_id]
@@ -110,6 +118,13 @@ def solve_node_closure(
             externalized[node_id] = broken
             if node_id not in entry_nodes:
                 entry_nodes.append(node_id)
+            hints = {
+                path: producers[path]
+                for path in broken
+                if path in producers and producers[path] != node_id
+            }
+            if hints:
+                suggestions[node_id] = hints
         for artifact in _artifact_dicts(node, "outputs"):
             if isinstance(artifact, dict) and isinstance(artifact.get("path"), str):
                 available.add(artifact["path"])
@@ -119,4 +134,5 @@ def solve_node_closure(
         added=tuple(node_id for node_id in node_order if node_id in added),
         entry_nodes=tuple(entry_nodes),
         externalized=externalized,
+        suggestions=suggestions,
     )
