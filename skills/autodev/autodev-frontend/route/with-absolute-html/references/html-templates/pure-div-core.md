@@ -1,4 +1,6 @@
-# 纯 div 核心规则
+﻿# 纯 div 核心规则
+
+本文中提到的 `SKILL.md` 均指仓库根技能 `../../../SKILL.md`。
 
 当处理纯 div 或绝对定位 HTML 时，把这份文件作为默认的小模型参考。
 
@@ -10,8 +12,22 @@
 
 ## 默认流程
 
-1. 运行 `scripts/prepare_html_analysis.py`。
-2. 以 `output/html-analysis/task-{N}.md` 作为主交接说明。
+1. 运行 `prepare_html_analysis.py`（必填参数 `--project-root` / `--task-stem` / `--html-file`，完整命令以 `SKILL.md §4` 为准）：
+   - 仓库根目录：
+     ```
+     python route/with-absolute-html/scripts/prepare_html_analysis.py \
+       --project-root . \
+       --task-stem <task-stem> \
+       --html-file <HTML_PATH>
+     ```
+   - `route/with-absolute-html/` 目录：
+     ```
+     python scripts/prepare_html_analysis.py \
+       --project-root ../.. \
+       --task-stem <task-stem> \
+       --html-file <HTML_PATH>
+     ```
+2. 先读 `output/html-analysis/<task-stem>-checklist.md`，再按需读 `output/html-analysis/<task-stem>.md`。
 3. 以原始 HTML 加紧凑 handoff 作为视觉契约。
 4. 产出组件槽位计划：
    - 用户组件
@@ -22,7 +38,7 @@
 5. 一次只转换一个区域。
 6. 优先输出框架代码。
 
-只有在以下情况才生成 `output/task-{N}-fidelity.html`：
+只有在以下情况才生成调试 HTML 或参考 HTML：
 
 - 用户明确要求独立视觉回放 HTML
 - 本地视觉调试确实需要它
@@ -31,7 +47,7 @@
 
 - 当 manifest 已存在时，不要把整份原始 HTML 直接传给弱模型。
 - 不要发明 section、字段、按钮或辅助区块。
-- 不要超出 HTML 或 `prd.md` 明确给出的范围去改字段名。
+- 不要超出 HTML 或 PRD 明确给出的范围去改字段名。
 - 不要把整页重建成 Card/Grid/Tabs，除非用户明确要求组件优先重构。
 - 不要把 AntD / Element 组件默认 props 当成视觉事实。
 - 不要把原稿同一行的数字、单位、百分号、币种或短尾缀误拆成两行。
@@ -97,3 +113,6 @@
 - 规则列表 / 评分面板：序号 + 标题 + 分数 + 正文 + “添加规则”动作 → 作为结构化列表组件，抑制原始规则文本与小分数盒子。
 
 弱模型分步流程：先决定区域归属（fidelity-only 还是组件接管）→ 只转换该归属区域 → 抑制该区域原始层 → 验证边界外无残留原始文本。
+
+
+

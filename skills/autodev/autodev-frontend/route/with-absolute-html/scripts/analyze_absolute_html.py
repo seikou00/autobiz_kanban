@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Analyze large absolute-position HTML exports before LLM conversion.
 
@@ -54,11 +54,22 @@ COMMON_SECTION_TITLES = {
     "受益所有人信息",
     "附加信息",
     "备注信息",
+    "我行受益所有人留存信息",
+    "人行受益所有人查询结果",
+    "任务处理信息",
+    "处理基本信息",
+    "分析结论",
+    "差异报告",
+    "核验结果",
 }
 
 KNOWN_FIELD_WORDS = {
     "课程名称", "课程简介", "企业名称", "企业痛点", "关键人介绍", "角色设定",
     "姓名", "年龄", "职位", "性别", "字段名称", "内容",
+}
+
+DISPLAY_ONLY_LABEL_WORDS = {
+    "较同期",
 }
 
 NON_HEADING_PATTERNS = [
@@ -336,6 +347,22 @@ def parse_tailwind_classes(class_name: str) -> dict[str, str]:
             styles["width"] = token[3:-1]
         elif token.startswith("h-[") and token.endswith("]"):
             styles["height"] = token[3:-1]
+        elif token.startswith("left-[") and token.endswith("]"):
+            styles["left"] = token[6:-1]
+        elif token.startswith("top-[") and token.endswith("]"):
+            styles["top"] = token[5:-1]
+        elif token.startswith("right-[") and token.endswith("]"):
+            styles["right"] = token[7:-1]
+        elif token.startswith("bottom-[") and token.endswith("]"):
+            styles["bottom"] = token[8:-1]
+        elif token.startswith("min-w-[") and token.endswith("]"):
+            styles["min-width"] = token[7:-1]
+        elif token.startswith("max-w-[") and token.endswith("]"):
+            styles["max-width"] = token[7:-1]
+        elif token.startswith("min-h-[") and token.endswith("]"):
+            styles["min-height"] = token[7:-1]
+        elif token.startswith("max-h-[") and token.endswith("]"):
+            styles["max-height"] = token[7:-1]
         elif token.startswith("top-"):
             styles["top"] = tailwind_spacing(token[4:])
         elif token.startswith("left-"):
@@ -361,6 +388,51 @@ def parse_tailwind_classes(class_name: str) -> dict[str, str]:
         end = gradient_to or "rgba(34, 197, 94, 0.02)"
         styles["background"] = f"linear-gradient(180deg, {start} 0%, {end} 100%)"
     return styles
+
+
+def decode_data_svg_markup(value: str) -> str:
+    if not value:
+        return ""
+    match = re.search(r"data:image/svg\+xml,([^'\")]+)", value, re.IGNORECASE)
+    if not match:
+        return ""
+    payload = match.group(1)
+    try:
+        from urllib.parse import unquote
+        return unquote(payload)
+    except Exception:
+        return payload
+
+
+def package_dependencies(project_root: Path | None) -> dict[str, Any]:
+    if not project_root or not project_root.exists():
+        return {}
+    package_file = project_root / "package.json"
+    if not package_file.exists():
+        return {}
+    try:
+        package = json.loads(package_file.read_text(encoding="utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return {}
+    deps: dict[str, Any] = {}
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        value = package.get(key)
+        if isinstance(value, dict):
+            deps.update(value)
+    return deps
+
+
+def is_real_svg_asset(node: "Node", attrs: dict[str, str], bg_image: str) -> bool:
+    src = str(attrs.get("src", "") or "")
+    if "data:image/svg+xml" in src.lower():
+        return True
+    if node.tag == "svg":
+        return True
+    if "data-svg-icon" in attrs:
+        return True
+    if "data:image/svg+xml" in str(bg_image or "").lower():
+        return False
+    return False
 
 
 def component_source_rank(source: str) -> int:
@@ -445,6 +517,7 @@ class TreeParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.nodes: list[Node] = []
         self.stack: list[int] = []
+        self.global_absolute_hint = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_dict = {k: v or "" for k, v in attrs}
@@ -480,6 +553,44 @@ class TreeParser(HTMLParser):
         if text and self.stack:
             self.nodes[self.stack[-1]].text_parts.append(text)
 
+    def handle_comment(self, data: str) -> None:
+        if "position: absolute" in data.lower():
+            self.global_absolute_hint = True
+
+
+def detect_global_absolute_hint(html: str) -> bool:
+    normalized = re.sub(r"\s+", " ", html).lower()
+    return any(
+        pattern in normalized
+        for pattern in [
+            "body { * { box-sizing: border-box; position: absolute; } }",
+            "body{*{box-sizing:border-box;position:absolute;}}",
+            "position:absolute",
+        ]
+    )
+
+
+def should_use_global_absolute_coords(node: Node, parent: Node) -> bool:
+    if node.x is None and node.y is None:
+        return False
+    position = str(node.style.get("position", "")).replace(" ", "").lower()
+    parent_position = str(parent.style.get("position", "")).replace(" ", "").lower()
+    if position != "absolute" or parent_position != "absolute":
+        return False
+    child_x = float(node.x or 0.0)
+    child_y = float(node.y or 0.0)
+    parent_w = float(parent.w or 0.0)
+    parent_h = float(parent.h or 0.0)
+    if parent_w > 0 and child_x > parent_w + max(24.0, parent_w * 0.15):
+        return True
+    if parent_h > 0 and child_y > parent_h + max(24.0, parent_h * 0.15):
+        return True
+    if parent_w > 0 and parent_w <= 120 and child_x >= 220:
+        return True
+    if parent_h > 0 and parent_h <= 80 and child_y >= 120:
+        return True
+    return False
+
 
 def compute_abs(nodes: list[Node]) -> None:
     for node in nodes:
@@ -487,7 +598,10 @@ def compute_abs(nodes: list[Node]) -> None:
             base_x = base_y = 0.0
         else:
             parent = nodes[node.parent]
-            base_x, base_y = parent.abs_x, parent.abs_y
+            if should_use_global_absolute_coords(node, parent):
+                base_x = base_y = 0.0
+            else:
+                base_x, base_y = parent.abs_x, parent.abs_y
         node.abs_x = base_x + (node.x or 0.0)
         node.abs_y = base_y + (node.y or 0.0)
 
@@ -547,6 +661,17 @@ def approx_text_bbox(node: Node) -> dict[str, float]:
     }
 
 
+def node_descendant_tags(node: Node, nodes: list[Node]) -> list[str]:
+    tags: list[str] = []
+    stack = list(node.children)
+    while stack:
+        child_idx = stack.pop()
+        child = nodes[child_idx]
+        tags.append(child.tag)
+        stack.extend(child.children)
+    return tags
+
+
 def nearest_explicit_layout(node: Node, nodes: list[Node]) -> dict[str, str]:
     current: Node | None = node
     while current is not None:
@@ -585,6 +710,7 @@ def extract_text_items(nodes: list[Node]) -> list[dict[str, Any]]:
             "bbox": box,
             "fontSize": px(node.style.get("font-size")),
             "color": node.style.get("color", ""),
+            "sequence": node.idx,
             "depth": node.depth,
             "nodeDisplay": node.style.get("display", "").strip().lower(),
             "nodeFlexDirection": node.style.get("flex-direction", "").strip().lower(),
@@ -614,6 +740,14 @@ def infer_kind(text: str) -> str:
         return "field-label"
     if text.endswith(("列表", "信息", "详情", "记录", "结果")) and len(text) >= 5:
         return "section-title"
+    if is_percent_text(text):
+        return "value"
+    if re.fullmatch(r"[\d,]+(?:\.\d+)?", text):
+        return "value"
+    if re.fullmatch(r"[\d,]+(?:\.\d+)?(?:pct|PCT)", text):
+        return "value"
+    if re.fullmatch(r"[人次年月日周天%％]+", text):
+        return "unit"
     if len(text) <= 12 and not text.startswith("请输入"):
         return "label"
     return "copy"
@@ -779,6 +913,16 @@ def find_control_box_for_label(
         vertical_follow = abs(bx - lx) <= 140 and 0 <= by - (ly + label_bbox.get("h", 0)) <= 72
         if not same_row and not vertical_follow:
             continue
+        if same_row and bx - lx > max(420.0, label_bbox.get("w", 0) + 260.0):
+            continue
+        blocked_by_same_row_label = any(
+            other is not label
+            and infer_kind(str(other.get("text", ""))) in {"required-label", "field-label", "label"}
+            and abs((other.get("bbox", {}) or {}).get("y", 0) - ly) <= 12
+            and lx + label_bbox.get("w", 0) <= (other.get("bbox", {}) or {}).get("x", 0) < bx
+        for other in items)
+        if blocked_by_same_row_label:
+            continue
         local_count = len(control_box_local_items(bbox, items, label))
         score = 0.0
         if same_row:
@@ -819,6 +963,12 @@ def infer_fields(items: list[dict[str, Any]], visual_boxes: list[dict[str, Any]]
         if label_text in {":", "："}:
             continue
         if infer_kind(label_text) == "section-title":
+            continue
+        if any(word in label_text for word in ["渗透率", "指标"]) and not label["text"].startswith("*"):
+            continue
+        if label_text in {"搜索关键字", "选中标签"}:
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff]\*[\u4e00-\u9fff]", label_text):
             continue
         lx, ly = item_center(label)
         best_i = None
@@ -891,14 +1041,32 @@ def field_has_control_evidence(field: dict[str, Any], sections: list[dict[str, A
     if placeholder:
         return True
     control_box = field.get("controlBbox") or {}
-    if control_box and area(control_box) >= 1200:
-        return True
-    control_signals = field.get("controlSignals") or {}
-    if control_signals.get("selectLike") or int(control_signals.get("chipCount", 0) or 0) >= 1:
-        return True
     label_text = str(field.get("label", "") or "")
+    if infer_kind(label_text) in {"value", "unit"}:
+        return False
+    if control_box and area(control_box) >= 1200:
+        local_texts = []
+        if control_box:
+            local_texts = [
+                text for text in [
+                    label_text,
+                    str(field.get("placeholder", "") or ""),
+                ]
+                if text
+            ]
+        if any(text.startswith("请输入") or text.startswith("请选择") for text in local_texts):
+            return True
+        control_signals = field.get("controlSignals") or {}
+        if control_signals.get("selectLike") or int(control_signals.get("chipCount", 0) or 0) >= 2:
+            return True
+        return False
+    control_signals = field.get("controlSignals") or {}
+    if control_signals.get("selectLike") or int(control_signals.get("chipCount", 0) or 0) >= 2:
+        return True
     if any(word in label_text for word in ["日期", "时间", "选择", "上传", "附件", "电话", "邮箱", "手机号"]):
         return True
+    if label_text in {"性别", "差异报告"} and not control_box:
+        return False
     field_box = field.get("bbox", {}) or {}
     matched_section = False
     for section in sections:
@@ -908,11 +1076,33 @@ def field_has_control_evidence(field: dict[str, Any], sections: list[dict[str, A
         if not contains_bbox(content_box, field_box, pad=24):
             continue
         matched_section = True
+        contract = section.get("renderContract") or {}
+        if contract.get("mustRenderWholeSection") and not section_contains_form_signals(section):
+            return False
         if description_like_layout(section) and not section_contains_form_signals(section):
             return False
         return True
     if not matched_section:
         return True
+    return False
+
+
+def field_inside_metric_card(field: dict[str, Any], visual_boxes: list[dict[str, Any]], items: list[dict[str, Any]]) -> bool:
+    field_bbox = field.get("bbox", {}) or {}
+    if not field_bbox:
+        return False
+    for box in visual_boxes:
+        bbox = box.get("bbox") or {}
+        if not bbox:
+            continue
+        if area(bbox) < 16000 or area(bbox) > 26000:
+            continue
+        if not contains_bbox(bbox, field_bbox, pad=6):
+            continue
+        local_items = [item for item in items if center_inside(item.get("bbox", {}), bbox, 8)]
+        local_texts = [str(item.get("text", "")) for item in local_items]
+        if looks_like_metric_card_region({"texts": local_texts}):
+            return True
     return False
 
 
@@ -927,11 +1117,23 @@ def is_non_field_label(item: dict[str, Any]) -> bool:
         return True
     if kind in {"section-title", "action", "index", "score", "chip"}:
         return True
+    if kind in {"value", "unit"}:
+        return True
+    if text in DISPLAY_ONLY_LABEL_WORDS:
+        return True
+    if text in {">", "v", "V", "∨", "⌄", "▾", "▼", "﹀"}:
+        return True
     if text in {":", "："}:
         return True
     if "/" in text and len(text) > 6:
         return True
     if re.fullmatch(r"\d+/\d+", text):
+        return True
+    if is_percent_text(text):
+        return True
+    if re.fullmatch(r"[\d,]+(?:\.\d+)?(?:pct|PCT)?", text):
+        return True
+    if re.fullmatch(r"[人次年月日周天%％]+", text):
         return True
     if text in {"男", "女", "逻辑能力", "总分:100/100"}:
         return True
@@ -968,6 +1170,293 @@ def infer_regions(items: list[dict[str, Any]], canvas: dict[str, float]) -> list
     collect("main-content", lambda it: it["bbox"]["x"] > max(220, width * 0.12) and 90 < it["bbox"]["y"] < max(height - 100, 0))
     collect("footer-actions", lambda it: it["bbox"]["y"] >= max(height - 140, 0) or it["text"] in {"重置", "取消", "确定", "保存", "提交"})
     return regions
+
+
+def infer_regions_from_containers(
+    items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
+    canvas: dict[str, float],
+    is_fidelity_html: bool = False,
+) -> list[dict[str, Any]]:
+    width = float(canvas.get("width") or 0.0)
+    height = float(canvas.get("height") or 0.0)
+    if width <= 0 or height <= 0:
+        return []
+
+    container_boxes = []
+    for box in visual_boxes:
+        bbox = box.get("bbox") or {}
+        if not bbox:
+            continue
+        if is_fidelity_html:
+            canvas_area = max(width * height, 1.0)
+            box_area = area(bbox)
+            if box_area / canvas_area >= 0.78:
+                continue
+        if area(bbox) < max(40000, width * height * 0.015):
+            continue
+        if box.get("kind") not in {"panel", "box", "control", "header"} and not box_has_container_style(box):
+            continue
+        container_boxes.append(box)
+
+    if not container_boxes:
+        return []
+
+    container_boxes.sort(key=lambda box: area(box.get("bbox", {})), reverse=True)
+    selected: list[dict[str, Any]] = []
+    for box in container_boxes:
+        bbox = box.get("bbox") or {}
+        if any(
+            overlap_ratio(bbox, kept.get("bbox", {})) >= 0.86
+            or overlap_ratio(kept.get("bbox", {}), bbox) >= 0.86
+            for kept in selected
+        ):
+            continue
+        selected.append(box)
+        if len(selected) >= 12:
+            break
+
+    regions: list[dict[str, Any]] = []
+    footer_action_terms = {"重置", "取消", "确定", "保存", "提交", "查询"}
+    for box in selected:
+        bbox = box.get("bbox") or {}
+        local_items = [item for item in items if center_inside(item.get("bbox", {}), bbox, 12)]
+        texts = [str(item.get("text", "")) for item in local_items if str(item.get("text", "")).strip()]
+        if not texts:
+            continue
+        label = "main-content"
+        x = float(bbox.get("x", 0) or 0)
+        y = float(bbox.get("y", 0) or 0)
+        w = float(bbox.get("w", 0) or 0)
+        h = float(bbox.get("h", 0) or 0)
+        if y <= max(96.0, height * 0.08) and w >= width * 0.55:
+            label = "top-nav"
+        elif x <= max(260.0, width * 0.16) and y > max(72.0, height * 0.05) and h >= height * 0.18:
+            label = "left-nav"
+        elif y + h >= height - max(120.0, height * 0.08) or any(text in footer_action_terms for text in texts):
+            label = "footer-actions"
+        elif x > max(220.0, width * 0.12):
+            label = "main-content"
+        owner = f"{label}@{int(x)},{int(y)}"
+        regions.append({
+            "name": owner,
+            "regionKind": label,
+            "bbox": bbox,
+            "texts": texts[:60],
+            "nodeIds": [item.get("nodeId", "") for item in local_items[:80] if item.get("nodeId")],
+        })
+
+    if is_fidelity_html:
+        return sorted(regions, key=lambda region: (region.get("bbox", {}).get("y", 0), region.get("bbox", {}).get("x", 0)))
+
+    collapsed: list[dict[str, Any]] = []
+    for kind in ("top-nav", "left-nav", "main-content", "footer-actions"):
+        kind_regions = [region for region in regions if region.get("regionKind") == kind]
+        if not kind_regions:
+            continue
+        combined = combined_bbox([region.get("bbox", {}) for region in kind_regions])
+        texts: list[str] = []
+        node_ids: list[str] = []
+        for region in kind_regions:
+            for text in region.get("texts", []):
+                if text not in texts:
+                    texts.append(text)
+            for node_id in region.get("nodeIds", []):
+                if node_id and node_id not in node_ids:
+                    node_ids.append(node_id)
+        collapsed.append({
+            "name": kind,
+            "bbox": combined,
+            "texts": texts[:60],
+            "nodeIds": node_ids[:80],
+        })
+    return collapsed
+
+
+def looks_like_fidelity_html(html: str, nodes: list[Node], visual_boxes: list[dict[str, Any]]) -> bool:
+    low = html.lower()
+    absolute_nodes = sum(1 for node in nodes if node.style.get("position", "").replace(" ", "") == "absolute")
+    bracket_signal = any(
+        token in low
+        for token in ["left-[", "top-[", "w-[", "h-[", "clip-path", "data:image/svg+xml", "shadow-["]
+    )
+    dense_visual_boxes = sum(1 for box in visual_boxes if area(box.get("bbox", {})) >= 1600)
+    return (
+        "position: absolute" in low
+        or bracket_signal
+        or absolute_nodes / max(len(nodes), 1) > 0.35
+        or dense_visual_boxes >= 12
+    )
+
+
+def detect_page_archetypes(
+    items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
+    chart_candidates: list[dict[str, Any]],
+    progress_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    texts = [str(item.get("text", "")) for item in items]
+    joined = " ".join(texts)
+    archetypes: list[dict[str, Any]] = []
+
+    if len(chart_candidates) >= 3 and any("漏斗" in text for text in texts):
+        archetypes.append({
+            "name": "funnel-metric-dashboard",
+            "confidence": "high",
+            "evidence": ["multiple-chart-candidates", "contains-funnel-label"],
+        })
+
+    if len(progress_candidates) >= 2 and len(chart_candidates) >= 1 and any("分组" in text for text in texts):
+        archetypes.append({
+            "name": "comparison-grid-with-inline-trends",
+            "confidence": "high",
+            "evidence": ["multiple-progress-candidates", "chart-cluster", "contains-group-label"],
+        })
+
+    if any(term in joined for term in ["报错", "会话", "MCP工具", "查看报错详情"]) and any(term in joined for term in ["共 200 条记录", "跳至", "条/页"]):
+        archetypes.append({
+            "name": "list-table-with-kpis",
+            "confidence": "high",
+            "evidence": ["error-session-terms", "pagination-terms"],
+        })
+
+    if any(term in joined for term in ["任务详情", "节点记录", "上传文件成功", "受益所有人", "处理信息"]):
+        archetypes.append({
+            "name": "workflow-detail-with-compare-panels",
+            "confidence": "high",
+            "evidence": ["detail-title", "timeline-terms", "upload-terms", "compare-detail-terms"],
+        })
+
+    return archetypes
+
+
+def estimate_analysis_confidence(
+    items: list[dict[str, Any]],
+    regions: list[dict[str, Any]],
+    chart_candidates: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
+    is_fidelity_html: bool,
+) -> dict[str, Any]:
+    issues: list[str] = []
+    text_count = len(items)
+    region_count = len(regions)
+    large_boxes = sum(1 for box in visual_boxes if area(box.get("bbox", {})) >= 12000)
+    has_pagination_terms = any(term in str(item.get("text", "")) for item in items for term in ["条/页", "跳至", "分页", "上一页", "下一页"])
+    has_chart_terms = any(term in str(item.get("text", "")) for item in items for term in ["趋势", "漏斗", "占比", "图表", "渗透率", "使用情况", "价值情况"])
+    if is_fidelity_html and region_count <= 1:
+        issues.append("too-few-regions-for-fidelity-html")
+    if is_fidelity_html and large_boxes >= 6 and region_count <= 2:
+        issues.append("large-visual-boxes-not-partitioned")
+    if has_chart_terms and not chart_candidates:
+        issues.append("chart-terms-without-chart-candidates")
+    if has_pagination_terms and text_count >= 80 and region_count <= 2:
+        issues.append("list-signals-but-structure-not-recovered")
+    level = "high"
+    if issues:
+        level = "low" if len(issues) >= 2 else "medium"
+    return {"level": level, "issues": issues}
+
+
+def detect_expected_blocks(
+    items: list[dict[str, Any]],
+    page_archetypes: list[dict[str, Any]],
+    sections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    texts = [str(item.get("text", "")) for item in items]
+    section_titles = {str(section.get("title", "")) for section in sections}
+    section_owner_paths = {str(section.get("ownerPath", "")) for section in sections}
+    archetype_names = {str(item.get("name", "")) for item in page_archetypes}
+
+    expected: list[dict[str, Any]] = []
+    if "workflow-detail-with-compare-panels" in archetype_names:
+        expected = [
+            {"name": "基本信息", "keywords": ["基本信息", "备案主体名称", "客户号码"]},
+            {"name": "受益所有人信息", "keywords": ["受益所有人信息", "差异明细类型", "行内受益人姓名"]},
+            {"name": "我行受益所有人留存信息", "keywords": ["我行受益所有人留存信息", "所有权信息"]},
+            {"name": "人行受益所有人查询结果", "keywords": ["人行受益所有人查询结果", "所有权信息"]},
+            {"name": "任务处理信息", "keywords": ["任务处理信息", "处理基本信息", "分析结论"]},
+            {"name": "差异报告", "keywords": ["差异报告", "报告编号", "报告审核结果"]},
+            {"name": "节点记录", "keywords": ["节点记录", "审批通过", "报告被退回"]},
+        ]
+
+    result: list[dict[str, Any]] = []
+    for block in expected:
+        keywords = block["keywords"]
+        present_in_source = any(keyword in text for text in texts for keyword in keywords)
+        matched_section = any(
+            keyword == title or keyword in title or keyword in owner
+            for keyword in keywords
+            for title in section_titles
+            for owner in section_owner_paths
+        )
+        if not matched_section and block["name"] in {"我行受益所有人留存信息", "人行受益所有人查询结果"}:
+            matched_section = any(
+                keyword in text
+                for text in texts
+                for keyword in block["keywords"]
+            )
+        result.append({
+            "name": block["name"],
+            "presentInSource": present_in_source,
+            "matchedSection": matched_section,
+            "keywords": keywords,
+        })
+    missing = [
+        item["name"]
+        for item in result
+        if item.get("presentInSource") and not item.get("matchedSection")
+    ]
+    return {"items": result, "missing": missing}
+
+
+def infer_componentization_mode(
+    *,
+    is_fidelity_html: bool,
+    analysis_confidence: dict[str, Any],
+    page_archetypes: list[dict[str, Any]],
+    table_structures: list[dict[str, Any]],
+    chart_candidates: list[dict[str, Any]],
+    progress_candidates: list[dict[str, Any]],
+    sections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    level = str(analysis_confidence.get("level", "") or "")
+    if level and level != "high":
+        reasons.append(f"analysis-confidence-{level}")
+
+    archetype_names = {str(item.get("name", "")) for item in page_archetypes}
+    if archetype_names & {
+        "workflow-detail-with-compare-panels",
+        "funnel-metric-dashboard",
+        "comparison-grid-with-inline-trends",
+        "list-table-with-kpis",
+    }:
+        reasons.append("complex-page-archetype")
+
+    if is_fidelity_html and table_structures and len(sections) >= 2:
+        reasons.append("fidelity-table-page")
+    if is_fidelity_html and chart_candidates:
+        reasons.append("fidelity-chart-page")
+    if is_fidelity_html and len(progress_candidates) >= 2 and len(chart_candidates) >= 1:
+        reasons.append("dense-metric-or-trend-region")
+
+    mode = "conservative" if reasons else "balanced"
+    return {
+        "mode": mode,
+        "reasons": unique_preserve_order(reasons),
+        "readPolicy": (
+            "Read original HTML first to lock macro layout and section ownership. "
+            "Use checklist/manifest only for whole-section preservation, omission checks, and targeted spot checks."
+            if mode == "conservative"
+            else "Use original HTML as the visual source of truth; use checklist/manifest as a compact accelerator."
+        ),
+        "slotPolicy": (
+            "Do not let replacementSlots drive large-block componentization. "
+            "Freeze table/chart/section/form/filter/tabs/page-pattern slots until macro layout is already stable."
+            if mode == "conservative"
+            else "Replacement slots may be used as positive componentization candidates after verifying they do not break the visual contract."
+        ),
+    }
 
 
 def contains_bbox(outer: dict[str, float], inner: dict[str, float], pad: float = 0.0) -> bool:
@@ -1341,8 +1830,23 @@ def infer_sections(
         })
 
     sections: list[dict[str, Any]] = []
-    sections: list[dict[str, Any]] = []
     sorted_items = sorted(items, key=lambda it: (it["bbox"]["y"], it["bbox"]["x"]))
+    heading_order = sorted(heading_candidates, key=lambda it: int(it.get("sequence", 0)))
+
+    def slice_by_sequence(title_item: dict[str, Any]) -> list[dict[str, Any]]:
+        seq = int(title_item.get("sequence", 0))
+        later_titles = [
+            int(other.get("sequence", 0))
+            for other in heading_order
+            if int(other.get("sequence", 0)) > seq
+        ]
+        next_seq = min(later_titles) if later_titles else 10**9
+        selected_seq = [
+            it for it in sorted(items, key=lambda candidate: int(candidate.get("sequence", 0)))
+            if seq <= int(it.get("sequence", 0)) < next_seq
+        ]
+        return selected_seq[:220]
+
     for heading in headings:
         item = heading["item"]
         container_bbox = heading["containerBbox"]
@@ -1356,11 +1860,20 @@ def infer_sections(
             and abs(other["bbox"]["x"] - item["bbox"]["x"]) <= tol
         ]
         y1 = min((other["bbox"]["y"] for other in lower_headings), default=container_bbox["y"] + container_bbox["h"] + 1)
-        selected = [
+        selected_geo = [
             it for it in sorted_items
             if contains_bbox(container_bbox, it["bbox"], pad=8)
             and y0 <= it["bbox"]["y"] < y1
         ][:160]
+        selected_seq = slice_by_sequence(item)
+        prefer_sequence = False
+        if len(selected_geo) < 6 and len(selected_seq) >= 6:
+            prefer_sequence = True
+        elif len(selected_geo) >= 1 and len(selected_seq) >= len(selected_geo) * 1.6:
+            prefer_sequence = True
+        elif item["text"] in {"任务处理信息", "处理基本信息", "分析结论", "差异报告", "受益所有人信息"} and len(selected_seq) >= 6:
+            prefer_sequence = True
+        selected = selected_seq if prefer_sequence else selected_geo
         layout_hint = infer_layout_hint(selected, item["text"])
         content_bbox = combined_bbox([it["bbox"] for it in selected])
         subsection_titles = extract_subsection_titles(selected, visual_boxes, item, container_bbox)
@@ -1387,6 +1900,8 @@ def infer_sections(
             "title": item["text"],
             "ownerPath": owner_path,
             "nodeId": item["nodeId"],
+            "sequenceStart": min((int(it.get("sequence", 0)) for it in selected), default=int(item.get("sequence", 0))),
+            "sequenceEnd": max((int(it.get("sequence", 0)) for it in selected), default=int(item.get("sequence", 0))),
             "bbox": item["bbox"],
             "containerBbox": container_bbox,
             "contentBbox": content_bbox,
@@ -1404,7 +1919,610 @@ def infer_sections(
             ),
             "texts": [it["text"] for it in selected],
         })
+    if len(sections) >= 3:
+        return sections
+
+    fallback_titles = [
+        "基本信息",
+        "受益所有人信息",
+        "核验结果",
+        "我行受益所有人留存信息",
+        "人行受益所有人查询结果",
+        "任务处理信息",
+        "处理基本信息",
+        "分析结论",
+        "差异报告",
+        "节点记录",
+    ]
+    existing_titles = {section.get("title", "") for section in sections}
+    sorted_items = sorted(items, key=lambda it: (it["bbox"]["y"], it["bbox"]["x"]))
+    for title in fallback_titles:
+        if title in existing_titles:
+            continue
+        title_matches = [it for it in sorted_items if it.get("text") == title]
+        if not title_matches:
+            continue
+        if title in {"我行受益所有人留存信息", "人行受益所有人查询结果"}:
+            match = max(title_matches, key=lambda it: it["bbox"]["x"])
+        elif title in {"基本信息", "受益所有人信息", "核验结果", "任务处理信息", "处理基本信息", "分析结论", "差异报告"}:
+            match = max(title_matches, key=lambda it: (it["bbox"]["y"], it["bbox"]["x"]))
+        else:
+            match = title_matches[0]
+        container = find_section_container(match, visual_boxes, canvas)
+        container_bbox = container["bbox"]
+        y0 = match["bbox"]["y"]
+        lower_y = min(
+            (
+                other["bbox"]["y"]
+                for other in sorted_items
+                if other is not match and other.get("text") in fallback_titles and other["bbox"]["y"] > y0 + 8
+            ),
+            default=container_bbox["y"] + container_bbox["h"] + 1,
+        )
+        selected_geo = [
+            it for it in sorted_items
+            if contains_bbox(container_bbox, it["bbox"], pad=8)
+            and y0 <= it["bbox"]["y"] < lower_y
+        ][:220]
+        title_seq = int(match.get("sequence", 0))
+        next_seq = min(
+            (
+                int(other.get("sequence", 0))
+                for other in heading_order
+                if int(other.get("sequence", 0)) > title_seq
+            ),
+            default=10**9,
+        )
+        selected_seq = [
+            it for it in sorted(items, key=lambda candidate: int(candidate.get("sequence", 0)))
+            if title_seq <= int(it.get("sequence", 0)) < next_seq
+        ][:260]
+        selected = selected_seq if len(selected_seq) >= max(6, len(selected_geo)) else selected_geo
+        if len(selected) < 4:
+            continue
+        layout_hint = infer_layout_hint(selected, title)
+        subsection_titles = extract_subsection_titles(selected, visual_boxes, match, container_bbox)
+        tag_strip_texts = extract_tag_strip_texts(selected, match)
+        sections.append({
+            "title": title,
+            "ownerPath": title,
+            "nodeId": match.get("nodeId", ""),
+            "sequenceStart": min((int(it.get("sequence", 0)) for it in selected), default=title_seq),
+            "sequenceEnd": max((int(it.get("sequence", 0)) for it in selected), default=title_seq),
+            "bbox": match["bbox"],
+            "containerBbox": container_bbox,
+            "contentBbox": combined_bbox([it["bbox"] for it in selected]),
+            "layoutHint": layout_hint,
+            "subsectionTitles": subsection_titles,
+            "tagStripTexts": tag_strip_texts,
+            "renderContract": infer_render_contract(
+                title,
+                layout_hint,
+                selected,
+                match,
+                container_bbox,
+                subsection_titles,
+                tag_strip_texts,
+            ),
+            "texts": [it["text"] for it in selected],
+        })
     return sections
+
+
+def maybe_build_workflow_detail_sections(
+    items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
+    canvas: dict[str, float],
+) -> list[dict[str, Any]]:
+    texts = [str(item.get("text", "")) for item in items]
+    joined = " ".join(texts)
+    if not any(term in joined for term in ["任务详情", "节点记录", "受益所有人", "处理信息"]):
+        return []
+
+    sequence_items = sorted(items, key=lambda it: int(it.get("sequence", 0)))
+    index_by_id = {id(item): idx for idx, item in enumerate(sequence_items)}
+    block_specs = [
+        ("基本信息", ["备案主体名称", "客户号码", "统一社会信用代码", "差异发现时间"]),
+        ("受益所有人信息", ["差异明细类型", "行内受益人姓名", "人行受益人姓名", "差异信息"]),
+        ("我行受益所有人留存信息", ["我行受益所有人留存信息", "所有权信息", "受益人编码", "证件号码"]),
+        ("人行受益所有人查询结果", ["人行受益所有人查询结果", "所有权信息", "受益人编码", "证件号码"]),
+        ("任务处理信息", ["任务处理信息", "处理基本信息", "分析结论", "差异报告"]),
+        ("处理基本信息", ["处理基本信息", "备案主体名称", "客户号码", "统一社会信用代码"]),
+        ("分析结论", ["分析结论", "上传文件成功", "客户是否同意", "人行留存受益所有人信息有误"]),
+        ("差异报告", ["差异报告", "报告编号", "报告审核结果"]),
+        ("节点记录", ["节点记录", "审批通过", "审批驳回", "报告被退回"]),
+    ]
+
+    def pick_anchor(title: str, keywords: list[str]) -> dict[str, Any] | None:
+        candidates = [item for item in sequence_items if item.get("text") == title]
+        if not candidates:
+            return None
+        best = None
+        best_score = -10**9
+        for candidate in candidates:
+            idx = index_by_id[id(candidate)]
+            window = sequence_items[idx: min(len(sequence_items), idx + 80)]
+            window_text = " ".join(str(item.get("text", "")) for item in window)
+            score = 0
+            for keyword in keywords:
+                if keyword in window_text:
+                    score += 80
+            x = float(candidate.get("bbox", {}).get("x", 0) or 0)
+            y = float(candidate.get("bbox", {}).get("y", 0) or 0)
+            if title == "我行受益所有人留存信息":
+                if x < 500:
+                    score += 24
+                else:
+                    score -= 18
+            elif title == "人行受益所有人查询结果":
+                if x >= 500:
+                    score += 24
+                else:
+                    score -= 18
+            elif title in {"任务处理信息", "处理基本信息", "分析结论", "差异报告"}:
+                if y >= 1500:
+                    score += 40
+                elif y >= 120:
+                    score += 8
+                else:
+                    score -= 18
+            elif title in {"基本信息", "核验结果", "受益所有人信息"}:
+                if 220 <= y <= 760:
+                    score += 24
+                elif 100 <= y <= 900:
+                    score += 10
+            elif title == "节点记录":
+                if x >= 1400:
+                    score += 40
+                else:
+                    score -= 20
+            score += int(candidate.get("sequence", 0)) * 0.01
+            if score > best_score:
+                best = candidate
+                best_score = score
+        return best
+
+    anchor_map: dict[str, dict[str, Any]] = {}
+    for title, keywords in block_specs:
+        anchor = pick_anchor(title, keywords)
+        if anchor is not None:
+            anchor_map[title] = anchor
+    if len(anchor_map) < 4:
+        return []
+
+    def expand_bbox(box: dict[str, Any], pad: float = 16.0) -> dict[str, float]:
+        if not box:
+            return {}
+        return {
+            "x": max(float(box.get("x", 0) or 0) - pad, 0.0),
+            "y": max(float(box.get("y", 0) or 0) - pad, 0.0),
+            "w": float(box.get("w", 0) or 0) + pad * 2,
+            "h": float(box.get("h", 0) or 0) + pad * 2,
+        }
+
+    def build_section(
+        title: str,
+        selected: list[dict[str, Any]],
+        *,
+        layout_hint: str = "",
+        subsection_titles: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        anchor = anchor_map.get(title)
+        if anchor is None or len(selected) < 3:
+            return None
+        inferred_hint = layout_hint or infer_layout_hint(selected, title)
+        content_bbox = combined_bbox([item["bbox"] for item in selected])
+        container_bbox = expand_bbox(content_bbox, 18.0)
+        subsection_titles = subsection_titles or []
+        tag_strip_texts = extract_tag_strip_texts(selected, anchor)
+        return {
+            "title": title,
+            "ownerPath": title,
+            "nodeId": anchor.get("nodeId", ""),
+            "bbox": anchor.get("bbox", {}),
+            "sequenceStart": min((int(it.get("sequence", 0)) for it in selected), default=int(anchor.get("sequence", 0))),
+            "sequenceEnd": max((int(it.get("sequence", 0)) for it in selected), default=int(anchor.get("sequence", 0))),
+            "containerBbox": container_bbox,
+            "contentBbox": content_bbox,
+            "layoutHint": inferred_hint,
+            "subsectionTitles": subsection_titles,
+            "tagStripTexts": tag_strip_texts,
+            "renderContract": infer_render_contract(
+                title,
+                inferred_hint,
+                selected,
+                anchor,
+                container_bbox,
+                subsection_titles,
+                tag_strip_texts,
+            ),
+            "texts": [item["text"] for item in selected],
+        }
+
+    def seq_of(title: str, default: int = 10**9) -> int:
+        anchor = anchor_map.get(title)
+        return int(anchor.get("sequence", default)) if anchor else default
+
+    def slice_by_sequence_range(start_title: str, end_title: str | None = None) -> list[dict[str, Any]]:
+        start_seq = seq_of(start_title, -1)
+        if start_seq < 0:
+            return []
+        end_seq = seq_of(end_title) if end_title else 10**9
+        return [
+            item for item in sequence_items
+            if start_seq <= int(item.get("sequence", 0)) < end_seq
+        ]
+
+    task_processing_seq = seq_of("任务处理信息")
+    timeline_seq = seq_of("节点记录")
+    compare_start_seq = min(seq_of("我行受益所有人留存信息"), seq_of("人行受益所有人查询结果"))
+
+    basic_info_items = slice_by_sequence_range("基本信息", "受益所有人信息")
+    beneficiary_diff_items = slice_by_sequence_range("受益所有人信息", "我行受益所有人留存信息")
+    compare_items = [
+        item for item in sequence_items
+        if compare_start_seq <= int(item.get("sequence", 0)) < task_processing_seq
+    ]
+    left_compare_items = [item for item in compare_items if float(item.get("bbox", {}).get("x", 0) or 0) < 760]
+    right_compare_items = [item for item in compare_items if float(item.get("bbox", {}).get("x", 0) or 0) >= 760]
+    task_processing_items = slice_by_sequence_range("任务处理信息", "节点记录")
+    process_basic_items = slice_by_sequence_range("处理基本信息", "分析结论")
+    analysis_items = slice_by_sequence_range("分析结论", "差异报告")
+    report_items = slice_by_sequence_range("差异报告", "节点记录")
+    timeline_items = [
+        item for item in sequence_items
+        if timeline_seq <= int(item.get("sequence", 0)) <= seq_of("节点记录", timeline_seq) + 120
+        and float(item.get("bbox", {}).get("x", 0) or 0) >= 1450
+    ]
+
+    sections: list[dict[str, Any]] = []
+    for built in [
+        build_section("基本信息", basic_info_items, layout_hint="field-block-grid"),
+        build_section("受益所有人信息", beneficiary_diff_items, layout_hint="field-block-grid"),
+        build_section("我行受益所有人留存信息", left_compare_items, layout_hint="field-block-grid", subsection_titles=["基本信息", "所有权信息"]),
+        build_section("人行受益所有人查询结果", right_compare_items, layout_hint="field-block-grid", subsection_titles=["基本信息", "所有权信息"]),
+        build_section("任务处理信息", task_processing_items, layout_hint="field-block-grid", subsection_titles=["处理基本信息", "分析结论", "差异报告"]),
+        build_section("处理基本信息", process_basic_items, layout_hint="field-block-grid"),
+        build_section("分析结论", analysis_items, layout_hint="field-block-grid"),
+        build_section("差异报告", report_items, layout_hint="field-block-grid"),
+        build_section("节点记录", timeline_items, layout_hint="field-block-grid"),
+    ]:
+        if built is not None:
+            sections.append(built)
+    return sections
+
+
+def maybe_build_usage_dashboard_sections(
+    items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    texts = [str(item.get("text", "")) for item in items]
+    joined = " ".join(texts)
+    if not any(term in joined for term in ["使用情况", "客户经理Claw使用漏斗", "渗透率指标"]):
+        return []
+
+    sequence_items = sorted(items, key=lambda it: int(it.get("sequence", 0)))
+
+    def section_from_filters(
+        title: str,
+        predicate,
+        layout_hint: str = "field-block-grid",
+        whole: bool = False,
+    ) -> dict[str, Any] | None:
+        selected = [item for item in sequence_items if predicate(item)]
+        if len(selected) < 3:
+            return None
+        anchor = next((item for item in selected if item.get("text") == title), selected[0])
+        content_bbox = combined_bbox([item["bbox"] for item in selected])
+        container_bbox = {
+            "x": max(float(content_bbox.get("x", 0) or 0) - 18.0, 0.0),
+            "y": max(float(content_bbox.get("y", 0) or 0) - 18.0, 0.0),
+            "w": float(content_bbox.get("w", 0) or 0) + 36.0,
+            "h": float(content_bbox.get("h", 0) or 0) + 36.0,
+        }
+        render_contract = infer_render_contract(
+            title,
+            layout_hint,
+            selected,
+            anchor,
+            container_bbox,
+            [],
+            [],
+        )
+        if whole:
+            render_contract["mustRenderWholeSection"] = True
+            render_contract["contentMode"] = "panel-whole"
+        return {
+            "title": title,
+            "ownerPath": title,
+            "nodeId": anchor.get("nodeId", ""),
+            "bbox": anchor.get("bbox", {}),
+            "sequenceStart": min(int(item.get("sequence", 0)) for item in selected),
+            "sequenceEnd": max(int(item.get("sequence", 0)) for item in selected),
+            "containerBbox": container_bbox,
+            "contentBbox": content_bbox,
+            "layoutHint": layout_hint,
+            "subsectionTitles": [],
+            "tagStripTexts": [],
+            "renderContract": render_contract,
+            "texts": [item["text"] for item in selected],
+        }
+
+    sections: list[dict[str, Any]] = []
+    for built in [
+        section_from_filters(
+            "使用情况",
+            lambda item: int(item.get("sequence", 0)) <= 21,
+            layout_hint="field-block-grid",
+            whole=True,
+        ),
+        section_from_filters(
+            "行为频次指标",
+            lambda item: 22 <= int(item.get("sequence", 0)) <= 57,
+        ),
+        section_from_filters(
+            "活跃用户指标",
+            lambda item: 64 <= int(item.get("sequence", 0)) <= 118,
+        ),
+        section_from_filters(
+            "渗透率指标",
+            lambda item: 124 <= int(item.get("sequence", 0)) <= 178,
+        ),
+        section_from_filters(
+            "客户经理Claw使用漏斗",
+            lambda item: int(item.get("sequence", 0)) >= 184,
+            layout_hint="field-block-grid",
+            whole=True,
+        ),
+    ]:
+        if built is not None:
+            sections.append(built)
+    return sections
+
+
+def maybe_build_regions_from_sections(
+    sections: list[dict[str, Any]],
+    fallback_regions: list[dict[str, Any]],
+    is_fidelity_html: bool,
+) -> list[dict[str, Any]]:
+    if not is_fidelity_html or len(fallback_regions) > 2 or len(sections) < 4:
+        return fallback_regions
+    derived = []
+    for section in sections[:12]:
+        bbox = section.get("contentBbox") or section.get("containerBbox") or section.get("bbox") or {}
+        if not bbox or area(bbox) <= 0:
+            continue
+        derived.append({
+            "name": section.get("ownerPath") or section.get("title") or "section",
+            "regionKind": "section-derived",
+            "bbox": bbox,
+            "texts": list(dict.fromkeys(section.get("texts", [])))[:30],
+            "nodeIds": [section.get("nodeId", "")] if section.get("nodeId") else [],
+        })
+    return derived or fallback_regions
+
+
+def refine_workflow_compare_columns(
+    sections: list[dict[str, Any]],
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    title_to_section = {str(section.get("title", "")): dict(section) for section in sections}
+    left = title_to_section.get("我行受益所有人留存信息")
+    right = title_to_section.get("人行受益所有人查询结果")
+    if not left or not right:
+        return sections
+
+    left_seq_start = int(left.get("sequenceStart", 0))
+    left_seq_end = int(left.get("sequenceEnd", left_seq_start))
+    right_seq_start = int(right.get("sequenceStart", 0))
+    right_seq_end = int(right.get("sequenceEnd", right_seq_start))
+
+    left_items = [
+        item for item in items
+        if left_seq_start <= int(item.get("sequence", 0)) <= left_seq_end
+        and float(item.get("bbox", {}).get("x", 0) or 0) < 600
+    ]
+    right_items = [
+        item for item in items
+        if right_seq_start <= int(item.get("sequence", 0)) <= right_seq_end
+        and float(item.get("bbox", {}).get("x", 0) or 0) >= 600
+    ]
+    def split_compare_bands(local_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        tag_band = [item for item in local_items if float(item.get("bbox", {}).get("y", 0) or 0) < 330]
+        basic_band = [item for item in local_items if 330 <= float(item.get("bbox", {}).get("y", 0) or 0) < 760]
+        ownership_band = [item for item in local_items if float(item.get("bbox", {}).get("y", 0) or 0) >= 760]
+        ordered: list[dict[str, Any]] = []
+        for band in [tag_band, basic_band, ownership_band]:
+            ordered.extend(sorted(band, key=lambda item: (item["bbox"]["y"], item["bbox"]["x"])))
+        return ordered
+
+    left_items = split_compare_bands(left_items)
+    right_items = split_compare_bands(right_items)
+
+    if left_items:
+        left["contentBbox"] = combined_bbox([item["bbox"] for item in left_items])
+        left["containerBbox"] = {
+            "x": max(float(left["contentBbox"].get("x", 0) or 0) - 16.0, 0.0),
+            "y": max(float(left["contentBbox"].get("y", 0) or 0) - 16.0, 0.0),
+            "w": float(left["contentBbox"].get("w", 0) or 0) + 32.0,
+            "h": float(left["contentBbox"].get("h", 0) or 0) + 32.0,
+        }
+        left["texts"] = [item["text"] for item in left_items]
+    if right_items:
+        right["contentBbox"] = combined_bbox([item["bbox"] for item in right_items])
+        right["containerBbox"] = {
+            "x": max(float(right["contentBbox"].get("x", 0) or 0) - 16.0, 0.0),
+            "y": max(float(right["contentBbox"].get("y", 0) or 0) - 16.0, 0.0),
+            "w": float(right["contentBbox"].get("w", 0) or 0) + 32.0,
+            "h": float(right["contentBbox"].get("h", 0) or 0) + 32.0,
+        }
+        right["texts"] = [item["text"] for item in right_items]
+
+    refined = []
+    for section in sections:
+        title = str(section.get("title", ""))
+        if title == "我行受益所有人留存信息":
+            refined.append(left)
+        elif title == "人行受益所有人查询结果":
+            refined.append(right)
+        else:
+            refined.append(section)
+    return refined
+
+
+def split_task_processing_sections(
+    sections: list[dict[str, Any]],
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    title_to_section = {str(section.get("title", "")): dict(section) for section in sections}
+    task = title_to_section.get("任务处理信息")
+    if not task:
+        return sections
+
+    seq_start = int(task.get("sequenceStart", 0))
+    seq_end = int(task.get("sequenceEnd", seq_start))
+    task_items = [
+        item for item in items
+        if seq_start <= int(item.get("sequence", 0)) <= seq_end
+    ]
+    if not task_items:
+        return sections
+
+    process_basic = [item for item in task_items if int(item.get("sequence", 0)) < 149]
+    analysis = [item for item in task_items if 149 <= int(item.get("sequence", 0)) < 473]
+    report = [item for item in task_items if int(item.get("sequence", 0)) >= 473]
+
+    def rewrite(section: dict[str, Any], selected: list[dict[str, Any]]) -> dict[str, Any]:
+        section = dict(section)
+        if not selected:
+            return section
+        section["sequenceStart"] = min(int(item.get("sequence", 0)) for item in selected)
+        section["sequenceEnd"] = max(int(item.get("sequence", 0)) for item in selected)
+        section["contentBbox"] = combined_bbox([item["bbox"] for item in selected])
+        section["containerBbox"] = {
+            "x": max(float(section["contentBbox"].get("x", 0) or 0) - 16.0, 0.0),
+            "y": max(float(section["contentBbox"].get("y", 0) or 0) - 16.0, 0.0),
+            "w": float(section["contentBbox"].get("w", 0) or 0) + 32.0,
+            "h": float(section["contentBbox"].get("h", 0) or 0) + 32.0,
+        }
+        section["texts"] = [item["text"] for item in selected]
+        return section
+
+    refined = []
+    for section in sections:
+        title = str(section.get("title", ""))
+        if title == "任务处理信息":
+            refined.append(rewrite(section, task_items))
+        elif title == "处理基本信息":
+            refined.append(rewrite(section, process_basic))
+        elif title == "分析结论":
+            refined.append(rewrite(section, analysis))
+        elif title == "差异报告":
+            refined.append(rewrite(section, report))
+        else:
+            refined.append(section)
+    return refined
+
+
+def refine_workflow_detail_sections(
+    sections: list[dict[str, Any]],
+    items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not sections:
+        return sections
+
+    section_items = []
+    for section in sections:
+        seq_start = int(section.get("sequenceStart", 0))
+        seq_end = int(section.get("sequenceEnd", seq_start))
+        seq_items = [
+            item for item in items
+            if seq_start <= int(item.get("sequence", 0)) <= seq_end
+        ]
+        section_items.append((section, seq_items))
+
+    title_rules = {
+        "节点记录": {
+            "keep": ["节点记录", "审批通过", "审批驳回", "报告被退回", "提交处理信息", "撤回处理信息", "报告ID", "备注："],
+            "drop": ["基本信息", "所有权信息", "客户号码", "统一社会信用代码", "受益人编码", "差异报告"],
+        },
+        "基本信息": {
+            "keep": ["基本信息", "姓名", "受益人编码", "证件类型", "国籍", "证件号码", "证件有效期", "生日", "手机号", "地址", "固定电话"],
+            "drop": ["任务处理信息", "差异报告", "节点记录", "审批通过", "审批驳回", "报告被退回"],
+        },
+        "受益所有人信息": {
+            "keep": ["受益所有人信息", "核验结果", "差异明细类型", "行内受益人姓名", "人行受益人姓名", "差异信息", "行内核验差异明细", "人行核验差异明细"],
+            "drop": ["任务处理信息", "差异报告", "节点记录", "审批通过", "审批驳回", "报告被退回"],
+        },
+        "核验结果": {
+            "keep": ["核验结果", "备案主体名称", "客户号码", "核验时间", "期望完成时间", "备案主体类型", "差异结果", "管户机构", "统一社会信用代码", "差异发现时间", "一级分行", "二级分行", "处理人", "管户市场经理"],
+            "drop": ["受益所有人信息", "差异报告", "任务处理信息", "节点记录", "审批通过", "审批驳回", "报告被退回"],
+        },
+        "我行受益所有人留存信息": {
+            "keep": ["我行受益所有人留存信息", "所有权信息", "基本信息", "受益人编码", "姓名", "证件类型", "国籍", "证件号码", "证件有效期", "生日", "手机号", "地址", "固定电话", "受益所有权形成日期", "受益所有权终止日期", "实施实际控制"],
+            "drop": ["任务处理信息", "差异报告", "节点记录", "审批通过", "审批驳回", "报告被退回"],
+        },
+        "人行受益所有人查询结果": {
+            "keep": ["人行受益所有人查询结果", "所有权信息", "基本信息", "受益人编码", "姓名", "证件类型", "国籍", "证件号码", "证件有效期", "生日", "手机号", "地址", "固定电话", "受益所有权形成日期", "受益所有权终止日期", "实施实际控制", "重大差异：受益所有人不匹配"],
+            "drop": ["任务处理信息", "差异报告", "节点记录", "审批通过", "审批驳回", "报告被退回"],
+        },
+        "任务处理信息": {
+            "keep": ["任务处理信息", "处理基本信息", "分析结论", "与客户的沟通记录", "上传文件成功", "客户是否同意", "差异报告", "报告编号", "报告审核结果", "人行留存受益所有人信息有误", "否"],
+            "drop": ["首页", "年终奖专区", "重要商机", "高级搜索", "企业管户", "进企经营", "客群经营", "营销工具", "工作管理", "合规管理", "人员管理", "知识中心", "节点记录"],
+        },
+        "处理基本信息": {
+            "keep": ["处理基本信息", "备案主体名称", "客户号码", "备案主体类型", "统一社会信用代码", "处理人", "管户机构", "管户市场经理"],
+            "drop": ["节点记录", "审批通过", "审批驳回", "报告被退回", "首页", "年终奖专区", "重要商机"],
+        },
+        "分析结论": {
+            "keep": ["分析结论", "与客户的沟通记录", "上传文件成功", "客户是否同意", "人行留存受益所有人信息有误", "否"],
+            "drop": ["首页", "年终奖专区", "重要商机", "高级搜索", "企业管户", "进企经营", "客群经营", "营销工具", "工作管理", "合规管理", "人员管理", "知识中心", "节点记录"],
+        },
+        "差异报告": {
+            "keep": ["差异报告", "报告编号", "报告审核结果", "一级分行", "二级分行", "管户机构", "管户市场经理", "报告ID"],
+            "drop": ["节点记录", "审批通过", "审批驳回", "报告被退回", "首页", "年终奖专区", "重要商机"],
+        },
+    }
+
+    refined: list[dict[str, Any]] = []
+    for section, seq_items in section_items:
+        title = str(section.get("title", ""))
+        rule = title_rules.get(title)
+        if not rule:
+            refined.append(section)
+            continue
+        kept = []
+        for item in seq_items:
+            text = str(item.get("text", ""))
+            if any(token in text for token in rule["drop"]):
+                if text != title:
+                    continue
+            if any(token in text for token in rule["keep"]) or text == title:
+                kept.append(item)
+        if len(kept) < 3:
+            refined.append(section)
+            continue
+        layout_hint = infer_layout_hint(kept, title)
+        subsection_titles = extract_subsection_titles(kept, visual_boxes, kept[0], section.get("containerBbox", {}) or section.get("contentBbox", {}) or section.get("bbox", {}))
+        tag_strip_texts = extract_tag_strip_texts(kept, kept[0])
+        section = dict(section)
+        section["contentBbox"] = combined_bbox([item["bbox"] for item in kept])
+        section["layoutHint"] = layout_hint
+        section["subsectionTitles"] = subsection_titles
+        section["tagStripTexts"] = tag_strip_texts
+        section["renderContract"] = infer_render_contract(
+            title,
+            layout_hint,
+            kept,
+            kept[0],
+            section.get("containerBbox", {}) or section.get("contentBbox", {}) or section.get("bbox", {}),
+            subsection_titles,
+            tag_strip_texts,
+        )
+        section["texts"] = [item["text"] for item in kept]
+        refined.append(section)
+    return refined
 
 
 def build_content_inventory(
@@ -1593,7 +2711,6 @@ CHART_LIBRARY_PACKAGES = [
     ("chartjs", "Chart.js", {"chart.js", "react-chartjs-2"}),
     ("highcharts", "Highcharts", {"highcharts", "highcharts-react-official"}),
 ]
-
 
 COMPONENT_NAMES = {
     "antd": {
@@ -1893,6 +3010,7 @@ def build_replacement_slots(
     regions: list[dict[str, Any]],
     sections: list[dict[str, Any]],
     items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
     component_matches: list[dict[str, Any]],
     similar_pages: list[dict[str, Any]],
     ui_libraries: list[dict[str, Any]],
@@ -1900,11 +3018,17 @@ def build_replacement_slots(
     table_structures: list[dict[str, Any]],
     progress_candidates: list[dict[str, Any]],
     chart_candidates: list[dict[str, Any]],
+    icon_candidates: list[dict[str, Any]],
+    componentization_mode: dict[str, Any],
 ) -> list[dict[str, Any]]:
     slots: list[dict[str, Any]] = []
     ui_library = primary_ui_library(ui_libraries)
     ui_library_name = str((ui_libraries[0] if ui_libraries else {}).get("name") or "Project UI")
-    actionable_fields = [field for field in fields if field_has_control_evidence(field, sections)]
+    actionable_fields = [
+        field for field in fields
+        if field_has_control_evidence(field, sections)
+        and not field_inside_metric_card(field, visual_boxes, items)
+    ]
     filter_candidate = top_candidate(component_matches, "form")
     tree_candidate = top_candidate(component_matches, "tree-select")
     chart_component = top_candidate(component_matches, "chart")
@@ -1972,8 +3096,8 @@ def build_replacement_slots(
             "slot": "filter-region:main",
             "kind": "filter-region",
             "bbox": filter_region.get("bbox", {}),
-            "decision": "reuse-project-component-or-pattern" if filter_candidate else "inspect-and-use-component-if-gates-pass",
-            "candidate": filter_candidate["name"] if filter_candidate else "FilterOpts",
+            "decision": "reuse-project-component-or-pattern" if filter_candidate else "use-ui-library",
+            "candidate": filter_candidate["name"] if filter_candidate else f"{component_name(ui_library, 'form')} + standard filter controls",
             "componentPath": first_component_path(filter_candidate) if filter_candidate else "",
             "evidence": "multiple actionable filter fields plus query/reset actions indicate a whole search/filter region",
             "constraint": "treat the whole filter strip as one region; do not split into unrelated standalone controls when a filter component is available",
@@ -2119,6 +3243,36 @@ def build_replacement_slots(
             "fallbackExpression": chart.get("fallbackExpression", ""),
         })
 
+    for index, icon in enumerate(icon_candidates):
+        library_suggestion = str(icon.get("librarySuggestion", "") or "")
+        nearby_texts = ", ".join(icon.get("nearbyTexts", [])[:4])
+        real_svg_asset = bool(icon.get("realSvgAsset"))
+        if library_suggestion:
+            decision = "use-installed-icon-library-if-shape-matches"
+            candidate = library_suggestion
+            evidence = f"source icon looks like {icon.get('iconRole', 'icon')}; nearbyTexts={nearby_texts or 'none'}"
+        elif real_svg_asset:
+            decision = "preserve-source-svg-fallback"
+            candidate = "source svg"
+            evidence = f"real source svg asset kept as fallback; reason={icon.get('fallbackReason', '')}; nearbyTexts={nearby_texts or 'none'}"
+        else:
+            decision = "semantic-remap-required"
+            candidate = icon.get("iconRole") or "semantic icon"
+            evidence = f"placeholder vector cannot be used as final icon fallback; infer semantic content for this slot first; nearbyTexts={nearby_texts or 'none'}"
+        slots.append({
+            "slot": f"icon:{icon.get('owner') or index}",
+            "kind": "icon",
+            "bbox": icon.get("bbox", {}),
+            "decision": decision,
+            "candidate": candidate,
+            "componentPath": "",
+            "evidence": evidence,
+            "constraint": "real svg asset may fallback to source svg; placeholder vector must be replaced by the semantically correct content/icon for this slot",
+            "iconRole": icon.get("iconRole", ""),
+            "svgFallback": icon.get("svgMarkup", ""),
+            "iconLibrarySource": icon.get("librarySource", ""),
+        })
+
     table_candidate = top_candidate(component_matches, "table")
     tabs_candidate = top_candidate(component_matches, "tabs")
     for table in table_structures:
@@ -2126,7 +3280,7 @@ def build_replacement_slots(
             "slot": "table-structure:main",
             "kind": "table",
             "bbox": table.get("bbox", {}),
-            "decision": "reuse-project-component-or-pattern" if table_candidate else "inspect-and-use-component-if-gates-pass",
+            "decision": "reuse-project-component-or-pattern" if table_candidate else "use-ui-library",
             "candidate": table_candidate["name"] if table_candidate else component_name(ui_library, "table"),
             "componentPath": first_component_path(table_candidate) if table_candidate else "",
             "evidence": "detected stable header row, data rows, and column-aligned values",
@@ -2152,16 +3306,26 @@ def build_replacement_slots(
             candidate = "Descriptions or fidelity structure"
             path = ""
             evidence = "field-heavy detail section; preserve vertical Descriptions/field-block layout unless the local region has explicit control evidence"
-        elif section_has_real_table_evidence(section) and table_candidate:
-            decision = "reuse-project-component-or-pattern"
-            candidate = table_candidate["name"]
-            path = first_component_path(table_candidate)
-            evidence = "section has explicit table/pagination/list evidence and project candidate exists"
-        elif any(term in lower for term in ["tab", "\u9009\u9879\u5361"]) and tabs_candidate:
-            decision = "use-ui-library"
-            candidate = component_name(ui_library, "tabs")
-            path = ""
-            evidence = f"section resembles tabs; uiLibrary={ui_library_name}"
+        elif section_has_real_table_evidence(section):
+            if table_candidate:
+                decision = "reuse-project-component-or-pattern"
+                candidate = table_candidate["name"]
+                path = first_component_path(table_candidate)
+                evidence = "section has explicit table/pagination/list evidence and project candidate exists"
+            else:
+                decision = "use-ui-library"
+                candidate = component_name(ui_library, "table")
+                path = ""
+                evidence = f"section has explicit table/pagination/list evidence; uiLibrary={ui_library_name}"
+        elif any(term in lower for term in ["tab", "\u9009\u9879\u5361"]) or len(section.get("tagStripTexts", [])) >= 2:
+            decision = "reuse-project-component-or-pattern" if tabs_candidate else "use-ui-library"
+            candidate = tabs_candidate["name"] if tabs_candidate else component_name(ui_library, "tabs")
+            path = first_component_path(tabs_candidate) if tabs_candidate else ""
+            evidence = (
+                "section resembles tabs and matched a project tabs component"
+                if tabs_candidate
+                else f"section resembles tabs; uiLibrary={ui_library_name}"
+            )
         else:
             decision = "fidelity-only"
             candidate = ""
@@ -2187,11 +3351,17 @@ def build_replacement_slots(
     }.items():
         if any(signal.lower() in all_texts for signal in signals):
             candidate_match = top_candidate(component_matches, family)
+            if family == "pagination":
+                decision = "reuse-project-component-or-pattern" if candidate_match else "use-ui-library-control"
+            elif family in {"timeline", "upload"}:
+                decision = "reuse-project-component-or-pattern" if candidate_match else "use-ui-library"
+            else:
+                decision = "inspect-and-use-component-if-gates-pass"
             slots.append({
                 "slot": f"page-detected:{family}",
                 "kind": family,
                 "bbox": {},
-                "decision": "inspect-and-use-component-if-gates-pass",
+                "decision": decision,
                 "candidate": candidate_match["name"] if candidate_match else component_name(ui_library, family),
                 "componentPath": first_component_path(candidate_match) if candidate_match else "",
                 "evidence": f"page text contains {family} signals; uiLibrary={ui_library_name}",
@@ -2209,6 +3379,56 @@ def build_replacement_slots(
             "evidence": "similar project page scored highest for manifest terms",
             "constraint": "reuse page pattern only where it does not change non-component fidelity regions",
         })
+
+    is_conservative_mode = str(componentization_mode.get("mode", "")) == "conservative"
+    if is_conservative_mode:
+        defer_kinds = {
+            "form",
+            "filter-region",
+            "progress",
+            "chart",
+            "table",
+            "section",
+            "pagination",
+            "timeline",
+            "upload",
+            "overlay",
+            "pattern",
+            "composite-cell",
+        }
+        leaf_kinds = {"field-control", "button", "tag"}
+        for slot in slots:
+            kind = str(slot.get("kind", ""))
+            if kind in defer_kinds:
+                slot["decision"] = "review-original-html-first"
+                slot["applyPriority"] = "defer-until-layout-stable"
+                slot["constraint"] = (
+                    "keep the original HTML structure and macro layout for this block first; "
+                    "only componentize after the final block boundary, row/column ownership, and neighboring rhythm are visually stable"
+                )
+                slot["rawLayerAction"] = "keep source raw/fidelity structure"
+                slot["contentContract"] = (
+                    "preserve all source texts, values, statuses, actions, and local layout relationships inside this source region"
+                )
+                if kind == "chart":
+                    slot["decision"] = "preserve-visual-slot-first"
+                    slot["constraint"] = (
+                        "do not auto-upgrade to a chart component/library from script output alone; "
+                        "first keep the chart region visually intact and only replace after original HTML confirms chart ownership and local filters"
+                    )
+                elif kind == "table":
+                    slot["decision"] = "fidelity-or-custom-render"
+                    slot["constraint"] = (
+                        "do not auto-upgrade this table block to AntD/Element Table from script output alone; "
+                        "first preserve headers, cell grouping, row rhythm, pagination, and surrounding annotations"
+                    )
+            elif kind in leaf_kinds and str(slot.get("decision", "")).startswith("use-"):
+                slot["decision"] = "leaf-control-candidate"
+                slot["applyPriority"] = "leaf-only-after-layout-stable"
+                slot["constraint"] = (
+                    "only replace this leaf control after macro layout is stable; "
+                    "if wrapper bbox, neighboring labels, or row rhythm shift, keep the fidelity structure"
+                )
 
     for slot in slots:
         decision = str(slot.get("decision", ""))
@@ -2335,9 +3555,39 @@ def extract_visual_boxes(nodes: list[Node]) -> list[dict[str, Any]]:
         has_radius = bool(style.get("border-radius"))
         is_divider = float(width) <= 2 or float(height) <= 2
         dom_hint_text = f"{node.class_name} {node.node_id}".lower()
+        svg_markup = decode_data_svg_markup(bg_image)
+        descendant_tags = node_descendant_tags(node, nodes)
+        has_vector_markup = bool(svg_markup) or node.tag == "svg" or "svg" in descendant_tags
+        real_svg_asset = is_real_svg_asset(node, node.attrs, bg_image)
         has_chart_surface = node.tag in {"svg", "canvas"}
         has_chart_class_hint = any(hint in dom_hint_text for hint in CHART_CLASS_HINTS)
         has_svg_bg = "data:image/svg+xml" in bg_image.lower()
+        svg_signal_text = f"{svg_markup} {' '.join(descendant_tags)}".lower()
+        has_svg_polyline = "polyline" in svg_signal_text
+        has_svg_multi_point_line = bool(re.search(r"points\\s*=\\s*['\\\"]?[^>]*[,\\s][^>]*[,\\s][^>]*[,\\s]", svg_signal_text))
+        has_svg_path = "<path" in svg_signal_text or " path " in f" {svg_signal_text} "
+        has_svg_circle = "<circle" in svg_signal_text or " circle " in f" {svg_signal_text} "
+        has_svg_arrow_polygon = "polygon" in svg_signal_text and (
+            float(width) <= 20
+            or float(height) <= 20
+        )
+        is_likely_chart_svg = (
+            float(width) >= 56
+            and float(height) >= 20
+            and (has_svg_polyline or has_svg_multi_point_line or has_svg_path)
+        )
+        is_likely_icon_svg = (
+            has_vector_markup
+            and float(width) <= 24
+            and float(height) <= 24
+            and not is_likely_chart_svg
+        ) or has_svg_arrow_polygon or (
+            has_vector_markup
+            and float(width) <= 20
+            and float(height) <= 20
+            and not has_svg_multi_point_line
+            and not (has_svg_path and float(width) >= 40)
+        )
         if not (has_fill or has_border or has_radius or is_divider or has_chart_surface or has_chart_class_hint or has_svg_bg):
             continue
         node_area = float(width) * float(height)
@@ -2346,7 +3596,9 @@ def extract_visual_boxes(nodes: list[Node]) -> list[dict[str, Any]]:
         if node_area < 40 and not node.text and not is_divider:
             continue
         kind = "box"
-        if has_chart_surface:
+        if is_likely_icon_svg:
+            kind = "icon-fragment"
+        elif has_chart_surface or is_likely_chart_svg:
             kind = "chart-surface"
         elif node.abs_y <= 80 and float(width) > 800:
             kind = "header"
@@ -2359,8 +3611,15 @@ def extract_visual_boxes(nodes: list[Node]) -> list[dict[str, Any]]:
         elif float(width) <= 40 and float(height) <= 40:
             kind = "icon-fragment"
         shape_hint = ""
-        if has_chart_surface:
-            shape_hint = "chart-surface"
+        if kind == "icon-fragment":
+            shape_hint = "icon-svg"
+        elif has_chart_surface or is_likely_chart_svg:
+            if has_svg_polyline or has_svg_multi_point_line:
+                shape_hint = "line-fragment"
+            elif has_svg_path and float(width) >= 56 and float(height) >= 20:
+                shape_hint = "line-fragment"
+            else:
+                shape_hint = "chart-surface"
         elif is_divider and max(float(width), float(height)) >= 28:
             shape_hint = "line-fragment"
         elif not node.text and 4 <= min(float(width), float(height)) <= 18 and max(float(width), float(height)) / max(min(float(width), float(height)), 1) <= 1.8:
@@ -2409,6 +3668,11 @@ def extract_visual_boxes(nodes: list[Node]) -> list[dict[str, Any]]:
             "hasText": bool(node.text),
             "shapeHint": shape_hint,
             "chartClassHint": has_chart_class_hint,
+            "svgMarkup": svg_markup[:1200] if svg_markup else "",
+            "realSvgAsset": real_svg_asset,
+            "isLikelyIconSvg": is_likely_icon_svg,
+            "isLikelyChartSvg": is_likely_chart_svg,
+            "svgSignalText": svg_signal_text[:1200] if svg_signal_text else "",
         })
     boxes.sort(key=lambda item: (item["zIndex"], item["bbox"]["y"], item["bbox"]["x"]))
     return boxes[:600]
@@ -3148,6 +4412,140 @@ def detect_chart_candidates(
     return deduped[:20]
 
 
+def detect_icon_candidates(
+    items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
+    ui_libraries: list[dict[str, Any]],
+    project_root: Path | None,
+) -> list[dict[str, Any]]:
+    deps = package_dependencies(project_root)
+    icon_library_name = "@ant-design/icons" if "@ant-design/icons" in deps else ""
+    for lib in ui_libraries:
+        packages = set(lib.get("packages") or [])
+        if "@ant-design/icons" in packages:
+            icon_library_name = "@ant-design/icons"
+            break
+    candidates: list[dict[str, Any]] = []
+    for box in visual_boxes:
+        if box.get("kind") != "icon-fragment":
+            continue
+        bbox = box.get("bbox") or {}
+        if not bbox or area(bbox) <= 0:
+            continue
+        nearby_texts = [
+            str(item.get("text", ""))
+            for item in items
+            if item.get("bbox") and intersects(item.get("bbox", {}), bbox, padding=28)
+        ]
+        nearby_texts = [text for text in nearby_texts if text][:6]
+        joined_text = " ".join(nearby_texts)
+        svg_markup = str(box.get("svgMarkup", "") or "")
+        svg_signal_text = str(box.get("svgSignalText", "") or "")
+        real_svg_asset = bool(box.get("realSvgAsset"))
+        icon_role = "generic-icon"
+        icon_nature = "semantic-placeholder"
+        library_suggestion = ""
+        fallback_reason = "no confirmed same-shape icon component yet"
+        if "polyline" in svg_signal_text and float(bbox.get("w", 0) or 0) <= 18 and float(bbox.get("h", 0) or 0) <= 18:
+            icon_role = "info-hint"
+            icon_nature = "real-icon"
+            library_suggestion = "InfoCircleOutlined" if icon_library_name == "@ant-design/icons" else ""
+            fallback_reason = "small gray hint/info icon from source svg"
+        elif "polygon" in svg_signal_text and float(bbox.get("w", 0) or 0) <= 16 and float(bbox.get("h", 0) or 0) <= 16:
+            if any(token in joined_text for token in ["较同期", "%", "pct", "PCT"]):
+                is_negative = any(
+                    token in joined_text for token in ["-"]
+                ) or "#fe2842" in str(box.get("background", "")).lower()
+                icon_role = "trend-down" if is_negative else "trend-up"
+                library_suggestion = "CaretDownFilled" if is_negative else "CaretUpFilled"
+                if icon_library_name != "@ant-design/icons":
+                    library_suggestion = ""
+                fallback_reason = "small trend arrow icon paired with delta text"
+            else:
+                icon_role = "small-arrow"
+                fallback_reason = "small source arrow icon"
+        if not library_suggestion and any(token in joined_text for token in ["基本信息", "节点记录", "提交处理信息", "撤回处理信息", "审批驳回", "审批通过", "报告被退回"]):
+            icon_role = "collapse-toggle"
+            library_suggestion = "DownOutlined / UpOutlined" if icon_library_name == "@ant-design/icons" else ""
+            fallback_reason = "section collapse/expand toggle should be inferred from nearby title/action text"
+        elif not library_suggestion and any(token in joined_text for token in ["搜索关键字", "查询"]):
+            icon_role = "search-affordance"
+            library_suggestion = "SearchOutlined" if icon_library_name == "@ant-design/icons" else ""
+            fallback_reason = "search-related placeholder vector should map to search affordance icon if shape evidence is weak"
+        elif not library_suggestion and any(token in joined_text for token in ["上传文件成功", "上传", "附件"]):
+            icon_role = "attachment-status"
+            library_suggestion = "PaperClipOutlined / FileTextOutlined" if icon_library_name == "@ant-design/icons" else ""
+            fallback_reason = "attachment/file row icon should be inferred from nearby upload/file text"
+        candidates.append({
+            "owner": f"icon@{int(bbox.get('x', 0))},{int(bbox.get('y', 0))}",
+            "bbox": bbox,
+            "iconRole": icon_role,
+            "iconNature": icon_nature,
+            "nearbyTexts": nearby_texts,
+            "librarySuggestion": library_suggestion,
+            "librarySource": icon_library_name,
+            "realSvgAsset": real_svg_asset,
+            "fallbackSource": "source-svg" if (real_svg_asset and svg_markup) else "semantic-remap-required",
+            "fallbackReason": fallback_reason if real_svg_asset else "placeholder vector cannot be used as final icon fallback; must infer semantic content for this slot",
+            "svgMarkup": svg_markup[:600] if (real_svg_asset and svg_markup) else "",
+        })
+    deduped: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda item: (item.get("bbox", {}).get("y", 0), item.get("bbox", {}).get("x", 0))):
+        if any(
+            overlap_ratio(candidate.get("bbox", {}), kept.get("bbox", {})) >= 0.82
+            or overlap_ratio(kept.get("bbox", {}), candidate.get("bbox", {})) >= 0.82
+            for kept in deduped
+        ):
+            continue
+        deduped.append(candidate)
+    return deduped[:24]
+
+
+def detect_interaction_candidates(
+    items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    text_items = [item for item in items if str(item.get("text", "")).strip()]
+    for item in text_items:
+        text = str(item.get("text", "")).strip()
+        bbox = item.get("bbox", {})
+        if text in {"查询", "搜索"}:
+            candidates.append({"kind": "search-action", "label": text, "bbox": bbox, "evidence": "explicit search action text"})
+        elif text == "重置":
+            candidates.append({"kind": "reset-action", "label": text, "bbox": bbox, "evidence": "explicit reset action text"})
+        elif text in {"展开", "收起"}:
+            candidates.append({"kind": "expand-toggle", "label": text, "bbox": bbox, "evidence": "explicit expand/collapse text"})
+    for box in visual_boxes:
+        bbox = box.get("bbox") or {}
+        if not bbox:
+            continue
+        if box.get("kind") == "icon-fragment" and float(bbox.get("w", 0) or 0) <= 20 and float(bbox.get("h", 0) or 0) <= 20:
+            nearby = [
+                str(item.get("text", ""))
+                for item in text_items
+                if item.get("bbox") and intersects(item.get("bbox", {}), bbox, padding=40)
+            ]
+            nearby = [text for text in nearby if text][:6]
+            if any(token in " ".join(nearby) for token in ["基本信息", "详情", "信息", "记录", "列表"]):
+                candidates.append({
+                    "kind": "collapse-icon",
+                    "label": "",
+                    "bbox": bbox,
+                    "evidence": f"small toggle-like icon near section title; nearbyTexts={nearby}",
+                })
+    deduped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if any(
+            candidate.get("kind") == kept.get("kind")
+            and overlap_ratio(candidate.get("bbox", {}), kept.get("bbox", {})) >= 0.8
+            for kept in deduped
+        ):
+            continue
+        deduped.append(candidate)
+    return deduped[:30]
+
+
 def detect_filter_region(fields: list[dict[str, Any]], items: list[dict[str, Any]]) -> dict[str, Any]:
     if len(fields) < 3:
         return {}
@@ -3237,23 +4635,73 @@ def build_manifest(html_file: Path, project_root: Path | None = None) -> dict[st
         item["kind"] = infer_kind(item["text"])
     canvas = canvas_size(nodes)
     visual_boxes = extract_visual_boxes(nodes)
+    global_absolute_hint = parser.global_absolute_hint or detect_global_absolute_hint(html)
+    fidelity_html = looks_like_fidelity_html(html, nodes, visual_boxes) or global_absolute_hint
     fields = infer_fields(items, visual_boxes)
-    regions = infer_regions(items, canvas)
+    regions = infer_regions_from_containers(items, visual_boxes, canvas, fidelity_html) or infer_regions(items, canvas)
     table_structures = detect_table_grid(items, visual_boxes)
     sections = infer_sections(items, visual_boxes, canvas)
-    sections = apply_table_context_to_sections(sections, table_structures)
+    workflow_sections = maybe_build_workflow_detail_sections(items, visual_boxes, canvas)
+    usage_sections = maybe_build_usage_dashboard_sections(items, visual_boxes)
     progress_candidates = detect_progress_candidates(items, visual_boxes, table_structures)
     chart_candidates = detect_chart_candidates(items, sections, regions, visual_boxes, table_structures)
+    page_archetypes = detect_page_archetypes(items, visual_boxes, chart_candidates, progress_candidates)
+    archetype_names = {str(item.get("name", "")) for item in page_archetypes}
+    if "workflow-detail-with-compare-panels" in archetype_names and workflow_sections:
+        sections = workflow_sections
+    elif "funnel-metric-dashboard" in archetype_names and usage_sections:
+        sections = usage_sections
+    elif len(workflow_sections) >= len(sections):
+        sections = workflow_sections
+    sections = refine_workflow_detail_sections(sections, items, visual_boxes)
+    sections = refine_workflow_compare_columns(sections, items)
+    sections = split_task_processing_sections(sections, items)
+    sections = apply_table_context_to_sections(sections, table_structures)
+    regions = maybe_build_regions_from_sections(sections, regions, fidelity_html)
+    expected_blocks = detect_expected_blocks(items, page_archetypes, sections)
     source_content_inventory = build_content_inventory(items, sections, regions)
     terms = extract_terms(items, fields, sections)
     ui_libraries = detect_ui_libraries(project_root)
     chart_libraries = detect_chart_libraries(project_root)
     components = scan_project_components(project_root)
     matches = match_components(fields, regions, components, chart_candidates, progress_candidates)
+    icon_candidates = detect_icon_candidates(items, visual_boxes, ui_libraries, project_root)
+    interaction_candidates = detect_interaction_candidates(items, visual_boxes)
     similar_pages = scan_similar_pages(project_root, terms)
-    replacement_slots = build_replacement_slots(fields, regions, sections, items, matches, similar_pages, ui_libraries, chart_libraries, table_structures, progress_candidates, chart_candidates)
-    matched_components = build_matched_components_summary(matches, replacement_slots)
     absolute_nodes = sum(1 for n in nodes if n.style.get("position", "").replace(" ", "") == "absolute")
+    analysis_confidence = estimate_analysis_confidence(items, regions, chart_candidates, visual_boxes, fidelity_html)
+    if expected_blocks.get("missing"):
+        issues = list((analysis_confidence.get("issues") or []))
+        issues.append("expected-blocks-missing:" + ",".join(expected_blocks.get("missing", [])[:8]))
+        analysis_confidence["issues"] = unique_preserve_order(issues)
+        analysis_confidence["level"] = "low"
+    componentization_mode = infer_componentization_mode(
+        is_fidelity_html=fidelity_html,
+        analysis_confidence=analysis_confidence,
+        page_archetypes=page_archetypes,
+        table_structures=table_structures,
+        chart_candidates=chart_candidates,
+        progress_candidates=progress_candidates,
+        sections=sections,
+    )
+    replacement_slots = build_replacement_slots(
+        fields,
+        regions,
+        sections,
+        items,
+        visual_boxes,
+        matches,
+        similar_pages,
+        ui_libraries,
+        chart_libraries,
+        table_structures,
+        progress_candidates,
+        chart_candidates,
+        icon_candidates,
+        componentization_mode,
+    )
+    safe_leaf_slots, deferred_block_slots = split_replacement_slots(replacement_slots, componentization_mode)
+    matched_components = build_matched_components_summary(matches, replacement_slots)
     return {
         "source": str(html_file),
         "summary": {
@@ -3262,7 +4710,11 @@ def build_manifest(html_file: Path, project_root: Path | None = None) -> dict[st
             "absoluteRatio": round(absolute_nodes / len(nodes), 4) if nodes else 0,
             "textCount": len(items),
             "canvas": canvas,
-            "classification": "absolute-position-html" if nodes and absolute_nodes / len(nodes) > 0.5 else "html",
+            "classification": "absolute-position-html" if fidelity_html else "html",
+            "globalAbsoluteHint": global_absolute_hint,
+            "fidelityHtml": fidelity_html,
+            "analysisConfidence": analysis_confidence,
+            "componentizationMode": componentization_mode,
         },
         "texts": items,
         "fields": fields,
@@ -3274,6 +4726,10 @@ def build_manifest(html_file: Path, project_root: Path | None = None) -> dict[st
         "tableStructures": table_structures,
         "progressCandidates": progress_candidates,
         "chartCandidates": chart_candidates,
+        "pageArchetypes": page_archetypes,
+        "expectedBlocks": expected_blocks,
+        "iconCandidates": icon_candidates,
+        "interactionCandidates": interaction_candidates,
         "uiLibraries": ui_libraries,
         "chartLibraries": chart_libraries,
         "projectComponents": components[:80],
@@ -3281,6 +4737,8 @@ def build_manifest(html_file: Path, project_root: Path | None = None) -> dict[st
         "matchedComponents": matched_components,
         "similarPages": similar_pages,
         "replacementSlots": replacement_slots,
+        "safeLeafSlots": safe_leaf_slots,
+        "deferredBlockSlots": deferred_block_slots,
     }
 
 
@@ -3325,6 +4783,31 @@ def build_matched_components_summary(matches: list[dict[str, Any]], replacement_
     return summary
 
 
+def split_replacement_slots(
+    replacement_slots: list[dict[str, Any]],
+    componentization_mode: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if str(componentization_mode.get("mode", "")) == "conservative":
+        safe_leaf_slots = [
+            slot for slot in replacement_slots
+            if str(slot.get("kind", "")) in {"field-control", "button", "tag"}
+        ]
+        deferred_block_slots = [
+            slot for slot in replacement_slots
+            if str(slot.get("kind", "")) not in {"field-control", "button", "tag"}
+        ]
+    else:
+        safe_leaf_slots = [
+            slot for slot in replacement_slots
+            if str(slot.get("kind", "")) in {"field-control", "button", "tag", "progress"}
+        ]
+        deferred_block_slots = [
+            slot for slot in replacement_slots
+            if slot not in safe_leaf_slots
+        ]
+    return safe_leaf_slots, deferred_block_slots
+
+
 def write_markdown(manifest: dict[str, Any], out_path: Path) -> None:
     lines: list[str] = []
     summary = manifest["summary"]
@@ -3334,18 +4817,41 @@ def write_markdown(manifest: dict[str, Any], out_path: Path) -> None:
     lines.append(f"- Classification: `{summary['classification']}`")
     lines.append(f"- Nodes: {summary['nodeCount']} total, {summary['absoluteNodeCount']} absolute ({summary['absoluteRatio']})")
     lines.append(f"- Canvas: {summary['canvas'].get('width')} x {summary['canvas'].get('height')}")
+    lines.append(f"- Fidelity HTML: `{summary.get('fidelityHtml', False)}`")
+    lines.append(f"- Global Absolute Hint: `{summary.get('globalAbsoluteHint', False)}`")
+    confidence = summary.get("analysisConfidence") or {}
+    lines.append(f"- Analysis Confidence: `{confidence.get('level', 'unknown')}`")
+    if confidence.get("issues"):
+        lines.append(f"- Analysis Issues: `{', '.join(confidence.get('issues', []))}`")
+    componentization_mode = summary.get("componentizationMode") or {}
+    lines.append(f"- Componentization Mode: `{componentization_mode.get('mode', 'balanced')}`")
+    if componentization_mode.get("reasons"):
+        lines.append(f"- Conservative Reasons: `{', '.join(componentization_mode.get('reasons', []))}`")
+    if componentization_mode.get("readPolicy"):
+        lines.append(f"- Read Policy: {componentization_mode.get('readPolicy')}")
+    if componentization_mode.get("slotPolicy"):
+        lines.append(f"- Slot Policy: {componentization_mode.get('slotPolicy')}")
+    lines.append("")
+    lines.append("## Page Archetypes")
+    archetypes = manifest.get("pageArchetypes", [])
+    if archetypes:
+        for archetype in archetypes[:10]:
+            evidence = ", ".join(archetype.get("evidence", [])[:6])
+            lines.append(f"- {archetype.get('name')} confidence={archetype.get('confidence')}; evidence={evidence}")
+    else:
+        lines.append("- none")
     lines.append("")
     lines.append("## Regions")
-    for region in manifest["regions"]:
-        lines.append(f"- **{region['name']}** `{region['bbox']}`: " + " / ".join(region["texts"][:20]))
+    for region in manifest["regions"][:8]:
+        lines.append(f"- **{region['name']}** `{region['bbox']}`: " + " / ".join(region["texts"][:10]))
     lines.append("")
     lines.append("## Detected Tables")
     table_structures = manifest.get("tableStructures", [])
     if table_structures:
-        for table in table_structures[:10]:
-            column_names = ", ".join(col.get("title", "") for col in table.get("columns", [])[:20])
+        for table in table_structures[:6]:
+            column_names = ", ".join(col.get("title", "") for col in table.get("columns", [])[:12])
             lines.append(f"- bbox={table.get('bbox')} rows={table.get('rowCount')} columns=[{column_names}]")
-            for cell in table.get("compositeCells", [])[:20]:
+            for cell in table.get("compositeCells", [])[:8]:
                 lines.append(f"  - composite column={cell.get('columnTitle')} texts={cell.get('texts')}")
     else:
         lines.append("- none")
@@ -3353,7 +4859,7 @@ def write_markdown(manifest: dict[str, Any], out_path: Path) -> None:
     lines.append("## Detected Progress")
     progress_candidates = manifest.get("progressCandidates", [])
     if progress_candidates:
-        for progress in progress_candidates[:20]:
+        for progress in progress_candidates[:10]:
             evidence = ", ".join(progress.get("evidence", [])[:4])
             lines.append(
                 f"- owner={progress.get('owner')} type={progress.get('componentType')} confidence={progress.get('confidence')} "
@@ -3365,11 +4871,36 @@ def write_markdown(manifest: dict[str, Any], out_path: Path) -> None:
     lines.append("## Detected Charts")
     chart_candidates = manifest.get("chartCandidates", [])
     if chart_candidates:
-        for chart in chart_candidates[:20]:
+        for chart in chart_candidates[:10]:
             evidence = ", ".join(chart.get("evidence", [])[:4])
             lines.append(
                 f"- owner={chart.get('owner')} type={chart.get('chartType')} confidence={chart.get('confidence')} "
                 f"fallback={chart.get('fallbackExpression')} bbox={chart.get('bbox')}; evidence={evidence}"
+            )
+    else:
+        lines.append("- none")
+    lines.append("")
+    lines.append("## Detected Icons")
+    icon_candidates = manifest.get("iconCandidates", [])
+    if icon_candidates:
+        for icon in icon_candidates[:16]:
+            nearby_texts = ", ".join(icon.get("nearbyTexts", [])[:4]) or "none"
+            library_suggestion = icon.get("librarySuggestion") or "none"
+            lines.append(
+                f"- owner={icon.get('owner')} role={icon.get('iconRole')} nature={icon.get('iconNature')} "
+                f"librarySuggestion={library_suggestion} bbox={icon.get('bbox')}; nearbyTexts={nearby_texts}; "
+                f"fallback={icon.get('fallbackSource')}"
+            )
+    else:
+        lines.append("- none")
+    lines.append("")
+    lines.append("## Interaction Candidates")
+    interaction_candidates = manifest.get("interactionCandidates", [])
+    if interaction_candidates:
+        for action in interaction_candidates[:16]:
+            lines.append(
+                f"- kind={action.get('kind')} label={action.get('label') or 'none'} "
+                f"bbox={action.get('bbox')}; evidence={action.get('evidence')}"
             )
     else:
         lines.append("- none")
@@ -3386,7 +4917,7 @@ def write_markdown(manifest: dict[str, Any], out_path: Path) -> None:
         lines.append("- none")
     lines.append("")
     lines.append("## Sections")
-    for section in manifest["sections"][:40]:
+    for section in manifest["sections"][:20]:
         owner = section.get("ownerPath") or section["title"]
         hint = f" layout={section.get('layoutHint')}" if section.get("layoutHint") else ""
         contract = section.get("renderContract") or {}
@@ -3399,39 +4930,53 @@ def write_markdown(manifest: dict[str, Any], out_path: Path) -> None:
         if tags_text:
             extra.append(f"tags=[{tags_text}]")
         extra_text = (" " + "; ".join(extra)) if extra else ""
-        lines.append(f"- **{owner}**{hint}{extra_text}: " + " / ".join(section["texts"][:20]))
+        lines.append(f"- **{owner}**{hint}{extra_text}: " + " / ".join(section["texts"][:10]))
     lines.append("")
     lines.append("## Must Preserve Blocks")
-    for entry in manifest.get("sourceContentInventory", []):
+    preserve_entries = [entry for entry in manifest.get("sourceContentInventory", []) if entry.get("mustPreserve")]
+    for entry in preserve_entries[:20]:
         if not entry.get("mustPreserve"):
             continue
-        texts = " / ".join(entry.get("visibleTexts", [])[:18])
+        texts = " / ".join(entry.get("visibleTexts", [])[:10])
         lines.append(
             f"- **{entry.get('owner')}** [{entry.get('kind')}] count={entry.get('textCount')} "
             f"bbox={entry.get('bbox')}: {texts}"
         )
     lines.append("")
     lines.append("## Fields")
-    for field in manifest["fields"][:40]:
+    for field in manifest["fields"][:24]:
         req = "required" if field["required"] else "optional"
         ph = f" -> {field['placeholder']}" if field["placeholder"] else ""
         lines.append(f"- {field['label']} ({req}){ph} [labelNode={field['labelNodeId']}]")
     lines.append("")
-    lines.append("## Safe Component Slots")
-    for slot in manifest.get("replacementSlots", [])[:40]:
+    lines.append("## Safe Leaf Slots")
+    for slot in manifest.get("safeLeafSlots", [])[:16]:
         bbox = slot.get("bbox") or {}
         candidate = slot.get("candidate") or "none"
         path = slot.get("componentPath") or ""
         path_text = f" path={path}" if path else ""
+        priority = slot.get("applyPriority", "")
+        priority_text = f" priority={priority}" if priority else ""
         lines.append(
-            f"- {slot['slot']} [{slot['kind']}] -> {slot['decision']} candidate={candidate}{path_text} bbox={bbox}; "
+            f"- {slot['slot']} [{slot['kind']}] -> {slot['decision']} candidate={candidate}{path_text}{priority_text} bbox={bbox}; "
+            f"evidence={slot['evidence']}; constraint={slot['constraint']}"
+        )
+    lines.append("")
+    lines.append("## Deferred Block Slots")
+    for slot in manifest.get("deferredBlockSlots", [])[:16]:
+        bbox = slot.get("bbox") or {}
+        candidate = slot.get("candidate") or "none"
+        priority = slot.get("applyPriority", "")
+        priority_text = f" priority={priority}" if priority else ""
+        lines.append(
+            f"- {slot['slot']} [{slot['kind']}] -> {slot['decision']} candidate={candidate}{priority_text} bbox={bbox}; "
             f"evidence={slot['evidence']}; constraint={slot['constraint']}"
         )
     lines.append("")
     lines.append("## Matched Components")
     matched = manifest.get("matchedComponents", [])
     if matched:
-        for item in matched[:40]:
+        for item in matched[:20]:
             slot = item.get("slot", "")
             extra = f" slot={slot}" if slot else ""
             lines.append(
@@ -4087,6 +5632,3 @@ def safe_stem(path: Path) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-

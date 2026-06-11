@@ -1,6 +1,6 @@
 ---
 name: autodev-frontend
-description: Dev 阶段 frontend_before_specs workflow profile 的 HTML 转前端实现节点。用于在行为规格生成前，基于 PRD、HTML、接口说明和现有前端工程完成前端实现；高保真/绝对定位 HTML 走本技能路线，普通静态 HTML 可分流到 html-to-react。
+description: Dev 阶段 frontend_before_specs workflow profile 的 HTML 转前端实现节点。用于在行为规格生成前，基于 PRD、HTML、接口说明和现有前端工程完成前端实现；仅保留标准 HTML、绝对定位高保真 HTML 两种实现路线，以及用户确认后的 review 路线。
 version: v1.1.1604
 ---
 
@@ -32,11 +32,14 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-frontend --feature
 
 # /autodev-frontend - HTML 转前端实现
 
-本技能是 `frontend_before_specs` workflow profile 中的正式 Dev 节点。它处理用户明确提供的 HTML、截图或页面说明，并在进入行为规格前完成前端实现准备或代码落地。
+本技能是 `frontend_before_specs` workflow profile 中的正式 Dev 节点。它只保留两种实现路线：
 
-面向“已有前端工程中的实现工作”。用户提供高保真/绝对定位/Figma 风格 HTML 时，先进入 `route/route-with-html.md`，按 HTML-first 主线完成 Stage 1 分析与转交，再由 `deps/html-parser.md` 指导落代码；用户提供普通静态 HTML、复制的 DOM 片段、小型静态站点，或明确要求 HTML 转 React/TSX/Vite/Next 时，分流到 `../autodev-html-to-react/SKILL.md` 的规则执行。`{FEATURE_DIR}/PRD.md` 与本地接口说明文档按可用情况用于校正文案、字段和交互边界。
+| 输入形态 | 路线 |
+| --- | --- |
+| Figma/低代码导出的高保真 HTML、绝对定位/大量 inline style/像素坐标 HTML、纯 div 视觉稿 | `route/with-absolute-html/SKILL.md` |
+| 普通静态 HTML、复制的 DOM 片段、小型静态站点、语义化 HTML/CSS/JS，或用户明确说 HTML 转 React/TSX/Vite/Next | `route/with-standard-html/SKILL.md` |
 
-不要再走单独的 PRD 解析、YAPI 获取、接口联调或中间任务文件生成流程。
+主线完成后，如用户明确确认回检，进入 `route/review/SKILL.md`。不要再使用这三条 route 之外的实现路线。
 
 ## 流程状态
 
@@ -56,71 +59,29 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 完成后汇报变更文件、验证命令、未覆盖风险，并提示下一步进入 `/autodev-specs`。
 
-## 路线入口
+## 路由规则
 
-HTML 路线的触发条件、失败条件、默认读取顺序与转交规则，以本节分流规则和 `route/route-with-html.md` 为权威来源。
+`frontend_before_specs` 只有一个正式 workflow 节点和一组 checkpoint：`frontend_in_progress -> frontend_done`。标准 HTML 与绝对定位 HTML 是同一节点内的两种内部路线，不是两个串行阶段。
 
-如果用户未提供 HTML、截图或明确页面目标，先澄清输入，不要编造页面代码。
+### 高保真 / 绝对定位信号
 
-### 入口分流
+命中任一条时进入 `route/with-absolute-html/SKILL.md`：
 
-`frontend_before_specs` 只有一个正式 workflow 节点和一组 checkpoint：`frontend_in_progress -> frontend_done`。`/autodev-frontend` 与 `/html-to-react` 不是两个串行阶段，而是同一节点下的两种入口。
+- 用户明确标注“高保真 HTML”“设计导出 HTML”“绝对定位”“Figma/MasterGo 导出”
+- 大量 `position: absolute`、`left/top`、固定像素宽高、`clip-path`、`data:image/svg+xml`、渐变、阴影
+- 页面主体由碎片 `div`、梯形块、迷你趋势图、像素级卡片矩阵、复杂壳层布局组成
 
-| 输入形态 | 入口 |
-| --- | --- |
-| Figma/低代码导出的高保真 HTML、绝对定位/大量 inline style/像素坐标 HTML、纯 div 视觉稿 | 继续走本技能：`route/route-with-html.md` → `scripts/prepare_html_analysis.py` → `deps/html-parser.md` |
-| 普通静态 HTML、复制的 DOM 片段、小型静态站点、语义化 HTML/CSS/JS，或用户明确说 HTML 转 React/TSX/Vite/Next | 分流到 `../autodev-html-to-react/SKILL.md`，不运行 `prepare_html_analysis.py` |
+### 标准 HTML 信号
 
-分流到 `html-to-react` 时，仍然沿用本节点的状态推进：如当前仍在 `prd_done`，先推进到 `frontend_in_progress` 并写入 `--workflow-profile frontend_before_specs`；完成转换和验证后推进到 `frontend_done`。
+未命中绝对定位信号，且存在标准 DOM、表单、表格、按钮、label、flex/grid、清晰 class/style 或普通静态页面结构时，进入 `route/with-standard-html/SKILL.md`。
 
-## 一页总览
-
-| 维度 | 默认策略 |
-| --- | --- |
-| 项目说明来源 | `CODE_WORKSPACE/architecture/` → 源码扫描 → 技能内参考 |
-| 需求来源 | `{FEATURE_DIR}/PRD.md`；如用户额外提供 `prd.md`，只作为补充校对 |
-| 接口来源 | `CODE_WORKSPACE` 中的接口说明文档；不再走 YAPI、API helper、Mock 或联调流程 |
-| HTML 主线 | 高保真/绝对定位 HTML：`route/route-with-html.md` → `scripts/prepare_html_analysis.py` → `deps/html-parser.md`；普通静态 HTML：`../autodev-html-to-react/SKILL.md` |
-| 组件来源 | 项目公共组件 → 本地组件 → 已安装且在用的组件库 → 相似页面 → fidelity-only |
-| 技术栈兜底 | 无法确认时按 React + AntD 继续 |
-| 图标 | 默认检测与生成 |
-| 图表 | 默认检测与生成 |
-| 布局策略 | 保留高保真样式；宽高少写死，优先继承、拉伸、比例布局 |
-| 代码质量 | 补简洁注释；优先抽取共享常量、类型、helper、hook 或配置 |
-
-## 输入补充
-
-进入高保真 HTML 路线后，先按 `route/route-with-html.md` 完成 HTML-first 读取与 Stage 1 handoff，再按可用情况补充。进入 `html-to-react` 分流时，按 `../autodev-html-to-react/SKILL.md` 的 intake/craft/extract/layout/publish 流程执行，再补充以下上下文：
-
-- `{FEATURE_DIR}/PRD.md`
-- 用户提供或 `CODE_WORKSPACE` 内的接口说明文档
-- `CODE_WORKSPACE/architecture/` 中的结构、技术栈和组件说明
-
-如果 PRD 或接口说明文档不存在，要在交接和汇报中明确说明缺失；不要改回旧的解析、抓取或联调流程。
-
-## 核心原则
-
-| 编号 | 原则 |
-| --- | --- |
-| 1 | 进入 HTML 转前端节点后，先判断 HTML 格式；高保真/绝对定位 HTML 走 `route/route-with-html.md`，普通静态 HTML 走 `../autodev-html-to-react/SKILL.md` |
-| 2 | 先读项目说明文档，再扫项目源码 |
-| 3 | 先读 `{FEATURE_DIR}/PRD.md`，字段、文案、交互和任务边界以它为准 |
-| 4 | 先读接口说明文档，请求/响应字段和约束以它为准 |
-| 5 | 先恢复整页与结构，再做局部组件化 |
-| 6 | 没有 HTML、截图或明确页面目标时不生成页面代码 |
-| 7 | 技术栈无明确证据时，不停在分析阶段；按 React + AntD 兜底交付 |
-| 8 | 图标属于页面语义的一部分，默认检测与生成 |
-| 9 | 图表属于页面信息结构的一部分，默认检测与生成 |
-| 10 | 高保真 HTML 是视觉契约；不要因组件默认行为改变布局、边框、方向、形态或状态表达 |
-| 11 | 同一行原子内容必须保持同一行，例如数字 + 单位、金额 + 币种、百分比 + `%`、主值 + 短尾标 |
-| 12 | 大页面和大模块优先使用可伸缩布局，不要层层写死宽高 |
-| 13 | 生成代码时，对函数、类型、关键变量和复杂逻辑补简洁注释 |
+如果用户没有提供 HTML 文件、HTML 片段或可读取的 HTML 内容，停止并要求补充 HTML；不要根据 PRD 或截图直接生成页面。
 
 ## 输入边界
 
 | 来源 | 负责内容 |
 | --- | --- |
-| `{FEATURE_DIR}/PRD.md` | 字段、文案、交互、任务边界、页面业务语义 |
+| `{FEATURE_DIR}/PRD.md` | 字段、文案、交互、任务边界、页面业务语义，仅作 HTML 实现校对依据 |
 | 接口说明文档 | 接口路径、请求方式、参数、响应字段、枚举/状态约束 |
 | HTML | 布局、结构、间距、视觉层级、组件槽位与视觉契约 |
 
@@ -131,45 +92,65 @@ HTML 路线的触发条件、失败条件、默认读取顺序与转交规则，
 - 数据字段与接口约束以接口说明文档为准。
 - 如果三者互相冲突，先保留 HTML 布局，再在汇报中明确冲突点；不要私自编造第四套口径。
 
-## 资源地图
+## 核心原则
 
-| 需求 | 读取 |
+| 编号 | 原则 |
 | --- | --- |
-| HTML 分析与 Stage 1 handoff | 高保真/绝对定位 HTML：`scripts/prepare_html_analysis.py` → `deps/html-parser.md`；普通静态 HTML：`../autodev-html-to-react/SKILL.md` |
-| 项目公共组件索引、说明与示例 | 优先读 `CODE_WORKSPACE/architecture/publicComponents.md` |
-| 项目共享组件使用方式 | 若没有 `publicComponents.md`，读 `CODE_WORKSPACE/architecture/shared-components.md` |
-| 项目应用结构说明、技术栈、组件说明 | 优先读 `CODE_WORKSPACE/architecture/`；没有时再扫源码 |
-| 页面原型与大骨架判断（按需读取） | `references/page-archetypes.md` |
-| 组件槽位与高风险交互参考（按需读取） | `references/component-slot-map.md`、`references/components-match-rules.md` |
-| 脱离式浮层、工具栏、表单布局等交互约束（按需读取） | `references/interaction-contracts.md` |
-| 转换纯 div / Figma 风格 HTML | 优先读 `references/pure-div-core.md`；只有在需要给弱模型或下游模型传紧凑提示词时再读 `references/llm-prompt-template.md`；只有必要时再读 `pure-div-converter.md` |
+| 1 | 先读项目说明文档，再扫项目源码。 |
+| 2 | 先复用项目组件体系，再回退到本地组件、已安装组件库或用户提供的兜底组件库。 |
+| 3 | 先恢复整页与结构，再做局部组件化。 |
+| 4 | 高保真 HTML 是视觉契约；不要因组件默认行为改变布局、边框、方向、形态或状态表达。 |
+| 5 | 同一行原子内容必须保持同一行，例如数字 + 单位、金额 + 币种、百分比 + `%`、主值 + 短尾标。 |
+| 6 | 大页面和大模块优先使用可伸缩布局，不要层层写死宽高。 |
+| 7 | 图标属于页面语义的一部分，默认检测与生成。 |
+| 8 | 图表必须用真实图表库实现；具体来源、询问、兜底和交付状态见 §图表来源顺序。 |
+| 9 | HTML 路线默认先执行对应脚本，用于分析加速、内容盘点和组件候选识别；脚本产物不得压过原始 HTML。 |
+| 10 | 主线交付总结不是整轮终点；交付总结后必须执行 §回检决策规则。 |
 
 ## 全局优先级
-
-### 组件来源优先级
-
-| 优先级 | 来源 |
-| --- | --- |
-| 1 | `CODE_WORKSPACE/architecture/publicComponents.md` |
-| 2 | `CODE_WORKSPACE/architecture/shared-components.md` |
-| 3 | 项目本地 `components` / `src/components` |
-| 4 | 当前工程已安装并实际在用的组件库 |
-| 5 | 相似页面模式 |
-| 6 | fidelity-only |
-
-规则：
-
-- `publicComponents.md` 是最高优先级说明源。
-- 第 1、2 层命中时，先按文档理解用途、props、导入方式与示例，再用真实源码确认导出与路径。
-- 没有源码、导出或真实使用示例时，不能因为规则命中就强行使用。
 
 ### 项目说明优先级
 
 | 优先级 | 来源 |
 | --- | --- |
-| 1 | `CODE_WORKSPACE/architecture/` 下的说明文档 |
-| 2 | 项目真实源码结构与相似页面 |
-| 3 | 技能内参考文档 |
+| 1 | 项目 `AGENTS.md` |
+| 2 | 其它项目说明文档 |
+| 3 | 项目真实源码结构（必要时生成 `output/scan-result.json`） |
+| 4 | 技能内参考文档 |
+
+规则：
+
+- 应用结构、API、技术栈、路由/菜单/权限、状态管理、样式体系都先看项目说明文档。
+- `AGENTS.md` 中的项目约束优先于本技能规则；如冲突，以 `AGENTS.md` 为准，除非系统级指令另有要求。
+- 没有项目说明时再扫源码，不要凭技能默认值覆盖真实工程模式。
+
+### 组件来源优先级
+
+| 优先级 | 来源 |
+| --- | --- |
+| 1 | 项目 `AGENTS.md` 中给出的公共组件库路径与使用规则 |
+| 2 | 项目 `architecture/components/` |
+| 3 | 项目本地 `components` / `src/components` |
+| 4 | 当前工程已安装并实际在用的组件库 |
+| 5 | 用户提供的兜底组件库 |
+| 6 | 相似页面模式 |
+| 7 | fidelity-only |
+
+规则：
+
+- `AGENTS.md` 是项目总说明与组件策略的第一入口。
+- 如果 `AGENTS.md` 已经明确约定组件、页面目录、布局骨架或实现方式，优先遵守。
+- 如果 `AGENTS.md` 给出公共组件库路径，先按该路径扫描真实组件源码与使用方式；通常是当前工程上一级目录的 `components/`。
+- 文档层命中时，先按说明理解用途、props、导入方式与示例，再用真实源码确认导出与路径。
+- 没有源码、导出或真实使用示例时，不能因为规则命中就强行使用。
+- 如果当前工程缺少所需组件库，按 §依赖安装确认规则 执行。
+
+### 依赖安装确认规则
+
+- 不静默新增组件库、图标库、图表库或样式依赖。
+- 需要新增依赖时，先判断项目使用 `pnpm` 还是 `npm`：`pnpm-lock.yaml` -> `package-lock.json` -> `package.json` 的 `packageManager` 字段 -> 真实项目命令痕迹。
+- 向用户说明待新增依赖、用途和影响，获得明确确认后再安装。
+- 如果本次安装了依赖，最终汇报必须列出新增库。
 
 ### 技术栈兜底
 
@@ -177,15 +158,17 @@ HTML 路线的触发条件、失败条件、默认读取顺序与转交规则，
 
 | 顺序 | 证据 |
 | --- | --- |
-| 1 | `CODE_WORKSPACE/architecture/` 说明文档 |
-| 2 | 真实源码扫描结果 |
+| 1 | 项目 `AGENTS.md` |
+| 2 | 其它项目说明文档 |
+| 3 | `output/scan-result.json` |
+| 4 | 真实源码扫描结果 |
 
-统一按 React + AntD 继续执行。
+统一按以下规则继续执行：
 
-补充规则：
+- 桌面端页面：React + `antd`
+- 移动端页面：React + `antd-mobile`
 
-- 用户明确指定 Vue / React / 其它框架时，用户指令优先。
-- 汇报时必须明确标记“使用 React + AntD 兜底”。
+用户明确指定 Vue / React / 其它框架时，用户指令优先。汇报时必须明确标记使用了哪一种兜底或候选方案。
 
 ## 图标 / 图表权威规则
 
@@ -193,58 +176,72 @@ HTML 路线的触发条件、失败条件、默认读取顺序与转交规则，
 
 | 优先级 | 来源 |
 | --- | --- |
-| 1 | `CODE_WORKSPACE/architecture/` 中定义的图标组件 / 图标规则 |
+| 1 | `AGENTS.md` 或其它项目说明中定义的图标组件 / 图标规则 |
 | 2 | 项目本地 icon 组件、svg 资产、iconfont、统一包装层 |
 | 3 | 已安装且在真实源码中实际使用过的图标库 |
 | 4 | React + AntD 的 `@ant-design/icons` |
 
-图标规则：
+规则：
 
 - 有明确形状或类名时保留同一或最接近的图标；只有语义时按常见业务语义选。
+- 对 HTML 里提供的 `svg` / `data:image/svg+xml`，先区分它是明显的小型 icon 还是迷你图表 / sparkline / 趋势线。
+- 明显的小型 icon 要先匹配项目图标体系或已安装图标库里外观足够接近的 icon；找不到时才保留真实原始 SVG。
+- 占位几何、装饰 path、背景碎片不能直接当最终 icon。
+- `sparkline`、迷你趋势线、迷你面积图即使尺寸小，也仍按图表处理。
 - 纯图标按钮必须补 `Tooltip` 和 `aria-label`。
-- 交接必须说明图标来源层级与关键图标映射。
+- 汇报必须说明图标来源层级与关键图标映射。
 
 ### 图表来源顺序
 
 | 优先级 | 来源 |
 | --- | --- |
-| 1 | `CODE_WORKSPACE/architecture/` 中定义的图表组件 / 图表规则 |
+| 1 | `AGENTS.md` 或其它项目说明中定义的图表组件 / 图表规则 |
 | 2 | 项目本地 chart 组件、可视化包装层、统计卡片与图表容器 |
 | 3 | 当前工程已安装并且在真实源码中实际使用过的图表库 |
-| 4 | `ECharts` |
+| 4 | 用户明确指定的图表库 |
+| 5 | `ECharts` 默认兜底方案 |
 
-图表规则：
+规则：
 
-- 匹配优先级固定为：图表 > 百分比进度条 > 渐进 / 渐变等装饰性背景或线条。
-- “已安装”不构成证据，必须有真实导入或页面使用。
-- 折线、面积背景、柱条、扇区、漏斗等图表形态优先按图表还原，不要因为 `linear-gradient` 就降级为背景装饰。
-- 有明确类型则保留同类型；只有业务语义时按数据结构选最保守的表达。
-- 无真实图表实现证据时兜底 `ECharts`。
-- 交接必须说明图表来源层级、类型映射，以及是否使用项目现有图库或 `ECharts`。
+- `package.json` 出现但源码无导入/使用证据，不可直接视为可用图库。
+- 只要需求或 HTML 语义是图表，默认必须用真实图表库实现；唯一例外是用户明确说明只需静态展示或视觉占位。
+- 折线、面积、柱状、条形、饼图、环图、漏斗图、sparkline、迷你趋势图等任意图表形态，都不得退回成静态 SVG、纯 CSS 图形、`linear-gradient` 背景、结构式假图表、统计卡片、表格、进度条或简化趋势块。
+- 当本次任务需要真实图表，但前 3 级都无证据时，必须先询问用户：使用 `ECharts`、改用其它指定图库，或等待用户安装。
+- 若流程中漏问且必须继续，默认按 `ECharts` 真实图表方案处理，并在交付中标注采用了默认方案。
+- 安装完成前结果只能标记为待安装 / 待完成，不得视为最终交付。
+- 交付必须包含图表来源层级、业务语义到最终图表类型的映射、是否触发 `ECharts` 兜底、本次是否新增图表依赖。
 
 ## 高保真 HTML 全局约束
 
 | 场景 | 全局规则 |
 | --- | --- |
-| HTML 样式优先级 | 已有高保真时，表现层样式以高保真还原为准，不再强要求 token 化 |
-| 默认外观 | 不要把 AntD / Element 默认外观当成视觉事实 |
-| 组件默认行为冲突 | 必须显式配置 props 或补样式 |
-| 行内原子内容 | 不要拆坏数字 + 单位、金额 + 币种、数值 + `%` 等同一视觉行 |
-| 大页面布局 | 父级已决定宽高和分栏关系时，子级优先继承 / 拉伸 / 比例，不重复写死整套宽高 |
-| 父级 flex 继承 | 父级已是 flex 且子项明显等分时，子级优先 `flex: 1` / 百分比 / 轨道继承，不要重复写死子项宽度 |
-| 上下结构方向 | 区域明显上下排列时，优先保留普通块流或使用 `flex-direction: column`，不要误做成左右结构 |
-| 失败回退 | 先退回更小槽位，再不行退回 fidelity-only |
+| HTML 样式优先级 | 已有高保真时，表现层样式以高保真还原为准，不再强要求 token 化。 |
+| 默认外观 | 不要把 AntD / Element 默认外观当成视觉事实。 |
+| 组件默认行为冲突 | 必须显式配置 props 或补样式。 |
+| 行内原子内容 | 不要拆坏数字 + 单位、金额 + 币种、数值 + `%` 等同一视觉行。 |
+| 大页面布局 | 父级已决定宽高和分栏关系时，子级优先继承 / 拉伸 / 比例，不重复写整套宽高。 |
+| 父级 flex 继承 | 父级已是 flex 且子项明显等分时，子项优先 `flex: 1` / 百分比 / grid 轨道继承。 |
+| 上下结构方向 | 区域明显上下排列时，优先保留普通块流或 `flex-direction: column`。 |
+| 失败回退 | 先退回更小槽位，再不行退回 fidelity-only。 |
+
+## 回检决策规则
+
+- 主线交付总结和是否进入 review 是两个连续但不同的步骤。
+- 主线 route 可以汇报结果，但不能用“如需我可以继续回检”替代真实决策。
+- 顶层收到主线结果后，必须立即发起是否进入 `route/review/SKILL.md` 的确认。
+- 若当前运行模式支持 `request_user_input`，必须优先使用它发起“继续回检 / 先不回检”选择。
+- 若当前运行模式不支持 `request_user_input`，必须显式追问：`是否现在进入回检流程？请回复“继续回检”或“先不回检”。`
+- 未拿到用户明确答复前，不得自动进入 review，也不得把主线交付当成整轮结束。
 
 ## 执行清单
 
-| 步骤 | 动作 |
-| --- | --- |
-| 1 | 确认当前 Feature、workflow profile、checkpoint 和目标代码工程 |
-| 2 | 判断 HTML 格式：高保真/绝对定位 HTML 进入 `route/route-with-html.md`；普通静态 HTML 进入 `../autodev-html-to-react/SKILL.md` |
-| 3 | 补充读取 `CODE_WORKSPACE/architecture/`、`{FEATURE_DIR}/PRD.md` 与接口说明文档 |
-| 4 | 生成或修改与扫描结果匹配的框架代码；若无明确技术栈，则按 React + AntD 兜底 |
-| 5 | 检测并生成图标 / 图表，校验来源层级、类型映射、可访问性 |
-| 6 | 对关键组件槽位反推 props / mode 与补充样式，避免默认行为偏离高保真 |
-| 7 | 校验行内原子内容未误拆行、布局容器未层层写死宽高 |
-| 8 | 生成代码时补简洁注释；对同业务的变量、枚举、列定义、图表配置做局部抽取 |
-| 9 | 校验生成文件，更新 checkpoint，并汇报变更文件、实际读取的 PRD / 接口文档、是否触发兜底和剩余风险 |
+1. 确认 Feature、workflow profile、checkpoint 和 `CODE_WORKSPACE`。
+2. 读取 `inspect_skill_contract.py` 输出的 Source Bundle / Method Bundle。
+3. 优先读取 `{CODE_WORKSPACE}/AGENTS.md`，再读取项目说明、组件文档和目标代码。
+4. 确认用户提供了 HTML 文件、HTML 片段或可读取 HTML 内容；否则停止要求补充 HTML。
+5. 按路由规则进入 `route/with-absolute-html/SKILL.md` 或 `route/with-standard-html/SKILL.md`。
+6. 生成或修改与项目结构匹配的前端代码。
+7. 校验字段、标题、按钮、表格列、Tab、展开/收起区、图标、图表和明显交互没有增减或丢失。
+8. 运行项目适配的验证命令；无法运行时说明原因。
+9. 汇报页面名称、页面位置、变更文件、跳过步骤、是否触发兜底、验证状态、剩余风险和新增依赖。
+10. 主线完成后必须按 §回检决策规则 确认是否执行 review；只有用户明确确认后，才进入 `route/review/SKILL.md`。
