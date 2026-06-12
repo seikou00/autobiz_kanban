@@ -23,7 +23,8 @@ from hooks.paths import (
     get_features_active_dir,
     get_plugin_output_workspace,
 )
-from board_core.state_store import check_or_fix_state_sync, state_rows_from_records
+from board_core.contracts import BoardConfigError, SkillContract, load_record_workflow_contracts
+from board_core.state_store import check_or_fix_state_sync
 
 
 BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR = (
@@ -33,15 +34,47 @@ FORMAL_PRD_TITLE = "# 需求正式稿"
 FORBIDDEN_PRD_SECTION_TITLES = ("审理提炼", "待确认事项", "待确认项", "外部依赖", "第三方依赖")
 
 
-def _validate_state_sync(feature: str, expected_cp: str, workspace: Path, errors: List[str]) -> None:
+def _resolve_feature_context(feature: str, workspace: Path):
+    """Load the feature's state record and workflow contracts.
+
+    校验范围以本 Feature 契约为准：节点不在链中则整段校验跳过，
+    被 drop 的输入不做存在性检查。
+    Returns (record, contracts, errors).
+    """
+    errors: List[str] = []
     sync_result = check_or_fix_state_sync(workspace, fix=True)
     if not sync_result.state_exists:
         errors.append(f"state.json 不存在且无法从 STATE.md 迁移: {sync_result.state_json_path}")
-        return
+        return None, None, errors
     if sync_result.errors:
         errors.extend(sync_result.errors)
+        return None, None, errors
+    record = sync_result.records.get(feature)
+    if record is None:
+        errors.append(f"state.json 中 Feature '{feature}' 不存在")
+        return None, None, errors
+    try:
+        contracts = load_record_workflow_contracts(_REPO_ROOT, record, workspace=workspace)
+    except BoardConfigError as exc:
+        errors.append(f"Feature '{feature}' 的 workflow 契约无法解析: {exc}")
+        return record, None, errors
+    return record, contracts, errors
+
+
+def _skill_contract_or_none(contracts, skill: str) -> Optional[SkillContract]:
+    try:
+        return contracts.contract_for_skill(skill)
+    except BoardConfigError:
+        # 节点未被选入当前工作流，或已被中途跳过。
+        return None
+
+
+def _check_done_checkpoint(record: Dict[str, Any], contract: SkillContract, errors: List[str]) -> None:
+    expected_cp = next((cp for cp in contract.checkpoints if cp.endswith("_done")), None)
+    if not expected_cp:
         return
-    actual_cp = state_rows_from_records(sync_result.records).get(feature)
+    feature = record.get("feature", "")
+    actual_cp = record.get("checkpoint")
     if actual_cp != expected_cp:
         errors.append(
             f"state.json 中 Feature '{feature}' 的 checkpoint 应为 {expected_cp}，当前为: {actual_cp or '未设置'}"
@@ -80,23 +113,34 @@ def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     if not feature_dir:
         return _fail(f"未找到 feature 目录: feature={feature}, 请确认 .autobizdevops/features/ 下存在对应目录")
 
-    errors: List[str] = []
+    slug = feature_dir.name
+    record, contracts, errors = _resolve_feature_context(slug, workspace)
+    if errors:
+        return _fail("discuss 阶段产出物校验未通过", {"feature": slug, "errors": errors})
+
+    contract = _skill_contract_or_none(contracts, "autobiz-requirement-discuss")
+    if contract is None:
+        return _ok(
+            "discuss 校验跳过：需求澄清节点不在当前工作流链中",
+            {"feature": slug, "skipped": True},
+        )
+
     discuss_md = feature_dir / "PRD_DISCUSS.md"
+    if "PRD_DISCUSS.md" in contract.required_outputs:
+        if not discuss_md.exists():
+            errors.append(f"PRD_DISCUSS.md 不存在: {discuss_md}")
+        else:
+            content = discuss_md.read_text(encoding="utf-8")
+            required_sections = ["需求摘要", "已确认结论", "问题清单", "待确认事项", "假设与风险"]
+            missing = [s for s in required_sections if s not in content]
+            if missing:
+                errors.append(f"PRD_DISCUSS.md 缺少必要章节: {', '.join(missing)}")
 
-    if not discuss_md.exists():
-        errors.append(f"PRD_DISCUSS.md 不存在: {discuss_md}")
-    else:
-        content = discuss_md.read_text(encoding="utf-8")
-        required_sections = ["需求摘要", "已确认结论", "问题清单", "待确认事项", "假设与风险"]
-        missing = [s for s in required_sections if s not in content]
-        if missing:
-            errors.append(f"PRD_DISCUSS.md 缺少必要章节: {', '.join(missing)}")
-
-    _validate_state_sync(feature_dir.name, "discuss_done", workspace, errors)
+    _check_done_checkpoint(record, contract, errors)
 
     if errors:
-        return _fail("discuss 阶段产出物校验未通过", {"feature": feature_dir.name, "errors": errors})
-    return _ok("discuss 阶段产出物校验通过", {"feature": feature_dir.name})
+        return _fail("discuss 阶段产出物校验未通过", {"feature": slug, "errors": errors})
+    return _ok("discuss 阶段产出物校验通过", {"feature": slug})
 
 
 def _markdown_headings(content: str) -> List[str]:
@@ -108,10 +152,23 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     if not feature_dir:
         return _fail(f"未找到 feature 目录: feature={feature}")
 
-    errors: List[str] = []
+    slug = feature_dir.name
+    record, contracts, errors = _resolve_feature_context(slug, workspace)
+    if errors:
+        return _fail("prd 阶段产出物校验未通过", {"feature": slug, "errors": errors})
+
+    contract = _skill_contract_or_none(contracts, "autobiz-prd-generate")
+    if contract is None:
+        return _ok(
+            "prd 校验跳过：PRD 生成节点不在当前工作流链中",
+            {"feature": slug, "skipped": True},
+        )
+
     discuss_md = feature_dir / "PRD_DISCUSS.md"
     prd_md = feature_dir / "PRD.md"
-    if not discuss_md.exists():
+    # 讨论稿存在性只在它仍属于本 Feature 契约的必需输入时检查；
+    # custom 链未选 biz.discuss 时该输入已从 bundle 中移除。
+    if "PRD_DISCUSS.md" in contract.required_inputs and not discuss_md.exists():
         errors.append(f"PRD_DISCUSS.md 不存在: {discuss_md}")
 
     if not prd_md.exists():
@@ -144,11 +201,11 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
         if forbidden_headings:
             errors.append(f"PRD.md 不应包含正式稿禁用标题: {', '.join(forbidden_headings)}")
 
-    _validate_state_sync(feature_dir.name, "prd_done", workspace, errors)
+    _check_done_checkpoint(record, contract, errors)
 
     if errors:
-        return _fail("prd 阶段产出物校验未通过", {"feature": feature_dir.name, "errors": errors})
-    return _ok("prd 阶段产出物校验通过", {"feature": feature_dir.name})
+        return _fail("prd 阶段产出物校验未通过", {"feature": slug, "errors": errors})
+    return _ok("prd 阶段产出物校验通过", {"feature": slug})
 
 
 def main(argv: Optional[List[str]] = None) -> int:

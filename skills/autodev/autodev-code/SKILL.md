@@ -24,8 +24,8 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-code --feature "$F
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
-- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；bundle 未列出的产物不属于本工作流，不要读取、不要等待，也不要要求用户提供。
+- **降级语义**：`required: false` 的输入是可选参考，缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。上游节点不在当前工作流时，其产物已从 bundle 中移除，按本文对应的「bundle 不含 X」分支处理。
 
 无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
@@ -76,7 +76,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 读取输入（消费 Source Bundle）：
 - 先按「流程契约」一节取本 Feature 的契约 JSON，按 `sourceBundle` 逐项读取原件，按各自 `extract` 抽取上下文。
 - `{FEATURE_DIR}/DETAIL_DESIGN.md`（如果存在）与 AGENTS.md（如果存在）作为补充上下文一并读取。
-- 仅当 `required_inputs` 中的产物缺失时停止，不要生成替代文件；`external: true` 的输入缺失时按其 `extract.degrade` 继续，不要停止。
+- 仅当 `required_inputs` 中的产物缺失时停止，不要生成替代文件；`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要停止；bundle 未列出的产物不读不等。
 
 开始任何业务代码修改前，必须根据 AGENTS.md 与项目 manifest 生成模块编译清单：
 
@@ -122,7 +122,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 执行队列的确定：
 - bundle 含 `PLAN.md` 时，按 PLAN 的任务 DAG 作为执行队列；如果 PLAN 中额外写明模块路径、入口、涉及文件或用户补充技术细节，把它们作为定位线索，不要要求 PLAN 必须列出完整文件清单。
-- bundle 不含 `PLAN.md`（external）时，按其 `extract.degrade`：从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务，每个任务含做什么/规格依据/验证方法），逐项实现，并在完成摘要中记录任务清单与验证结果。
+- bundle 不含 `PLAN.md` 时（其生产者不在当前工作流）：从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务，每个任务含做什么/规格依据/验证方法），逐项实现，并在完成摘要中记录任务清单与验证结果。
 
 一致性检查（对 bundle 中存在的产物生效）：
 - 如果某个待做任务引用的 `规格依据` 在 `specs/**/*.md` 中不存在，停止并提示回到 Specs/Plan 修正。

@@ -1,6 +1,6 @@
 ---
 name: autobiz-prd-generate
-description: Biz 阶段 PRD 生成技能。读取已收敛的 `{FEATURE_DIR}/PRD_DISCUSS.md`，截取讨论记录标题之前的内容并规范化为正式稿前缀，再直接追加用户故事、验收口径、验收标准和关键约束，生成 `{FEATURE_DIR}/PRD.md`。适用于需求讨论完成后，输出可供下游阶段消费的正式需求文档。
+description: Biz 阶段 PRD 生成技能。契约含讨论稿时读取已收敛的 `{FEATURE_DIR}/PRD_DISCUSS.md`，截取讨论记录标题之前的内容并规范化为正式稿前缀，再直接追加用户故事、验收口径、验收标准和关键约束，生成 `{FEATURE_DIR}/PRD.md`；契约不含讨论稿时基于与用户确认的需求直接生成正式稿。适用于需求讨论完成后，输出可供下游阶段消费的正式需求文档。
 version: v1.1.1604
 ---
 
@@ -14,11 +14,14 @@ version: v1.1.1604
 
 # /autobiz-prd-generate — Biz 阶段 PRD 生成技能
 
-> 本技能专注将讨论稿生成为正式 PRD，不负责需求澄清循环。
+> 本技能专注生成正式 PRD；bundle 含讨论稿时由讨论稿提炼，标准链下不负责需求澄清循环。
 
 ## 概述
 
-本技能用于在需求讨论收敛后，基于 `PRD_DISCUSS.md` 生成可交付的正式 `PRD.md`。正式稿应提炼讨论稿中的已确认需求，形成可供下游 Dev 阶段消费的正式需求文档。
+本技能用于生成可交付的正式 `PRD.md`，输入以 Source Bundle 为准：
+
+- bundle 含 `PRD_DISCUSS.md`（标准链）：在需求讨论收敛后，提炼讨论稿中的已确认需求
+- bundle 不含讨论稿（custom 链未选需求澄清节点）：基于与用户确认的需求直接撰写正式稿，不读取也不向用户索要讨论稿
 
 ## 核心能力
 
@@ -38,16 +41,16 @@ version: v1.1.1604
 
 ## 输入前提
 
-优先读取以下输入，按可信度从高到低使用：
+输入清单以本 Feature 契约的 Source Bundle 为准，按可信度从高到低使用：
 
-1. `{FEATURE_DIR}/PRD_DISCUSS.md`
+1. bundle 列出的上游产物（标准链为 `{FEATURE_DIR}/PRD_DISCUSS.md`）
 2. 用户明确给出的已确认需求结论、功能范围、验收标准
 
-`{FEATURE_DIR}/PRD_DISCUSS.md` 是 `/autobiz-requirement-discuss` 的中间讨论稿，必须在需求已收敛的前提下使用。
+**bundle 含讨论稿时（标准链）**：`PRD_DISCUSS.md` 是 `/autobiz-requirement-discuss` 的中间讨论稿，必须在需求已收敛的前提下使用。讨论稿缺失或需求尚未收敛（仍有大量 P0 / P1 未解决）时，先回到 `/autobiz-requirement-discuss` 完成需求澄清。
 
-如果当前没有 `PRD_DISCUSS.md`，或需求尚未收敛（仍有大量 P0 / P1 未解决），先回到 `/autobiz-requirement-discuss` 完成需求澄清。
+**bundle 不含讨论稿时**：需求澄清节点不在当前工作流中，不读取也不索要 `PRD_DISCUSS.md`；与用户确认需求结论、功能范围和验收标准后直接进入生成流程。
 
-如果当前只有 `PRD_DISCUSS.md`、还没有 `PRD.md`，必须按本技能流程完成"生成正式 PRD"。
+如果当前还没有 `PRD.md`，必须按本技能流程完成"生成正式 PRD"。
 
 推进 checkpoint 必须使用统一脚本。
 
@@ -81,8 +84,8 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autobiz-prd-generate --fea
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
-- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；bundle 未列出的产物不属于本工作流，不要读取、不要等待，也不要要求用户提供。
+- **降级语义**：`required: false` 的输入是可选参考，缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。上游节点不在当前工作流时，其产物已从 bundle 中移除，按本文对应的「bundle 不含 X」分支处理。
 
 无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
@@ -94,11 +97,11 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autobiz-prd-generate --fea
 python autobiz/hooks/biz_validate.py discuss --feature {slug}
 ```
 
-脚本通过后，按 Source Bundle 读取上游产物原件（标准链为 `{FEATURE_DIR}/PRD_DISCUSS.md`），检查讨论稿的收敛状态：
+脚本通过后，按 Source Bundle 读取上游产物原件（标准链为 `{FEATURE_DIR}/PRD_DISCUSS.md`）：
 
-- 若仍有大量 P0 / P1 未解决：提示用户先回到 `/autobiz-requirement-discuss` 继续澄清
-- 若已收敛或只剩可接受的 P2：继续执行
-- 讨论稿被契约标记为外部输入（`external: true`）且缺失时，按其降级读法：先与用户完成需求澄清，再生成 PRD
+- bundle 含讨论稿且仍有大量 P0 / P1 未解决：提示用户先回到 `/autobiz-requirement-discuss` 继续澄清
+- bundle 含讨论稿且已收敛（或只剩可接受的 P2）：继续执行
+- bundle 不含讨论稿：不读取也不向用户索要，与用户确认需求结论后直接进入生成流程
 
 ### Step 2: 更新状态
 
@@ -111,7 +114,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 #### 目标
 
-- 基于 `PRD_DISCUSS.md` 中已经确认的内容提炼正式需求，不要求 `PRD.md` 正文与讨论稿截断前内容逐字一致
+- bundle 含讨论稿时：基于 `PRD_DISCUSS.md` 中已经确认的内容提炼正式需求，不要求 `PRD.md` 正文与讨论稿截断前内容逐字一致
+- bundle 不含讨论稿时：基于与用户确认的需求结论撰写正式需求，未确认的内容不得写入
 - 正式稿必须以 `# 需求正式稿` 开头，直接剔除独立出现的 `本文档为需求讨论中间稿，用于记录需求讨论过程和结论`
 - 正式稿不得包含 `待确认事项`、`待确认项`、`外部依赖`、`第三方依赖` Markdown 章节及其正文
 - 正式稿不得包含讨论记录正文，也不得输出包装标题
@@ -123,7 +127,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 1. **正式标题与需求正文**
    - 第一行必须是 `# 需求正式稿`
-   - 可以基于讨论稿整理需求摘要、确认结论、问题处理状态、假设与风险
+   - 可以基于讨论稿（bundle 含时）或用户确认的需求结论整理需求摘要、确认结论、问题处理状态、假设与风险
    - 不需要与 `PRD_DISCUSS.md` 截断前内容做正文一致性对比
 2. **正式需求段落**
    - 必须直接包含 `用户故事`、`验收口径`、`验收标准`、`关键约束`
@@ -138,11 +142,11 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 - 验收口径应拆分用户视角、工程视角和回归视角
 - 验收标准必须可验证，覆盖关键输入、处理、输出、边界和异常路径
 - 关键约束应覆盖需求中已明确或可从正式需求正文直接追溯的权限、数据、状态、时间和组织约束
-- 若信息不足以生成正式段落，必须停止并回到 `/autobiz-requirement-discuss` 继续澄清，不要把未确认内容写进正式 PRD
+- 若信息不足以生成正式段落，必须停止补齐信息后再生成：bundle 含讨论稿时回到 `/autobiz-requirement-discuss` 继续澄清，bundle 不含时直接与用户确认；不要把未确认内容写进正式 PRD
 
 #### 输出文件
 
-- 输入稿：`{FEATURE_DIR}/PRD_DISCUSS.md`
+- 输入稿：以 Source Bundle 为准（标准链为 `{FEATURE_DIR}/PRD_DISCUSS.md`）
 - 正式稿：`{FEATURE_DIR}/PRD.md`
 - 格式：Markdown
 
@@ -150,7 +154,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 完成 PRD 生成后，检查以下事项：
 
-- `{FEATURE_DIR}/PRD_DISCUSS.md` 已存在，且保留了完整收敛过程
+- bundle 含讨论稿时：`{FEATURE_DIR}/PRD_DISCUSS.md` 已存在，且保留了完整收敛过程
 - `{FEATURE_DIR}/PRD.md` 已存在，且以 `# 需求正式稿` 开头
 - `{FEATURE_DIR}/PRD.md` 不包含讨论稿说明句 `本文档为需求讨论中间稿，用于记录需求讨论过程和结论`
 - `{FEATURE_DIR}/PRD.md` 不包含 `审理提炼`、`待确认事项`、`待确认项`、`外部依赖`、`第三方依赖` 标题
@@ -160,9 +164,9 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 向用户明确说明：
 
-- 讨论稿位于 `{FEATURE_DIR}/PRD_DISCUSS.md`
+- 讨论稿位于 `{FEATURE_DIR}/PRD_DISCUSS.md`（仅 bundle 含讨论稿时）
 - 正式 PRD 位于 `{FEATURE_DIR}/PRD.md`
-- 下一步必须进入 `/autodev`。
+- 下一步按工作流推进（标准链为 `/autodev`）。
 
 ### Step 5: 更新状态（标记完成）
 
@@ -183,8 +187,8 @@ python autobiz/hooks/biz_validate.py prd --feature {slug}
 
 ## 技能使用约束
 
-1. 本技能专注将讨论稿生成为正式 PRD，不替代需求澄清过程
-2. 正式 `PRD.md` 必须由讨论稿生成，不能跳过中间稿直接输出
+1. 本技能专注生成正式 PRD，不替代需求澄清过程
+2. bundle 含讨论稿时，正式 `PRD.md` 必须由讨论稿生成，不能跳过中间稿直接输出；bundle 不含讨论稿时，必须基于与用户确认的需求生成，不得凭空编造
 3. 不能把用户未确认的内容"补全成看起来合理的实现"
-4. 若发现讨论稿中存在未解决的 P0 / P1 问题，必须停止并提示用户先回到 `/autobiz-requirement-discuss`
+4. bundle 含讨论稿且发现未解决的 P0 / P1 问题时，必须停止并提示用户先回到 `/autobiz-requirement-discuss`
 5. 不要输出伪代码、数据库实现方案或服务内部类设计来替代 PRD

@@ -58,29 +58,30 @@ class CompileNodeSubsetTest(unittest.TestCase):
         )
         self.assertIn("dev.detail_design", [node["id"] for node in detail["workflow"]["nodes"]])
 
-    def test_lean_subset_externalizes_dropped_producer_inputs(self) -> None:
+    def test_lean_subset_drops_broken_inputs(self) -> None:
         effective = compile_node_subset(base_config(), LEAN_NODE_IDS)
         self.assertEqual(
             [node["id"] for node in effective["workflow"]["nodes"]],
             LEAN_NODE_IDS,
         )
+        # Inputs whose producer is outside the subset are removed entirely —
+        # including optional references like dev.code's PRD.md.
         self.assertEqual(
-            effective["workflowExternalizedInputs"],
+            effective["workflowDroppedInputs"],
             {
                 "dev.specs": ["PRD.md"],
-                "dev.code": ["design.md", "PLAN.md"],
+                "dev.code": ["PRD.md", "design.md", "PLAN.md"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )
         code_node = effective["workflow"]["nodes"][1]
-        externalized = [
-            artifact
-            for artifact in code_node["artifacts"]["inputs"]
-            if artifact.get("external")
-        ]
-        self.assertEqual({artifact["path"] for artifact in externalized}, {"design.md", "PLAN.md"})
-        # Externalized inputs become optional so prechecks do not block on them.
-        self.assertTrue(all(artifact["required"] is False for artifact in externalized))
+        self.assertEqual(
+            [artifact["path"] for artifact in code_node["artifacts"]["inputs"]],
+            ["proposal.md", "specs/**/*.md"],
+        )
+        for node in effective["workflow"]["nodes"]:
+            for artifact in node["artifacts"]["inputs"]:
+                self.assertNotIn("external", artifact)
 
     def test_lean_subset_relinks_chain_and_filters_checkpoints(self) -> None:
         effective = compile_node_subset(base_config(), LEAN_NODE_IDS)
@@ -102,30 +103,14 @@ class CompileNodeSubsetTest(unittest.TestCase):
         with self.assertRaises(WorkflowCompileError):
             compile_node_subset(base_config(), [])
 
-    def test_forced_externalization(self) -> None:
-        effective = compile_node_subset(
-            base_config(),
-            ["dev.specs", "dev.plan", "dev.code", "ops.archive"],
-            externalized_inputs={"dev.code": ["PLAN.md"]},
-        )
-        self.assertEqual(
-            effective["workflowExternalizedInputs"],
-            {
-                "dev.specs": ["PRD.md"],
-                "dev.code": ["PLAN.md"],
-                "ops.archive": ["CICD_CHECKLIST.md"],
-            },
-        )
-
-
 class SolveNodeClosureTest(unittest.TestCase):
-    def test_default_keeps_selection_and_externalizes_with_suggestions(self) -> None:
+    def test_default_keeps_selection_and_drops_with_suggestions(self) -> None:
         result = solve_node_closure(base_config(), ["dev.code"])
         self.assertEqual(result.nodes, ("dev.code",))
         self.assertEqual(result.added, ())
         self.assertEqual(
-            result.externalized,
-            {"dev.code": ("proposal.md", "specs/**/*.md", "design.md", "PLAN.md")},
+            result.dropped,
+            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md")},
         )
         self.assertEqual(result.entry_nodes, ("dev.code",))
         self.assertEqual(
@@ -134,34 +119,43 @@ class SolveNodeClosureTest(unittest.TestCase):
                 "dev.code": {
                     "proposal.md": "dev.specs",
                     "specs/**/*.md": "dev.specs",
+                    "PRD.md": "biz.prd",
                     "design.md": "dev.plan",
                     "PLAN.md": "dev.plan",
                 }
             },
         )
 
-    def test_default_selecting_prd_externalizes_discuss_draft(self) -> None:
+    def test_default_selecting_prd_drops_discuss_draft(self) -> None:
         result = solve_node_closure(base_config(), ["biz.prd"])
         self.assertEqual(result.nodes, ("biz.prd",))
-        self.assertEqual(result.externalized, {"biz.prd": ("PRD_DISCUSS.md",)})
+        self.assertEqual(result.dropped, {"biz.prd": ("PRD_DISCUSS.md",)})
         self.assertEqual(result.suggestions, {"biz.prd": {"PRD_DISCUSS.md": "biz.discuss"}})
+
+    def test_optional_only_drop_is_not_entry_node(self) -> None:
+        # With specs+plan selected, dev.code keeps every required input and
+        # only loses the optional PRD.md reference — dropped, but not an entry.
+        result = solve_node_closure(base_config(), ["dev.specs", "dev.plan", "dev.code"])
+        self.assertEqual(result.dropped["dev.code"], ("PRD.md",))
+        self.assertEqual(result.entry_nodes, ("dev.specs",))
 
     def test_auto_include_pulls_producers_transitively(self) -> None:
         result = solve_node_closure(base_config(), ["biz.prd"], auto_include_producers=True)
         self.assertEqual(result.nodes, ("biz.discuss", "biz.prd"))
         self.assertEqual(result.added, ("biz.discuss",))
-        self.assertEqual(result.externalized, {})
+        self.assertEqual(result.dropped, {})
         self.assertEqual(result.suggestions, {})
 
     def test_closure_result_compiles_as_subset(self) -> None:
         base = base_config()
         result = solve_node_closure(base, ["dev.code"])
-        effective = compile_node_subset(
-            base,
-            list(result.nodes),
-            externalized_inputs={node: list(paths) for node, paths in result.externalized.items()},
-        )
+        effective = compile_node_subset(base, list(result.nodes))
         self.assertEqual([node["id"] for node in effective["workflow"]["nodes"]], ["dev.code"])
+        # Closure preview and subset compilation must agree on what is dropped.
+        self.assertEqual(
+            {node: tuple(paths) for node, paths in effective["workflowDroppedInputs"].items()},
+            result.dropped,
+        )
 
     def test_unknown_selection_rejected(self) -> None:
         with self.assertRaises(WorkflowCompileError):
@@ -191,17 +185,16 @@ class WorkflowTemplateTest(unittest.TestCase):
     def test_resolve_template_subset(self) -> None:
         self.assertIsNone(resolve_template_subset(base_config(), "standard"))
         lean = resolve_template_subset(base_config(), "lean")
-        self.assertEqual(lean, (LEAN_NODE_IDS, {}))
+        self.assertEqual(lean, LEAN_NODE_IDS)
         custom = resolve_template_subset(
             base_config(),
             "custom",
             workflow_nodes=["dev.specs"],
-            workflow_externalized={"dev.code": ["PLAN.md"]},
         )
         # custom 强制并集 requiredNodes（必含 dev.code 与 ops.archive）。
-        self.assertEqual(custom, (["dev.specs", "dev.code", "ops.archive"], {"dev.code": ["PLAN.md"]}))
+        self.assertEqual(custom, ["dev.specs", "dev.code", "ops.archive"])
         baseline = resolve_template_subset(base_config(), "custom")
-        self.assertEqual(baseline, (["dev.code", "ops.archive"], {}))
+        self.assertEqual(baseline, ["dev.code", "ops.archive"])
         with self.assertRaises(WorkflowCompileError):
             resolve_template_subset(base_config(), "nope")
 
@@ -212,6 +205,8 @@ class WorkflowTemplateTest(unittest.TestCase):
         )
         code = contracts.contract_for_skill("autodev-code")
         self.assertEqual(list(code.required_inputs), ["proposal.md", "specs/**/*.md"])
+        # Dropped inputs vanish from the bundle entirely (no optional PRD.md).
+        self.assertEqual([artifact.path for artifact in code.inputs], ["proposal.md", "specs/**/*.md"])
         self.assertIn("specs_in_progress", contracts.known_checkpoints)
         self.assertNotIn("plan_in_progress", contracts.known_checkpoints)
         self.assertEqual(contracts.allowed_next["code_done"], frozenset({"archived"}))
@@ -273,7 +268,7 @@ class StateStoreTemplateRecordTest(unittest.TestCase):
         self.assertEqual(records, {})
         self.assertTrue(any("未知 checkpoint" in error for error in errors))
 
-    def test_custom_record_keeps_nodes_and_externalized(self) -> None:
+    def test_custom_record_keeps_nodes_and_discards_legacy_externalized(self) -> None:
         records, errors = normalize_state_records(
             {
                 "feat-custom": {
@@ -288,7 +283,9 @@ class StateStoreTemplateRecordTest(unittest.TestCase):
         self.assertEqual(errors, [])
         record = records["feat-custom"]
         self.assertEqual(record["workflowNodes"], ["dev.code"])
-        self.assertIn("dev.code", record["workflowExternalized"])
+        # Legacy externalization records load fine but are not carried over:
+        # the compiler drops producer-less inputs on its own.
+        self.assertNotIn("workflowExternalized", record)
 
     def test_legacy_record_defaults_to_standard_template(self) -> None:
         records, errors = normalize_state_records(

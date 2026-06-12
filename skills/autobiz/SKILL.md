@@ -69,7 +69,7 @@ python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_D
 | 用户意图 | 当前状态要求 | 路由目标 |
 |---------|------------|---------|
 | 需求澄清、讨论需求、完善需求文档 | 无硬性前置 | `/autobiz-requirement-discuss` |
-| 生成正式 PRD、整理 PRD、PRD 定稿 | 必须先有收敛的 `PRD_DISCUSS.md` | `/autobiz-prd-generate` |
+| 生成正式 PRD、整理 PRD、PRD 定稿 | 契约含 `PRD_DISCUSS.md` 时必须先有收敛的讨论稿；契约不含时无此前置 | `/autobiz-prd-generate` |
 
 **执行顺序约束**：
 
@@ -111,4 +111,4 @@ set PYTHONIOENCODING=utf-8 && python autobiz/hooks/biz_validate.py prd --feature
 
 1. 不允许跳过前置准入直接调用子技能
 2. 不允许仅通过 Markdown 勾选替代脚本校验
-3. 不允许在 `PRD_DISCUSS.md` 缺失时进入 `/autobiz-prd-generate`（除非当前 Feature 工作流契约把它标记为外部输入，此时按其降级读法先完成需求澄清）
+3. 契约含 `PRD_DISCUSS.md` 时，不允许在讨论稿缺失时进入 `/autobiz-prd-generate`；契约不含讨论稿时（custom 链未选需求澄清节点），按 bundle 直接生成，不读取也不向用户索要讨论稿

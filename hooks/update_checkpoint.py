@@ -305,7 +305,6 @@ def prepare_checkpoint_update(
         "workflowDecisions": resolved_decisions,
         "workflowTemplate": resolved_template,
         "workflowNodes": (old_record or {}).get("workflowNodes"),
-        "workflowExternalized": (old_record or {}).get("workflowExternalized"),
         "workflowSkippedNodes": (old_record or {}).get("workflowSkippedNodes"),
     }
     try:
@@ -418,7 +417,8 @@ def prepare_skip_update(
 
     Skip is its own sanctioned transition: it bypasses allowed_next and the
     skipped node's postcheck, but still runs the landing skill's precheck under
-    the post-skip contracts (externalized inputs are no longer required there).
+    the post-skip contracts (inputs dropped by the skip are no longer part of
+    the landing contract).
     """
     workspace = workspace.resolve()
     state_path = workspace / STATE_RELATIVE_PATH
