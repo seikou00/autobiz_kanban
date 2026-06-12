@@ -261,10 +261,8 @@ def _resolve_project_workspace(workspace: Path, project: str) -> Path:
 def _collect_project_runs(
     project_workspace: Path,
     config: dict,
-    project: str,
-    dynamic_workflows: dict[str, dict],
 ) -> list[dict]:
-    """返回某个 project 下所有 feature 的 runs 摘要列表（不包含 workflow 外壳）"""
+    """返回某个 project 下所有 feature 的 runs 摘要列表。"""
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
@@ -276,7 +274,7 @@ def _collect_project_runs(
         record = state_records.get(feature, {})
         workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
         workflow_skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
-        workflow_id, workflow_profile, workflow_decisions = workflow_marker(
+        workflow_id, _workflow_profile, _workflow_decisions = workflow_marker(
             record.get("workflowProfile", BASE_WORKFLOW_PROFILE),
             record.get("workflowDecisions", {}),
             workflow_template,
@@ -286,8 +284,7 @@ def _collect_project_runs(
         run_config = config
         if workflow_id != BASE_WORKFLOW_ID:
             run_config = _load_record_config(project_workspace, record)
-            if workflow_id not in dynamic_workflows:
-                dynamic_workflows[workflow_id] = build_workflow_shell(run_config)
+        run_shell = build_workflow_shell(run_config)
         nodes_config = run_config["workflow"]["nodes"]
         suffix_states = run_config["checkpointSuffixState"]
         checkpoint = record.get("checkpoint", "")
@@ -310,9 +307,8 @@ def _collect_project_runs(
             "currentNodeId": current_node_id or "unknown",
             "currentNodeStatus": current_node_status,
             "currentNodeStatusLabel": current_node_status_label,
+            "nodes": run_shell["nodes"],
         }
-        if workflow_id != BASE_WORKFLOW_ID:
-            run_summary["workflowId"] = workflow_id
         if workflow_template != BASE_WORKFLOW_TEMPLATE:
             run_summary["workflowTemplate"] = workflow_template
         if workflow_skipped:
@@ -325,18 +321,16 @@ def _collect_project_runs(
 def project_mode(workspace: Path, projects: list[str], config: dict) -> int:
     """Handle --mode project with one or more projects."""
     all_projects: dict[str, dict] = {}
-    dynamic_workflows: dict[str, dict] = {}
     for project in projects:
         project_workspace = _resolve_project_workspace(workspace, project)
         if not project_workspace.is_dir():
             print(f"project 不存在: {project_workspace}", file=sys.stderr)
             continue
-        runs = _collect_project_runs(project_workspace, config, project, dynamic_workflows)
+        runs = _collect_project_runs(project_workspace, config)
         all_projects[project] = {"runs": runs}
 
     output = {
         "workflow": build_workflow_shell(config),
-        "dynamicWorkflows": dynamic_workflows,
         "projects": all_projects,
     }
 

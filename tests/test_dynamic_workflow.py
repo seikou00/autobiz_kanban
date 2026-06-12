@@ -727,17 +727,14 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
             run = payload["projects"]["proj"]["runs"][0]
-            self.assertEqual(run["workflowId"], "frontend_before_specs")
+            self.assertNotIn("workflowId", run)
             self.assertNotIn("workflowProfile", run)
             self.assertNotIn("workflowDecisions", run)
-            self.assertIn("frontend_before_specs", payload["dynamicWorkflows"])
+            self.assertNotIn("dynamicWorkflows", payload)
             self.assertNotIn("dev.frontend", [node["id"] for node in payload["workflow"]["nodes"]])
 
-            restored = payload["dynamicWorkflows"]["frontend_before_specs"]
-            self.assertIn("nodes", restored)
-            self.assertNotIn("workflowDelta", restored)
-            self.assertNotIn("workflow", restored)
-            self.assertIn("dev.frontend", [node["id"] for node in restored["nodes"]])
+            self.assertIn("nodes", run)
+            self.assertIn("dev.frontend", [node["id"] for node in run["nodes"]])
             self.assertEqual(run["currentNodeId"], "dev.frontend")
 
     def test_project_inspect_restores_dynamic_decision_workflow(self) -> None:
@@ -773,18 +770,14 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
-            workflow_id = "standard__detail_design_before_code_enabled"
             run = payload["projects"]["proj"]["runs"][0]
-            self.assertEqual(run["workflowId"], workflow_id)
+            self.assertNotIn("workflowId", run)
             self.assertNotIn("workflowProfile", run)
             self.assertNotIn("workflowDecisions", run)
             self.assertEqual(run["currentNodeId"], "dev.detail_design")
+            self.assertNotIn("dynamicWorkflows", payload)
 
-            restored = payload["dynamicWorkflows"][workflow_id]
-            self.assertIn("nodes", restored)
-            self.assertNotIn("workflowDelta", restored)
-            self.assertNotIn("workflow", restored)
-            workflow_nodes = [node["id"] for node in restored["nodes"]]
+            workflow_nodes = [node["id"] for node in run["nodes"]]
             self.assertLess(workflow_nodes.index("dev.plan"), workflow_nodes.index("dev.detail_design"))
             self.assertLess(workflow_nodes.index("dev.detail_design"), workflow_nodes.index("dev.code"))
 
@@ -825,28 +818,21 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
-            self.assertEqual(
-                set(payload["dynamicWorkflows"]),
-                {"frontend_before_specs", "standard__detail_design_before_code_enabled"},
-            )
+            self.assertNotIn("dynamicWorkflows", payload)
             runs_by_feature = {
                 run["featureId"]: run
                 for run in payload["projects"]["proj"]["runs"]
             }
             self.assertNotIn("workflowId", runs_by_feature["alpha"])
-            self.assertEqual(runs_by_feature["beta"]["workflowId"], "frontend_before_specs")
-            self.assertEqual(
-                runs_by_feature["gamma"]["workflowId"],
-                "standard__detail_design_before_code_enabled",
-            )
+            self.assertNotIn("workflowId", runs_by_feature["beta"])
+            self.assertNotIn("workflowId", runs_by_feature["gamma"])
 
             for run in payload["projects"]["proj"]["runs"]:
-                if "workflowId" in run:
-                    workflow = payload["dynamicWorkflows"][run["workflowId"]]
-                else:
-                    workflow = payload["workflow"]
-                workflow_node_ids = {node["id"] for node in workflow["nodes"]}
+                self.assertIn("nodes", run)
+                workflow_node_ids = {node["id"] for node in run["nodes"]}
                 self.assertIn(run["currentNodeId"], workflow_node_ids)
+            self.assertIn("dev.frontend", {node["id"] for node in runs_by_feature["beta"]["nodes"]})
+            self.assertIn("dev.detail_design", {node["id"] for node in runs_by_feature["gamma"]["nodes"]})
 
     def test_dynamic_lifecycle_checks_outputs_and_logs_dynamic_node_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
