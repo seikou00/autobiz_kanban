@@ -281,9 +281,6 @@ def create_feature(
         if effective_nodes:
             closure = solve_node_closure(base_config, effective_nodes)
             record["workflowNodes"] = list(closure.nodes)
-            record["workflowExternalized"] = {
-                node_id: list(paths) for node_id, paths in closure.externalized.items()
-            }
         contracts = load_record_workflow_contracts(ROOT, record, workspace=workspace)
     except (BoardConfigError, WorkflowCompileError) as exc:
         print(f"ERROR: workflow template 无法编译: {exc}", file=sys.stderr)

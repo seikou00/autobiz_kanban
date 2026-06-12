@@ -24,8 +24,8 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-verify --feature "
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
-- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；bundle 未列出的产物不属于本工作流，不要读取、不要等待，也不要要求用户提供。
+- **降级语义**：`required: false` 的输入是可选参考，缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。上游节点不在当前工作流时，其产物已从 bundle 中移除，按本文对应的「bundle 不含 X」分支处理。
 
 无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
@@ -77,7 +77,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 ## Step 3: 提取验收契约
 
-按「流程契约」一节取本 Feature 的 Source Bundle，对其中每个输入按 `extract` 抽取；契约未提供（`external: true`）的输入按其降级读法处理并在报告中标注基准缺失。
+按「流程契约」一节取本 Feature 的 Source Bundle，对其中每个输入按 `extract` 抽取；`required: false` 的输入缺失时按其降级读法处理。bundle 未列出的输入不读取：其所属阶段在契约 JSON 的 `workflow.workflowSkippedNodes` 中（中途跳过）或不在当前工作流链中时，在报告中标注「该阶段已跳过 / 不在本工作流」，而非「缺失」。
 
 从 `{FEATURE_DIR}/proposal.md` 提取本轮能力边界、影响面和非目标。
 
@@ -108,7 +108,7 @@ bundle 含 `design.md` 时同时读取：
 
 > ✋ **本步骤严格只读。** 不得运行 `npm test` / `pytest` / `mvn test` / Playwright 等任何测试命令，不得启动任何服务，不得再生成新的测试代码。所有测试证据来自上游阶段产物。
 
-**证据文件（以 bundle 为准；契约未提供的在报告中记为缺项）：**
+**证据文件（以 bundle 为准；bundle 未列出的证据文件不读取，按 Step 3 的约定在报告中标注所属阶段状态）：**
 
 1. `{FEATURE_DIR}/UNIT_TEST_REPORT.md` — 上游阶段技能 `autodev-utest` 产出的结构化单测报告。
 2. `{FEATURE_DIR}/test-output.log` — 单测执行的原始日志（通过/失败数量、失败堆栈；缺失时记录）。
@@ -116,13 +116,13 @@ bundle 含 `design.md` 时同时读取：
 4. `{FEATURE_DIR}/E2E_REPORT.md` — E2E 结果、失败归因、修复尝试与重跑摘要。
 5. `{FEATURE_DIR}/e2e-run.log` — E2E 原始运行日志、服务/鉴权/UI 执行证据。
 
-**从 UNIT_TEST_REPORT.md 中抽取（按 autodev-utest 的输出约定）：**
+**从 UNIT_TEST_REPORT.md 中抽取（按 Method Bundle 的 `extract` 抽取；标准链下对应 autodev-utest 的输出约定）：**
 
 - 每个 Requirement / Scenario 对应的测试方法名 / 文件路径 / 执行结果（PASS/FAIL/SKIP）
 - 每个 specs/design 契约验证项 `Cn` 对应的验证结果（如报告涵盖）
 - 整体通过率（P/M、P/K）
 
-**从 E2E_REPORT.md 与 e2e-run.log 中抽取（按 autodev-e2e 的输出约定）：**
+**从 E2E_REPORT.md 与 e2e-run.log 中抽取（按 Method Bundle 的 `extract` 抽取；标准链下对应 autodev-e2e 的输出约定）：**
 
 - 每个 E2E 用例的执行结果（PASS/FAIL/BLOCKED/SKIP）
 - 服务启动证据、鉴权处理证据、UI Execution Evidence / UI执行证据

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -15,6 +15,7 @@ from board_core.workflow_compiler import (
     load_effective_board_config,
     normalize_workflow_decisions,
     normalize_workflow_profile,
+    normalize_workflow_skipped_nodes,
     normalize_workflow_template,
     read_json,
     resolve_template_subset,
@@ -41,7 +42,6 @@ class ArtifactSpec:
     path: str
     kind: str = "file"
     required: bool = True
-    external: bool = False
     extract: ExtractSpec | None = None
 
 
@@ -77,11 +77,17 @@ class WorkflowContracts:
     stage_labels: dict[str, str]
     start_checkpoint_to_skill: dict[str, str]
     end_checkpoint_to_skill: dict[str, str]
+    skipped_skills: dict[str, str] = field(default_factory=dict)
 
     def contract_for_skill(self, skill: str) -> SkillContract:
         try:
             return self.skill_contracts[skill]
         except KeyError as exc:
+            skipped_node = self.skipped_skills.get(skill)
+            if skipped_node:
+                raise BoardConfigError(
+                    f"skill {skill} 所属节点 {skipped_node} 已在当前 workflow 中被跳过"
+                ) from exc
             raise BoardConfigError(f"unknown skill in board_config.json: {skill}") from exc
 
 
@@ -164,15 +170,12 @@ def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, 
         label = item.get("label", item.get("name", artifact_id))
         kind = item.get("artifactType", "file")
         required = item.get("required", True)
-        external = item.get("external", False)
         if not isinstance(label, str):
             raise BoardConfigError(f"{item_context}.label must be a string")
         if not isinstance(kind, str) or not kind:
             raise BoardConfigError(f"{item_context}.artifactType must be a non-empty string")
         if not isinstance(required, bool):
             raise BoardConfigError(f"{item_context}.required must be a boolean")
-        if not isinstance(external, bool):
-            raise BoardConfigError(f"{item_context}.external must be a boolean")
         extract = _read_extract_spec(item.get("extract"), context=item_context)
 
         specs.append(
@@ -182,7 +185,6 @@ def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, 
                 path=path,
                 kind=kind,
                 required=required,
-                external=external,
                 extract=extract,
             )
         )
@@ -209,7 +211,7 @@ def load_workflow_contracts(
     workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
     node_subset: list[str] | tuple[str, ...] | None = None,
-    externalized_inputs: dict[str, list[str]] | None = None,
+    skipped_nodes: object | None = None,
 ) -> WorkflowContracts:
     profile = normalize_workflow_profile(profile)
     try:
@@ -219,7 +221,7 @@ def load_workflow_contracts(
                 node_subset,
                 profile=profile,
                 workflow_decisions=workflow_decisions,
-                externalized_inputs=externalized_inputs,
+                skipped_nodes=skipped_nodes,
             )
         else:
             config = load_effective_board_config(
@@ -229,6 +231,7 @@ def load_workflow_contracts(
                 profile=profile,
                 workflow_decisions=workflow_decisions,
                 overlays=overlays,
+                skipped_nodes=skipped_nodes,
             )
     except WorkflowCompileError as exc:
         raise BoardConfigError(str(exc)) from exc
@@ -268,6 +271,7 @@ def load_workflow_contracts(
     skill_contracts: dict[str, SkillContract] = {}
     start_checkpoint_to_skill: dict[str, str] = {}
     end_checkpoint_to_skill: dict[str, str] = {}
+    skipped_skills: dict[str, str] = {}
 
     for index, node in enumerate(nodes):
         if not isinstance(node, dict):
@@ -285,6 +289,14 @@ def load_workflow_contracts(
             raise BoardConfigError(f"{node_id}.group must be a string")
         if skill is not None and (not isinstance(skill, str) or not skill):
             raise BoardConfigError(f"{node_id}.skill must be a non-empty string")
+
+        if node.get("skipped"):
+            # Mid-flight skipped node: stays in the display chain but declares
+            # no checkpoints, no skill contract, and no lifecycle mapping, so
+            # transition checks, pre/postchecks, and validators never see it.
+            if isinstance(skill, str) and skill:
+                skipped_skills[skill] = node_id
+            continue
 
         checkpoints = _read_string_list(node.get("checkpoints", []), context=f"{node_id}.checkpoints")
         for checkpoint in checkpoints:
@@ -357,6 +369,7 @@ def load_workflow_contracts(
         stage_labels=stage_labels,
         start_checkpoint_to_skill=start_checkpoint_to_skill,
         end_checkpoint_to_skill=end_checkpoint_to_skill,
+        skipped_skills=skipped_skills,
     )
 
 
@@ -368,7 +381,7 @@ def load_repo_workflow_contracts(
     workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
     node_subset: list[str] | tuple[str, ...] | None = None,
-    externalized_inputs: dict[str, list[str]] | None = None,
+    skipped_nodes: object | None = None,
 ) -> WorkflowContracts:
     return load_workflow_contracts(
         config_path_for_repo(repo_root),
@@ -378,7 +391,7 @@ def load_repo_workflow_contracts(
         workflow_decisions=workflow_decisions,
         overlays=overlays,
         node_subset=node_subset,
-        externalized_inputs=externalized_inputs,
+        skipped_nodes=skipped_nodes,
     )
 
 
@@ -391,8 +404,8 @@ def load_record_workflow_contracts(
     """Resolve contracts from a state record's workflow fields (template-aware).
 
     Reads workflowProfile/workflowDecisions/workflowTemplate plus, for custom
-    templates, workflowNodes/workflowExternalized. nodeSubset and custom
-    templates reject non-standard profiles and workflow decisions.
+    templates, workflowNodes. nodeSubset and custom templates reject
+    non-standard profiles and workflow decisions.
     """
     if not isinstance(record, dict):
         raise BoardConfigError("workflow record must be an object")
@@ -401,11 +414,11 @@ def load_record_workflow_contracts(
     config_path = config_path_for_repo(repo_root)
     try:
         decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
+        skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
         subset = resolve_template_subset(
             load_board_config(config_path),
             template,
             workflow_nodes=record.get("workflowNodes"),
-            workflow_externalized=record.get("workflowExternalized"),
         )
     except WorkflowCompileError as exc:
         raise BoardConfigError(str(exc)) from exc
@@ -417,17 +430,17 @@ def load_record_workflow_contracts(
             workspace=workspace,
             profile=profile,
             workflow_decisions=decisions,
+            skipped_nodes=skipped,
         )
 
     if profile != BASE_WORKFLOW_PROFILE:
         raise BoardConfigError(f"workflow template {template} 不支持 workflowProfile={profile}")
     if decisions:
         raise BoardConfigError(f"workflow template {template} 不支持 workflowDecisions")
-    node_ids, externalized = subset
     return load_workflow_contracts(
         config_path,
         repo_root=repo_root,
         workspace=workspace,
-        node_subset=node_ids,
-        externalized_inputs=externalized,
+        node_subset=subset,
+        skipped_nodes=skipped,
     )

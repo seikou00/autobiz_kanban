@@ -28,7 +28,7 @@ from board_core.workflow_compiler import (  # noqa: E402
 
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
-SCHEMA_VERSION = "autobizdevops.workflow.templates.v1"
+SCHEMA_VERSION = "autobizdevops.workflow.templates.v2"
 
 
 def _node_catalog(base_config: dict) -> list[dict]:
@@ -69,14 +69,13 @@ def _node_catalog(base_config: dict) -> list[dict]:
 
 def _closure_payload(base_config: dict, node_ids: list[str], *, auto_include: bool) -> dict:
     result = solve_node_closure(base_config, node_ids, auto_include_producers=auto_include)
-    externalized = {node_id: list(paths) for node_id, paths in result.externalized.items()}
-    effective = compile_node_subset(base_config, list(result.nodes), externalized_inputs=externalized)
+    effective = compile_node_subset(base_config, list(result.nodes))
     checkpoints = effective.get("workflow", {}).get("checkpoints", {})
     return {
         "nodes": list(result.nodes),
         "added": list(result.added),
         "entryNodes": list(result.entry_nodes),
-        "externalized": externalized,
+        "dropped": {node_id: list(paths) for node_id, paths in result.dropped.items()},
         "suggestions": {node_id: dict(hints) for node_id, hints in result.suggestions.items()},
         "initialCheckpoints": checkpoints.get("initial", []),
         "transitions": checkpoints.get("transitions", {}),
@@ -99,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--auto-include",
         action="store_true",
-        help="closure 模式下自动补全上游 producer（默认不补全：缺失输入外部化并返回 suggestions 供 UI 可选添加）",
+        help="closure 模式下自动补全上游 producer（默认不补全：缺少上游的输入将被移除（dropped），并返回 suggestions 供 UI 可选添加上游节点）",
     )
     parser.add_argument(
         "--template",

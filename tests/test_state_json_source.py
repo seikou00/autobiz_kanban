@@ -606,6 +606,9 @@ class StateIntegrationTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
+            self.assertIn("workflow", payload)
+            self.assertNotIn("templates", payload["workflow"])
+            self.assertIn("nodes", payload["run"])
             workflow_nodes = {node["id"]: node for node in payload["workflow"]["nodes"]}
 
             def next_action(node_id: str, state_id: str) -> dict:

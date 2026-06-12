@@ -15,7 +15,11 @@ if str(ROOT) not in sys.path:
 
 from board_core.contracts import load_record_workflow_contracts, load_repo_workflow_contracts  # noqa: E402
 from board_core.state_store import get_state_json_path, load_state_json_records_result  # noqa: E402
-from board_core.workflow import derive_node_status, find_current_node  # noqa: E402
+from board_core.workflow import (  # noqa: E402
+    derive_node_status,
+    find_current_node,
+    skippable_node_ids,
+)
 from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_PROFILE,
     BASE_WORKFLOW_TEMPLATE,
@@ -24,9 +28,11 @@ from board_core.workflow_compiler import (  # noqa: E402
     WorkflowCompileError,
     configured_dynamic_stages,
     configured_profile_options,
+    configured_skip_policy,
     load_effective_board_config,
     load_record_effective_board_config,
     normalize_workflow_decisions,
+    normalize_workflow_skipped_nodes,
     normalize_workflow_template,
     read_json,
 )
@@ -254,12 +260,19 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         if is_standard_template
         else []
     )
+    workflow_skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
+    try:
+        skip_policy = configured_skip_policy(read_json(BOARD_CONFIG_PATH))
+        skippable = skippable_node_ids(list(nodes), checkpoint, locked_nodes=skip_policy["lockedNodes"])
+    except WorkflowCompileError:
+        skippable = []
     return {
         "ok": True,
         "feature": feature,
         "workflowProfile": workflow_profile,
         "workflowTemplate": workflow_template,
         "workflowDecisions": workflow_decisions,
+        "workflowSkippedNodes": list(workflow_skipped),
         "checkpoint": checkpoint,
         "currentNodeId": current_node_id,
         "currentNodeStatus": node_status,
@@ -270,6 +283,7 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         "profileChoices": profile_choices,
         "requiresWorkflowChoice": bool(workflow_choices),
         "workflowChoices": workflow_choices,
+        "skippableNodes": skippable,
         "nextAction": next_action,
     }, 0
 
