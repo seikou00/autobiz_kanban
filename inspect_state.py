@@ -306,7 +306,7 @@ def _collect_project_runs(
             "currentNodeId": current_node_id or "unknown",
             "currentNodeStatus": current_node_status,
             "currentNodeStatusLabel": current_node_status_label,
-            "nodes": [node["id"] for node in nodes_config],
+            "nodeIds": [node["id"] for node in nodes_config],
         }
         if workflow_template != BASE_WORKFLOW_TEMPLATE:
             run_summary["workflowTemplate"] = workflow_template
