@@ -131,10 +131,10 @@ def validate_plan_initial_tasks(ctx: HookContext) -> int:
 def validate_plan_finished_tasks(ctx: HookContext) -> int:
     plan = ctx.file("PLAN.md")
     if not is_nonempty(plan):
-        # PLAN.md externalized by the current workflow (e.g. lean): degrade,
+        # PLAN.md not in this workflow's contract (e.g. lean): degrade,
         # task closure lives in the completion summary instead.
         if not ctx.requires_artifact("PLAN.md"):
-            info(ctx, "plan_externalized_degrade")
+            info(ctx, "plan_not_in_contract_degrade")
             return 0
         return fail_line(ctx, "missing_plan")
     failures = 0

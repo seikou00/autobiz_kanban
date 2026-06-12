@@ -142,7 +142,6 @@ def _normalize_record(
         "workflowDecisions": workflow_decisions,
         "workflowTemplate": workflow_template,
         "workflowNodes": raw_record.get("workflowNodes"),
-        "workflowExternalized": raw_record.get("workflowExternalized"),
         "workflowSkippedNodes": list(workflow_skipped),
     }
     try:
@@ -170,11 +169,8 @@ def _normalize_record(
     }
     if WORKFLOW_TEMPLATES.get(workflow_template, {}).get("kind") == "custom":
         record["workflowNodes"] = [str(item).strip() for item in raw_record.get("workflowNodes", [])]
-        externalized = raw_record.get("workflowExternalized") or {}
-        record["workflowExternalized"] = {
-            str(node_id): [str(path) for path in paths]
-            for node_id, paths in externalized.items()
-        } if isinstance(externalized, dict) else {}
+        # Legacy workflowExternalized is intentionally not carried over: inputs
+        # whose producer is absent are dropped by the compiler instead.
     if workflow_skipped:
         record["workflowSkippedNodes"] = list(workflow_skipped)
     return record

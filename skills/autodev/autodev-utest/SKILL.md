@@ -24,8 +24,8 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-utest --feature "$
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；契约未列出的产物不要硬等。
-- **降级语义**：`external: true` 的输入不在本工作流内生成；缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；bundle 未列出的产物不属于本工作流，不要读取、不要等待，也不要要求用户提供。
+- **降级语义**：`required: false` 的输入是可选参考，缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。上游节点不在当前工作流时，其产物已从 bundle 中移除，按本文对应的「bundle 不含 X」分支处理。
 
 无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->

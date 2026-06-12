@@ -39,8 +39,7 @@ def _artifact_lines(title: str, artifacts: tuple, *, heading: str = "##") -> lis
 
     for artifact in artifacts:
         required = "必需" if artifact.required else "可选"
-        qualifier = f"{required}，外部输入" if artifact.external else required
-        lines.append(f"- `{artifact.path}`：{artifact.label}（{qualifier}）")
+        lines.append(f"- `{artifact.path}`：{artifact.label}（{required}）")
         extract = getattr(artifact, "extract", None)
         if extract is None:
             continue
@@ -91,7 +90,6 @@ def contract_to_dict(contract: SkillContract) -> dict:
                 "path": artifact.path,
                 "label": artifact.label,
                 "required": artifact.required,
-                "external": artifact.external,
             }
             for artifact in contract.inputs
         ],

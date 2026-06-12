@@ -66,6 +66,11 @@ name: autodev-sample
         )
         self.assertIn("Source Bundle", compiled)
         self.assertIn("Method Bundle", compiled)
+        # Drop semantics: degrade speaks about optional inputs; the external
+        # concept and any "ask the user to supply it" path are gone.
+        self.assertIn("`required: false` 的输入", compiled)
+        self.assertIn("不要要求用户提供", compiled)
+        self.assertNotIn("external: true", compiled)
         self.assertIn("# Body", compiled)
         self.assertNotIn("AUTOBIZDEVOPS_CONTRACT", compiled)
         self.assertNotIn("AUTOBIZDEVOPS_ARTIFACT_RULES", compiled)
