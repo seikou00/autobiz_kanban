@@ -733,9 +733,10 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             self.assertNotIn("dynamicWorkflows", payload)
             self.assertNotIn("dev.frontend", [node["id"] for node in payload["workflow"]["nodes"]])
 
-            self.assertIn("nodes", run)
-            self.assertTrue(all(isinstance(node_id, str) for node_id in run["nodes"]))
-            self.assertIn("dev.frontend", run["nodes"])
+            self.assertNotIn("nodes", run)
+            self.assertIn("nodeIds", run)
+            self.assertTrue(all(isinstance(node_id, str) for node_id in run["nodeIds"]))
+            self.assertIn("dev.frontend", run["nodeIds"])
             self.assertEqual(run["currentNodeId"], "dev.frontend")
 
     def test_project_inspect_restores_dynamic_decision_workflow(self) -> None:
@@ -778,7 +779,8 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             self.assertEqual(run["currentNodeId"], "dev.detail_design")
             self.assertNotIn("dynamicWorkflows", payload)
 
-            workflow_nodes = run["nodes"]
+            self.assertNotIn("nodes", run)
+            workflow_nodes = run["nodeIds"]
             self.assertTrue(all(isinstance(node_id, str) for node_id in workflow_nodes))
             self.assertLess(workflow_nodes.index("dev.plan"), workflow_nodes.index("dev.detail_design"))
             self.assertLess(workflow_nodes.index("dev.detail_design"), workflow_nodes.index("dev.code"))
@@ -830,11 +832,12 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             self.assertNotIn("workflowId", runs_by_feature["gamma"])
 
             for run in payload["projects"]["proj"]["runs"]:
-                self.assertIn("nodes", run)
-                self.assertTrue(all(isinstance(node_id, str) for node_id in run["nodes"]))
-                self.assertIn(run["currentNodeId"], set(run["nodes"]))
-            self.assertIn("dev.frontend", runs_by_feature["beta"]["nodes"])
-            self.assertIn("dev.detail_design", runs_by_feature["gamma"]["nodes"])
+                self.assertNotIn("nodes", run)
+                self.assertIn("nodeIds", run)
+                self.assertTrue(all(isinstance(node_id, str) for node_id in run["nodeIds"]))
+                self.assertIn(run["currentNodeId"], set(run["nodeIds"]))
+            self.assertIn("dev.frontend", runs_by_feature["beta"]["nodeIds"])
+            self.assertIn("dev.detail_design", runs_by_feature["gamma"]["nodeIds"])
 
     def test_dynamic_lifecycle_checks_outputs_and_logs_dynamic_node_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
