@@ -284,7 +284,6 @@ def _collect_project_runs(
         run_config = config
         if workflow_id != BASE_WORKFLOW_ID:
             run_config = _load_record_config(project_workspace, record)
-        run_shell = build_workflow_shell(run_config)
         nodes_config = run_config["workflow"]["nodes"]
         suffix_states = run_config["checkpointSuffixState"]
         checkpoint = record.get("checkpoint", "")
@@ -307,7 +306,7 @@ def _collect_project_runs(
             "currentNodeId": current_node_id or "unknown",
             "currentNodeStatus": current_node_status,
             "currentNodeStatusLabel": current_node_status_label,
-            "nodes": run_shell["nodes"],
+            "nodes": [node["id"] for node in nodes_config],
         }
         if workflow_template != BASE_WORKFLOW_TEMPLATE:
             run_summary["workflowTemplate"] = workflow_template
