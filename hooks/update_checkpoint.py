@@ -27,6 +27,7 @@ from hooks.paths import (  # noqa: E402
 )
 from state_checkpoint import (  # noqa: E402
     append_checkpoint_hook_logs,
+    check_stage_inputs,
     validate_lifecycle,
     validate_transitions,
 )
@@ -40,13 +41,19 @@ from board_core.state_store import (  # noqa: E402
     state_rows_from_records,
     write_state_records,
 )
+from board_core.workflow import (  # noqa: E402
+    landing_checkpoint_after_skip,
+    validate_skip_request,
+)
 from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_PROFILE,
     BASE_WORKFLOW_TEMPLATE,
     WorkflowCompileError,
     configured_dynamic_stages,
+    configured_skip_policy,
     normalize_workflow_decisions,
     normalize_workflow_profile,
+    normalize_workflow_skipped_nodes,
 )
 
 
@@ -299,6 +306,7 @@ def prepare_checkpoint_update(
         "workflowTemplate": resolved_template,
         "workflowNodes": (old_record or {}).get("workflowNodes"),
         "workflowExternalized": (old_record or {}).get("workflowExternalized"),
+        "workflowSkippedNodes": (old_record or {}).get("workflowSkippedNodes"),
     }
     try:
         contracts = load_record_workflow_contracts(ROOT, workflow_record, workspace=workspace)
@@ -399,6 +407,195 @@ def prepare_checkpoint_update(
     )
 
 
+def prepare_skip_update(
+    *,
+    workspace: Path,
+    feature: str,
+    skip_nodes: list[str],
+    updated_at: str | None = None,
+) -> CheckpointUpdate:
+    """Atomically skip workflow nodes for one feature.
+
+    Skip is its own sanctioned transition: it bypasses allowed_next and the
+    skipped node's postcheck, but still runs the landing skill's precheck under
+    the post-skip contracts (externalized inputs are no longer required there).
+    """
+    workspace = workspace.resolve()
+    state_path = workspace / STATE_RELATIVE_PATH
+    state_json_path = workspace / STATE_JSON_RELATIVE_PATH
+
+    def failed(
+        *transition_errors: str,
+        old_checkpoint: str | None = None,
+        new_checkpoint: str | None = None,
+        profile: str = BASE_WORKFLOW_PROFILE,
+        decisions: dict[str, str] | None = None,
+    ) -> CheckpointUpdate:
+        return CheckpointUpdate(
+            ok=False,
+            state_path=state_path,
+            state_json_path=state_json_path,
+            content="",
+            state_json_content="",
+            records={},
+            transition_errors=tuple(transition_errors),
+            lifecycle_errors=(),
+            old_checkpoint=old_checkpoint,
+            new_checkpoint=new_checkpoint,
+            workflow_profile=profile,
+            workflow_decisions=decisions or {},
+        )
+
+    if not feature.strip():
+        return failed("feature 不能为空")
+    try:
+        requested_skips = normalize_workflow_skipped_nodes(skip_nodes)
+    except WorkflowCompileError as exc:
+        return failed(f"--skip-node 无效: {exc}")
+    if not requested_skips:
+        return failed("--skip-node 不能为空")
+
+    sync_result = check_or_fix_state_sync(workspace, fix=True)
+    if not sync_result.state_exists:
+        return failed(f"state.json 不存在且无法从 STATE.md 迁移: {state_json_path}")
+    if sync_result.errors:
+        return failed(*sync_result.errors)
+
+    old_records = sync_result.records
+    old_record = old_records.get(feature)
+    if old_record is None:
+        return failed(f"Feature '{feature}' 不存在，无法跳过节点")
+
+    old_checkpoint = old_record.get("checkpoint", "")
+    profile = normalize_workflow_profile(old_record.get("workflowProfile", BASE_WORKFLOW_PROFILE))
+    decisions = normalize_workflow_decisions(old_record.get("workflowDecisions", {}))
+
+    try:
+        old_contracts = load_record_workflow_contracts(ROOT, old_record, workspace=workspace)
+    except BoardConfigError as exc:
+        return failed(
+            f"workflow 配置无法编译: {exc}",
+            old_checkpoint=old_checkpoint, profile=profile, decisions=decisions,
+        )
+    try:
+        policy = configured_skip_policy(load_board_config(ROOT / "board_core" / "board_config.json"))
+    except WorkflowCompileError as exc:
+        return failed(
+            f"skipPolicy 无效: {exc}",
+            old_checkpoint=old_checkpoint, profile=profile, decisions=decisions,
+        )
+
+    nodes = list(old_contracts.nodes)
+    skip_errors = validate_skip_request(
+        nodes,
+        old_checkpoint,
+        list(requested_skips),
+        locked_nodes=policy["lockedNodes"],
+    )
+    if skip_errors:
+        return failed(*skip_errors, old_checkpoint=old_checkpoint, profile=profile, decisions=decisions)
+
+    landing = landing_checkpoint_after_skip(nodes, old_checkpoint, list(requested_skips))
+    new_checkpoint = landing or old_checkpoint
+
+    new_record = dict(old_record)
+    merged_skips = normalize_workflow_skipped_nodes(
+        [*(old_record.get("workflowSkippedNodes") or []), *requested_skips]
+    )
+    new_record["workflowSkippedNodes"] = list(merged_skips)
+    new_record["checkpoint"] = new_checkpoint
+    new_record["updated_at"] = updated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        new_contracts = load_record_workflow_contracts(ROOT, new_record, workspace=workspace)
+    except BoardConfigError as exc:
+        return failed(
+            f"跳过后的 workflow 配置无法编译: {exc}",
+            old_checkpoint=old_checkpoint, new_checkpoint=new_checkpoint,
+            profile=profile, decisions=decisions,
+        )
+    if new_checkpoint not in new_contracts.known_checkpoints:
+        return failed(
+            f"跳过后没有可用的落地 checkpoint: {new_checkpoint or 'empty'}",
+            old_checkpoint=old_checkpoint, profile=profile, decisions=decisions,
+        )
+    new_record["stage"] = new_contracts.stage_labels.get(new_checkpoint, "")
+
+    new_records: StateRecords = {slug: dict(record) for slug, record in old_records.items()}
+    new_records[feature] = new_record
+
+    content = ""
+    state_json_content = ""
+    render_errors: list[str] = []
+    try:
+        content = render_state_md(new_records, workspace=workspace)
+        state_json_content = state_json_content_from_records(new_records, workspace=workspace)
+    except ValueError as exc:
+        render_errors.extend(str(exc).splitlines())
+
+    lifecycle_errors: list[str] = []
+    if not render_errors and landing is not None:
+        start_skill = new_contracts.start_checkpoint_to_skill.get(new_checkpoint)
+        if start_skill:
+            error = check_stage_inputs(
+                workspace,
+                feature,
+                start_skill,
+                ROOT,
+                workflow_profile=profile,
+                workflow_decisions=decisions,
+                workflow_record=new_record,
+            )
+            if error:
+                lifecycle_errors.append(error)
+
+    errors = [*render_errors, *lifecycle_errors]
+    return CheckpointUpdate(
+        ok=not errors,
+        state_path=state_path,
+        state_json_path=state_json_path,
+        content=content if not errors else "",
+        state_json_content=state_json_content if not errors else "",
+        records=new_records if not errors else {},
+        transition_errors=tuple(render_errors),
+        lifecycle_errors=tuple(lifecycle_errors),
+        old_checkpoint=old_checkpoint,
+        new_checkpoint=new_checkpoint,
+        workflow_profile=profile,
+        workflow_decisions=decisions,
+    )
+
+
+def write_skip_hook_logs(
+    result: CheckpointUpdate,
+    *,
+    workspace: Path,
+    feature: str,
+    skip_nodes: list[str],
+) -> None:
+    label = "节点跳过"
+    skipped_text = ", ".join(skip_nodes)
+    transition = f"{result.old_checkpoint or 'empty'} -> {result.new_checkpoint or result.old_checkpoint or 'empty'}"
+    errors = list(result.errors)
+    message = (
+        f"skip {skipped_text}: {transition}: {label} 通过"
+        if result.ok
+        else f"skip {skipped_text}: {transition}: " + "\n".join(errors)
+    )
+    append_checkpoint_hook_logs(
+        workspace,
+        [(feature, result.old_checkpoint, result.new_checkpoint or result.old_checkpoint)],
+        event_id="node-skip",
+        label=label,
+        errors=errors,
+        event_status="success" if result.ok else "blocked",
+        exit_code=0 if result.ok else 1,
+        message=message,
+        workflow_profiles={feature: result.workflow_profile},
+        workflow_decisions={feature: result.workflow_decisions or {}},
+    )
+
+
 def stage_event_status(result: CheckpointUpdate, stage: str) -> str:
     if stage == "transition_errors":
         return "blocked" if result.transition_errors else "success"
@@ -448,26 +645,30 @@ def write_hook_logs(result: CheckpointUpdate, *, workspace: Path, feature: str) 
         )
 
 
-def write_result_json(result: CheckpointUpdate, *, feature: str, checkpoint: str, dry_run: bool) -> None:
-    print(
-        json.dumps(
-            {
-                "ok": result.ok,
-                "state_path": str(result.state_path),
-                "state_json_path": str(result.state_json_path),
-                "feature": feature,
-                "old_checkpoint": result.old_checkpoint,
-                "new_checkpoint": result.new_checkpoint,
-                "requested_checkpoint": checkpoint,
-                "workflow_profile": result.workflow_profile,
-                "workflow_decisions": result.workflow_decisions or {},
-                "dry_run": dry_run,
-                "errors": list(result.errors),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+def write_result_json(
+    result: CheckpointUpdate,
+    *,
+    feature: str,
+    checkpoint: str,
+    dry_run: bool,
+    skip_nodes: list[str] | None = None,
+) -> None:
+    payload = {
+        "ok": result.ok,
+        "state_path": str(result.state_path),
+        "state_json_path": str(result.state_json_path),
+        "feature": feature,
+        "old_checkpoint": result.old_checkpoint,
+        "new_checkpoint": result.new_checkpoint,
+        "requested_checkpoint": checkpoint,
+        "workflow_profile": result.workflow_profile,
+        "workflow_decisions": result.workflow_decisions or {},
+        "dry_run": dry_run,
+        "errors": list(result.errors),
+    }
+    if skip_nodes:
+        payload["skip_nodes"] = list(skip_nodes)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -481,7 +682,13 @@ def main(argv: list[str] | None = None) -> int:
         allow_abbrev=False,
     )
     parser.add_argument("--feature", "-f", help="feature slug; defaults to FEATURE_ID")
-    parser.add_argument("--checkpoint", "-c", required=True, help="target checkpoint")
+    parser.add_argument("--checkpoint", "-c", help="target checkpoint")
+    parser.add_argument(
+        "--skip-node",
+        action="append",
+        default=[],
+        help="skip a workflow node mid-flight (node id, e.g. dev.utest); may be repeated",
+    )
     parser.add_argument("--stage", help="stage column override")
     parser.add_argument("--owner", help="owner column override")
     parser.add_argument("--iteration", help="iteration column override")
@@ -497,6 +704,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="print JSON result")
     args = parser.parse_args(raw_args)
 
+    if bool(args.skip_node) == bool(args.checkpoint):
+        print("checkpoint 更新失败: 必须且只能提供 --checkpoint 或 --skip-node 之一", file=sys.stderr)
+        return 1
+    if args.skip_node and any(
+        [args.stage, args.owner, args.iteration, args.workflow_profile, args.workflow_decision, args.allow_create]
+    ):
+        print(
+            "checkpoint 更新失败: --skip-node 不能与 --stage/--owner/--iteration/"
+            "--workflow-profile/--workflow-decision/--allow-create 同时使用",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         workspace = get_plugin_output_workspace()
         feature = resolve_env_feature(args.feature, required=True)
@@ -504,57 +724,82 @@ def main(argv: list[str] | None = None) -> int:
         print(f"checkpoint 更新失败: {exc}", file=sys.stderr)
         return 1
 
-    workflow_decision_updates, decision_arg_errors = parse_workflow_decision_args(args.workflow_decision)
-    if decision_arg_errors:
-        result = CheckpointUpdate(
-            ok=False,
-            state_path=workspace / STATE_RELATIVE_PATH,
-            state_json_path=workspace / STATE_JSON_RELATIVE_PATH,
-            content="",
-            state_json_content="",
-            records={},
-            transition_errors=decision_arg_errors,
-            lifecycle_errors=(),
-            old_checkpoint=None,
-            new_checkpoint=None,
-            workflow_profile=args.workflow_profile or BASE_WORKFLOW_PROFILE,
-            workflow_decisions={},
-        )
-    else:
-        result = prepare_checkpoint_update(
+    if args.skip_node:
+        result = prepare_skip_update(
             workspace=workspace,
             feature=feature,
-            checkpoint=args.checkpoint,
-            stage=args.stage,
-            owner=args.owner,
-            iteration=args.iteration,
-            allow_create=args.allow_create,
-            workflow_profile=args.workflow_profile,
-            workflow_decision_updates=workflow_decision_updates,
+            skip_nodes=args.skip_node,
         )
+    else:
+        workflow_decision_updates, decision_arg_errors = parse_workflow_decision_args(args.workflow_decision)
+        if decision_arg_errors:
+            result = CheckpointUpdate(
+                ok=False,
+                state_path=workspace / STATE_RELATIVE_PATH,
+                state_json_path=workspace / STATE_JSON_RELATIVE_PATH,
+                content="",
+                state_json_content="",
+                records={},
+                transition_errors=decision_arg_errors,
+                lifecycle_errors=(),
+                old_checkpoint=None,
+                new_checkpoint=None,
+                workflow_profile=args.workflow_profile or BASE_WORKFLOW_PROFILE,
+                workflow_decisions={},
+            )
+        else:
+            result = prepare_checkpoint_update(
+                workspace=workspace,
+                feature=feature,
+                checkpoint=args.checkpoint,
+                stage=args.stage,
+                owner=args.owner,
+                iteration=args.iteration,
+                allow_create=args.allow_create,
+                workflow_profile=args.workflow_profile,
+                workflow_decision_updates=workflow_decision_updates,
+            )
 
+    requested_checkpoint = args.checkpoint or result.new_checkpoint or ""
     if args.json:
-        write_result_json(result, feature=feature, checkpoint=args.checkpoint, dry_run=args.dry_run)
+        write_result_json(
+            result,
+            feature=feature,
+            checkpoint=requested_checkpoint,
+            dry_run=args.dry_run,
+            skip_nodes=args.skip_node or None,
+        )
     elif not result.ok:
         print("checkpoint 更新失败:", file=sys.stderr)
         for error in result.errors:
             print(f"  - {error}", file=sys.stderr)
     elif args.dry_run:
-        print(f"DRY_RUN checkpoint update: feature={feature} checkpoint={args.checkpoint}")
+        print(f"DRY_RUN checkpoint update: feature={feature} checkpoint={requested_checkpoint}")
         print("--- state.json ---")
         print(result.state_json_content, end="")
         print("--- STATE.md ---")
         print(result.content, end="")
+    elif args.skip_node:
+        print(
+            f"workflow nodes skipped: feature={feature} nodes={','.join(args.skip_node)} "
+            f"checkpoint={result.new_checkpoint}"
+        )
     else:
         print(f"checkpoint updated: feature={feature} checkpoint={args.checkpoint}")
 
+    def _write_logs() -> None:
+        if args.skip_node:
+            write_skip_hook_logs(result, workspace=workspace, feature=feature, skip_nodes=args.skip_node)
+        else:
+            write_hook_logs(result, workspace=workspace, feature=feature)
+
     if not result.ok:
         if not args.dry_run:
-            write_hook_logs(result, workspace=workspace, feature=feature)
+            _write_logs()
         return 1
     if not args.dry_run:
         write_state_records(workspace, result.records)
-        write_hook_logs(result, workspace=workspace, feature=feature)
+        _write_logs()
     return 0
 
 

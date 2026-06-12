@@ -85,6 +85,118 @@ def find_current_node(
     return -1, None
 
 
+def node_start_checkpoint(node: dict) -> str | None:
+    """Return the checkpoint that enters the node (its *_in_progress or archived)."""
+    checkpoints = node.get("checkpoints", [])
+    if not isinstance(checkpoints, list):
+        return None
+    for checkpoint in checkpoints:
+        if isinstance(checkpoint, str) and checkpoint.endswith("_in_progress"):
+            return checkpoint
+    if checkpoints == ["archived"]:
+        return "archived"
+    return None
+
+
+def validate_skip_request(
+    nodes: list[dict],
+    current_checkpoint: str,
+    skip_ids: list[str] | tuple[str, ...],
+    *,
+    locked_nodes: list[str] | tuple[str, ...] = (),
+) -> list[str]:
+    """Return error strings for a mid-flight node skip request.
+
+    Rules: ids must be active chain members; locked nodes (skipPolicy) are
+    rejected; only the current node (while at its *_in_progress checkpoint) or
+    not-yet-started nodes may be skipped; the current checkpoint must belong to
+    a node; skipping the current node requires a later active node to land on;
+    at least one active node must remain.
+    """
+    skip_list = [str(item).strip() for item in skip_ids if str(item).strip()]
+    if not skip_list:
+        return ["未提供要跳过的节点"]
+
+    errors: list[str] = []
+    index_by_id = {str(node.get("id", "")): idx for idx, node in enumerate(nodes)}
+    active_ids = {str(node.get("id", "")) for node in nodes if not node.get("skipped")}
+    locked = {str(item).strip() for item in locked_nodes}
+
+    current_idx, current_node_id = find_current_node(nodes, current_checkpoint)
+    if current_idx < 0:
+        return [f"当前 checkpoint '{current_checkpoint or 'empty'}' 不属于任何节点，无法跳过"]
+
+    skip_set = set(skip_list)
+    for node_id in skip_list:
+        if node_id not in index_by_id:
+            errors.append(f"未知节点: {node_id}")
+            continue
+        if node_id not in active_ids:
+            errors.append(f"节点已被跳过: {node_id}")
+            continue
+        if node_id in locked:
+            errors.append(f"节点被 skipPolicy.lockedNodes 锁定，不可跳过: {node_id}")
+            continue
+        idx = index_by_id[node_id]
+        if idx < current_idx:
+            errors.append(f"节点 {node_id} 已完成，不可跳过")
+        elif idx == current_idx and not current_checkpoint.endswith("_in_progress"):
+            errors.append(f"节点 {node_id} 已到 {current_checkpoint}，不可跳过")
+
+    remaining_active = [
+        node
+        for node in nodes
+        if not node.get("skipped") and str(node.get("id", "")) not in skip_set
+    ]
+    if not remaining_active:
+        errors.append("不能跳过全部剩余节点")
+    elif current_node_id in skip_set and not any(
+        index_by_id[str(node.get("id", ""))] > current_idx for node in remaining_active
+    ):
+        errors.append("跳过当前节点后没有可落地的后续节点")
+    return errors
+
+
+def landing_checkpoint_after_skip(
+    nodes: list[dict],
+    current_checkpoint: str,
+    skip_ids: list[str] | tuple[str, ...],
+) -> str | None:
+    """Return the checkpoint to land on after the skip, or None when unchanged.
+
+    Only skipping the current node moves the checkpoint: it lands on the start
+    checkpoint of the next node that is neither skipped nor being skipped.
+    """
+    current_idx, current_node_id = find_current_node(nodes, current_checkpoint)
+    skip_set = {str(item).strip() for item in skip_ids}
+    if current_idx < 0 or current_node_id not in skip_set:
+        return None
+    for node in nodes[current_idx + 1 :]:
+        if node.get("skipped") or str(node.get("id", "")) in skip_set:
+            continue
+        return node_start_checkpoint(node)
+    return None
+
+
+def skippable_node_ids(
+    nodes: list[dict],
+    current_checkpoint: str,
+    *,
+    locked_nodes: list[str] | tuple[str, ...] = (),
+) -> list[str]:
+    """Return node ids that a single-node skip request would currently accept."""
+    result: list[str] = []
+    for node in nodes:
+        if node.get("skipped"):
+            continue
+        node_id = str(node.get("id", ""))
+        if not node_id:
+            continue
+        if not validate_skip_request(nodes, current_checkpoint, [node_id], locked_nodes=locked_nodes):
+            result.append(node_id)
+    return result
+
+
 def _normalize_node_status(value: object) -> str:
     if isinstance(value, str) and value in NODE_STATUSES:
         return value
@@ -105,6 +217,9 @@ def derive_node_status(
     suffix_states: dict,
 ) -> str:
     """Return the board node status for a single node based on current position."""
+    if node.get("skipped"):
+        return "skipped"
+
     if current_checkpoint == "archived":
         return "archived" if node["id"] == "ops.archive" else "done"
 
@@ -248,6 +363,7 @@ def build_workflow_shell(config: dict) -> dict:
 
     Removes from output:
     - top-level ``id``, ``version``, and ``kind``
+    - workflow-level ``templates`` (create-feature options, not run display state)
     - workflow-level ``checkpoints`` (contract-only checkpoint matrix)
     - workflow-level ``transitions`` (the board currently treats nodes as a linear sequence)
     - node-level ``checkpoints`` (internal checkpoint→node mapping)
@@ -257,7 +373,17 @@ def build_workflow_shell(config: dict) -> dict:
     workflow = {
         k: v
         for k, v in config["workflow"].items()
-            if k not in {"id", "version", "kind", "checkpoints", "transitions", "profiles", "dynamicStages"}
+            if k not in {
+                "id",
+                "version",
+                "kind",
+                "templates",
+                "checkpoints",
+                "transitions",
+                "profiles",
+                "dynamicStages",
+                "skipPolicy",
+            }
     }
     clean_nodes: list[dict] = []
     for node in workflow["nodes"]:

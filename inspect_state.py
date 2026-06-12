@@ -31,6 +31,7 @@ from board_core.workflow_compiler import (  # type: ignore[import-untyped]
     load_record_effective_board_config,
     normalize_workflow_decisions,
     normalize_workflow_profile,
+    normalize_workflow_skipped_nodes,
     normalize_workflow_template,
 )
 from board_core.state import (  # type: ignore[import-untyped]
@@ -87,29 +88,40 @@ def workflow_marker(
     decisions: object | None,
     template: str | None = None,
     workflow_nodes: object | None = None,
+    workflow_skipped: object | None = None,
 ) -> tuple[str, str, dict[str, str]]:
     workflow_profile = normalize_workflow_profile(profile)
     workflow_decisions = normalize_workflow_decisions(decisions)
     workflow_template = normalize_workflow_template(template)
+    workflow_skipped_nodes = normalize_workflow_skipped_nodes(workflow_skipped)
     sorted_decisions = {
         stage_id: workflow_decisions[stage_id]
         for stage_id in sorted(workflow_decisions)
     }
+
+    def _with_skips(marker: str) -> str:
+        # Distinct marker per skip set so project mode caches one workflow
+        # shell per effective chain.
+        if not workflow_skipped_nodes:
+            return marker
+        skip_parts = [node_id.replace(".", "-") for node_id in workflow_skipped_nodes]
+        return "__".join([marker, "skip", *skip_parts])
+
     if workflow_template != BASE_WORKFLOW_TEMPLATE:
         marker = workflow_template
         if isinstance(workflow_nodes, list) and workflow_nodes:
             node_parts = [str(node_id).replace(".", "-") for node_id in workflow_nodes]
             marker = "__".join([workflow_template, *node_parts])
-        return marker, workflow_profile, sorted_decisions
+        return _with_skips(marker), workflow_profile, sorted_decisions
     if workflow_profile == BASE_WORKFLOW_PROFILE and not sorted_decisions:
-        return BASE_WORKFLOW_ID, workflow_profile, sorted_decisions
+        return _with_skips(BASE_WORKFLOW_ID), workflow_profile, sorted_decisions
     if not sorted_decisions:
-        return workflow_profile, workflow_profile, sorted_decisions
+        return _with_skips(workflow_profile), workflow_profile, sorted_decisions
     decision_parts = [
         f"{stage_id}_{decision}"
         for stage_id, decision in sorted_decisions.items()
     ]
-    return "__".join([workflow_profile, *decision_parts]), workflow_profile, sorted_decisions
+    return _with_skips("__".join([workflow_profile, *decision_parts])), workflow_profile, sorted_decisions
 
 
 def _feature_ref_dir(workspace: Path, feature: str, feature_dir: Path | None) -> str:
@@ -146,7 +158,13 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
     workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
     workflow_decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
-    if workflow_profile != BASE_WORKFLOW_PROFILE or workflow_decisions or workflow_template != BASE_WORKFLOW_TEMPLATE:
+    workflow_skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
+    if (
+        workflow_profile != BASE_WORKFLOW_PROFILE
+        or workflow_decisions
+        or workflow_template != BASE_WORKFLOW_TEMPLATE
+        or workflow_skipped
+    ):
         config = _load_record_config(workspace, record)
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
@@ -203,6 +221,7 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
         workflow_decisions,
         workflow_template,
         record.get("workflowNodes"),
+        workflow_skipped,
     )
 
     # Assemble output
@@ -221,6 +240,8 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
             "nodes": run_nodes,
         },
     }
+    if workflow_skipped:
+        output["run"]["workflowSkippedNodes"] = list(workflow_skipped)
 
     json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
     print()
@@ -254,11 +275,13 @@ def _collect_project_runs(
     for feature in feature_names:
         record = state_records.get(feature, {})
         workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
+        workflow_skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
         workflow_id, workflow_profile, workflow_decisions = workflow_marker(
             record.get("workflowProfile", BASE_WORKFLOW_PROFILE),
             record.get("workflowDecisions", {}),
             workflow_template,
             record.get("workflowNodes"),
+            workflow_skipped,
         )
         run_config = config
         if workflow_id != BASE_WORKFLOW_ID:
@@ -292,6 +315,8 @@ def _collect_project_runs(
             run_summary["workflowId"] = workflow_id
         if workflow_template != BASE_WORKFLOW_TEMPLATE:
             run_summary["workflowTemplate"] = workflow_template
+        if workflow_skipped:
+            run_summary["workflowSkippedNodes"] = list(workflow_skipped)
         runs.append(run_summary)
 
     return runs

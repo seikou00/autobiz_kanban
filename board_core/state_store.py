@@ -21,6 +21,7 @@ from board_core.workflow_compiler import (
     configured_workflow_templates,
     normalize_workflow_decisions,
     normalize_workflow_profile,
+    normalize_workflow_skipped_nodes,
     normalize_workflow_template,
 )
 
@@ -88,7 +89,8 @@ def _contracts_for_record(workspace: Path | None, record: dict):
     workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
     workflow_template = record.get("workflowTemplate", BASE_WORKFLOW_TEMPLATE)
     workflow_decisions = record.get("workflowDecisions") or {}
-    if workflow_template == BASE_WORKFLOW_TEMPLATE and not workflow_decisions:
+    workflow_skipped = record.get("workflowSkippedNodes") or []
+    if workflow_template == BASE_WORKFLOW_TEMPLATE and not workflow_decisions and not workflow_skipped:
         if workspace is None or workflow_profile == BASE_WORKFLOW_PROFILE:
             return WORKFLOW_CONTRACTS
     try:
@@ -130,12 +132,18 @@ def _normalize_record(
     except WorkflowCompileError as exc:
         errors.append(f"{context}: Feature '{feature}' 的 workflowDecisions 无效: {exc}")
         return None
+    try:
+        workflow_skipped = normalize_workflow_skipped_nodes(raw_record.get("workflowSkippedNodes"))
+    except WorkflowCompileError as exc:
+        errors.append(f"{context}: Feature '{feature}' 的 workflowSkippedNodes 无效: {exc}")
+        return None
     resolved_record = {
         "workflowProfile": workflow_profile,
         "workflowDecisions": workflow_decisions,
         "workflowTemplate": workflow_template,
         "workflowNodes": raw_record.get("workflowNodes"),
         "workflowExternalized": raw_record.get("workflowExternalized"),
+        "workflowSkippedNodes": list(workflow_skipped),
     }
     try:
         contracts = _contracts_for_record(workspace, resolved_record)
@@ -167,6 +175,8 @@ def _normalize_record(
             str(node_id): [str(path) for path in paths]
             for node_id, paths in externalized.items()
         } if isinstance(externalized, dict) else {}
+    if workflow_skipped:
+        record["workflowSkippedNodes"] = list(workflow_skipped)
     return record
 
 

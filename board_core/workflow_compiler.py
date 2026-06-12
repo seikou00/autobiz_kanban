@@ -293,6 +293,72 @@ def resolve_template_subset(
     return merged_nodes, externalized
 
 
+def normalize_workflow_skipped_nodes(value: object | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise WorkflowCompileError("workflowSkippedNodes must be a list of non-empty node ids")
+    return tuple(dict.fromkeys(item.strip() for item in value))
+
+
+def configured_skip_policy(base_config: dict) -> dict:
+    """Validated workflow.skipPolicy.
+
+    Policy is enforced only by the skip operation (validate_skip_request), not
+    by the compiler: tightening the policy later must not make existing state
+    records unloadable.
+    """
+    workflow = base_config.get("workflow")
+    raw = workflow.get("skipPolicy", {}) if isinstance(workflow, dict) else {}
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise WorkflowCompileError("workflow.skipPolicy must be an object")
+    locked = raw.get("lockedNodes", [])
+    if locked is None:
+        locked = []
+    if not isinstance(locked, list) or any(
+        not isinstance(item, str) or not item.strip() for item in locked
+    ):
+        raise WorkflowCompileError("workflow.skipPolicy.lockedNodes must be a list of non-empty node ids")
+    return {"lockedNodes": tuple(dict.fromkeys(item.strip() for item in locked))}
+
+
+def _active_nodes(nodes: list[dict]) -> list[dict]:
+    return [node for node in nodes if not node.get("skipped")]
+
+
+def _mark_skipped_nodes(
+    nodes: list[dict],
+    skipped_ids: tuple[str, ...],
+    *,
+    context: str = "workflowSkippedNodes",
+) -> list[dict]:
+    """Mark skipped nodes in place and return the active sublist.
+
+    Skipped nodes stay in the node array (the board renders them as 已跳过) but
+    are excluded from every contract derivation by the callers.
+    """
+    if not skipped_ids:
+        return nodes
+    known = {str(node.get("id", "")) for node in nodes if isinstance(node, dict)}
+    unknown = sorted(set(skipped_ids) - known)
+    if unknown:
+        raise WorkflowCompileError(f"{context} references unknown nodes: {', '.join(unknown)}")
+    skipped_set = set(skipped_ids)
+    active: list[dict] = []
+    for node in nodes:
+        if str(node.get("id", "")) in skipped_set:
+            node["skipped"] = True
+        else:
+            active.append(node)
+    if not active:
+        raise WorkflowCompileError(f"{context} cannot skip every workflow node")
+    return active
+
+
 def normalize_workflow_decisions(decisions: object | None) -> dict[str, str]:
     if decisions is None:
         return {}
@@ -661,6 +727,8 @@ def _derive_state(
 
 def _next_node_skill(nodes: list[dict], index: int) -> tuple[str, str]:
     for next_node in nodes[index + 1 :]:
+        if next_node.get("skipped"):
+            continue
         skill = next_node.get("skill")
         label = next_node.get("label")
         if isinstance(skill, str) and skill and isinstance(label, str):
@@ -940,10 +1008,13 @@ def _assemble_effective(
     """Validate nodes and derive states/checkpoints/transitions into the effective config.
 
     enabled_stages=None skips dynamic-stage target validation (subset workflows
-    do not support dynamic stages).
+    do not support dynamic stages). Nodes marked skipped stay in the node array
+    for display but every contract derivation runs on the active sublist only,
+    so transitions bridge over them and their checkpoints become unknown.
     """
+    active = _active_nodes(nodes)
     _validate_unique_nodes_and_checkpoints(nodes)
-    _validate_artifact_dependencies(nodes)
+    _validate_artifact_dependencies(active)
     _renumber_nodes(nodes)
     _derive_node_states(nodes)
 
@@ -953,13 +1024,13 @@ def _assemble_effective(
     base_labels = base_labels if isinstance(base_labels, dict) else {}
     workflow["nodes"] = nodes
     workflow["checkpoints"] = {
-        "initial": _derive_initial_checkpoints(nodes, checkpoint_config),
-        "transitions": _derive_checkpoint_transitions(nodes, checkpoint_config),
-        "stageLabels": _derive_stage_labels(nodes, base_labels),
+        "initial": _derive_initial_checkpoints(active, checkpoint_config),
+        "transitions": _derive_checkpoint_transitions(active, checkpoint_config),
+        "stageLabels": _derive_stage_labels(active, base_labels),
     }
     if enabled_stages is not None:
-        _validate_dynamic_stage_targets(nodes, workflow["checkpoints"]["transitions"], enabled_stages)
-    workflow["transitions"] = _derive_ui_transitions(nodes)
+        _validate_dynamic_stage_targets(active, workflow["checkpoints"]["transitions"], enabled_stages)
+    workflow["transitions"] = _derive_ui_transitions(active)
     effective["workflowProfile"] = profile
     effective["workflowDecisions"] = decisions
     return effective
@@ -973,10 +1044,12 @@ def compile_board_config(
     profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
+    skipped_nodes: object | None = None,
 ) -> dict:
     """Compile a profile-specific effective workflow config."""
     profile = normalize_workflow_profile(profile)
     decisions = normalize_workflow_decisions(workflow_decisions)
+    skipped = normalize_workflow_skipped_nodes(skipped_nodes)
     dynamic_stages = configured_dynamic_stages(base_config)
     stage_by_id = {stage["id"]: stage for stage in dynamic_stages}
     unknown_decisions = sorted(set(decisions) - set(stage_by_id))
@@ -1000,7 +1073,7 @@ def compile_board_config(
             if decisions.get(stage["id"]) == ENABLED_WORKFLOW_DECISION
         )
 
-    if not loaded_overlays:
+    if not loaded_overlays and not skipped:
         workflow = effective.get("workflow")
         nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
         if not isinstance(nodes, list):
@@ -1039,7 +1112,27 @@ def compile_board_config(
         for stage in dynamic_stages
         if decisions.get(stage["id"]) == ENABLED_WORKFLOW_DECISION
     ]
-    return _assemble_effective(
+    externalized: dict[str, list[str]] = {}
+    if skipped:
+        # Skips apply after overlay/dynamic insertion so dynamic nodes are
+        # skippable too. Stages whose checkpoints left the active chain must
+        # not be target-validated.
+        active = _mark_skipped_nodes(nodes, skipped)
+        externalized = _externalize_broken_inputs(active)
+        _filter_checkpoint_config(workflow, active)
+        active_checkpoints = {
+            checkpoint
+            for node in active
+            for checkpoint in node.get("checkpoints", [])
+            if isinstance(checkpoint, str)
+        }
+        enabled_stages = [
+            stage
+            for stage in enabled_stages
+            if stage["enableTargetCheckpoint"] in active_checkpoints
+            and stage["choiceCheckpoint"] in active_checkpoints
+        ]
+    effective = _assemble_effective(
         effective,
         workflow,
         nodes,
@@ -1047,6 +1140,12 @@ def compile_board_config(
         decisions=decisions,
         enabled_stages=enabled_stages,
     )
+    if skipped:
+        effective["workflowSkippedNodes"] = list(skipped)
+        effective["workflowExternalizedInputs"] = {
+            node_id: list(paths) for node_id, paths in externalized.items()
+        }
+    return effective
 
 
 def _externalize_broken_inputs(nodes: list[dict], forced: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
@@ -1126,15 +1225,18 @@ def compile_node_subset(
     profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: object | None = None,
     externalized_inputs: dict[str, list[str]] | None = None,
+    skipped_nodes: object | None = None,
 ) -> dict:
     """Compile an effective workflow keeping only the selected base nodes.
 
     Nodes keep base array order; required inputs whose producer was dropped are
     externalized. Dynamic stages and profile overlays are not applied to subset
-    workflows.
+    workflows. skipped_nodes marks subset members as mid-flight skipped: they
+    stay in the node array but leave the contract chain.
     """
     profile = normalize_workflow_profile(profile)
     decisions = normalize_workflow_decisions(workflow_decisions)
+    skipped = normalize_workflow_skipped_nodes(skipped_nodes)
 
     requested = [str(node_id).strip() for node_id in node_ids if str(node_id).strip()]
     if not requested:
@@ -1164,8 +1266,9 @@ def compile_node_subset(
         if isinstance(node, dict) and str(node.get("id", "")) in selected
     ]
 
-    externalized = _externalize_broken_inputs(nodes, externalized_inputs)
-    _filter_checkpoint_config(workflow, nodes)
+    active = _mark_skipped_nodes(nodes, skipped) if skipped else nodes
+    externalized = _externalize_broken_inputs(active, externalized_inputs)
+    _filter_checkpoint_config(workflow, active)
 
     effective = _assemble_effective(
         effective,
@@ -1179,6 +1282,8 @@ def compile_node_subset(
     effective["workflowExternalizedInputs"] = {
         node_id: list(paths) for node_id, paths in externalized.items()
     }
+    if skipped:
+        effective["workflowSkippedNodes"] = list(skipped)
     return effective
 
 
@@ -1190,6 +1295,7 @@ def load_effective_board_config(
     profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: object | None = None,
     overlays: list[dict] | None = None,
+    skipped_nodes: object | None = None,
 ) -> dict:
     path = config_path or default_config_path()
     base_config = read_json(path)
@@ -1201,6 +1307,7 @@ def load_effective_board_config(
         profile=profile,
         workflow_decisions=workflow_decisions,
         overlays=overlays,
+        skipped_nodes=skipped_nodes,
     )
 
 
@@ -1219,6 +1326,7 @@ def load_record_effective_board_config(
     profile = normalize_workflow_profile(record.get("workflowProfile"))
     decisions = normalize_workflow_decisions(record.get("workflowDecisions", {}))
     template = normalize_workflow_template(record.get("workflowTemplate"))
+    skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
     subset = resolve_template_subset(
         base_config,
         template,
@@ -1232,10 +1340,11 @@ def load_record_effective_board_config(
             workspace=workspace,
             profile=profile,
             workflow_decisions=decisions,
+            skipped_nodes=skipped,
         )
     if profile != BASE_WORKFLOW_PROFILE:
         raise WorkflowCompileError(f"workflow template {template} 不支持 workflowProfile={profile}")
     if decisions:
         raise WorkflowCompileError(f"workflow template {template} 不支持 workflowDecisions")
     node_ids, externalized = subset
-    return compile_node_subset(base_config, node_ids, externalized_inputs=externalized)
+    return compile_node_subset(base_config, node_ids, externalized_inputs=externalized, skipped_nodes=skipped)

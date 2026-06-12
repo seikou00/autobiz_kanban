@@ -170,6 +170,8 @@ def _find_feature_contract(
     }
     if record.get("workflowNodes"):
         workflow_context["workflowNodes"] = record.get("workflowNodes")
+    if record.get("workflowSkippedNodes"):
+        workflow_context["workflowSkippedNodes"] = record.get("workflowSkippedNodes")
     return contracts.contract_for_skill(skill), workflow_context
 
 

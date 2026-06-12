@@ -364,11 +364,13 @@ def _contracts_for_record(
     profile = record.get("workflowProfile") or BASE_WORKFLOW_PROFILE
     template = record.get("workflowTemplate") or BASE_WORKFLOW_TEMPLATE
     decisions = record.get("workflowDecisions") or {}
+    skipped = record.get("workflowSkippedNodes") or []
     if (
         workspace_root is None
         and profile == BASE_WORKFLOW_PROFILE
         and template == BASE_WORKFLOW_TEMPLATE
         and not decisions
+        and not skipped
     ):
         return WORKFLOW_CONTRACTS
     return load_record_workflow_contracts(repo_root, record, workspace=workspace_root)

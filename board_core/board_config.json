@@ -33,6 +33,9 @@
     }
   },
   "workflow": {
+    "skipPolicy": {
+      "lockedNodes": []
+    },
     "templates": {
       "standard": {
         "kind": "profile",
