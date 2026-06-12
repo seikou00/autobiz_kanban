@@ -9,7 +9,8 @@
       "system_prompt_inject": "\n- 当前 FEATURE_ID 是 `${feature}`，不得自行定义特性/feature/slug 名称\n- PLUGIN_ROOT：`${pluginPath}`，这是插件代码根目录，调用脚本使用 `$PLUGIN_ROOT/...`\n- PLUGIN_WORKSPACE：`${pluginWorkspace}`，这是项目集合工作区，不直接包含 `.autobizdevops/state.json`\n- PROJECT_DIR：`${projectDir}`，当前项目目录名\n- PROJECT_PLUGIN_DIR：`${pluginWorkspace}/${projectDir}`，这是包含 `${pluginWorkspace}/${projectDir}/.autobizdevops/state.json` 的项目插件根目录\n- FEATURE_DIR：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`，这是当前 Feature 产物目录",
       "plugin_dir_hook": "${pluginWorkspace}/${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
-      "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py"
+      "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
+      "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId} --json"
     },
     "linux": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -19,7 +20,8 @@
       "system_prompt_inject": "\n- 当前 FEATURE_ID 是 `${feature}`，不得自行定义特性/feature/slug 名称\n- PLUGIN_ROOT：`${pluginPath}`，这是插件代码根目录，调用脚本使用 `$PLUGIN_ROOT/...`\n- PLUGIN_WORKSPACE：`${pluginWorkspace}`，这是项目集合工作区，不直接包含 `.autobizdevops/state.json`\n- PROJECT_DIR：`${projectDir}`，当前项目目录名\n- PROJECT_PLUGIN_DIR：`${pluginWorkspace}/${projectDir}`，这是包含 `${pluginWorkspace}/${projectDir}/.autobizdevops/state.json` 的项目插件根目录\n- FEATURE_DIR：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`，这是当前 Feature 产物目录",
       "plugin_dir_hook": "${pluginWorkspace}/${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
-      "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py"
+      "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
+      "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId} --json"
     },
     "win32": {
       "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -29,7 +31,8 @@
       "system_prompt_inject": "\n- 当前 FEATURE_ID 是 `${feature}`，不得自行定义特性/feature/slug 名称\n- PLUGIN_ROOT：`${pluginPath}`，这是插件代码根目录，调用脚本使用 `$PLUGIN_ROOT/...`\n- PLUGIN_WORKSPACE：`${pluginWorkspace}`，这是项目集合工作区，不直接包含 `.autobizdevops/state.json`\n- PROJECT_DIR：`${projectDir}`，当前项目目录名\n- PROJECT_PLUGIN_DIR：`${pluginWorkspace}\\${projectDir}`，这是包含 `${pluginWorkspace}\\${projectDir}\\.autobizdevops\\state.json` 的项目插件根目录\n- FEATURE_DIR：`${pluginWorkspace}\\${projectDir}\\.autobizdevops\\features\\${feature}`，这是当前 Feature 产物目录",
       "plugin_dir_hook": "${pluginWorkspace}\\${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
-      "dynamic_workflow": "python3 ${pluginPath}\\hooks\\inspect_workflow_templates.py"
+      "dynamic_workflow": "python3 ${pluginPath}\\hooks\\inspect_workflow_templates.py",
+      "skip_node": "python3 ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId} --json"
     }
   },
   "workflow": {
