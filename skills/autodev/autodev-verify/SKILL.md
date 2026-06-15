@@ -9,7 +9,7 @@ version: v1.1.1604
 - **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
 - **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
 - **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
@@ -22,10 +22,12 @@ version: v1.1.1604
 python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-verify --feature "$FEATURE_ID" --json
 ```
 
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；bundle 未列出的产物不属于本工作流，不要读取、不要等待，也不要要求用户提供。
-- **降级语义**：`required: false` 的输入是可选参考，缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。上游节点不在当前工作流时，其产物已从 bundle 中移除，按本文对应的「bundle 不含 X」分支处理。
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
+- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
+- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
+- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
 无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
@@ -90,16 +92,14 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 共 M 项待裁决。
 
-bundle 含 `design.md` 时同时读取：
+按各输入的 Method Bundle 提取验收验证项：
 
-- 从 specs Requirement / Scenario 提取行为契约验证项 C1, C2, ...
-- 从 design.md 的 API Decisions、Data Decisions 提取接口/数据契约验证项。
-- 如果 API Decisions 包含 `x-auto-no-http-api: true` → 记录本轮无 HTTP/API 契约验证项。
-- 如果 Data Decisions 包含 `x-auto-no-sql: true` → 记录本轮无数据库变更验证项。
+- 从行为契约 Requirement / Scenario 提取行为验证项 C1, C2, ...
+- 从在场的设计决策提取接口/数据契约验证项；遇 `x-auto-no-http-api: true` / `x-auto-no-sql: true` 记录本轮无对应验证项。
 
 ### ⛔ 步骤完成检查 — Step 3
-- [ ] 已从 proposal.md 与 specs/**/*.md 提取所有待验收行为并编号 1..m
-- [ ] bundle 含 design.md 时：已提取 API/数据契约验证项，或确认 `x-auto-no-http-api: true` / `x-auto-no-sql: true`；不含时已标注设计基准缺失
+- [ ] 已从上游行为契约提取所有待验收行为并编号 1..m
+- [ ] 设计决策在场时：已提取 API/数据契约验证项或确认 `x-auto-no-http-api: true` / `x-auto-no-sql: true`；缺失时按其 degrade 标注设计基准缺失
 - [ ] 共 M 项已列出
 
 ---
@@ -116,13 +116,13 @@ bundle 含 `design.md` 时同时读取：
 4. `{FEATURE_DIR}/E2E_REPORT.md` — E2E 结果、失败归因、修复尝试与重跑摘要。
 5. `{FEATURE_DIR}/e2e-run.log` — E2E 原始运行日志、服务/鉴权/UI 执行证据。
 
-**从 UNIT_TEST_REPORT.md 中抽取（按 Method Bundle 的 `extract` 抽取；标准链下对应 autodev-utest 的输出约定）：**
+**从 `UNIT_TEST_REPORT.md` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
 
 - 每个 Requirement / Scenario 对应的测试方法名 / 文件路径 / 执行结果（PASS/FAIL/SKIP）
 - 每个 specs/design 契约验证项 `Cn` 对应的验证结果（如报告涵盖）
 - 整体通过率（P/M、P/K）
 
-**从 E2E_REPORT.md 与 e2e-run.log 中抽取（按 Method Bundle 的 `extract` 抽取；标准链下对应 autodev-e2e 的输出约定）：**
+**从 `E2E_REPORT.md` 与 `e2e-run.log` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
 
 - 每个 E2E 用例的执行结果（PASS/FAIL/BLOCKED/SKIP）
 - 服务启动证据、鉴权处理证据、UI Execution Evidence / UI执行证据

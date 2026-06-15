@@ -1,6 +1,6 @@
 ---
 name: autodev-specs
-description: Dev 阶段行为规格生成。按上游产物契约（Source Bundle）读取输入（标准链为 PRD.md；精简链无 PRD 时基于用户描述直接澄清），探索需求、现有代码和隐性约束，与用户确认行为/API/数据边界后生成 proposal.md 与 specs/**/*.md；不得生成技术设计、任务计划或修改业务代码。
+description: Dev 阶段行为规格生成。按上游产物契约（Source Bundle）读取输入（缺上游 PRD 时基于用户描述澄清），探索需求、现有代码和隐性约束，与用户确认行为/API/数据边界后生成 proposal.md 与 specs/**/*.md；不得生成技术设计、任务计划或修改业务代码。
 version: v1.1.1604
 ---
 
@@ -9,7 +9,7 @@ version: v1.1.1604
 - **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
 - **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
 - **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
 - **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
@@ -22,10 +22,12 @@ version: v1.1.1604
 python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-specs --feature "$FEATURE_ID" --json
 ```
 
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件，不要读取清单之外的阶段产物作为硬依赖。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）；按它决定读哪些部分、如何提取上下文。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止；bundle 未列出的产物不属于本工作流，不要读取、不要等待，也不要要求用户提供。
-- **降级语义**：`required: false` 的输入是可选参考，缺失时按其 `extract.degrade` 的退化读法继续执行，不要因缺失而停止。上游节点不在当前工作流时，其产物已从 bundle 中移除，按本文对应的「bundle 不含 X」分支处理。
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
+- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
+- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
+- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
 无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
@@ -35,7 +37,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-specs --feature "$
 
 ## 阶段定位
 
-`autodev-specs` 是 Dev 阶段的第一个上下文边界，负责把上游需求输入（标准链为 `PRD.md`；精简链为用户直供需求）转成稳定的行为契约。
+`autodev-specs` 是 Dev 阶段的第一个上下文边界，负责把上游需求输入转成稳定的行为契约。
 
 本阶段只回答：
 
@@ -44,9 +46,8 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-specs --feature "$
 
 本阶段不回答：
 
-- **怎么实现**：交给 `/autodev-plan` 的 `design.md`
-- **怎么拆编码任务**：交给 `/autodev-plan` 的 `PLAN.md`
-- **怎么改代码**：交给 `/autodev-code`
+- **怎么实现 / 怎么拆编码任务**：交给后续设计与计划阶段
+- **怎么改代码**：交给后续编码阶段
 
 ## 输入与输出
 
@@ -58,8 +59,7 @@ FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 
 读取输入（消费 Source Bundle）：
 
-- 按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的上游产物原件（标准链为 `{FEATURE_DIR}/PRD.md`），按其 `extract` 抽取重点。
-- 契约不含 `PRD.md` 时（如精简链 / custom 链未选 Biz 节点）：基于用户描述直接澄清行为契约，不读取也不向用户索要 PRD，不要因缺 PRD 停止。
+- 按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的上游产物原件，按其 `extract` 抽取重点；契约未列出的上游产物不读不等，按其 `degrade` 处理（如基于用户直供需求澄清行为）。
 - 用户补充说明
 - AGENTS.md 与项目约束
 - 与当前 feature 相关的现有代码、接口、数据模型、测试、配置
@@ -91,9 +91,9 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 探索时必须：
 
-- 从上游需求输入（PRD，或用户直供需求）提取目标、用户角色、主流程、验收标准、非目标。
+- 从上游需求输入提取目标、用户角色、主流程、验收标准、非目标。
 - 阅读现有代码和 AGENTS.md，识别已有接口、数据模型、权限、租户、审计、错误体、分页、状态流、配置和测试风格。
-- 将 PRD 改写为外部可观察行为，不要把实现猜测写成需求。
+- 将上游需求改写为外部可观察行为，不要把实现猜测写成需求。
 - 识别 capabilities：一组可以独立命名、独立验收的能力边界，例如 `order-export`、`approval-reminder`。
 - 如果 API 或数据边界会影响行为契约，必须先与用户讨论。不要带着关键待确认项生成 specs。
 
@@ -166,4 +166,4 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PLUGIN_WORKSPACE/$PROJECT_CODE" --feature "$FEATURE_ID"
 ```
 
-标准链下一步为 `/autodev-plan`；精简链下一步为 `/autodev-code`。
+（不预设固定下一技能，以上述脚本输出为准。）

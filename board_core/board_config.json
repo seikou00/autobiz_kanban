@@ -255,7 +255,7 @@
             { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true,
               "extract": {
                 "focus": ["已澄清的需求结论与边界", "未决问题与待确认项"],
-                "method": "把讨论稿中已确认的结论转写为正式 PRD 结构；未决问题显式保留，不要替用户补齐",
+                "method": "把讨论稿中已确认的结论转写为正式 PRD 结构；未决问题显式保留、不要替用户补齐；讨论稿尚未收敛（仍有大量 P0/P1 未解决）时先回到需求澄清",
                 "degrade": "无讨论稿时先与用户完成需求澄清，再生成 PRD"
               } }
           ],
@@ -356,7 +356,7 @@
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
                 "focus": ["每个 capability 的 Requirement / Scenario", "ADDED / MODIFIED / REMOVED 行为变化", "SHALL/MUST 约束、边界条件、失败路径", "权限/租户/审计/幂等/异步等外部可观察行为"],
-                "method": "以 specs 为最高行为依据先确认行为，再结合 design 定位实现；specs 冲突时停止并回流 /autodev-specs",
+                "method": "以 specs 为最高行为依据确认行为，不得被任务说明或代码现状覆盖；specs 冲突时停止并回流 /autodev-specs",
                 "degrade": "无 specs 时以 proposal 与用户确认的行为预期为依据，并在完成摘要中记录行为假设"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
@@ -368,13 +368,13 @@
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
                 "focus": ["Spec Traceability", "API Decisions（API-*、x-auto-no-http-api）", "Data Decisions（DATA-*、x-auto-no-sql）", "Technical Design（D-*、模块边界、集成点）", "Risks / Open Questions"],
-                "method": "把设计决策映射到接口、数据模型与模块边界，限定实现选型；design 冲突时停止并回流 /autodev-plan",
+                "method": "把设计决策映射到接口、数据模型与模块边界，限定实现选型，遵守 x-auto-no-http-api / x-auto-no-sql 等标记；design 冲突时停止并回流 /autodev-plan",
                 "degrade": "无 design 契约时基于 proposal+specs 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
               } },
             { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
               "extract": {
                 "focus": ["任务 DAG 与依赖顺序", "每个任务的做什么/规格依据/设计依据/验证方法/状态", "specs 行为覆盖与设计决策覆盖"],
-                "method": "作为执行队列逐任务推进，并就地更新任务状态与验证证据",
+                "method": "作为现成执行队列，按任务 DAG 逐项推进、不必再自行拆解；就地更新任务状态（保持 `- **状态:** 待做|进行中|完成|失败` 行格式，hook 据此识别）与验证证据",
                 "degrade": "无 PLAN 契约时从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务），逐项实现并在完成摘要中记录任务与验证结果"
               } }
           ],
