@@ -158,7 +158,7 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
             self.assertEqual(result.stderr, "")
             self.assertEqual(result.stdout, "")
 
-    def test_code_done_hook_compile_failure_logs_warning_without_blocking(self) -> None:
+    def test_code_done_hook_compile_failure_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace = make_workspace(root)
@@ -176,13 +176,17 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
                 env=plugin_env(workspace),
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stderr, "")
-            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            decision = json.loads(result.stdout)
+            self.assertEqual(decision["decision"], "block")
+            self.assertIn("模块 service 编译失败", decision["reason"])
+            self.assertIn("boom output", decision["reason"])
+            self.assertIn("code 编译未通过", decision["systemMessage"])
+            self.assertIn("请将以下编译问题展示给用户", decision["additionalContext"])
             events = read_hook_events(workspace)
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["eventId"], "code-compile")
-            self.assertEqual(events[0]["eventStatus"], "warning")
+            self.assertEqual(events[0]["eventStatus"], "blocked")
             self.assertIn("模块 service 编译失败", events[0]["message"])
             self.assertIn("boom output", events[0]["message"])
 

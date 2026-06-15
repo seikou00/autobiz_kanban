@@ -48,7 +48,7 @@
           "onBlock": {
             "reason": "状态脚本参数不合法",
             "systemMessage": "停止执行状态脚本。请删除 --workspace/-w，由插件环境决定状态路径。",
-            "additionalContext": "code_done 编译由 execute hook 非阻塞执行，模块编译清单应位于 PLUGIN_WORKSPACE/PROJECT_CODE/.autobizdevops/modules_compile.json。"
+            "additionalContext": "code_done 转移前由 execute hook 编译 PLUGIN_WORKSPACE/PROJECT_CODE/.autobizdevops/modules_compile.json 中的模块，编译失败会阻塞转移。"
           },
           "persistAfterInterrupt": true
         }
