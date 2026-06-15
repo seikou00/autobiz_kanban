@@ -1,6 +1,6 @@
 ﻿# 纯 div 核心规则
 
-本文中提到的 `SKILL.md` 均指仓库根技能 `../../../SKILL.md`。
+本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../../SKILL.md`。
 
 当处理纯 div 或绝对定位 HTML 时，把这份文件作为默认的小模型参考。
 
@@ -15,12 +15,12 @@
 1. 运行 `prepare_html_analysis.py`（必填参数 `--project-root` / `--task-stem` / `--html-file`，完整命令以 `SKILL.md §4` 为准）：
    - 仓库根目录：
      ```
-     python route/with-absolute-html/scripts/prepare_html_analysis.py \
+     python deps/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
        --project-root . \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>
      ```
-   - `route/with-absolute-html/` 目录：
+   - `deps/frontend-html/with-absolute-html/` 目录：
      ```
      python scripts/prepare_html_analysis.py \
        --project-root ../.. \

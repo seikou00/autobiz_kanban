@@ -305,7 +305,37 @@ class ArtifactScanTests(unittest.TestCase):
                 ],
             )
 
-    def test_scan_rejects_non_specs_glob_paths(self) -> None:
+    def test_scan_frontend_html_glob_returns_all_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            (feature_dir / "frontend-html" / "page").mkdir(parents=True)
+            (feature_dir / "frontend-html" / "page" / "index.html").write_text("html", encoding="utf-8")
+            (feature_dir / "frontend-html" / "page" / "style.css").write_text("css", encoding="utf-8")
+
+            artifacts = scan_artifacts(
+                feature_dir,
+                workspace,
+                [{"id": "frontend_html", "label": "前端HTML输入", "path": "frontend-html/**/*"}],
+            )
+
+            self.assertEqual(
+                artifacts,
+                [
+                    {
+                        "id": "frontend_html",
+                        "artifactLabel": "前端HTML输入",
+                        "paths": [
+                            ".autobizdevops/features/alpha/frontend-html/page/index.html",
+                            ".autobizdevops/features/alpha/frontend-html/page/style.css",
+                        ],
+                        "artifactStatus": "generated",
+                        "artifactStatusLabel": "已生成",
+                    }
+                ],
+            )
+
+    def test_scan_rejects_unknown_glob_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"

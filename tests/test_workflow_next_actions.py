@@ -24,7 +24,9 @@ class WorkflowNextActionsTest(unittest.TestCase):
         action = next_action("biz.prd", "done")
 
         self.assertEqual(action["slashSkill"], "autodev")
-        self.assertIn("路由到行为规格", action["dialogTips"])
+        self.assertIn("下一步进入行为规格", action["dialogTips"])
+        self.assertIn("autodev-code", action["dialogTips"])
+        self.assertNotIn("autodev-frontend", action["dialogTips"])
         self.assertNotIn("初始化代码工作区 AGENTS.md", action["dialogTips"])
 
     def test_system_prompt_inject_distinguishes_workspace_and_feature_dir(self) -> None:

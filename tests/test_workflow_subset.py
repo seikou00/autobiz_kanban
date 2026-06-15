@@ -46,10 +46,10 @@ class CompileNodeSubsetTest(unittest.TestCase):
         )
         self.assertEqual(effective["workflow"]["checkpoints"], base["workflow"]["checkpoints"])
 
-    def test_profile_and_decision_compiles_still_work(self) -> None:
+    def test_standard_profile_and_decision_compiles_still_work(self) -> None:
         base = base_config()
-        frontend = compile_board_config(copy.deepcopy(base), repo_root=ROOT, profile="frontend_before_specs")
-        self.assertIn("dev.frontend", [node["id"] for node in frontend["workflow"]["nodes"]])
+        standard = compile_board_config(copy.deepcopy(base), repo_root=ROOT, profile="standard")
+        self.assertNotIn("dev.frontend", [node["id"] for node in standard["workflow"]["nodes"]])
 
         detail = compile_board_config(
             copy.deepcopy(base),
@@ -70,7 +70,7 @@ class CompileNodeSubsetTest(unittest.TestCase):
             effective["workflowDroppedInputs"],
             {
                 "dev.specs": ["PRD.md"],
-                "dev.code": ["PRD.md", "design.md", "PLAN.md"],
+                "dev.code": ["PRD.md", "design.md", "PLAN.md", "frontend-html/**/*"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )
@@ -110,7 +110,16 @@ class SolveNodeClosureTest(unittest.TestCase):
         self.assertEqual(result.added, ())
         self.assertEqual(
             result.dropped,
-            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md")},
+            {
+                "dev.code": (
+                    "proposal.md",
+                    "specs/**/*.md",
+                    "PRD.md",
+                    "design.md",
+                    "PLAN.md",
+                    "frontend-html/**/*",
+                )
+            },
         )
         self.assertEqual(result.entry_nodes, ("dev.code",))
         self.assertEqual(
@@ -136,7 +145,7 @@ class SolveNodeClosureTest(unittest.TestCase):
         # With specs+plan selected, dev.code keeps every required input and
         # only loses the optional PRD.md reference — dropped, but not an entry.
         result = solve_node_closure(base_config(), ["dev.specs", "dev.plan", "dev.code"])
-        self.assertEqual(result.dropped["dev.code"], ("PRD.md",))
+        self.assertEqual(result.dropped["dev.code"], ("PRD.md", "frontend-html/**/*"))
         self.assertEqual(result.entry_nodes, ("dev.specs",))
 
     def test_auto_include_pulls_producers_transitively(self) -> None:
@@ -215,7 +224,7 @@ class WorkflowTemplateTest(unittest.TestCase):
         with self.assertRaises(BoardConfigError):
             load_record_workflow_contracts(
                 ROOT,
-                {"workflowProfile": "frontend_before_specs", "workflowTemplate": "lean"},
+                {"workflowProfile": "legacy_frontend", "workflowTemplate": "lean"},
             )
         with self.assertRaises(BoardConfigError):
             load_record_workflow_contracts(
