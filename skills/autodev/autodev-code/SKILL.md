@@ -1,6 +1,6 @@
 ---
 name: autodev-code
-description: 按工作流契约逐任务执行代码。消费契约 Source Bundle 列出的 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不属于本工作流，不读不等。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
+description: 按工作流契约逐任务执行代码，并在 code 阶段内部处理可选前端 HTML 实现分支。消费契约 Source Bundle 列出的 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不属于本工作流，不读不等。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
 version: v1.1.1604
 ---
 
@@ -36,6 +36,29 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{
 输出：业务代码 / 测试 / 配置的最小必要修改；刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
 补充上下文（存在即读，非契约硬依赖）：`{FEATURE_DIR}/DETAIL_DESIGN.md`、`{CODE_WORKSPACE}/AGENTS.md`（与本技能冲突时以 AGENTS.md 为准，除非系统级指令另有要求）。
+
+## 前端 HTML 实现分支
+
+HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不再产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能统一收尾推进到 `code_done`。
+
+触发条件：
+
+- Source Bundle 中存在 `frontend_html`，且 `{FEATURE_DIR}/frontend-html/**/*` 至少有一个真实 HTML/CSS/JS/资源文件。
+- 或 `PLAN.md` / specs / 用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
+
+执行优先级：
+
+1. 行为契约以 `specs/**/*.md` 为最高依据。
+2. 技术边界以 `design.md` 与 `PLAN.md` 为实现依据。
+3. `frontend_html` 只提供页面结构、视觉布局、组件槽位与交互线索，不得覆盖 specs/design/PLAN。
+4. 如果任务明确要求高保真 HTML 转换但没有可读取 HTML，停止并要求补充 HTML；如果任务可由 specs/design/PLAN 直接实现，则按 `frontend_html.extract.degrade` 跳过。
+
+内部分流：
+
+- 绝对定位 / 高保真 / Figma 或低代码导出的 HTML：读取 `deps/frontend-html/with-absolute-html/SKILL.md`，再按其 `deps/html-parser.md` 执行。
+- 标准 DOM / 语义结构清晰 / 普通静态 HTML / HTML 转 React：读取 `deps/frontend-html/with-standard-html/SKILL.md`，再按其 `deps/standard-html-parser.md` 执行。
+
+该分支完成后回到本文件的「执行协议」与「完成条件」：更新真实业务代码、执行必要验证、按 code 节点规则推进。
 
 ## 准入检查
 

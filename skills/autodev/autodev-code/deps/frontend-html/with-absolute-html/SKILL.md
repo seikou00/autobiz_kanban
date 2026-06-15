@@ -1,6 +1,6 @@
 ---
-name: route-with-absolute-html
-description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义绝对定位 / 碎片 div / Figma 导出类 HTML 的适用条件、读取顺序、转交给本目录 `deps/html-parser.md` 的时机，以及失败兜底方式。
+name: code-frontend-with-absolute-html
+description: code 阶段内部处理绝对定位高保真 HTML 的路线。它负责定义绝对定位 / 碎片 div / Figma 导出类 HTML 的适用条件、读取顺序、转交给本目录 `deps/html-parser.md` 的时机，以及失败兜底方式。
 ---
 
 **路径变量约定（必须区分）：**
@@ -13,17 +13,17 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
 
 # 绝对定位高保真 HTML 路线
 
-这是独立的绝对定位高保真 HTML route 技能目录。
+这是 `/autodev-code` 内部的绝对定位高保真 HTML 实现路线目录。
 
 - 当前 route 技能入口：`SKILL.md`
 - 当前 route 技能依赖：`deps/`
 - 当前 route 技能参考：`references/`
 - 当前 route 技能脚本：`scripts/`
 
-本文中提到的 `SKILL.md` 均指仓库根技能 `../../SKILL.md`。
+本文中提到的 `SKILL.md` 均指 code 根技能 `../../../SKILL.md`。
 命令示例兼容两种工作目录：
-- 如果当前目录是 `SKILL_ROOT`（`autodev-frontend` 技能根目录），使用 `route/with-absolute-html/scripts/...`
-- 如果当前目录已经是 `route/with-absolute-html/`，使用 `scripts/...`
+- 如果当前目录是 `autodev-code` 技能根目录，使用 `deps/frontend-html/with-absolute-html/scripts/...`
+- 如果当前目录已经是 `deps/frontend-html/with-absolute-html/`，使用 `scripts/...`
 
 ## 1. 这条路线什么时候使用
 
@@ -59,7 +59,7 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
 
 本文件只负责：总原则、读取顺序、转交给 `deps/html-parser.md` 的时机、失败兜底。
 
-它不展开实现细则，不替代根技能 `../../SKILL.md` 的全局优先级，也不重复 `deps/html-parser.md` 的执行规则。
+它不展开实现细则，不替代 code 根技能 `../../../SKILL.md` 的全局优先级，也不重复 `deps/html-parser.md` 的执行规则。
 
 ## 3. 路线总原则
 
@@ -128,12 +128,12 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
 2. **默认必跑 `prepare_html_analysis.py`。** 使用完整命令模板，参数齐全后再执行：
    - `SKILL_ROOT` 目录：
      ```
-     python route/with-absolute-html/scripts/prepare_html_analysis.py \
+     python deps/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
        --project-root . \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>
      ```
-   - `route/with-absolute-html/` 目录：
+   - `deps/frontend-html/with-absolute-html/` 目录：
      ```
      python scripts/prepare_html_analysis.py \
        --project-root ../.. \
@@ -159,7 +159,7 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
    - `hasManifest=true`：表示脚本产物可用，但它们只是辅助。
    - `hasManifest=false`：表示脚本失败，后续完全以原始 HTML 为主。
 6. 完成主线代码生成、页面拆分 / 抽取与最低校验。
-7. 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明"已跳过 Stage 1 脚本及原因"），再立刻确认是否进入 `../review/SKILL.md`；具体询问格式与强制动作遵循 `deps/html-parser.md` 末尾"汇报后的强制动作"，未获用户答复前停止，不自动继续。
+7. 主线完成后输出交付总结（若走降级路径，须在总结里显式声明"已跳过 Stage 1 脚本及原因"），然后返回 `/autodev-code` 主流程，按 code 节点收尾规则推进到 `code_done`。
 
 ## 5. 转交规则
 
@@ -203,7 +203,6 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
 
 | 文件 | 一句话职责 |
 | --- | --- |
-| `../../SKILL.md` | 总入口 + 全局优先级与执行清单 |
+| `../../../SKILL.md` | `/autodev-code` 总入口 + 全局优先级与执行清单 |
 | `SKILL.md` | 绝对定位高保真 HTML route 入口、读取顺序与转交规则 |
 | `deps/html-parser.md` | 真正把路走完（分类、整页恢复、组件替换、写代码） |
-| `../review/SKILL.md` | 用户确认后进入回检路由 |

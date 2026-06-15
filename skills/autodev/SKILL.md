@@ -9,11 +9,10 @@ version: v1.1.1604
 ### 技能映射
 | 阶段 | 调用 Skill | 本工程文件 |
 |------|------------|------------|
-| Frontend（`frontend_before_specs` profile） | `/autodev-frontend`（内部按标准 HTML / 绝对定位 HTML 分流，用户确认后可 review） | `autodev/autodev-frontend/SKILL.md` |
 | Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
 | Detail Design（dynamic stage） | `/autodev-detail-design` | `autodev/autodev-detail-design/SKILL.md` |
-| Code | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
+| Code（含可选前端 HTML 实现分支） | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
 | Requirements Review | `/autodev-reviewer` | `autodev/autodev-reviewer/SKILL.md` |
 | Unit Test | `/autodev-utest` | `autodev/autodev-utest/SKILL.md` |
 | E2E | `/autodev-e2e` | `autodev/autodev-e2e/SKILL.md` |
@@ -23,26 +22,24 @@ version: v1.1.1604
 
 ```text
 prd_done → resolve_next_skill.py --json
-            ├── standard → /autodev-specs
-            └── frontend_before_specs → /autodev-frontend
-                                      ├── 高保真/绝对定位 HTML → route/with-absolute-html
-                                      └── 普通静态/拷贝 HTML → route/with-standard-html
-                                             ↓
-                                      /autodev-specs
-                                             ↓
-	                                      /autodev-plan
-	                                             ↓
-	                         plan_done → detail_design_before_code choice
-	                                      ├── enabled → /autodev-detail-design
-	                                      └── skipped → /autodev-code
-	                                             ↓
-	                                      /autodev-reviewer
-                                             ↓
-                                      /autodev-utest
-                                             ↓
-                                      /autodev-e2e
-                                             ↓
-                                      /autodev-verify
+            ↓
+          /autodev-specs
+            ↓
+          /autodev-plan
+            ↓
+plan_done → detail_design_before_code choice
+            ├── enabled → /autodev-detail-design
+            └── skipped → /autodev-code
+                         ├── 可选前端 HTML → deps/frontend-html/with-absolute-html
+                         └── 可选前端 HTML → deps/frontend-html/with-standard-html
+            ↓
+          /autodev-reviewer
+            ↓
+          /autodev-utest
+            ↓
+          /autodev-e2e
+            ↓
+          /autodev-verify
 ```
 
 
@@ -81,12 +78,6 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
 ```
 
-若脚本返回 `requiresProfileChoice: true`，按用户表达选择是否需要 HTML 转前端：
-
-- 用户说 `/autodev-frontend`、需要进入、需要先转 HTML、先把设计稿转工程文件、HTML 转 React、静态 HTML 转前端代码、按 PRD 先做前端页面等，视为需要转换或前端先行实现：推进到 `frontend_in_progress`，并传入 `--workflow-profile frontend_before_specs`。
-- 用户说不需要、直接进规格、先走 `autodev-specs` 等，视为不需要转换：推进到 `specs_in_progress`。
-- 如果用户只触发 `/autodev`，且没有表达需要或不需要，简短询问：`是否需要先将 HTML 转换为项目内前端工程文件？需要则进入 autodev-frontend，并在该节点内按标准 HTML 或绝对定位高保真 HTML 分流；不需要则直接进入 autodev-specs 阶段。`
-
 若脚本返回 `requiresWorkflowChoice: true`，读取 `workflowChoices` 中的 `stageId`、`decision` 和 `targetCheckpoint`，按用户表达选择 dynamic stage：
 
 - 对 `detail_design_before_code`，用户说需要详细设计、先出详细设计、code 前设计等，视为启用：推进到 `detail_design_in_progress`，并传入 `--workflow-decision detail_design_before_code=enabled`。
@@ -116,7 +107,6 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_
 
 使用 `resolve_next_skill.py --json` 的返回结果路由：
 
-- `requiresProfileChoice: true`：先完成 workflow profile 选择并写入 checkpoint。
 - `requiresWorkflowChoice: true`：先完成 dynamic stage 选择，使用 `--workflow-decision {stageId}=enabled|skipped` 写入 state.json 后再路由。
 - `recommendedNextSkill` 非空：调用对应子技能，所有非终止状态默认将 `/ARGUMENTS` 透传至子技能。
 - `recommendedNextSkill` 为空且当前 checkpoint 为 `verify_done`：Dev 阶段结束，进入 Ops。
@@ -143,21 +133,21 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan --json
 
 ---
 
-## 4. HTML 转前端（`frontend_before_specs` profile）
+## 4. 前端 HTML 实现归属
 
-在 `prd_done` checkpoint 进入 Dev 阶段时，若 `resolve_next_skill.py --json` 返回 `requiresProfileChoice: true`：
+HTML 转前端现在归属 `/autodev-code`，作为 code 阶段的内部实现分支：
 
-1. 根据用户表达判断是否需要将 HTML 转换为项目内工程文件；若不明确，使用上面的简短问题确认。
-2. 不需要转换时，推进到 `specs_in_progress` 并进入 `/autodev-specs`。
-3. 需要转换时，使用 `--workflow-profile frontend_before_specs` 推进到 `frontend_in_progress`，进入 `/autodev-frontend` 这个工作流节点。
-4. 工作流节点内按输入形态分流：高保真/绝对定位/Figma 导出的 HTML 走 `/autodev-frontend` 的 `route/with-absolute-html/SKILL.md`；普通静态 HTML、复制的 DOM 片段、小型静态站点或用户明确说 HTML 转 React 时，走 `route/with-standard-html/SKILL.md`；主线完成且用户明确确认后，才走 `route/review/SKILL.md`。
-5. 任一入口完成后都推进到 `frontend_done`，根路由器再次刷新状态并进入 `/autodev-specs`。
+1. `/autodev` 不再路由到 `/autodev-frontend`，也不再写入 `frontend_in_progress` / `frontend_done`。
+2. `prd_done` 后统一进入 `/autodev-specs`，先沉淀行为契约。
+3. 若 `{FEATURE_DIR}/frontend-html/**/*` 存在，或 PLAN/specs/用户任务要求根据 HTML 实现前端，`/autodev-code` 读取 `frontend_html` 可选输入。
+4. code 阶段内部按 HTML 形态分流：高保真/绝对定位/Figma 导出的 HTML 走 `autodev-code/deps/frontend-html/with-absolute-html/SKILL.md`；普通静态 HTML、复制 DOM、小型静态站点或 HTML 转 React 走 `autodev-code/deps/frontend-html/with-standard-html/SKILL.md`。
+5. 任一分支完成后都回到 `/autodev-code` 主流程，按 code 节点完成条件推进 `code_done`。
 
 ### 约束
 
-- HTML / PRD 转前端是 `frontend_before_specs` profile 的正式 Dev 节点，不是停留在 `prd_done` 的无状态临时步骤；具体路线由 `/autodev-frontend` 内部 route 目录负责。
-- 转换不影响 Specs 阶段的输入产物要求，`PRD.md` 仍为 `/autodev-specs` 的必需输入。
-- 未选择 `frontend_before_specs` 时，不得直接调用 `/autodev-frontend` 或其内部 route 绕过 workflow profile。
+- HTML 只是 code 阶段的视觉与结构输入，不得覆盖 specs/design/PLAN。
+- 缺少 HTML 但任务明确要求高保真转换时，由 `/autodev-code` 停止并要求补充；可由 specs/design/PLAN 直接实现时跳过 HTML 分支。
+- 不得再直接调用 `/autodev-frontend` 或写入旧 frontend checkpoint。
 
 ---
 
@@ -180,7 +170,7 @@ Dev 阶段的可选步骤由 `{PLUGIN_ROOT}/board_core/board_config.json` 的 `w
 
 - dynamic stage 必须先在 board_config 的 `workflow.dynamicStages` 声明，不得由根 skill 临时发明节点。
 - 未写入对应 `workflowDecisions` 时，不得直接跳入动态节点 checkpoint。
-- 已启用的 dynamic stage 与 `workflowProfile` 叠加生效；例如先走过 `frontend_before_specs` 的 Feature，启用详细设计后仍必须保留 frontend 节点历史。
+- 已启用的 dynamic stage 只通过 `workflowDecisions` 生效；前端 HTML 实现不再作为 workflowProfile 叠加节点。
 
 ---
 

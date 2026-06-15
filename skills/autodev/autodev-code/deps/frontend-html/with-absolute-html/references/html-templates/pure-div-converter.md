@@ -13,7 +13,7 @@ description: >
 
 # 纯 div 无语义元素 HTML 转换规则
 
-本文中提到的 `SKILL.md` 均指仓库根技能 `../../../SKILL.md`。
+本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../../SKILL.md`。
 
 当用户提供的 HTML 所有元素都是 `<div>`，没有 `<span>`、`<button>`、`<input>` 等语义元素时，通过 className、内联样式、嵌套关系、文字内容综合判断元素类型，进行语义推断转换。
 
@@ -27,9 +27,9 @@ description: >
 
 ```bash
 # 仓库根目录执行
-python route/with-absolute-html/scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
+python deps/frontend-html/with-absolute-html/scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
 
-# route/with-absolute-html/ 目录执行
+# deps/frontend-html/with-absolute-html/ 目录执行
 python scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
 ```
 
