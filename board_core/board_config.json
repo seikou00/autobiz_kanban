@@ -74,7 +74,7 @@
             "skill": "autodev-frontend",
             "insertBefore": "dev.specs",
             "checkpointPrefix": "frontend",
-            "description": "基于 PRD 与 HTML 进行前端实现，并在 autodev-frontend 内部按标准 HTML 或绝对定位高保真 HTML 分流",
+            "description": "基于 PRD 与 HTML 进行前端实现，并在 autodev-frontend 内部按标准 HTML 或绝对定位高保真 HTML 分流 \n 产物：项目内前端工程文件（无独立文档产物）",
             "artifacts": {
               "inputs": [
                 { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
@@ -114,7 +114,7 @@
             "label": "详细设计",
             "skill": "autodev-detail-design",
             "checkpointPrefix": "detail_design",
-            "description": "生成代码实现前的文件级详细设计",
+            "description": "生成代码实现前的文件级详细设计 \n 产物：DETAIL_DESIGN.md（文件级详细设计：到文件的修改方案）",
             "artifacts": {
               "inputs": [
                 { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
@@ -222,7 +222,7 @@
         "group": "Biz",
         "skill": "autobiz-requirement-discuss",
         "order": 10,
-        "description": "沉淀需求讨论稿",
+        "description": "沉淀需求讨论稿 \n 产物：PRD_DISCUSS.md（需求讨论稿：澄清结论、边界与待确认项）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清。" } },
@@ -246,7 +246,7 @@
         "group": "Biz",
         "skill": "autobiz-prd-generate",
         "order": 20,
-        "description": "生成正式 PRD 文档",
+        "description": "生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
@@ -277,7 +277,7 @@
         "group": "Dev",
         "skill": "autodev-specs",
         "order": 30,
-        "description": "生成 proposal 与行为规格",
+        "description": "生成 proposal 与行为规格 \n 产物：proposal.md（变更提案：本轮目标、范围与非目标）、specs/**/*.md（行为规格：各能力 Requirement/Scenario 契约）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "当前阶段：行为规格。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "当前阶段：行为规格。" } },
@@ -306,7 +306,7 @@
         "group": "Dev",
         "skill": "autodev-plan",
         "order": 40,
-        "description": "生成技术设计和执行计划",
+        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、PLAN.md（执行计划：任务 DAG 与各任务依据/验证/状态）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
@@ -341,7 +341,7 @@
         "group": "Dev",
         "skill": "autodev-code",
         "order": 50,
-        "description": "根据规格、设计和计划实现代码",
+        "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码（本轮新增/修改的代码，按 PLAN 就地更新任务状态；无独立文档产物）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
@@ -393,7 +393,7 @@
         "group": "Dev",
         "skill": "autodev-reviewer",
         "order": 60,
-        "description": "评审代码实现是否满足规格",
+        "description": "评审代码实现是否满足规格 \n 产物：REQUIREMENTS_EVAL.md（需求实现评审报告：实现对规格的覆盖结论与发现项）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-reviewer", "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。", "dialogTips": "当前阶段：需求实现评审。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-reviewer", "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。", "dialogTips": "当前阶段：需求实现评审。" } },
@@ -445,7 +445,7 @@
         "group": "Dev",
         "skill": "autodev-utest",
         "order": 70,
-        "description": "单元测试生成、验证与最小修复",
+        "description": "单元测试生成、验证与最小修复 \n 产物：UNIT_TEST_REPORT.md（单元测试报告：用例结果、覆盖与风险）、test-output.log（单测运行原始输出日志）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } },
@@ -504,7 +504,7 @@
         "group": "Dev",
         "skill": "autodev-e2e",
         "order": 80,
-        "description": "端到端测试",
+        "description": "端到端测试 \n 产物：E2E_TEST_CASES.yaml（E2E 测试用例：步骤与断言定义）、E2E_REPORT.md（E2E 测试报告：执行结论与失败项）、e2e-run.log（E2E 运行原始日志）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
@@ -576,7 +576,7 @@
         "group": "Dev",
         "skill": "autodev-verify",
         "order": 90,
-        "description": "验收汇总",
+        "description": "验收汇总 \n 产物：VERIFY_REPORT.md（验收报告：逐项行为验收汇总与最终结论）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-verify", "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。", "dialogTips": "当前阶段：验收汇总。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-verify", "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。", "dialogTips": "当前阶段：验收汇总。" } },
@@ -652,7 +652,7 @@
         "group": "Ops",
         "skill": "autoops-cicd",
         "order": 100,
-        "description": "CI/CD 流水线和 PR 准备",
+        "description": "CI/CD 流水线和 PR 准备 \n 产物：CICD_CHECKLIST.md（CI/CD 清单：流水线与交付检查项）、PR_BODY.md（PR 描述正文：变更说明与风险，可选）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autoops-cicd", "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。", "dialogTips": "当前阶段：CI/CD。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autoops-cicd", "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。", "dialogTips": "当前阶段：CI/CD。" } },
@@ -693,7 +693,7 @@
         "group": "Ops",
         "skill": "autoops-archive",
         "order": 110,
-        "description": "Feature 归档",
+        "description": "Feature 归档 \n 产物：归档记录（状态置为 archived，无独立文档产物）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autoops-archive", "userMessage": "请使用 /autoops-archive 继续推进当前 Feature。", "dialogTips": "当前阶段：归档。" } },
           { "nodeStatus": "archived", "label": "已归档", "nextAction": { "slashSkill": "autoops-archive", "userMessage": "请使用 /autoops-archive 查看当前 Feature 的归档状态。", "dialogTips": "当前阶段：归档。" } }
