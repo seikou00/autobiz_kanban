@@ -102,7 +102,8 @@ class SkipNodeCliTests(unittest.TestCase):
 
             self.assertEqual(code, 1)
             self.assertFalse(payload["ok"])
-            self.assertTrue(any("未知节点" in error for error in payload["errors"]), payload)
+            self.assertIsInstance(payload["message"], str)
+            self.assertIn("未知节点", payload["message"])
 
     def test_invalid_workspace_returns_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

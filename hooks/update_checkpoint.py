@@ -652,6 +652,7 @@ def write_result_json(
     checkpoint: str,
     dry_run: bool,
     skip_nodes: list[str] | None = None,
+    errors_as_message: bool = False,
 ) -> None:
     payload = {
         "ok": result.ok,
@@ -664,8 +665,12 @@ def write_result_json(
         "workflow_profile": result.workflow_profile,
         "workflow_decisions": result.workflow_decisions or {},
         "dry_run": dry_run,
-        "errors": list(result.errors),
     }
+    if errors_as_message:
+        # 前端直调（skip_node.py）取用 message 字符串，便于直接展示
+        payload["message"] = "\n".join(result.errors)
+    else:
+        payload["errors"] = list(result.errors)
     if skip_nodes:
         payload["skip_nodes"] = list(skip_nodes)
     print(json.dumps(payload, ensure_ascii=False, indent=2))

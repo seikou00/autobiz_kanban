@@ -57,7 +57,19 @@ def main(argv: list[str] | None = None) -> int:
         help="要跳过的工作流节点 id（如 dev.utest）；可重复",
     )
     parser.add_argument("--dry-run", action="store_true", help="只校验不写入")
-    parser.add_argument("--json", action="store_true", help="输出 JSON 结果")
+    parser.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        default=True,
+        help="输出 JSON 结果（默认开启，前端直调使用）",
+    )
+    parser.add_argument(
+        "--no-json",
+        dest="json",
+        action="store_false",
+        help="改为输出人类可读文本（默认 JSON）",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     try:
@@ -89,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint=result.new_checkpoint or "",
             dry_run=args.dry_run,
             skip_nodes=args.skip_node,
+            errors_as_message=True,
         )
     elif not result.ok:
         print("skip 失败:", file=sys.stderr)

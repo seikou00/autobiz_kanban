@@ -10,7 +10,7 @@
       "plugin_dir_hook": "${pluginWorkspace}/${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
-      "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId} --json"
+      "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}"
     },
     "linux": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -21,7 +21,7 @@
       "plugin_dir_hook": "${pluginWorkspace}/${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
-      "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId} --json"
+      "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}"
     },
     "win32": {
       "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -32,7 +32,7 @@
       "plugin_dir_hook": "${pluginWorkspace}\\${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python3 ${pluginPath}\\hooks\\inspect_workflow_templates.py",
-      "skip_node": "python3 ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId} --json"
+      "skip_node": "python3 ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}"
     }
   },
   "workflow": {
