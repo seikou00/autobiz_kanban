@@ -4,22 +4,14 @@ description: 按工作流契约逐任务执行代码。消费契约 Source Bundl
 version: v1.1.1604
 ---
 
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
-
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-code --feature "$FEATURE_ID" --json
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{FEATURE_ID}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
@@ -29,7 +21,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-code --feature "$F
 - **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
-无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -50,7 +42,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-code --feature "$F
 确定 `{slug}` 后，先读快照并捕获 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 `CHECKPOINT` 为空、未知或无法唯一确定当前 Feature → 停止并请用户选择。确认 `{FEATURE_DIR}/` 存在。
@@ -75,8 +67,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 开始编码前推进到 `code_in_progress`：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint code_in_progress
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_in_progress
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 ## 执行协议
@@ -112,8 +104,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 队列无「待做」「进行中」后，跑项目级验证（优先 AGENTS.md / 契约指定命令；Java/Maven 至少编译）。失败回到相关任务，不推进。通过后：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint code_done
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_done
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 ## 写入边界
@@ -133,5 +125,5 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 **Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PLUGIN_WORKSPACE/$PROJECT_CODE" --feature "$FEATURE_ID"
+python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PLUGIN_WORKSPACE}/{PROJECT_CODE}" --feature "{FEATURE_ID}"
 ```

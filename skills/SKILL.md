@@ -4,14 +4,6 @@ description: 完成项目研发的全流程，按 biz / dev / ops 三个可独�
 version: v1.1.1604
 ---
 
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
-
 # 核心工作原则
 
 - 根工作目录总入口，分为 `biz`、`dev`、`ops` 三个阶段。完整链路 `biz -> dev -> ops`，每个阶段执行完成后必须由用户确认后继续执行。
@@ -62,20 +54,20 @@ version: v1.1.1604
 
 ```bash
 # 已知 Feature
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 # 未知 Feature：先读取全部 records，再选择或要求用户选择 Feature
-python "$PLUGIN_ROOT/read_state_json.py"
+python "{PLUGIN_ROOT}/read_state_json.py"
 ```
 
 只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
 
 ### 动态路由读取
 
-所有根路由判断必须以 `$PLUGIN_ROOT/board_core/board_config.json` 编译后的有效 workflow 为准：
+所有根路由判断必须以 `{PLUGIN_ROOT}/board_core/board_config.json` 编译后的有效 workflow 为准：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
+python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
 ```
 
 - `currentNodeId` 所属 group 为 `Biz` 时，进入 `/autobiz`。
@@ -88,7 +80,7 @@ python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_D
 所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转和 Autodev 产物校验；进入 `code_done` 时，execute hook 会基于 `.autobizdevops/modules_compile.json` 非阻塞执行编译并写入 hook 日志，编译失败不阻止 checkpoint 更新。
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint {checkpoint}
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint {checkpoint}
 ```
 
 静态 checkpoint 表不得作为事实源；如本文与 `resolve_next_skill.py --json` 输出冲突，以脚本输出为准。

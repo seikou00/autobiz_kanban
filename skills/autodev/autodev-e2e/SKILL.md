@@ -21,11 +21,11 @@ FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-e2e --feature "$FEATURE_ID" --json
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-e2e --feature "{FEATURE_ID}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
@@ -35,7 +35,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-e2e --feature "$FE
 - **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
-无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -44,7 +44,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-e2e --feature "$FE
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 后续准入、恢复和分支决策直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
@@ -67,18 +67,18 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 开始 E2E 前推进到 `e2e_in_progress`，写入后立即刷新 `CHECKPOINT`：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 E2E 通过后推进到 `e2e_done`；若存在明确失败并需要回流，推进到 `needs_fix`。每次写入后都必须刷新 `CHECKPOINT`：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint e2e_done
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint e2e_done
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint needs_fix
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint needs_fix
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```

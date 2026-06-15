@@ -8,11 +8,11 @@ author: zhangQiuFeng
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autoops-archive --feature "$FEATURE_ID" --json
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autoops-archive --feature "{FEATURE_ID}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
@@ -22,17 +22,8 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autoops-archive --feature 
 - **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
-无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
-
-
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
 
 # /autoops-archive — Feature 过程归档
 
@@ -54,7 +45,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autoops-archive --feature 
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 后续准入和恢复直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
@@ -70,7 +61,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 `iter{N}` 的确定规则：
 
-1. 先调用 `python "$PLUGIN_ROOT/read_state_json.py"` 读取全量 JSON，优先取 `STATE.records[{FEATURE_ID}].iteration`；若为有效数字则作为起始候选。
+1. 先调用 `python "{PLUGIN_ROOT}/read_state_json.py"` 读取全量 JSON，优先取 `STATE.records[{FEATURE_ID}].iteration`；若为有效数字则作为起始候选。
 2. 若迭代列为空或不是数字，则从 `1` 开始。
 3. 若 `.autobizdevops/archive/{slug}-iter{N}/` 已存在，递增 N，直到找到不存在的目录。
 4. 禁止覆盖、合并或删除已有归档目录。
@@ -97,8 +88,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `archived`，并写入归档迭代号：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint archived --iteration "{N}"
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint archived --iteration "{N}"
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 只允许更新当前 `{slug}` 对应的 Feature 行，不得删除该行，不得改写其他 Feature 状态。

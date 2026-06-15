@@ -4,14 +4,6 @@ description: Autoops Ops 阶段根路由器。基于 checkpoint 路由到 CI/CD 
 version: v1.1.1604
 ---
 
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
-
 # /autoops — Ops 阶段根路由器
 
 ## 技能映射
@@ -48,13 +40,13 @@ version: v1.1.1604
 - 否则先读取全部 State 快照，再从 `STATE.records` 优先选择单一进行中的 Feature；无法唯一确定时列出候选并让用户选择：
 
 ```bash
-python "$PLUGIN_ROOT/read_state_json.py"
+python "{PLUGIN_ROOT}/read_state_json.py"
 ```
 
 确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。
@@ -62,14 +54,14 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
+python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
 ```
 
 ---
 
 ## 2. Checkpoint 路由
 
-使用 Step 1.2 获取的 `CHECKPOINT` 和 `resolve_next_skill.py --json` 的返回结果路由。`recommendedNextSkill`、`allowedNextCheckpoints` 与 `nextAction` 均以 `$PLUGIN_ROOT/board_core/board_config.json` 的有效 workflow 为准。
+使用 Step 1.2 获取的 `CHECKPOINT` 和 `resolve_next_skill.py --json` 的返回结果路由。`recommendedNextSkill`、`allowedNextCheckpoints` 与 `nextAction` 均以 `{PLUGIN_ROOT}/board_core/board_config.json` 的有效 workflow 为准。
 
 - `recommendedNextSkill` 为 `autoops-cicd` 或 `autoops-archive` 时，调用对应子技能。
 - `checkpoint` 为 `archived` 时，Ops 终态，提示已归档并输出归档位置（如可定位）。

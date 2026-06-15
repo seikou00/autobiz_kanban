@@ -3,15 +3,6 @@ name: autodev-detail-design
 description: Autodev dynamic detailed design node. When the `detail_design_before_code` workflow decision is enabled at `plan_done`, use after /autodev-plan and before /autodev-code to write `DETAIL_DESIGN.md` with file-level change design, implementation logic, and overall flow. This skill updates detail_design checkpoints but must not modify business code.
 version: v1.1.1604
 ---
-**路径变量约定（必须区分）：**
-
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 $PLUGIN_ROOT/...。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 .autobizdevops/state.json。
-- **PROJECT_CODE**：当前项目目录名；PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}，必须包含 .autobizdevops/state.json。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 --feature 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}；只用于读写 PRD、proposal、specs、design、PLAN、DETAIL_DESIGN、报告等 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索，不得在本 skill 中修改业务代码。
-
 # /autodev-detail-design - 详细计划
 
 ## 阶段定位
@@ -41,19 +32,19 @@ autodev-detail-design 是 `detail_design_before_code` dynamic stage 启用后的
 确定 {FEATURE_ID} 后，读取当前 Feature 快照判断是否已进入本动态节点：
 
 ```
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 如当前 checkpoint 仍为 `plan_done` 且用户选择需要详细设计，先使用统一状态脚本启用 dynamic stage 并进入本节点：
 
 ```
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled
 ```
 
 可查看动态节点契约：
 
 ```
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --json
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --json
 ```
 
 读取输入（消费 Source Bundle）：
@@ -156,7 +147,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-detail-design --wo
 - 文件改动清单覆盖 `PLAN.md` 中所有待编码任务，或明确说明某任务无需文件改动。
 - 每个文件级改动都能追溯到 specs、design 或 PLAN。
 - 仍不确定的路径、字段、接口、权限、数据或状态流已标为待确认。
-- 已调用 `python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
+- 已调用 `python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
 
 **Skill 完成。** 下一步通常是继续 `/autodev-code`。
 

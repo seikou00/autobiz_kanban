@@ -4,22 +4,14 @@ description: Dev 阶段技术设计与执行计划生成。按上游产物契约
 version: v1.1.1604
 ---
 
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
-
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --feature "$FEATURE_ID" --json
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan --feature "{FEATURE_ID}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
@@ -29,7 +21,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --feature "$F
 - **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
-无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -114,7 +106,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --feature "$F
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。若 Feature slug、工作目录或 `CHECKPOINT` 为空、未知，或无法唯一确定，停止并提示用户选择 Feature；若本轮是用户直供需求并允许 `plan_in_progress --allow-create` 创建状态，创建后必须刷新 `CHECKPOINT`。
@@ -330,8 +322,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 #### 写入checkpoint
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 ---
@@ -340,7 +332,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 本阶段必须生成 `{FEATURE_DIR}/design.md`。`design.md` 是后续编码、测试和验收的稳定技术设计契约，承载 API、数据、架构、迁移和风险决策；行为契约以 `specs/**/*.md` 为准，不在 design.md 中重复维护完整 specs。
 
-按 `$PLUGIN_ROOT/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
+按 `{PLUGIN_ROOT}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
 - **Context / 输入上下文**：引用 proposal 和 specs，说明当前代码现状和约束。
 - **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。
@@ -392,7 +384,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 
 每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
-按 `$PLUGIN_ROOT/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
+按 `{PLUGIN_ROOT}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 
 完成条件：
 - [ ] `{FEATURE_DIR}/PLAN.md` 文件已写入磁盘
@@ -408,14 +400,14 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ## 整体完成条件
 - `design.md`、`PLAN.md` 已完成
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint plan_done
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint plan_done
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 **Skill 完成。** 下一步以当前 Feature 的工作流为准：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PLUGIN_WORKSPACE/$PROJECT_CODE" --feature "$FEATURE_ID"
+python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PLUGIN_WORKSPACE}/{PROJECT_CODE}" --feature "{FEATURE_ID}"
 ```
 
 （不预设固定下一技能，以上述脚本输出为准。）

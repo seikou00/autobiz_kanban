@@ -4,14 +4,6 @@ description: Autodev Dev 阶段根路由器。基于 checkpoint 路由到对应�
 version: v1.1.1604
 ---
 
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
-
 ## autodev
 
 ### 技能映射
@@ -72,13 +64,13 @@ prd_done → resolve_next_skill.py --json
 - 否则先读取全部 State 快照，再从 `STATE.records` 列出候选让用户选择：
 
 ```bash
-python "$PLUGIN_ROOT/read_state_json.py"
+python "{PLUGIN_ROOT}/read_state_json.py"
 ```
 
 确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。
@@ -86,7 +78,7 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_DIR" --feature "$FEATURE_ID" --json
+python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
 ```
 
 若脚本返回 `requiresProfileChoice: true`，按用户表达选择是否需要 HTML 转前端：
@@ -142,11 +134,11 @@ python "$PLUGIN_ROOT/hooks/resolve_next_skill.py" --workspace "$PROJECT_PLUGIN_D
 3. `needs_fix` → 按最近阶段报告中的建议回流阶段处理。
 4. 合法出口只更新当前阶段结果；后续阶段需由用户再次触发根路由器或指定子技能继续执行。
 
-各子技能的产物契约、validators 与 checkpoint 合法矩阵以 `$PLUGIN_ROOT/board_core/board_config.json` 为唯一事实来源；如本文静态说明与 board config 冲突，以 board config 为准。不得再新增 per-skill `artifact-check.yaml`。可运行以下只读命令查看某个子技能的当前契约：
+各子技能的产物契约、validators 与 checkpoint 合法矩阵以 `{PLUGIN_ROOT}/board_core/board_config.json` 为唯一事实来源；如本文静态说明与 board config 冲突，以 board config 为准。不得再新增 per-skill `artifact-check.yaml`。可运行以下只读命令查看某个子技能的当前契约：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan --json
 ```
 
 ---
@@ -171,7 +163,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-plan --json
 
 ## 5. 动态 Dev 阶段
 
-Dev 阶段的可选步骤由 `$PLUGIN_ROOT/board_core/board_config.json` 的 `workflow.dynamicStages` 声明，运行态选择写入 `.autobizdevops/state.json` 的 `workflowDecisions`。根路由器不得硬编码某个可选节点的流程结构，应以 `resolve_next_skill.py --json` 的 `workflowChoices` 为准。
+Dev 阶段的可选步骤由 `{PLUGIN_ROOT}/board_core/board_config.json` 的 `workflow.dynamicStages` 声明，运行态选择写入 `.autobizdevops/state.json` 的 `workflowDecisions`。根路由器不得硬编码某个可选节点的流程结构，应以 `resolve_next_skill.py --json` 的 `workflowChoices` 为准。
 
 ### 详细设计（`detail_design_before_code` dynamic stage）
 
@@ -179,9 +171,9 @@ Dev 阶段的可选步骤由 `$PLUGIN_ROOT/board_core/board_config.json` 的 `wo
 
 1. 根据用户表达判断是否需要在 code 前生成 `DETAIL_DESIGN.md`。
 2. 不需要时，推进到 `code_in_progress`：
-   `python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
+   `python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
 3. 需要时，推进到 `detail_design_in_progress`：
-   `python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled`
+   `python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled`
 4. `/autodev-detail-design` 生成 `DETAIL_DESIGN.md` 后推进到 `detail_design_done`，根路由器再次刷新状态并进入 `/autodev-code`。
 
 ### 约束

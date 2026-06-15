@@ -4,22 +4,14 @@ description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单
 version: v1.1.1604
 ---
 
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；只用于代码探索、实现和验证。
-
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-verify --feature "$FEATURE_ID" --json
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-verify --feature "{FEATURE_ID}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
@@ -29,7 +21,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-verify --feature "
 - **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
-无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -54,7 +46,7 @@ python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-verify --feature "
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 后续准入、恢复和分支决策直接取用 `CHECKPOINT`：
@@ -73,8 +65,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
 ## Step 2: 写入 Checkpoint（标记开始）
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint verify_in_progress
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint verify_in_progress
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 ## Step 3: 提取验收契约
@@ -222,8 +214,8 @@ specs/[capability]/spec.md / Requirement / Scenario
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `verify_done`。本轮验收摘要与历史证据写入 `VERIFY_REPORT.md`。
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint verify_done
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint verify_done
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "FEATURE_ID")
 ```
 
 **输出提示：**
@@ -248,8 +240,8 @@ checkpoint=verify_done → Dev 阶段结束，Ops 阶段可继续调用 autoops-
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `needs_fix`：
 
 ```bash
-python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint needs_fix
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "$FEATURE_ID")
+python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint needs_fix
+CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 在 `VERIFY_REPORT.md` 的失败详情中追加：
