@@ -395,7 +395,7 @@ python hooks/init_workspace.py --mode createFeature --workspace <PLUGIN_WORKSPAC
 
 ```text
 继续当前 Feature。
-不需要先做 HTML 转前端，直接进入行为规格。
+先进入行为规格；如果后续代码实现需要 HTML 转前端，在 code 阶段处理。
 ```
 
 当 UI 提示进入发布或归档阶段时：
@@ -431,8 +431,8 @@ Biz:
   需求澄清 -> PRD 生成
 
 Dev:
-  可选 HTML 转前端 -> 行为规格 -> 技术设计与计划
-  -> 可选详细设计 -> 代码实现 -> 独立需求评审
+  行为规格 -> 技术设计与计划
+  -> 可选详细设计 -> 代码实现（可选 HTML 转前端）-> 独立需求评审
   -> 单元测试 -> E2E -> 验收汇总
 
 Ops:
@@ -494,13 +494,14 @@ cicd_done -> archived
 - PRD 不能包含讨论记录、待确认事项、外部依赖章节正文。
 - 未确认的信息不能写成确定需求。
 
-### 9.3 Dev: 可选 HTML 转前端
+### 9.3 Dev: 前端 HTML 实现归属
 
-技能：`/autodev-frontend`
+技能：`/autodev-code` 内部分支
 
 触发时机：
 
-- `prd_done` 后，进入 `/autodev` 时，插件可能询问是否需要先把 HTML 转成前端工程文件。
+- 不再在 `prd_done` 后单独触发。
+- `code_in_progress` 阶段，如果 `{FEATURE_DIR}/frontend-html/**/*` 存在，或 specs / PLAN / 用户任务明确要求根据 HTML 实现前端页面，由 `/autodev-code` 内部分流处理。
 
 适合：
 
@@ -511,9 +512,10 @@ cicd_done -> archived
 注意：
 
 - 必须有 HTML 文件、HTML 片段或可读取 HTML 内容。
-- 只有 PRD 或截图时，不应直接进入该路线。
+- 只有 PRD 或截图时，不应进入 HTML 转换分支；可按 specs/design/PLAN 直接实现的任务跳过该分支。
+- HTML 只提供视觉、结构和组件槽位线索，行为以 specs、design、PLAN 为准。
 - 新增依赖必须先得到用户确认。
-- 主线完成后，必须询问是否进入回检流程。
+- 分支完成后回到 `/autodev-code` 主流程，最终推进 `code_done`。
 
 ### 9.4 Dev: 行为规格
 
@@ -760,7 +762,7 @@ python "$PLUGIN_ROOT/hooks/update_checkpoint.py" --checkpoint <checkpoint>
 5. 不要把项目产物存放路径或 `FEATURE_DIR` 当作业务代码目录。
 6. 不要在 Code 阶段偷偷改 specs 或 design。
 7. 不要为了测试通过降低断言、跳过测试或伪造日志。
-8. 用户必须在关键阶段确认：需求问题清单、是否进入 Plan 生成、是否需要 HTML 转前端、是否需要详细设计、CI/CD 是否完成、是否归档。
+8. 用户必须在关键阶段确认：需求问题清单、是否进入 Plan 生成、是否需要详细设计、CI/CD 是否完成、是否归档。
 9. 新增依赖、跑长时间命令、访问外部服务、触发流水线等操作，应先确认影响。
 10. `AGENTS.md` 要先做成索引，指向前端、后端、架构、接口、数据库、代码规范等文档。
 11. 发生冲突时，以系统指令和项目 `AGENTS.md` 优先，其次才是插件技能文档。

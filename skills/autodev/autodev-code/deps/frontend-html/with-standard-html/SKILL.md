@@ -1,18 +1,26 @@
 ---
-name: route-with-standard-html
-description: 处理标准 DOM / 语义明确 HTML 的独立 route 技能。适用于标准 DOM、`<style>`、class 命名清晰、表单/按钮/label/flex 结构明显的 HTML 输入；既覆盖普通 HTML，也覆盖结构标准但视觉仍要求高保真的 HTML。
+name: code-frontend-with-standard-html
+description: code 阶段内部处理标准 DOM / 语义明确 HTML 的路线。适用于标准 DOM、`<style>`、class 命名清晰、表单/按钮/label/flex 结构明显的 HTML 输入；既覆盖普通 HTML，也覆盖结构标准但视觉仍要求高保真的 HTML。
 ---
 
 # 标准 HTML 路线
 
-这是独立的标准 HTML route 技能目录。
+这是 `/autodev-code` 内部的标准 HTML 实现路线目录。
+
+**路径变量约定：**
+- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
+- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
+- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
+- **FEATURE_ID**：当前 Feature 名称。
+- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`。
+- **CODE_WORKSPACE**：真实代码工作区根目录，用于前端代码探索、实现和验证。
 
 - 当前 route 技能入口：`SKILL.md`
 - 当前 route 技能依赖：`deps/`
 - 当前 route 技能参考：`references/`
 - 当前 route 技能脚本：`scripts/`
 
-本文中提到的 `SKILL.md` 均指仓库根技能 `../../SKILL.md`。
+本文中提到的 `SKILL.md` 均指 code 根技能 `../../../SKILL.md`。
 
 ## 1. 什么时候使用
 
@@ -53,5 +61,5 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 技能。适�
 
 - 本路线只负责标准 DOM / 语义明确 HTML
 - 不修改原有绝对定位高保真路线
-- 不依赖 `route/with-absolute-html/` 下的 absolute 分析脚本
+- 不依赖 `deps/frontend-html/with-absolute-html/` 下的 absolute 分析脚本
 - 不依赖标准 HTML 分析脚本或 `output/html-analysis/*.json` 前置产物；`scripts/audit_antd_coverage.py` 只在 Ant Design 转换后做源码覆盖审计，不作为 HTML 解析前置步骤

@@ -39,6 +39,7 @@ DEFAULT_NODE_STATUS_LABELS = {
 ARTIFACT_TYPES = {
     "file",
     "directory",
+    "glob",
     "markdown",
     "text",
     "log",

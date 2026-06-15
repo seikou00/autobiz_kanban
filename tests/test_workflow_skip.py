@@ -151,18 +151,13 @@ class SkipCompileTests(unittest.TestCase):
                 copy.deepcopy(base_config()), repo_root=ROOT, skipped_nodes=all_ids
             )
 
-    def test_profile_dynamic_node_skippable(self) -> None:
-        effective = compile_board_config(
-            copy.deepcopy(base_config()),
-            repo_root=ROOT,
-            profile="frontend_before_specs",
-            skipped_nodes=["dev.frontend"],
-        )
-        by_id = {node["id"]: node for node in effective["workflow"]["nodes"]}
-        self.assertTrue(by_id["dev.frontend"].get("skipped"))
-        transitions = effective["workflow"]["checkpoints"]["transitions"]
-        self.assertEqual(transitions["prd_done"], ["specs_in_progress"])
-        self.assertNotIn("frontend_in_progress", transitions)
+    def test_removed_frontend_node_is_not_skippable(self) -> None:
+        with self.assertRaises(WorkflowCompileError):
+            compile_board_config(
+                copy.deepcopy(base_config()),
+                repo_root=ROOT,
+                skipped_nodes=["dev.frontend"],
+            )
 
     def test_dynamic_stage_enabled_then_skipped(self) -> None:
         effective = compile_board_config(
@@ -187,7 +182,7 @@ class SkipCompileTests(unittest.TestCase):
         self.assertEqual(
             effective["workflowDroppedInputs"],
             {
-                "dev.code": ["proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md"],
+                "dev.code": ["proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md", "frontend-html/**/*"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )

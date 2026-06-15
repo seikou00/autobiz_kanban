@@ -1,13 +1,13 @@
 ---
 name: standard-html-parser
-description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该依赖以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；同时遵循根 SKILL.md 的组件优先级、图标/图表规则、技术栈兜底和回检契约。
+description: 处理标准 DOM / 语义明确 HTML 的 code 阶段内部依赖。该依赖以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；同时遵循 code 根 SKILL.md 的组件优先级、图标/图表规则、技术栈兜底和主线交付契约。
 ---
 
 # 标准 HTML 解析器
 
 本依赖只在上层 route 技能 `../SKILL.md` 已经把当前输入明确判定为“标准 DOM / 语义明确 HTML”后进入。它替代原有薄版 `standard-html-parser`，作为 `with-standard-html` 路线的 HTML 转工程代码主执行技能。
 
-本文中提到的 `SKILL.md` 均指仓库根技能 `../../../SKILL.md`。若本文和根技能冲突，以根技能的全局优先级、图标/图表规则、依赖安装确认规则和回检决策规则为准。
+本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../SKILL.md`。若本文和根技能冲突，以根技能的全局优先级、图标/图表规则、依赖安装确认规则和收尾规则为准。
 
 ## 1. 入口契约
 
@@ -28,7 +28,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 - 按根技能优先级复用项目公共组件、本地组件和已安装且真实使用的组件库。
 - 对产品 UI 中的表单、表格、筛选、导航、反馈、上传、弹窗等结构，优先映射到真实项目组件或 Ant Design。
 - 对品牌化、文章化、营销化、异形视觉和高度自定义布局，保留原始语义 HTML / CSS，不强行 AntD 化。
-- 在主线阶段完成组件、数据、常量、类型、helper、hook、图标和图表配置抽取，不把维护性工作留到回检阶段。
+- 在主线阶段完成组件、数据、常量、类型、helper、hook、图标和图表配置抽取，不把维护性工作留到后续阶段。
 
 ## 3. 读取顺序
 
@@ -37,7 +37,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 3. 读取项目 `architecture/`、组件说明、API 说明和相似页面。
 4. 扫描真实源码确认导入路径、组件导出、组件用法、样式方案、路由结构、包管理器和已安装依赖。
 5. 如决定使用 Ant Design，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
-6. 如涉及 YAPI 或真实接口，读取顶层 `../../../deps/yapi-fetcher.md` 的产物或项目 API helper。
+6. 如涉及 YAPI 或真实接口，读取项目 API helper、已有接口封装或用户提供的接口材料。
 
 ## 4. Craft：编码前简报
 
@@ -208,7 +208,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 从本技能仓库根目录运行：
 
 ```bash
-python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
 ```
 
 脚本只扫描 `.tsx` / `.jsx` 源码。退出码 `0` 表示未发现候选项；退出码 `1` 表示发现可能遗漏的 Ant Design 转换候选项，应把输出作为待处理清单继续转换或说明，不视为脚本故障。
@@ -288,7 +288,7 @@ python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-pro
 - 前端任务要启动 dev server，并用浏览器确认页面非空白、资源加载、布局无明显错位。
 - 检查桌面和移动视口：溢出、裁切、文本重叠、按钮挤压、表格横向滚动。
 - Ant Design 场景检查：样式是否加载、版本 API 是否正确、Form 默认值与校验、Radio/Checkbox/Select/Tabs 状态、Table `rowKey`、Modal/Drawer open/close、feedback API provider context。
-- Ant Design 转换被请求或被选择时，运行 `python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
+- Ant Design 转换被请求或被选择时，运行 `python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
 - 检查图标 / 图表来源层级和可访问性。
 - 回查页面主区域、字段、标题、按钮、表格列、tab、展开收起区、图标、图表和明显交互是否有增减或丢失。
 
@@ -308,7 +308,7 @@ python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-pro
 - 新增依赖。
 - 剩余风险。
 
-随后必须返回顶层，由顶层立即发起“是否进入回检”的真实决策动作。未拿到用户确认前，不得自动进入 `../../review/SKILL.md`。
+随后必须返回 `/autodev-code` 主流程，由 code 根技能按收尾规则推进到 `code_done`。
 
 ## 13. 禁止事项
 
@@ -321,4 +321,4 @@ python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-pro
 - 不要丢失资产、字段、状态、交互和数据列。
 - 不要使用不稳定 index key，除非没有更稳定来源。
 - 不要无依据使用 `any`。
-- 不要把主线总结当成整轮结束；必须回到顶层做回检决策。
+- 不要在主线总结后引用已移除的内部复核路线；必须回到 `/autodev-code` 主流程推进 `code_done`。
