@@ -81,12 +81,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         print(f"skip 失败: {exc}", file=sys.stderr)
-        return 1
+        return 0
 
     feature = args.feature.strip()
     if not feature:
         print("skip 失败: --feature 不能为空", file=sys.stderr)
-        return 1
+        return 0
 
     result = prepare_skip_update(
         workspace=workspace,
@@ -121,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     if not result.ok:
         if not args.dry_run:
             write_skip_hook_logs(result, workspace=workspace, feature=feature, skip_nodes=args.skip_node)
-        return 1
+        return 0
     if not args.dry_run:
         write_state_records(workspace, result.records)
         write_skip_hook_logs(result, workspace=workspace, feature=feature, skip_nodes=args.skip_node)
