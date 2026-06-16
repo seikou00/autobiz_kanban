@@ -52,7 +52,9 @@ def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
     entry: dict = {
         "id": artifact["id"],
         "artifactLabel": _artifact_label(artifact),
-        "paths": matches,
+        # 无匹配（feature 初始化阶段）时兜底回显占位 glob，供看板展示；
+        # 有真实文件时仍展开真实文件列表。
+        "paths": matches or [_relative_path(feature_dir / path, workspace)],
     }
     if matches:
         _set_artifact_status(entry, "generated")

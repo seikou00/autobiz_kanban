@@ -280,7 +280,7 @@ class ArtifactScanTests(unittest.TestCase):
                 ],
             )
 
-    def test_scan_specs_glob_without_matches_returns_empty_paths(self) -> None:
+    def test_scan_specs_glob_without_matches_returns_fallback_glob_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -298,7 +298,7 @@ class ArtifactScanTests(unittest.TestCase):
                     {
                         "id": "specs",
                         "artifactLabel": "行为规格",
-                        "paths": [],
+                        "paths": [".autobizdevops/features/alpha/specs/**/*.md"],
                         "artifactStatus": "missing",
                         "artifactStatusLabel": "未生成",
                     }
