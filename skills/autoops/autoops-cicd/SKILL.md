@@ -128,8 +128,9 @@ python hooks/poll_pipeline_status.py --pipelineCode <pipeline_code> --pipelineNu
 ### Step 5: 用户确认后完成阶段
 
 1. 本技能不得执行 git 写命令
-2. 只有在用户明确回复“已执行 / 已完成 / done / ok”后，才允许用统一脚本把 checkpoint 推进到 `cicd_done`
-3. 若用户未确认，保持 `cicd_in_progress`
+2. 请用户确认 CI/CD 是否完成时，若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `已完成、推进到 cicd_done (Recommended)` / `尚未完成、保持当前状态`；若不支持，必须显式追问：`CI/CD 是否已完成？请回复”已完成”或”未完成”。`
+3. 只有在用户明确回复”已完成”（已执行 / done / ok 等）后，才允许用统一脚本把 checkpoint 推进到 `cicd_done`
+4. 未拿到明确肯定答复前，必须保持 `cicd_in_progress`，不得推进 `cicd_done`
 
 macOS/Linux:
 
@@ -140,5 +141,5 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ### Step 6: 是否再次执行
 
-1. 需要再次触发流水线或重新整理清单时，必须先询问用户
-2. 未经用户同意，不能擅自重跑
+1. 需要再次触发流水线或重新整理清单时，若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `重新触发流水线 / 重整清单` / `不再重跑 (Recommended)`；若不支持，必须显式追问：`是否需要再次执行流水线或重新整理清单？请回复"重跑"或"不重跑"。`
+2. 未拿到用户明确同意前，不得擅自重跑。

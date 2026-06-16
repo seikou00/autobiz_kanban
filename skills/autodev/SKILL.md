@@ -64,6 +64,8 @@ plan_done → detail_design_before_code choice
 python "{PLUGIN_ROOT}/read_state_json.py"
 ```
 
+- 需要用户从候选 Feature 中选择时，若当前运行模式支持 `request_user_input`，必须优先用它把 `STATE.records` 中的候选列成结构化选项供用户单选；若不支持，必须列出候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
+
 确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
@@ -78,11 +80,17 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
 ```
 
+若脚本返回 `requiresProfileChoice: true`，按用户表达选择是否需要 HTML 转前端：
+
+- 用户说 `/autodev-frontend`、需要进入、需要先转 HTML、先把设计稿转工程文件、HTML 转 React、静态 HTML 转前端代码、按 PRD 先做前端页面等，视为需要转换或前端先行实现：推进到 `frontend_in_progress`，并传入 `--workflow-profile frontend_before_specs`。
+- 用户说不需要、直接进规格、先走 `autodev-specs` 等，视为不需要转换：推进到 `specs_in_progress`。
+- 如果用户只触发 `/autodev`，且没有表达需要或不需要：若当前运行模式支持 `request_user_input`，必须优先用它发起分流选择，选项至少包含 `先转 HTML 前端 (Recommended)` / `直接进入 specs`；若不支持，必须显式追问：`是否需要先将 HTML 转换为项目内前端工程文件？需要则进入 autodev-frontend，并在该节点内按标准 HTML 或绝对定位高保真 HTML 分流；不需要则直接进入 autodev-specs 阶段。请回复"先转 HTML 前端"或"直接进入 specs"。` 未拿到明确答复前，不得写入 profile，也不得推进 checkpoint。
+
 若脚本返回 `requiresWorkflowChoice: true`，读取 `workflowChoices` 中的 `stageId`、`decision` 和 `targetCheckpoint`，按用户表达选择 dynamic stage：
 
 - 对 `detail_design_before_code`，用户说需要详细设计、先出详细设计、code 前设计等，视为启用：推进到 `detail_design_in_progress`，并传入 `--workflow-decision detail_design_before_code=enabled`。
 - 用户说不需要、直接编码、跳过详细设计等，视为跳过：推进到 `code_in_progress`，并传入 `--workflow-decision detail_design_before_code=skipped`。
-- 如果用户只触发 `/autodev`，且没有表达需要或不需要，简短询问：`是否需要在代码实现前生成 DETAIL_DESIGN.md？需要则进入 autodev-detail-design，不需要则直接进入 autodev-code。`
+- 如果用户只触发 `/autodev`，且没有表达需要或不需要：若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `先做详细设计` / `直接进入编码 (Recommended)`；若不支持，必须显式追问：`是否需要在代码实现前生成 DETAIL_DESIGN.md？需要则进入 autodev-detail-design，不需要则直接进入 autodev-code。请回复"先做详细设计"或"直接进入编码"。` 未拿到明确答复前，不得写入 workflow-decision，也不得推进 checkpoint。
 
 ### 1.3 产出物校验
 

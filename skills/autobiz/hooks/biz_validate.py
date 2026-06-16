@@ -28,7 +28,7 @@ from board_core.state_store import check_or_fix_state_sync
 
 
 BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR = (
-    "biz_validate.py 不接受 --workspace/-w；路径由 PLUGIN_WORKSPACE/PROJECT_CODE 环境变量决定。"
+    "biz_validate.py 不接受 --workspace/-w；路径由 PLUGIN_WORKSPACE/PROJECT_DIR 环境变量决定。"
 )
 FORMAL_PRD_TITLE = "# 需求正式稿"
 FORBIDDEN_PRD_SECTION_TITLES = ("审理提炼", "待确认事项", "待确认项", "外部依赖", "第三方依赖")

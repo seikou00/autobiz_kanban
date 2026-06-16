@@ -279,21 +279,32 @@ def write_compile_result(
     *,
     old_checkpoint: str,
     errors: list[str],
-) -> None:
+) -> int:
     new_checkpoint = "code_done"
     transition = f"{old_checkpoint or 'empty'} -> {new_checkpoint}"
     if errors:
+        reason = "\n".join(errors)
         append_checkpoint_hook_logs(
             workspace,
             [(feature, old_checkpoint, new_checkpoint)],
             event_id="code-compile",
             label="code_done 编译校验",
             errors=errors,
-            event_status="warning",
-            exit_code=0,
-            message=f"{transition}: " + "\n".join(errors),
+            event_status="blocked",
+            exit_code=BLOCK_EXIT_CODE,
+            message=f"{transition}: " + reason,
         )
-        return
+        json.dump(
+            {
+                "decision": "block",
+                "reason": reason,
+                "systemMessage": f"code 编译未通过：\n{reason}",
+                "additionalContext": f"请将以下编译问题展示给用户：\n{reason}",
+            },
+            sys.stdout,
+            ensure_ascii=False,
+        )
+        return BLOCK_EXIT_CODE
 
     append_checkpoint_hook_logs(
         workspace,
@@ -305,6 +316,7 @@ def write_compile_result(
         exit_code=0,
         message=f"{transition}: code_done 编译校验通过",
     )
+    return 0
 
 
 def run_code_done_compile_hook() -> int:
@@ -319,13 +331,12 @@ def run_code_done_compile_hook() -> int:
         return 0
 
     _, errors = validate_modules_compile(workspace, emit_success=False)
-    write_compile_result(
+    return write_compile_result(
         workspace,
         feature,
         old_checkpoint=checkpoint,
         errors=errors,
     )
-    return 0
 
 
 def run_guard(payload: dict[str, Any]) -> int:

@@ -2,8 +2,8 @@
 """Read .autobizdevops/state.json without falling back to STATE.md.
 
 Usage:
-    PLUGIN_WORKSPACE=<collection-workspace> PROJECT_CODE=<project> python read_state_json.py
-    PLUGIN_WORKSPACE=<collection-workspace> PROJECT_CODE=<project> FEATURE_ID=<slug> python read_state_json.py --feature <slug>
+    PLUGIN_WORKSPACE=<collection-workspace> PROJECT_DIR=<project> python read_state_json.py
+    PLUGIN_WORKSPACE=<collection-workspace> PROJECT_DIR=<project> FEATURE_ID=<slug> python read_state_json.py --feature <slug>
 """
 
 from __future__ import annotations

@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from init_validate import validate_precheck
-from paths import get_plugin_output_workspace
+from paths import get_plugin_output_workspace, resolve_project_dir
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -87,7 +87,7 @@ def plugin_read_paths(payload: dict, plugin_root: Path = PLUGIN_ROOT) -> list[Pa
 
 def workspace_from_payload(payload: dict) -> Path:
     plugin_workspace = str(os.environ.get("PLUGIN_WORKSPACE") or "").strip()
-    project_code = str(os.environ.get("PROJECT_CODE") or "").strip()
+    project_code = resolve_project_dir(os.environ)
     if plugin_workspace and project_code and "/" not in project_code and "\\" not in project_code:
         return (Path(plugin_workspace).expanduser() / project_code).resolve(strict=False)
 

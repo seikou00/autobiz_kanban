@@ -38,7 +38,7 @@ def plugin_env(workspace: Path, *, feature: str = "alpha") -> dict[str, str]:
     env = os.environ.copy()
     env["PLUGIN_ROOT"] = str(ROOT)
     env["PLUGIN_WORKSPACE"] = str(workspace.parent)
-    env["PROJECT_CODE"] = workspace.name
+    env["PROJECT_DIR"] = workspace.name
     env["FEATURE_ID"] = feature
     env.pop("PLUGIN_OUTPUT_DIR", None)
     return env
@@ -494,11 +494,11 @@ class StateIntegrationTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
-                env=env_without(workspace, "PROJECT_CODE"),
+                env=env_without(workspace, "PROJECT_DIR"),
             )
 
             self.assertEqual(result.returncode, 1)
-            self.assertIn("PROJECT_CODE 未设置", result.stderr)
+            self.assertIn("PROJECT_DIR 未设置", result.stderr)
 
     def test_update_checkpoint_cli_requires_feature_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -751,6 +751,32 @@ class StateIntegrationTests(unittest.TestCase):
                 capture_output=True,
                 check=False,
                 env=plugin_env(workspace),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["records"]["alpha"]["checkpoint"], "prd_done")
+
+    def test_read_state_json_cli_accepts_legacy_project_code(self) -> None:
+        # 平台过渡期兼容：只下发旧变量 PROJECT_CODE（无 PROJECT_DIR）时仍能解析工作区。
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_state_records(workspace, {"alpha": sample_record("prd_done")})
+
+            env = plugin_env(workspace)
+            env.pop("PROJECT_DIR", None)
+            env["PROJECT_CODE"] = workspace.name
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "read_state_json.py"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
