@@ -3,7 +3,7 @@
 """UI 专用：以参数方式定位并跳过工作流节点（不依赖环境变量）。
 
 看板 UI 在对话/skill 上下文之外触发节点跳过，没有 PLUGIN_WORKSPACE /
-PROJECT_CODE / FEATURE_ID 环境变量，因此通过 --plugin-workspace / --project /
+PROJECT_DIR / FEATURE_ID 环境变量，因此通过 --plugin-workspace / --project /
 --feature 三个参数显式定位（分别镜像那三个环境变量）。底层跳过逻辑与状态写入
 复用 update_checkpoint.py 的现成函数，本脚本只负责参数式入口。
 """
@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--project",
         required=True,
-        help="项目码（对应 PROJECT_CODE 环境变量）",
+        help="项目目录名（对应 PROJECT_DIR 环境变量）",
     )
     parser.add_argument(
         "--feature",
@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace = get_plugin_output_workspace(
             env={
                 "PLUGIN_WORKSPACE": args.plugin_workspace,
-                "PROJECT_CODE": args.project,
+                "PROJECT_DIR": args.project,
             }
         )
     except ValueError as exc:

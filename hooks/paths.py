@@ -11,7 +11,7 @@ PathLike = Union[str, Path]
 
 
 STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR = (
-    "状态读写脚本不接受 --workspace/-w；请删除该参数，路径由 PLUGIN_WORKSPACE/PROJECT_CODE 环境变量决定。"
+    "状态读写脚本不接受 --workspace/-w；请删除该参数，路径由 PLUGIN_WORKSPACE/PROJECT_DIR 环境变量决定。"
 )
 
 
@@ -30,16 +30,21 @@ def _env_value(values: Mapping[str, str], name: str) -> str:
     return str(values.get(name, "") or "").strip()
 
 
+def resolve_project_dir(values: Mapping[str, str]) -> str:
+    """项目目录名：优先 PROJECT_DIR，回退旧变量 PROJECT_CODE（平台过渡期兼容）。"""
+    return _env_value(values, "PROJECT_DIR") or _env_value(values, "PROJECT_CODE")
+
+
 def get_plugin_output_workspace(env: Optional[Mapping[str, str]] = None) -> Path:
     values = os.environ if env is None else env
     plugin_workspace_raw = _env_value(values, "PLUGIN_WORKSPACE")
-    project_code = _env_value(values, "PROJECT_CODE")
+    project_code = resolve_project_dir(values)
 
-    missing = [name for name, value in (("PLUGIN_WORKSPACE", plugin_workspace_raw), ("PROJECT_CODE", project_code)) if not value]
+    missing = [name for name, value in (("PLUGIN_WORKSPACE", plugin_workspace_raw), ("PROJECT_DIR", project_code)) if not value]
     if missing:
-        raise ValueError(f"{', '.join(missing)} 未设置；状态脚本必须由插件环境提供 PLUGIN_WORKSPACE 和 PROJECT_CODE")
+        raise ValueError(f"{', '.join(missing)} 未设置；状态脚本必须由插件环境提供 PLUGIN_WORKSPACE 和 PROJECT_DIR")
     if "/" in project_code or "\\" in project_code:
-        raise ValueError(f"PROJECT_CODE 不能包含路径分隔符: {project_code}")
+        raise ValueError(f"PROJECT_DIR 不能包含路径分隔符: {project_code}")
 
     plugin_workspace = Path(plugin_workspace_raw).expanduser().resolve(strict=False)
     if not plugin_workspace.is_dir():
@@ -47,7 +52,7 @@ def get_plugin_output_workspace(env: Optional[Mapping[str, str]] = None) -> Path
 
     workspace = (plugin_workspace / project_code).resolve(strict=False)
     if not workspace.is_dir():
-        raise ValueError(f"PROJECT_CODE 对应的项目插件目录不存在: {workspace}")
+        raise ValueError(f"PROJECT_DIR 对应的项目插件目录不存在: {workspace}")
 
     state_json_path = workspace / ".autobizdevops" / "state.json"
     if not state_json_path.is_file():

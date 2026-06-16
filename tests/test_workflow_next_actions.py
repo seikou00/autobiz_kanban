@@ -34,7 +34,7 @@ class WorkflowNextActionsTest(unittest.TestCase):
             with self.subTest(platform=platform):
                 prompt = commands["system_prompt_inject"]
                 self.assertIn("PLUGIN_WORKSPACE", prompt)
-                self.assertIn("PROJECT_CODE", prompt)
+                self.assertIn("PROJECT_DIR", prompt)
                 self.assertIn("FEATURE_ID", prompt)
                 self.assertIn("PROJECT_PLUGIN_DIR", prompt)
                 self.assertIn("FEATURE_DIR", prompt)
@@ -47,7 +47,7 @@ class WorkflowNextActionsTest(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT).as_posix()):
                 content = path.read_text(encoding="utf-8")
                 self.assertIn("PLUGIN_WORKSPACE", content)
-                self.assertIn("PROJECT_CODE", content)
+                self.assertIn("PROJECT_DIR", content)
                 self.assertIn("FEATURE_ID", content)
                 self.assertIn("PROJECT_PLUGIN_DIR", content)
                 self.assertNotIn("PLUGIN_OUTPUT_DIR", content)
