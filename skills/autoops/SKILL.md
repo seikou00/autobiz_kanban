@@ -43,6 +43,8 @@ version: v1.1.1604
 python "{PLUGIN_ROOT}/read_state_json.py"
 ```
 
+- 需要用户从候选 Feature 中选择时，若当前运行模式支持 `request_user_input`，必须优先用它把 `STATE.records` 中的候选列成结构化选项供用户单选；若不支持，必须列出候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
+
 确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
