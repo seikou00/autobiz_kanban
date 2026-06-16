@@ -150,6 +150,127 @@ def _hook_log_refs(workspace: Path, feature: str, feature_dir: Path | None = Non
     ]
 
 
+def _text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _first_present(mapping: dict, *keys: str) -> object:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _normalize_text_map(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        service = _text(key)
+        directory = item.strip() if isinstance(item, str) else ""
+        if service:
+            result[service] = directory
+    return result
+
+
+def _normalize_services(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+
+    services: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        service = _text(item.get("service"))
+        agentsmd_dir = _text(_first_present(item, "agentsmdDir", "agentsmd_dir"))
+        if service and agentsmd_dir:
+            services.append({"service": service, "agentsmdDir": agentsmd_dir})
+    return services
+
+
+def _normalize_agentsmd_load_conf(
+    value: object,
+    active_service_names: set[str] | None = None,
+) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+
+    raw_active = _bool(_first_present(value, "active"))
+    load_system_agentsmd = _bool(_first_present(value, "loadSystemAgentsmd", "load_system_agentsmd"))
+    services = _normalize_services(value.get("services"))
+    if active_service_names is not None:
+        services = [
+            service
+            for service in services
+            if service["service"] in active_service_names
+        ]
+
+    return {
+        "version": 1,
+        "active": raw_active and (load_system_agentsmd or bool(services)),
+        "systemId": _text(_first_present(value, "systemId", "system_id")),
+        "loadSystemAgentsmd": load_system_agentsmd,
+        "systemAgentsmdDir": _text(_first_present(value, "systemAgentsmdDir", "system_agentsmd_dir")),
+        "services": services,
+    }
+
+
+def _load_feature_context_file(feature_dir: Path | None) -> dict | None:
+    if feature_dir is None:
+        return None
+    context_path = feature_dir / "feature_context.json"
+    if not context_path.is_file():
+        return None
+
+    try:
+        payload = json.loads(context_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    service_code_directories = _normalize_text_map(payload.get("serviceCodeDirectories"))
+    active_service_names = {
+        service
+        for service, directory in service_code_directories.items()
+        if directory.strip()
+    }
+    agentsmd_load_conf = _normalize_agentsmd_load_conf(
+        payload.get("agentsmdLoadConf"),
+        active_service_names,
+    )
+    if agentsmd_load_conf is None:
+        return None
+    return {
+        "version": 1,
+        "agentsmdLoadConf": agentsmd_load_conf,
+        "serviceCodeDirectories": service_code_directories,
+    }
+
+
+def _load_feature_context(feature_dir: Path | None) -> dict | None:
+    return _load_feature_context_file(feature_dir)
+
+
+def _feature_context_watch_refs(
+    workspace: Path,
+    feature: str,
+    feature_dir: Path | None,
+) -> list[dict]:
+    feature_ref_dir = _feature_ref_dir(workspace, feature, feature_dir)
+    return [
+        {"path": f"{feature_ref_dir}/feature_context.json", "purpose": "feature-context"},
+    ]
+
+
 
 def run_mode(workspace: Path, feature: str, config: dict) -> int:
     """Handle --mode run."""
@@ -242,6 +363,12 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     }
     if workflow_skipped:
         output["run"]["workflowSkippedNodes"] = list(workflow_skipped)
+    feature_context = _load_feature_context(feature_dir)
+    output["run"]["watchRefs"].extend(
+        _feature_context_watch_refs(workspace, feature, feature_dir)
+    )
+    if feature_context is not None:
+        output["run"]["featureContext"] = feature_context
 
     json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
     print()

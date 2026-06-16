@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -115,6 +116,160 @@ def _generate_state_json_from_state_md(state_md: Path) -> str:
     if errors:
         return _generate_state_json()
     return state_json_content_from_records(records)
+
+
+def _text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _first_present(mapping: Dict[str, object], *keys: str) -> object:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _extract_sysid(project_md_content: str) -> Optional[str]:
+    patterns = [
+        r"(?i)[-*]\s*\*\*sysid\*\*\s*[:：]\s*(.+)",
+        r"(?i)[-*]\s*sysid\s*[:：]\s*(.+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, project_md_content)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if value and not value.startswith("[") and value != "待填写":
+            return value
+    return None
+
+
+def _project_sysid(workspace: Path) -> str:
+    project_md = get_project_md_path(workspace)
+    if not project_md.is_file():
+        return ""
+    return _extract_sysid(project_md.read_text(encoding="utf-8", errors="ignore")) or ""
+
+
+def _harness_search_roots(workspace: Path, system_id: str) -> List[Path]:
+    roots: List[Path] = []
+    candidate = ROOT / "sys" / system_id
+    if candidate.is_dir():
+        roots.append(candidate)
+    return roots
+
+
+def _harness_config_paths(workspace: Path, system_id: str) -> List[Path]:
+    if not system_id:
+        return []
+
+    paths: List[Path] = []
+    seen = set()
+    for root in _harness_search_roots(workspace, system_id):
+        for path in sorted(root.rglob("harness.config")):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(path)
+    return paths
+
+
+def _normalize_harness_services(payload: Dict[str, object]) -> List[Dict[str, str]]:
+    mapping_conf = payload.get("service_code_dir_mapping")
+    if isinstance(mapping_conf, dict) and not _bool(mapping_conf.get("enabled")):
+        return []
+
+    raw_services = payload.get("services")
+    if not isinstance(raw_services, list):
+        return []
+
+    services: List[Dict[str, str]] = []
+    for item in raw_services:
+        if not isinstance(item, dict):
+            continue
+        if "enabled" in item and not _bool(item.get("enabled")):
+            continue
+        service = _text(item.get("service"))
+        agentsmd_dir = _text(_first_present(item, "agentsmdDir", "agentsmd_dir"))
+        if service and agentsmd_dir:
+            services.append({"service": service, "agentsmdDir": agentsmd_dir})
+    return services
+
+
+def _merge_services(service_groups: List[List[Dict[str, str]]]) -> List[Dict[str, str]]:
+    merged: List[Dict[str, str]] = []
+    seen = set()
+    for services in service_groups:
+        for service in services:
+            name = service["service"]
+            if name in seen:
+                continue
+            seen.add(name)
+            merged.append(service)
+    return merged
+
+
+def _generate_feature_context(workspace: Path) -> Dict[str, object]:
+    system_id = _project_sysid(workspace)
+    service_groups: List[List[Dict[str, str]]] = []
+    load_system_agentsmd = False
+    system_agentsmd_dir = ""
+
+    for harness_path in _harness_config_paths(workspace, system_id):
+        try:
+            payload = json.loads(harness_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        service_groups.append(_normalize_harness_services(payload))
+        if not load_system_agentsmd:
+            load_system_agentsmd = _bool(
+                _first_present(payload, "loadSystemAgentsmd", "load_system_agentsmd")
+            )
+        if not system_agentsmd_dir:
+            system_agentsmd_dir = _text(
+                _first_present(payload, "systemAgentsmdDir", "system_agentsmd_dir")
+            )
+
+    services = _merge_services(service_groups)
+    return {
+        "version": 1,
+        "agentsmdLoadConf": {
+            "version": 1,
+            "active": False,
+            "systemId": system_id,
+            "loadSystemAgentsmd": load_system_agentsmd,
+            "systemAgentsmdDir": system_agentsmd_dir,
+            "services": services,
+        },
+        "serviceCodeDirectories": {
+            service["service"]: ""
+            for service in services
+        },
+    }
+
+
+def _write_feature_context(feature_dir: Path, workspace: Path, created: List[str]) -> None:
+    context_path = feature_dir / "feature_context.json"
+    if context_path.exists():
+        return
+    context = _generate_feature_context(workspace)
+    context_path.write_text(
+        json.dumps(context, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    created.append(str(context_path))
 
 
 def _write_if_missing(path: Path, content: str, created: List[str]) -> None:
@@ -315,6 +470,8 @@ def create_feature(
         sys.exit(1)
 
     ensure_dir(feature_dir)
+    created = [str(feature_dir)]
+    _write_feature_context(feature_dir, workspace, created)
 
     record["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     records = {slug: dict(existing) for slug, existing in sync_result.records.items()}
@@ -323,7 +480,7 @@ def create_feature(
 
     return {
         "initialized": feature_dir.is_dir(),
-        "created": [str(feature_dir)],
+        "created": created,
         "backup": None,
         "message": f"Feature created successfully: {feature_dir}",
     }
