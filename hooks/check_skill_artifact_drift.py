@@ -117,16 +117,8 @@ def managed_contracts(contracts: WorkflowContracts) -> list[SkillContract]:
     return result
 
 
-def profile_names(repo_root: Path, profile: str) -> list[str]:
-    cleaned = profile.strip()
-    if cleaned == "all":
-        return list(configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json")))
-    profiles = [item.strip() for item in cleaned.split(",") if item.strip()]
-    return profiles or ["standard"]
-
-
-def profile_contracts(repo_root: Path, profile: str = "standard") -> list[WorkflowContracts]:
-    profiles = profile_names(repo_root, profile)
+def profile_contracts(repo_root: Path) -> list[WorkflowContracts]:
+    profiles = configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json"))
     return [
         load_repo_workflow_contracts(repo_root, profile=profile)
         for profile in profiles
@@ -262,13 +254,8 @@ def detect_artifact_drift_in_content(
     return findings
 
 
-def check_contracts_for_drift(
-    repo_root: Path,
-    contracts: Iterable[SkillContract],
-    *,
-    profile: str = "standard",
-) -> list[ArtifactDriftFinding]:
-    workflow_contracts = profile_contracts(repo_root, profile)
+def check_contracts_for_drift(repo_root: Path, contracts: Iterable[SkillContract]) -> list[ArtifactDriftFinding]:
+    workflow_contracts = profile_contracts(repo_root)
     known_artifact_paths: set[str] = set(DEFAULT_FORMAL_ARTIFACT_PATHS)
     for contract_set in workflow_contracts:
         known_artifact_paths.update(all_workflow_artifact_paths(contract_set))
@@ -294,17 +281,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check SKILL.md artifact drift for Biz/Dev/Ops node skills")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
     parser.add_argument("--skill", help="check a single node skill, e.g. autodev-plan / autobiz-prd-generate")
-    parser.add_argument(
-        "--profile",
-        default="standard",
-        help="workflow profile(s) to inspect, comma-separated; use 'all' to include every configured profile",
-    )
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
     try:
-        selected = selected_contracts(profile_contracts(repo_root, args.profile), args.skill)
-        findings = check_contracts_for_drift(repo_root, selected, profile=args.profile)
+        selected = selected_contracts(profile_contracts(repo_root), args.skill)
+        findings = check_contracts_for_drift(repo_root, selected)
     except (BoardConfigError, ValueError) as error:
         print(f"ARTIFACT_DRIFT_FAIL {error}", file=sys.stderr)
         return 1

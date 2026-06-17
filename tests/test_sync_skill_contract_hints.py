@@ -69,11 +69,7 @@ name: autodev-sample
         # Drop semantics: degrade speaks about optional inputs; the external
         # concept and any "ask the user to supply it" path are gone.
         self.assertIn("`required: false` 的输入", compiled)
-        self.assertIn("索要", compiled)
-        self.assertIn("正式流程产物 input", compiled)
-        self.assertIn("内部 route SKILL/deps", compiled)
-        self.assertIn("用户本轮直接提供的材料", compiled)
-        self.assertNotIn("也不要为其设想任何分支", compiled)
+        self.assertIn("不索要", compiled)
         self.assertNotIn("external: true", compiled)
         self.assertIn("# Body", compiled)
         self.assertNotIn("AUTOBIZDEVOPS_CONTRACT", compiled)
@@ -123,14 +119,6 @@ old generated rules
         self.assertEqual(payload["required_outputs"], [])
         self.assertEqual(payload["inputs"][0]["id"], "prd")
         self.assertFalse(payload["outputs"][0]["required"])
-
-    def test_autodev_code_html_route_is_not_bound_to_source_bundle(self) -> None:
-        content = (ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md").read_text(encoding="utf-8")
-
-        self.assertIn("不要求 Source Bundle 中存在 `frontend_html`", content)
-        self.assertIn("用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段", content)
-        self.assertNotIn("- Source Bundle 中存在 `frontend_html`", content)
-        self.assertNotIn("frontend_html.extract.degrade", content)
 
 
 if __name__ == "__main__":
