@@ -48,12 +48,12 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "## 流程契约（Source Bundle + Method Bundle）",
             "",
             "当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 "
-            "`{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；"
+            "`$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；"
             "本文档不维护产物清单，不要依赖文中写死的文件名。",
             "进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：",
             "",
             "```bash",
-            f'python "{{PLUGIN_ROOT}}/hooks/inspect_skill_contract.py" {contract.skill} --feature "{{FEATURE_ID}}" --json',
+            f'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" {contract.skill} --feature "$FEATURE_ID" --json',
             "```",
             "",
             "- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下"
@@ -66,7 +66,7 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "也不要为其设想任何分支。",
             "- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。",
             "",
-            "无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。",
+            "无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。",
             HINT_END_MARKER,
             "",
         ]

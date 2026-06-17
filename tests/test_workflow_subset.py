@@ -70,7 +70,7 @@ class CompileNodeSubsetTest(unittest.TestCase):
             effective["workflowDroppedInputs"],
             {
                 "dev.specs": ["PRD.md"],
-                "dev.code": ["PRD.md", "design.md", "PLAN.md", "frontend-html/**/*"],
+                "dev.code": ["PRD.md", "design.md", "PLAN.md"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )
@@ -110,7 +110,7 @@ class SolveNodeClosureTest(unittest.TestCase):
         self.assertEqual(result.added, ())
         self.assertEqual(
             result.dropped,
-            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md", "frontend-html/**/*")},
+            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md")},
         )
         self.assertEqual(result.entry_nodes, ("dev.code",))
         self.assertEqual(
@@ -136,7 +136,7 @@ class SolveNodeClosureTest(unittest.TestCase):
         # With specs+plan selected, dev.code keeps every required input and
         # only loses the optional PRD.md reference — dropped, but not an entry.
         result = solve_node_closure(base_config(), ["dev.specs", "dev.plan", "dev.code"])
-        self.assertEqual(result.dropped["dev.code"], ("PRD.md", "frontend-html/**/*"))
+        self.assertEqual(result.dropped["dev.code"], ("PRD.md",))
         self.assertEqual(result.entry_nodes, ("dev.specs",))
 
     def test_auto_include_pulls_producers_transitively(self) -> None:
