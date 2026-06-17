@@ -61,7 +61,7 @@ name: autodev-sample
         self.assertIn("FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}", compiled)
         self.assertNotIn("工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/", compiled)
         self.assertIn(
-            'python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-sample --feature "{FEATURE_ID}" --json',
+            'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-sample --feature "$FEATURE_ID" --json',
             compiled,
         )
         self.assertNotIn("--feature \"${feature}\" --json", compiled)

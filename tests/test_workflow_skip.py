@@ -187,7 +187,7 @@ class SkipCompileTests(unittest.TestCase):
         self.assertEqual(
             effective["workflowDroppedInputs"],
             {
-                "dev.code": ["proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md", "frontend-html/**/*"],
+                "dev.code": ["proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )
