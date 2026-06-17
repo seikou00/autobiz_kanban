@@ -61,15 +61,22 @@ name: autodev-sample
         self.assertIn("FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}", compiled)
         self.assertNotIn("工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/", compiled)
         self.assertIn(
-            'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-sample --feature "$FEATURE_ID" --json',
+            'python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-sample --feature "{FEATURE_ID}" --json',
             compiled,
         )
+        self.assertIn("无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。", compiled)
+        self.assertNotIn("无 `{FEATURE_ID}` 时可省略", compiled)
+        self.assertNotIn("无 `$FEATURE_ID` 时可省略", compiled)
         self.assertIn("Source Bundle", compiled)
         self.assertIn("Method Bundle", compiled)
         # Drop semantics: degrade speaks about optional inputs; the external
         # concept and any "ask the user to supply it" path are gone.
         self.assertIn("`required: false` 的输入", compiled)
-        self.assertIn("不索要", compiled)
+        self.assertIn("索要", compiled)
+        self.assertIn("正式流程产物 input", compiled)
+        self.assertIn("内部 route SKILL/deps", compiled)
+        self.assertIn("用户本轮直接提供的材料", compiled)
+        self.assertNotIn("也不要为其设想任何分支", compiled)
         self.assertNotIn("external: true", compiled)
         self.assertIn("# Body", compiled)
         self.assertNotIn("AUTOBIZDEVOPS_CONTRACT", compiled)

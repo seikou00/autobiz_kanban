@@ -13,12 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from board_core.contracts import BoardConfigError, SkillContract, WorkflowContracts, load_board_config, load_repo_workflow_contracts  # noqa: E402
-from board_core.workflow_compiler import configured_profile_names  # noqa: E402
+from board_core.contracts import BoardConfigError, SkillContract, WorkflowContracts  # noqa: E402
 from hooks.check_skill_artifact_drift import (  # noqa: E402
     check_contracts_for_drift,
     is_managed_contract,
     managed_contracts,
+    profile_contracts,
     skill_file_for_contract,
 )
 
@@ -48,12 +48,12 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "## 流程契约（Source Bundle + Method Bundle）",
             "",
             "当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 "
-            "`$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；"
+            "`{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；"
             "本文档不维护产物清单，不要依赖文中写死的文件名。",
             "进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：",
             "",
             "```bash",
-            f'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" {contract.skill} --feature "$FEATURE_ID" --json',
+            f'python "{{PLUGIN_ROOT}}/hooks/inspect_skill_contract.py" {contract.skill} --feature "{{FEATURE_ID}}" --json',
             "```",
             "",
             "- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下"
@@ -62,11 +62,13 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "读取方式（method）和缺失降级（degrade）。",
             "- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。",
             "- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。",
-            "- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，"
-            "也不要为其设想任何分支。",
+            "- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，"
+            "不要把它当作上游阶段产物读取、等待或索要。",
+            "- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、"
+            "代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。",
             "- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。",
             "",
-            "无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。",
+            "无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。",
             HINT_END_MARKER,
             "",
         ]
@@ -197,14 +199,6 @@ def sync_skill_content(content: str, contract: SkillContract) -> str:
     return insert_after_frontmatter(content, block)
 
 
-def profile_contracts(repo_root: Path) -> list[WorkflowContracts]:
-    profiles = configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json"))
-    return [
-        load_repo_workflow_contracts(repo_root, profile=profile)
-        for profile in profiles
-    ]
-
-
 def unique_contracts(contracts: list[SkillContract]) -> list[SkillContract]:
     result: list[SkillContract] = []
     seen: set[str] = set()
@@ -261,11 +255,16 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--write", action="store_true", help="write generated contract blocks")
     parser.add_argument("--skill", help="sync a single node skill hint, e.g. autodev-plan / autobiz-prd-generate")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
+    parser.add_argument(
+        "--profile",
+        default="standard",
+        help="workflow profile(s) to inspect, comma-separated; use 'all' to include every configured profile",
+    )
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root).resolve()
     try:
-        selected = selected_contracts(profile_contracts(repo_root), args.skill)
+        selected = selected_contracts(profile_contracts(repo_root, args.profile), args.skill)
     except BoardConfigError as error:
         print(f"SKILL_CONTRACT_HINTS_FAIL {error}", file=sys.stderr)
         return 1
@@ -277,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"SKILL_CONTRACT_HINTS_FAIL skill={result.skill} path={result.path} reason={result.error}", file=sys.stderr)
         return 1
 
-    drift_findings = check_contracts_for_drift(repo_root, selected) if args.check else []
+    drift_findings = check_contracts_for_drift(repo_root, selected, profile=args.profile) if args.check else []
     changed = [result for result in results if result.changed]
     if not changed and not drift_findings:
         print("SKILL_CONTRACT_HINTS_UP_TO_DATE")
