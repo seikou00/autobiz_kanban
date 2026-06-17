@@ -64,6 +64,9 @@ name: autodev-sample
             'python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-sample --feature "{FEATURE_ID}" --json',
             compiled,
         )
+        self.assertIn("无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。", compiled)
+        self.assertNotIn("无 `{FEATURE_ID}` 时可省略", compiled)
+        self.assertNotIn("无 `$FEATURE_ID` 时可省略", compiled)
         self.assertIn("Source Bundle", compiled)
         self.assertIn("Method Bundle", compiled)
         # Drop semantics: degrade speaks about optional inputs; the external
