@@ -131,7 +131,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --plain
 
 1. `/autodev` 不再路由到 `/autodev-frontend`，也不再写入 `frontend_in_progress` / `frontend_done`。
 2. `prd_done` 后统一进入 `/autodev-specs`，先沉淀行为契约。
-3. 若 `{FEATURE_DIR}/frontend-html/**/*` 存在，或 PLAN/specs/用户任务要求根据 HTML 实现前端，`/autodev-code` 把这些 HTML/DOM/设计导出稿作为 code 阶段实现素材处理；它不要求 Source Bundle 中存在 `frontend_html`。
+3.  PLAN/specs/用户任务要求根据 HTML 实现前端，`/autodev-code` 把这些 HTML/DOM/设计导出稿作为 code 阶段实现素材处理。
 4. code 阶段内部按 HTML 形态分流：高保真/绝对定位/Figma 导出的 HTML 走 `autodev-code/deps/frontend-html/with-absolute-html/SKILL.md`；普通静态 HTML、复制 DOM、小型静态站点或 HTML 转 React 走 `autodev-code/deps/frontend-html/with-standard-html/SKILL.md`。
 5. 任一分支完成后都回到 `/autodev-code` 主流程，按 code 节点完成条件推进 `code_done`。
 

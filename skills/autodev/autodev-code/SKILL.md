@@ -42,11 +42,8 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{
 
 HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不再产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能统一收尾推进到 `code_done`。
 
-`frontend-html` 是 code 阶段实现素材，不是正式流程产物 input；进入本分支不要求 Source Bundle 中存在 `frontend_html`。
-
 触发条件（任一满足即进入本分支）：
 
-- `{FEATURE_DIR}/frontend-html/` 下至少有一个可读的 HTML/CSS/JS/资源文件。
 - `PLAN.md` / specs / 用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
 - 用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段、设计导出稿或静态页面素材。
 
