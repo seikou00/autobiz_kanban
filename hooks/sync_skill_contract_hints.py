@@ -57,18 +57,17 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             f'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" {contract.skill} --feature "$FEATURE_ID" --json',
             "```",
             "",
-            "- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，"
-            "不需要自己判断产物是否存在或该走哪个分支。",
-            "- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，"
-            "优先于技能正文的通用默认。",
-            "- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；"
-            "可选 input 按其降级动作继续，不因缺失而停止。",
-            "- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，"
+            "- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下"
+            "要读取的真实产物文件；按清单读原件。",
+            "- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、"
+            "读取方式（method）和缺失降级（degrade）。",
+            "- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。",
+            "- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。",
+            "- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，"
             "不要把它当作上游阶段产物读取、等待或索要。",
             "- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、"
             "代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。",
-            "- **输出与校验**：`## 输出产物` 是本节点应产出的产物；"
-            "`## Validators`/`## Guards` 是推进 checkpoint 的校验项。",
+            "- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。",
             "",
             "无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。",
             HINT_END_MARKER,

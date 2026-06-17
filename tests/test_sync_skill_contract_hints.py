@@ -64,20 +64,11 @@ name: autodev-sample
             'python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-sample --feature "$FEATURE_ID" --json',
             compiled,
         )
-        self.assertNotIn("--feature \"${feature}\" --json", compiled)
-        self.assertIn("无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单", compiled)
-        self.assertNotIn("无 `{FEATURE_ID}` 时可省略", compiled)
-        self.assertNotIn("无 `$FEATURE_ID` 时可省略", compiled)
-        # Plain consumption: the checklist vocabulary replaces the JSON bundle terms.
-        self.assertIn("执行清单", compiled)
-        self.assertIn("读取方式", compiled)
-        self.assertIn("缺失处理", compiled)
-        self.assertNotIn("Source Bundle", compiled)
-        self.assertNotIn("Method Bundle", compiled)
-        # Optional inputs degrade; required inputs stop — stated in plain terms,
-        # and the external "ask the user to supply it" path stays gone.
-        self.assertIn("可选 input 按其降级动作继续", compiled)
-        self.assertIn("必需 input 停止并回流上游补齐", compiled)
+        self.assertIn("Source Bundle", compiled)
+        self.assertIn("Method Bundle", compiled)
+        # Drop semantics: degrade speaks about optional inputs; the external
+        # concept and any "ask the user to supply it" path are gone.
+        self.assertIn("`required: false` 的输入", compiled)
         self.assertIn("索要", compiled)
         self.assertIn("正式流程产物 input", compiled)
         self.assertIn("内部 route SKILL/deps", compiled)
@@ -132,6 +123,14 @@ old generated rules
         self.assertEqual(payload["required_outputs"], [])
         self.assertEqual(payload["inputs"][0]["id"], "prd")
         self.assertFalse(payload["outputs"][0]["required"])
+
+    def test_autodev_code_html_route_is_not_bound_to_source_bundle(self) -> None:
+        content = (ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("不要求 Source Bundle 中存在 `frontend_html`", content)
+        self.assertIn("用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段", content)
+        self.assertNotIn("- Source Bundle 中存在 `frontend_html`", content)
+        self.assertNotIn("frontend_html.extract.degrade", content)
 
 
 if __name__ == "__main__":

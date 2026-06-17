@@ -106,19 +106,40 @@ python "${F}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feat
 1. 读取产品经理上传的需求材料
    - 优先读取 Word 文档（`.docx` / `.doc`）
    - 若用户提供 Markdown、需求说明、会议纪要、飞书导出内容，也可作为输入
-2. **动态提取原始文档的所有章节内容**：按原始文档的实际目录结构逐章逐节提取，不预设固定的信息类别
-   - 识别并记录原始文档的完整章节树（章节编号、标题层级、子章节关系）
-   - 提取每个章节下的具体内容,完整详细
-3. 记录原始文档的目录结构、编号规范、术语和文风特点
-4. **【必须】删除内容检查**：识别确认不做的功能点，**此步骤不可跳过**
-   - **关键词识别**：扫描文档中以下标记词
-     | 识别类型 | 示例关键词 |
-     |----------|------------|
-     | 格式识别 | 删除线文本（~~删除线~~） |
-     | 格式识别 | w:strike |
-     | 方案标记 | 已删除、废弃、方案2取消、方案3不用 |
-     | 状态标记 | 二期做、暂不开发、本期不做、后续处理 |
-   - **结果处理**：将识别结果记录到需求上下文中，注明标识为删除内容。
+2. 提取以下信息
+   - 特性概述 / 背景 / 目标
+   - 功能任务描述
+   - 验收标准
+   - 角色、流程、边界、外部依赖
+3. 记录原始文档的结构、编号规范、术语和文风特点
+
+**确定 FEATURE_DIR：**
+
+```
+FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
+```
+
+<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
+## 流程契约（Source Bundle + Method Bundle）
+
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+
+```bash
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "$FEATURE_ID" --json
+```
+
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
+- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
+- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
+- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
+
+无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+<!-- AUTODEV_RUNTIME_CONTRACT:END -->
+
 
 Expected output: 已完成原始需求材料读取，并形成后续分析所需上下文。
 

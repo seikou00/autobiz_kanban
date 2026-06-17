@@ -154,7 +154,7 @@ class SkipCompileTests(unittest.TestCase):
     def test_profile_dynamic_node_skippable(self) -> None:
         effective = compile_board_config(
             copy.deepcopy(base_config()),
-            repo_root=ROOT,
+            repo_root=None,
             profile="frontend_before_specs",
             skipped_nodes=["dev.frontend"],
         )

@@ -1,27 +1,28 @@
 ---
 name: autodev-code
-description: Dev 阶段逐任务代码执行。
+description: 按工作流契约逐任务执行代码，并在 code 阶段内部处理可选前端 HTML 实现分支。消费契约 Source Bundle 列出的正式流程产物 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不作为上游阶段产物读取或索要，但不阻止用户直供 HTML/DOM 素材和内部 route SKILL。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
 version: v1.1.1604
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（执行清单）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单：
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `$PLUGIN_ROOT/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
+python "$PLUGIN_ROOT/hooks/inspect_skill_contract.py" autodev-code --feature "$FEATURE_ID" --json
 ```
 
-- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
-- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
-- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
-- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
+- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
+- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
+- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
+- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
 - **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
+- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
+无 `$FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -31,11 +32,37 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 
 把上游确认的契约落成代码。输入/输出/读取方式以「流程契约」一节取到的契约为唯一事实源。
 
-**核心：** 你的 input 就是执行清单 `## 输入产物` 里列出的那几个，逐个**按其 `读取方式`**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的读取方式里。清单没列的 id 不属于本工作流——不读、不等、不索要，也不要设想"如果有 X"。**每个 input 的读取方式优先于本文通用默认。** 若清单含 `plan.json`，任务 DAG、依赖、状态与 evidenceIds 一律以 `plan.json` 为事实源；`PLAN.md` 若存在只作为人类可读视图按需同步维护，不参与机器判断。
+**核心：** 你的正式流程产物 input 就是契约 Source Bundle 里列出的那几个，逐个**按其 Method Bundle（focus/method）**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的 method 里。契约没列的 id 不作为上游阶段产物读取、等待或索要。用户本轮直接提供的 HTML/DOM/设计导出稿、`{FEATURE_DIR}/frontend-html/` 素材、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 不受这条排除规则限制。**每个 input 的 method 优先于本文通用默认。**
 
 输出：业务代码 / 测试 / 配置的最小必要修改；刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
-补充上下文（存在即读，非契约硬依赖）：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/DETAIL_DESIGN.md`、`AGENTS.md`（与本技能冲突时以 AGENTS.md 为准，除非系统级指令另有要求）。
+补充上下文（存在即读，非契约硬依赖）：`{FEATURE_DIR}/DETAIL_DESIGN.md`、`{CODE_WORKSPACE}/AGENTS.md`（与本技能冲突时以 AGENTS.md 为准，除非系统级指令另有要求）。
+
+## 前端 HTML 实现分支
+
+HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不再产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能统一收尾推进到 `code_done`。
+
+`frontend-html` 是 code 阶段实现素材，不是正式流程产物 input；进入本分支不要求 Source Bundle 中存在 `frontend_html`。
+
+触发条件（任一满足即进入本分支）：
+
+- `{FEATURE_DIR}/frontend-html/` 下至少有一个可读的 HTML/CSS/JS/资源文件。
+- `PLAN.md` / specs / 用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
+- 用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段、设计导出稿或静态页面素材。
+
+执行优先级：
+
+1. 行为契约以 `specs/**/*.md` 为最高依据。
+2. 技术边界以 `design.md` 与 `PLAN.md` 为实现依据。
+3. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位与交互线索，不得覆盖 specs/design/PLAN。
+4. 如果任务明确要求 HTML 转换但没有可读取 HTML/DOM/静态素材，停止并要求补充；如果任务可由 specs/design/PLAN 直接实现且没有可读 HTML 素材，则跳过本分支。
+
+内部分流：
+
+- 绝对定位 / 高保真 / Figma 或低代码导出的 HTML：读取 `deps/frontend-html/with-absolute-html/SKILL.md`，再按其 `deps/html-parser.md` 执行。
+- 标准 DOM / 语义结构清晰 / 普通静态 HTML / HTML 转 React：读取 `deps/frontend-html/with-standard-html/SKILL.md`，再按其 `deps/standard-html-parser.md` 执行。
+
+该分支完成后回到本文件的「执行协议」与「完成条件」：更新真实业务代码、执行必要验证、按 code 节点规则推进。
 
 ## 准入检查
 
