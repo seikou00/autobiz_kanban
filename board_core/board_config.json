@@ -250,7 +250,7 @@
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
-          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev", "userMessage": "请使用 /autodev 继续推进当前 Feature。", "dialogTips": "通过 /autodev 路由到行为规格；是否需要先将 HTML 转换为项目内前端工程文件？需要则进入 autodev-frontend，并在该节点内按标准 HTML 或绝对定位高保真 HTML 分流；不需要则直接进入 autodev-specs 阶段。" } }
+          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "通过 /autodev-specs 路由到行为规格；是否需要先将 HTML 转换为项目内前端工程文件？需要则进入 autodev-frontend，并在该节点内按标准 HTML 或绝对定位高保真 HTML 分流；不需要则直接进入 autodev-specs 阶段。" } }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {
