@@ -48,10 +48,8 @@ class CompileNodeSubsetTest(unittest.TestCase):
 
     def test_profile_and_decision_compiles_still_work(self) -> None:
         base = base_config()
-        frontend = compile_board_config(copy.deepcopy(base), repo_root=None, profile="frontend_before_specs")
+        frontend = compile_board_config(copy.deepcopy(base), repo_root=ROOT, profile="frontend_before_specs")
         self.assertIn("dev.frontend", [node["id"] for node in frontend["workflow"]["nodes"]])
-        frontend_node = next(node for node in frontend["workflow"]["nodes"] if node["id"] == "dev.frontend")
-        self.assertEqual(frontend_node["skill"], "autodev-frontend")
 
         detail = compile_board_config(
             copy.deepcopy(base),
