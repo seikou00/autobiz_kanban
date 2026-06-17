@@ -1,6 +1,6 @@
 ---
 name: autodev-code
-description: 按工作流契约逐任务执行代码，并在 code 阶段内部处理可选前端 HTML 实现分支。消费契约 Source Bundle 列出的 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不属于本工作流，不读不等。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
+description: 按工作流契约逐任务执行代码，并在 code 阶段内部处理可选前端 HTML 实现分支。消费契约 Source Bundle 列出的正式流程产物 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不作为上游阶段产物读取或索要，但不阻止用户直供 HTML/DOM 素材和内部 route SKILL。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
 version: v1.1.1604
 ---
 
@@ -18,10 +18,11 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
 - **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
 - **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
+- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `{FEATURE_ID}` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -31,7 +32,7 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{
 
 把上游确认的契约落成代码。输入/输出/读取方式以「流程契约」一节取到的契约为唯一事实源。
 
-**核心：** 你的 input 就是契约 Source Bundle 里列出的那几个，逐个**按其 Method Bundle（focus/method）**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的 method 里。契约没列的 id 不属于本工作流——不读、不等、不索要，也不要设想"如果有 X"。**每个 input 的 method 优先于本文通用默认。**
+**核心：** 你的正式流程产物 input 就是契约 Source Bundle 里列出的那几个，逐个**按其 Method Bundle（focus/method）**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的 method 里。契约没列的 id 不作为上游阶段产物读取、等待或索要。用户本轮直接提供的 HTML/DOM/设计导出稿、`{FEATURE_DIR}/frontend-html/` 素材、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 不受这条排除规则限制。**每个 input 的 method 优先于本文通用默认。**
 
 输出：业务代码 / 测试 / 配置的最小必要修改；刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
@@ -41,17 +42,20 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{
 
 HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不再产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能统一收尾推进到 `code_done`。
 
-触发条件：
+`frontend-html` 是 code 阶段实现素材，不是正式流程产物 input；进入本分支不要求 Source Bundle 中存在 `frontend_html`。
 
-- Source Bundle 中存在 `frontend_html`，且 `{FEATURE_DIR}/frontend-html/**/*` 至少有一个真实 HTML/CSS/JS/资源文件。
-- 或 `PLAN.md` / specs / 用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
+触发条件（任一满足即进入本分支）：
+
+- `{FEATURE_DIR}/frontend-html/` 下至少有一个可读的 HTML/CSS/JS/资源文件。
+- `PLAN.md` / specs / 用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
+- 用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段、设计导出稿或静态页面素材。
 
 执行优先级：
 
 1. 行为契约以 `specs/**/*.md` 为最高依据。
 2. 技术边界以 `design.md` 与 `PLAN.md` 为实现依据。
-3. `frontend_html` 只提供页面结构、视觉布局、组件槽位与交互线索，不得覆盖 specs/design/PLAN。
-4. 如果任务明确要求高保真 HTML 转换但没有可读取 HTML，停止并要求补充 HTML；如果任务可由 specs/design/PLAN 直接实现，则按 `frontend_html.extract.degrade` 跳过。
+3. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位与交互线索，不得覆盖 specs/design/PLAN。
+4. 如果任务明确要求 HTML 转换但没有可读取 HTML/DOM/静态素材，停止并要求补充；如果任务可由 specs/design/PLAN 直接实现且没有可读 HTML 素材，则跳过本分支。
 
 内部分流：
 
