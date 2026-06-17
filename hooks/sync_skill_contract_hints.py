@@ -48,13 +48,13 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "## 流程契约（执行清单）",
             "",
             "当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 "
-            "`${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；"
+            "`{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；"
             "本文档不维护产物清单，不要依赖文中写死的文件名。",
             "进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，"
             "把每个 input 解析成一条确定指令）：",
             "",
             "```bash",
-            f'python "${{pluginPath}}/hooks/inspect_skill_contract.py" {contract.skill} --feature "${{feature}}" --plain',
+            f'python "{{PLUGIN_ROOT}}/hooks/inspect_skill_contract.py" {contract.skill} --feature "{{FEATURE_ID}}" --json',
             "```",
             "",
             "- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，"
@@ -70,7 +70,7 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "- **输出与校验**：`## 输出产物` 是本节点应产出的产物；"
             "`## Validators`/`## Guards` 是推进 checkpoint 的校验项。",
             "",
-            "无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。",
+            "无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。",
             HINT_END_MARKER,
             "",
         ]
