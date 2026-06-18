@@ -8,18 +8,19 @@ author: zhangQiuFeng
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autoops-cicd --feature "{FEATURE_ID}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "${feature}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
 - **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
 - **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
+- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
 无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
@@ -38,8 +39,8 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autoops-cicd --feature "{
 
 如本技能为某个 Feature 生成交付物，产物统一写入最外层工作目录 `.autobizdevops`：
 
-- CI/CD 清单：`{FEATURE_DIR}/CICD_CHECKLIST.md`
-- PR 描述草稿：`{FEATURE_DIR}/PR_BODY.md`
+- CI/CD 清单：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/CICD_CHECKLIST.md`
+- PR 描述草稿：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PR_BODY.md`
 - 全局状态：`.autobizdevops/state.json`
 
 如用户额外提供 `PRD.md` 或 `design.md`，可在 `CICD_CHECKLIST.md` 中记录其来源；未提供时允许继续，但必须明确写明“需求/设计文档缺失或未提供”。
@@ -60,11 +61,11 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autoops-cicd --feature "{
 
 ### Step 1: 标准化工作目录与 State 快照
 
-1. 确定 `{slug}`，进入 `{FEATURE_DIR}/`
+1. 确定 `{slug}`，进入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/`
 2. 调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 3. 后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，仅用户直供 CI/CD 场景可继续通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
@@ -73,14 +74,14 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 6. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress --stage "CI/CD（来源: 用户直供）" --allow-create
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress --stage "CI/CD（来源: 用户直供）" --allow-create
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### Step 2: 生成交付文档
 
-1. 生成 `{FEATURE_DIR}/CICD_CHECKLIST.md`
-2. 生成 `{FEATURE_DIR}/PR_BODY.md`
+1. 生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/CICD_CHECKLIST.md`
+2. 生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PR_BODY.md`
 3. 若已知 PRD 或 API 来源，在 `CICD_CHECKLIST.md` 或 `PR_BODY.md` 中标注引用路径
 4. 若需求文档缺失，必须在 `CICD_CHECKLIST.md` 中记录：
 
@@ -135,11 +136,17 @@ python hooks/poll_pipeline_status.py --pipelineCode <pipeline_code> --pipelineNu
 macOS/Linux:
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint cicd_done
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_done
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### Step 6: 是否再次执行
 
 1. 需要再次触发流水线或重新整理清单时，若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `重新触发流水线 / 重整清单` / `不再重跑 (Recommended)`；若不支持，必须显式追问：`是否需要再次执行流水线或重新整理清单？请回复"重跑"或"不重跑"。`
 2. 未拿到用户明确同意前，不得擅自重跑。
+
+**Skill 完成。** 推进 `cicd_done` 后下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
+
+```bash
+python "${pluginPath}/hooks/resolve_next_skill.py"
+```

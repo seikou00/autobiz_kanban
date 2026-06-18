@@ -3,14 +3,6 @@ name: route-with-absolute-html
 description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义绝对定位 / 碎片 div / Figma 导出类 HTML 的适用条件、读取顺序、转交给本目录 `deps/html-parser.md` 的时机，以及失败兜底方式。
 ---
 
-**路径变量约定（必须区分）：**
-- **PLUGIN_ROOT**：插件代码根目录；调用插件脚本必须使用 `$PLUGIN_ROOT/...`。
-- **PLUGIN_WORKSPACE**：项目集合工作区，不直接包含 `.autobizdevops/state.json`。
-- **PROJECT_CODE**：当前项目目录名；`PROJECT_PLUGIN_DIR = {PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`。
-- **FEATURE_ID**：当前 Feature 名称；状态脚本未显式传 `--feature` 时会使用它。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 PRD、proposal、specs、design、PLAN、报告等 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`；用于前端代码探索、实现和验证。
-
 # 绝对定位高保真 HTML 路线
 
 这是独立的绝对定位高保真 HTML route 技能目录。

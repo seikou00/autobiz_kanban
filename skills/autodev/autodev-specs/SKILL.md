@@ -8,18 +8,19 @@ version: v1.1.1604
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-specs --feature "{FEATURE_ID}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
 - **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
 - **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
+- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
 无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
@@ -44,23 +45,17 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 ## 输入与输出
 
-FEATURE_DIR：
-
-```text
-FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
-```
-
 读取输入（消费 Source Bundle）：
 
-- 按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的上游产物原件，按其 `extract` 抽取重点；契约未列出的上游产物不读不等，按其 `degrade` 处理（如基于用户直供需求澄清行为）。
-- 用户补充说明
+- 按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的上游产物原件，按对应methodBundle `extract` 抽取重点；契约未列出的上游产物不读不等，按其 `degrade` 处理（如基于用户直供需求澄清行为）。
+- 用户补充说明(如有)
 - AGENTS.md 与项目约束
 - 与当前 feature 相关的现有代码、接口、数据模型、测试、配置
 
 输出产物：
 
-- `{FEATURE_DIR}/proposal.md`
-- `{FEATURE_DIR}/specs/<capability>/spec.md`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/<capability>/spec.md`
 
 禁止写入：
 
@@ -74,15 +69,15 @@ FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
 开始生成规格前推进到 `specs_in_progress`：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ## Explore 协议
 
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
-> 若当前运行模式支持 `write_todos`，进入探索前先建立一份覆盖宏观流程的任务清单：`探索澄清行为/接口/数据边界` / `生成 proposal.md` / `生成 specs/**/*.md` / `推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）；目的是探索代码后仍记得后续产出，不丢流程。不支持 `write_todos` 时按正文完成条件推进；清单只反映进度，不替代完成条件勾选与脚本校验。
+> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索澄清行为/接口/数据边界` / `生成 proposal.md` / `生成 specs/**/*.md` / `推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
 
 探索时必须：
 
@@ -116,7 +111,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ## 生成 proposal.md
 
-按 `{PLUGIN_ROOT}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
+按 `${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
 
 必须包含：
 
@@ -128,7 +123,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ## 生成 specs/**/*.md
 
-按 `{PLUGIN_ROOT}/skills/autodev/autodev-specs/templates/spec.md` 输出。
+按 `${pluginPath}/skills/autodev/autodev-specs/templates/spec.md` 输出。
 
 规则：
 
@@ -143,8 +138,8 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ## 完成条件
 
-- `{FEATURE_DIR}/proposal.md` 已生成。
-- `{FEATURE_DIR}/specs/` 下至少存在一个 `spec.md`。
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md` 已生成。
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/` 下至少存在一个 `spec.md`。
 - proposal 的每个 capability 都有对应 spec 文件。
 - 每个 spec 至少包含一个 Requirement 和一个 Scenario。
 - specs 只描述行为契约，不包含实现任务。
@@ -152,14 +147,12 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 完成后推进 checkpoint：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint specs_done
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 **Skill 完成。** 下一步以当前 Feature 的工作流为准：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PLUGIN_WORKSPACE}/{PROJECT_CODE}" --feature "{FEATURE_ID}"
+python "${pluginPath}/hooks/resolve_next_skill.py"
 ```
-
-（不预设固定下一技能，以上述脚本输出为准。）

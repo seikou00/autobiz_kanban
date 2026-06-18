@@ -25,32 +25,32 @@ autodev-detail-design 是 `detail_design_before_code` dynamic stage 启用后的
 
 输出产物：
 
-- {FEATURE_DIR}/DETAIL_DESIGN.md
+- ${feature}/DETAIL_DESIGN.md
 
 ## 准入与上下文
 
-确定 {FEATURE_ID} 后，读取当前 Feature 快照判断是否已进入本动态节点：
+确定 ${feature} 后，读取当前 Feature 快照判断是否已进入本动态节点：
 
 ```
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 如当前 checkpoint 仍为 `plan_done` 且用户选择需要详细设计，先使用统一状态脚本启用 dynamic stage 并进入本节点：
 
 ```
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled
 ```
 
 可查看动态节点契约：
 
 ```
-python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --json
 ```
 
 读取输入（消费 Source Bundle）：
 
 - 按契约 `sourceBundle` 读取上游产物原件（本节点为 proposal.md、specs/**/*.md、design.md、PLAN.md），按各自 `extract` 抽取重点。
-- {CODE_WORKSPACE}/AGENTS.md（如存在）
+- AGENTS.md（如存在）
 - 与本 Feature 相关的现有业务代码、测试、配置和接口定义
 
 `required_inputs` 中任一产物缺失时停止并提示先完成对应上游阶段（本节点仅在标准链启用 detail_design 决策后插入，design.md/PLAN.md 均为必需）；本 skill 不补写上游设计契约。
@@ -65,7 +65,7 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 
 ## 生成 DETAIL_DESIGN.md
 
-写入 {FEATURE_DIR}/DETAIL_DESIGN.md，建议结构如下：
+写入 ${feature}/DETAIL_DESIGN.md，建议结构如下：
 
 ````
 # 详细设计: [Feature 名称]
@@ -76,7 +76,7 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 
 ## 1. 设计目标
 
-- **Feature:** {FEATURE_ID}
+- **Feature:** ${feature}
 - **目标:** [本次改动要达成的结果]
 - **规格依据:** [列出 specs 中的 Requirement / Scenario]
 - **计划依据:** [列出 PLAN.md 中相关任务]
@@ -143,12 +143,16 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 
 ## 完成条件
 
-- `{FEATURE_DIR}/DETAIL_DESIGN.md` 已写入。
+- `${feature}/DETAIL_DESIGN.md` 已写入。
 - 文件改动清单覆盖 `PLAN.md` 中所有待编码任务，或明确说明某任务无需文件改动。
 - 每个文件级改动都能追溯到 specs、design 或 PLAN。
 - 仍不确定的路径、字段、接口、权限、数据或状态流已标为待确认。
-- 已调用 `python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
+- 已调用 `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
 
-**Skill 完成。** 下一步通常是继续 `/autodev-code`。
+**Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
+
+```bash
+python "${pluginPath}/hooks/resolve_next_skill.py"
+```
 
 $ARGUMENTS

@@ -30,7 +30,7 @@ LEGACY_RULES_END_MARKER = "<!-- AUTOBIZDEVOPS_ARTIFACT_RULES:END -->"
 HINT_BEGIN_MARKER = "<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->"
 HINT_END_MARKER = "<!-- AUTODEV_RUNTIME_CONTRACT:END -->"
 LEGACY_FEATURE_DIR_LINE = "工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/"
-FEATURE_DIR_LINE = "FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}"
+FEATURE_DIR_LINE = "FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}"
 
 
 @dataclass(frozen=True)
@@ -48,12 +48,12 @@ def runtime_contract_hint_block(contract: SkillContract) -> str:
             "## 流程契约（Source Bundle + Method Bundle）",
             "",
             "当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 "
-            "`{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；"
+            "`${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；"
             "本文档不维护产物清单，不要依赖文中写死的文件名。",
             "进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：",
             "",
             "```bash",
-            f'python "{{PLUGIN_ROOT}}/hooks/inspect_skill_contract.py" {contract.skill} --feature "{{FEATURE_ID}}" --json',
+            f'python "${{pluginPath}}/hooks/inspect_skill_contract.py" {contract.skill} --feature "${{feature}}" --json',
             "```",
             "",
             "- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下"

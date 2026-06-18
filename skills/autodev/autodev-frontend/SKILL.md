@@ -7,18 +7,19 @@ version: v1.1.1604
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-frontend --feature "{FEATURE_ID}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --feature "${feature}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
 - **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
 - **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
+- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
 无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
@@ -39,18 +40,24 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-frontend --featur
 进入本技能前，当前 workflow profile 必须是 `frontend_before_specs`。如果由 `prd_done` 直接进入本技能，先使用统一脚本推进 checkpoint：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 完成前端实现和必要验证后：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint frontend_done
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_done
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-完成后汇报变更文件、验证命令、未覆盖风险，并提示下一步进入 `/autodev-specs`。
+完成后汇报变更文件、验证命令、未覆盖风险。
+
+**Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
+
+```bash
+python "${pluginPath}/hooks/resolve_next_skill.py"
+```
 
 ## 路由规则
 
@@ -74,14 +81,14 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 | 来源 | 负责内容 |
 | --- | --- |
-| `{FEATURE_DIR}/PRD.md` | 字段、文案、交互、任务边界、页面业务语义，仅作 HTML 实现校对依据 |
+| `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` | 字段、文案、交互、任务边界、页面业务语义，仅作 HTML 实现校对依据 |
 | 接口说明文档 | 接口路径、请求方式、参数、响应字段、枚举/状态约束 |
 | HTML | 布局、结构、间距、视觉层级、组件槽位与视觉契约 |
 
 边界优先级：
 
 - 布局和视觉以 HTML 为准。
-- 业务文案和交互以 `{FEATURE_DIR}/PRD.md` 为准。
+- 业务文案和交互以 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 为准。
 - 数据字段与接口约束以接口说明文档为准。
 - 如果三者互相冲突，先保留 HTML 布局，再在汇报中明确冲突点；不要私自编造第四套口径。
 
@@ -228,9 +235,9 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ## 执行清单
 
-1. 确认 Feature、workflow profile、checkpoint 和 `CODE_WORKSPACE`。
+1. 确认 Feature、workflow profile、checkpoint。
 2. 读取 `inspect_skill_contract.py` 输出的 Source Bundle / Method Bundle。
-3. 优先读取 `{CODE_WORKSPACE}/AGENTS.md`，再读取项目说明、组件文档和目标代码。
+3. 优先读取 `AGENTS.md`，再读取项目说明、组件文档和目标代码。
 4. 确认用户提供了 HTML 文件、HTML 片段或可读取 HTML 内容；否则停止要求补充 HTML。
 5. 按路由规则进入 `route/with-absolute-html/SKILL.md` 或 `route/with-standard-html/SKILL.md`。
 6. 生成或修改与项目结构匹配的前端代码。

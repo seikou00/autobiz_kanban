@@ -1,14 +1,12 @@
 ---
 name: autobiz-requirement-discuss
-description: Biz 阶段需求澄清技能。读取原始需求材料，通过分析评估、问题清单、对话循环收敛需求，沉淀中间讨论稿 `{FEATURE_DIR}/PRD_DISCUSS.md`。适用于需求评审、需求完善、协助 PM 补齐信息。
+description: Biz 阶段需求澄清技能。读取原始需求材料，通过分析评估、问题清单、对话循环收敛需求，沉淀中间讨论稿 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。适用于需求评审、需求完善、协助 PM 补齐信息。
 version: v1.1.1604
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清技能
 
 > 本技能专注需求澄清与讨论收敛，不直接输出正式 PRD。
->
-> 需求收敛后，下一步应运行 `/autobiz-prd-generate` 提炼生成正式 `PRD.md`。
 
 ## 概述
 
@@ -16,7 +14,7 @@ version: v1.1.1604
 
 ## 产物协议
 
-- 中间产物：`{FEATURE_DIR}/PRD_DISCUSS.md`
+- 中间产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
 - `PRD_DISCUSS.md` 用于承接循环中的讨论结论、待确认项、假设与阶段性方案
 - 除非用户明确要求只停在讨论阶段，否则本技能应在收敛后结束，并提示用户运行 `/autobiz-prd-generate` 生成正式 PRD
 
@@ -26,7 +24,7 @@ version: v1.1.1604
 - 问题清单生成：将问题按优先级整理成结构化清单
 - 对话式引导：通过逐轮问答收集补充信息并确认关键决策
 - 详细需求提取：从原始需求文档提取每个任务的**业务逻辑、字段定义、筛选条件、状态流转、验收标准等信息**，形成可开发的完整描述
-- 讨论稿沉淀：结合需求描述和用户讨论，并回检优化，把循环过程稳定写入 `{FEATURE_DIR}/PRD_DISCUSS.md`
+- 讨论稿沉淀：结合需求描述和用户讨论，并回检优化，把循环过程稳定写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
 
 ## 触发条件
 
@@ -46,7 +44,7 @@ version: v1.1.1604
 确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "{FEATURE_ID}")
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 后续需要当前 checkpoint 时直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，本技能允许通过下面的 `update_checkpoint.py --allow-create` 创建；创建或推进 checkpoint 后，必须再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
@@ -72,8 +70,8 @@ CHECKPOINT=$(python "$PLUGIN_ROOT/read_state_json.py" --feature "{FEATURE_ID}")
 开始需求澄清时必须用脚本写入开始态（允许新建 Feature 行）：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint discuss_in_progress --allow-create
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_in_progress --allow-create
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ## 工作流程
@@ -93,24 +91,25 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 **确定 FEATURE_DIR：**
 
 ```
-FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
+FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
 ```
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "{FEATURE_ID}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
 - **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
 - **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
+- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
 无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
@@ -157,7 +156,7 @@ Expected output: 已完成原始需求材料读取，并形成后续分析所需
 
 ### Step 4: 对话式引导并沉淀 `PRD_DISCUSS.md`
 
-【关键方法】这一阶段的主要目标不是直接写正式 PRD，而是通过对话循环结合原始需求文档和用户回复，把需求内容调整结果稳定沉淀到 `{FEATURE_DIR}/PRD_DISCUSS.md`。
+【关键方法】这一阶段的主要目标不是直接写正式 PRD，而是通过对话循环结合原始需求文档和用户回复，把需求内容调整结果稳定沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。
 
 #### Step 4.1 问题清单引导策略
 
@@ -216,11 +215,11 @@ Expected output: 已完成原始需求材料读取，并形成后续分析所需
 - 讨论稿不要求完全标准化，但必须保证信息可追溯、语义稳定、便于后续提炼
 - 若用户指定"只先讨论，不输出正式 PRD"，可以停留在本文件；否则提示用户运行 `/autobiz-prd-generate`
 
-Expected output: `{FEATURE_DIR}/PRD_DISCUSS.md` 已沉淀当前轮次的需求结论、待确认项和风险。
+Expected output: `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 已沉淀当前轮次的需求结论、待确认项和风险。
 
 ### Step 5: 迭代直到收敛
 
-将 `{FEATURE_DIR}/PRD_DISCUSS.md` 与 `analysis-guide.md` 反复对照检查：
+将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 与 `analysis-guide.md` 反复对照检查：
 
 1. 检查原问题是否已解决
 2. 检查是否引入新问题或新歧义
@@ -244,8 +243,8 @@ Expected output: `{FEATURE_DIR}/PRD_DISCUSS.md` 已沉淀当前轮次的需求�
 使用统一脚本将当前 Feature 推进到 `discuss_done`：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint discuss_done
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_done
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 
@@ -259,13 +258,17 @@ python autobiz/hooks/biz_validate.py discuss --feature {slug}
 
 脚本通过即视为以下清单已完成：
 
-- `{FEATURE_DIR}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
-- `{FEATURE_DIR}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险
-- `{FEATURE_DIR}/PRD_DISCUSS.md` — 完整性校验章节所有检查项均为检查通过
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 完整性校验章节所有检查项均为检查通过
 - `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 
-**Skill 完成。** 下一步：`/autobiz-prd-generate`（生成正式 PRD）
+**Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
+
+```bash
+python "${pluginPath}/hooks/resolve_next_skill.py"
+```
 
 ## 技能使用约束
 

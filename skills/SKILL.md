@@ -21,15 +21,6 @@ version: v1.1.1604
 | `templates/` | 标准产物模板。当前产物模板分布在各阶段 skill 内，供 Biz / Dev 阶段生成 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md` 时读取。 |
 
 
-
-### 路径概念区分
-- **PLUGIN_DIR**：本插件的根目录（即 `../`）。所有 SKILL.md 文件、校验脚本、hooks 都存放在此目录下。脚本调用路径均以此为基准。
-- **PROJECT_PLUGIN_DIR**：项目插件根目录，固定为 `{PLUGIN_WORKSPACE}/{PROJECT_CODE}`，必须包含 `.autobizdevops/state.json`；`read_state_json.py` / `update_checkpoint.py` 固定从这里读写状态，命令中不得传 `--workspace/-w`。
-- **FEATURE_DIR**：当前 Feature 产物目录，固定为 `{PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}`；只用于读写 Feature 产物，不得作为状态脚本路径来源。
-- **CODE_WORKSPACE**：真实代码工作区根目录，包含业务代码、构建脚本和项目级 `AGENTS.md`。`CODE_WORKSPACE` 可能与 `PROJECT_PLUGIN_DIR` 相同，但不得默认把 `PROJECT_PLUGIN_DIR` 当作代码工作区。
-
-`AGENTS.md` 属于代码工作区约束文件。读取或检查 `AGENTS.md` 时，目标必须是 `{CODE_WORKSPACE}/AGENTS.md`；只有明确确认代码根目录和 `PROJECT_PLUGIN_DIR` 是同一目录时，才允许检查 `{PROJECT_PLUGIN_DIR}/AGENTS.md`。
-
 ## 入口约定
 
 以下三个为 `autobizdevops` 的唯一直接入口。所有 Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口按 checkpoint 路由，不允许跳过前置准入直接调用子技能。
@@ -54,10 +45,10 @@ version: v1.1.1604
 
 ```bash
 # 已知 Feature
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 # 未知 Feature：先读取全部 records，再选择或要求用户选择 Feature
-python "{PLUGIN_ROOT}/read_state_json.py"
+python "${pluginPath}/read_state_json.py"
 ```
 
 - 需要用户从候选 Feature 中选择时，若当前运行模式支持 `request_user_input`，必须优先用它把 `STATE.records` 中的候选列成结构化选项供用户单选；若不支持，必须列出候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
@@ -66,10 +57,10 @@ python "{PLUGIN_ROOT}/read_state_json.py"
 
 ### 动态路由读取
 
-所有根路由判断必须以 `{PLUGIN_ROOT}/board_core/board_config.json` 编译后的有效 workflow 为准：
+所有根路由判断必须以 `${pluginPath}/board_core/board_config.json` 编译后的有效 workflow 为准：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
+python "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 - `currentNodeId` 所属 group 为 `Biz` 时，进入 `/autobiz`。
@@ -82,7 +73,7 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_
 所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转和 Autodev 产物校验；进入 `code_done` 时，execute hook 会基于 `.autobizdevops/modules_compile.json` 非阻塞执行编译并写入 hook 日志，编译失败不阻止 checkpoint 更新。
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint {checkpoint}
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint {checkpoint}
 ```
 
 静态 checkpoint 表不得作为事实源；如本文与 `resolve_next_skill.py --json` 输出冲突，以脚本输出为准。

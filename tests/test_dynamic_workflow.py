@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -430,19 +431,22 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             (feature_dir / "PRD.md").write_text("prd", encoding="utf-8")
             write_state_records(workspace, {"alpha": record("prd_done", profile="standard")})
 
+            env = {
+                **os.environ,
+                "PLUGIN_WORKSPACE": str(workspace.parent),
+                "PROJECT_DIR": workspace.name,
+                "FEATURE_ID": "alpha",
+            }
             result = subprocess.run(
                 [
                     sys.executable,
                     str(ROOT / "hooks" / "resolve_next_skill.py"),
-                    "--workspace",
-                    str(workspace),
-                    "--feature",
-                    "alpha",
                     "--json",
                 ],
                 text=True,
                 capture_output=True,
                 check=False,
+                env=env,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)

@@ -20,7 +20,7 @@ version: v1.1.1604
 - 用户要求进入 Biz 阶段（需求澄清、PRD 生成）
 - 用户提到"完善需求""整理 PRD"
 - 用户从其他阶段（如 Dev）回溯到 Biz 阶段
-- 任何需要操作 `{FEATURE_DIR}/` 目录的场景
+- 任何需要操作 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 目录的场景
 
 ## 前置准入条件
 
@@ -38,7 +38,7 @@ version: v1.1.1604
 若 `{slug}` 未确定，先读取全部 State 快照，再从 `STATE.records` 选择或要求用户选择 Feature：
 
 ```bash
-python "{PLUGIN_ROOT}/read_state_json.py"
+python "${pluginPath}/read_state_json.py"
 ```
 
 - 需要用户从候选 Feature 中选择时，若当前运行模式支持 `request_user_input`，必须优先用它把 `STATE.records` 中的候选列成结构化选项供用户单选；若不支持，必须列出候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
@@ -46,7 +46,7 @@ python "{PLUGIN_ROOT}/read_state_json.py"
 确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 后续流程编排和子技能准入直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。若脚本提示 Feature 不存在，仅 `/autobiz-requirement-discuss` 可通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
@@ -54,12 +54,12 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
+python "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 ## 流程编排
 
-根据 `CHECKPOINT`、用户意图和 `resolve_next_skill.py --json` 结果路由到对应子技能。`recommendedNextSkill` 和 `nextAction` 均来自 `{PLUGIN_ROOT}/board_core/board_config.json` 的有效 workflow；静态说明不得覆盖脚本结果。
+根据 `CHECKPOINT`、用户意图和 `resolve_next_skill.py --json` 结果路由到对应子技能。`recommendedNextSkill` 和 `nextAction` 均来自 `${pluginPath}/board_core/board_config.json` 的有效 workflow；静态说明不得覆盖脚本结果。
 
 | 用户意图 | 当前状态要求 | 路由目标 |
 |---------|------------|---------|
@@ -83,10 +83,10 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_
 
 ```bash
 # 需求澄清完成后
-set PYTHONIOENCODING=utf-8 && python autobiz/hooks/biz_validate.py discuss --feature {slug}
+set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py discuss --feature {slug}
 
 # PRD 生成完成后
-set PYTHONIOENCODING=utf-8 && python autobiz/hooks/biz_validate.py prd --feature {slug}
+set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py prd --feature {slug}
 ```
 
 ### 校验不通过时的处理

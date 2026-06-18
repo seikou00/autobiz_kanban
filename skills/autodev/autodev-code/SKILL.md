@@ -7,18 +7,19 @@ version: v1.1.1604
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{FEATURE_ID}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --json
 ```
 
 - **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
 - **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
 - **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
 - **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
+- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
 - **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
 
 无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
@@ -35,17 +36,17 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{
 
 输出：业务代码 / 测试 / 配置的最小必要修改；刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
-补充上下文（存在即读，非契约硬依赖）：`{FEATURE_DIR}/DETAIL_DESIGN.md`、`{CODE_WORKSPACE}/AGENTS.md`（与本技能冲突时以 AGENTS.md 为准，除非系统级指令另有要求）。
+补充上下文（存在即读，非契约硬依赖）：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/DETAIL_DESIGN.md`、`AGENTS.md`（与本技能冲突时以 AGENTS.md 为准，除非系统级指令另有要求）。
 
 ## 准入检查
 
 确定 `{slug}` 后，先读快照并捕获 `CHECKPOINT`：
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-`CHECKPOINT` 为空、未知或无法唯一确定当前 Feature → 停止并请用户选择。确认 `{FEATURE_DIR}/` 存在。
+`CHECKPOINT` 为空、未知→停止并请用户选择。确认 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 存在。
 
 读取输入：按「流程契约」取契约 JSON，按 `sourceBundle` 逐项读原件、按各自 `extract` 抽取上下文。仅当 `required_inputs` 缺失时停止，不要生成替代文件。
 
@@ -67,8 +68,8 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 开始编码前推进到 `code_in_progress`：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_in_progress
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ## 执行协议
@@ -87,7 +88,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ### 3. 执行单个任务
 
-1. 任务状态置「进行中」，保留原内容（如启用 `write_todos`，将该任务条目置为进行中）。
+1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。
 2. 读任务的 做什么 / 依据 / 验证方法。先依各 input 的 method 确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（method 优先于此默认）。
 3. 改代码前做有界探索定位真实文件与既有模式：只读契约 input、AGENTS.md 指向的或 `rg` 命中的相关文件；先识别项目分层、命名、错误处理、校验、日志、测试风格；形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
 4. 实现并自检：
@@ -105,8 +106,8 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 队列无「待做」「进行中」后，跑项目级验证（优先 AGENTS.md / 契约指定命令；Java/Maven 至少编译）。失败回到相关任务，不推进。通过后：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_done
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ## 写入边界
@@ -126,5 +127,5 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 **Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PLUGIN_WORKSPACE}/{PROJECT_CODE}" --feature "{FEATURE_ID}"
+python "${pluginPath}/hooks/resolve_next_skill.py"
 ```
