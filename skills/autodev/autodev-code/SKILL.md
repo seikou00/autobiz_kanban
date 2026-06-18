@@ -56,8 +56,12 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 
 内部分流：
 
-- 绝对定位 / 高保真 / Figma 或低代码导出的 HTML：读取 `deps/frontend-html/with-absolute-html/SKILL.md`，再按其 `deps/html-parser.md` 执行。
-- 标准 DOM / 语义结构清晰 / 普通静态 HTML / HTML 转 React：读取 `deps/frontend-html/with-standard-html/SKILL.md`，再按其 `deps/standard-html-parser.md` 执行。
+1. 先建立本分支任务队列。若当前运行模式支持 `write_todos`，必须先把本分支主线写成可见清单，再读取 route SKILL/deps 或改代码；未完成这一步，不得进入后续分流。清单至少覆盖：`判断 HTML 路线并读取对应 SKILL` / `完成 HTML 解析与页面结构还原` / `映射真实工程组件、样式与交互` / `执行分支验证并回到 /autodev-code 主流程`；可按实际任务细化，但不得缺项、不得只放在脑内。若当前 code 主队列已存在更细任务，可继续沿用，但必须确保上述 4 类动作在同一份清单里都有对应条目。若不支持 `write_todos`，仍需在完成摘要维护同顺序队列与状态。状态规则沿用下文「执行协议」：每次只允许一个“进行中”，完成或失败后立即同步。
+2. 判断 HTML 路线并读取对应 SKILL：
+   - 绝对定位 / 高保真 / Figma 或低代码导出的 HTML：读取 `deps/frontend-html/with-absolute-html/SKILL.md`，再按其 `deps/html-parser.md` 执行。
+   - 标准 DOM / 语义结构清晰 / 普通静态 HTML / HTML 转 React：读取 `deps/frontend-html/with-standard-html/SKILL.md`，再按其 `deps/standard-html-parser.md` 执行。
+3. 沿选中路线完成 HTML 解析、页面结构还原，以及真实工程组件、样式与交互映射。
+4. 执行本分支验证，确认已回到 `/autodev-code` 主流程后，再按本文件的「执行协议」与「完成条件」收尾；在显式完成“回到 `/autodev-code` 主流程并按 code 节点收尾”前，不得把本分支视为完成。
 
 该分支完成后回到本文件的「执行协议」与「完成条件」：更新真实业务代码、执行必要验证、按 code 节点规则推进。
 
