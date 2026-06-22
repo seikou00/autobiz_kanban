@@ -197,6 +197,7 @@ Verdict: <PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED>
 只有最终 verdict 是 `PASS` 或 `PASS_WITH_WARNINGS` 时，本 skill 才算完成。
 
 **Skill 完成。** 收敛后下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
+建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

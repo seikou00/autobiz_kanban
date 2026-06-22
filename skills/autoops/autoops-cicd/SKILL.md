@@ -146,6 +146,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 2. 未拿到用户明确同意前，不得擅自重跑。
 
 **Skill 完成。** 推进 `cicd_done` 后下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
+建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

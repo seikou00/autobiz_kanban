@@ -152,6 +152,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 **Skill 完成。** 下一步以当前 Feature 的工作流为准：
+建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

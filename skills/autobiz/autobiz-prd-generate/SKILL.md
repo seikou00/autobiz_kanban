@@ -151,7 +151,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 - 上游讨论稿（若属于本工作流）的位置见 Source Bundle
 - 正式 PRD 位于 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
-- 下一步按工作流推进（以 `resolve_next_skill.py` 为准）。
+- 下一步按工作流推进（以 `resolve_next_skill.py` 为准）。建议不要在当前线程执行下一技能。
 
 ### Step 5: 更新状态（标记完成）
 
@@ -168,7 +168,7 @@ Skill 完成后，必须运行脚本校验：
 python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature {slug}
 ```
 
-通过脚本检查即视为**Skill 完成。** 下一步：`/autodev`
+通过脚本检查即视为**Skill 完成。** 下一步：`/autodev`。建议不要在当前线程执行下一技能。
 
 ## 技能使用约束
 
