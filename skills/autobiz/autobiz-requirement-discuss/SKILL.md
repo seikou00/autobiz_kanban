@@ -16,7 +16,7 @@ version: v1.1.1604
 
 - 中间产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
 - `PRD_DISCUSS.md` 用于承接循环中的讨论结论、待确认项、假设与阶段性方案
-- 除非用户明确要求只停在讨论阶段，否则本技能应在收敛后结束，并提示用户运行 `/autobiz-prd-generate` 生成正式 PRD。建议不要在当前线程执行下一技能。
+- 除非用户明确要求只停在讨论阶段，否则本技能应在收敛后结束，并提示用户运行 `/autobiz-prd-generate` 生成正式 PRD。
 
 ## 核心能力
 
@@ -213,7 +213,7 @@ Expected output: 已完成原始需求材料读取，并形成后续分析所需
 - 讨论稿可以保留"待确认""候选方案""暂定结论"这类中间状态
 - 每次新增或修改都要明确哪些内容是已确认，哪些仍待确认
 - 讨论稿不要求完全标准化，但必须保证信息可追溯、语义稳定、便于后续提炼
-- 若用户指定"只先讨论，不输出正式 PRD"，可以停留在本文件；否则提示用户运行 `/autobiz-prd-generate`。建议不要在当前线程执行下一技能。
+- 若用户指定"只先讨论，不输出正式 PRD"，可以停留在本文件；否则提示用户运行 `/autobiz-prd-generate`。
 
 Expected output: `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 已沉淀当前轮次的需求结论、待确认项和风险。
 
@@ -265,7 +265,6 @@ python autobiz/hooks/biz_validate.py discuss --feature {slug}
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 
 **Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

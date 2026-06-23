@@ -125,7 +125,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
 **Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

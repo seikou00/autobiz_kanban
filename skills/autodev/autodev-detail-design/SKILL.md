@@ -150,7 +150,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 - 已调用 `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
 
 **Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

@@ -33,7 +33,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --featur
 | Figma/低代码导出的高保真 HTML、绝对定位/大量 inline style/像素坐标 HTML、纯 div 视觉稿 | `route/with-absolute-html/SKILL.md` |
 | 普通静态 HTML、复制的 DOM 片段、小型静态站点、语义化 HTML/CSS/JS，或用户明确说 HTML 转 React/TSX/Vite/Next | `route/with-standard-html/SKILL.md` |
 
-主线完成后，如用户明确确认回检，进入 `route/review/SKILL.md`。建议不要在当前线程执行下一技能。不要再使用这三条 route 之外的实现路线。
+主线完成后，如用户明确确认回检，进入 `route/review/SKILL.md`。不要再使用这三条 route 之外的实现路线。
 
 ## 流程状态
 
@@ -54,7 +54,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 完成后汇报变更文件、验证命令、未覆盖风险。
 
 **Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"
@@ -229,7 +228,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py"
 
 - 主线交付总结和是否进入 review 是两个连续但不同的步骤。
 - 主线 route 可以汇报结果，但不能用“如需我可以继续回检”替代真实决策。
-- 顶层收到主线结果后，必须立即发起是否进入 `route/review/SKILL.md` 的确认。建议不要在当前线程执行下一技能。
+- 顶层收到主线结果后，必须立即发起是否进入 `route/review/SKILL.md` 的确认。
 - 若当前运行模式支持 `request_user_input`，必须优先使用它发起“继续回检 / 先不回检”选择。
 - 若当前运行模式不支持 `request_user_input`，必须显式追问：`是否现在进入回检流程？请回复“继续回检”或“先不回检”。`
 - 未拿到用户明确答复前，不得自动进入 review，也不得把主线交付当成整轮结束。
@@ -245,4 +244,4 @@ python "${pluginPath}/hooks/resolve_next_skill.py"
 7. 校验字段、标题、按钮、表格列、Tab、展开/收起区、图标、图表和明显交互没有增减或丢失。
 8. 运行项目适配的验证命令；无法运行时说明原因。
 9. 汇报页面名称、页面位置、变更文件、跳过步骤、是否触发兜底、验证状态、剩余风险和新增依赖。
-10. 主线完成后必须按 §回检决策规则 确认是否执行 review；只有用户明确确认后，才进入 `route/review/SKILL.md`。建议不要在当前线程执行下一技能。
+10. 主线完成后必须按 §回检决策规则 确认是否执行 review；只有用户明确确认后，才进入 `route/review/SKILL.md`。

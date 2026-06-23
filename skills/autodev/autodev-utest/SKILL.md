@@ -338,7 +338,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] 成功时已推进 `unit_test_done`。
 
 **Skill 完成。** 推进 `unit_test_done` 后下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

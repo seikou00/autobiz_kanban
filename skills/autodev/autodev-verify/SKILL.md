@@ -233,7 +233,6 @@ checkpoint=verify_done → Dev 阶段结束
 > ⚠️ **归档不在本 skill 执行**。归档由 Ops 阶段处理。
 
 **Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-建议不要在当前线程执行下一技能。
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"
@@ -269,7 +268,7 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 → 根路由器将读取 VERIFY_REPORT.md 中记录的问题来源与建议回流阶段，再决定回到 Biz / Plan / Code / Ops
 ```
 
-**Skill 完成。** 下一步由路由器决定：`needs_fix` → 按 `VERIFY_REPORT.md` 中的建议回流阶段处理。建议不要在当前线程执行下一技能。
+**Skill 完成。** 下一步由路由器决定：`needs_fix` → 按 `VERIFY_REPORT.md` 中的建议回流阶段处理。
 
 ---
 
