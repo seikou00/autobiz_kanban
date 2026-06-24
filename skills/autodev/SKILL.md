@@ -87,13 +87,13 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 - 用户说 `/autodev-frontend`、需要进入、需要先转 HTML、先把设计稿转工程文件、HTML 转 React、静态 HTML 转前端代码、按 PRD 先做前端页面等，视为需要转换或前端先行实现：推进到 `frontend_in_progress`，并传入 `--workflow-profile frontend_before_specs`。
 - 用户说不需要、直接进规格、先走 `autodev-specs` 等，视为不需要转换：推进到 `specs_in_progress`。
-- 如果用户只触发 `/autodev`，且没有表达需要或不需要：若当前运行模式支持 `request_user_input`，必须优先用它发起分流选择，选项至少包含 `先转 HTML 前端 (Recommended)` / `直接进入 specs`；若不支持，必须显式追问：`是否需要先将 HTML 转换为项目内前端工程文件？需要则进入 autodev-frontend，并在该节点内按标准 HTML 或绝对定位高保真 HTML 分流；不需要则直接进入 autodev-specs 阶段。请回复"先转 HTML 前端"或"直接进入 specs"。` 未拿到明确答复前，不得写入 profile，也不得推进 checkpoint。
+- 如果用户只触发 `/autodev`，且没有表达需要或不需要：不得使用 `request_user_input` 发起分流选择；必须停止并用普通文本提示用户下一轮显式触发 `/autodev` 且带上选择，例如 `/autodev 先转 HTML 前端` 或 `/autodev 直接进入 specs`。未拿到下一轮明确指令前，不得写入 profile，也不得推进 checkpoint。
 
 若脚本返回 `requiresWorkflowChoice: true`，读取 `workflowChoices` 中的 `stageId`、`decision` 和 `targetCheckpoint`，按用户表达选择 dynamic stage：
 
 - 对 `detail_design_before_code`，用户说需要详细设计、先出详细设计、code 前设计等，视为启用：推进到 `detail_design_in_progress`，并传入 `--workflow-decision detail_design_before_code=enabled`。
 - 用户说不需要、直接编码、跳过详细设计等，视为跳过：推进到 `code_in_progress`，并传入 `--workflow-decision detail_design_before_code=skipped`。
-- 如果用户只触发 `/autodev`，且没有表达需要或不需要：若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `先做详细设计` / `直接进入编码 (Recommended)`；若不支持，必须显式追问：`是否需要在代码实现前生成 DETAIL_DESIGN.md？需要则进入 autodev-detail-design，不需要则直接进入 autodev-code。请回复"先做详细设计"或"直接进入编码"。` 未拿到明确答复前，不得写入 workflow-decision，也不得推进 checkpoint。
+- 如果用户只触发 `/autodev`，且没有表达需要或不需要：不得使用 `request_user_input` 发起分流选择；必须停止并用普通文本提示用户下一轮显式触发 `/autodev` 且带上选择，例如 `/autodev 先做详细设计` 或 `/autodev 直接进入编码`。未拿到下一轮明确指令前，不得写入 workflow-decision，也不得推进 checkpoint。
 
 ### 1.3 产出物校验
 
@@ -149,7 +149,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --json
 
 在 `prd_done` checkpoint 进入 Dev 阶段时，若 `resolve_next_skill.py --json` 返回 `requiresProfileChoice: true`：
 
-1. 根据用户表达判断是否需要将 HTML 转换为项目内工程文件；若不明确，使用上面的简短问题确认。
+1. 根据用户表达判断是否需要将 HTML 转换为项目内工程文件；若不明确，停止并提示用户下一轮用明确指令重新触发根路由。
 2. 不需要转换时，推进到 `specs_in_progress` 并进入 `/autodev-specs`。
 3. 需要转换时，使用 `--workflow-profile frontend_before_specs` 推进到 `frontend_in_progress`，进入 `/autodev-frontend` 这个工作流节点。
 4. 工作流节点内按输入形态分流：高保真/绝对定位/Figma 导出的 HTML 走 `/autodev-frontend` 的 `route/with-absolute-html/SKILL.md`；普通静态 HTML、复制的 DOM 片段、小型静态站点或用户明确说 HTML 转 React 时，走 `route/with-standard-html/SKILL.md`；主线完成且用户明确确认后，才走 `route/review/SKILL.md`。
@@ -171,7 +171,7 @@ Dev 阶段的可选步骤由 `${pluginPath}/board_core/board_config.json` 的 `w
 
 在 `plan_done` checkpoint 若脚本返回 `requiresWorkflowChoice: true`：
 
-1. 根据用户表达判断是否需要在 code 前生成 `DETAIL_DESIGN.md`。
+1. 根据用户表达判断是否需要在 code 前生成 `DETAIL_DESIGN.md`；若不明确，停止并提示用户下一轮用明确指令重新触发根路由。
 2. 不需要时，推进到 `code_in_progress`：
    `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
 3. 需要时，推进到 `detail_design_in_progress`：

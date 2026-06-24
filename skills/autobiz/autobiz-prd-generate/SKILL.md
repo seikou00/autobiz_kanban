@@ -168,7 +168,7 @@ Skill 完成后，必须运行脚本校验：
 python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature {slug}
 ```
 
-通过脚本检查即视为**Skill 完成。** 下一步：`/autodev`
+通过脚本检查即视为**Skill 完成。** 下一步：`/autodev`。
 
 ## 技能使用约束
 
