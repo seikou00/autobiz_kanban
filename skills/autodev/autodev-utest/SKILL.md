@@ -41,6 +41,13 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "
 - 在边界内做最小修复：测试代码问题修测试，当前 feature 的业务实现问题可修生产代码。
 - 生成 `UNIT_TEST_REPORT.md`，为 E2E 与 Verify 阶段提供证据。
 
+## 稳定 ID 规范
+
+- Test Plan 中的测试目标使用 `UT-001`、`UT-002` ...
+- Coverage Matrix 中的 Source / Requirement / Scenario 必须使用稳定引用：`specs/<capability>/spec.md#REQ-001`、`#SCN-001`、`design.md#API-001`。
+- `UNIT_TEST_REPORT.md` 中的修复尝试、命令和覆盖项也必须保持同一组 ID。
+- 新建测试目标继续递增，不允许重用已删除或已完成的 ID。
+
 ## 执行主体
 
 本 skill 默认且只能由当前会话内联执行：
@@ -163,7 +170,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```markdown
 | ID | Source | Behavior | Test Target | Priority | Status |
 |----|--------|----------|-------------|----------|--------|
-| UT-001 | specs/foo/spec.md / Scenario | ... | FooServiceTest#should... | P0 | planned |
+| UT-001 | specs/foo/spec.md#REQ-001 / #SCN-001 | ... | FooServiceTest#should... | P0 | planned |
 ```
 
 优先级：
@@ -273,11 +280,11 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 ## Handoff
 ```
 
-`Coverage Matrix` 至少要映射 specs Requirement / Scenario 或 design 契约到测试方法：
+`Coverage Matrix` 至少要映射 specs Requirement / Scenario 或 design 契约到测试方法，并使用稳定 ID：
 
 ```markdown
-| Source | Requirement | Test | Result | Evidence |
-|--------|-------------|------|--------|----------|
+| Source | Requirement / Scenario | Test | Result | Evidence |
+|--------|------------------------|------|--------|----------|
 ```
 
 `Fix Attempts` 必须列出每一次修复：

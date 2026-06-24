@@ -105,8 +105,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 | ID | 类型 | 决策点 | 当前建议 | 备选方案 | 影响 | 需要确认 |
 |----|------|--------|----------|----------|------|----------|
 | SPEC-01 | Behavior | [行为边界] | [建议] | [备选] | [影响验收] | [问题] |
-| API-01 | API | [接口入口/请求响应/错误码] | [建议] | [备选] | [影响任务/验收] | [问题] |
-| DATA-01 | Data | [表/字段/状态/约束] | [建议] | [备选] | [影响任务/验收] | [问题] |
+| API-001 | API | [接口入口/请求响应/错误码] | [建议] | [备选] | [影响任务/验收] | [问题] |
+| DATA-001 | Data | [表/字段/状态/约束] | [建议] | [备选] | [影响任务/验收] | [问题] |
 ```
 
 ## 生成 proposal.md
@@ -129,8 +129,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 - 每个 capability 一个 spec 文件：`specs/<capability>/spec.md`。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
-- Requirement 使用 `### Requirement: <name>`。
-- Scenario 使用四级标题 `#### Scenario: <name>`。
+- Requirement 使用 `### Requirement [REQ-001]: <name>`。
+- Scenario 使用四级标题 `#### Scenario [SCN-001]: <name>`。
 - 每个 Requirement 至少一个 Scenario。
 - 使用 SHALL/MUST 表达可验证行为。
 - 修改已有行为时，写完整的新行为，不要只写差异片段。

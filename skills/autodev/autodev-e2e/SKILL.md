@@ -52,6 +52,12 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 每轮 E2E 必须优先以 specs 中属于用户主链路的 Requirement / Scenario 生成结构化测试用例；相关 API Decision 或 Data Decision 只作为执行和断言上下文。涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由、用户可见流程的 P0/P1 用例必须标记 `ui_required: true`。
 
+E2E 用例的稳定 ID 规则：
+
+- 用例 `id` 统一使用 `E2E-{slug}-001`、`E2E-{slug}-002` ...
+- `source.specs_contract` 必须优先引用稳定 ID，例如 `specs/<capability>/spec.md#REQ-001` / `#SCN-001`
+- `E2E_REPORT.md` 中的失败项与回流说明必须回链到相同的 `REQ-001` / `SCN-001`
+
 ## Checkpoint 写入
 
 开始 E2E 前推进到 `e2e_in_progress`，写入后立即刷新 `CHECKPOINT`：

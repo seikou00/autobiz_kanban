@@ -73,6 +73,52 @@ def write_modules_compile(workspace: Path, modules: list[dict]) -> None:
     )
 
 
+def write_minimal_trace_sources(feature_dir: Path) -> None:
+    (feature_dir / "specs" / "capability").mkdir(parents=True, exist_ok=True)
+    (feature_dir / "specs" / "capability" / "spec.md").write_text(
+        "\n".join(
+            [
+                "## ADDED Requirements",
+                "### Requirement [REQ-001]: capability",
+                "#### Scenario [SCN-001]: happy path",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (feature_dir / "design.md").write_text(
+        "\n".join(
+            [
+                "# 技术设计: capability",
+                "## 1. Context / 输入上下文",
+                "## 2. Spec Traceability / 规格追踪",
+                "| Spec | Requirement / Scenario | Design Coverage |",
+                "|------|------------------------|-----------------|",
+                "| specs/capability/spec.md | Requirement [REQ-001] / Scenario [SCN-001] | API-001 / DATA-001 / D-001 |",
+                "## 3. API Decisions / 接口决策",
+                "- x-auto-no-http-api: true",
+                "| ID | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |",
+                "|----|--------|--------------|---------|----------|--------|-------------------|--------|",
+                "| API-001 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                "## 4. Data Decisions / 数据决策",
+                "- x-auto-no-sql: true",
+                "| ID | Table/Model | Change | Fields | Index/Migration | Rollback | Status |",
+                "|----|-------------|--------|--------|-----------------|----------|--------|",
+                "| DATA-001 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                "## 5. Technical Design / 技术设计",
+                "### Decisions",
+                "| ID | Decision | Rationale | Alternatives | Status |",
+                "|----|----------|-----------|--------------|--------|",
+                "| D-001 | no-op | no-op | none | 已确认 |",
+                "## 6. Risks / Open Questions",
+                "| ID | Type | Description | Impact | Owner/Next Step |",
+                "|----|------|-------------|--------|-----------------|",
+                "| R-001 | 风险 | none | low | none |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 class StateStoreTests(unittest.TestCase):
     def test_loads_v2_state_and_repairs_markdown_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -393,8 +439,17 @@ class StateIntegrationTests(unittest.TestCase):
             write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             feature_dir.mkdir(parents=True)
+            write_minimal_trace_sources(feature_dir)
             (feature_dir / "PLAN.md").write_text(
-                "\n".join(["### 1. Implement", "- **状态:** 完成", ""]),
+                "\n".join(
+                    [
+                        "### Task [T001]: Implement",
+                        "- **状态:** 完成",
+                        "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **设计依据:** design.md#API-001 / #DATA-001 / #D-001",
+                        "- **证据依据:** ev_0001",
+                    ]
+                ),
                 encoding="utf-8",
             )
             module_dir = root / "service"
@@ -901,8 +956,17 @@ class StateIntegrationTests(unittest.TestCase):
             workspace = make_workspace(root)
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             feature_dir.mkdir(parents=True)
+            write_minimal_trace_sources(feature_dir)
             (feature_dir / "PLAN.md").write_text(
-                "\n".join(["### 1. Implement", "- **状态:** 完成", ""]),
+                "\n".join(
+                    [
+                        "### Task [T001]: Implement",
+                        "- **状态:** 完成",
+                        "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **设计依据:** design.md#API-001 / #DATA-001 / #D-001",
+                        "- **证据依据:** ev_0001",
+                    ]
+                ),
                 encoding="utf-8",
             )
             module_dir = root / "service"

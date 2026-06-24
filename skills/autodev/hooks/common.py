@@ -145,13 +145,22 @@ def info(ctx: HookContext, reason: str, extra: str = "") -> None:
 def task_count(plan: Path) -> int:
     if not is_nonempty(plan):
         return 0
-    return len(re.findall(r"^### [0-9]+\.", read_text(plan), re.MULTILINE))
+    return len(
+        re.findall(
+            r"^###\s+(?:Task\s+\[T\d{3}\]\s*:\s+.+|\d+[.)]\s+.+)$",
+            read_text(plan),
+            re.MULTILINE,
+        )
+    )
 
 
 def task_statuses(plan: Path) -> list[str]:
     if not is_nonempty(plan):
         return []
-    return [
-        match.group(1).strip()
-        for match in re.finditer(r"^[ \t]*[-*][ \t]*\*\*状态:\*\*[ \t]*(.+)$", read_text(plan), re.MULTILINE)
-    ]
+    statuses: list[str] = []
+    for line in read_text(plan).splitlines():
+        normalized = re.sub(r"\*+", "", line).strip()
+        match = re.match(r"^[-*]\s*(?:状态|Status)\s*[:：]\s*(.+)$", normalized, re.IGNORECASE)
+        if match:
+            statuses.append(match.group(1).strip())
+    return statuses

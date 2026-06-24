@@ -568,7 +568,7 @@
             { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true }
           ]
         },
-        "validators": []
+        "validators": ["e2e_report_contract"]
       },
       {
         "id": "dev.verify",
@@ -644,7 +644,7 @@
             { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true }
           ]
         },
-        "validators": []
+        "validators": ["verify_report_contract"]
       },
       {
         "id": "ops.cicd",

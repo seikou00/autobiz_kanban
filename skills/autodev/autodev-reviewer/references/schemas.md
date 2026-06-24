@@ -2,6 +2,15 @@
 
 这里定义主 agent 的完成声明，以及独立 reviewer 的正式需求评估交接文件。字段名保持稳定，方便后续工具解析。跨仓库支持直接扩展 `cowork.completion-proposal.v1`，不创建 v2。
 
+## 稳定 ID 规范
+
+- Requirement ID：`REQ-001`、`REQ-002` ...
+- Scenario ID：`SCN-001`、`SCN-002` ...
+- Task ID：`T001`、`T002` ...
+- Evidence ID：`ev_0001`、`ev_0002` ...
+- Eval ID：`eval_0001`、`eval_0002` ...
+- 跨阶段引用应使用稳定本地 ID，例如 `specs/<capability>/spec.md#REQ-001`、`specs/<capability>/spec.md#SCN-001`、`design.md#API-001`、`T001`、`ev_0001`。
+
 ## .autobizdevops/features/{slug}/completion-proposal.json
 
 主 agent 第一阶段只需要写这个文件。
@@ -69,6 +78,16 @@
     }
   ],
   "summary": "描述本次声称完成了什么。",
+  "task_refs": [
+    "T001"
+  ],
+  "spec_refs": [
+    "specs/{capability}/spec.md#REQ-001",
+    "specs/{capability}/spec.md#SCN-001"
+  ],
+  "evidence_ids": [
+    "ev_0001"
+  ],
   "files_changed": [
     {
       "repository_id": "frontend",
@@ -124,6 +143,7 @@ proposal 规则：
 - affected_repositories[].expected_changes 描述该仓库声称完成的行为或改动，不要只写“已修改”。
 - files_changed 是主 agent 的完成声明，不是最终事实；reviewer 会独立用 shell/git 核对。
 - files_changed[].repository_id 是可选字段；跨仓库任务中必须填写，并且必须匹配 affected_repositories[].id。单仓库旧流程可以省略。
+- task_refs / spec_refs / evidence_ids 是稳定追踪引用。没有它们也能评审，但有它们时 reviewer 会优先按引用追溯。
 - verification.commands 记录“声称运行过的验证”。如果没有真实输出证据，不要夸大，只写能确认的事实。
 - known_limitations 必须诚实。没有已知限制时才留空。
 - not_done 用来区分“明确不做”和“忘了做”。
@@ -165,7 +185,7 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 
 | Requirement | Status | Evidence | Risk |
 |---|---|---|---|
-| specs/[capability]/spec.md / Requirement / Scenario | covered / missing / risky / not_applicable | `frontend: src/App.tsx` / `backend: app/api/example.py` / `cross-repo: API contract` | low / medium / high / blocker |
+| specs/[capability]/spec.md#REQ-001 / #SCN-001 | covered / missing / risky / not_applicable | `frontend: src/App.tsx` / `backend: app/api/example.py` / `cross-repo: API contract` | low / medium / high / blocker |
 
 ## E2E Focus
 
