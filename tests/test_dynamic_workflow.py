@@ -175,9 +175,104 @@ def write_overlay(workspace: Path, profile: str, overlay: dict) -> None:
 def write_plan_artifacts(feature_dir: Path) -> None:
     (feature_dir / "proposal.md").write_text("proposal", encoding="utf-8")
     (feature_dir / "specs" / "capability").mkdir(parents=True, exist_ok=True)
-    (feature_dir / "specs" / "capability" / "spec.md").write_text("spec", encoding="utf-8")
-    (feature_dir / "design.md").write_text("design", encoding="utf-8")
-    (feature_dir / "PLAN.md").write_text("plan", encoding="utf-8")
+    (feature_dir / "specs" / "capability" / "spec.md").write_text(
+        "\n".join(
+            [
+                "## ADDED Requirements",
+                "",
+                "### Requirement [REQ-001]: capability",
+                "The system SHALL behave.",
+                "",
+                "#### Scenario [SCN-001]: happy path",
+                "- **WHEN** something happens",
+                "- **THEN** result appears",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (feature_dir / "design.md").write_text(
+        "\n".join(
+            [
+                "# 技术设计: capability",
+                "",
+                "## 1. Context / 输入上下文",
+                "",
+                "## 2. Spec Traceability / 规格追踪",
+                "",
+                "| Spec | Requirement / Scenario | Design Coverage |",
+                "|------|------------------------|-----------------|",
+                "| specs/capability/spec.md | Requirement [REQ-001] / Scenario [SCN-001] | API-001 / DATA-001 / D-001 |",
+                "",
+                "## 3. API Decisions / 接口决策",
+                "",
+                "- x-auto-no-http-api: true",
+                "",
+                "| ID | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |",
+                "|----|--------|--------------|---------|----------|--------|-------------------|--------|",
+                "| API-001 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                "",
+                "## 4. Data Decisions / 数据决策",
+                "",
+                "- x-auto-no-sql: true",
+                "",
+                "| ID | Table/Model | Change | Fields | Index/Migration | Rollback | Status |",
+                "|----|-------------|--------|--------|-----------------|----------|--------|",
+                "| DATA-001 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                "",
+                "## 5. Technical Design / 技术设计",
+                "",
+                "### Current State",
+                "无",
+                "",
+                "### Decisions",
+                "| ID | Decision | Rationale | Alternatives | Status |",
+                "|----|----------|-----------|--------------|--------|",
+                "| D-001 | no-op | no-op | none | 已确认 |",
+                "",
+                "## 6. Risks / Open Questions",
+                "",
+                "| ID | Type | Description | Impact | Owner/Next Step |",
+                "|----|------|-------------|--------|-----------------|",
+                "| R-001 | 风险 | none | low | none |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (feature_dir / "PLAN.md").write_text(
+        "\n".join(
+            [
+                "# 执行计划: capability",
+                "",
+                "## 概述",
+                "",
+                "## 任务 DAG",
+                "",
+                "### Task [T001]: Implement capability",
+                "- **做什么:** do it",
+                "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                "- **设计依据:** design.md#API-001 / #DATA-001 / #D-001",
+                "- **证据依据:** ev_0001",
+                "- **验证方法:** echo ok 预期结果：ok",
+                "- **状态:** 待做",
+                "",
+                "## Specs 行为覆盖",
+                "",
+                "| Spec Requirement / Scenario | 覆盖任务 | 验证方法 |",
+                "| --------------------------- | -------- | -------- |",
+                "| REQ-001 / SCN-001 | T001 | echo ok |",
+                "",
+                "## 规格与设计决策覆盖",
+                "",
+                "| specs/design 项 | 类型 | 实现任务 | 验证任务/方法 |",
+                "| ---------------- | ---- | -------- | ------------- |",
+                "| REQ-001 / SCN-001 | Behavior | T001 | echo ok |",
+                "| API-001 / x-auto-no-http-api | API | T001 / 无 | echo ok |",
+                "| DATA-001 / x-auto-no-sql | Data | T001 / 无 | echo ok |",
+                "| D-001 | Technical Decision | T001 | echo ok |",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def record(checkpoint: str, *, profile: str = "quality") -> dict[str, str]:
@@ -848,8 +943,81 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             workspace = make_workspace(Path(tmp))
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             write_overlay(workspace, "quality", quality_overlay())
-            (feature_dir / "design.md").write_text("design", encoding="utf-8")
-            (feature_dir / "PLAN.md").write_text("plan", encoding="utf-8")
+            (feature_dir / "design.md").write_text(
+                "\n".join(
+                    [
+                        "# 技术设计: capability",
+                        "",
+                        "## 1. Context / 输入上下文",
+                        "",
+                        "## 2. Spec Traceability / 规格追踪",
+                        "",
+                        "| Spec | Requirement / Scenario | Design Coverage |",
+                        "|------|------------------------|-----------------|",
+                        "| specs/capability/spec.md | Requirement [REQ-001] / Scenario [SCN-001] | API-001 / DATA-001 / D-001 |",
+                        "",
+                        "## 3. API Decisions / 接口决策",
+                        "",
+                        "- x-auto-no-http-api: true",
+                        "",
+                        "## 4. Data Decisions / 数据决策",
+                        "",
+                        "- x-auto-no-sql: true",
+                        "",
+                        "## 5. Technical Design / 技术设计",
+                        "",
+                        "### Current State",
+                        "无",
+                        "",
+                        "### Decisions",
+                        "| ID | Decision | Rationale | Alternatives | Status |",
+                        "|----|----------|-----------|--------------|--------|",
+                        "| D-001 | no-op | no-op | none | 已确认 |",
+                        "",
+                        "## 6. Risks / Open Questions",
+                        "",
+                        "| ID | Type | Description | Impact | Owner/Next Step |",
+                        "|----|------|-------------|--------|-----------------|",
+                        "| R-001 | 风险 | none | low | none |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (feature_dir / "PLAN.md").write_text(
+                "\n".join(
+                    [
+                        "# 执行计划: capability",
+                        "",
+                        "## 概述",
+                        "",
+                        "## 任务 DAG",
+                        "",
+                        "### Task [T001]: Implement capability",
+                        "- **做什么:** do it",
+                        "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **设计依据:** design.md#API-001 / #DATA-001 / #D-001",
+                        "- **证据依据:** ev_0001",
+                        "- **验证方法:** echo ok 预期结果：ok",
+                        "- **状态:** 完成",
+                        "",
+                        "## Specs 行为覆盖",
+                        "",
+                        "| Spec Requirement / Scenario | 覆盖任务 | 验证方法 |",
+                        "| --------------------------- | -------- | -------- |",
+                        "| REQ-001 / SCN-001 | T001 | echo ok |",
+                        "",
+                        "## 规格与设计决策覆盖",
+                        "",
+                        "| specs/design 项 | 类型 | 实现任务 | 验证任务/方法 |",
+                        "| ---------------- | ---- | -------- | ------------- |",
+                        "| REQ-001 / SCN-001 | Behavior | T001 | echo ok |",
+                        "| API-001 / x-auto-no-http-api | API | T001 / 无 | echo ok |",
+                        "| DATA-001 / x-auto-no-sql | Data | T001 / 无 | echo ok |",
+                        "| D-001 | Technical Decision | T001 | echo ok |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             write_state_records(workspace, {"alpha": record("plan_done")})
 
             started = prepare_checkpoint_update(

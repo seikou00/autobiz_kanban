@@ -85,6 +85,14 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 共 M 项待裁决。
 
+要求在验收报告里使用稳定 ID 回链：
+
+- Requirement: `specs/<capability>/spec.md#REQ-001`
+- Scenario: `specs/<capability>/spec.md#SCN-001`
+- Task: `T001`
+- Evidence: `ev_0001`
+- Eval: `eval_0001`
+
 按各输入的 Method Bundle 提取验收验证项：
 
 - 从行为契约 Requirement / Scenario 提取行为验证项 C1, C2, ...
@@ -166,9 +174,9 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 | # | Specs Requirement / Scenario | 裁定 | 证据来源 |
 |---|---------|------|---------|
-| 1 | [Requirement / Scenario 1] | ✓ 通过 | UNIT_TEST_REPORT + E2E_REPORT |
-| 2 | [Requirement / Scenario 2] | ✗ 失败 | E2E_REPORT（FAIL: AssertionError ...） |
-| 3 | [Requirement / Scenario 3] | ⚠ 需人工验证 | 报告未覆盖（UI 类） |
+| 1 | specs/[capability]/spec.md#REQ-001 / #SCN-001 | ✓ 通过 | UNIT_TEST_REPORT + E2E_REPORT |
+| 2 | specs/[capability]/spec.md#REQ-002 / #SCN-002 | ✗ 失败 | E2E_REPORT（FAIL: AssertionError ...） |
+| 3 | specs/[capability]/spec.md#REQ-003 / #SCN-003 | ⚠ 需人工验证 | 报告未覆盖（UI 类） |
 
 通过: N/M | 失败: K/M | 需人工验证: J/M
 
@@ -176,7 +184,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 | # | Contract Item | 裁定 | 证据来源 |
 |---|-----------|------|---------|
-| 1 | specs/[capability]/spec.md / Requirement / Scenario / API-01 / DATA-01 | ✓ 通过 | UNIT_TEST_REPORT §C1 + E2E_REPORT §E2E-001 |
+| 1 | specs/[capability]/spec.md#REQ-001 / #SCN-001 / API-001 / DATA-001 | ✓ 通过 | UNIT_TEST_REPORT §C1 + E2E_REPORT §E2E-001 |
 
 或：本轮 `x-auto-no-http-api: true`，无 HTTP/API 契约验证项；`x-auto-no-sql: true`，无数据库变更验证项。
 
