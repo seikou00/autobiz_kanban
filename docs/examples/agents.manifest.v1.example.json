@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "v1",
+  "systems": [
+    {
+      "systemId": "LF39",
+      "description": "外联服务系统",
+      "agentsPath": "LF3905/AGENTS.md",
+      "serviceUnits": [
+        { "serviceUnitId": "LF39.18_Outservice", "description": "外联出站服务", "agentsPath": "LF3918中台导航/Backend/services/focusone/descition.md" },
+        { "serviceUnitId": "LF39.20_Inservice", "description": "外联入站服务", "agentsPath": "" }
+      ]
+    },
+    {
+      "systemId": "LA64",
+      "description": "UEX 网关系统",
+      "agentsPath": "shared/gateway/AGENTS.md",
+      "serviceUnits": [
+        { "serviceUnitId": "LA64.05_UEXgateway", "description": "UEX 网关", "agentsPath": "" }
+      ]
+    }
+  ]
+}
