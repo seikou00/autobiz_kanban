@@ -40,30 +40,54 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{
 
 ## 前端 HTML 实现分支
 
-HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不再产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能统一收尾推进到 `code_done`。
+HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不再产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能统一收尾推进到 `code_done`。本分支只处理 HTML/DOM/设计导出稿到真实工程代码的实现方式，正式流程输入、行为边界与回流规则仍以本 Feature 的 Source Bundle + Method Bundle 为准。
 
 触发条件（任一满足即进入本分支）：
 
 - `PLAN.md` / specs / 用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
 - 用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段、设计导出稿或静态页面素材。
 
-执行优先级：
+总优先级：
 
 1. 行为契约以 `specs/**/*.md` 为最高依据。
 2. 技术边界以 `design.md` 与 `PLAN.md` 为实现依据。
-3. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位与交互线索，不得覆盖 specs/design/PLAN。
-4. 如果任务明确要求 HTML 转换但没有可读取 HTML/DOM/静态素材，停止并要求补充；如果任务可由 specs/design/PLAN 直接实现且没有可读 HTML 素材，则跳过本分支。
+3. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位、文案内容和交互线索，不得覆盖 specs/design/PLAN。
+4. PRD / specs / PLAN 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
+5. 如果任务明确要求 HTML 转换但没有可读取 HTML/DOM/静态素材，停止并要求补充；如果任务可由 specs/design/PLAN 直接实现且没有可读 HTML 素材，则跳过本分支。
 
-内部分流：
+HTML 分流规则：
 
-1. 先建立本分支任务队列。若当前运行模式支持 `write_todos`，必须先把本分支主线写成可见清单，再读取 route SKILL/deps 或改代码；未完成这一步，不得进入后续分流。清单至少覆盖：`判断 HTML 路线并读取对应 SKILL` / `完成 HTML 解析与页面结构还原` / `映射真实工程组件、样式与交互` / `执行分支验证并回到 /autodev-code 主流程`；可按实际任务细化，但不得缺项、不得只放在脑内。若当前 code 主队列已存在更细任务，可继续沿用，但必须确保上述 4 类动作在同一份清单里都有对应条目。若不支持 `write_todos`，仍需在完成摘要维护同顺序队列与状态。状态规则沿用下文「执行协议」：每次只允许一个“进行中”，完成或失败后立即同步。
-2. 判断 HTML 路线并读取对应 SKILL：
-   - 绝对定位 / 高保真 / Figma 或低代码导出的 HTML：读取 `deps/frontend-html/with-absolute-html/SKILL.md`，再按其 `deps/html-parser.md` 执行。
-   - 标准 DOM / 语义结构清晰 / 普通静态 HTML / HTML 转 React：读取 `deps/frontend-html/with-standard-html/SKILL.md`，再按其 `deps/standard-html-parser.md` 执行。
-3. 沿选中路线完成 HTML 解析、页面结构还原，以及真实工程组件、样式与交互映射。
-4. 执行本分支验证，确认已回到 `/autodev-code` 主流程后，再按本文件的「执行协议」与「完成条件」收尾；在显式完成“回到 `/autodev-code` 主流程并按 code 节点收尾”前，不得把本分支视为完成。
+| 输入形态 | 路线 |
+| --- | --- |
+| 标准 DOM、语义结构清晰、`form` / `table` / `button` / `label` / flex / grid / class 规则明显 | `deps/frontend-html/with-standard-html/SKILL.md` |
+| 普通静态 HTML、复制 DOM、小型静态站点、HTML 转 React，且页面主体不是绝对定位碎片结构 | `deps/frontend-html/with-standard-html/SKILL.md` |
+| 高保真 HTML、Figma/MasterGo/低代码导出稿、坐标稿、碎片 div、页面主体或关键分区由 `position:absolute` / `left/top` / 固定像素尺寸主导 | `deps/frontend-html/with-absolute-html/SKILL.md` |
+| 高保真但绝对定位仅局部、稀疏、装饰性存在，整体仍以标准 DOM / flex / grid 为主 | `deps/frontend-html/with-standard-html/SKILL.md` |
 
-该分支完成后回到本文件的「执行协议」与「完成条件」：更新真实业务代码、执行必要验证、按 code 节点规则推进。
+高保真 / 绝对定位强信号（命中且主导页面主体、关键分区或多个视觉块时，必须走 absolute 路线）：
+
+- 用户明确标注“高保真 HTML”“设计导出 HTML”“Figma/MasterGo 导出”“绝对定位”“纯坐标还原稿”。
+- 大量 `position:absolute`、`left/top`、固定像素宽高、`clip-path`、`data:image/svg+xml`、渐变、阴影。
+- 页面主体由碎片 `div`、梯形块、迷你趋势图、像素级卡片矩阵、复杂壳层布局组成。
+
+组件、图标与图表来源：
+
+1. 先读 `{CODE_WORKSPACE}/AGENTS.md` 与项目说明，再扫真实源码；项目约束优先于本分支默认规则。
+2. 组件来源优先级：AGENTS.md 指定公共组件库 -> `architecture/components` -> 项目本地组件 -> 已安装且真实使用的组件库 -> 用户提供兜底组件库 -> 相似页面 -> fidelity-only。
+3. 图标来源优先级：项目图标规则 -> 本地 icon/svg/iconfont -> 已安装且真实使用的图标库 -> React + AntD `@ant-design/icons` 兜底；纯图标按钮补 `Tooltip` 与 `aria-label`。
+4. 图表必须使用真实图表组件或图库实现；优先项目图表规则 / 本地图表组件 / 已安装且真实使用的图库，缺证据时按任务约束确认或默认 ECharts 兜底，不得用静态 SVG / CSS 图形假冒真实图表，除非用户明确只要静态占位。
+5. 缺少需要新增的组件库、图标库或图表库时，按项目包管理器和用户确认流程处理；安装完成前不得把依赖相关能力标记为最终完成。
+
+实现与收尾要求：
+
+1. 先建立本分支任务队列。若当前运行模式支持 `write_todos`，必须先把本分支主线写成可见清单，再读取 route SKILL/deps 或改代码；未完成这一步，不得进入后续分流。清单至少覆盖：`判断 HTML 路线并读取对应 SKILL` / `完成 HTML 解析与页面结构还原` / `映射真实工程组件、样式与交互` / `执行分支验证并回到 /autodev-code 主流程`；可按实际任务细化，但不得缺项、不得只放在脑内。
+2. 标准 HTML 路线进入 `with-standard-html/SKILL.md` 后，必须先完成路线判定、页面模块、转换、Ant Design 审计四类清单，并带 `routeType`、`absoluteSignalsCleared`、`moduleTodosReady`、`conversionTodosReady`、`uiLibraryTarget`、`antdMode`、`auditRequired` 交接状态转给 `deps/standard-html-parser.md`。
+3. 绝对定位高保真路线进入 `with-absolute-html/SKILL.md` 后，必须先完成页面模块清单与独立脚本清单；脚本清单至少覆盖参数确认、执行脚本、检查 `.frontend/html-analysis/<task-stem>.*` 产物、失败降级。脚本异常不阻塞主流程，降级后以原始 HTML 为唯一视觉源继续。
+4. 主线结束前必须做样式细节收尾，补齐 padding、边框、圆角、阴影、字色、字号、字重、行高、内外边距、对齐、状态色、文本内容、hover / active / selected 等用户一眼能看出的差异。
+5. 主线里完成页面拆分，以及函数、常量、类型、helper / hook、图表配置与同页公共内容抽取；不要把明显的可维护性工作留给后续 `/autodev-reviewer`。
+6. 执行本分支验证，确认已回到 `/autodev-code` 主流程后，再按本文件的「执行协议」与「完成条件」收尾；在显式完成“回到 `/autodev-code` 主流程并按 code 节点收尾”前，不得把本分支视为完成。
+
+分支返回契约：两个 HTML 路线完成后都必须返回 `/autodev-code` 主流程，由 code 根技能继续项目级验证、`.autobizdevops/modules_compile.json` 编译清单校验和 `code_done` checkpoint 推进。HTML 分支内部不得发起独立回检选择，不得调用或引用已移除的 `autodev-frontend`、`frontend_done` 或内部回检路线。
 
 ## 准入检查
 

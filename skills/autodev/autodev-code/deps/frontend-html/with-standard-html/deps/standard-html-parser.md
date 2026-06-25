@@ -1,13 +1,13 @@
 ---
 name: standard-html-parser
-description: 处理标准 DOM / 语义明确 HTML 的 code 阶段内部依赖。该依赖以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；同时遵循 code 根 SKILL.md 的组件优先级、图标/图表规则、技术栈兜底和主线交付契约。
+description: 处理 `/autodev-code` 内部标准 DOM / 语义明确 HTML 的依赖。该依赖以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；同时遵循 code 根 SKILL.md 的组件优先级、图标/图表规则、技术栈兜底和 code_done 收尾契约。
 ---
 
 # 标准 HTML 解析器
 
-本依赖只在上层 route 技能 `../SKILL.md` 已经把当前输入明确判定为“标准 DOM / 语义明确 HTML”后进入。它替代原有薄版 `standard-html-parser`，作为 `with-standard-html` 路线的 HTML 转工程代码主执行技能。
+本依赖只在上层路线技能 `../SKILL.md` 已经把当前输入明确判定为“标准 DOM / 语义明确 HTML”后进入。它替代原有薄版 `standard-html-parser`，作为 `with-standard-html` 路线的 HTML 转工程代码主执行技能。
 
-本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../SKILL.md`。若本文和根技能冲突，以根技能的全局优先级、图标/图表规则、依赖安装确认规则和收尾规则为准。
+本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../SKILL.md`。若本文和根技能冲突，以 code 根技能的 Source/Method Bundle 优先级、HTML 分支总控契约、图标/图表规则、依赖安装确认规则和 code_done 收尾规则为准。
 
 ## 1. 入口契约
 
@@ -15,8 +15,22 @@ description: 处理标准 DOM / 语义明确 HTML 的 code 阶段内部依赖。
 
 1. 明确把输入判定为 `standard-html`，即标准 DOM、语义结构、表单 / 表格 / flex / grid / class 规则较清晰。
 2. 确认未命中 `../../with-absolute-html/SKILL.md` 定义的强制绝对定位 / 设计导出稿信号。
-3. 准备原始 HTML 与目标工程上下文。
-4. 保留原始 HTML 作为最终视觉与内容事实源。
+3. 完成上层 `../SKILL.md` 的主流程 `write_todos`：路线判定清单、页面模块清单、转换清单，以及按需启用的 Ant Design 审计清单。
+4. 准备原始 HTML 与目标工程上下文。
+5. 保留原始 HTML 作为最终视觉、内容和语义事实源。
+6. 携带以下交接状态：
+
+```text
+routeType=standard-html
+absoluteSignalsCleared=true
+moduleTodosReady=true
+conversionTodosReady=true
+uiLibraryTarget=<project|antd|antd-mobile|native>
+antdMode=<required|candidate|selected|notApplicable>
+auditRequired=<true|false>
+```
+
+若 `moduleTodosReady` 或 `conversionTodosReady` 不为 `true`，先返回上层补齐清单，不要直接编码。若 `absoluteSignalsCleared` 不为 `true`，返回 `../../with-absolute-html/SKILL.md` 重新分流。
 
 ## 2. 核心定位
 
@@ -26,37 +40,53 @@ description: 处理标准 DOM / 语义明确 HTML 的 code 阶段内部依赖。
 
 - 保留源 HTML 的业务语义、内容完整度、视觉结构和交互意图。
 - 按根技能优先级复用项目公共组件、本地组件和已安装且真实使用的组件库。
-- 对产品 UI 中的表单、表格、筛选、导航、反馈、上传、弹窗等结构，优先映射到真实项目组件或 Ant Design。
+- 对产品 UI 中的表单、表格、筛选、导航、反馈、上传、弹窗等结构，优先映射到真实项目组件、桌面 Ant Design 或 Ant Design Mobile。
 - 对品牌化、文章化、营销化、异形视觉和高度自定义布局，保留原始语义 HTML / CSS，不强行 AntD 化。
-- 在主线阶段完成组件、数据、常量、类型、helper、hook、图标和图表配置抽取，不把维护性工作留到后续阶段。
+- 在主线阶段完成组件、数据、常量、类型、helper、hook、图标和图表配置抽取，不把维护性工作留到后续 `/autodev-reviewer` 阶段。
 
 ## 3. 读取顺序
+
+本节消费上层 `write_todos` 产物，不重新发明一套路线判定。若上层清单缺失，先补齐清单，再继续。
 
 1. 读取原始 HTML 文件或用户提供的 HTML 内容。
 2. 从 HTML 来源目录和目标工程目录向上查找并读取 `AGENT.md` / `AGENTS.md`，更近的规则优先。
 3. 读取项目 `architecture/`、组件说明、API 说明和相似页面。
 4. 扫描真实源码确认导入路径、组件导出、组件用法、样式方案、路由结构、包管理器和已安装依赖。
-5. 如决定使用 Ant Design，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
-6. 如涉及 YAPI 或真实接口，读取项目 API helper、已有接口封装或用户提供的接口材料。
+5. 对照页面模块清单确认入口、分区、局部组件、复用逻辑、样式文件和资产范围。
+6. 对照转换清单确认项目组件 / Ant Design / Ant Design Mobile / 原生 React + CSS 的映射策略，并消费 `uiLibraryTarget`。
+7. 当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
+8. 当 `uiLibraryTarget=antd-mobile` 时，不读取桌面 Ant Design 转换参考，不运行桌面 Ant Design 覆盖审计；按项目移动端组件规则或 code 根技能 React + Ant Design Mobile 兜底继续。
+9. 如涉及 YAPI 或真实接口，读取项目 API helper、已有接口封装或用户本轮提供的接口材料。
 
 ## 4. Craft：编码前简报
 
-写代码前先形成一个短实现简报，并据此落地：
+写代码前先形成一个短实现简报，并据此落地。这个简报必须消费上层 `write_todos`，不能跳过页面模块清单、转换清单或已启用的 Ant Design 审计清单。
 
 1. 源 HTML 范围、依赖、外部资源和可用资产。
 2. 目标工程位置、路由位置和文件组织。
 3. 组件边界与抽取标准。
-4. 项目组件 / Ant Design / 原生 HTML 的映射计划；当 Ant Design 适用或可能适用时，必须补充 Ant Design 映射矩阵。
-5. 样式策略：CSS Modules、Less、Tailwind、普通 CSS、styled-components 或项目既有方案。
-6. 需要保留或重建的交互：tab、展开收起、表单提交、分页、筛选、弹窗、上传、排序等。
-7. 需要支持的状态：默认、loading、empty、error、disabled、hover/focus、responsive。
-8. 验证计划：静态检查、构建、运行、浏览器预览、响应式检查。
+4. 页面模块清单：入口、分区、局部组件、复用逻辑、样式文件和资产。
+5. 项目组件 / Ant Design / Ant Design Mobile / 原生 HTML 的映射计划；当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，必须补充 Ant Design 映射矩阵。
+6. 样式策略：CSS Modules、Less、Tailwind、普通 CSS、styled-components 或项目既有方案。
+7. 需要保留或重建的交互：tab、展开收起、表单提交、分页、筛选、弹窗、上传、排序等。
+8. 需要支持的状态：默认、loading、empty、error、disabled、hover/focus、responsive。
+9. `uiLibraryTarget`、`antdMode` 与 `auditRequired`，以及审计命令和候选项处理方式。
+10. 验证计划：静态检查、构建、运行、浏览器预览、响应式检查。
 
 若用户要求像素级或高保真迁移，源 HTML 就是设计简报；不要主动归一化成 AntD 默认外观。若用户要求工程化清理或后台产品 UI，允许在不丢失语义和业务层级的前提下把标准控件映射到项目组件或 Ant Design。
 
+主线实现顺序固定为：
+
+1. 先按页面模块清单逐区实现页面壳层、路由入口、状态编排、数据获取和分区装配。
+2. 再按转换清单逐项替换项目组件、桌面 Ant Design 或 Ant Design Mobile；品牌化、高自定义视觉和保真区域保留原生 React + CSS。
+3. 当 `antdMode=candidate` 但映射矩阵未选择桌面 Ant Design 时，将 `antdMode` 更新为 `notApplicable` 且 `auditRequired=false`；实际选择桌面 Ant Design 时，将 `antdMode` 更新为 `selected` 且 `auditRequired=true`。
+4. 最后按 Ant Design 审计清单处理残留 native 产品控件；审计脚本退出码 `1` 是待处理候选清单，不是脚本故障。
+
+标准 HTML 转换的默认原则是“语义优先，组件替换有证据”：后台产品 UI 优先项目组件 / 桌面 Ant Design，移动端产品 UI 优先项目移动端组件 / Ant Design Mobile，品牌化或高度自定义视觉保留原生 React + CSS。没有源码、导出或真实用例证据时，不要强行使用某个项目组件。
+
 ### 4.1 Ant Design 映射矩阵
 
-当 Ant Design 适用或可能适用时，编码前创建 Ant Design 映射矩阵。小页面保持紧凑，复杂后台 / 产品 UI 需要覆盖全部候选结构：
+当 `uiLibraryTarget=antd` 且 `antdMode=required|candidate` 时，编码前创建 Ant Design 映射矩阵。小页面保持紧凑，复杂后台 / 产品 UI 需要覆盖全部候选结构：
 
 | 源 HTML | 意图 | Ant Design 组件 | 转换? | 原因 |
 | --- | --- | --- | --- | --- |
@@ -66,6 +96,8 @@ description: 处理标准 DOM / 语义明确 HTML 的 code 阶段内部依赖。
 | 品牌视觉容器 | 自定义视觉布局 | 原生 React / CSS | no | 保真优先 |
 
 把矩阵作为转换清单使用。每个产品 UI 控件、数据面、导航模式、反馈元素、overlay、表单控件候选，都要进入矩阵并给出 convert / keep 决策。
+
+矩阵决策后必须更新状态：若实际选择桌面 Ant Design，记录 `antdMode=selected`、`auditRequired=true`；若全部保留项目组件、Ant Design Mobile 或原生实现，记录 `antdMode=notApplicable`、`auditRequired=false`。`candidate` 不能作为编码后的最终状态。
 
 ## 5. Parse And Normalize
 
@@ -143,6 +175,14 @@ description: 处理标准 DOM / 语义明确 HTML 的 code 阶段内部依赖。
 4. 现有项目未安装 Ant Design 且用户未明确要求时，新增依赖前必须按根技能规则向用户确认。
 5. 异形视觉、营销内容、文章内容、自定义插画和 Ant Design 会明显降低保真的区域，保留原生 / 自定义 React markup。
 
+状态语义必须保持一致：
+
+- `antdMode=required`：用户明确要求桌面 Ant Design，必须创建映射矩阵并在实现后做桌面 Ant Design 覆盖审计。
+- `antdMode=candidate`：桌面 Ant Design 可能适用，必须创建映射矩阵，但不代表最终使用；编码完成前必须更新为 `selected` 或 `notApplicable`。
+- `antdMode=selected`：映射矩阵决策后实际使用桌面 Ant Design，必须做覆盖审计。
+- `antdMode=notApplicable`：不使用桌面 Ant Design，不运行桌面 Ant Design 覆盖审计。
+- `uiLibraryTarget=antd-mobile`：移动端标准 HTML 使用 Ant Design Mobile 或项目移动端组件，不套用本节桌面 Ant Design 映射矩阵和审计脚本。
+
 ### 7.2 版本门槛
 
 写 Ant Design 代码前必须检查：
@@ -194,7 +234,9 @@ description: 处理标准 DOM / 语义明确 HTML 的 code 阶段内部依赖。
 
 ### 7.5 覆盖审计
 
-当 Ant Design 被用户要求、被本路线选择，或被后台 / 产品 UI 强烈暗示时，实现后必须做 Ant Design 覆盖审计。
+当 `uiLibraryTarget=antd` 且 `antdMode=required|selected` 时，实现后必须做桌面 Ant Design 覆盖审计。
+
+`audit_antd_coverage.py` 是 JSX / TSX 启发式候选扫描，不是 AST 级完整审计。它用于发现可能遗漏的 native 产品控件，不替代人工按映射矩阵逐项确认，也不适用于 Ant Design Mobile。
 
 审计 JSX / TSX 源码，不审计浏览器运行时 DOM；Ant Design 组件自身会渲染原生 `button`、`input`、`table` 等 DOM，不能据此误判。
 
@@ -205,9 +247,11 @@ description: 处理标准 DOM / 语义明确 HTML 的 code 阶段内部依赖。
 - 转换成合适的项目组件或 Ant Design 组件。
 - 明确说明保留 native/custom 的原因，例如自定义视觉、编辑内容、可访问性 / 保真约束、项目依赖不可用。
 
-从本技能仓库根目录运行：
+从插件根目录或 code 技能根目录运行：
 
 ```bash
+python skills/autodev/autodev-code/deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+# 或在 autodev-code 技能根目录运行：
 python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
 ```
 
@@ -266,6 +310,7 @@ python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <tar
 - 避免无关重构。
 - 保留用户已有改动。
 - 如果目标页面已存在，先读当前文件，对比 HTML 差异，只改变化部分。
+- 增量页面场景必须以现有目标文件和原始 HTML 差异为边界，不按完整模块清单重写整页。
 - 页面壳层、数据编排和局部组件拆分应和项目已有模式一致。
 
 ### 10.2 新 React 工程
@@ -277,6 +322,7 @@ python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <tar
 - `src/main.tsx`、`src/App.tsx` 或项目路由入口清晰。
 - 组件放在 `src/components` 或既定结构。
 - 静态资源按 import 需求放在 `public` 或 `src/assets`。
+- 新建页面场景按完整页面模块清单落盘，确保入口、分区、局部组件、复用逻辑、样式和资产都有明确归属。
 - 使用源 HTML 里的真实内容，不填充无关 placeholder。
 - 需要 Ant Design 时只做必要配置，不做大范围主题重写。
 
@@ -287,8 +333,9 @@ python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <tar
 - 安装 / 构建 / lint / test 中可用且合适的命令。
 - 前端任务要启动 dev server，并用浏览器确认页面非空白、资源加载、布局无明显错位。
 - 检查桌面和移动视口：溢出、裁切、文本重叠、按钮挤压、表格横向滚动。
-- Ant Design 场景检查：样式是否加载、版本 API 是否正确、Form 默认值与校验、Radio/Checkbox/Select/Tabs 状态、Table `rowKey`、Modal/Drawer open/close、feedback API provider context。
-- Ant Design 转换被请求或被选择时，运行 `python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
+- 桌面 Ant Design 场景检查：样式是否加载、版本 API 是否正确、Form 默认值与校验、Radio/Checkbox/Select/Tabs 状态、Table `rowKey`、Modal/Drawer open/close、feedback API provider context。
+- 当 `uiLibraryTarget=antd` 且 `antdMode=required|selected` 时，运行 `python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
+- 当 `uiLibraryTarget=antd-mobile` 时，不运行桌面 Ant Design 覆盖审计；只按项目移动端组件规则和可用校验命令确认交互、样式与状态。
 - 检查图标 / 图表来源层级和可访问性。
 - 回查页面主区域、字段、标题、按钮、表格列、tab、展开收起区、图标、图表和明显交互是否有增减或丢失。
 
@@ -298,8 +345,9 @@ python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <tar
 
 - 页面名称与页面位置。
 - 变更文件。
-- 使用的项目组件 / Ant Design / 原生自定义结构映射。
-- Ant Design 映射矩阵与覆盖审计结论（仅在 Ant Design 适用、被请求或被选择时）。
+- 使用的项目组件 / Ant Design / Ant Design Mobile / 原生自定义结构映射。
+- `uiLibraryTarget`、`antdMode`、`auditRequired` 最终状态；`antdMode=candidate` 不能作为最终交付状态。
+- Ant Design 映射矩阵与覆盖审计结论（仅在 `uiLibraryTarget=antd` 且 `antdMode=required|selected` 时）。
 - 图标来源层级与关键映射。
 - 图表来源层级、类型映射、是否触发 ECharts 兜底、新增依赖。
 - 联调状态：真实接口 / YAPI / API helper / Mock。
@@ -308,17 +356,17 @@ python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <tar
 - 新增依赖。
 - 剩余风险。
 
-随后必须返回 `/autodev-code` 主流程，由 code 根技能按收尾规则推进到 `code_done`。
+随后必须返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、模块编译清单校验和 `code_done` 推进。不要发起独立回检选择，不要调用或引用已移除的内部回检路线。
 
 ## 13. 禁止事项
 
 - 不要停留在 JSX 语法转换，必须交付工程化 React 代码。
 - 不要把绝对定位 / Figma 导出稿误走本依赖；命中强信号时返回 `../../with-absolute-html/SKILL.md`。
 - 不要静默新增依赖；缺少组件库、图标库或图表库时按根技能确认规则执行。
-- 不要保留明显可转为项目组件 / AntD 的后台产品控件为裸 HTML，除非保真或项目规则要求。
-- 不要在 AntD 转换后留下未审计 / 未说明的原生产品控件、表单、表格、弹窗、反馈、分页、上传、导航或数据面。
+- 不要保留明显可转为项目组件 / AntD / Ant Design Mobile 的后台或移动端产品控件为裸 HTML，除非保真或项目规则要求。
+- 不要在桌面 AntD 转换后留下未审计 / 未说明的原生产品控件、表单、表格、弹窗、反馈、分页、上传、导航或数据面。
 - 不要把自定义视觉内容强行 AntD 化。
 - 不要丢失资产、字段、状态、交互和数据列。
 - 不要使用不稳定 index key，除非没有更稳定来源。
 - 不要无依据使用 `any`。
-- 不要在主线总结后引用已移除的内部复核路线；必须回到 `/autodev-code` 主流程推进 `code_done`。
+- 不要把主线总结当成 code 节点结束；必须回到 `/autodev-code` 主流程推进 `code_done`。
