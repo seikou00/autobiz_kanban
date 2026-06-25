@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shutil
 import subprocess
@@ -109,6 +111,115 @@ class SyncRepoEndToEndTest(unittest.TestCase):
         (dest / "stray.txt").write_text("x", encoding="utf-8")
         with self.assertRaises(RuntimeError):
             sync_agents.sync_repo(str(src), "main", dest)
+
+
+class WriteBoardConfigTest(unittest.TestCase):
+    SAMPLE = (
+        "{\n"
+        '  "apiVersion": 1,\n'
+        '  "agentsRepo": {\n'
+        '    "url": "",\n'
+        '    "ref": "main"\n'
+        "  },\n"
+        '  "supported_service_units": ["OLD1", "OLD2"],\n'
+        '  "inspectCommands": { "darwin": { "x": "y" } }\n'
+        "}\n"
+    )
+
+    def _write(self, text: str) -> Path:
+        cfg = Path(tempfile.mkdtemp()) / "board_config.json"
+        cfg.write_text(text, encoding="utf-8")
+        return cfg
+
+    def test_replaces_only_the_array_and_preserves_rest(self):
+        cfg = self._write(self.SAMPLE)
+        sync_agents.merge_supported_units_into_board_config(["A", "B", "C"], cfg)
+        out = cfg.read_text(encoding="utf-8")
+        self.assertEqual(json.loads(out)["supported_service_units"], ["A", "B", "C"])
+        self.assertIn('  "apiVersion": 1,\n', out)
+        self.assertIn('  "inspectCommands": { "darwin": { "x": "y" } }\n', out)
+        self.assertIn('"supported_service_units": ["A", "B", "C"],', out)
+        # 仅定点替换、不重排：总行数不变
+        self.assertEqual(len(out.splitlines()), len(self.SAMPLE.splitlines()))
+
+    def test_inserts_after_agentsRepo_when_key_absent(self):
+        text = (
+            "{\n"
+            '  "agentsRepo": {\n'
+            '    "url": "",\n'
+            '    "ref": "main"\n'
+            "  },\n"
+            '  "inspectCommands": {}\n'
+            "}\n"
+        )
+        cfg = self._write(text)
+        sync_agents.merge_supported_units_into_board_config(["A"], cfg)
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(data["supported_service_units"], ["A"])
+        self.assertEqual(data["inspectCommands"], {})
+
+    def test_empty_list_writes_empty_array(self):
+        cfg = self._write(self.SAMPLE)
+        sync_agents.merge_supported_units_into_board_config([], cfg)
+        out = cfg.read_text(encoding="utf-8")
+        self.assertEqual(json.loads(out)["supported_service_units"], [])
+        self.assertIn('"supported_service_units": [],', out)
+
+    def test_missing_agentsRepo_anchor_raises_and_does_not_write(self):
+        text = '{\n  "inspectCommands": {}\n}\n'
+        cfg = self._write(text)
+        with self.assertRaises(RuntimeError):
+            sync_agents.merge_supported_units_into_board_config(["A"], cfg)
+        self.assertEqual(cfg.read_text(encoding="utf-8"), text)  # 未落盘
+
+    def test_against_real_board_config_copy_changes_exactly_one_line(self):
+        real = (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
+        cfg = self._write(real)
+        sync_agents.merge_supported_units_into_board_config(["X1", "X2"], cfg)
+        after = cfg.read_text(encoding="utf-8").splitlines()
+        before = real.splitlines()
+        self.assertEqual(json.loads("\n".join(after))["supported_service_units"], ["X1", "X2"])
+        self.assertEqual(len(before), len(after))
+        diffs = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+        self.assertEqual(len(diffs), 1)
+        self.assertIn("supported_service_units", before[diffs[0]])
+
+
+class WriteBoardConfigWiringTest(unittest.TestCase):
+    """main() 里 --write-board-config 的触发条件（monkeypatch，不碰真实文件）。"""
+
+    def _run_main(self, argv, run_payload):
+        calls = []
+        orig_run = sync_agents.run
+        orig_merge = sync_agents.merge_supported_units_into_board_config
+        sync_agents.run = lambda *a, **k: dict(run_payload)
+        sync_agents.merge_supported_units_into_board_config = (
+            lambda units, *a, **k: calls.append(list(units))
+        )
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                sync_agents.main(argv)
+        finally:
+            sync_agents.run = orig_run
+            sync_agents.merge_supported_units_into_board_config = orig_merge
+        return calls
+
+    def test_flag_triggers_write_with_synced_units(self):
+        calls = self._run_main(
+            ["--write-board-config"],
+            {"ok": True, "supported_service_units": ["U1", "U2"], "message": "x"},
+        )
+        self.assertEqual(calls, [["U1", "U2"]])
+
+    def test_no_flag_does_not_write(self):
+        calls = self._run_main(
+            [], {"ok": True, "supported_service_units": ["U1"], "message": "x"}
+        )
+        self.assertEqual(calls, [])
+
+    def test_flag_skips_write_when_sync_failed(self):
+        calls = self._run_main(["--write-board-config"], {"ok": False, "message": "fail"})
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

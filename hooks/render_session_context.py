@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""session_context 动态提示词注入（createFeature 选中服务单元 -> agentmdPrompt）。
+"""session_context_inject 动态提示词注入（createFeature 选中服务单元 -> agentmdPrompt）。
 
 board_config.json 注册（样例，附件约定）::
 
-    "session_context": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
 
 入参 ``--selected-serviceUnit`` 是一个 JSON 数组字符串（serviceUnitId = 后端单元 id）::
 
@@ -306,7 +306,7 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="session_context: 选中服务单元 -> 注入 agentmdPrompt（适用范围+系统级+各单元）",
+        description="session_context_inject: 选中服务单元 -> 注入 agentmdPrompt（适用范围+系统级+各单元）",
         allow_abbrev=False,
     )
     parser.add_argument(
