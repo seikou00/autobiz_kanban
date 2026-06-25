@@ -1,5 +1,9 @@
 {
   "apiVersion": 1,
+  "agentsRepo": {
+    "url": "",
+    "ref": "main"
+  },
   "inspectCommands": {
     "darwin": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -10,7 +14,9 @@
       "plugin_dir_hook": "${pluginWorkspace}/${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
-      "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}"
+      "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
+      "sync_agents": "python3 ${pluginPath}/hooks/sync_agents.py",
+      "session_context": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     },
     "linux": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -21,7 +27,9 @@
       "plugin_dir_hook": "${pluginWorkspace}/${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
-      "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}"
+      "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
+      "sync_agents": "python3 ${pluginPath}/hooks/sync_agents.py",
+      "session_context": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     },
     "win32": {
       "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -32,7 +40,9 @@
       "plugin_dir_hook": "${pluginWorkspace}\\${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
-      "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}"
+      "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
+      "sync_agents": "python ${pluginPath}\\hooks\\sync_agents.py",
+      "session_context": "python ${pluginPath}\\hooks\\render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     }
   },
   "workflow": {

@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""session_context 动态提示词注入（createFeature 选中服务单元 -> agentmdPrompt）。
+
+board_config.json 注册（样例，附件约定）::
+
+    "session_context": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+
+入参 ``--selected-serviceUnit`` 是一个 JSON 数组字符串（serviceUnitId = 后端单元 id）::
+
+    --selected-serviceUnit '[{"serviceUnitId":"LF39.18_Outservice","localRepoPath":"/repo/out"}]'
+
+输出（固定形状，注入项目模式系统提示词）::
+
+    { "ok": true, "message": "...", "agentmdPrompt": "...",
+      "agentmdLoadStatus": [ {serviceUnitId, path, loaded, source, message} ] }
+
+``agentmdPrompt`` 三段拼接（见 docs/agents-loading-remote-local.md）：
+  ① 适用范围：清单 description（引用范围）+ UI localRepoPath（代码地址）。
+  ② 系统级 AGENTS.md：选中单元所属系统 agentsPath 全文，按 systemId 去重。
+  ③ 各单元 description.md：选中单元 agentsPath 全文，按选择顺序；空则跳过。
+
+每个 md 文件按 remote 优先 → local 兜底（``<localRepoPath>/AGENTS.md``）→ 都无则
+``loaded:false`` 解析，并各产出一条 agentmdLoadStatus（系统级文件按 systemId 去重，
+归属该系统首个被选中单元）。
+
+设计原则：除入参 JSON 非法外，任何情况都返回 ok:true，绝不抛异常中断会话；
+缺清单 / 未匹配单元 / 缺 AGENTS.md 都降级为「少注入一点」并在 message 说明。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from hooks.agents_repo import (  # noqa: E402
+    AgentsManifestError,
+    Manifest,
+    index_unit_pairs,
+    load_manifest,
+    sys_abspath,
+    sys_display,
+)
+
+LOCAL_AGENTS_MD = "AGENTS.md"  # local 兜底文件名（§8 #1：直接读用户仓库既有 AGENTS.md）
+
+
+def _parse_selected(raw: Optional[str]) -> List[dict]:
+    """解析 --selected-serviceUnit。空/缺省 -> []；非法 -> ValueError。"""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--selected-serviceUnit 不是合法 JSON: {exc}") from exc
+    if not isinstance(value, list):
+        raise ValueError("--selected-serviceUnit 必须是 JSON 数组")
+    selected: List[dict] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"--selected-serviceUnit[{idx}] 必须是对象")
+        unit_id = item.get("serviceUnitId")
+        if not isinstance(unit_id, str) or not unit_id.strip():
+            raise ValueError(f"--selected-serviceUnit[{idx}].serviceUnitId 必须是非空字符串")
+        local_repo = item.get("localRepoPath", "")
+        selected.append(
+            {
+                "serviceUnitId": unit_id.strip(),
+                "localRepoPath": local_repo if isinstance(local_repo, str) else "",
+            }
+        )
+    return selected
+
+
+def _read_nonempty(path: Path) -> Optional[str]:
+    """读取文本；不存在或全空白时返回 None。"""
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return text if text.strip() else None
+
+
+def _resolve_one(
+    owner_uid: str,
+    rel_in_manifest: str,
+    local_repo: str,
+    *,
+    plugin_root: Optional[Path],
+) -> Tuple[dict, Optional[Path], Optional[str]]:
+    """一个 md 文件：remote 优先 → local 兜底 → 都无则 loaded:false。
+
+    返回 (status, abs_path, content)；content 非 None 表示成功加载、可进正文。
+    """
+    # ① remote：清单里有该路径 且 sys/ 下文件存在 → 用 remote，忽略 local。
+    if rel_in_manifest:
+        try:
+            abs_path = sys_abspath(rel_in_manifest, plugin_root)
+        except AgentsManifestError:
+            abs_path = None  # 路径非法（穿越/绝对）：当作 remote 取不到，转 local 兜底。
+        if abs_path is not None:
+            content = _read_nonempty(abs_path)
+            if content is not None:
+                status = {
+                    "serviceUnitId": owner_uid,
+                    "path": sys_display(rel_in_manifest, plugin_root),
+                    "loaded": True,
+                    "source": "remote",
+                    "message": "",
+                }
+                return status, abs_path, content
+
+    # ② local 兜底：未命中清单 或 remote 文件缺失 → 读 <localRepoPath>/AGENTS.md。
+    local_abs = (Path(local_repo) / LOCAL_AGENTS_MD) if local_repo else None
+    if local_abs is not None:
+        content = _read_nonempty(local_abs)
+        if content is not None:
+            status = {
+                "serviceUnitId": owner_uid,
+                "path": str(local_abs),
+                "loaded": True,
+                "source": "local",
+                "message": "",
+            }
+            return status, local_abs, content
+
+    # ③ remote 与 local 都没有。
+    status = {
+        "serviceUnitId": owner_uid,
+        "path": str(local_abs) if local_abs is not None else "",
+        "loaded": False,
+        "source": "local",
+        "message": "file not exist",
+    }
+    return status, None, None
+
+
+def _md_cell(text: str) -> str:
+    """转义表格单元里的 `|` 与换行，避免用户值（description/localRepoPath）撑破表格。"""
+    return text.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def _compose_prompt(
+    bindings: List[dict],
+    system_sections: List[dict],
+    unit_sections: List[dict],
+) -> str:
+    """① 适用范围（绑定表，serviceUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md。
+
+    各内容段用 Markdown 二级标题 + 显式 ``<a id>`` 锚点分隔（不再用 ===== 围栏）；适用范围
+    表里的 serviceUnitId 以 ``[id](#anchor)`` 指向其下方对应段落（有单元段指向单元段，
+    否则指向所属系统段；无内容则不加链接）。
+    """
+    lines: List[str] = []
+    lines.append("# 适用范围")
+    lines.append(
+        "项目模式已为当前特性绑定以下引用范围与本机代码地址，"
+        "开发、排查与代码修改时优先在这些路径内进行（serviceUnitId 链接指向下方对应知识库段）："
+    )
+    lines.append("")
+    lines.append("| 引用范围 | serviceUnitId | 代码地址（localRepoPath） |")
+    lines.append("| --- | --- | --- |")
+    for binding in bindings:
+        ref = _md_cell(binding.get("ref") or "(未匹配知识库)")
+        repo = _md_cell(binding.get("localRepoPath") or "(未提供)")
+        uid_text = _md_cell(binding["serviceUnitId"])
+        cell = f"[{uid_text}](#{binding['anchor']})" if binding.get("anchor") else uid_text
+        lines.append(f"| {ref} | {cell} | {repo} |")
+
+    for section in system_sections:
+        lines.append("")
+        lines.append(f"## <a id=\"sys-{section['systemId']}\"></a>系统级 AGENTS.md：{section['title']}")
+        lines.append("")
+        lines.append(section["content"].rstrip())
+
+    for section in unit_sections:
+        title = section["serviceUnitId"]
+        if section.get("ref"):
+            title += f"（{section['ref']}）"
+        lines.append("")
+        lines.append(
+            f"## <a id=\"unit-{section['serviceUnitId']}\"></a>服务单元 description.md：{title}"
+        )
+        lines.append("")
+        lines.append(section["content"].rstrip())
+
+    return "\n".join(lines)
+
+
+def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
+    """核心逻辑（无 I/O 边界外副作用），便于单测。"""
+    if not selected:
+        return {
+            "ok": True,
+            "message": "未选择服务单元，无需注入",
+            "agentmdPrompt": "",
+            "agentmdLoadStatus": [],
+        }
+
+    # 清单不可用（缺失/非法）时降级：所有单元当作未命中，直接走 local 兜底。
+    manifest: Optional[Manifest]
+    try:
+        manifest = load_manifest(plugin_root)
+    except AgentsManifestError:
+        manifest = None
+    pairs = index_unit_pairs(manifest) if manifest is not None else {}
+
+    load_status: List[dict] = []
+    system_sections: List[dict] = []  # ② 按 systemId 去重，首次出现顺序
+    unit_sections: List[dict] = []    # ③ 按选择顺序
+    seen_systems: set[str] = set()
+    seen_paths: set[Path] = set()     # 正文按解析后绝对路径去重
+    system_loaded: set[str] = set()   # 实际产出系统段的 systemId（供锚点回退）
+    unit_has_section: set[str] = set()  # 实际产出单元段的 serviceUnitId（供锚点指向）
+
+    def _append_body(abs_path: Optional[Path], bucket: List[dict], section: dict) -> bool:
+        if abs_path is not None and abs_path not in seen_paths:
+            seen_paths.add(abs_path)
+            bucket.append(section)
+            return True
+        return False
+
+    for sel in selected:
+        uid = sel["serviceUnitId"]
+        local = sel["localRepoPath"]
+        pair = pairs.get(uid)
+        if pair is not None:
+            system, unit = pair
+            # ② 系统级 AGENTS.md —— 每个系统一次（归属首个被选中单元）。
+            if system.system_id not in seen_systems:
+                seen_systems.add(system.system_id)
+                status, abs_path, content = _resolve_one(
+                    uid, system.agents_relpath(), local, plugin_root=plugin_root
+                )
+                load_status.append(status)
+                if content is not None:
+                    title = system.system_id
+                    if system.system_name:
+                        title += f"（{system.system_name}）"
+                    if _append_body(
+                        abs_path, system_sections,
+                        {"systemId": system.system_id, "title": title, "content": content},
+                    ):
+                        system_loaded.add(system.system_id)
+            # ③ 单元级 description.md —— 仅当单元自带 agentsPath。
+            if unit.agents_rel:
+                status, abs_path, content = _resolve_one(
+                    uid, unit.agents_rel, local, plugin_root=plugin_root
+                )
+                load_status.append(status)
+                if content is not None and _append_body(
+                    abs_path, unit_sections,
+                    {"serviceUnitId": uid, "ref": unit.name, "content": content},
+                ):
+                    unit_has_section.add(uid)
+        else:
+            # 未命中清单：只走 local 兜底（rel 为空）。
+            status, abs_path, content = _resolve_one(uid, "", local, plugin_root=plugin_root)
+            load_status.append(status)
+            if content is not None and _append_body(
+                abs_path, unit_sections,
+                {"serviceUnitId": uid, "ref": "", "content": content},
+            ):
+                unit_has_section.add(uid)
+
+    # 适用范围：每个选中单元一行（引用范围 = 清单 description；代码地址 = localRepoPath）；
+    # serviceUnitId 锚点：有单元段→指向单元段，否则→指向所属系统段，再否则→无链接。
+    bindings: List[dict] = []
+    for sel in selected:
+        uid = sel["serviceUnitId"]
+        pair = pairs.get(uid)
+        if uid in unit_has_section:
+            anchor = f"unit-{uid}"
+        elif pair is not None and pair[0].system_id in system_loaded:
+            anchor = f"sys-{pair[0].system_id}"
+        else:
+            anchor = ""
+        bindings.append(
+            {
+                "serviceUnitId": uid,
+                "ref": pair[1].name if pair else "",
+                "localRepoPath": sel["localRepoPath"],
+                "anchor": anchor,
+            }
+        )
+
+    prompt = _compose_prompt(bindings, system_sections, unit_sections)
+    remote_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "remote")
+    local_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "local")
+    miss_n = sum(1 for s in load_status if not s["loaded"])
+    message = f"remote {remote_n} / local {local_n} / 缺 {miss_n}"
+    return {
+        "ok": True,
+        "message": message,
+        "agentmdPrompt": prompt,
+        "agentmdLoadStatus": load_status,
+    }
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="session_context: 选中服务单元 -> 注入 agentmdPrompt（适用范围+系统级+各单元）",
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--selected-serviceUnit",
+        dest="selected",
+        default="",
+        help="JSON 数组字符串：[{\"serviceUnitId\":\"...\",\"localRepoPath\":\"...\"}]",
+    )
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+
+    try:
+        selected = _parse_selected(args.selected)
+    except ValueError as exc:
+        result = {
+            "ok": False,
+            "message": str(exc),
+            "agentmdPrompt": "",
+            "agentmdLoadStatus": [],
+        }
+    else:
+        result = render(selected)
+
+    json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

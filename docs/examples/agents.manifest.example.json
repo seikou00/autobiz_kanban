@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "autobizdevops.agents.manifest.v1",
+  "systems": [
+    {
+      "systemId": "LF39",
+      "systemName": "外联服务系统",
+      "agents": "LF39/AGENTS.md",
+      "serviceUnits": [
+        { "serviceUnitId": "LF39.18_Outservice", "name": "外联出站服务" },
+        { "serviceUnitId": "LF39.20_Inservice", "name": "外联入站服务" }
+      ]
+    },
+    {
+      "systemId": "LA64",
+      "systemName": "UEX 网关系统",
+      "serviceUnits": [
+        { "serviceUnitId": "LA64.05_UEXgateway", "name": "UEX 网关" }
+      ]
+    }
+  ]
+}
