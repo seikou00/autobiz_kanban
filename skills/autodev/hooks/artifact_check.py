@@ -111,6 +111,24 @@ def _task_field(block_text: str, label: str) -> str | None:
     return match.group(1).strip()
 
 
+def _task_id_values(block_text: str, label: str, pattern: str) -> list[str] | None:
+    value = _task_field(block_text, label)
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or value.lower() == "无":
+        return []
+    return list(dict.fromkeys(re.findall(pattern, value)))
+
+
+def _ids_from_design_refs(design_refs: str) -> dict[str, list[str]]:
+    return {
+        "API": re.findall(r"\bAPI-\d{3}\b", design_refs),
+        "DATA": re.findall(r"\bDATA-\d{3}\b", design_refs),
+        "D": re.findall(r"\bD-\d{3}\b", design_refs),
+    }
+
+
 def _boolean_marker_value(text: str, marker: str) -> bool | None:
     match = re.search(rf"{re.escape(marker)}\W*:\W*(true|false)\b", text, re.IGNORECASE)
     if not match:
@@ -292,13 +310,17 @@ def validate_stable_plan_contract(ctx: HookContext, plan_text: str) -> int:
         block_text = block.group(0)
         spec_refs = _task_field(block_text, "规格依据")
         design_refs = _task_field(block_text, "设计依据")
+        api_ids = _task_id_values(block_text, "api_id", r"\bAPI-\d{3}\b")
+        data_ids = _task_id_values(block_text, "data_id", r"\bDATA-\d{3}\b")
+        decision_ids = _task_id_values(block_text, "decision_id", r"\bD-\d{3}\b")
         evidence_refs = _task_field(block_text, "证据依据")
         if spec_refs is None:
             failures += fail_line(ctx, "missing_task_spec_refs", f" task={task_id}")
             spec_refs = ""
-        if design_refs is None:
+        if design_refs is None and not any(
+            values is not None for values in [api_ids, data_ids, decision_ids]
+        ):
             failures += fail_line(ctx, "missing_task_design_refs", f" task={task_id}")
-            design_refs = ""
         if evidence_refs is None:
             failures += fail_line(ctx, "missing_task_evidence_refs", f" task={task_id}")
             evidence_refs = ""
@@ -316,15 +338,31 @@ def validate_stable_plan_contract(ctx: HookContext, plan_text: str) -> int:
             if scn_id not in spec_ids["SCN"]:
                 failures += fail_line(ctx, "unknown_task_scenario_id", f" task={task_id} id={scn_id}")
 
-        api_refs = re.findall(r"\bAPI-\d{3}\b", design_refs)
-        data_refs = re.findall(r"\bDATA-\d{3}\b", design_refs)
-        decision_refs = re.findall(r"\bD-\d{3}\b", design_refs)
-        if not no_http_api and not api_refs:
-            failures += fail_line(ctx, "missing_task_api_id", f" task={task_id}")
-        if not no_sql and not data_refs:
-            failures += fail_line(ctx, "missing_task_data_id", f" task={task_id}")
-        if not decision_refs:
-            failures += fail_line(ctx, "missing_task_decision_id", f" task={task_id}")
+        summary_refs = _ids_from_design_refs(design_refs) if design_refs is not None else {"API": [], "DATA": [], "D": []}
+        if api_ids is None:
+            api_refs = summary_refs["API"]
+            if not no_http_api and not api_refs:
+                failures += fail_line(ctx, "missing_task_api_id", f" task={task_id}")
+        else:
+            api_refs = api_ids
+            if not no_http_api and not api_refs:
+                failures += fail_line(ctx, "missing_task_api_id", f" task={task_id}")
+        if data_ids is None:
+            data_refs = summary_refs["DATA"]
+            if not no_sql and not data_refs:
+                failures += fail_line(ctx, "missing_task_data_id", f" task={task_id}")
+        else:
+            data_refs = data_ids
+            if not no_sql and not data_refs:
+                failures += fail_line(ctx, "missing_task_data_id", f" task={task_id}")
+        if decision_ids is None:
+            decision_refs = summary_refs["D"]
+            if not decision_refs:
+                failures += fail_line(ctx, "missing_task_decision_id", f" task={task_id}")
+        else:
+            decision_refs = decision_ids
+            if not decision_refs:
+                failures += fail_line(ctx, "missing_task_decision_id", f" task={task_id}")
         for api_id in api_refs:
             if api_id not in design_ids["API"]:
                 failures += fail_line(ctx, "unknown_task_api_id", f" task={task_id} id={api_id}")

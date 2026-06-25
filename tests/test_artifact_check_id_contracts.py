@@ -58,22 +58,28 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         no_sql: bool = True,
         include_api: bool = True,
         include_data: bool = True,
+        api_ids: list[str] | None = None,
+        data_ids: list[str] | None = None,
+        decision_ids: list[str] | None = None,
     ) -> None:
-        coverage = ["D-001"]
-        if include_data:
-            coverage.insert(0, "DATA-001")
-        if include_api:
-            coverage.insert(0, "API-001")
-        api_row = (
-            "| API-001 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |"
-            if include_api
-            else "| 无决策项 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |"
+        api_ids = api_ids or (["API-001"] if include_api else [])
+        data_ids = data_ids or (["DATA-001"] if include_data else [])
+        decision_ids = decision_ids or ["D-001"]
+        coverage = [*api_ids, *data_ids, *decision_ids]
+        api_rows = (
+            [f"| {api_id} | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |" for api_id in api_ids]
+            if api_ids
+            else ["| 无决策项 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |"]
         )
-        data_row = (
-            "| DATA-001 | 无 | 无 | 无 | 无 | 无 | 已确认 |"
-            if include_data
-            else "| 无决策项 | 无 | 无 | 无 | 无 | 无 | 已确认 |"
+        data_rows = (
+            [f"| {data_id} | 无 | 无 | 无 | 无 | 无 | 已确认 |" for data_id in data_ids]
+            if data_ids
+            else ["| 无决策项 | 无 | 无 | 无 | 无 | 无 | 已确认 |"]
         )
+        decision_rows = [
+            f"| {decision_id} | no-op | no-op | none | 已确认 |"
+            for decision_id in decision_ids
+        ]
         (feature_dir / "design.md").write_text(
             "\n".join(
                 [
@@ -87,17 +93,17 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     f"- x-auto-no-http-api: {str(no_http_api).lower()}",
                     "| ID | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |",
                     "|----|--------|--------------|---------|----------|--------|-------------------|--------|",
-                    api_row,
+                    *api_rows,
                     "## 4. Data Decisions / 数据决策",
                     f"- x-auto-no-sql: {str(no_sql).lower()}",
                     "| ID | Table/Model | Change | Fields | Index/Migration | Rollback | Status |",
                     "|----|-------------|--------|--------|-----------------|----------|--------|",
-                    data_row,
+                    *data_rows,
                     "## 5. Technical Design / 技术设计",
                     "### Decisions",
                     "| ID | Decision | Rationale | Alternatives | Status |",
                     "|----|----------|-----------|--------------|--------|",
-                    "| D-001 | no-op | no-op | none | 已确认 |",
+                    *decision_rows,
                     "## 6. Risks / Open Questions",
                     "| ID | Type | Description | Impact | Owner/Next Step |",
                     "|----|------|-------------|--------|-----------------|",
@@ -113,18 +119,43 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         *,
         spec_ref: str = "REQ-001 / #SCN-001",
         design_ref: str = "design.md#API-001 / #DATA-001 / #D-001",
+        api_id: str = "API-001",
+        data_id: str = "DATA-001",
+        decision_id: str = "D-001",
+        use_structured_ids: bool = False,
     ) -> None:
+        task_lines = [
+            "### Task [T001]: do",
+            "- **做什么:** do",
+            f"- **规格依据:** specs/cap/spec.md#{spec_ref}",
+        ]
+        if use_structured_ids:
+            task_lines.extend(
+                [
+                    f"- **api_id:** {api_id}",
+                    f"- **data_id:** {data_id}",
+                    f"- **decision_id:** {decision_id}",
+                    f"- **设计依据:** {design_ref}",
+                ]
+            )
+        else:
+            task_lines.extend(
+                [
+                    f"- **设计依据:** {design_ref}",
+                ]
+            )
+        task_lines.extend(
+            [
+                "- **证据依据:** ev_0001",
+                "- **验证方法:** echo ok",
+                "- **状态:** 完成",
+            ]
+        )
         (feature_dir / "PLAN.md").write_text(
             "\n".join(
                 [
                     "# 执行计划: cap",
-                    "### Task [T001]: do",
-                    "- **做什么:** do",
-                    f"- **规格依据:** specs/cap/spec.md#{spec_ref}",
-                    f"- **设计依据:** {design_ref}",
-                    "- **证据依据:** ev_0001",
-                    "- **验证方法:** echo ok",
-                    "- **状态:** 完成",
+                    *task_lines,
                     "## Specs 行为覆盖",
                     "| Spec Requirement / Scenario | 覆盖任务 | 验证方法 |",
                     "| --------------------------- | -------- | -------- |",
@@ -191,6 +222,52 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             self.assertEqual(validate_design_contract(ctx), 0)
             self.assertEqual(validate_plan_finished_tasks(ctx), 0)
             self.assertEqual(validate_unit_test_report_contract(ctx), 0)
+
+    def test_plan_accepts_structured_task_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan(feature_dir, use_structured_ids=True)
+            ctx = self._ctx(feature_dir)
+            self.assertEqual(validate_plan_finished_tasks(ctx), 0)
+
+    def test_plan_accepts_multi_value_structured_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(
+                feature_dir,
+                no_http_api=False,
+                no_sql=False,
+                api_ids=["API-001", "API-002"],
+                data_ids=["DATA-001", "DATA-002"],
+                decision_ids=["D-001", "D-002"],
+            )
+            self._write_plan(
+                feature_dir,
+                api_id="API-001 / API-002",
+                data_id="DATA-001, DATA-002",
+                decision_id="D-001 / D-002",
+                design_ref="design.md#API-999 / #DATA-999 / #D-999",
+                use_structured_ids=True,
+            )
+            ctx = self._ctx(feature_dir)
+            self.assertEqual(validate_plan_finished_tasks(ctx), 0)
+
+    def test_plan_accepts_data_none_even_if_summary_mentions_data_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir, include_data=False, no_sql=True)
+            self._write_plan(
+                feature_dir,
+                data_id="无",
+                design_ref="design.md#API-001 / #DATA-001 / #D-001",
+                use_structured_ids=True,
+            )
+            ctx = self._ctx(feature_dir)
+            self.assertEqual(validate_plan_finished_tasks(ctx), 0)
 
     def test_design_escape_hatches_allow_absent_api_and_data_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
