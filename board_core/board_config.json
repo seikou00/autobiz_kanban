@@ -386,7 +386,7 @@
               } },
             { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
               "extract": {
-                "focus": ["任务 DAG 与依赖顺序", "每个任务的做什么/规格依据/设计依据/验证方法/状态", "specs 行为覆盖与设计决策覆盖"],
+                "focus": ["任务 DAG 与依赖顺序", "每个任务的做什么/规格依据/api_id/data_id/decision_id/验证方法/状态", "specs 行为覆盖与设计决策覆盖"],
                 "method": "作为现成执行队列，按任务 DAG 逐项推进、不必再自行拆解；就地更新任务状态（保持 `- **状态:** 待做|进行中|完成|失败` 行格式，hook 据此识别）与验证证据",
                 "degrade": "无 PLAN 契约时从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务），逐项实现并在完成摘要中记录任务与验证结果"
               } }

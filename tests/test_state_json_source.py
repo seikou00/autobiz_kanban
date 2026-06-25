@@ -446,6 +446,9 @@ class StateIntegrationTests(unittest.TestCase):
                         "### Task [T001]: Implement",
                         "- **状态:** 完成",
                         "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **api_id:** API-001",
+                        "- **data_id:** DATA-001",
+                        "- **decision_id:** D-001",
                         "- **设计依据:** design.md#API-001 / #DATA-001 / #D-001",
                         "- **证据依据:** ev_0001",
                     ]
@@ -963,6 +966,9 @@ class StateIntegrationTests(unittest.TestCase):
                         "### Task [T001]: Implement",
                         "- **状态:** 完成",
                         "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **api_id:** API-001",
+                        "- **data_id:** DATA-001",
+                        "- **decision_id:** D-001",
                         "- **设计依据:** design.md#API-001 / #DATA-001 / #D-001",
                         "- **证据依据:** ev_0001",
                     ]

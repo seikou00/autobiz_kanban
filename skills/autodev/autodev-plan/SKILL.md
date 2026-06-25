@@ -402,7 +402,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘
 - [ ] PLAN.md 包含「任务 DAG」「任务总览」「任务详情」「Specs 行为覆盖」「规格与设计决策覆盖」
-- [ ] 每个任务都包含「做什么」「规格依据」「设计依据」「涉及范围」「执行要点」「验证命令」「预期结果」「状态: 待做」
+- [ ] 每个任务都包含「做什么」「规格依据」「api_id」「data_id」「decision_id」「设计依据」「涉及范围」「执行要点」「验证命令」「预期结果」「状态: 待做」
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点足以指导实现，但没有写成逐行代码、逐文件微任务或 commit 步骤
 - [ ] specs 中每个 Requirement / Scenario 至少被一个任务覆盖

@@ -5,8 +5,11 @@
 ## 稳定 ID 规范
 
 - Task ID 统一使用 `T001`、`T002` ...，并写在任务标题和任务表格中。
-- Task 必须引用 `specRefs`、`designRefs`、`evidenceIds`，引用格式使用 `specs/<capability>/spec.md#REQ-001` / `design.md#API-001` / `ev_0001`。
-- `designRefs` 只引用 `design.md` 中实际存在的设计 ID；若 `x-auto-no-http-api: true` / `x-auto-no-sql: true`，不要为对应类型伪造 `API-*` / `DATA-*`。
+- Task 必须引用 `specRefs`、`api_id`、`data_id`、`decision_id`、`evidenceIds`。
+- `specRefs` 使用 `specs/<capability>/spec.md#REQ-001` / `#SCN-001`。
+- `api_id`、`data_id`、`decision_id` 分别写成独立字段；每个字段都可以写多个 ID，多个值用 `/` 或 `,` 分隔。
+- 若 `x-auto-no-http-api: true` / `x-auto-no-sql: true`，对应字段写 `无`，不要为对应类型伪造 `API-*` / `DATA-*`。
+- `设计依据` 可作为人类可读摘要保留，但机器校验只看单独字段；它不需要和字段一一对账。模板里仍保留 `design.md#API-001 / #DATA-001 / #D-001` 这种可追溯写法。
 - 覆盖矩阵中的 Requirement / Scenario 也必须带同样的本地 ID。
 - 新建任务继续递增，不允许重用已删除或已完成任务的 ID。
 
@@ -54,7 +57,10 @@ graph TD
 
 - **做什么:** [本任务交付的需求能力、用户可观察行为或验收闭环；不要写成单个文件/类/方法修改]
 - **规格依据:** [specs/[capability]/spec.md#REQ-001 / #SCN-001]
-- **设计依据:** [design.md#API-001 / #DATA-001 / #D-001；若 design.md 标记无 API/无 SQL，则省略对应 API/DATA 引用]
+- **api_id:** [API-001 / API-002 / 无]
+- **data_id:** [DATA-001 / DATA-002 / 无]
+- **decision_id:** [D-001 / D-002]
+- **设计依据:** [design.md#API-001 / #DATA-001 / #D-001；若 design.md 标记无 API/无 SQL，则省略对应 API/DATA 引用；也可作为摘要保留 design.md]
 - **证据依据:** [ev_0001, ev_0002]
 - **涉及范围:** [模块、入口、服务、模型、配置、测试等方向；能确定真实路径时写路径，不能确定时写要定位的现有范围]
 - **执行要点:**
@@ -70,7 +76,10 @@ graph TD
 
 - **做什么:** [本任务交付的需求能力、用户可观察行为或验收闭环]
 - **规格依据:** [specs/[capability]/spec.md#REQ-002 / #SCN-002]
-- **设计依据:** [design.md#API-002 / #DATA-002 / #D-002；若 design.md 标记无 API/无 SQL，则省略对应 API/DATA 引用]
+- **api_id:** [API-002 / API-003 / 无]
+- **data_id:** [DATA-002 / DATA-003 / 无]
+- **decision_id:** [D-002 / D-003]
+- **设计依据:** [design.md#API-002 / #DATA-002 / #D-002；若 design.md 标记无 API/无 SQL，则省略对应 API/DATA 引用；也可作为摘要保留 design.md]
 - **证据依据:** [ev_0003]
 - **涉及范围:** [模块、入口、服务、模型、配置、测试等方向]
 - **执行要点:**
