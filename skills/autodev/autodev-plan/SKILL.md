@@ -27,7 +27,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 
 # /autodev-plan - Executable Task Plan
-**workflow** plan 阶段工作流: proposal/specs -> design.md -> PLAN.md
+**workflow** plan 阶段工作流: proposal/specs -> design.md -> PLAN.md + plan.json
 
 
 ## explore
@@ -321,7 +321,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 
 ### PLAN阶段
-基于 sourceBundle 结论，先生成 `design.md`，再基于sourceBundle和design 生成 `PLAN.md`。
+基于 sourceBundle 结论，先生成 `design.md`，再基于 sourceBundle 和 design 生成 `PLAN.md` 与 `plan.json`。
 
 #### 工作目录
 若 `CHECKPOINT` 为空、未知，重新通过脚本获取当前checkpoint；后必须刷新 `CHECKPOINT`。
@@ -366,12 +366,13 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 #### 生成 PLAN
 
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。PLAN 只承载执行任务，不再重复写需求契约、行为规格或完整技术设计；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 和 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`。PLAN 只承载执行任务的人类可读视图，`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。
 - 如果用户补充内容改变了外部可观察行为、验收标准或能力边界，停止并建议回到 `/autodev-specs` 更新 `proposal.md` / `specs/**/*.md`。
 - 必须在 PLAN.md 中新增或更新「用户补充说明 / 技术细节」章节。
+- `plan.json` 必须与 PLAN.md 同步，任务 id / deps / status / specRefs / designRefs / validationCommands / evidenceIds 不能漂移。
 - 用户明确确认的内容，标记为「已确认」。
 - 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
@@ -401,7 +402,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘
+- [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘
 - [ ] PLAN.md 包含「任务 DAG」「任务总览」「任务详情」「Specs 行为覆盖」「规格与设计决策覆盖」
+- [ ] `plan.json` 可作为任务 DAG 的机器事实源被后续阶段优先读取
 - [ ] 每个任务都包含「做什么」「规格依据」「api_id」「data_id」「decision_id」「设计依据」「涉及范围」「执行要点」「验证命令」「预期结果」「状态: 待做」
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点足以指导实现，但没有写成逐行代码、逐文件微任务或 commit 步骤
@@ -412,7 +415,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ---
 
 ## 整体完成条件
-- `design.md`、`PLAN.md` 已完成
+- `design.md`、`PLAN.md`、`plan.json` 已完成
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")

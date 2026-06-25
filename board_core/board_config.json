@@ -330,10 +330,11 @@
           ],
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true }
           ]
         },
-        "validators": ["design_contract", "plan_initial_tasks"]
+        "validators": ["design_contract", "plan_initial_tasks", "plan_json_contract"]
       },
       {
         "id": "dev.code",
@@ -377,14 +378,21 @@
             { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
               "extract": {
                 "focus": ["任务 DAG 与依赖顺序", "每个任务的做什么/规格依据/api_id/data_id/decision_id/验证方法/状态", "specs 行为覆盖与设计决策覆盖"],
-                "method": "作为现成执行队列，按任务 DAG 逐项推进、不必再自行拆解；就地更新任务状态（保持 `- **状态:** 待做|进行中|完成|失败` 行格式，hook 据此识别）与验证证据",
+                "method": "作为人类可读执行计划；任务 DAG、状态、依赖和 evidenceIds 以 plan.json 为准，更新任务时同步保持 PLAN.md 视图一致",
                 "degrade": "无 PLAN 契约时从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务），逐项实现并在完成摘要中记录任务与验证结果"
+              } },
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
+              "extract": {
+                "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers"],
+                "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都优先读写 plan.json，PLAN.md 只作同步视图",
+                "degrade": "无 plan.json 时仅在当前 workflow 不包含 plan 阶段时降级；标准 workflow 下缺失必须回到 /autodev-plan 生成"
               } }
           ],
           "outputs": [
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["plan_finished_tasks"],
+        "validators": ["plan_json_contract", "plan_finished_tasks", "evidence_integrity"],
         "guards": ["code_compile"]
       },
       {
@@ -431,6 +439,18 @@
                 "focus": ["任务完成状态与验证证据", "覆盖矩阵"],
                 "method": "核对任务闭环与验证证据是否完整",
                 "degrade": "无 PLAN 时以代码 diff 与提交记录核对实现闭环"
+              } },
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": false,
+              "extract": {
+                "focus": ["tasks[].status/evidenceIds", "任务依赖闭环", "blockers"],
+                "method": "优先用 plan.json 核对 code 阶段任务闭环；PLAN.md 只作人类摘要参考",
+                "degrade": "无 plan.json 时以 PLAN.md 和代码 diff 降级核对，并在评审报告中标注机器事实源缺失"
+              } },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": false,
+              "extract": {
+                "focus": ["code 阶段每个 taskId 的 pass/fail validation evidence", "changedFiles", "specRefs/designRefs"],
+                "method": "作为任务完成证据事实源，核对每个结论是否能回链到 task/spec/design",
+                "degrade": "缺失时在评审报告中标注 code 证据流缺失"
               } }
           ],
           "outputs": [
@@ -484,6 +504,18 @@
                 "method": "作为测试定位线索，核对每个任务的验证闭环",
                 "degrade": "无 PLAN 时以代码 diff 推导待测变更清单"
               } },
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": false,
+              "extract": {
+                "focus": ["tasks[].id/status/specRefs/designRefs/evidenceIds", "validationCommands"],
+                "method": "优先按 plan.json 的 taskId 与 validationCommands 组织测试覆盖，并把新增测试证据追加回 EVIDENCE.jsonl",
+                "degrade": "无 plan.json 时以 PLAN.md/code diff 降级生成测试计划"
+              } },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": false,
+              "extract": {
+                "focus": ["code 阶段验证证据", "taskId/specRefs/designRefs 与 changedFiles"],
+                "method": "读取既有 code evidence，并在单测命令执行后追加新的 validation evidence；不得截断或重写",
+                "degrade": "缺失时先补齐 code 阶段证据或在报告中标注证据链缺口"
+              } },
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true,
               "extract": {
                 "focus": ["评审结论与发现项", "风险点"],
@@ -493,10 +525,11 @@
           ],
           "outputs": [
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
-            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": true }
+            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": true },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["unit_test_report_contract"]
+        "validators": ["unit_test_report_contract", "evidence_integrity"]
       },
       {
         "id": "dev.e2e",
@@ -543,6 +576,18 @@
                 "method": "避免与已验证项重复，聚焦端到端闭环",
                 "degrade": "无 PLAN 时以 specs 场景为唯一覆盖基准"
               } },
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": false,
+              "extract": {
+                "focus": ["tasks[].id/specRefs/designRefs/evidenceIds", "validationCommands"],
+                "method": "优先用 plan.json 的任务与证据映射决定 E2E 覆盖缺口，并把 E2E 运行结果追加到 EVIDENCE.jsonl",
+                "degrade": "无 plan.json 时以 PLAN.md/specs 降级生成 E2E 用例"
+              } },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": false,
+              "extract": {
+                "focus": ["code/unit test 阶段验证证据", "尚未端到端覆盖的 task/spec/design"],
+                "method": "读取既有 evidence 后追加 E2E validation evidence；不得截断或重写",
+                "degrade": "缺失时在 E2E_REPORT.md 标注证据链缺口"
+              } },
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true,
               "extract": {
                 "focus": ["评审发现的风险与薄弱点"],
@@ -565,10 +610,11 @@
           "outputs": [
             { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
             { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true },
-            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true }
+            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["e2e_report_contract"]
+        "validators": ["e2e_report_contract", "evidence_integrity"]
       },
       {
         "id": "dev.verify",
@@ -609,6 +655,18 @@
                 "method": "核对全部任务闭环",
                 "degrade": "无 PLAN 时以代码与报告核对交付闭环"
               } },
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": false,
+              "extract": {
+                "focus": ["tasks[].id/status/specRefs/designRefs/evidenceIds", "blockers"],
+                "method": "优先用 plan.json 汇总任务与证据闭环；VERIFY_REPORT.md 的任务结论必须回链到 plan.json 中的 taskId/evidenceIds",
+                "degrade": "无 plan.json 时以 PLAN.md 和各阶段报告降级汇总，并标注机器事实源缺失"
+              } },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": false,
+              "extract": {
+                "focus": ["code/unit/e2e 阶段全部 validation evidence", "taskId/specRefs/designRefs/changedFiles/validation.result"],
+                "method": "作为最终验收证据事实源；verify 只追加汇总 evidence，不截断、不重写",
+                "degrade": "缺失时 VERIFY_REPORT.md 必须标注证据流缺失并不能给出完整通过结论"
+              } },
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true,
               "extract": {
                 "focus": ["verdict 与未覆盖风险"],
@@ -641,10 +699,11 @@
               } }
           ],
           "outputs": [
-            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true }
+            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["verify_report_contract"]
+        "validators": ["verify_report_contract", "evidence_integrity"]
       },
       {
         "id": "ops.cicd",

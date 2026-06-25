@@ -58,10 +58,10 @@ name: autodev-sample
         compiled = sync_skill_content(content, contract)
 
         self.assertIn("<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->", compiled)
-        self.assertIn("FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}", compiled)
+        self.assertIn("FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}", compiled)
         self.assertNotIn("工作目录 = {PLUGIN_OUTPUT_DIR}/.autobizdevops/features/{slug}/", compiled)
         self.assertIn(
-            'python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-sample --feature "{FEATURE_ID}" --json',
+            'python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-sample --feature "${feature}" --json',
             compiled,
         )
         self.assertIn("无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。", compiled)

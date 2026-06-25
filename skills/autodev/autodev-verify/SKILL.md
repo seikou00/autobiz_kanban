@@ -116,6 +116,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 3. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml` — 上游阶段技能 `autodev-e2e` 产出的结构化 E2E 用例。
 4. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_REPORT.md` — E2E 结果、失败归因、修复尝试与重跑摘要。
 5. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/e2e-run.log` — E2E 原始运行日志、服务/鉴权/UI 执行证据。
+6. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` — append-only 证据事实流；若存在，优先用其中的 taskId/specRefs/designRefs/validation.result 建立验收证据回链。
 
 **从 `UNIT_TEST_REPORT.md` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
 
@@ -157,6 +158,8 @@ specs/[capability]/spec.md / Requirement / Scenario
 ## Step 5: 生成 VERIFY_REPORT.md（纯汇总）
 
 将裁定结果写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md`。**不得**在 VERIFY_REPORT.md 中夹带新的命令输出、新的测试代码、新的 HTTP 响应证据——这些应由 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 与 `e2e-run.log` 提供，VERIFY_REPORT.md 只做"映射 + 归档"。
+
+写入 `VERIFY_REPORT.md` 后，必须使用 `hooks/evidence_store.py append` 追加一条 verify 汇总 evidence，记录本阶段 verdict、引用的 evidenceIds、覆盖的 specRefs/designRefs。verify 阶段仍不得运行测试命令；这里追加的是汇总结论证据，不是新的测试执行证据。
 
 **模板：**
 

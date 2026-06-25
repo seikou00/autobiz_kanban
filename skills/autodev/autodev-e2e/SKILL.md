@@ -58,6 +58,8 @@ E2E 用例的稳定 ID 规则：
 - `source.specs_contract` 必须优先引用稳定 ID，例如 `specs/<capability>/spec.md#REQ-001` / `#SCN-001`
 - `E2E_REPORT.md` 中的失败项与回流说明必须回链到相同的 `REQ-001` / `SCN-001`
 
+每次 E2E 命令或人工驱动执行结束后，必须把运行结果追加到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`：使用 `hooks/evidence_store.py append` 写入 taskId（优先来自 `plan.json`）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并把运行日志尾部作为 evidence tail 保存。`E2E_REPORT.md` 的每个用例结论都应引用对应 `ev_XXXX`；不得截断或重写 `EVIDENCE.jsonl`。
+
 ## Checkpoint 写入
 
 开始 E2E 前推进到 `e2e_in_progress`，写入后立即刷新 `CHECKPOINT`：

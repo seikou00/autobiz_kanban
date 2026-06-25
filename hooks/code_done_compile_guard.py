@@ -26,6 +26,7 @@ from paths import (
     resolve_env_feature,
 )
 from board_core.state_store import load_state_json_records_result
+from evidence_integrity_gate import check_code_done
 from state_checkpoint import append_checkpoint_hook_logs
 
 
@@ -319,6 +320,42 @@ def write_compile_result(
     return 0
 
 
+def write_evidence_gate_result(
+    workspace: Path,
+    feature: str,
+    *,
+    old_checkpoint: str,
+    errors: list[str],
+) -> int:
+    new_checkpoint = "code_done"
+    if not errors:
+        return 0
+
+    reason = "\n".join(errors)
+    transition = f"{old_checkpoint or 'empty'} -> {new_checkpoint}"
+    append_checkpoint_hook_logs(
+        workspace,
+        [(feature, old_checkpoint, new_checkpoint)],
+        event_id="code-evidence",
+        label="code_done 证据门禁",
+        errors=errors,
+        event_status="blocked",
+        exit_code=BLOCK_EXIT_CODE,
+        message=f"{transition}: " + reason,
+    )
+    json.dump(
+        {
+            "decision": "block",
+            "reason": reason,
+            "systemMessage": f"code 证据门禁未通过：\n{reason}",
+            "additionalContext": f"请先补齐 plan.json 与 EVIDENCE.jsonl 证据闭环：\n{reason}",
+        },
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    return BLOCK_EXIT_CODE
+
+
 def run_code_done_compile_hook() -> int:
     try:
         workspace = get_plugin_output_workspace()
@@ -329,6 +366,16 @@ def run_code_done_compile_hook() -> int:
     checkpoint = current_checkpoint(workspace, feature)
     if checkpoint != "code_in_progress":
         return 0
+
+    feature_dir = workspace / ".autobizdevops" / "features" / feature
+    evidence_errors = check_code_done(feature_dir)
+    if evidence_errors:
+        return write_evidence_gate_result(
+            workspace,
+            feature,
+            old_checkpoint=checkpoint,
+            errors=evidence_errors,
+        )
 
     _, errors = validate_modules_compile(workspace, emit_success=False)
     return write_compile_result(
