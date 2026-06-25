@@ -347,6 +347,16 @@ def main() -> None:
         type=_parse_workflow_nodes,
         help="JSON list of node ids, e.g. '[\"dev.specs\",\"dev.code\"]'",
     )
+    parser.add_argument(
+        "--selected-serviceUnit",
+        dest="selected_service_units",
+        default="",
+        help=(
+            "占位参数：UI 在 createFeature 勾选的服务单元（JSON 数组字符串）。"
+            "当前仅接收以保证命令可解析，不落库（沿用「选择不落库」决策），"
+            "由 session_context_inject 在会话期现传消费。"
+        ),
+    )
     parser.add_argument("--force", action="store_true", help="Force re-initialization (will backup existing)")
     args = parser.parse_args()
 

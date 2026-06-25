@@ -4,7 +4,7 @@
 
 board_config.json 注册::
 
-    "sync_agents": "python3 ${pluginPath}/hooks/sync_agents.py"
+    "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py"
 
 仓库地址来自 board_config.json 顶层 ``agentsRepo``（可被 --repo-url/--ref 覆盖）::
 
@@ -20,6 +20,10 @@ board_config.json 注册::
       "supported_service_units": [...],
       "systems": [ {"systemId","systemName","agentsReady","agentsPath","serviceUnits":[...]} ] }
 
+``--write-board-config``（可选，打包前 bake）：同步成功后把 ``supported_service_units``
+定点写回 board_config.json 顶层同名字段（正则只改那一处数组、不重排整份文件；写前校验
+仍为合法 JSON，否则放弃写入并在结果里给出 boardConfigWriteError）。UI 常规拉取不必带。
+
 UI 直调约定：逻辑失败也输出 ok:false 的 JSON 并 exit 0，绝不让 UI 收到非 JSON。
 """
 
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -147,6 +152,38 @@ def run(repo_url: Optional[str], ref: Optional[str]) -> dict:
     return payload
 
 
+def merge_supported_units_into_board_config(
+    units: List[str], config_path: Path = BOARD_CONFIG_PATH
+) -> None:
+    """把同步得到的 supported_service_units 定点写回 board_config.json（打包前 bake）。
+
+    只替换顶层 ``"supported_service_units": [...]`` 这一处的数组值（正则定点替换、
+    不重排整份文件，保留其余手写格式）；该键不存在时插到 ``agentsRepo`` 块之后。
+    写盘前用 ``json.loads`` 校验结果仍是合法 JSON 且该字段已等于 units，否则抛
+    RuntimeError 不落盘——确保任何情况下都不会写坏 board_config.json。
+    """
+    text = config_path.read_text(encoding="utf-8")
+    serialized = json.dumps(units, ensure_ascii=False)  # 形如 ["a", "b"]，与手写风格一致
+    array_pat = re.compile(r'("supported_service_units"\s*:\s*)\[[^\]]*\]')
+    if array_pat.search(text):
+        new_text = array_pat.sub(lambda m: m.group(1) + serialized, text, count=1)
+    else:
+        # 键缺失：插到 agentsRepo 对象（含其后逗号）之后，沿用顶层两空格缩进。
+        anchor = re.search(r'"agentsRepo"\s*:\s*\{[^}]*\}\s*,', text)
+        if not anchor:
+            raise RuntimeError("board_config.json 缺少 agentsRepo 锚点，无法插入 supported_service_units")
+        insertion = anchor.group(0) + f'\n  "supported_service_units": {serialized},'
+        new_text = text[: anchor.start()] + insertion + text[anchor.end() :]
+
+    try:
+        parsed = json.loads(new_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"写回后 board_config.json 非合法 JSON，已放弃写入: {exc}") from exc
+    if parsed.get("supported_service_units") != units:
+        raise RuntimeError("写回校验失败：supported_service_units 未按预期更新，已放弃写入")
+    config_path.write_text(new_text, encoding="utf-8")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="拉取 agents 知识库仓库并产出 service units（UI 触发）",
@@ -154,9 +191,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--repo-url", dest="repo_url", default=None, help="覆盖 board_config.json 的 agentsRepo.url")
     parser.add_argument("--ref", dest="ref", default=None, help="覆盖 agentsRepo.ref（分支/标签/commit，默认 main）")
+    parser.add_argument(
+        "--write-board-config",
+        dest="write_board_config",
+        action="store_true",
+        help="同步成功后把 supported_service_units 定点写回 board_config.json（打包前 bake 用；UI 常规拉取不必带）",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     result = run(args.repo_url, args.ref)
+    if args.write_board_config and result.get("ok") and isinstance(result.get("supported_service_units"), list):
+        try:
+            merge_supported_units_into_board_config(result["supported_service_units"])
+            result["boardConfigWritten"] = True
+        except (OSError, RuntimeError) as exc:
+            result["boardConfigWritten"] = False
+            result["boardConfigWriteError"] = str(exc)
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     print()
     return 0

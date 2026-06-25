@@ -4,45 +4,46 @@
     "url": "",
     "ref": "main"
   },
+  "supported_service_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
   "inspectCommands": {
     "darwin": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
       "feature_status": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature}",
       "create_project": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${projectDir}",
-      "create_feature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --workflow-template ${workflowTemplate} --workflow-nodes ${workflowNodes}",
+      "create_feature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --workflow-template ${workflowTemplate} --workflow-nodes ${workflowNodes} --selected-serviceUnit ${selectedServiceUnits}",
       "system_prompt_inject": "\n- FEATURE_DIR：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`，这是当前 Feature 产物目录，不得自行定义特性/feature/slug 名称",
       "plugin_dir_hook": "${pluginWorkspace}/${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "sync_agents": "python3 ${pluginPath}/hooks/sync_agents.py",
-      "session_context": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py",
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     },
     "linux": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
       "feature_status": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature}",
       "create_project": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${projectDir}",
-      "create_feature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --workflow-template ${workflowTemplate} --workflow-nodes ${workflowNodes}",
+      "create_feature": "python3 ${pluginPath}/hooks/init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --workflow-template ${workflowTemplate} --workflow-nodes ${workflowNodes} --selected-serviceUnit ${selectedServiceUnits}",
       "system_prompt_inject": "\n- FEATURE_DIR：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`，这是当前 Feature 产物目录，不得自行定义特性/feature/slug 名称",
       "plugin_dir_hook": "${pluginWorkspace}/${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "sync_agents": "python3 ${pluginPath}/hooks/sync_agents.py",
-      "session_context": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py",
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     },
     "win32": {
       "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
       "feature_status": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature}",
       "create_project": "python ${pluginPath}\\hooks\\init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${projectDir}",
-      "create_feature": "python ${pluginPath}\\hooks\\init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --workflow-template ${workflowTemplate} --workflow-nodes ${workflowNodes}",
+      "create_feature": "python ${pluginPath}\\hooks\\init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --workflow-template ${workflowTemplate} --workflow-nodes ${workflowNodes} --selected-serviceUnit ${selectedServiceUnits}",
       "system_prompt_inject": "\n- FEATURE_DIR：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`，这是当前 Feature 产物目录，不得自行定义特性/feature/slug 名称",
       "plugin_dir_hook": "${pluginWorkspace}\\${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "sync_agents": "python ${pluginPath}\\hooks\\sync_agents.py",
-      "session_context": "python ${pluginPath}\\hooks\\render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+      "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py",
+      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     }
   },
   "workflow": {
