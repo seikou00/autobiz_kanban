@@ -11,7 +11,7 @@
 ```
   ┌─────────────── 拉取段（插件已实现）──────────────┐
   │ UI 触发 → sync_agents.py 克隆 agents 仓库到本机    │
-  │ → 解析仓库根的 agents.manifest.json               │── stdout JSON ──▶ 宿主合并进 board.json
+  │ → 解析仓库根的 agents.manifest.json               │── stdout JSON ──▶ 宿主合并写回 board.json（持久化）
   └──────────────────────────────────────────────────┘                        │
                                                                                ▼
                                                           UI 渲染「服务单元选择 + AGENTS.md Ready」
@@ -112,9 +112,9 @@ agents-kb/                       ← 这个仓库的地址就是 agentsRepo.url
 
 插件已在 `board_config.json` 的 `inspectCommands` 注册两条命令（darwin/linux/win32 都有）。你负责：触发它们、消费它们的 stdout、把结果落到 board.json 与系统提示词。
 
-### 4.1 拉取：`sync_agents` 命令
+### 4.1 拉取：`pull_knowledge` 命令
 
-- **命令**：`python3 ${pluginPath}/hooks/sync_agents.py`（无参，仓库地址读 `board_config.json` 的 `agentsRepo`）。
+- **命令**（board.json key = `pull_knowledge`）：`python3 ${pluginPath}/hooks/sync_agents.py`（无参，仓库地址读 `board_config.json` 的 `agentsRepo`）。
 - **触发时机**：由你决定（建议项目页一个「同步 Agents」按钮）。
 - **前置**：需要先把 `board_config.json` 顶层的 `agentsRepo.url` 填成真实仓库地址（**当前为空**）。空时命令返回 `ok:false` 且 message 引导去填。
 
@@ -122,7 +122,7 @@ agents-kb/                       ← 这个仓库的地址就是 agentsRepo.url
   "agentsRepo": { "url": "https://git.example.com/agents-kb.git", "ref": "main" }
   ```
 
-- **stdout 契约**（你据此合并进 board.json）：
+- **stdout 契约**（你据此合并写回 board.json 顶层 `supported_service_units`）：
 
   ```json
   {
@@ -152,10 +152,11 @@ agents-kb/                       ← 这个仓库的地址就是 agentsRepo.url
   - `supported_service_units`：**扁平数组**，所有系统全部单元；按附件 4.5 语义，这是「可选的发布单元」，**不用来过滤**。
   - `systems[].agentsReady`：磁盘上该系统 `AGENTS.md` 是否存在 → **用来渲染「AGENTS.md Ready」徽标**。可以出现「在列表里但 `agentsReady=false`」（单元能选、知识库还没就绪）。
   - 失败统一返回 `{ "ok": false, "message": ..., "errors": [...] }` 且 **进程 exit 0**（绝不返回非 JSON）。
+- **打包前 bake（插件已实现）**：维护/打包流程跑 `python3 ${pluginPath}/hooks/sync_agents.py --write-board-config`，同步成功后会把 `supported_service_units` 定点写回 `board_config.json` 顶层同名字段（正则只改那一处数组、不重排整份文件；写前校验仍为合法 JSON，否则放弃并在结果给出 `boardConfigWriteError`）。UI 常规拉取按钮**不带**该参数（避免在只读安装目录里写文件 / 制造无谓变更）。
 
-### 4.2 注入：`session_context` 命令
+### 4.2 注入：`session_context_inject` 命令
 
-- **命令**：`python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}`
+- **命令**（board.json key = `session_context_inject`）：`python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}`
 - **入参**（与 createFeature 同源，附件已约定的 JSON 字符串）：
 
   ```
@@ -183,9 +184,9 @@ agents-kb/                       ← 这个仓库的地址就是 agentsRepo.url
 ### 5.1 已确认的架构决策（已拍板，按此实现）
 
 - **克隆位置**：下到**插件根目录 `<pluginPath>/sys/`**，全机共享一份（不按工作区分别克隆）。
-- **选择不落库**：插件**不**把"选了哪些服务单元"写进 `state.json`；每次由 UI 通过 `--selected-serviceUnit` 现传给 `session_context`。
-- **仓库地址来源**：配在 `board_config.json` 顶层 `agentsRepo.url/ref`，由 `sync_agents` 读取（`--repo-url/--ref` 仅作兜底覆盖）。
-- 连带：`create_feature` **不**接收 `--selected-serviceUnit`（无需持久化），只有 `session_context` 接收；`session_context` 命令也**不需** `--workspace`（靠插件路径定位 `sys/`）。
+- **选择不落库**：插件**不**把"选了哪些服务单元"写进 `state.json`；每次由 UI 通过 `--selected-serviceUnit` 现传给 `session_context_inject`。
+- **仓库地址来源**：配在 `board_config.json` 顶层 `agentsRepo.url/ref`，由 `pull_knowledge` 读取（`--repo-url/--ref` 仅作兜底覆盖）。
+- 连带：`create_feature` 现接收 `--selected-serviceUnit` 占位符（UI 真实填入），但仍**不落库**、只作占位透传（脚本接收以保证命令可解析，不写 `state.json`）；选中单元仍由 `session_context_inject` 在会话期现传消费，该命令也**不需** `--workspace`（靠插件路径定位 `sys/`）。
 
 ### 5.2 待确认问题（插件侧的假设，需各方对齐）
 
@@ -194,8 +195,8 @@ agents-kb/                       ← 这个仓库的地址就是 agentsRepo.url
 | 1 | `serviceUnitId` 命名 | 全局唯一、带系统前缀（`LF39.18_xxx`） | git 仓库同事 |
 | 2 | 系统↔单元层级 | 一系统多单元、一份 AGENTS.md 服务多个单元 | git 仓库同事 |
 | 3 | `agents` 字段 | 可选，默认 `<systemId>/AGENTS.md` | git 仓库同事（要不要改必填？） |
-| 4 | `board.json` 合并落点 | `supported_service_units` 进哪个字段、`agentsReady` 怎么映射徽标 | UI/宿主 |
-| 5 | `sync_agents` 触发入口与时机 | 由 UI 决定（按钮？项目打开时？） | UI/宿主 |
+| 4 | `supported_service_units` 落 board.json | **已定：持久化进 board.json**（打包不含运行期 git 缓存 `sys/`，board.json 才是随包分发的耐久配置）。由 `pull_knowledge --write-board-config` 在打包前 bake 定点写回 board.json 顶层同名字段（**插件已实现**，见 §4.1）；仓库里已提交的值＝上次同步基线，也是首次拉取前的兜底。剩 `agentsReady` 怎么映射徽标待 UI 定。 | 插件已实现 / 徽标待 UI |
+| 5 | `pull_knowledge` 触发入口与时机 | 由 UI 决定（按钮？项目打开时？） | UI/宿主 |
 | 6 | `inlineSystemPrompt` 注入位置 | 项目模式系统提示词 | UI/宿主 |
 
 ---
