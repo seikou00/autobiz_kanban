@@ -26,6 +26,8 @@ from board_core.state_store import (  # noqa: E402
 )
 from board_core.workflow import build_workflow_shell  # noqa: E402
 from hooks.update_checkpoint import prepare_checkpoint_update  # noqa: E402
+from hooks.update_checkpoint import sync_plan_json_if_needed  # noqa: E402
+from hooks.evidence_store import append_evidence  # noqa: E402
 
 
 def make_workspace(root: Path) -> Path:
@@ -116,6 +118,54 @@ def write_minimal_trace_sources(feature_dir: Path) -> None:
             ]
         ),
         encoding="utf-8",
+    )
+
+
+def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alpha") -> None:
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    (feature_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "featureId": feature,
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "title": "Implement",
+                        "status": "done",
+                        "deps": [],
+                        "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+                        "designRefs": ["design.md#API-001", "#DATA-001", "#D-001"],
+                        "apiIds": ["API-001"],
+                        "dataIds": ["DATA-001"],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo ok"}],
+                        "expectedFiles": [],
+                        "evidenceIds": ["ev_0001"],
+                        "blockers": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    append_evidence(
+        feature_dir,
+        {
+            "featureId": feature,
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+            "designRefs": ["design.md#API-001", "#DATA-001", "#D-001"],
+            "changedFiles": ["src/example.py"],
+            "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+        },
     )
 
 
@@ -379,6 +429,127 @@ class ArtifactScanTests(unittest.TestCase):
 
 
 class StateIntegrationTests(unittest.TestCase):
+    def test_plan_done_sync_preserves_existing_rich_plan_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            (feature_dir / "PLAN.md").write_text(
+                "\n".join(
+                    [
+                        "## 任务总览",
+                        "| Task ID | 任务 | 依赖 | 覆盖规格/设计项 | 状态 |",
+                        "| ------- | ---- | ---- | --------------- | ---- |",
+                        "| T001 | one | 无 | REQ-001/SCN-001 / D-001 | 待做 |",
+                        "| T002 | two | T001 | REQ-001/SCN-001 / D-001 | 待做 |",
+                        "",
+                        "## 任务详情",
+                        "### Task [T001]: one",
+                        "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **decision_id:** D-001",
+                        "- **设计依据:** design.md#D-001",
+                        "- **证据依据:** ev_0001",
+                        "- **验证命令:** echo one",
+                        "- **状态:** 待做",
+                        "",
+                        "### Task [T002]: two",
+                        "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **decision_id:** D-001",
+                        "- **设计依据:** design.md#D-001",
+                        "- **证据依据:** ev_0002",
+                        "- **验证命令:** echo two",
+                        "- **状态:** 待做",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rich_plan = {
+                "version": 1,
+                "featureId": "alpha",
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "title": "one",
+                        "status": "todo",
+                        "deps": [],
+                        "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+                        "designRefs": ["design.md#D-001"],
+                        "apiIds": [],
+                        "dataIds": [],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo one"}],
+                        "expectedFiles": ["src/a.py"],
+                        "evidenceIds": ["ev_0001"],
+                        "blockers": [],
+                    },
+                    {
+                        "id": "T002",
+                        "title": "two",
+                        "status": "todo",
+                        "deps": ["T001"],
+                        "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+                        "designRefs": ["design.md#D-001"],
+                        "apiIds": [],
+                        "dataIds": [],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo two"}],
+                        "expectedFiles": ["src/b.py"],
+                        "evidenceIds": ["ev_0002"],
+                        "blockers": [],
+                    },
+                ],
+            }
+            (feature_dir / "plan.json").write_text(json.dumps(rich_plan, ensure_ascii=False), encoding="utf-8")
+
+            synced, error = sync_plan_json_if_needed(workspace=workspace, feature="alpha", checkpoint="plan_done")
+
+            self.assertTrue(synced, error)
+            preserved = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(preserved["tasks"][1]["deps"], ["T001"])
+            self.assertEqual(preserved["tasks"][1]["expectedFiles"], ["src/b.py"])
+
+    def test_plan_done_sync_backfills_deps_from_task_summary_table_when_missing_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            (feature_dir / "PLAN.md").write_text(
+                "\n".join(
+                    [
+                        "## 任务总览",
+                        "| Task ID | 任务 | 依赖 | 覆盖规格/设计项 | 状态 |",
+                        "| ------- | ---- | ---- | --------------- | ---- |",
+                        "| T001 | one | 无 | REQ-001/SCN-001 / D-001 | 待做 |",
+                        "| T002 | two | T001 | REQ-001/SCN-001 / D-001 | 待做 |",
+                        "",
+                        "## 任务详情",
+                        "### Task [T001]: one",
+                        "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **decision_id:** D-001",
+                        "- **设计依据:** design.md#D-001",
+                        "- **证据依据:** ev_0001",
+                        "- **验证命令:** echo one",
+                        "- **状态:** 待做",
+                        "",
+                        "### Task [T002]: two",
+                        "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
+                        "- **decision_id:** D-001",
+                        "- **设计依据:** design.md#D-001",
+                        "- **证据依据:** ev_0002",
+                        "- **验证命令:** echo two",
+                        "- **状态:** 待做",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            synced, error = sync_plan_json_if_needed(workspace=workspace, feature="alpha", checkpoint="plan_done")
+
+            self.assertTrue(synced, error)
+            generated = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(generated["tasks"][0]["deps"], [])
+            self.assertEqual(generated["tasks"][1]["deps"], ["T001"])
+
     def test_update_checkpoint_cli_writes_json_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
@@ -455,6 +626,7 @@ class StateIntegrationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            write_done_plan_json_and_evidence(feature_dir)
             module_dir = root / "service"
             module_dir.mkdir()
             write_modules_compile(
@@ -975,6 +1147,7 @@ class StateIntegrationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            write_done_plan_json_and_evidence(feature_dir)
             module_dir = root / "service"
             module_dir.mkdir()
             write_modules_compile(

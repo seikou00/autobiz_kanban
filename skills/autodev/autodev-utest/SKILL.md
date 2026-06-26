@@ -100,6 +100,7 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`（append-only 证据流）
 - `.autobizdevops/state.json` 与自动生成视图 `.autobizdevops/STATE.md`
 
 禁止修改：
@@ -217,6 +218,8 @@ pytest tests/test_foo.py::test_rejects_empty_name
 ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log
 ```
 
+每次测试命令结束后，还必须用 `hooks/evidence_store.py append` 向 `evidence/EVIDENCE.jsonl` 追加 validation evidence，记录 taskId（优先来自 `plan.json`）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并将输出尾部写入 evidence tail 文件。不得截断或重写 `EVIDENCE.jsonl`；报告中的 Evidence 列优先引用新增的 `ev_XXXX`。
+
 日志中至少保留：
 
 - 时间。
@@ -307,6 +310,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - P0 单测目标全部 PASS。
 - P1 单测目标 PASS，或有明确可接受原因并标记 `PASS_WITH_WARNINGS`。
 - `UNIT_TEST_REPORT.md` 与 `test-output.log` 均已写入。
+- `evidence/EVIDENCE.jsonl` 已追加本阶段 validation evidence，完整性校验通过。
 - 所有业务代码修复都有对应失败测试锚点和重跑通过证据。
 - 扩大验证命令已运行，并在报告中记录结果。
 - 报告 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS`。
@@ -338,6 +342,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] 已建立 Test Plan。
 - [ ] 已生成或补齐单测。
 - [ ] 已运行精确测试并记录到 `test-output.log`。
+- [ ] 已将单测运行结果 append 到 `evidence/EVIDENCE.jsonl`，并在报告中引用 evidenceId。
 - [ ] 失败均已归因。
 - [ ] 允许范围内的最小修复均已验证。
 - [ ] 已执行扩大验证。

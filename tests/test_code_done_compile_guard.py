@@ -20,6 +20,7 @@ if str(HOOKS_DIR) not in sys.path:
 
 from code_done_compile_guard import validate_modules_compile  # noqa: E402
 from board_core.state_store import write_state_records  # noqa: E402
+from evidence_store import append_evidence  # noqa: E402
 
 
 def plugin_env(workspace: Path, *, feature: str = "alpha") -> dict[str, str]:
@@ -96,6 +97,55 @@ def read_hook_events(workspace: Path, feature: str = "alpha") -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def seed_done_plan_and_evidence(workspace: Path, feature: str = "alpha") -> None:
+    feature_dir = workspace / ".autobizdevops" / "features" / feature
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    (feature_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "featureId": feature,
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "title": "Implement capability",
+                        "status": "done",
+                        "deps": [],
+                        "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+                        "designRefs": ["design.md#D-001"],
+                        "apiIds": [],
+                        "dataIds": [],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo ok"}],
+                        "expectedFiles": [],
+                        "evidenceIds": ["ev_0001"],
+                        "blockers": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    append_evidence(
+        feature_dir,
+        {
+            "featureId": feature,
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+            "designRefs": ["design.md#D-001"],
+            "changedFiles": ["src/example.py"],
+            "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+        },
+    )
+
+
 class CodeDoneCompileGuardTest(unittest.TestCase):
     def test_non_update_checkpoint_command_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -163,6 +213,7 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
             root = Path(tmp)
             workspace = make_workspace(root)
             write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
+            seed_done_plan_and_evidence(workspace)
             service = root / "service"
             service.mkdir()
             command_text = py_command("import sys; print('boom output'); sys.exit(7)")
@@ -195,6 +246,7 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
             root = Path(tmp)
             workspace = make_workspace(root)
             write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
+            seed_done_plan_and_evidence(workspace)
             service = root / "service"
             service.mkdir()
             write_modules(

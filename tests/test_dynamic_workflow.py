@@ -276,6 +276,35 @@ def write_plan_artifacts(feature_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+    (feature_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "featureId": "alpha",
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "title": "Implement capability",
+                        "status": "todo",
+                        "deps": [],
+                        "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+                        "designRefs": ["design.md#API-001", "#DATA-001", "#D-001"],
+                        "apiIds": ["API-001"],
+                        "dataIds": ["DATA-001"],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo ok"}],
+                        "expectedFiles": [],
+                        "evidenceIds": ["ev_0001"],
+                        "blockers": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def record(checkpoint: str, *, profile: str = "quality") -> dict[str, str]:

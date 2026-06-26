@@ -70,7 +70,7 @@ class CompileNodeSubsetTest(unittest.TestCase):
             effective["workflowDroppedInputs"],
             {
                 "dev.specs": ["PRD.md"],
-                "dev.code": ["PRD.md", "design.md", "PLAN.md"],
+                "dev.code": ["PRD.md", "design.md", "PLAN.md", "plan.json"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )
@@ -110,7 +110,7 @@ class SolveNodeClosureTest(unittest.TestCase):
         self.assertEqual(result.added, ())
         self.assertEqual(
             result.dropped,
-            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md")},
+            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md", "plan.json")},
         )
         self.assertEqual(result.entry_nodes, ("dev.code",))
         self.assertEqual(
@@ -122,6 +122,7 @@ class SolveNodeClosureTest(unittest.TestCase):
                     "PRD.md": "biz.prd",
                     "design.md": "dev.plan",
                     "PLAN.md": "dev.plan",
+                    "plan.json": "dev.plan",
                 }
             },
         )

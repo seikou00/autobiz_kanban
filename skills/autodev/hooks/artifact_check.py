@@ -22,6 +22,16 @@ from common import (
 )
 from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
+from hooks.evidence_integrity_gate import check_integrity, check_plan_evidence_refs  # noqa: E402
+from hooks.plan_json import (  # noqa: E402
+    failed_tasks,
+    load_and_validate_plan,
+    parse_plan_markdown,
+    plan_json_path,
+    unfinished_tasks,
+    validate_plan_data,
+    write_plan_json,
+)
 
 
 PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
@@ -259,7 +269,34 @@ def validate_plan_initial_tasks(ctx: HookContext) -> int:
     return failures
 
 
+def validate_plan_json_contract(ctx: HookContext) -> int:
+    plan_json = ctx.file("plan.json")
+    data, errors = load_and_validate_plan(plan_json)
+    failures = 0
+    if errors:
+        for error in errors:
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+        return failures
+    if data is None:
+        return fail_line(ctx, "missing_plan_json")
+    return 0
+
+
 def validate_plan_finished_tasks(ctx: HookContext) -> int:
+    plan_json = ctx.file("plan.json")
+    if is_nonempty(plan_json):
+        data, errors = load_and_validate_plan(plan_json, require_all_done=True)
+        failures = 0
+        for error in errors:
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+        if data is not None:
+            if unfinished := unfinished_tasks(data):
+                failures += fail_line(ctx, "plan_json_has_pending_tasks", f" tasks={','.join(unfinished)}")
+            if failed := failed_tasks(data):
+                failures += fail_line(ctx, "plan_json_has_failed_tasks", f" tasks={','.join(failed)}")
+        if failures:
+            return failures
+
     plan = ctx.file("PLAN.md")
     if not is_nonempty(plan):
         # PLAN.md not in this workflow's contract (e.g. lean): degrade,
@@ -287,6 +324,19 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
         info(ctx, "plan_legacy_format_degrade")
     else:
         failures += fail_line(ctx, "missing_task_id_heading")
+    return failures
+
+
+def validate_evidence_integrity(ctx: HookContext) -> int:
+    if not ctx.requires_artifact("evidence/EVIDENCE.jsonl"):
+        info(ctx, "evidence_not_in_contract_degrade")
+        return 0
+    failures = 0
+    for error in check_integrity(ctx.feature_dir, require_index=True):
+        failures += fail_line(ctx, "invalid_evidence_stream", f" detail={error}")
+    if is_nonempty(plan_json_path(ctx.feature_dir)):
+        for error in check_plan_evidence_refs(ctx.feature_dir):
+            failures += fail_line(ctx, "invalid_evidence_trace", f" detail={error}")
     return failures
 
 
@@ -507,8 +557,10 @@ VALIDATORS = {
     "proposal_contract": validate_proposal_contract,
     "specs_contract": validate_specs_contract,
     "design_contract": validate_design_contract,
+    "plan_json_contract": validate_plan_json_contract,
     "plan_initial_tasks": validate_plan_initial_tasks,
     "plan_finished_tasks": validate_plan_finished_tasks,
+    "evidence_integrity": validate_evidence_integrity,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
     "unit_test_report_contract": validate_unit_test_report_contract,
     "e2e_report_contract": validate_e2e_report_contract,
@@ -626,6 +678,7 @@ def run_postcheck(
             workflow_decisions=workflow_decisions,
             workflow_record=workflow_record,
         )
+        maybe_sync_plan_json_for_plan_skill(workspace_root, slug, skill, config.required_outputs)
         validate_required_files(workspace_root, slug, config.required_outputs)
         for validator in config.validators:
             if validator not in VALIDATORS:
@@ -649,6 +702,28 @@ def run_postcheck(
     if failures:
         return 1, f"POST_SKILL_FAIL skill={skill} failures={failures}"
     return 0, f"POST_SKILL_PASS skill={skill}"
+
+
+def maybe_sync_plan_json_for_plan_skill(
+    workspace_root: Path,
+    slug: str,
+    skill: str,
+    required_outputs: tuple[str, ...],
+) -> None:
+    if skill != "autodev-plan" or "plan.json" not in required_outputs:
+        return
+    feature_dir = workspace_root / ".autobizdevops" / "features" / slug
+    target = feature_dir / "plan.json"
+    if is_nonempty(target):
+        return
+    plan = feature_dir / "PLAN.md"
+    if not is_nonempty(plan):
+        return
+    data = parse_plan_markdown(read_text(plan), feature_id=slug)
+    errors = validate_plan_data(data)
+    if errors:
+        raise HookCheckError("invalid_plan_json_sync", "; ".join(errors))
+    write_plan_json(target, data)
 
 
 def run_check(

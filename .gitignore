@@ -92,6 +92,7 @@ application-local.properties
 # =========================
 logs/
 *.log
+!.autobizdevops/features/**/evidence/*.log
 
 # =========================
 # Temp files

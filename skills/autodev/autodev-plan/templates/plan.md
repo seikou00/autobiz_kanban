@@ -1,17 +1,18 @@
 # 计划模板
 
-> 由 Plan 阶段生成，写入 `{FEATURE_DIR}/PLAN.md`。本文件只承载执行层任务、验证计划和覆盖矩阵；行为契约以 `{FEATURE_DIR}/specs/**/*.md` 为准，接口/数据/技术决策以 `{FEATURE_DIR}/design.md` 为准。
+> 由 Plan 阶段生成，写入 `{FEATURE_DIR}/PLAN.md`。`plan.json` 是同一计划的机器事实源，本模板只描述 PLAN.md 的人类视图；行为契约以 `{FEATURE_DIR}/specs/**/*.md` 为准，接口/数据/技术决策以 `{FEATURE_DIR}/design.md` 为准。
 
 ## 稳定 ID 规范
 
 - Task ID 统一使用 `T001`、`T002` ...，并写在任务标题和任务表格中。
-- Task 必须引用 `specRefs`、`api_id`、`data_id`、`decision_id`、`evidenceIds`。
+- Task 必须引用 `specRefs`、`api_id`、`data_id`、`decision_id`、`evidenceIds`；对应的 `plan.json` 需同步保存 `deps`、`status`、`validationCommands`。
 - `specRefs` 使用 `specs/<capability>/spec.md#REQ-001` / `#SCN-001`。
 - `api_id`、`data_id`、`decision_id` 分别写成独立字段；每个字段都可以写多个 ID，多个值用 `/` 或 `,` 分隔。
 - 若 `x-auto-no-http-api: true` / `x-auto-no-sql: true`，对应字段写 `无`，不要为对应类型伪造 `API-*` / `DATA-*`。
 - `设计依据` 可作为人类可读摘要保留，但机器校验只看单独字段；它不需要和字段一一对账。模板里仍保留 `design.md#API-001 / #DATA-001 / #D-001` 这种可追溯写法。
 - 覆盖矩阵中的 Requirement / Scenario 也必须带同样的本地 ID。
 - 新建任务继续递增，不允许重用已删除或已完成任务的 ID。
+- `plan.json` 与 PLAN.md 必须描述同一批任务，不能出现任务缺失或状态漂移。
 
 ---
 
