@@ -4,7 +4,7 @@
 
 board_config.json 注册::
 
-    "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py"
+    "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config"
 
 仓库地址来自 board_config.json 顶层 ``agentsRepo``（可被 --repo-url/--ref 覆盖）::
 
@@ -20,9 +20,10 @@ board_config.json 注册::
       "supported_service_units": [...],
       "systems": [ {"systemId","systemName","agentsReady","agentsPath","serviceUnits":[...]} ] }
 
-``--write-board-config``（可选，打包前 bake）：同步成功后把 ``supported_service_units``
-定点写回 board_config.json 顶层同名字段（正则只改那一处数组、不重排整份文件；写前校验
-仍为合法 JSON，否则放弃写入并在结果里给出 boardConfigWriteError）。UI 常规拉取不必带。
+``--write-board-config``（已写进注册的 pull_knowledge 命令，UI 每次拉取即触发）：同步成功后
+把 ``supported_service_units`` 定点写回 board_config.json 顶层同名字段（正则只改那一处数组、
+不重排整份文件；写前校验仍为合法 JSON，否则放弃写入并在结果里给出 boardConfigWriteError）。
+只读安装环境可从命令里去掉该参数、改为打包前手动 bake 一次。
 
 UI 直调约定：逻辑失败也输出 ok:false 的 JSON 并 exit 0，绝不让 UI 收到非 JSON。
 """

@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "agentsRepo": {
-    "url": "",
+    "url": "https://github.com/seikou00/testAgents.git",
     "ref": "main"
   },
   "supported_service_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
@@ -16,7 +16,7 @@
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py",
+      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
       "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     },
     "linux": {
@@ -29,7 +29,7 @@
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py",
+      "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
       "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     },
     "win32": {
@@ -42,7 +42,7 @@
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
-      "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py",
+      "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --write-board-config",
       "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
     }
   },
