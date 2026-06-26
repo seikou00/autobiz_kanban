@@ -22,21 +22,41 @@ from hooks.agents_repo import build_sync_payload  # noqa: E402
 GIT = shutil.which("git")
 
 
+@contextlib.contextmanager
+def _temp_board_config(text: str):
+    """临时把 sync_agents.BOARD_CONFIG_PATH 指到内容受控的配置——测回退逻辑本身，
+    不依赖随包 board_config.json 当前的 agentsRepo.url（避免被真实值改动影响）。"""
+    orig = sync_agents.BOARD_CONFIG_PATH
+    cfg = Path(tempfile.mkdtemp()) / "board_config.json"
+    cfg.write_text(text, encoding="utf-8")
+    sync_agents.BOARD_CONFIG_PATH = cfg
+    try:
+        yield cfg
+    finally:
+        sync_agents.BOARD_CONFIG_PATH = orig
+
+
 class ResolveRepoTest(unittest.TestCase):
     def test_cli_override_wins_without_reading_config(self):
         url, ref = sync_agents._resolve_repo("https://example.com/a.git", "dev")
         self.assertEqual((url, ref), ("https://example.com/a.git", "dev"))
 
-    def test_falls_back_to_board_config(self):
-        # 真实 board_config.json 的 agentsRepo.url 为空、ref 为 main
-        url, ref = sync_agents._resolve_repo(None, None)
+    def test_falls_back_to_empty_board_config(self):
+        with _temp_board_config('{"agentsRepo": {"url": "", "ref": "main"}}'):
+            url, ref = sync_agents._resolve_repo(None, None)
         self.assertEqual(url, "")
         self.assertEqual(ref, "main")
+
+    def test_falls_back_to_configured_url(self):
+        with _temp_board_config('{"agentsRepo": {"url": "https://git/x.git", "ref": "dev"}}'):
+            url, ref = sync_agents._resolve_repo(None, None)
+        self.assertEqual((url, ref), ("https://git/x.git", "dev"))
 
 
 class RunFailurePathTest(unittest.TestCase):
     def test_missing_url_returns_ok_false_without_touching_git(self):
-        result = sync_agents.run(None, None)  # 真实配置 url 为空
+        with _temp_board_config('{"agentsRepo": {"url": "", "ref": "main"}}'):
+            result = sync_agents.run(None, None)
         self.assertFalse(result["ok"])
         self.assertIn("未配置 agents 仓库地址", result["message"])
 
