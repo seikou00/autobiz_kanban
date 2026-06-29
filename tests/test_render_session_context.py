@@ -271,7 +271,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
         self.assertEqual(len(status), 1)
         self.assertFalse(status[0]["loaded"])
         self.assertEqual(status[0]["source"], "local")
-        self.assertEqual(status[0]["message"], "file not exist")
+        self.assertEqual(status[0]["message"], "未找到知识库 AGENTS.md 和本地 AGENTS.md")
         self.assertIn("缺 1", res["message"])
         self.assertNotIn("#unit-section", res["sessionContext"])  # 无内容→不加锚点链接
 
