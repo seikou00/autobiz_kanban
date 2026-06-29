@@ -187,7 +187,7 @@ def _resolve_one(
         "path": str(local_abs) if local_abs is not None else "",
         "loaded": False,
         "source": "local",
-        "message": "file not exist",
+        "message": "未找到知识库 AGENTS.md 和本地 AGENTS.md",
     }
     return status, None, None
 
