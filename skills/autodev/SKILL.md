@@ -102,12 +102,12 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 - 标准链下，`prd_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`；精简链（lean）等无 Biz 阶段的工作流中，契约不含 `PRD.md`，`/autodev-specs` 基于用户描述直接澄清，不得因缺 PRD 阻断。
 - `specs_done` 之后的 Dev 阶段不再把 `PRD.md` 作为硬输入，统一以 `proposal.md` 与 `specs/**/*.md` 作为行为契约源。
 
-**提示（仅标准链缺 PRD 时）：** `请先使用 /autobiz 系列技能补齐 Biz 阶段产出物 PRD.md，然后重新触发 /autodev。proposal.md 与 specs/**/*.md 将由 /autodev-specs 生成，design.md 与 PLAN.md 将由 /autodev-plan 生成。`
+**提示（仅标准链缺 PRD 时）：** `请先使用 /autobiz 系列技能补齐 Biz 阶段产出物 PRD.md，然后重新触发 /autodev。proposal.md 与 specs/**/*.md 将由 /autodev-specs 生成，design.md 与 plan.json 将由 /autodev-plan 生成。`
 
 
 ### 禁止事项
 
-1. **禁止在 Dev 阶段凭空生成 PRD；只有 `/autodev-specs` 可以生成或更新 proposal.md 与 specs/**/*.md，只有 `/autodev-plan` 可以生成或更新 design.md 与 PLAN.md。**
+1. **禁止在 Dev 阶段凭空生成 PRD；只有 `/autodev-specs` 可以生成或更新 proposal.md 与 specs/**/*.md，只有 `/autodev-plan` 可以生成或更新 design.md 与 plan.json；PLAN.md 仅为可选人类视图。**
 2. **禁止跳跃 checkpoint。**
 3. **在执行autobiz与子技能时，约束必须参考AGENTS.md中存在的定制约束，不能仅遵守技能的约束。**
 4. **本 skill 的规则不得覆盖 AGENTS.md；如冲突，以 AGENTS.md 中项目约束为准，除非系统级指令另有要求。**

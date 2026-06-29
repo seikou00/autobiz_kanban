@@ -78,12 +78,10 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(offenders),
         )
 
-    def test_plan_markdown_inputs_also_expose_plan_json(self) -> None:
-        self._assert_markdown_inputs_expose_json({"PLAN.md": "plan.json"})
-
-    def test_markdown_report_inputs_also_expose_json_sidecars(self) -> None:
-        self._assert_markdown_inputs_expose_json(
+    def test_machine_stages_do_not_require_markdown_views_when_json_exists(self) -> None:
+        self._assert_markdown_views_are_optional(
             {
+                "PLAN.md": "plan.json",
                 "REQUIREMENTS_EVAL.md": "REVIEW_FINDINGS.json",
                 "UNIT_TEST_REPORT.md": "UNIT_TEST_RESULT.json",
                 "E2E_REPORT.md": "E2E_RESULT.json",
@@ -91,7 +89,43 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             }
         )
 
-    def _assert_markdown_inputs_expose_json(self, pairs: dict[str, str]) -> None:
+    def test_machine_stages_do_not_use_markdown_report_validators(self) -> None:
+        legacy_markdown_validators = {
+            "requirements_eval_verdict",
+            "unit_test_report_contract",
+            "e2e_report_contract",
+            "verify_report_contract",
+            "plan_initial_tasks",
+        }
+        offenders: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict):
+                continue
+            validators = node.get("validators", [])
+            if not isinstance(validators, list):
+                continue
+            for validator in validators:
+                if validator in legacy_markdown_validators:
+                    offenders.append(f"{context}[{node.get('id', '?')}]: {validator}")
+        self.assertEqual(
+            offenders,
+            [],
+            "machine workflow must validate JSON facts, not Markdown reports: " + ", ".join(offenders),
+        )
+
+    def test_plan_stage_keeps_json_initial_status_gate(self) -> None:
+        offenders: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict):
+                continue
+            if node.get("id") != "dev.plan":
+                continue
+            validators = node.get("validators", [])
+            if not isinstance(validators, list) or "plan_json_initial_tasks" not in validators:
+                offenders.append(f"{context}[dev.plan]")
+        self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
+
+    def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:
         offenders: list[str] = []
         for context, node in _iter_nodes(_board_config()):
             if not isinstance(node, dict):
@@ -99,19 +133,29 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             artifacts = node.get("artifacts")
             if not isinstance(artifacts, dict):
                 continue
-            input_paths = {
-                artifact.get("path")
+            input_by_path = {
+                artifact.get("path"): artifact
                 for artifact in artifacts.get("inputs", []) or []
                 if isinstance(artifact, dict)
             }
             for markdown_path, json_path in pairs.items():
-                if markdown_path in input_paths and json_path not in input_paths:
-                    offenders.append(f"{context}[{node.get('id', '?')}]: {markdown_path} -> {json_path}")
+                markdown = input_by_path.get(markdown_path)
+                if markdown is None:
+                    continue
+                json_input = input_by_path.get(json_path)
+                if json_input is None:
+                    offenders.append(f"{context}[{node.get('id', '?')}]: {markdown_path} without {json_path}")
+                    continue
+                if markdown.get("required") is True or json_input.get("required") is not True:
+                    offenders.append(
+                        f"{context}[{node.get('id', '?')}]: {markdown_path} required={markdown.get('required')} "
+                        f"{json_path} required={json_input.get('required')}"
+                    )
         self.assertEqual(
             offenders,
             [],
-            "any node consuming a Markdown view must also expose its JSON "
-            "machine-readable source: " + ", ".join(offenders),
+            "Markdown views with JSON counterparts must be optional inputs, "
+            "and the JSON counterpart must be required: " + ", ".join(offenders),
         )
 
 

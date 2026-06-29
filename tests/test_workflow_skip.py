@@ -97,8 +97,10 @@ E2E_PRECHECK_ARTIFACTS = [
     "proposal.md",
     "specs/alpha.md",
     "design.md",
-    "PLAN.md",
-    "REQUIREMENTS_EVAL.md",
+    "plan.json",
+    "REVIEW_FINDINGS.json",
+    "evidence/EVIDENCE.jsonl",
+    "UNIT_TEST_RESULT.json",
 ]
 
 
@@ -130,7 +132,7 @@ class SkipCompileTests(unittest.TestCase):
         self.assertNotIn("UNIT_TEST_REPORT.md", e2e_input_paths)
         self.assertNotIn("UNIT_TEST_RESULT.json", e2e_input_paths)
         self.assertNotIn("test-output.log", e2e_input_paths)
-        self.assertIn("REQUIREMENTS_EVAL.md", e2e_input_paths)
+        self.assertIn("REVIEW_FINDINGS.json", e2e_input_paths)
 
     def test_skip_plan_removes_needs_fix_target(self) -> None:
         effective = compile_board_config(
@@ -189,7 +191,7 @@ class SkipCompileTests(unittest.TestCase):
         self.assertEqual(
             effective["workflowDroppedInputs"],
             {
-                "dev.code": ["proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md", "plan.json"],
+                "dev.code": ["proposal.md", "specs/**/*.md", "PRD.md", "design.md", "plan.json"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )
@@ -432,7 +434,7 @@ class SkipUpdateCheckpointTests(unittest.TestCase):
             seed_feature(
                 workspace,
                 "unit_test_in_progress",
-                artifacts=[name for name in E2E_PRECHECK_ARTIFACTS if name != "REQUIREMENTS_EVAL.md"],
+                artifacts=[name for name in E2E_PRECHECK_ARTIFACTS if name != "REVIEW_FINDINGS.json"],
             )
 
             result = prepare_skip_update(

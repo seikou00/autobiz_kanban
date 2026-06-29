@@ -1,6 +1,6 @@
 ---
 name: autodev-utest
-description: "Dev 阶段单元测试生成与单测驱动最小修复技能。读取 proposal.md、specs/**/*.md、design.md、PLAN.md 与 REQUIREMENTS_EVAL，按 specs 行为契约生成单测、执行验证、归因失败，并在当前 feature 范围内做最小测试代码或业务代码修复。默认由当前会话内联执行。"
+description: "Dev 阶段单元测试生成与单测驱动最小修复技能。读取 proposal.md、specs/**/*.md、design.md、plan.json、evidence/EVIDENCE.jsonl 与 REVIEW_FINDINGS.json，按 specs 行为契约生成单测、执行验证、归因失败，并在当前 feature 范围内做最小测试代码或业务代码修复。默认由当前会话内联执行。"
 version: v1.1.1604
 ---
 
@@ -34,18 +34,18 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "
 
 核心目标：
 
-- 从 `proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md`、`REQUIREMENTS_EVAL.md` 提取需要单测覆盖的行为，其中 specs 是主要行为契约。
+- 从 Source Bundle 中的 `proposal.md`、`specs/**/*.md`、`design.md`、`plan.json`、`evidence/EVIDENCE.jsonl`、`REVIEW_FINDINGS.json` 提取需要单测覆盖的行为，其中 specs 是主要行为契约，plan/evidence/review 均以 JSON 为机器事实源。
 - 为当前 feature 生成或补齐单元测试。
 - 逐个运行测试，保留原始测试日志。
 - 对失败进行根因归类。
 - 在边界内做最小修复：测试代码问题修测试，当前 feature 的业务实现问题可修生产代码。
-- 生成 `UNIT_TEST_REPORT.md`，为 E2E 与 Verify 阶段提供证据。
+- 生成 `UNIT_TEST_RESULT.json`，为 E2E 与 Verify 阶段提供机器事实源；`UNIT_TEST_REPORT.md` 只是可选人类报告。
 
 ## 稳定 ID 规范
 
 - Test Plan 中的测试目标使用 `UT-001`、`UT-002` ...
 - Coverage Matrix 中的 Source / Requirement / Scenario 必须使用稳定引用：`specs/<capability>/spec.md#REQ-001`、`#SCN-001`、`design.md#API-001`。
-- `UNIT_TEST_REPORT.md` 中的修复尝试、命令和覆盖项也必须保持同一组 ID。
+- `UNIT_TEST_RESULT.json` 中的 targets、scenarioCoverage 与 evidenceIds 必须保持同一组 ID；`UNIT_TEST_REPORT.md` 若生成，也应投影同一组 ID。
 - 新建测试目标继续递增，不允许重用已删除或已完成的 ID。
 
 ## 执行主体
@@ -98,10 +98,10 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 输出产物：
 
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`（append-only 证据流）
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`（可选人类报告）
 - `.autobizdevops/state.json` 与自动生成视图 `.autobizdevops/STATE.md`
 
 禁止修改：
@@ -122,7 +122,7 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 1. 已有或新生成的单元测试能稳定复现失败。
 2. 已确认失败不是测试代码、mock、fixture、命令或环境问题。
-3. 失败行为能映射到 `specs/**/*.md`、`design.md` 或 `REQUIREMENTS_EVAL.md` 中的当前 feature 契约。
+3. 失败行为能映射到 `specs/**/*.md`、`design.md` 或 `REVIEW_FINDINGS.json` 中的当前 feature 契约。
 4. 已定位到当前 feature 直接相关的最小代码区域。
 5. 修复不需要改变需求、接口契约、数据模型或跨模块设计。
 6. 修复后必须重跑精确失败测试，并重跑受影响测试类或模块。
@@ -167,7 +167,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 按 Method Bundle（各输入的 `extract.focus`/`method`）从输入产物中提取测试所需的行为契约、覆盖重点、风险与受影响范围。
 
-生成测试矩阵，写入 `UNIT_TEST_REPORT.md` 的 `## Test Plan`：
+生成测试矩阵，优先沉淀到 `UNIT_TEST_RESULT.json.targets[]`；若生成 `UNIT_TEST_REPORT.md`，可同步写入其 `## Test Plan`：
 
 ```markdown
 | ID | Source | Behavior | Test Target | Priority | Status |
@@ -191,7 +191,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 2. 选择最小测试入口，优先测试真实行为。
 3. Mock 只在不可避免时使用，不得只测试 mock 行为。
 4. 写入一个测试方法或一个最小测试文件。
-5. 在 `UNIT_TEST_REPORT.md` 立刻追加该测试目标的状态。
+5. 在 `UNIT_TEST_RESULT.json.targets[]` 立刻追加或更新该测试目标的状态；`UNIT_TEST_REPORT.md` 若生成，再同步人类视图。
 
 若当前行为是新需求或缺陷修复，优先走 red-green：
 
@@ -258,7 +258,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 
 ### Step 8: 生成最终报告
 
-`UNIT_TEST_REPORT.md` 必须包含以下章节：
+可同步生成 `UNIT_TEST_REPORT.md` 作为人类报告；若生成，建议包含以下章节：
 
 ```markdown
 # Unit Test Report
@@ -333,12 +333,11 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 
 - P0 单测目标全部 PASS。
 - P1 单测目标 PASS，或有明确可接受原因并标记 `PASS_WITH_WARNINGS`。
-- `UNIT_TEST_REPORT.md` 与 `test-output.log` 均已写入。
+- `UNIT_TEST_RESULT.json` 与 `test-output.log` 均已写入。
 - `evidence/EVIDENCE.jsonl` 已追加本阶段 validation evidence，完整性校验通过。
 - 所有业务代码修复都有对应失败测试锚点和重跑通过证据。
 - 扩大验证命令已运行，并在报告中记录结果。
-- 报告 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS`。
-- `UNIT_TEST_RESULT.json` 已写入，且每个 target 带 `taskId`、`specRefs`、`evidenceIds`、`result`、`command`。
+- `UNIT_TEST_RESULT.json.verdict` 为 `PASS` 或 `PASS_WITH_WARNINGS`，且每个 target 带 `taskId`、`specRefs`、`evidenceIds`、`result`、`command`。
 
 推进命令：
 
@@ -371,7 +370,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] 失败均已归因。
 - [ ] 允许范围内的最小修复均已验证。
 - [ ] 已执行扩大验证。
-- [ ] `UNIT_TEST_REPORT.md` 包含必需章节和 verdict。
 - [ ] `UNIT_TEST_RESULT.json` 已写入，JSON 是下游机器主入口。
 - [ ] 成功时已推进 `unit_test_done`。
 

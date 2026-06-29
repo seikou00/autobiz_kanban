@@ -49,9 +49,9 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 按「流程契约」一节取当前 Feature 的 Source Bundle，对每个输入按其 Method Bundle 读取：
 
-- `VERIFY_DECISION.json` 在场时是 CI/CD 准入机器事实源；用 `verdict`、`nextCheckpoint`、`failedScenarioRefs`、`manualVerificationRefs`、`missingScenarioRefs` 和 `evidenceIds` 判断是否可进入流水线。
+- `VERIFY_DECISION.json` 是 CI/CD 准入机器事实源；用 `verdict`、`nextCheckpoint`、`failedScenarioRefs`、`manualVerificationRefs`、`missingScenarioRefs` 和 `evidenceIds` 判断是否可进入流水线。
 - `VERIFY_REPORT.md` 只作为验收的人类叙述参考，用于补充交付说明和遗留风险文字，不从 Markdown 文本重新推导 verdict。
-- 若 `VERIFY_DECISION.json` 缺失，按 bundle 的 degrade 降级读取 `VERIFY_REPORT.md`，并在 `CICD_CHECKLIST.md` / `PR_BODY.md` 中标注“验收机器事实源缺失”。
+- 若 `VERIFY_DECISION.json` 缺失，停止并回到 verify 阶段补齐结构化验收决策；不得用 `VERIFY_REPORT.md` 推导准入 verdict。
 - 若 `VERIFY_DECISION.json.verdict != "pass"` 或 `nextCheckpoint != "verify_done"`，不得启动流水线；把失败、人工验证或缺失场景写入阻断项，等待回流或人工确认。
 
 ## 使用场景
@@ -91,7 +91,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 1. 生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/CICD_CHECKLIST.md`
 2. 生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PR_BODY.md`
-3. 若 `VERIFY_DECISION.json` 在场，在 `CICD_CHECKLIST.md` 记录 verdict、nextCheckpoint、场景失败/人工验证/缺失集合与 evidenceIds；`VERIFY_REPORT.md` 只补充说明文字。
+3. 在 `CICD_CHECKLIST.md` 记录 `VERIFY_DECISION.json` 的 verdict、nextCheckpoint、场景失败/人工验证/缺失集合与 evidenceIds；`VERIFY_REPORT.md` 只补充说明文字。
 4. 若已知 PRD 或 API 来源，在 `CICD_CHECKLIST.md` 或 `PR_BODY.md` 中标注引用路径
 5. 若需求文档缺失，必须在 `CICD_CHECKLIST.md` 中记录：
 

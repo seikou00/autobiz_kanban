@@ -60,7 +60,7 @@ class CompileNodeSubsetTest(unittest.TestCase):
         self.assertIn("dev.detail_design", detail_nodes)
         self.assertEqual(
             [artifact["path"] for artifact in detail_nodes["dev.detail_design"]["artifacts"]["inputs"]],
-            ["proposal.md", "specs/**/*.md", "design.md", "PLAN.md", "plan.json"],
+            ["proposal.md", "specs/**/*.md", "design.md", "plan.json"],
         )
 
     def test_lean_subset_drops_broken_inputs(self) -> None:
@@ -75,7 +75,7 @@ class CompileNodeSubsetTest(unittest.TestCase):
             effective["workflowDroppedInputs"],
             {
                 "dev.specs": ["PRD.md"],
-                "dev.code": ["PRD.md", "design.md", "PLAN.md", "plan.json"],
+                "dev.code": ["PRD.md", "design.md", "plan.json"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )
@@ -115,7 +115,7 @@ class SolveNodeClosureTest(unittest.TestCase):
         self.assertEqual(result.added, ())
         self.assertEqual(
             result.dropped,
-            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "PLAN.md", "plan.json")},
+            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "plan.json")},
         )
         self.assertEqual(result.entry_nodes, ("dev.code",))
         self.assertEqual(
@@ -126,7 +126,6 @@ class SolveNodeClosureTest(unittest.TestCase):
                     "specs/**/*.md": "dev.specs",
                     "PRD.md": "biz.prd",
                     "design.md": "dev.plan",
-                    "PLAN.md": "dev.plan",
                     "plan.json": "dev.plan",
                 }
             },
@@ -282,7 +281,7 @@ class StateStoreTemplateRecordTest(unittest.TestCase):
                     "checkpoint": "code_in_progress",
                     "workflowTemplate": "custom",
                     "workflowNodes": ["dev.code"],
-                    "workflowExternalized": {"dev.code": ["proposal.md", "specs/**/*.md", "design.md", "PLAN.md"]},
+                    "workflowExternalized": {"dev.code": ["proposal.md", "specs/**/*.md", "design.md", "plan.json"]},
                 }
             }
         )

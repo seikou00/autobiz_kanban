@@ -1,6 +1,6 @@
 ---
 name: autodev-e2e
-description: 对单个 feature 执行端到端测试。作为 Autodev 根流程中的正式阶段，承接 autodev-utest 产物，输出 E2E_REPORT.md / e2e-run.log，并按 checkpoint 做 e2e_done / needs_fix 分支决策。默认由当前会话内联执行；可使用后台进程启动服务或运行长时间测试命令。
+description: 对单个 feature 执行端到端测试。作为 Autodev 根流程中的正式阶段，承接 autodev-utest 的 UNIT_TEST_RESULT.json，输出 E2E_RESULT.json / E2E_TEST_CASES.yaml / e2e-run.log，并按 checkpoint 做 e2e_done / needs_fix 分支决策。默认由当前会话内联执行；可使用后台进程启动服务或运行长时间测试命令。
 version: v1.1.1604
 ---
 
@@ -41,7 +41,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ## 输入与行为依据
 
-消费 Source Bundle：按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的产物原件，按各自 `extract`（focus/method/degrade）决定读取重点；`required: false` 的输入缺失时按降级读法继续，bundle 未列出的产物不读不等。上游阶段被跳过（契约 JSON `workflow.workflowSkippedNodes`）时，在 `E2E_REPORT.md` 中注明该阶段已跳过。
+消费 Source Bundle：按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的产物原件，按各自 `extract`（focus/method/degrade）决定读取重点；`required: false` 的输入缺失时按降级读法继续，bundle 未列出的产物不读不等。上游阶段被跳过（契约 JSON `workflow.workflowSkippedNodes`）时，在可选人类报告中注明该阶段已跳过。
 
 各输入的用途以其 Method Bundle（`extract`）为准；行为契约（specs 的 Requirement / Scenario）是 E2E pass/fail 的主要行为依据。
 
@@ -56,15 +56,16 @@ E2E 用例的稳定 ID 规则：
 
 - 用例 `id` 统一使用 `E2E-{slug}-001`、`E2E-{slug}-002` ...
 - `source.specs_contract` 必须优先引用稳定 ID，例如 `specs/<capability>/spec.md#REQ-001` / `#SCN-001`
-- `E2E_REPORT.md` 中的失败项与回流说明必须回链到相同的 `REQ-001` / `SCN-001`
+- `E2E_RESULT.json` 中的失败项与回流说明必须回链到相同的 `REQ-001` / `SCN-001`
 
-每次 E2E 命令或人工驱动执行结束后，必须把运行结果追加到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`：使用 `hooks/evidence_store.py append` 写入 taskId（优先来自 `plan.json`）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并把运行日志尾部作为 evidence tail 保存。`E2E_REPORT.md` 的每个用例结论都应引用对应 `ev_XXXX`；不得截断或重写 `EVIDENCE.jsonl`。
+每次 E2E 命令或人工驱动执行结束后，必须把运行结果追加到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`：使用 `hooks/evidence_store.py append` 写入 taskId（优先来自 `plan.json`）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并把运行日志尾部作为 evidence tail 保存。`E2E_RESULT.json` 的每个用例结论都必须引用对应 `ev_XXXX`；不得截断或重写 `EVIDENCE.jsonl`。
 
 同时必须写入 `E2E_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 case 必须用 `specRefs` 回链 Requirement / Scenario，并引用对应 `evidenceIds`。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。
 
 ```json
 {
   "version": 1,
+  "verdict": "PASS",
   "scenarioCoverage": [
     {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
   ],
