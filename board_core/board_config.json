@@ -384,7 +384,7 @@
           "outputs": [
           ]
         },
-        "validators": ["plan_finished_tasks"],
+        "validators": ["plan_finished_tasks", "frontend_route_gate"],
         "guards": ["code_compile"]
       },
       {

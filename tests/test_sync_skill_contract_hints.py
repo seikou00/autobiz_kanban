@@ -132,21 +132,29 @@ old generated rules
 
         self.assertIn("不要求 Source Bundle 中存在 `frontend_html`", content)
         self.assertIn("用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段", content)
-        self.assertNotIn("Source Bundle 中存在 `frontend_html`", content)
         self.assertNotIn("frontend_html.extract.degrade", content)
 
     def test_autodev_code_html_route_gates_internal_branching_with_write_todos(self) -> None:
         content = (ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md").read_text(encoding="utf-8")
 
         route_index = content.index("内部分流：")
-        queue_index = content.index("1. 先建立本分支任务队列。")
+        gate_index = content.index("前端 Route 强制闸门（必须优先执行）")
+        resolver_index = content.index("resolve_frontend_html_route.py")
+        route_skill_index = content.index("按输出的 `route` 读取 route SKILL 到 EOF")
+        route_todos_index = content.index("把 route SKILL 中定义的 `write_todos` 主流程转成可见任务清单")
+        parser_index = content.index("只有 route SKILL 的清单推进到“转交 parser”步骤时，才能读取 parser")
+        queue_index = content.index("1. 先执行本文开头的「前端 Route 强制闸门」")
         branch_index = content.index("2. 判断 HTML 路线并读取对应 SKILL：")
 
+        self.assertLess(gate_index, route_index)
+        self.assertLess(resolver_index, route_skill_index)
+        self.assertLess(route_skill_index, route_todos_index)
+        self.assertLess(route_todos_index, parser_index)
         self.assertLess(route_index, queue_index)
         self.assertLess(queue_index, branch_index)
         self.assertNotIn("> 若进入本分支", content)
-        self.assertIn("若当前运行模式支持 `write_todos`，必须先把本分支主线写成可见清单", content)
-        self.assertIn("未完成这一步，不得进入后续分流", content)
+        self.assertIn("未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码", content)
+        self.assertIn("清单创建后立即记录机器证据", content)
         self.assertIn("判断 HTML 路线并读取对应 SKILL", content)
         self.assertIn("执行本分支验证，确认已回到 `/autodev-code` 主流程后", content)
         self.assertIn("不得把本分支视为完成", content)

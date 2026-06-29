@@ -3,6 +3,50 @@ name: autodev-code
 description: 按工作流契约逐任务执行代码，并在 code 阶段内部处理可选前端 HTML 实现分支。消费契约 Source Bundle 列出的正式流程产物 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不作为上游阶段产物读取或索要，但不阻止用户直供 HTML/DOM 素材和内部 route SKILL。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
 ---
 
+## 前端 Route 强制闸门（必须优先执行）
+
+当本轮任务是前端代码生成、HTML/DOM/设计导出稿转工程代码，或触发「前端 HTML 实现分支」时，`/autodev-code` 不得自行改写成普通前端编码任务。必须先进入内部 route，并以 route SKILL 的 `write_todos` 为权威流程。
+
+1. 推进到 `code_in_progress` 后，先解析并记录 route：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --write-evidence --json
+```
+
+如用户本轮直供了不在 `{FEATURE_DIR}/frontend-html/` 或流程文档中的 HTML 文件，追加 `--html-file "<HTML_PATH>"`，可重复。
+
+2. 按输出的 `route` 读取 route SKILL 到 EOF：
+   - `route=absolute-html`：完整读取 `skills/autodev/autodev-code/deps/frontend-html/with-absolute-html/SKILL.md`
+   - `route=standard-html`：完整读取 `skills/autodev/autodev-code/deps/frontend-html/with-standard-html/SKILL.md`
+   - 如果读取工具返回截断内容，继续续读直到 EOF；未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码。
+
+3. 把 route SKILL 中定义的 `write_todos` 主流程转成可见任务清单，逐项执行并更新状态，不能合并成一句“实现前端页面”。清单创建后立即记录机器证据：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todos-created --json
+```
+
+4. 只有 route SKILL 的清单推进到“转交 parser”步骤时，才能读取 parser：
+   - `absolute-html` 只能由 `with-absolute-html/SKILL.md` 转交 `deps/html-parser.md`
+   - `standard-html` 只能由 `with-standard-html/SKILL.md` 转交 `deps/standard-html-parser.md`
+   - `/autodev-code` 根技能不得直接跳入 parser 文档。
+
+5. route SKILL 的全部主流程清单完成后记录：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todos-completed --json
+```
+
+6. 统一前端回检后，把结果写入 `{FEATURE_DIR}/FRONTEND_ROUTE.json`：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --review-status passed --json
+```
+
+允许值：`passed`、`has-suggestions`、`skipped-by-user`、`failed`。`failed` 或未写明且未明确跳过时，`frontend_route_gate` 会阻断 `code_done`。
+
+`{FEATURE_DIR}/FRONTEND_ROUTE.json` 是本闸门的机器证据。前端代码生成任务缺少该文件、route SKILL 未读完、route todos 未创建/未完成、parser 未读、回检未通过或未明确跳过时，不得推进 `code_done`。
+
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
 
@@ -40,6 +84,7 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-code --feature "{
 ## 前端 HTML 实现分支
 
 HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不再产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能统一收尾推进到 `code_done`。本分支只处理 HTML/DOM/设计导出稿到真实工程代码的实现方式，正式流程输入、行为边界与回流规则仍以本 Feature 的 Source Bundle + Method Bundle 为准。
+本分支不要求 Source Bundle 中存在 `frontend_html`；用户本轮直接提供的 HTML/DOM 素材、`{FEATURE_DIR}/frontend-html/` 素材和内部 route SKILL/deps 由本文的前端 Route 强制闸门管理。
 
 触发条件（任一满足即进入本分支）：
 
@@ -81,10 +126,10 @@ HTML 分流规则：
 
 实现与收尾要求：
 
-1. 先建立本分支任务队列。若当前运行模式支持 `write_todos`，必须先把本分支主线写成可见清单，再读取 route SKILL/deps 或改代码；未完成这一步，不得进入后续分流。清单至少覆盖：`判断 HTML 路线并读取对应 SKILL` / `完成 HTML 解析与页面结构还原` / `映射真实工程组件、样式与交互` / `执行分支验证并回到 /autodev-code 主流程`；可按实际任务细化，但不得缺项、不得只放在脑内。
-2. 判断 HTML 路线并读取对应 SKILL：按上方内部分流规则选择 `with-standard-html/SKILL.md` 或 `with-absolute-html/SKILL.md`。
-3. 标准 HTML 路线进入 `with-standard-html/SKILL.md` 后，必须先完成路线判定、页面模块、转换、Ant Design 审计四类清单，并带 `routeType`、`absoluteSignalsCleared`、`moduleTodosReady`、`conversionTodosReady`、`uiLibraryTarget`、`antdMode`、`auditRequired` 交接状态转给 `deps/standard-html-parser.md`。
-4. 绝对定位高保真路线进入 `with-absolute-html/SKILL.md` 后，必须先完成页面模块清单与独立脚本清单；脚本清单至少覆盖参数确认、执行脚本、检查 `.frontend/html-analysis/<task-stem>.*` 产物、失败降级。脚本异常不阻塞主流程，降级后以原始 HTML 为唯一视觉源继续。
+1. 先执行本文开头的「前端 Route 强制闸门」：运行 `resolve_frontend_html_route.py`，完整读取对应 route SKILL.md 到 EOF，再把该 route SKILL 中定义的 `write_todos` 主流程转成可见清单；未完成这一步，不得读取 parser、读取 HTML 或改前端代码。
+2. 判断 HTML 路线并读取对应 SKILL：按上方内部分流规则选择 `with-standard-html/SKILL.md` 或 `with-absolute-html/SKILL.md`；最终 route 以 `{FEATURE_DIR}/FRONTEND_ROUTE.json` 为机器事实。
+3. 标准 HTML 路线进入 `with-standard-html/SKILL.md` 后，必须按其 `write_todos` 完成路线判定、页面模块、转换、Ant Design 审计四类清单，并带 `routeType`、`absoluteSignalsCleared`、`moduleTodosReady`、`conversionTodosReady`、`uiLibraryTarget`、`antdMode`、`auditRequired` 交接状态转给 `deps/standard-html-parser.md`。
+4. 绝对定位高保真路线进入 `with-absolute-html/SKILL.md` 后，必须按其 `write_todos` 完成页面模块清单、独立脚本清单、上下文读取与 `deps/html-parser.md` 转交；脚本清单至少覆盖参数确认、执行脚本、检查 `.frontend/html-analysis/<task-stem>.*` 产物、失败降级。脚本异常不阻塞主流程，降级后以原始 HTML 为唯一视觉源继续。
 5. 主线结束前必须做样式细节收尾，补齐 padding、边框、圆角、阴影、字色、字号、字重、行高、内外边距、对齐、状态色、文本内容、hover / active / selected 等用户一眼能看出的差异。
 6. 主线里完成页面拆分，以及函数、常量、类型、helper / hook、图表配置与同页公共内容抽取；不要把明显的可维护性工作留给后续 `/autodev-reviewer`。
 7. 执行本分支验证，确认已回到 `/autodev-code` 主流程后，再按本文件的「执行协议」与「完成条件」收尾；在显式完成“回到 `/autodev-code` 主流程并按 code 节点收尾”前，不得把本分支视为完成。

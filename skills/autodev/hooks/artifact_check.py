@@ -22,6 +22,15 @@ from common import (
 )
 from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
+from hooks.resolve_frontend_html_route import (  # noqa: E402
+    ROUTE_ABSOLUTE,
+    ROUTE_MISSING,
+    ROUTE_NONE,
+    ROUTE_STANDARD,
+    evidence_path as frontend_evidence_path,
+    read_json as read_frontend_json,
+    resolve_frontend_route,
+)
 
 
 PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
@@ -32,6 +41,7 @@ UNIT_TEST_VERDICT = re.compile(
     re.IGNORECASE,
 )
 UNIT_TEST_PASS = {"PASS", "PASS_WITH_WARNINGS"}
+FRONTEND_REVIEW_PASS = {"passed", "has-suggestions", "skipped-by-user"}
 
 
 def spec_files(ctx: HookContext) -> list[Path]:
@@ -210,12 +220,57 @@ def validate_unit_test_report_contract(ctx: HookContext) -> int:
     return failures
 
 
+def validate_frontend_route_gate(ctx: HookContext) -> int:
+    evidence_file = frontend_evidence_path(ctx.root, ctx.slug)
+    evidence = read_frontend_json(evidence_file)
+
+    if not evidence:
+        resolved = resolve_frontend_route(ctx.root, ctx.slug, write_evidence=False)
+        if resolved.get("triggered"):
+            return fail_line(
+                ctx,
+                "missing_frontend_route_evidence",
+                f" route={resolved.get('route')} evidence={evidence_file}",
+            )
+        return 0
+
+    route = evidence.get("route")
+    if route == ROUTE_NONE and evidence.get("triggered") is not True:
+        return 0
+    if route == ROUTE_MISSING:
+        return fail_line(ctx, "frontend_html_source_missing", f" evidence={evidence_file}")
+    if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
+        return fail_line(ctx, "invalid_frontend_route", f" route={route!r} evidence={evidence_file}")
+
+    failures = 0
+    required_flags = (
+        "routeSkillRead",
+        "routeSkillReadComplete",
+        "routeTodosCreated",
+        "routeTodosCompleted",
+        "parserRead",
+    )
+    for flag in required_flags:
+        if evidence.get(flag) is not True:
+            failures += fail_line(ctx, f"frontend_route_{flag}_missing", f" evidence={evidence_file}")
+
+    review_status = evidence.get("reviewStatus")
+    if review_status not in FRONTEND_REVIEW_PASS:
+        failures += fail_line(
+            ctx,
+            "frontend_review_not_passed_or_skipped",
+            f" reviewStatus={review_status!r} evidence={evidence_file}",
+        )
+    return failures
+
+
 VALIDATORS = {
     "proposal_contract": validate_proposal_contract,
     "specs_contract": validate_specs_contract,
     "design_contract": validate_design_contract,
     "plan_initial_tasks": validate_plan_initial_tasks,
     "plan_finished_tasks": validate_plan_finished_tasks,
+    "frontend_route_gate": validate_frontend_route_gate,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
     "unit_test_report_contract": validate_unit_test_report_contract,
 }
