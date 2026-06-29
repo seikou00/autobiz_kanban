@@ -114,7 +114,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 
 **验证点:**
 
-- [单测/集成/E2E/手工验证建议]
+- [单测/集成/E2E/curl 接口断言等可自动执行的验证建议；不要建议手工/人工/Postman 验证]
 
 ## 5. 模块调用关系
 

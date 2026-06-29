@@ -43,7 +43,7 @@ graph TD
 
 ## 任务详情
 
-> **具体度要求（粗泛即不合格）:** explore 阶段读到的真实路径/类名/可复用点必须在这里落下，不要回到 PLAN 再抽象成“相关服务”“更新相关逻辑”。每个任务的执行要点**至少一条钉住真实锚点**——`文件#符号`、真实入口、或 `design.md#API/DATA/D-xxx`；`验证命令`带具体目标（测试类/用例）或具体人工步骤，不要写裸 `mvn test`/`npm test`。
+> **具体度要求（粗泛即不合格）:** explore 阶段读到的真实路径/类名/可复用点必须在这里落下，不要回到 PLAN 再抽象成“相关服务”“更新相关逻辑”。每个任务的执行要点**至少一条钉住真实锚点**——`文件#符号`、真实入口、或 `design.md#API/DATA/D-xxx`；`验证命令`必须是大模型能直接运行并自行判读的命令（测试类/用例、构建、lint、`curl`/HTTP 脚本断言），带具体目标，不要写裸 `mvn test`/`npm test`，**禁止"手工""人工验证""Postman""浏览器点击"等需要人参与的步骤**。
 
 > **✅ 示例（仅示范“需求闭环粒度 + 可开工具体度”，生成时删除本示例块）:**
 >
@@ -62,7 +62,7 @@ graph TD
 >   2. 异步消费复用现有 `@Async` 线程池（见 `AsyncConfig`），产物落对象存储，回写 `export_job.status/file_url`
 >   3. 失败路径：消费异常时 `export_job.status=FAILED` 并记审计（复用 `AuditLogger`）；下载接口对 `FAILED` 返回 409
 >   4. jobId 鉴权按 design.md#D-003（仅本人/同租户可查）实现，未定部分标风险
-> - **验证命令:** `mvn test -Dtest=OrderExportAsyncTest`；手工：POST 6万行导出 → 返回 202+jobId → 轮询 GET 状态 RUNNING→SUCCESS → 下载链接可下
+> - **验证命令:** `mvn test -Dtest=OrderExportAsyncTest`；`curl -s -X POST .../orders/export -d @big.json -w '%{http_code}'` 断言 202 并取 jobId，`curl -s .../export/job/$jobId` 轮询断言 status 由 RUNNING 转 SUCCESS、file_url 可下（全部由命令完成，无需人工）
 > - **预期结果:** 大数据量返回 202 与 jobId、小数据量仍同步下载；失败 job 状态=FAILED 且下载返回 409
 > - **状态:** 待做
 
@@ -81,7 +81,7 @@ graph TD
   2. [关键改动或约束：改哪里、按哪个 API-/DATA-/D- 决策，避免只写“更新相关逻辑”]
   3. [边界/失败路径/兼容性的具体处理]
   4. [测试或验证补充：具体到测什么]
-- **验证命令:** `[带具体目标的命令(如 mvn test -Dtest=XxxTest)；纯人工时写具体操作步骤；不要写裸 mvn test / npm test]`
+- **验证命令:** `[大模型可直接运行并自行判读的命令：mvn test -Dtest=XxxTest / 构建 / lint / curl 断言；不要写裸 mvn test / npm test，禁止手工·人工·Postman·浏览器点击]`
 - **预期结果:** [明确可观察结果；不要只写“通过”]
 - **状态:** 待做
 
@@ -95,7 +95,7 @@ graph TD
   1. [实现切入点或复用现有能力的具体动作]
   2. [关键改动或约束]
   3. [边界/失败路径/兼容性处理]
-- **验证命令:** `[检查命令或人工验证入口]`
+- **验证命令:** `[大模型可直接运行的检查/测试/curl 命令，无需人工]`
 - **预期结果:** [明确可观察结果]
 - **状态:** 待做
 
@@ -103,9 +103,10 @@ graph TD
 
 ## Specs 行为覆盖
 
-| Spec Requirement / Scenario | 覆盖任务  | 验证方法                 |
-| --------------------------- | --------- | ------------------------ |
-| REQ-01 / Scenario           | 任务 1, 2 | [命令/测试/人工验证方式] |
+| Spec Requirement / Scenario | 覆盖任务 | 验证方法 |
+| --------------------------- | -------- | -------- |
+| REQ-001 / SCN-001 | T001 | [可直接运行的命令/测试，无需人工] |
+| REQ-002 / SCN-002 | T002 | [可直接运行的命令/测试，无需人工] |
 
 ---
 
