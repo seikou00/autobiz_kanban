@@ -244,8 +244,19 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
     unit_sections: List[dict] = []    # ③ 按选择顺序
     seen_systems: set[str] = set()
     seen_paths: set[Path] = set()     # 正文按解析后绝对路径去重
+    seen_status_paths: set[str] = set()  # load_status 按状态 path 去重（local 兜底时系统级/单元级同指一个 AGENTS.md）
     system_loaded: set[str] = set()   # 实际产出系统段的 systemId（供锚点回退）
     unit_has_section: set[str] = set()  # 实际产出单元段的 serviceUnitId（供锚点指向）
+
+    def _append_status(status: dict) -> None:
+        # 同一个解析后物理路径只报一条：local 兜底时系统级与单元级会同指 <localRepoPath>/AGENTS.md，
+        # 否则缺文件/命中同一文件都会重复产出。path 为空（既无 remote 又无 local）不参与去重。
+        path = status.get("path") or ""
+        if path and path in seen_status_paths:
+            return
+        if path:
+            seen_status_paths.add(path)
+        load_status.append(status)
 
     def _append_body(abs_path: Optional[Path], bucket: List[dict], section: dict) -> bool:
         if abs_path is not None and abs_path not in seen_paths:
@@ -266,7 +277,7 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
                 status, abs_path, content = _resolve_one(
                     uid, system.agents_relpath(), local, plugin_root=plugin_root
                 )
-                load_status.append(status)
+                _append_status(status)
                 if content is not None:
                     title = system.system_id
                     if system.system_name:
@@ -281,7 +292,7 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
                 status, abs_path, content = _resolve_one(
                     uid, unit.agents_rel, local, plugin_root=plugin_root
                 )
-                load_status.append(status)
+                _append_status(status)
                 if content is not None and _append_body(
                     abs_path, unit_sections,
                     {"serviceUnitId": uid, "ref": unit.name, "content": content},
@@ -290,7 +301,7 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
         else:
             # 未命中清单：只走 local 兜底（rel 为空）。
             status, abs_path, content = _resolve_one(uid, "", local, plugin_root=plugin_root)
-            load_status.append(status)
+            _append_status(status)
             if content is not None and _append_body(
                 abs_path, unit_sections,
                 {"serviceUnitId": uid, "ref": "", "content": content},
