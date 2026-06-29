@@ -187,7 +187,9 @@ def validate_plan_data(
         if require_all_done and not evidence_ids:
             errors.append(f"{task_id}.evidenceIds_missing")
         _validate_string_list(errors, raw_task, task_id, "expectedFiles", required=False)
-        _validate_string_list(errors, raw_task, task_id, "blockers", required=False)
+        blockers = _validate_string_list(errors, raw_task, task_id, "blockers", required=False)
+        if require_all_done and blockers:
+            errors.append(f"{task_id}.blockers_unresolved")
 
         commands = raw_task.get("validationCommands")
         if not isinstance(commands, list):

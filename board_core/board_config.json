@@ -403,7 +403,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["plan_json_contract", "plan_finished_tasks", "evidence_integrity"],
+        "validators": ["plan_json_contract", "plan_finished_tasks", "code_done_gate", "evidence_integrity"],
         "guards": ["code_compile"]
       },
       {
@@ -465,10 +465,11 @@
               } }
           ],
           "outputs": [
-            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true },
+            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true }
           ]
         },
-        "validators": ["requirements_eval_verdict"]
+        "validators": ["requirements_eval_verdict", "review_findings_json"]
       },
       {
         "id": "dev.utest",
@@ -536,11 +537,12 @@
           ],
           "outputs": [
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
+            { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": true },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": true },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["unit_test_report_contract", "evidence_integrity"]
+        "validators": ["unit_test_report_contract", "unit_test_result_json", "evidence_integrity"]
       },
       {
         "id": "dev.e2e",
@@ -621,11 +623,13 @@
           "outputs": [
             { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
             { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true },
+            { "id": "e2e_result_json", "label": "结构化 E2E 结果", "artifactType": "json", "path": "E2E_RESULT.json", "required": true },
+            { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false },
             { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["e2e_report_contract", "evidence_integrity"]
+        "validators": ["e2e_report_contract", "e2e_result_json", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "dev.verify",
@@ -707,14 +711,22 @@
                 "focus": ["运行证据与异常"],
                 "method": "只在核对证据时按需查看",
                 "degrade": "缺失时在验收报告中记为缺项"
+              } },
+            { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false,
+              "extract": {
+                "focus": ["上游 E2E 失败回流请求"],
+                "method": "若存在则读取并在 verify 失败决策中覆盖或沿用建议回流阶段",
+                "degrade": "缺失时 verify 根据本阶段裁决重新生成"
               } }
           ],
           "outputs": [
             { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true },
+            { "id": "verify_decision_json", "label": "结构化验收决策", "artifactType": "json", "path": "VERIFY_DECISION.json", "required": true },
+            { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["verify_report_contract", "evidence_integrity"]
+        "validators": ["verify_report_contract", "verify_decision_json", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "ops.cicd",

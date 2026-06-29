@@ -3,7 +3,9 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,13 +17,22 @@ if str(HOOKS_DIR) not in sys.path:
 
 from artifact_check import (  # noqa: E402
     HookContext,
+    validate_code_done_gate,
+    validate_e2e_result_json,
     validate_design_contract,
     validate_e2e_report_contract,
+    validate_fix_request_json,
     validate_plan_finished_tasks,
+    validate_review_findings_json,
     validate_specs_contract,
+    validate_unit_test_result_json,
     validate_unit_test_report_contract,
+    validate_verify_decision_json,
     validate_verify_report_contract,
 )
+from board_core.contracts import BoardConfigError  # noqa: E402
+from hooks.evidence_store import append_evidence  # noqa: E402
+from hooks.plan_json import write_plan_json  # noqa: E402
 
 
 class ArtifactCheckIdContractsTest(unittest.TestCase):
@@ -49,6 +60,54 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 ]
             )
         (feature_dir / "specs" / "cap" / "spec.md").write_text("\n".join(lines), encoding="utf-8")
+
+    def _write_plan_json_and_evidence(self, feature_dir: Path) -> None:
+        spec_refs = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"]
+        write_plan_json(
+            feature_dir / "plan.json",
+            {
+                "version": 1,
+                "featureId": "alpha",
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "title": "do",
+                        "status": "done",
+                        "deps": [],
+                        "specRefs": spec_refs,
+                        "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                        "apiIds": ["API-001"],
+                        "dataIds": ["DATA-001"],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo ok"}],
+                        "expectedFiles": [],
+                        "evidenceIds": ["ev_0001"],
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+        append_evidence(
+            feature_dir,
+            {
+                "featureId": "alpha",
+                "checkpoint": "code_in_progress",
+                "nodeId": "dev.code",
+                "skill": "autodev-code",
+                "taskId": "T001",
+                "action": "validation",
+                "specRefs": spec_refs,
+                "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                "changedFiles": ["src/foo.py"],
+                "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+            },
+        )
+
+    def _write_json(self, feature_dir: Path, name: str, payload: dict) -> None:
+        (feature_dir / name).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     def _write_design(
         self,
@@ -407,6 +466,509 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             (feature_dir / "E2E_REPORT.md").write_text("E2E-alpha-001 PASS\n", encoding="utf-8")
             (feature_dir / "e2e-run.log").write_text("ok\n", encoding="utf-8")
             self.assertGreater(validate_e2e_report_contract(self._ctx(feature_dir)), 0)
+
+    def test_json_sidecars_validate_trace_refs_and_scenario_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            spec_refs = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"]
+
+            self._write_json(
+                feature_dir,
+                "REVIEW_FINDINGS.json",
+                {
+                    "version": 1,
+                    "findings": [
+                        {
+                            "id": "R001",
+                            "taskId": "T001",
+                            "specRefs": spec_refs,
+                            "evidenceIds": ["ev_0001"],
+                            "severity": "high",
+                            "message": "covered",
+                            "suggestedCheckpoint": "code_in_progress",
+                        }
+                    ],
+                },
+            )
+            self._write_json(
+                feature_dir,
+                "UNIT_TEST_RESULT.json",
+                {
+                    "version": 1,
+                    "verdict": "PASS",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                    "targets": [
+                        {
+                            "targetId": "UT-001",
+                            "taskId": "T001",
+                            "specRefs": spec_refs,
+                            "evidenceIds": ["ev_0001"],
+                            "result": "PASS",
+                            "command": "pytest tests/test_foo.py",
+                            "coverage": {"lines": 1},
+                        }
+                    ],
+                },
+            )
+            self._write_json(
+                feature_dir,
+                "E2E_RESULT.json",
+                {
+                    "version": 1,
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                    "cases": [
+                        {
+                            "caseId": "E2E-alpha-001",
+                            "taskId": "T001",
+                            "specRefs": spec_refs,
+                            "evidenceIds": ["ev_0001"],
+                            "uiRequired": True,
+                            "executionMode": "manual",
+                            "steps": [{"action": "open", "expected": "ok", "result": "PASS"}],
+                            "verdict": "PASS",
+                        }
+                    ],
+                },
+            )
+            self._write_json(
+                feature_dir,
+                "VERIFY_DECISION.json",
+                {
+                    "version": 1,
+                    "verdict": "pass",
+                    "passedScenarioRefs": ["SCN-001"],
+                    "failedScenarioRefs": [],
+                    "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
+                    "evidenceIds": ["ev_0001"],
+                    "nextCheckpoint": "verify_done",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                },
+            )
+            self._write_json(
+                feature_dir,
+                "FIX_REQUEST.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "sourceCheckpoint": "verify_in_progress",
+                    "sourceNodeId": "dev.verify",
+                    "suggestedCheckpoint": "code_in_progress",
+                    "rootCause": "implementation_bug",
+                    "blockingReason": "fix",
+                    "humanActionRequired": False,
+                    "failedSpecRefs": spec_refs,
+                    "failedEvidenceIds": ["ev_0001"],
+                    "failedDesignRefs": ["design.md#D-001"],
+                    "createdAt": "2026-06-24T00:00:00Z",
+                },
+            )
+
+            ctx = self._ctx(feature_dir)
+            self.assertEqual(validate_review_findings_json(ctx), 0)
+            self.assertEqual(validate_unit_test_result_json(ctx), 0)
+            self.assertEqual(validate_e2e_result_json(ctx), 0)
+            self.assertEqual(validate_verify_decision_json(ctx), 0)
+            self.assertEqual(validate_fix_request_json(ctx), 0)
+
+    def test_verify_decision_requires_all_defined_scenario_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            with (feature_dir / "specs" / "cap" / "spec.md").open("a", encoding="utf-8") as handle:
+                handle.write("\n### Requirement [REQ-002]: another\n#### Scenario [SCN-002]: uncovered\n")
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "VERIFY_DECISION.json",
+                {
+                    "version": 1,
+                    "verdict": "pass",
+                    "passedScenarioRefs": ["SCN-001"],
+                    "failedScenarioRefs": [],
+                    "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
+                    "evidenceIds": ["ev_0001"],
+                    "nextCheckpoint": "verify_done",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_verify_decision_json(self._ctx(feature_dir)), 0)
+
+    def test_verify_decision_allows_explicit_missing_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            with (feature_dir / "specs" / "cap" / "spec.md").open("a", encoding="utf-8") as handle:
+                handle.write("\n### Requirement [REQ-002]: another\n#### Scenario [SCN-002]: uncovered\n")
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "VERIFY_DECISION.json",
+                {
+                    "version": 1,
+                    "verdict": "fail",
+                    "passedScenarioRefs": ["SCN-001"],
+                    "failedScenarioRefs": [],
+                    "manualVerificationRefs": [],
+                    "missingScenarioRefs": ["SCN-002"],
+                    "evidenceIds": ["ev_0001"],
+                    "nextCheckpoint": "needs_fix",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"},
+                        {"scenarioRef": "SCN-002", "evidenceIds": [], "verdict": "missing"},
+                    ],
+                },
+            )
+
+            self.assertEqual(validate_verify_decision_json(self._ctx(feature_dir)), 0)
+
+    def test_verify_decision_rejects_pass_rows_without_covering_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "VERIFY_DECISION.json",
+                {
+                    "version": 1,
+                    "verdict": "pass",
+                    "passedScenarioRefs": ["SCN-001"],
+                    "failedScenarioRefs": [],
+                    "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
+                    "evidenceIds": ["ev_0001"],
+                    "nextCheckpoint": "verify_done",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": [], "verdict": "pass"}
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_verify_decision_json(self._ctx(feature_dir)), 0)
+
+    def test_verify_decision_rejects_verdict_checkpoint_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "VERIFY_DECISION.json",
+                {
+                    "version": 1,
+                    "verdict": "fail",
+                    "passedScenarioRefs": [],
+                    "failedScenarioRefs": ["SCN-001"],
+                    "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
+                    "evidenceIds": ["ev_0001"],
+                    "nextCheckpoint": "verify_done",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "fail"}
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_verify_decision_json(self._ctx(feature_dir)), 0)
+
+    def test_verify_decision_rejects_scenario_matrix_decision_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "VERIFY_DECISION.json",
+                {
+                    "version": 1,
+                    "verdict": "pass",
+                    "passedScenarioRefs": ["SCN-001"],
+                    "failedScenarioRefs": [],
+                    "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
+                    "evidenceIds": ["ev_0001"],
+                    "nextCheckpoint": "verify_done",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "fail"}
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_verify_decision_json(self._ctx(feature_dir)), 0)
+
+    def test_unit_and_e2e_results_require_all_defined_scenario_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            with (feature_dir / "specs" / "cap" / "spec.md").open("a", encoding="utf-8") as handle:
+                handle.write("\n### Requirement [REQ-002]: another\n#### Scenario [SCN-002]: uncovered\n")
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            spec_refs = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"]
+            self._write_json(
+                feature_dir,
+                "UNIT_TEST_RESULT.json",
+                {
+                    "version": 1,
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                    "targets": [
+                        {
+                            "targetId": "UT-001",
+                            "taskId": "T001",
+                            "specRefs": spec_refs,
+                            "evidenceIds": ["ev_0001"],
+                            "result": "PASS",
+                            "command": "pytest tests/test_foo.py",
+                        }
+                    ],
+                },
+            )
+            self._write_json(
+                feature_dir,
+                "E2E_RESULT.json",
+                {
+                    "version": 1,
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                    "cases": [
+                        {
+                            "caseId": "E2E-alpha-001",
+                            "taskId": "T001",
+                            "specRefs": spec_refs,
+                            "evidenceIds": ["ev_0001"],
+                            "uiRequired": True,
+                            "executionMode": "manual",
+                            "steps": [],
+                            "verdict": "PASS",
+                        }
+                    ],
+                },
+            )
+
+            ctx = self._ctx(feature_dir)
+            self.assertGreater(validate_unit_test_result_json(ctx), 0)
+            self.assertGreater(validate_e2e_result_json(ctx), 0)
+
+    def test_json_sidecars_reject_parallel_scenario_ref_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "UNIT_TEST_RESULT.json",
+                {
+                    "version": 1,
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                    "targets": [
+                        {
+                            "targetId": "UT-001",
+                            "taskId": "T001",
+                            "scenarioRef": "SCN-999",
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "evidenceIds": ["ev_0001"],
+                            "result": "PASS",
+                            "command": "pytest tests/test_foo.py",
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_unit_test_result_json(self._ctx(feature_dir)), 0)
+
+    def test_json_sidecars_require_evidence_stream_for_evidence_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "do",
+                            "status": "done",
+                            "deps": [],
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#D-001"],
+                            "apiIds": [],
+                            "dataIds": [],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": ["ev_0001"],
+                            "blockers": [],
+                        }
+                    ],
+                },
+            )
+            self._write_json(
+                feature_dir,
+                "UNIT_TEST_RESULT.json",
+                {
+                    "version": 1,
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                    "targets": [
+                        {
+                            "targetId": "UT-001",
+                            "taskId": "T001",
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "evidenceIds": ["ev_0001"],
+                            "result": "PASS",
+                            "command": "pytest tests/test_foo.py",
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_unit_test_result_json(self._ctx(feature_dir)), 0)
+
+    def test_plan_json_success_skips_stale_plan_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            (feature_dir / "PLAN.md").write_text(
+                "\n".join(
+                    [
+                        "# 执行计划: stale",
+                        "### Task [T001]: stale",
+                        "- **状态:** 待做",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(validate_plan_finished_tasks(self._ctx(feature_dir)), 0)
+
+    def test_code_done_gate_validator_requires_pass_evidence_for_each_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "done without evidence",
+                            "status": "done",
+                            "deps": [],
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#D-001"],
+                            "apiIds": [],
+                            "dataIds": [],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        }
+                    ],
+                },
+            )
+            ctx = HookContext(
+                skill="autodev-code",
+                slug="alpha",
+                root=feature_dir.parent.parent.parent,
+                required_outputs=("evidence/EVIDENCE.jsonl",),
+            )
+
+            self.assertGreater(validate_code_done_gate(ctx), 0)
+
+    def test_fix_request_rejects_unknown_design_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "FIX_REQUEST.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "sourceCheckpoint": "verify_in_progress",
+                    "sourceNodeId": "dev.verify",
+                    "suggestedCheckpoint": "code_in_progress",
+                    "rootCause": "implementation_bug",
+                    "blockingReason": "fix",
+                    "humanActionRequired": False,
+                    "failedSpecRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                    "failedEvidenceIds": ["ev_0001"],
+                    "failedDesignRefs": ["design.md#D-999"],
+                    "createdAt": "2026-06-24T00:00:00Z",
+                },
+            )
+
+            self.assertGreater(validate_fix_request_json(self._ctx(feature_dir)), 0)
+
+    def test_fix_request_record_contract_error_falls_back_to_repo_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "FIX_REQUEST.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "sourceCheckpoint": "verify_in_progress",
+                    "sourceNodeId": "dev.verify",
+                    "suggestedCheckpoint": "verify_done",
+                    "rootCause": "implementation_bug",
+                    "blockingReason": "fix",
+                    "humanActionRequired": False,
+                    "failedSpecRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                    "failedEvidenceIds": ["ev_0001"],
+                    "failedDesignRefs": ["design.md#D-001"],
+                    "createdAt": "2026-06-24T00:00:00Z",
+                },
+            )
+            state_dir = feature_dir.parent.parent
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "state.json").write_text(
+                json.dumps({"features": {"alpha": {"checkpoint": "needs_fix"}}}),
+                encoding="utf-8",
+            )
+            with mock.patch("artifact_check.load_record_workflow_contracts", side_effect=BoardConfigError("bad record")):
+                self.assertGreater(validate_fix_request_json(self._ctx(feature_dir)), 0)
 
 
 if __name__ == "__main__":

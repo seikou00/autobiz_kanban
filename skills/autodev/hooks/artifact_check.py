@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -20,9 +21,16 @@ from common import (
     task_statuses,
     validate_required_files,
 )
-from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts  # noqa: E402
+from board_core.contracts import (  # noqa: E402
+    BoardConfigError,
+    load_board_config,
+    load_record_workflow_contracts,
+    load_repo_workflow_contracts,
+)
+from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
-from hooks.evidence_integrity_gate import check_integrity, check_plan_evidence_refs  # noqa: E402
+from hooks.evidence_integrity_gate import check_code_done, check_integrity, check_plan_evidence_refs  # noqa: E402
+from hooks.evidence_store import EvidenceStoreError, read_records, stream_path  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
     load_and_validate_plan,
@@ -52,6 +60,7 @@ SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", 
 DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DATA_DEF_RE = re.compile(r"^\|\s*(DATA-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
+DETAIL_DESIGN_ID = re.compile(r"\bDD-\d{2,3}\b")
 STABLE_TASK_HEADING_RE = re.compile(r"^###\s+Task\s+\[T\d{3}\]\s*:\s+.+$", re.MULTILINE)
 LEGACY_TASK_HEADING_RE = re.compile(r"^###\s+\d+[.)]\s+.+$", re.MULTILINE)
 TASK_BLOCK_RE = re.compile(
@@ -59,6 +68,7 @@ TASK_BLOCK_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 OLD_PLAN_TASK_BLOCK_RE = re.compile(r"^###\s+\d+[.)]\s+.+?(?=^###\s+\d+[.)]\s+|\Z)", re.MULTILINE | re.DOTALL)
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _spec_definition_index(text: str) -> tuple[dict[str, set[str]], list[str]]:
@@ -108,6 +118,677 @@ def collect_design_definition_index(ctx: HookContext) -> tuple[dict[str, set[str
     for reason in duplicate_reasons:
         failures += fail_line(ctx, reason)
     return definitions, failures
+
+
+def load_json_artifact(ctx: HookContext, name: str, *, required: bool = True) -> tuple[dict | None, int]:
+    path = ctx.file(name)
+    if not is_nonempty(path):
+        if not required:
+            info(ctx, "json_artifact_missing_degrade", f" file={name}")
+            return None, 0
+        return None, fail_line(ctx, "missing_json_artifact", f" file={name}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return None, fail_line(ctx, "invalid_json_artifact", f" file={name} detail={exc}")
+    if not isinstance(data, dict):
+        return None, fail_line(ctx, "invalid_json_artifact_root", f" file={name}")
+    return data, 0
+
+
+def _string_list_value(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            return None
+        stripped = item.strip()
+        if stripped:
+            result.append(stripped)
+    return result
+
+
+def _scenario_refs_from_spec_refs(spec_refs: list[str]) -> set[str]:
+    return set(SCN_ID.findall(" ".join(spec_refs)))
+
+
+def _check_scenario_ref_projection(
+    ctx: HookContext,
+    item: dict,
+    spec_refs: list[str],
+    *,
+    context: str,
+) -> int:
+    failures = 0
+    projected = _scenario_refs_from_spec_refs(spec_refs)
+    for field in ("scenarioRef", "scenarioId"):
+        value = item.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str) or value not in projected:
+            failures += fail_line(ctx, "scenario_ref_not_projected_from_spec_refs", f" item={context} field={field} value={value}")
+    return failures
+
+
+def _known_plan_task_ids(ctx: HookContext) -> set[str]:
+    plan, errors = load_and_validate_plan(plan_json_path(ctx.feature_dir))
+    return set() if errors or plan is None else {str(task.get("id")) for task in plan.get("tasks", []) if isinstance(task, dict)}
+
+
+def _known_evidence_ids(ctx: HookContext) -> set[str]:
+    try:
+        return {
+            evidence_id
+            for record in read_records(stream_path(ctx.feature_dir))
+            if isinstance((evidence_id := record.get("evidenceId")), str)
+        }
+    except EvidenceStoreError:
+        return set()
+
+
+def _evidence_stream_exists(ctx: HookContext) -> bool:
+    return stream_path(ctx.feature_dir).is_file()
+
+
+def _check_evidence_stream_for_refs(ctx: HookContext, evidence_ids: list[str], *, context: str) -> int:
+    if not evidence_ids:
+        return 0
+    if not _evidence_stream_exists(ctx):
+        return fail_line(ctx, "missing_evidence_stream_for_json_refs", f" item={context}")
+    try:
+        read_records(stream_path(ctx.feature_dir))
+    except EvidenceStoreError as exc:
+        return fail_line(ctx, "invalid_evidence_stream_for_json_refs", f" item={context} detail={exc}")
+    return 0
+
+
+def _check_string_field(ctx: HookContext, item: dict, field: str, *, context: str, required: bool = True) -> int:
+    value = item.get(field)
+    if value is None and not required:
+        return 0
+    if not isinstance(value, str) or not value.strip():
+        return fail_line(ctx, "invalid_json_field", f" item={context} field={field}")
+    return 0
+
+
+def _check_bool_field(ctx: HookContext, item: dict, field: str, *, context: str, required: bool = True) -> int:
+    value = item.get(field)
+    if value is None and not required:
+        return 0
+    if not isinstance(value, bool):
+        return fail_line(ctx, "invalid_json_field", f" item={context} field={field}")
+    return 0
+
+
+def _check_string_array_field(
+    ctx: HookContext,
+    item: dict,
+    field: str,
+    *,
+    context: str,
+    required: bool = True,
+    allow_empty: bool = False,
+    item_re: re.Pattern[str] | None = None,
+) -> tuple[list[str], int]:
+    value = item.get(field)
+    if value is None and not required:
+        return [], 0
+    values = _string_list_value(value)
+    if values is None:
+        return [], fail_line(ctx, "invalid_json_array_field", f" item={context} field={field}")
+    failures = 0
+    if required and not allow_empty and not values:
+        failures += fail_line(ctx, "missing_json_array_items", f" item={context} field={field}")
+    if item_re is not None:
+        for entry in values:
+            if not item_re.fullmatch(entry):
+                failures += fail_line(ctx, "invalid_json_array_item", f" item={context} field={field} value={entry}")
+    return values, failures
+
+
+def _check_trace_refs(
+    ctx: HookContext,
+    item: dict,
+    *,
+    context: str,
+    require_task: bool = False,
+    require_evidence: bool = False,
+    require_spec_refs: bool = True,
+) -> tuple[list[str], list[str], int]:
+    failures = 0
+    known_tasks = _known_plan_task_ids(ctx)
+    known_evidence = _known_evidence_ids(ctx)
+    spec_ids, spec_failures = collect_spec_definition_index(ctx)
+    failures += spec_failures
+
+    task_id = item.get("taskId")
+    if task_id is None and not require_task:
+        pass
+    elif not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
+        failures += fail_line(ctx, "invalid_json_task_id", f" item={context} taskId={task_id}")
+    elif known_tasks and task_id not in known_tasks:
+        failures += fail_line(ctx, "unknown_json_task_id", f" item={context} taskId={task_id}")
+
+    spec_refs, spec_ref_failures = _check_string_array_field(
+        ctx,
+        item,
+        "specRefs",
+        context=context,
+        required=require_spec_refs,
+    )
+    failures += spec_ref_failures
+    req_refs = set(REQ_ID.findall(" ".join(spec_refs)))
+    scenario_refs = _scenario_refs_from_spec_refs(spec_refs)
+    if spec_refs and not req_refs:
+        failures += fail_line(ctx, "missing_json_requirement_ref", f" item={context}")
+    if spec_refs and not scenario_refs:
+        failures += fail_line(ctx, "missing_json_scenario_ref", f" item={context}")
+    for req_id in sorted(req_refs):
+        if req_id not in spec_ids["REQ"]:
+            failures += fail_line(ctx, "unknown_json_requirement_ref", f" item={context} id={req_id}")
+    for scn_id in sorted(scenario_refs):
+        if scn_id not in spec_ids["SCN"]:
+            failures += fail_line(ctx, "unknown_json_scenario_ref", f" item={context} id={scn_id}")
+
+    evidence_ids, evidence_failures = _check_string_array_field(
+        ctx,
+        item,
+        "evidenceIds",
+        context=context,
+        required=require_evidence,
+        item_re=EVIDENCE_ID,
+    )
+    failures += evidence_failures
+    if require_evidence:
+        failures += _check_evidence_stream_for_refs(ctx, evidence_ids, context=context)
+    for evidence_id in evidence_ids:
+        if known_evidence and evidence_id not in known_evidence:
+            failures += fail_line(ctx, "unknown_json_evidence_id", f" item={context} evidenceId={evidence_id}")
+    failures += _check_scenario_ref_projection(ctx, item, spec_refs, context=context)
+    return spec_refs, evidence_ids, failures
+
+
+def _scenario_covering_evidence(ctx: HookContext) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    try:
+        records = read_records(stream_path(ctx.feature_dir))
+    except EvidenceStoreError:
+        return result
+    for record in records:
+        evidence_id = record.get("evidenceId")
+        spec_refs = record.get("specRefs")
+        if not isinstance(evidence_id, str) or not isinstance(spec_refs, list):
+            continue
+        scenario_refs = _scenario_refs_from_spec_refs([ref for ref in spec_refs if isinstance(ref, str)])
+        for scenario_ref in scenario_refs:
+            result.setdefault(scenario_ref, set()).add(evidence_id)
+    return result
+
+
+def _validate_scenario_coverage(
+    ctx: HookContext,
+    data: dict,
+    *,
+    field: str,
+    required: bool,
+    require_pass_evidence: bool,
+    covering_evidence: dict[str, set[str]] | None = None,
+    spec_ids: dict[str, set[str]] | None = None,
+) -> int:
+    failures = 0
+    if spec_ids is None:
+        spec_ids, spec_failures = collect_spec_definition_index(ctx)
+        failures += spec_failures
+    defined_scenarios = set(spec_ids["SCN"])
+    matrix = data.get(field)
+    if matrix is None:
+        if required:
+            return failures + fail_line(ctx, "missing_scenario_coverage", f" field={field}")
+        return failures
+    if not isinstance(matrix, list):
+        return failures + fail_line(ctx, "invalid_scenario_coverage", f" field={field}")
+
+    seen_scenarios: set[str] = set()
+    known_evidence = _known_evidence_ids(ctx)
+    evidence_by_scenario = covering_evidence if covering_evidence is not None else _scenario_covering_evidence(ctx)
+    allowed_verdicts = {"pass", "fail", "manual", "missing"}
+    for index, row in enumerate(matrix):
+        context = f"{field}[{index}]"
+        if not isinstance(row, dict):
+            failures += fail_line(ctx, "invalid_scenario_coverage_row", f" item={context}")
+            continue
+        scenario_ref = row.get("scenarioRef")
+        if not isinstance(scenario_ref, str) or scenario_ref not in defined_scenarios:
+            failures += fail_line(ctx, "unknown_scenario_coverage_ref", f" item={context} id={scenario_ref}")
+            continue
+        if scenario_ref in seen_scenarios:
+            failures += fail_line(ctx, "duplicate_scenario_coverage_row", f" item={context} id={scenario_ref}")
+        seen_scenarios.add(scenario_ref)
+        row_verdict = row.get("verdict")
+        normalized_verdict = row_verdict.lower() if isinstance(row_verdict, str) else ""
+        if normalized_verdict not in allowed_verdicts:
+            failures += fail_line(ctx, "invalid_scenario_coverage_verdict", f" item={context}")
+        row_evidence, row_evidence_failures = _check_string_array_field(
+            ctx,
+            row,
+            "evidenceIds",
+            context=context,
+            required=normalized_verdict == "pass" and require_pass_evidence,
+            item_re=EVIDENCE_ID,
+        )
+        failures += row_evidence_failures
+        failures += _check_evidence_stream_for_refs(ctx, row_evidence, context=context)
+        for evidence_id in row_evidence:
+            if known_evidence and evidence_id not in known_evidence:
+                failures += fail_line(ctx, "unknown_scenario_coverage_evidence_id", f" item={context} evidenceId={evidence_id}")
+        if normalized_verdict == "pass" and require_pass_evidence:
+            covering_ids = evidence_by_scenario.get(scenario_ref, set())
+            if not row_evidence:
+                failures += fail_line(ctx, "scenario_coverage_pass_without_evidence", f" item={context} id={scenario_ref}")
+            elif not any(evidence_id in covering_ids for evidence_id in row_evidence):
+                failures += fail_line(ctx, "scenario_coverage_pass_evidence_mismatch", f" item={context} id={scenario_ref}")
+
+    missing_rows = defined_scenarios - seen_scenarios
+    if missing_rows:
+        failures += fail_line(ctx, "missing_scenario_coverage_rows", f" field={field} ids={','.join(sorted(missing_rows))}")
+    return failures
+
+
+def _known_design_refs(ctx: HookContext) -> set[str]:
+    design_ids, _ = collect_design_definition_index(ctx)
+    refs = {
+        f"design.md#{item}"
+        for kind in ("API", "DATA", "D")
+        for item in design_ids[kind]
+    }
+    detail = ctx.file("DETAIL_DESIGN.md")
+    if is_nonempty(detail):
+        refs.update(f"DETAIL_DESIGN.md#{item}" for item in DETAIL_DESIGN_ID.findall(read_text(detail)))
+    return refs
+
+
+def _effective_needs_fix_targets(ctx: HookContext) -> set[str]:
+    result = load_state_json_records_result(ctx.root)
+    if result.exists and not result.errors:
+        record = result.records.get(ctx.slug)
+        if record is not None:
+            try:
+                return set(load_record_workflow_contracts(REPO_ROOT, record, workspace=ctx.root).allowed_next.get("needs_fix", frozenset()))
+            except BoardConfigError:
+                pass
+    try:
+        return set(load_repo_workflow_contracts(REPO_ROOT, workspace=ctx.root).allowed_next.get("needs_fix", frozenset()))
+    except BoardConfigError:
+        return set()
+
+
+def _check_verify_scenario_decisions(
+    ctx: HookContext,
+    data: dict,
+    *,
+    defined_scenarios: set[str],
+    passed: list[str],
+    failed: list[str],
+    manual: list[str],
+    missing: list[str],
+) -> int:
+    failures = 0
+    passed_set = set(passed)
+    failed_set = set(failed)
+    manual_set = set(manual)
+    missing_set = set(missing)
+    overlaps = (
+        (passed_set & failed_set)
+        | (passed_set & manual_set)
+        | (passed_set & missing_set)
+        | (failed_set & manual_set)
+        | (failed_set & missing_set)
+        | (manual_set & missing_set)
+    )
+    if overlaps:
+        failures += fail_line(ctx, "duplicate_verify_scenario_decision", f" ids={','.join(sorted(overlaps))}")
+
+    decided = passed_set | failed_set | manual_set | missing_set
+    missing_decisions = defined_scenarios - decided
+    if missing_decisions:
+        failures += fail_line(ctx, "missing_verify_scenario_decision", f" ids={','.join(sorted(missing_decisions))}")
+
+    verdict = data.get("verdict")
+    if isinstance(verdict, str):
+        normalized_verdict = verdict.lower()
+        if normalized_verdict == "pass" and (failed_set or manual_set or missing_set or missing_decisions):
+            failures += fail_line(ctx, "invalid_verify_decision_summary")
+        if normalized_verdict == "fail" and not (failed_set or missing_set):
+            failures += fail_line(ctx, "invalid_verify_decision_summary")
+        if normalized_verdict == "manual" and not manual_set:
+            failures += fail_line(ctx, "invalid_verify_decision_summary")
+
+    matrix = data.get("scenarioCoverage")
+    if not isinstance(matrix, list):
+        return failures
+    for index, row in enumerate(matrix):
+        context = f"scenarioCoverage[{index}]"
+        if not isinstance(row, dict):
+            continue
+        scenario_ref = row.get("scenarioRef")
+        row_verdict = row.get("verdict")
+        if not isinstance(scenario_ref, str) or scenario_ref not in defined_scenarios or not isinstance(row_verdict, str):
+            continue
+        normalized_row_verdict = row_verdict.lower()
+        mismatch = False
+        if normalized_row_verdict == "pass":
+            mismatch = scenario_ref not in passed_set
+        elif normalized_row_verdict == "fail":
+            mismatch = scenario_ref not in failed_set
+        elif normalized_row_verdict == "manual":
+            mismatch = scenario_ref not in manual_set
+        elif normalized_row_verdict == "missing":
+            mismatch = scenario_ref not in missing_set
+        if mismatch:
+            failures += fail_line(ctx, "verify_scenario_coverage_decision_mismatch", f" item={context} id={scenario_ref}")
+    return failures
+
+
+def validate_review_findings_json(ctx: HookContext) -> int:
+    data, failures = load_json_artifact(
+        ctx,
+        "REVIEW_FINDINGS.json",
+        required=ctx.requires_artifact("REVIEW_FINDINGS.json"),
+    )
+    if data is None:
+        return failures
+    if data.get("version") != 1:
+        failures += fail_line(ctx, "invalid_review_findings_version")
+    findings = data.get("findings")
+    if not isinstance(findings, list):
+        return failures + fail_line(ctx, "invalid_review_findings_items")
+    severities = {"blocker", "high", "medium", "low", "info", "minor", "important"}
+    for index, finding in enumerate(findings):
+        context = f"findings[{index}]"
+        if not isinstance(finding, dict):
+            failures += fail_line(ctx, "invalid_review_finding", f" item={context}")
+            continue
+        failures += _check_string_field(ctx, finding, "id", context=context)
+        failures += _check_string_field(ctx, finding, "message", context=context)
+        severity = finding.get("severity")
+        if not isinstance(severity, str) or severity.strip().lower() not in severities:
+            failures += fail_line(ctx, "invalid_review_finding_severity", f" item={context}")
+        failures += _check_trace_refs(ctx, finding, context=context, require_task=True, require_evidence=True)[2]
+        suggested = finding.get("suggestedCheckpoint")
+        if suggested is not None and (not isinstance(suggested, str) or not suggested.strip()):
+            failures += fail_line(ctx, "invalid_json_field", f" item={context} field=suggestedCheckpoint")
+    return failures
+
+
+def validate_unit_test_result_json(ctx: HookContext) -> int:
+    data, failures = load_json_artifact(
+        ctx,
+        "UNIT_TEST_RESULT.json",
+        required=ctx.requires_artifact("UNIT_TEST_RESULT.json"),
+    )
+    if data is None:
+        return failures
+    if data.get("version") != 1:
+        failures += fail_line(ctx, "invalid_unit_test_result_version")
+    verdict = data.get("verdict")
+    if verdict is not None and (not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED"}):
+        failures += fail_line(ctx, "invalid_unit_test_result_verdict")
+    targets = data.get("targets")
+    if not isinstance(targets, list) or not targets:
+        return failures + fail_line(ctx, "invalid_unit_test_targets")
+    for index, target in enumerate(targets):
+        context = f"targets[{index}]"
+        if not isinstance(target, dict):
+            failures += fail_line(ctx, "invalid_unit_test_target", f" item={context}")
+            continue
+        failures += _check_string_field(ctx, target, "targetId", context=context)
+        failures += _check_trace_refs(ctx, target, context=context, require_task=True, require_evidence=True)[2]
+        result = target.get("result")
+        if not isinstance(result, str) or result.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED", "SKIP"}:
+            failures += fail_line(ctx, "invalid_unit_test_target_result", f" item={context}")
+        failures += _check_string_field(ctx, target, "command", context=context)
+        coverage = target.get("coverage")
+        if coverage is not None and not isinstance(coverage, (dict, list, int, float, str)):
+            failures += fail_line(ctx, "invalid_json_field", f" item={context} field=coverage")
+    failures += _validate_scenario_coverage(
+        ctx,
+        data,
+        field="scenarioCoverage",
+        required=True,
+        require_pass_evidence=True,
+    )
+    return failures
+
+
+def validate_e2e_result_json(ctx: HookContext) -> int:
+    data, failures = load_json_artifact(
+        ctx,
+        "E2E_RESULT.json",
+        required=ctx.requires_artifact("E2E_RESULT.json"),
+    )
+    if data is None:
+        return failures
+    if data.get("version") != 1:
+        failures += fail_line(ctx, "invalid_e2e_result_version")
+    cases = data.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return failures + fail_line(ctx, "invalid_e2e_result_cases")
+    for index, case in enumerate(cases):
+        context = f"cases[{index}]"
+        if not isinstance(case, dict):
+            failures += fail_line(ctx, "invalid_e2e_result_case", f" item={context}")
+            continue
+        failures += _check_string_field(ctx, case, "caseId", context=context)
+        case_id = case.get("caseId")
+        if isinstance(case_id, str) and not E2E_ID.fullmatch(case_id):
+            failures += fail_line(ctx, "invalid_e2e_result_case_id", f" item={context}")
+        failures += _check_trace_refs(ctx, case, context=context, require_task=True, require_evidence=True)[2]
+        failures += _check_bool_field(ctx, case, "uiRequired", context=context)
+        failures += _check_string_field(ctx, case, "executionMode", context=context)
+        steps = case.get("steps")
+        if not isinstance(steps, list):
+            failures += fail_line(ctx, "invalid_json_array_field", f" item={context} field=steps")
+        verdict = case.get("verdict")
+        if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
+            failures += fail_line(ctx, "invalid_e2e_result_verdict", f" item={context}")
+    failures += _validate_scenario_coverage(
+        ctx,
+        data,
+        field="scenarioCoverage",
+        required=True,
+        require_pass_evidence=True,
+    )
+    return failures
+
+
+def validate_verify_decision_json(ctx: HookContext) -> int:
+    data, failures = load_json_artifact(
+        ctx,
+        "VERIFY_DECISION.json",
+        required=ctx.requires_artifact("VERIFY_DECISION.json"),
+    )
+    if data is None:
+        return failures
+    if data.get("version") != 1:
+        failures += fail_line(ctx, "invalid_verify_decision_version")
+    verdict = data.get("verdict")
+    if not isinstance(verdict, str) or verdict.lower() not in {"pass", "fail", "manual"}:
+        failures += fail_line(ctx, "invalid_verify_decision_verdict")
+    next_checkpoint = data.get("nextCheckpoint")
+    if not isinstance(next_checkpoint, str) or next_checkpoint not in {"verify_done", "needs_fix", "verify_in_progress"}:
+        failures += fail_line(ctx, "invalid_verify_next_checkpoint")
+    elif isinstance(verdict, str):
+        normalized_verdict = verdict.lower()
+        if normalized_verdict == "pass" and next_checkpoint != "verify_done":
+            failures += fail_line(ctx, "invalid_verify_decision_transition")
+        if normalized_verdict == "fail" and next_checkpoint != "needs_fix":
+            failures += fail_line(ctx, "invalid_verify_decision_transition")
+        if normalized_verdict == "manual" and next_checkpoint not in {"verify_in_progress", "needs_fix"}:
+            failures += fail_line(ctx, "invalid_verify_decision_transition")
+
+    spec_ids, spec_failures = collect_spec_definition_index(ctx)
+    failures += spec_failures
+    defined_scenarios = set(spec_ids["SCN"])
+    covered_by_evidence = _scenario_covering_evidence(ctx)
+    known_evidence = _known_evidence_ids(ctx)
+
+    passed, passed_failures = _check_string_array_field(
+        ctx,
+        data,
+        "passedScenarioRefs",
+        context="VERIFY_DECISION",
+        required=True,
+        allow_empty=True,
+    )
+    failed, failed_failures = _check_string_array_field(
+        ctx,
+        data,
+        "failedScenarioRefs",
+        context="VERIFY_DECISION",
+        required=True,
+        allow_empty=True,
+    )
+    manual, manual_failures = _check_string_array_field(
+        ctx,
+        data,
+        "manualVerificationRefs",
+        context="VERIFY_DECISION",
+        required=True,
+        allow_empty=True,
+    )
+    missing, missing_failures = _check_string_array_field(
+        ctx,
+        data,
+        "missingScenarioRefs",
+        context="VERIFY_DECISION",
+        required=False,
+        allow_empty=True,
+    )
+    evidence_ids, evidence_failures = _check_string_array_field(
+        ctx,
+        data,
+        "evidenceIds",
+        context="VERIFY_DECISION",
+        required=True,
+        item_re=EVIDENCE_ID,
+    )
+    failures += passed_failures + failed_failures + manual_failures + missing_failures + evidence_failures
+    failures += _check_evidence_stream_for_refs(ctx, evidence_ids, context="VERIFY_DECISION")
+    for field, scenario_refs in (
+        ("passedScenarioRefs", passed),
+        ("failedScenarioRefs", failed),
+        ("manualVerificationRefs", manual),
+        ("missingScenarioRefs", missing),
+    ):
+        for scenario_ref in scenario_refs:
+            if scenario_ref not in defined_scenarios:
+                failures += fail_line(ctx, "unknown_verify_scenario_ref", f" field={field} id={scenario_ref}")
+    for evidence_id in evidence_ids:
+        if known_evidence and evidence_id not in known_evidence:
+            failures += fail_line(ctx, "unknown_verify_evidence_id", f" evidenceId={evidence_id}")
+
+    failures += _validate_scenario_coverage(
+        ctx,
+        data,
+        field="scenarioCoverage",
+        required=True,
+        require_pass_evidence=True,
+        covering_evidence=covered_by_evidence,
+        spec_ids=spec_ids,
+    )
+    failures += _check_verify_scenario_decisions(
+        ctx,
+        data,
+        defined_scenarios=defined_scenarios,
+        passed=passed,
+        failed=failed,
+        manual=manual,
+        missing=missing,
+    )
+
+    passed_without_evidence = [scenario for scenario in passed if not covered_by_evidence.get(scenario)]
+    if passed_without_evidence:
+        failures += fail_line(ctx, "verify_passed_scenario_without_evidence", f" ids={','.join(sorted(passed_without_evidence))}")
+    return failures
+
+
+def validate_fix_request_json(ctx: HookContext) -> int:
+    data, failures = load_json_artifact(
+        ctx,
+        "FIX_REQUEST.json",
+        required=ctx.requires_artifact("FIX_REQUEST.json"),
+    )
+    if data is None:
+        return failures
+    if data.get("version") != 1:
+        failures += fail_line(ctx, "invalid_fix_request_version")
+    for field in ["featureId", "sourceCheckpoint", "sourceNodeId", "suggestedCheckpoint", "rootCause", "blockingReason", "createdAt"]:
+        failures += _check_string_field(ctx, data, field, context="FIX_REQUEST")
+    root_cause = data.get("rootCause")
+    if isinstance(root_cause, str) and root_cause not in {
+        "requirement_ambiguous",
+        "spec_gap",
+        "design_conflict",
+        "implementation_bug",
+        "test_bug",
+        "environment_issue",
+        "permission_issue",
+        "dependency_issue",
+        "unknown",
+    }:
+        failures += fail_line(ctx, "invalid_fix_request_root_cause")
+    suggested = data.get("suggestedCheckpoint")
+    allowed_fix_targets = _effective_needs_fix_targets(ctx)
+    if isinstance(suggested, str) and allowed_fix_targets and suggested not in allowed_fix_targets:
+        failures += fail_line(ctx, "invalid_fix_request_suggested_checkpoint")
+    human_action = data.get("humanActionRequired")
+    if not isinstance(human_action, bool):
+        failures += fail_line(ctx, "invalid_json_field", " item=FIX_REQUEST field=humanActionRequired")
+    failed_spec_refs, spec_failures = _check_string_array_field(
+        ctx,
+        data,
+        "failedSpecRefs",
+        context="FIX_REQUEST",
+        required=False,
+    )
+    failures += spec_failures
+    failed_evidence_ids, evidence_failures = _check_string_array_field(
+        ctx,
+        data,
+        "failedEvidenceIds",
+        context="FIX_REQUEST",
+        required=False,
+        item_re=EVIDENCE_ID,
+    )
+    failures += evidence_failures
+    failures += _check_evidence_stream_for_refs(ctx, failed_evidence_ids, context="FIX_REQUEST")
+    _, design_failures = _check_string_array_field(
+        ctx,
+        data,
+        "failedDesignRefs",
+        context="FIX_REQUEST",
+        required=False,
+    )
+    failures += design_failures
+
+    spec_ids, spec_id_failures = collect_spec_definition_index(ctx)
+    failures += spec_id_failures
+    for req_id in set(REQ_ID.findall(" ".join(failed_spec_refs))):
+        if req_id not in spec_ids["REQ"]:
+            failures += fail_line(ctx, "unknown_fix_request_requirement_ref", f" id={req_id}")
+    for scn_id in _scenario_refs_from_spec_refs(failed_spec_refs):
+        if scn_id not in spec_ids["SCN"]:
+            failures += fail_line(ctx, "unknown_fix_request_scenario_ref", f" id={scn_id}")
+    known_evidence = _known_evidence_ids(ctx)
+    for evidence_id in failed_evidence_ids:
+        if known_evidence and evidence_id not in known_evidence:
+            failures += fail_line(ctx, "unknown_fix_request_evidence_id", f" evidenceId={evidence_id}")
+    known_design_refs = _known_design_refs(ctx)
+    for design_ref in data.get("failedDesignRefs", []) if isinstance(data.get("failedDesignRefs"), list) else []:
+        if isinstance(design_ref, str) and known_design_refs and design_ref not in known_design_refs:
+            failures += fail_line(ctx, "unknown_fix_request_design_ref", f" ref={design_ref}")
+    return failures
 
 
 def _plan_is_legacy_format(plan_text: str) -> bool:
@@ -296,6 +977,7 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
                 failures += fail_line(ctx, "plan_json_has_failed_tasks", f" tasks={','.join(failed)}")
         if failures:
             return failures
+        return 0
 
     plan = ctx.file("PLAN.md")
     if not is_nonempty(plan):
@@ -324,6 +1006,16 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
         info(ctx, "plan_legacy_format_degrade")
     else:
         failures += fail_line(ctx, "missing_task_id_heading")
+    return failures
+
+
+def validate_code_done_gate(ctx: HookContext) -> int:
+    if not ctx.requires_artifact("evidence/EVIDENCE.jsonl"):
+        info(ctx, "code_done_gate_not_in_contract_degrade")
+        return 0
+    failures = 0
+    for error in check_code_done(ctx.feature_dir):
+        failures += fail_line(ctx, "invalid_code_done_gate", f" detail={error}")
     return failures
 
 
@@ -560,11 +1252,17 @@ VALIDATORS = {
     "plan_json_contract": validate_plan_json_contract,
     "plan_initial_tasks": validate_plan_initial_tasks,
     "plan_finished_tasks": validate_plan_finished_tasks,
+    "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
+    "review_findings_json": validate_review_findings_json,
     "unit_test_report_contract": validate_unit_test_report_contract,
+    "unit_test_result_json": validate_unit_test_result_json,
     "e2e_report_contract": validate_e2e_report_contract,
+    "e2e_result_json": validate_e2e_result_json,
     "verify_report_contract": validate_verify_report_contract,
+    "verify_decision_json": validate_verify_decision_json,
+    "fix_request_json": validate_fix_request_json,
 }
 
 

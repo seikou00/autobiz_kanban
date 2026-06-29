@@ -27,6 +27,7 @@ from evidence_store import (  # noqa: E402
     validate_record,
 )
 from plan_json import (  # noqa: E402
+    blocked_tasks,
     failed_tasks,
     load_and_validate_plan,
     plan_json_path,
@@ -141,6 +142,8 @@ def check_code_done(target_feature_dir: Path) -> list[str]:
     plan, plan_errors = load_and_validate_plan(plan_json_path(target_feature_dir), require_all_done=True)
     if plan_errors:
         errors.extend(f"plan_json:{error}" for error in plan_errors)
+        if plan is not None and (blocked := blocked_tasks(plan)):
+            errors.append("unresolved_blocker:" + ",".join(blocked))
         return errors
     if plan is None:
         errors.append("missing_plan_json")
@@ -150,6 +153,8 @@ def check_code_done(target_feature_dir: Path) -> list[str]:
         errors.append("plan_json_unfinished_tasks:" + ",".join(unfinished))
     if failed := failed_tasks(plan):
         errors.append("plan_json_failed_tasks:" + ",".join(failed))
+    if blocked := blocked_tasks(plan):
+        errors.append("unresolved_blocker:" + ",".join(blocked))
 
     try:
         records = read_records(stream_path(target_feature_dir))

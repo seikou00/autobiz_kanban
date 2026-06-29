@@ -58,7 +58,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 1. **主 agent 写 completion proposal。**按 references/schemas.md 创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/completion-proposal.json`。proposal 应描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。跨仓库任务必须写 `affected_repositories`；单仓库任务可以省略该字段。
 2. **主 agent 启动独立 reviewer agent。**使用 subagent 机制启动独立 reviewer。启动子代理，并把 references/reviewer-agent.md 中的 reviewer 指令作为 prompt。启动子agent附带用户提供的原始 PRD 路径列表；没有则写 none，供 reviewer 与 proposal.prd_references 交叉核对。如果流程希望 reviewer 核对用户主动输入的仓库是否被遗漏，启动 prompt 还必须附带 `User repository references`；否则 reviewer 只以 completion proposal、proposal.md、specs、design、PLAN、可选 PRD 和真实仓库状态为依据。
 3. **reviewer 自己获取真实状态。**reviewer 必须自行通过工具获取仓库状态，并读取 feature 目录中的 proposal.md、specs/**/*.md，以及 design.md、PLAN.md（如果存在；当前 Feature 工作流契约未提供时跳过并在评估中标注基准缺失）；PRD 只在用户或 completion proposal 显式引用时读取。若 completion proposal 有 `affected_repositories`，reviewer 必须对每个仓库逐个执行 git status/diff/log 等只读检查；若没有，则按旧流程把当前 cwd 当作唯一仓库。不要依赖主 agent 预先生成的 diff snapshot 或规格摘要。
-4. **reviewer 直接写需求评估文件。**reviewer 必须直接写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md`。
+4. **reviewer 直接写需求评估文件。**reviewer 必须直接写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md`，并同步写入机器事实源 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json`。
 5. **主 agent 读取 verdict 并分支。**如果 verdict 是 `PASS` 或 `PASS_WITH_WARNINGS`，报告 verdict 与 `REQUIREMENTS_EVAL.md` 路径后结束本阶段。如果 verdict 是 `FAIL`，主 agent 必须按 `REQUIREMENTS_EVAL.md` 中的 blockers 做最小修复，更新 `completion-proposal.json`，重新启动独立 reviewer，直到 verdict 变为 `PASS` 或 `PASS_WITH_WARNINGS`。如果 verdict 是 `DEGRADED`，停止并报告独立审查未成立。
 
 ## 严格职责边界
@@ -71,6 +71,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 reviewer 可以使用 Write，但只允许写协调仓库中的：
 
 ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md
+${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json
 
 reviewer 可以使用 shell/Bash 获取只读证据，但只能运行读操作。跨仓库任务中，以下命令必须在每个 `affected_repositories[].path` 对应的仓库内逐个执行。允许示例：
 
@@ -182,6 +183,25 @@ FAIL 修复规则：
 - 每轮修复后必须更新 `completion-proposal.json`，使 files_changed、behavior_changed、verification、known_limitations 与真实状态一致。
 - 如果修复需要超出当前任务范围、缺少信息、工具不可用或存在人工决策点，停止并报告 blocker，不要伪造 PASS。
 
+`REVIEW_FINDINGS.json` 是下游机器主入口，只放结构化发现项，不和 Markdown 做文本对账。每条 finding 必须包含 `taskId`、`specRefs`、`evidenceIds`、`severity`、`message`，可带 `suggestedCheckpoint`：
+
+```json
+{
+  "version": 1,
+  "findings": [
+    {
+      "id": "R001",
+      "taskId": "T001",
+      "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+      "evidenceIds": ["ev_0001"],
+      "severity": "high",
+      "message": "Missing assertion for SCN-001",
+      "suggestedCheckpoint": "code_in_progress"
+    }
+  ]
+}
+```
+
 最终回复使用这个形状：
 
 ```
@@ -189,6 +209,7 @@ FAIL 修复规则：
 Verdict: <PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED>
 交接文件:
 - ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md
+- ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json
 摘要: <一句话说明最终结果；如 PASS_WITH_WARNINGS，摘要 warnings>
 
 <PASS/PASS_WITH_WARNINGS 时说明 review 已收敛；FAIL/DEGRADED 时说明为什么无法继续>
