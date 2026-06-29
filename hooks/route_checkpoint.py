@@ -40,6 +40,7 @@ from board_core.workflow_compiler import (  # noqa: E402
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 PROFILE_CHOICE_CHECKPOINT = "prd_done"
+FIX_REQUEST_RELATIVE_PATH = Path(".autobizdevops") / "features"
 
 
 def _state_next_action(node: dict, node_status: str) -> dict[str, str]:
@@ -100,6 +101,25 @@ def _recommended_next_skill_for_record(workspace: Path, record: dict, allowed_ne
         if skill:
             return skill
     return ""
+
+
+def _load_fix_request(workspace: Path, feature: str, allowed_next: list[str]) -> tuple[dict | None, list[str]]:
+    path = FIX_REQUEST_RELATIVE_PATH / feature / "FIX_REQUEST.json"
+    full_path = workspace / path
+    if not full_path.is_file() or full_path.stat().st_size <= 0:
+        return None, [f"FIX_REQUEST.json 未找到: {full_path}"]
+    try:
+        data = json.loads(full_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return None, [f"FIX_REQUEST.json 非法: {exc}"]
+    if not isinstance(data, dict):
+        return None, ["FIX_REQUEST.json root 必须是 object"]
+    suggested = data.get("suggestedCheckpoint")
+    if not isinstance(suggested, str) or not suggested:
+        return data, ["FIX_REQUEST.json 缺少 suggestedCheckpoint"]
+    if allowed_next and suggested not in allowed_next:
+        return data, [f"FIX_REQUEST.json suggestedCheckpoint 不在允许回流中: {suggested}"]
+    return data, []
 
 
 def _profile_choice_payload(workspace: Path, checkpoint: str) -> list[dict[str, object]]:
@@ -231,6 +251,38 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         }, 1
 
     nodes = config["workflow"]["nodes"]
+    if checkpoint == "needs_fix":
+        allowed_next = _allowed_next(config, checkpoint)
+        fix_request, fix_request_errors = _load_fix_request(workspace, feature, allowed_next)
+        suggested = fix_request.get("suggestedCheckpoint") if isinstance(fix_request, dict) else None
+        if isinstance(suggested, str) and suggested in allowed_next:
+            allowed_next = [suggested]
+        elif fix_request_errors:
+            allowed_next = []
+        workflow_skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
+        return {
+            "ok": True,
+            "feature": feature,
+            "workflowProfile": workflow_profile,
+            "workflowTemplate": workflow_template,
+            "workflowDecisions": workflow_decisions,
+            "workflowSkippedNodes": list(workflow_skipped),
+            "checkpoint": checkpoint,
+            "currentNodeId": "needs_fix",
+            "currentNodeStatus": "blocked",
+            "currentStateId": "blocked",
+            "allowedNextCheckpoints": allowed_next,
+            "recommendedNextSkill": _recommended_next_skill_for_record(workspace, record, allowed_next),
+            "fixRequest": fix_request,
+            "fixRequestErrors": fix_request_errors,
+            "requiresProfileChoice": False,
+            "profileChoices": [],
+            "requiresWorkflowChoice": False,
+            "workflowChoices": [],
+            "skippableNodes": [],
+            "nextAction": {},
+        }, 0
+
     current_idx, current_node_id = find_current_node(nodes, checkpoint)
     if current_idx < 0:
         return {
@@ -279,6 +331,8 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         "currentStateId": node_status,
         "allowedNextCheckpoints": allowed_next,
         "recommendedNextSkill": _recommended_next_skill_for_record(workspace, record, allowed_next),
+        "fixRequest": None,
+        "fixRequestErrors": [],
         "requiresProfileChoice": checkpoint == PROFILE_CHOICE_CHECKPOINT and len(profile_choices) > 1,
         "profileChoices": profile_choices,
         "requiresWorkflowChoice": bool(workflow_choices),

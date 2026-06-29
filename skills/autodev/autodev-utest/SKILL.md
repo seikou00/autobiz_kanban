@@ -99,6 +99,7 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 输出产物：
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`（append-only 证据流）
 - `.autobizdevops/state.json` 与自动生成视图 `.autobizdevops/STATE.md`
@@ -303,6 +304,26 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - 仍需人工确认的项。
 - 若失败，建议回流阶段：`autodev-code`、`autobiz` 或 `environment`。
 
+同时必须写入 `UNIT_TEST_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。
+
+```json
+{
+  "version": 1,
+  "verdict": "PASS",
+  "targets": [
+    {
+      "targetId": "UT-001",
+      "taskId": "T001",
+      "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+      "evidenceIds": ["ev_0001"],
+      "result": "PASS",
+      "command": "pytest tests/test_cap.py::test_happy_path",
+      "coverage": {"lines": 12}
+    }
+  ]
+}
+```
+
 ### Step 9: 分支决策
 
 可以推进 `unit_test_done` 的条件：
@@ -314,6 +335,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - 所有业务代码修复都有对应失败测试锚点和重跑通过证据。
 - 扩大验证命令已运行，并在报告中记录结果。
 - 报告 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS`。
+- `UNIT_TEST_RESULT.json` 已写入，且每个 target 带 `taskId`、`specRefs`、`evidenceIds`、`result`、`command`。
 
 推进命令：
 
@@ -347,6 +369,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] 允许范围内的最小修复均已验证。
 - [ ] 已执行扩大验证。
 - [ ] `UNIT_TEST_REPORT.md` 包含必需章节和 verdict。
+- [ ] `UNIT_TEST_RESULT.json` 已写入，JSON 是下游机器主入口。
 - [ ] 成功时已推进 `unit_test_done`。
 
 **Skill 完成。** 推进 `unit_test_done` 后下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：

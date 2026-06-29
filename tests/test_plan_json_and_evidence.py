@@ -12,11 +12,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_integrity_gate import check_code_done, check_integrity  # noqa: E402
-from hooks.evidence_store import append_evidence, index_path, stream_path  # noqa: E402
+from hooks.evidence_store import append_evidence, index_path, stream_path, validate_record  # noqa: E402
 from hooks.plan_json import parse_plan_markdown, validate_plan_data, write_plan_json  # noqa: E402
 
 
-def valid_plan(*, feature: str = "alpha", status: str = "done", evidence_ids: list[str] | None = None) -> dict:
+def valid_plan(
+    *,
+    feature: str = "alpha",
+    status: str = "done",
+    evidence_ids: list[str] | None = None,
+    blockers: list[str] | None = None,
+) -> dict:
     return {
         "version": 1,
         "featureId": feature,
@@ -34,7 +40,7 @@ def valid_plan(*, feature: str = "alpha", status: str = "done", evidence_ids: li
                 "validationCommands": [{"command": "echo ok"}],
                 "expectedFiles": [],
                 "evidenceIds": evidence_ids if evidence_ids is not None else ["ev_0001"],
-                "blockers": [],
+                "blockers": blockers if blockers is not None else [],
             }
         ],
     }
@@ -128,6 +134,32 @@ class PlanJsonTest(unittest.TestCase):
 
 
 class EvidenceStoreTest(unittest.TestCase):
+    def test_validation_evidence_requires_structured_result(self) -> None:
+        record = {
+            "version": 1,
+            "evidenceId": "ev_0001",
+            "featureId": "alpha",
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "createdAt": "2026-06-24T00:00:00Z",
+            "validation": {},
+        }
+
+        errors = validate_record(record)
+
+        self.assertIn("validation.command_missing", errors)
+        self.assertIn("validation.exitCode_missing", errors)
+        self.assertIn("validation.result_invalid", errors)
+
+        record["validation"] = {"command": "pytest", "exitCode": 1, "result": "fail"}
+        self.assertIn("validation.outputTailPath_missing", validate_record(record))
+
+        record["validation"] = {"command": "pytest", "exitCode": 1, "result": "pass"}
+        self.assertIn("validation.result_exitCode_mismatch", validate_record(record))
+
     def test_append_evidence_creates_sequential_stream_tail_and_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
@@ -203,6 +235,21 @@ class EvidenceGateTest(unittest.TestCase):
             write_plan_json(feature_dir / "plan.json", valid_plan(status="done", evidence_ids=["ev_0001"]))
 
             self.assertEqual(check_code_done(feature_dir), [])
+
+    def test_code_done_gate_rejects_unresolved_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            write_plan_json(
+                feature_dir / "plan.json",
+                valid_plan(status="done", evidence_ids=["ev_0001"], blockers=["waiting for API contract"]),
+            )
+            append_pass_evidence(feature_dir)
+
+            errors = check_code_done(feature_dir)
+
+            self.assertIn("plan_json:T001.blockers_unresolved", errors)
+            self.assertIn("unresolved_blocker:T001", errors)
 
 
 if __name__ == "__main__":

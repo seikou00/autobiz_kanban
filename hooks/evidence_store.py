@@ -20,6 +20,7 @@ INDEX_VERSION = 1
 EVIDENCE_ID_RE = re.compile(r"^ev_(\d{4})$")
 DEFAULT_STREAM_RELATIVE_PATH = Path("evidence") / "EVIDENCE.jsonl"
 DEFAULT_INDEX_RELATIVE_PATH = Path("evidence") / "EVIDENCE.index.json"
+VALIDATION_RESULTS = {"pass", "fail", "blocked", "skipped"}
 
 
 class EvidenceStoreError(ValueError):
@@ -155,6 +156,28 @@ def validate_record(record: dict[str, Any]) -> list[str]:
     validation = record.get("validation")
     if validation is not None and not isinstance(validation, dict):
         errors.append("invalid_validation_object")
+    if record.get("action") == "validation":
+        if not isinstance(validation, dict):
+            errors.append("validation_missing")
+        else:
+            command = validation.get("command")
+            if not isinstance(command, str) or not command.strip():
+                errors.append("validation.command_missing")
+            exit_code = validation.get("exitCode")
+            if not isinstance(exit_code, int):
+                errors.append("validation.exitCode_missing")
+            raw_result = validation.get("result")
+            result = raw_result.strip().lower() if isinstance(raw_result, str) else ""
+            if result not in VALIDATION_RESULTS:
+                errors.append("validation.result_invalid")
+            if isinstance(exit_code, int) and result:
+                if exit_code == 0 and result != "pass":
+                    errors.append("validation.result_exitCode_mismatch")
+                if exit_code != 0 and result == "pass":
+                    errors.append("validation.result_exitCode_mismatch")
+            output_tail_path = validation.get("outputTailPath")
+            if result == "fail" and (not isinstance(output_tail_path, str) or not output_tail_path.strip()):
+                errors.append("validation.outputTailPath_missing")
     changed_files = record.get("changedFiles")
     if changed_files is not None and not _string_list(changed_files):
         errors.append("invalid_changedFiles")
@@ -270,6 +293,8 @@ def _cmd_append(args: argparse.Namespace) -> int:
         validation["exitCode"] = args.exit_code
         validation["result"] = "pass" if args.exit_code == 0 else "fail"
         record["validation"] = validation
+    if not record.get("action") and (args.command or args.exit_code is not None):
+        record["action"] = "validation"
     tail = Path(args.output_tail).read_text(encoding="utf-8", errors="ignore") if args.output_tail else None
     try:
         appended = append_evidence(target, record, output_tail=tail)

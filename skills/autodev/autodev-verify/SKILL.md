@@ -161,6 +161,23 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 写入 `VERIFY_REPORT.md` 后，必须使用 `hooks/evidence_store.py append` 追加一条 verify 汇总 evidence，记录本阶段 verdict、引用的 evidenceIds、覆盖的 specRefs/designRefs。verify 阶段仍不得运行测试命令；这里追加的是汇总结论证据，不是新的测试执行证据。
 
+同时必须写入 `VERIFY_DECISION.json` 作为机器事实源。JSON 只保留裁决字段，Markdown 只给人读；不要做 Markdown ↔ JSON 文本对账。`scenarioCoverage` 的行必须来自 specs 中定义的全部 `SCN-xxx` 分母，未覆盖的场景显式写 `missing` 或 `manual`，不能只列命中项。
+
+```json
+{
+  "version": 1,
+  "verdict": "pass",
+  "passedScenarioRefs": ["SCN-001"],
+  "failedScenarioRefs": [],
+  "manualVerificationRefs": [],
+  "evidenceIds": ["ev_0001"],
+  "nextCheckpoint": "verify_done",
+  "scenarioCoverage": [
+    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+  ]
+}
+```
+
 **模板：**
 
 ```markdown
@@ -213,6 +230,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ### ⛔ 步骤完成检查 — Step 5
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 已写入
+- [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_DECISION.json` 已写入，且 `scenarioCoverage` 覆盖 specs 中全部 Scenario
 - [ ] 报告中每项都标注了证据来源（指向 UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log 的段落或说明为何需人工验证）
 - [ ] 报告**不包含**本 skill 自行执行的测试命令输出或服务启动日志
 - [ ] 报告已展示给用户
@@ -253,7 +271,24 @@ python "${pluginPath}/hooks/resolve_next_skill.py"
 
 ### 路径 B：存在失败项 → `needs_fix`
 
-使用统一脚本将当前 Feature 的 checkpoint 推进为 `needs_fix`：
+使用统一脚本将当前 Feature 的 checkpoint 推进为 `needs_fix`。推进前必须先写 `FIX_REQUEST.json`，让路由器能读取建议回流阶段。
+
+```json
+{
+  "version": 1,
+  "featureId": "alpha",
+  "sourceCheckpoint": "verify_in_progress",
+  "sourceNodeId": "dev.verify",
+  "suggestedCheckpoint": "code_in_progress",
+  "rootCause": "implementation_bug",
+  "blockingReason": "SCN-001 failed in E2E",
+  "humanActionRequired": false,
+  "failedSpecRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+  "failedEvidenceIds": ["ev_0001"],
+  "failedDesignRefs": [],
+  "createdAt": "2026-06-24T00:00:00Z"
+}
+```
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
@@ -314,9 +349,10 @@ Skill 完成前必须满足：
 
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 已生成
 - [ ] 报告中每项裁定都指向 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 或 `e2e-run.log` 的证据段落，或标注"需人工验证"
+- [ ] `VERIFY_DECISION.json` 已写入，JSON 是下游机器主入口
 - [ ] 刷新后的 `CHECKPOINT` = `verify_done` / `needs_fix`（或路径 C 等待）
 - [ ] 验收摘要已写入报告（通过时）
-- [ ] 已知问题已更新（失败时）
+- [ ] 已知问题已更新，且 `FIX_REQUEST.json` 已写入（失败时）
 
 ---
 

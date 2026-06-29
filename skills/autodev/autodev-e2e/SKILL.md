@@ -60,6 +60,26 @@ E2E 用例的稳定 ID 规则：
 
 每次 E2E 命令或人工驱动执行结束后，必须把运行结果追加到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`：使用 `hooks/evidence_store.py append` 写入 taskId（优先来自 `plan.json`）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并把运行日志尾部作为 evidence tail 保存。`E2E_REPORT.md` 的每个用例结论都应引用对应 `ev_XXXX`；不得截断或重写 `EVIDENCE.jsonl`。
 
+同时必须写入 `E2E_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 case 必须用 `specRefs` 回链 Requirement / Scenario，并引用对应 `evidenceIds`。
+
+```json
+{
+  "version": 1,
+  "cases": [
+    {
+      "caseId": "E2E-alpha-001",
+      "taskId": "T001",
+      "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+      "evidenceIds": ["ev_0001"],
+      "uiRequired": true,
+      "executionMode": "manual",
+      "steps": [{"action": "open", "expected": "visible", "result": "PASS"}],
+      "verdict": "PASS"
+    }
+  ]
+}
+```
+
 ## Checkpoint 写入
 
 开始 E2E 前推进到 `e2e_in_progress`，写入后立即刷新 `CHECKPOINT`：
@@ -69,7 +89,24 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-E2E 通过后推进到 `e2e_done`；若存在明确失败并需要回流，推进到 `needs_fix`。每次写入后都必须刷新 `CHECKPOINT`：
+E2E 通过后推进到 `e2e_done`；若存在明确失败并需要回流，必须先写 `FIX_REQUEST.json`，再推进到 `needs_fix`。每次写入后都必须刷新 `CHECKPOINT`：
+
+```json
+{
+  "version": 1,
+  "featureId": "alpha",
+  "sourceCheckpoint": "e2e_in_progress",
+  "sourceNodeId": "dev.e2e",
+  "suggestedCheckpoint": "code_in_progress",
+  "rootCause": "implementation_bug",
+  "blockingReason": "E2E case failed",
+  "humanActionRequired": false,
+  "failedSpecRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+  "failedEvidenceIds": ["ev_0001"],
+  "failedDesignRefs": [],
+  "createdAt": "2026-06-24T00:00:00Z"
+}
+```
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_done

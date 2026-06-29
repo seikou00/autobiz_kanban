@@ -64,6 +64,7 @@ CHECKPOINT_LOG_EVENTS = (
     ("state-done", "STATE checkpoint 转移校验", "transition_errors"),
     ("autodev-lifecycle", "Autodev 产物校验", "lifecycle_errors"),
 )
+FIX_REQUEST_RELATIVE_PATH = Path(".autobizdevops") / "features"
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,33 @@ def validate_workflow_decision_updates(
                 f"workflow decision '{stage_id}' 只能在 {choice_checkpoint} 设置，当前 checkpoint 为 {old_checkpoint or 'empty'}"
             )
     return tuple(errors)
+
+
+def validate_fix_request_for_needs_fix(
+    workspace: Path,
+    feature: str,
+    checkpoint: str,
+    *,
+    allowed_next: frozenset[str] | set[str] | tuple[str, ...] | list[str] = (),
+) -> tuple[str, ...]:
+    if checkpoint != "needs_fix":
+        return ()
+    path = workspace / FIX_REQUEST_RELATIVE_PATH / feature / "FIX_REQUEST.json"
+    if not path.is_file() or path.stat().st_size <= 0:
+        return (f"进入 needs_fix 必须先生成 FIX_REQUEST.json: {path}",)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return (f"FIX_REQUEST.json 非法: {exc}",)
+    if not isinstance(data, dict):
+        return ("FIX_REQUEST.json root 必须是 object",)
+    suggested = data.get("suggestedCheckpoint")
+    if not isinstance(suggested, str) or not suggested.strip():
+        return ("FIX_REQUEST.json 缺少 suggestedCheckpoint",)
+    allowed = set(allowed_next)
+    if allowed and suggested not in allowed:
+        return (f"FIX_REQUEST.json suggestedCheckpoint 不在允许回流中: {suggested}",)
+    return ()
 
 
 def prepare_checkpoint_update(
@@ -368,6 +396,12 @@ def prepare_checkpoint_update(
 
     transition_errors = [
         *update_errors,
+        *validate_fix_request_for_needs_fix(
+            workspace,
+            feature,
+            checkpoint,
+            allowed_next=contracts.allowed_next.get("needs_fix", frozenset()),
+        ),
         *render_errors,
         *validate_transitions(
             old_map,
