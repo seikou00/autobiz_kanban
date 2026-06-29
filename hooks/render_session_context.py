@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""session_context_inject 动态提示词注入（createFeature 选中服务单元 -> agentmdPrompt）。
+"""session_context_inject 动态提示词注入（createFeature 选中服务单元 -> sessionContext）。
 
 board_config.json 注册（样例，附件约定）::
 
@@ -12,13 +12,14 @@ board_config.json 注册（样例，附件约定）::
 
 输出（固定形状，注入项目模式系统提示词）::
 
-    { "ok": true, "message": "...", "agentmdPrompt": "...",
+    { "ok": true, "message": "...", "sessionContext": "...",
       "agentmdLoadStatus": [ {serviceUnitId, path, loaded, source, message} ] }
 
-``agentmdPrompt`` 三段拼接（见 docs/agents-loading-remote-local.md）：
-  ① 适用范围：清单 description（引用范围）+ UI localRepoPath（代码地址）。
-  ② 系统级 AGENTS.md：选中单元所属系统 agentsPath 全文，按 systemId 去重。
-  ③ 各单元 description.md：选中单元 agentsPath 全文，按选择顺序；空则跳过。
+``sessionContext`` 三段拼接（见 docs/agents-loading-remote-local.md），三个层次各用一对
+XML 风格标签外包，使被嵌入 md 自带的 ``#``/``##`` 标题被「外包」在标签内，不再与结构标记冲突：
+  ① 适用范围 ``<applicable_scope>``：清单 description（引用范围）+ UI localRepoPath（代码地址）。
+  ② 系统级 AGENTS.md ``<system_agents>``：选中单元所属系统 agentsPath 全文，按 systemId 去重。
+  ③ 各单元 description.md ``<unit_description>``：选中单元 agentsPath 全文，按选择顺序；空则跳过。
 
 每个 md 文件按 remote 优先 → local 兜底（``<localRepoPath>/AGENTS.md``）→ 都无则
 ``loaded:false`` 解析，并各产出一条 agentmdLoadStatus（系统级文件按 systemId 去重，
@@ -147,6 +148,23 @@ def _md_cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
+# 三个层次各用一对 XML 风格标签外包：被嵌入 md 自带的 `#`/`##` 标题被包在标签内，不再与
+# 结构标记同级交错（取代旧的 Markdown 二级标题 + ``<a id>`` 锚点；锚点改放标签 id 属性）。
+SCOPE_TAG = "applicable_scope"   # ① 适用范围
+SYSTEM_TAG = "system_agents"     # ② 系统级 AGENTS.md
+UNIT_TAG = "unit_description"    # ③ 各单元 description.md
+
+
+def _attr(text: str) -> str:
+    """转义 XML 属性值里的 & < > "，避免 description 等自由文本撑破标签。"""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
 def _compose_prompt(
     bindings: List[dict],
     system_sections: List[dict],
@@ -154,11 +172,15 @@ def _compose_prompt(
 ) -> str:
     """① 适用范围（绑定表，serviceUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md。
 
-    各内容段用 Markdown 二级标题 + 显式 ``<a id>`` 锚点分隔（不再用 ===== 围栏）；适用范围
-    表里的 serviceUnitId 以 ``[id](#anchor)`` 指向其下方对应段落（有单元段指向单元段，
-    否则指向所属系统段；无内容则不加链接）。
+    三个层次各用一对 XML 风格标签外包（``<applicable_scope>`` / ``<system_agents>`` /
+    ``<unit_description>``）；被嵌入 md 自带的 ``#``/``##`` 标题被包在标签内，不再与结构
+    标记同级交错。锚点放在 ②③ 标签的 ``id`` 属性上，适用范围表里的 serviceUnitId 仍以
+    ``[id](#anchor)`` 指向下方对应段（有单元段指向单元段，否则指向所属系统段；无内容则不加链接）。
     """
     lines: List[str] = []
+
+    # ① 适用范围：绑定表（serviceUnitId 锚点链接指向下方 ②/③ 段的 id 属性）。
+    lines.append(f"<{SCOPE_TAG}>")
     lines.append("# 适用范围")
     lines.append(
         "项目模式已为当前特性绑定以下引用范围与本机代码地址，"
@@ -173,23 +195,28 @@ def _compose_prompt(
         uid_text = _md_cell(binding["serviceUnitId"])
         cell = f"[{uid_text}](#{binding['anchor']})" if binding.get("anchor") else uid_text
         lines.append(f"| {ref} | {cell} | {repo} |")
+    lines.append(f"</{SCOPE_TAG}>")
 
+    # ② 系统级 AGENTS.md：每段外包 <system_agents>，id 供 ① 表锚点定位。
     for section in system_sections:
         lines.append("")
-        lines.append(f"## <a id=\"sys-{section['systemId']}\"></a>系统级 AGENTS.md：{section['title']}")
-        lines.append("")
+        lines.append(
+            f'<{SYSTEM_TAG} id="sys-{section["systemId"]}" system="{_attr(section["title"])}">'
+        )
         lines.append(section["content"].rstrip())
+        lines.append(f"</{SYSTEM_TAG}>")
 
+    # ③ 各单元 description.md：每段外包 <unit_description>，id 供 ① 表锚点定位。
     for section in unit_sections:
         title = section["serviceUnitId"]
         if section.get("ref"):
             title += f"（{section['ref']}）"
         lines.append("")
         lines.append(
-            f"## <a id=\"unit-{section['serviceUnitId']}\"></a>服务单元 description.md：{title}"
+            f'<{UNIT_TAG} id="unit-{section["serviceUnitId"]}" unit="{_attr(title)}">'
         )
-        lines.append("")
         lines.append(section["content"].rstrip())
+        lines.append(f"</{UNIT_TAG}>")
 
     return "\n".join(lines)
 
@@ -200,7 +227,7 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
         return {
             "ok": True,
             "message": "未选择服务单元，无需注入",
-            "agentmdPrompt": "",
+            "sessionContext": "",
             "agentmdLoadStatus": [],
         }
 
@@ -299,14 +326,14 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
     return {
         "ok": True,
         "message": message,
-        "agentmdPrompt": prompt,
+        "sessionContext": prompt,
         "agentmdLoadStatus": load_status,
     }
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="session_context_inject: 选中服务单元 -> 注入 agentmdPrompt（适用范围+系统级+各单元）",
+        description="session_context_inject: 选中服务单元 -> 注入 sessionContext（适用范围+系统级+各单元）",
         allow_abbrev=False,
     )
     parser.add_argument(
@@ -323,7 +350,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = {
             "ok": False,
             "message": str(exc),
-            "agentmdPrompt": "",
+            "sessionContext": "",
             "agentmdLoadStatus": [],
         }
     else:
