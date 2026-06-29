@@ -4,22 +4,29 @@
 
 board_config.json 注册（样例，附件约定）::
 
-    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits} --session-workspace-path ${sessionWorkspacePath}"
 
-入参 ``--selected-serviceUnit`` 是一个 JSON 数组字符串（serviceUnitId = 后端单元 id）::
+入参：
+  · ``--selected-serviceUnit`` 是一个 JSON 数组字符串（serviceUnitId = 后端单元 id）::
 
-    --selected-serviceUnit '[{"serviceUnitId":"LF39.18_Outservice","localRepoPath":"/repo/out"}]'
+        --selected-serviceUnit '[{"serviceUnitId":"LF39.18_Outservice","localRepoPath":"/repo/out"}]'
+
+  · ``--session-workspace-path`` 是会话工作区目录的路径字符串（可空）；脚本读取该目录下的
+    ``AGENTS.md`` 作为「当前工作区指令」。路径为空 / 该文件缺失 / 全空白 → 不生成该段。
 
 输出（固定形状，注入项目模式系统提示词）::
 
     { "ok": true, "message": "...", "sessionContext": "...",
       "agentmdLoadStatus": [ {serviceUnitId, path, loaded, source, message} ] }
 
-``sessionContext`` 三段拼接（见 docs/agents-loading-remote-local.md），三个层次各用一对
+``sessionContext`` 分段拼接（见 docs/agents-loading-remote-local.md），各层次各用一对
 XML 风格标签外包，使被嵌入 md 自带的 ``#``/``##`` 标题被「外包」在标签内，不再与结构标记冲突：
   ① 适用范围 ``<SCOPE>``：清单 description（引用范围）+ UI localRepoPath（代码地址）。
   ② 系统级 AGENTS.md ``<SYSTEM>``：选中单元所属系统 agentsPath 全文，按 systemId 去重。
-  ③ 各单元 description.md ``<UNIT>``：选中单元 agentsPath 全文，按选择顺序；空则跳过。
+  ③ 单元级 ``<UNIT>``：整段**只用一对** ``<UNIT id="unit-section">`` 外包，内部顺序拼接：
+     先「当前工作区指令」（``<sessionWorkspacePath>/AGENTS.md`` 全文，排第一），再各选中单元
+     description.md 全文（按选择顺序）。每段前置一行加粗标签区分。工作区指令独立于服务单元选择——
+     即使未选任何单元，只要其存在也会注入；整段为空则跳过。
 
 加载策略按层次不同：
   · 系统级（②）只认 remote：本机不知道用户把系统级文件放在哪，**不走 local 兜底**（否则会拿
@@ -60,6 +67,8 @@ from hooks.agents_repo import (  # noqa: E402
 PROJECT_ROOT_PLACEHOLDER = "{project_root}"  # md 正文里的占位符，替换为该系统 sys/<systemId> 绝对路径
 
 LOCAL_AGENTS_MD = "AGENTS.md"  # local 兜底文件名（§8 #1：直接读用户仓库既有 AGENTS.md）
+
+WORKSPACE_AGENTS_MD = "AGENTS.md"  # 工程级「当前工作区指令」文件名（sessionWorkspacePath 下）
 
 
 def _parse_selected(raw: Optional[str]) -> List[dict]:
@@ -192,7 +201,36 @@ def _md_cell(text: str) -> str:
 # 结构标记同级交错（取代旧的 Markdown 二级标题 + ``<a id>`` 锚点；锚点改放标签 id 属性）。
 SCOPE_TAG = "SCOPE"   # ① 适用范围
 SYSTEM_TAG = "SYSTEM"     # ② 系统级 AGENTS.md
-UNIT_TAG = "UNIT"    # ③ 各单元 description.md
+UNIT_TAG = "UNIT"    # ③ 单元级：整段只用一对 <UNIT> 外包（工作区指令 + 各单元正文）
+UNIT_SECTION_ANCHOR = "unit-section"  # 单元级整段唯一 id；适用范围表里命中单元的锚点都指向它
+
+
+def _build_workspace_content(session_workspace_path: Optional[str]) -> Optional[str]:
+    """读取 ``<sessionWorkspacePath>/AGENTS.md`` 作为「当前工作区指令」正文。
+
+    路径为空 / 该目录下无 AGENTS.md / 文件全空白 → 返回 None（不生成该段）。
+    与服务单元选择无关：独立判断、独立注入。
+    """
+    path = (session_workspace_path or "").strip()
+    if not path:
+        return None
+    return _read_nonempty(Path(path) / WORKSPACE_AGENTS_MD)
+
+
+# 适用范围表里「当前工作区指令」那一行：serviceUnitId 列用此展示文本（链接指向单元级整段）。
+WORKSPACE_SCOPE_ID = "当前工作区"
+WORKSPACE_SCOPE_REF = "当前工作区指令"
+
+
+def _workspace_binding(session_workspace_path: Optional[str]) -> dict:
+    """工作区指令在适用范围表里的一行：引用范围=「当前工作区指令」、代码地址=工作区路径、
+    锚点指向单元级整段（工作区指令排在该段最前）。仅在已确认工作区有正文时调用。"""
+    return {
+        "serviceUnitId": WORKSPACE_SCOPE_ID,
+        "ref": WORKSPACE_SCOPE_REF,
+        "localRepoPath": (session_workspace_path or "").strip(),
+        "anchor": UNIT_SECTION_ANCHOR,
+    }
 
 
 def _attr(text: str) -> str:
@@ -208,6 +246,7 @@ def _attr(text: str) -> str:
 def _compose_prompt(
     bindings: List[dict],
     system_sections: List[dict],
+    workspace_content: Optional[str],
     unit_sections: List[dict],
 ) -> str:
     """① 适用范围（绑定表，serviceUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md。
@@ -227,24 +266,26 @@ def _compose_prompt(
     lines.append("# 统一 Agent 指令")
     lines.append("")
     # ① 适用范围：绑定表（serviceUnitId 锚点链接指向下方 ②/③ 段的 id 属性）。
-    lines.append(f"`<{SCOPE_TAG}>`")
-    lines.append("")
-    lines.append("## 适用范围")
-    lines.append(
-        "本文件是 产品的前端、后端工程工作的统一入口，执行任务前必须先确认下面的工程映射，避免把前端、后端或文档索引路径识别错。"
-        "开发、排查与代码修改时优先在这些路径内进行（serviceUnitId 链接指向下方对应知识库段）："
-    )
-    lines.append("")
-    lines.append("| 引用范围 | serviceUnitId | 代码地址（localRepoPath） |")
-    lines.append("| --- | --- | --- |")
-    for binding in bindings:
-        ref = _md_cell(binding.get("ref") or "(未匹配知识库)")
-        repo = _md_cell(binding.get("localRepoPath") or "(未提供)")
-        uid_text = _md_cell(binding["serviceUnitId"])
-        cell = f"[{uid_text}](#{binding['anchor']})" if binding.get("anchor") else uid_text
-        lines.append(f"| {ref} | {cell} | {repo} |")
-    lines.append("")
-    lines.append(f"`</{SCOPE_TAG}>`")
+    # 无绑定（未选任何单元、仅注入工作区指令时）则整段跳过。
+    if bindings:
+        lines.append(f"`<{SCOPE_TAG}>`")
+        lines.append("")
+        lines.append("## 适用范围")
+        lines.append(
+            "本文件是 产品的前端、后端工程工作的统一入口，执行任务前必须先确认下面的工程映射，避免把前端、后端或文档索引路径识别错。"
+            "开发、排查与代码修改时优先在这些路径内进行（serviceUnitId 链接指向下方对应知识库段）："
+        )
+        lines.append("")
+        lines.append("| 引用范围 | serviceUnitId | 代码地址（localRepoPath） |")
+        lines.append("| --- | --- | --- |")
+        for binding in bindings:
+            ref = _md_cell(binding.get("ref") or "(未匹配知识库)")
+            repo = _md_cell(binding.get("localRepoPath") or "(未提供)")
+            uid_text = _md_cell(binding["serviceUnitId"])
+            cell = f"[{uid_text}](#{binding['anchor']})" if binding.get("anchor") else uid_text
+            lines.append(f"| {ref} | {cell} | {repo} |")
+        lines.append("")
+        lines.append(f"`</{SCOPE_TAG}>`")
 
     # ② 系统级 AGENTS.md：每段外包 <SYSTEM>，id 供 ① 表锚点定位。
     for section in system_sections:
@@ -257,30 +298,53 @@ def _compose_prompt(
         lines.append("")
         lines.append(f"`</{SYSTEM_TAG}>`")
 
-    # ③ 各单元 description.md：每段外包 <UNIT>，id 供 ① 表锚点定位。
+    # ③ 单元级：整段只用一对 <UNIT> 外包（id 供 ① 表锚点定位）。
+    # 当前工作区指令排在最前，其后接各选中单元正文；每段前置一行加粗标签便于区分
+    # （用加粗而非 ## 标题，避免与嵌入 md 自带的 #/## 标题相撞）。空段跳过整对标签。
+    unit_blocks: List[str] = []
+    if workspace_content is not None:
+        unit_blocks.append(f"**当前工作区指令**\n\n{workspace_content.strip()}")
     for section in unit_sections:
-        title = section["serviceUnitId"]
+        label = section["serviceUnitId"]
         if section.get("ref"):
-            title += f"（{section['ref']}）"
+            label += f"（{section['ref']}）"
+        unit_blocks.append(f"**{label}**\n\n{section['content'].strip()}")
+    if unit_blocks:
         lines.append("")
-        lines.append(
-            f'`<{UNIT_TAG} id="unit-{section["serviceUnitId"]}" unit="{_attr(title)}">`'
-        )
+        lines.append(f'`<{UNIT_TAG} id="{UNIT_SECTION_ANCHOR}" unit="单元级">`')
         lines.append("")
-        lines.append(section["content"].strip())
+        lines.append("\n\n".join(unit_blocks))
         lines.append("")
         lines.append(f"`</{UNIT_TAG}>`")
 
     return "\n".join(lines)
 
 
-def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
+def render(
+    selected: List[dict],
+    *,
+    plugin_root: Optional[Path] = None,
+    session_workspace_path: Optional[str] = None,
+) -> dict:
     """核心逻辑（无 I/O 边界外副作用），便于单测。"""
+    # 「当前工作区指令」独立于服务单元选择：先行构建，未选单元也可单独注入。
+    workspace_content = _build_workspace_content(session_workspace_path)
+
     if not selected:
+        if workspace_content is None:
+            return {
+                "ok": True,
+                "message": "未选择服务单元，无需注入",
+                "sessionContext": "",
+                "agentmdLoadStatus": [],
+            }
+        # 即便未选单元，工作区指令也在适用范围表里占一行映射。
+        bindings = [_workspace_binding(session_workspace_path)]
+        prompt = _compose_prompt(bindings, [], workspace_content, [])
         return {
             "ok": True,
-            "message": "未选择服务单元，无需注入",
-            "sessionContext": "",
+            "message": "未选择服务单元，仅注入当前工作区指令",
+            "sessionContext": prompt,
             "agentmdLoadStatus": [],
         }
 
@@ -356,14 +420,17 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
             ):
                 unit_has_section.add(uid)
 
-    # 适用范围：每个选中单元一行（引用范围 = 清单 description；代码地址 = localRepoPath）；
-    # serviceUnitId 锚点：有单元段→指向单元段，否则→指向所属系统段，再否则→无链接。
+    # 适用范围：工作区指令（若有）占首行，其后每个选中单元一行（引用范围 = 清单 description；
+    # 代码地址 = localRepoPath）；serviceUnitId 锚点：有单元段→指向单元级整段，否则→指向所属
+    # 系统段，再否则→无链接。
     bindings: List[dict] = []
+    if workspace_content is not None:
+        bindings.append(_workspace_binding(session_workspace_path))
     for sel in selected:
         uid = sel["serviceUnitId"]
         pair = pairs.get(uid)
         if uid in unit_has_section:
-            anchor = f"unit-{uid}"
+            anchor = UNIT_SECTION_ANCHOR
         elif pair is not None and pair[0].system_id in system_loaded:
             anchor = f"sys-{pair[0].system_id}"
         else:
@@ -377,7 +444,7 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
             }
         )
 
-    prompt = _compose_prompt(bindings, system_sections, unit_sections)
+    prompt = _compose_prompt(bindings, system_sections, workspace_content, unit_sections)
     remote_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "remote")
     local_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "local")
     miss_n = sum(1 for s in load_status if not s["loaded"])
@@ -401,6 +468,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="",
         help="JSON 数组字符串：[{\"serviceUnitId\":\"...\",\"localRepoPath\":\"...\"}]",
     )
+    parser.add_argument(
+        "--session-workspace-path",
+        dest="session_workspace_path",
+        default="",
+        help="会话工作区目录路径；读取其下 AGENTS.md 作为「当前工作区指令」，缺失则不注入该段",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     try:
@@ -413,7 +486,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "agentmdLoadStatus": [],
         }
     else:
-        result = render(selected)
+        result = render(selected, session_workspace_path=args.session_workspace_path)
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     print()
