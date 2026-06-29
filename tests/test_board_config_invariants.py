@@ -78,6 +78,42 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(offenders),
         )
 
+    def test_plan_markdown_inputs_also_expose_plan_json(self) -> None:
+        self._assert_markdown_inputs_expose_json({"PLAN.md": "plan.json"})
+
+    def test_markdown_report_inputs_also_expose_json_sidecars(self) -> None:
+        self._assert_markdown_inputs_expose_json(
+            {
+                "REQUIREMENTS_EVAL.md": "REVIEW_FINDINGS.json",
+                "UNIT_TEST_REPORT.md": "UNIT_TEST_RESULT.json",
+                "E2E_REPORT.md": "E2E_RESULT.json",
+                "VERIFY_REPORT.md": "VERIFY_DECISION.json",
+            }
+        )
+
+    def _assert_markdown_inputs_expose_json(self, pairs: dict[str, str]) -> None:
+        offenders: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict):
+                continue
+            artifacts = node.get("artifacts")
+            if not isinstance(artifacts, dict):
+                continue
+            input_paths = {
+                artifact.get("path")
+                for artifact in artifacts.get("inputs", []) or []
+                if isinstance(artifact, dict)
+            }
+            for markdown_path, json_path in pairs.items():
+                if markdown_path in input_paths and json_path not in input_paths:
+                    offenders.append(f"{context}[{node.get('id', '?')}]: {markdown_path} -> {json_path}")
+        self.assertEqual(
+            offenders,
+            [],
+            "any node consuming a Markdown view must also expose its JSON "
+            "machine-readable source: " + ", ".join(offenders),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

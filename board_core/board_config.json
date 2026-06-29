@@ -149,8 +149,14 @@
                 { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
                   "extract": {
                     "focus": ["任务边界与涉及文件"],
-                    "method": "按任务组织文件级设计",
+                    "method": "作为人类可读计划视图；任务 DAG、taskId、specRefs、designRefs 以 plan.json 为准",
                     "degrade": "无 PLAN 时按 specs 能力组织设计"
+                  } },
+                { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
+                  "extract": {
+                    "focus": ["tasks[].id/status/deps/specRefs/designRefs/validationCommands/expectedFiles"],
+                    "method": "优先按 plan.json 的任务 DAG 与引用关系细化文件级设计；PLAN.md 只作人类摘要参考",
+                    "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能只依赖 PLAN.md 推进详细设计"
                   } }
               ],
               "outputs": [
@@ -412,7 +418,7 @@
         "group": "Dev",
         "skill": "autodev-reviewer",
         "order": 60,
-        "description": "评审代码实现是否满足规格 \n 产物：REQUIREMENTS_EVAL.md（需求实现评审报告：实现对规格的覆盖结论与发现项）",
+        "description": "评审代码实现是否满足规格 \n 产物：REQUIREMENTS_EVAL.md（人类可读评审报告）、REVIEW_FINDINGS.json（结构化评审发现机器事实源）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-reviewer", "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。", "dialogTips": "当前阶段：需求实现评审。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-reviewer", "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。", "dialogTips": "当前阶段：需求实现评审。" } },
@@ -477,7 +483,7 @@
         "group": "Dev",
         "skill": "autodev-utest",
         "order": 70,
-        "description": "单元测试生成、验证与最小修复 \n 产物：UNIT_TEST_REPORT.md（单元测试报告：用例结果、覆盖与风险）、test-output.log（单测运行原始输出日志）",
+        "description": "单元测试生成、验证与最小修复 \n 产物：UNIT_TEST_REPORT.md（人类可读单测报告）、UNIT_TEST_RESULT.json（结构化单测结果机器事实源）、test-output.log（单测运行原始输出日志）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } },
@@ -531,8 +537,14 @@
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true,
               "extract": {
                 "focus": ["评审结论与发现项", "风险点"],
-                "method": "针对评审发现的风险点优先补强测试",
+                "method": "作为评审发现的人类叙述参考；结构化发现以 REVIEW_FINDINGS.json 为机器事实源",
                 "degrade": "无评审报告时按 specs 覆盖优先级安排测试"
+              } },
+            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": false,
+              "extract": {
+                "focus": ["findings[].taskId/specRefs/evidenceIds/severity/message/suggestedCheckpoint"],
+                "method": "优先读取 REVIEW_FINDINGS.json 的结构化 findings，并据此补强高风险测试覆盖；REQUIREMENTS_EVAL.md 只作人类叙述补充",
+                "degrade": "无 REVIEW_FINDINGS.json 时以 REQUIREMENTS_EVAL.md 降级提取风险点，并在测试报告中标注机器事实源缺失"
               } }
           ],
           "outputs": [
@@ -550,7 +562,7 @@
         "group": "Dev",
         "skill": "autodev-e2e",
         "order": 80,
-        "description": "端到端测试 \n 产物：E2E_TEST_CASES.yaml（E2E 测试用例：步骤与断言定义）、E2E_REPORT.md（E2E 测试报告：执行结论与失败项）、e2e-run.log（E2E 运行原始日志）",
+        "description": "端到端测试 \n 产物：E2E_TEST_CASES.yaml（E2E 测试用例：步骤与断言定义）、E2E_REPORT.md（人类可读 E2E 报告）、E2E_RESULT.json（结构化 E2E 结果机器事实源）、e2e-run.log（E2E 运行原始日志）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
@@ -604,14 +616,26 @@
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true,
               "extract": {
                 "focus": ["评审发现的风险与薄弱点"],
-                "method": "优先覆盖评审标记的高风险链路",
+                "method": "作为评审发现的人类叙述参考；结构化发现以 REVIEW_FINDINGS.json 为机器事实源",
                 "degrade": "无评审报告时按 specs 场景优先级覆盖"
+              } },
+            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": false,
+              "extract": {
+                "focus": ["findings[].scenarioRef/specRefs/evidenceIds/severity/message/suggestedCheckpoint"],
+                "method": "优先读取 REVIEW_FINDINGS.json 的结构化 findings，决定 E2E 高风险链路覆盖；REQUIREMENTS_EVAL.md 只作人类叙述补充",
+                "degrade": "无 REVIEW_FINDINGS.json 时以 REQUIREMENTS_EVAL.md 降级提取风险点"
               } },
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true,
               "extract": {
                 "focus": ["单测覆盖结论与未覆盖区域"],
-                "method": "E2E 聚焦单测未覆盖的集成与主链路",
+                "method": "作为单测结果的人类叙述参考；结构化 verdict/scenarioCoverage 以 UNIT_TEST_RESULT.json 为机器事实源",
                 "degrade": "无单测报告时按全量主链路覆盖"
+              } },
+            { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": false,
+              "extract": {
+                "focus": ["verdict", "scenarioCoverage", "targets[].taskId/specRefs/evidenceIds/result/command"],
+                "method": "优先读取 UNIT_TEST_RESULT.json 的 verdict、scenarioCoverage 与 target 结果，决定 E2E 覆盖缺口；UNIT_TEST_REPORT.md 只作人类叙述补充",
+                "degrade": "无 UNIT_TEST_RESULT.json 时以 UNIT_TEST_REPORT.md 降级判断单测覆盖缺口"
               } },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
@@ -637,7 +661,7 @@
         "group": "Dev",
         "skill": "autodev-verify",
         "order": 90,
-        "description": "验收汇总 \n 产物：VERIFY_REPORT.md（验收报告：逐项行为验收汇总与最终结论）",
+        "description": "验收汇总 \n 产物：VERIFY_REPORT.md（人类可读验收报告）、VERIFY_DECISION.json（结构化验收决策机器事实源）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-verify", "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。", "dialogTips": "当前阶段：验收汇总。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-verify", "userMessage": "请使用 /autodev-verify 继续推进当前 Feature。", "dialogTips": "当前阶段：验收汇总。" } },
@@ -682,11 +706,23 @@
                 "method": "作为最终验收证据事实源；verify 只追加汇总 evidence，不截断、不重写",
                 "degrade": "缺失时 VERIFY_REPORT.md 必须标注证据流缺失并不能给出完整通过结论"
               } },
+            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": false,
+              "extract": {
+                "focus": ["findings[].scenarioRef/specRefs/evidenceIds/severity/message/suggestedCheckpoint"],
+                "method": "读取 REVIEW_FINDINGS.json 的结构化 findings，纳入最终风险和回流判断；评审 Markdown 不是 verify 的机器事实源",
+                "degrade": "缺失时跳过结构化评审发现，只按测试和证据事实源汇总验收"
+              } },
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true,
               "extract": {
                 "focus": ["verdict 与未覆盖风险"],
-                "method": "提取测试结论纳入验收汇总",
+                "method": "作为单测结果的人类叙述参考；结构化 verdict/scenarioCoverage 以 UNIT_TEST_RESULT.json 为机器事实源",
                 "degrade": "缺失时在验收报告中记为缺项"
+              } },
+            { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": false,
+              "extract": {
+                "focus": ["verdict", "scenarioCoverage", "targets[].taskId/specRefs/evidenceIds/result/command"],
+                "method": "优先读取 UNIT_TEST_RESULT.json 的 verdict、scenarioCoverage 与 target 结果生成验收矩阵；UNIT_TEST_REPORT.md 只作人类叙述补充",
+                "degrade": "无 UNIT_TEST_RESULT.json 时以 UNIT_TEST_REPORT.md 降级汇总单测结论，并标注机器事实源缺失"
               } },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
@@ -703,8 +739,14 @@
             { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true,
               "extract": {
                 "focus": ["verdict 与失败项"],
-                "method": "提取 E2E 结论纳入验收汇总",
+                "method": "作为 E2E 结果的人类叙述参考；结构化 verdict/scenarioCoverage 以 E2E_RESULT.json 为机器事实源",
                 "degrade": "缺失时在验收报告中记为缺项"
+              } },
+            { "id": "e2e_result_json", "label": "结构化 E2E 结果", "artifactType": "json", "path": "E2E_RESULT.json", "required": false,
+              "extract": {
+                "focus": ["scenarioCoverage", "cases[].taskId/specRefs/evidenceIds/verdict/executionMode"],
+                "method": "优先读取 E2E_RESULT.json 的 scenarioCoverage 与 case verdict 生成验收矩阵；E2E_REPORT.md 只作人类叙述补充",
+                "degrade": "无 E2E_RESULT.json 时以 E2E_REPORT.md 降级汇总 E2E 结论，并标注机器事实源缺失"
               } },
             { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true,
               "extract": {
@@ -746,8 +788,14 @@
             { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true,
               "extract": {
                 "focus": ["验收 verdict 与遗留风险", "交付物清单"],
-                "method": "确认验收通过后再准备流水线与 PR；遗留风险写入 PR 描述",
+                "method": "作为验收的人类叙述参考；是否可进入流水线以 VERIFY_DECISION.json 的 verdict/nextCheckpoint 为机器事实源",
                 "degrade": "无验收报告时基于代码 diff 与可用阶段报告整理交付说明，并标注验收缺项"
+              } },
+            { "id": "verify_decision_json", "label": "结构化验收决策", "artifactType": "json", "path": "VERIFY_DECISION.json", "required": false,
+              "extract": {
+                "focus": ["verdict", "nextCheckpoint", "passedScenarioRefs", "failedScenarioRefs", "manualVerificationRefs", "missingScenarioRefs", "evidenceIds"],
+                "method": "读取 VERIFY_DECISION.json 的 verdict/nextCheckpoint 判断是否可进入 CI/CD，并把失败、人工验证或缺失场景写入交付风险",
+                "degrade": "无 VERIFY_DECISION.json 时以 VERIFY_REPORT.md 降级整理交付说明，并标注验收机器事实源缺失"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {

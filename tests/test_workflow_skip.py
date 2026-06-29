@@ -121,13 +121,14 @@ class SkipCompileTests(unittest.TestCase):
         self.assertNotIn("unit_test_in_progress", effective["workflow"]["checkpoints"]["stageLabels"])
 
         dropped = effective["workflowDroppedInputs"]
-        self.assertEqual(dropped["dev.e2e"], ["UNIT_TEST_REPORT.md", "test-output.log"])
-        self.assertEqual(dropped["dev.verify"], ["UNIT_TEST_REPORT.md", "test-output.log"])
+        self.assertEqual(dropped["dev.e2e"], ["UNIT_TEST_REPORT.md", "UNIT_TEST_RESULT.json", "test-output.log"])
+        self.assertEqual(dropped["dev.verify"], ["UNIT_TEST_REPORT.md", "UNIT_TEST_RESULT.json", "test-output.log"])
         self.assertEqual(effective["workflowSkippedNodes"], ["dev.utest"])
 
         # The skipped producer's artifacts vanish from downstream bundles.
         e2e_input_paths = [artifact["path"] for artifact in by_id["dev.e2e"]["artifacts"]["inputs"]]
         self.assertNotIn("UNIT_TEST_REPORT.md", e2e_input_paths)
+        self.assertNotIn("UNIT_TEST_RESULT.json", e2e_input_paths)
         self.assertNotIn("test-output.log", e2e_input_paths)
         self.assertIn("REQUIREMENTS_EVAL.md", e2e_input_paths)
 
@@ -241,6 +242,7 @@ class SkipContractsTests(unittest.TestCase):
         self.assertNotIn("UNIT_TEST_REPORT.md", e2e.required_inputs)
         # Dropped inputs leave the bundle entirely.
         self.assertNotIn("UNIT_TEST_REPORT.md", [artifact.path for artifact in e2e.inputs])
+        self.assertNotIn("UNIT_TEST_RESULT.json", [artifact.path for artifact in e2e.inputs])
         self.assertNotIn("test-output.log", [artifact.path for artifact in e2e.inputs])
 
     def test_contract_for_skipped_skill_reports_skip(self) -> None:

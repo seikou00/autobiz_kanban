@@ -1,6 +1,6 @@
 ---
 name: autodev-verify
-description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作。默认由当前会话内联执行。
+description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的结构化单测、E2E 结果，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md / VERIFY_DECISION.json 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作。默认由当前会话内联执行。
 version: v1.1.1604
 ---
 
@@ -33,7 +33,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature 
 
 本 skill 默认且只能由当前会话内联执行：
 
-- 当前会话直接读取 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md`、`e2e-run.log`、`proposal.md`、`specs/**/*.md`、`design.md`，生成 `VERIFY_REPORT.md` 并做最终分支决策。
+- 当前会话直接读取 Source Bundle 中的结构化事实源，优先使用 `UNIT_TEST_RESULT.json`、`E2E_RESULT.json`、`REVIEW_FINDINGS.json`、`evidence/EVIDENCE.jsonl` 与 `plan.json`，Markdown 报告只做人类叙述补充，生成 `VERIFY_REPORT.md` / `VERIFY_DECISION.json` 并做最终分支决策。
 - 不得把验收汇总或分支决策委派给下级 agent或子agent。
 
 本 skill 负责记录失败事实、问题来源和建议回流阶段，不默认把问题绑定回 Biz。
@@ -105,36 +105,36 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ---
 
-## Step 4: 读取单测与 E2E 报告（证据源，不执行命令）
+## Step 4: 读取单测与 E2E 结构化结果（证据源，不执行命令）
 
 > ✋ **本步骤严格只读。** 不得运行 `npm test` / `pytest` / `mvn test` / Playwright 等任何测试命令，不得启动任何服务，不得再生成新的测试代码。所有测试证据来自上游阶段产物。
 
 **证据文件（以 bundle 为准；bundle 未列出的证据文件不读取，按 Step 3 的约定在报告中标注所属阶段状态）：**
 
-1. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md` — 上游阶段技能 `autodev-utest` 产出的结构化单测报告。
-2. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log` — 单测执行的原始日志（通过/失败数量、失败堆栈；缺失时记录）。
-3. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml` — 上游阶段技能 `autodev-e2e` 产出的结构化 E2E 用例。
-4. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_REPORT.md` — E2E 结果、失败归因、修复尝试与重跑摘要。
-5. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/e2e-run.log` — E2E 原始运行日志、服务/鉴权/UI 执行证据。
-6. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` — append-only 证据事实流；若存在，优先用其中的 taskId/specRefs/designRefs/validation.result 建立验收证据回链。
+1. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json` — 上游单测结构化 verdict、scenarioCoverage 与 target 结果；在场时作为单测机器事实源。
+2. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_RESULT.json` — 上游 E2E 结构化 scenarioCoverage 与 case verdict；在场时作为 E2E 机器事实源。
+3. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json` — 结构化评审发现；在场时纳入风险和建议回流判断。
+4. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` — append-only 证据事实流；若存在，优先用其中的 taskId/specRefs/designRefs/validation.result 建立验收证据回链。
+5. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md` / `E2E_REPORT.md` / `test-output.log` / `e2e-run.log` — 人类叙述与原始日志补充；只有对应 JSON 缺失时才降级用于汇总，并必须在报告中标注机器事实源缺失。
+6. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml` — 上游阶段技能 `autodev-e2e` 产出的结构化 E2E 用例。
 
-**从 `UNIT_TEST_REPORT.md` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
+**从 `UNIT_TEST_RESULT.json` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
 
-- 每个 Requirement / Scenario 对应的测试方法名 / 文件路径 / 执行结果（PASS/FAIL/SKIP）
-- 每个 specs/design 契约验证项 `Cn` 对应的验证结果（如报告涵盖）
-- 整体通过率（P/M、P/K）
+- `verdict`、`scenarioCoverage`、`targets[].taskId/specRefs/evidenceIds/result/command`
+- 每个 Requirement / Scenario 对应的结构化裁定与 evidenceIds
+- 顶层 verdict 与失败、人工验证、缺失场景集合
 
-**从 `E2E_REPORT.md` 与 `e2e-run.log` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
+**从 `E2E_RESULT.json` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
 
-- 每个 E2E 用例的执行结果（PASS/FAIL/BLOCKED/SKIP）
-- 服务启动证据、鉴权处理证据、UI Execution Evidence / UI执行证据
-- 失败归因、问题来源、建议回流阶段
-- 如执行过代码修复，轻量单测命令、轻量单测结果、E2E 重跑命令与重跑结果
+- `scenarioCoverage`、`cases[].taskId/specRefs/evidenceIds/verdict/executionMode`
+- 每个 E2E 用例的结构化执行结果（PASS/FAIL/BLOCKED/SKIP）
+- 失败归因、问题来源、建议回流阶段（若 JSON 未携带，才从 Markdown/log 补充）
 
-**从 test-output.log 中抽取：**
+**从 Markdown 报告与日志中补充：**
 
-- 通过测试数、失败测试数、跳过数
-- 每个失败测试的错误摘要（首行 + 堆栈关键行）
+- 只补充人类叙述、错误摘要、日志尾部和定位上下文。
+- 不从 Markdown 文本重新推导已经存在于 JSON 中的 verdict / scenarioCoverage。
+- 对应 JSON 缺失时允许降级读 Markdown/log，但必须在 `VERIFY_REPORT.md` 与 `VERIFY_DECISION.json` 中标注机器事实源缺失或人工验证风险。
 
 **映射规则：**
 
@@ -144,12 +144,13 @@ specs/[capability]/spec.md / Requirement / Scenario
 | FAIL / BLOCKED（有明确失败或阻断证据） | ✗ 失败 |
 | SKIP / NO_TEST（该 Requirement / Scenario 无自动化测试） | ⚠ 需人工验证 |
 
-> 若上游报告存在但格式与约定不符（找不到结论字段等），**不要尝试用测试命令补齐**，直接在报告中标注"报告格式异常"并将相关项置为 "⚠ 需人工验证"。
+> 若上游 JSON 存在但格式与约定不符，**不要尝试用测试命令补齐**，直接在报告中标注"结构化结果格式异常"并将相关项置为 "⚠ 需人工验证"。Markdown 报告不得覆盖已校验 JSON 的结构化裁决。
 
 ### ⛔ 步骤完成检查 — Step 4
-- [ ] 已读取 `UNIT_TEST_REPORT.md`（若存在）
+- [ ] 已读取 `UNIT_TEST_RESULT.json`（若存在；缺失已按 degrade 标注）
 - [ ] 已读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`（若存在；缺失已记录）
-- [ ] 已读取 `E2E_TEST_CASES.yaml`、`E2E_REPORT.md` 与 `e2e-run.log`
+- [ ] 已读取 `E2E_RESULT.json`（若存在；缺失已按 degrade 标注）
+- [ ] 已读取 `E2E_TEST_CASES.yaml`、`E2E_REPORT.md` 与 `e2e-run.log`（作为补充）
 - [ ] 已为每个步骤建立 PASS / FAIL / 需人工验证 的裁定
 - [ ] 未执行任何测试命令、未启动任何本地服务、未生成任何测试文件
 
@@ -157,7 +158,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ## Step 5: 生成 VERIFY_REPORT.md（纯汇总）
 
-将裁定结果写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md`。**不得**在 VERIFY_REPORT.md 中夹带新的命令输出、新的测试代码、新的 HTTP 响应证据——这些应由 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 与 `e2e-run.log` 提供，VERIFY_REPORT.md 只做"映射 + 归档"。
+将裁定结果写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md`。**不得**在 VERIFY_REPORT.md 中夹带新的命令输出、新的测试代码、新的 HTTP 响应证据——结构化裁决来自 `UNIT_TEST_RESULT.json`、`E2E_RESULT.json` 与 `evidence/EVIDENCE.jsonl`，Markdown/log 只提供人类叙述与定位补充，VERIFY_REPORT.md 只做"映射 + 归档"。
 
 写入 `VERIFY_REPORT.md` 后，必须使用 `hooks/evidence_store.py append` 追加一条 verify 汇总 evidence，记录本阶段 verdict、引用的 evidenceIds、覆盖的 specRefs/designRefs。verify 阶段仍不得运行测试命令；这里追加的是汇总结论证据，不是新的测试执行证据。
 
@@ -186,8 +187,10 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 - **Feature:** {slug}
 - **验证时间:** [当前时间]
+- **上游单测结果 JSON:** ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json
 - **上游单测报告:** ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md
 - **上游单测日志:** ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log
+- **上游 E2E 结果 JSON:** ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_RESULT.json
 - **上游 E2E 报告:** ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_REPORT.md
 - **上游 E2E 日志:** ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/e2e-run.log
 
@@ -195,9 +198,9 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 | # | Specs Requirement / Scenario | 裁定 | 证据来源 |
 |---|---------|------|---------|
-| 1 | specs/[capability]/spec.md#REQ-001 / #SCN-001 | ✓ 通过 | UNIT_TEST_REPORT + E2E_REPORT |
-| 2 | specs/[capability]/spec.md#REQ-002 / #SCN-002 | ✗ 失败 | E2E_REPORT（FAIL: AssertionError ...） |
-| 3 | specs/[capability]/spec.md#REQ-003 / #SCN-003 | ⚠ 需人工验证 | 报告未覆盖（UI 类） |
+| 1 | specs/[capability]/spec.md#REQ-001 / #SCN-001 | ✓ 通过 | UNIT_TEST_RESULT + E2E_RESULT + ev_0001 |
+| 2 | specs/[capability]/spec.md#REQ-002 / #SCN-002 | ✗ 失败 | E2E_RESULT + ev_0002（摘要来自 E2E_REPORT/log） |
+| 3 | specs/[capability]/spec.md#REQ-003 / #SCN-003 | ⚠ 需人工验证 | scenarioCoverage=manual/missing |
 
 通过: N/M | 失败: K/M | 需人工验证: J/M
 
@@ -205,7 +208,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 | # | Contract Item | 裁定 | 证据来源 |
 |---|-----------|------|---------|
-| 1 | specs/[capability]/spec.md#REQ-001 / #SCN-001 / API-001 / DATA-001 | ✓ 通过 | UNIT_TEST_REPORT §C1 + E2E_REPORT §E2E-001 |
+| 1 | specs/[capability]/spec.md#REQ-001 / #SCN-001 / API-001 / DATA-001 | ✓ 通过 | UNIT_TEST_RESULT/E2E_RESULT + ev_0001 |
 
 或：本轮 `x-auto-no-http-api: true`，无 HTTP/API 契约验证项；`x-auto-no-sql: true`，无数据库变更验证项。
 
@@ -232,7 +235,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 ### ⛔ 步骤完成检查 — Step 5
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 已写入
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_DECISION.json` 已写入，且 `scenarioCoverage` 覆盖 specs 中全部 Scenario
-- [ ] 报告中每项都标注了证据来源（指向 UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log 的段落或说明为何需人工验证）
+- [ ] 报告中每项都标注了结构化证据来源（指向 UNIT_TEST_RESULT.json / E2E_RESULT.json / evidenceId，或说明为何需人工验证；Markdown/log 仅作补充）
 - [ ] 报告**不包含**本 skill 自行执行的测试命令输出或服务启动日志
 - [ ] 报告已展示给用户
 
@@ -296,7 +299,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-在 `VERIFY_REPORT.md` 的失败详情中追加：
+在 `VERIFY_REPORT.md` 的失败详情中追加，并确保同一失败事实已写入 `VERIFY_DECISION.json` / `FIX_REQUEST.json`：
 
 ```markdown
 ## 已知问题
@@ -310,12 +313,12 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 ## ✗ 需要修复
 
-K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log）。问题已记录到 VERIFY_REPORT.md。
+K 个 specs 行为契约未通过（来源：UNIT_TEST_RESULT.json / E2E_RESULT.json / evidence/EVIDENCE.jsonl，Markdown/log 仅作摘要补充）。问题已记录到 VERIFY_DECISION.json、FIX_REQUEST.json 与 VERIFY_REPORT.md。
 
-→ 根路由器将读取 VERIFY_REPORT.md 中记录的问题来源与建议回流阶段，再决定回到 Biz / Plan / Code / Ops
+→ 根路由器将读取 FIX_REQUEST.json 与 VERIFY_DECISION.json 中的结构化问题来源与建议回流阶段，再决定回到 Biz / Plan / Code / Ops
 ```
 
-**Skill 完成。** 下一步由路由器决定：`needs_fix` → 按 `VERIFY_REPORT.md` 中的建议回流阶段处理。
+**Skill 完成。** 下一步由路由器决定：`needs_fix` → 按 `FIX_REQUEST.json` 中的建议回流阶段处理。
 
 ---
 
@@ -340,7 +343,7 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 
 ### ⛔ 步骤完成检查 — Step 6
 - [ ] 通过：验收摘要已写入 `VERIFY_REPORT.md`
-- [ ] 失败：已知问题已更新，失败详情已记录（引用 UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log 段落）
+- [ ] 失败：已知问题已更新，失败详情已记录（引用 UNIT_TEST_RESULT.json / E2E_RESULT.json / evidenceId；Markdown/log 只作摘要补充）
 
 ---
 
@@ -349,7 +352,7 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 Skill 完成前必须满足：
 
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 已生成
-- [ ] 报告中每项裁定都指向 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 或 `e2e-run.log` 的证据段落，或标注"需人工验证"
+- [ ] 报告中每项裁定都指向 `UNIT_TEST_RESULT.json`、`E2E_RESULT.json` 或 `evidence/EVIDENCE.jsonl` 的 evidenceId，或标注"需人工验证"
 - [ ] `VERIFY_DECISION.json` 已写入，JSON 是下游机器主入口
 - [ ] 刷新后的 `CHECKPOINT` = `verify_done` / `needs_fix`（或路径 C 等待）
 - [ ] 验收摘要已写入报告（通过时）
@@ -364,7 +367,7 @@ Skill 完成前必须满足：
 本 skill 是**纯只读 + 汇总**操作：
 
 1. 刷新后的 `CHECKPOINT` 停留在 `verify_in_progress`
-2. 重新读取 UNIT_TEST_REPORT.md、test-output.log、E2E_REPORT.md 和 e2e-run.log，重新生成 VERIFY_REPORT.md（允许覆盖）
+2. 重新读取 UNIT_TEST_RESULT.json、E2E_RESULT.json、REVIEW_FINDINGS.json、evidence/EVIDENCE.jsonl，并按需补充读取 UNIT_TEST_REPORT.md、test-output.log、E2E_REPORT.md 和 e2e-run.log，重新生成 VERIFY_REPORT.md / VERIFY_DECISION.json（允许覆盖）
 3. 重新做分支决策
 
 恢复完全幂等：不会破坏业务代码、不会重复启动服务、不会重复写测试。
