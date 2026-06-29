@@ -1,4 +1,4 @@
-"""Tests for hooks/render_session_context.py: selected units -> agentmdPrompt (v2)."""
+"""Tests for hooks/render_session_context.py: selected units -> sessionContext (v2)."""
 
 from __future__ import annotations
 
@@ -96,14 +96,14 @@ class ParseSelectedTest(unittest.TestCase):
 class RenderShapeTest(unittest.TestCase):
     def test_output_uses_new_fields_only(self):
         res = render([], plugin_root=_plugin_root())
-        self.assertIn("agentmdPrompt", res)
+        self.assertIn("sessionContext", res)
         self.assertIn("agentmdLoadStatus", res)
         self.assertNotIn("inlineSystemPrompt", res)  # 破坏性切换，不留旧字段
 
     def test_empty_selection_is_noop(self):
         res = render([], plugin_root=_plugin_root())
         self.assertTrue(res["ok"])
-        self.assertEqual(res["agentmdPrompt"], "")
+        self.assertEqual(res["sessionContext"], "")
         self.assertEqual(res["agentmdLoadStatus"], [])
 
 
@@ -114,18 +114,23 @@ class RenderRemoteTest(unittest.TestCase):
             plugin_root=_plugin_root(),
         )
         self.assertTrue(res["ok"])
-        prompt = res["agentmdPrompt"]
+        prompt = res["sessionContext"]
         # ① 适用范围
         self.assertIn("# 适用范围", prompt)
         self.assertIn("外联出站服务", prompt)
         self.assertIn("/repo/out", prompt)
         self.assertIn("LF39.18_Outservice", prompt)
-        # ② 系统级 + ③ 单元级（Markdown 标题 + 锚点，不再用 ===== 围栏）
-        self.assertIn("# LF39 系统级", prompt)
+        # ② 系统级 + ③ 单元级（三个层次各用 XML 标签外包，不再用 ## <a id> / ===== 围栏）
+        self.assertIn("# LF39 系统级", prompt)  # 被嵌入 md 自带标题，现包在标签内
         self.assertIn("# LF39.18 单元", prompt)
         self.assertNotIn("=====", prompt)
-        self.assertIn('## <a id="unit-LF39.18_Outservice"></a>', prompt)
-        self.assertIn("[LF39.18_Outservice](#unit-LF39.18_Outservice)", prompt)  # 锚点链接
+        self.assertIn("<applicable_scope>", prompt)
+        self.assertIn("</applicable_scope>", prompt)
+        self.assertIn('<system_agents id="sys-LF39"', prompt)
+        self.assertIn("</system_agents>", prompt)
+        self.assertIn('<unit_description id="unit-LF39.18_Outservice"', prompt)
+        self.assertIn("</unit_description>", prompt)
+        self.assertIn("[LF39.18_Outservice](#unit-LF39.18_Outservice)", prompt)  # 锚点链接仍指向 id 属性
         # 两条加载状态，均 remote 成功
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 2)
@@ -141,9 +146,9 @@ class RenderRemoteTest(unittest.TestCase):
             ],
             plugin_root=_plugin_root(),
         )
-        prompt = res["agentmdPrompt"]
+        prompt = res["sessionContext"]
         # 正文系统段只拼一次（按 systemId 去重）
-        self.assertEqual(prompt.count('<a id="sys-LF39">'), 1)
+        self.assertEqual(prompt.count('<system_agents id="sys-LF39"'), 1)
         # serviceUnitId 锚点：有单元段→指向单元段；无单元段→回退指向系统段
         self.assertIn("[LF39.18_Outservice](#unit-LF39.18_Outservice)", prompt)
         self.assertIn("[LF39.20_Inservice](#sys-LF39)", prompt)
@@ -165,9 +170,9 @@ class RenderRemoteTest(unittest.TestCase):
             ],
             plugin_root=_plugin_root(),
         )
-        prompt = res["agentmdPrompt"]
-        self.assertIn('<a id="sys-LF39">', prompt)
-        self.assertIn('<a id="sys-LA64">', prompt)
+        prompt = res["sessionContext"]
+        self.assertIn('<system_agents id="sys-LF39"', prompt)
+        self.assertIn('<system_agents id="sys-LA64"', prompt)
         # LA64.05 无独立 description.md → 锚点回退到系统段
         self.assertIn("[LA64.05_UEXgateway](#sys-LA64)", prompt)
 
@@ -183,7 +188,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
         sources = sorted((s["source"], s["loaded"]) for s in status)
         # 系统级 remote 成功 + 单元级 remote 缺失→local 兜底成功
         self.assertEqual(sources, [("local", True), ("remote", True)])
-        self.assertIn("# 本地知识库", res["agentmdPrompt"])
+        self.assertIn("# 本地知识库", res["sessionContext"])
 
     def test_unknown_unit_local_loaded(self):
         local = _local_repo()
@@ -197,8 +202,8 @@ class RenderLocalFallbackTest(unittest.TestCase):
         self.assertTrue(status[0]["loaded"])
         self.assertEqual(status[0]["source"], "local")
         self.assertTrue(status[0]["path"].endswith("AGENTS.md"))
-        self.assertIn("[GHOST.1](#unit-GHOST.1)", res["agentmdPrompt"])  # 锚点指向其本地段
-        self.assertIn("# 本地知识库", res["agentmdPrompt"])
+        self.assertIn("[GHOST.1](#unit-GHOST.1)", res["sessionContext"])  # 锚点指向其本地段
+        self.assertIn("# 本地知识库", res["sessionContext"])
 
     def test_unknown_unit_local_missing_reports_not_loaded(self):
         res = render(
@@ -212,7 +217,31 @@ class RenderLocalFallbackTest(unittest.TestCase):
         self.assertEqual(status[0]["source"], "local")
         self.assertEqual(status[0]["message"], "file not exist")
         self.assertIn("缺 1", res["message"])
-        self.assertNotIn("#unit-GHOST.1", res["agentmdPrompt"])  # 无内容→不加锚点链接
+        self.assertNotIn("#unit-GHOST.1", res["sessionContext"])  # 无内容→不加锚点链接
+
+    def test_matched_unit_both_levels_fallback_local_reports_once(self):
+        # 命中清单的单元：系统级 AGENTS.md 与单元级 description.md 远端都缺，
+        # 二者 local 兜底同指 <localRepoPath>/AGENTS.md（同一文件）→ 只报一条状态。
+        local = _local_repo()
+        res = render(
+            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            plugin_root=_plugin_root(write_remote=()),  # 无任何远端文件
+        )
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(len(status), 1)  # 不再重复两条
+        self.assertTrue(status[0]["loaded"])
+        self.assertEqual(status[0]["source"], "local")
+
+    def test_matched_unit_both_levels_fallback_local_missing_reports_once(self):
+        # 同上但 local AGENTS.md 也不存在：两条同路径的 "file not exist" 去重为一条。
+        res = render(
+            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/no/such/dir"}],
+            plugin_root=_plugin_root(write_remote=()),
+        )
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(len(status), 1)
+        self.assertFalse(status[0]["loaded"])
+        self.assertIn("缺 1", res["message"])
 
     def test_manifest_absent_degrades_to_local(self):
         local = _local_repo()
@@ -223,8 +252,8 @@ class RenderLocalFallbackTest(unittest.TestCase):
             plugin_root=tmp,
         )
         self.assertTrue(res["ok"])
-        self.assertIn("LF39.18_Outservice", res["agentmdPrompt"])  # 适用范围仍绑定
-        self.assertIn("# 本地知识库", res["agentmdPrompt"])  # 走 local 兜底
+        self.assertIn("LF39.18_Outservice", res["sessionContext"])  # 适用范围仍绑定
+        self.assertIn("# 本地知识库", res["sessionContext"])  # 走 local 兜底
         self.assertEqual(res["agentmdLoadStatus"][0]["source"], "local")
 
 
