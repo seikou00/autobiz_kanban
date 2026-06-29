@@ -124,12 +124,12 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertIn("# LF39 系统级", prompt)  # 被嵌入 md 自带标题，现包在标签内
         self.assertIn("# LF39.18 单元", prompt)
         self.assertNotIn("=====", prompt)
-        self.assertIn("<applicable_scope>", prompt)
-        self.assertIn("</applicable_scope>", prompt)
-        self.assertIn('<system_agents id="sys-LF39"', prompt)
-        self.assertIn("</system_agents>", prompt)
-        self.assertIn('<unit_description id="unit-LF39.18_Outservice"', prompt)
-        self.assertIn("</unit_description>", prompt)
+        self.assertIn("`<SCOPE>`", prompt)
+        self.assertIn("`</SCOPE>`", prompt)
+        self.assertIn('`<SYSTEM id="sys-LF39"', prompt)
+        self.assertIn("`</SYSTEM>`", prompt)
+        self.assertIn('`<UNIT id="unit-LF39.18_Outservice"', prompt)
+        self.assertIn("`</UNIT>`", prompt)
         self.assertIn("[LF39.18_Outservice](#unit-LF39.18_Outservice)", prompt)  # 锚点链接仍指向 id 属性
         # agentmdLoadStatus 只反映单元级：仅一条（系统级不进状态），remote 成功
         status = res["agentmdLoadStatus"]
@@ -149,7 +149,7 @@ class RenderRemoteTest(unittest.TestCase):
         )
         prompt = res["sessionContext"]
         # 正文系统段只拼一次（按 systemId 去重）
-        self.assertEqual(prompt.count('<system_agents id="sys-LF39"'), 1)
+        self.assertEqual(prompt.count('`<SYSTEM id="sys-LF39"'), 1)
         # serviceUnitId 锚点：有单元段→指向单元段；无单元段→回退指向系统段
         self.assertIn("[LF39.18_Outservice](#unit-LF39.18_Outservice)", prompt)
         self.assertIn("[LF39.20_Inservice](#sys-LF39)", prompt)
@@ -162,6 +162,32 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertEqual(len(status), 1)  # 仅 LF39.18 单元级
         self.assertEqual(status[0]["serviceUnitId"], "LF39.18_Outservice")
 
+    def test_project_root_placeholder_replaced_system_only(self):
+        # 系统级（②）正文里的 {project_root} → <pluginPath>/sys/<systemId>；单元级（③）不替换。
+        tmp = Path(tempfile.mkdtemp())
+        sysd = tmp / "sys"
+        (sysd / "LF3905").mkdir(parents=True)
+        (sysd / "LF3918").mkdir(parents=True)
+        (sysd / "agents.manifest.json").write_text(
+            json.dumps(MANIFEST, ensure_ascii=False), encoding="utf-8"
+        )
+        (sysd / "LF3905" / "AGENTS.md").write_text(
+            "# 系统级\n后端入口: {project_root}/src/\n", encoding="utf-8"
+        )
+        (sysd / "LF3918" / "descition.md").write_text(
+            "# 单元\n配置: {project_root}/conf\n", encoding="utf-8"
+        )
+        res = render(
+            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=tmp,
+        )
+        expected = str(sysd / "LF39")  # systemId 是 LF39（不是路径段 LF3905）
+        prompt = res["sessionContext"]
+        # 系统级已替换
+        self.assertIn(f"后端入口: {expected}/src/", prompt)
+        # 单元级占位符原样保留
+        self.assertIn("配置: {project_root}/conf", prompt)
+
     def test_multiple_systems_both_injected(self):
         res = render(
             [
@@ -171,10 +197,28 @@ class RenderRemoteTest(unittest.TestCase):
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
-        self.assertIn('<system_agents id="sys-LF39"', prompt)
-        self.assertIn('<system_agents id="sys-LA64"', prompt)
+        self.assertIn('`<SYSTEM id="sys-LF39"', prompt)
+        self.assertIn('`<SYSTEM id="sys-LA64"', prompt)
         # LA64.05 无独立 description.md → 锚点回退到系统段
         self.assertIn("[LA64.05_UEXgateway](#sys-LA64)", prompt)
+
+    def test_tags_are_backtick_wrapped_and_blank_line_separated(self):
+        # 每个标签用反引号包成 inline code、前后留空行：渲染时各自独占一个 <p><code> 块，
+        # 字符原样保留、块间换行；否则裸标签会被当原始 HTML 折叠到一行 / 整块不解析。
+        res = render(
+            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        # 反引号包裹 + 开标签后、闭标签前都有空行
+        self.assertIn("`<SCOPE>`\n\n", prompt)
+        self.assertIn("\n\n`</SCOPE>`", prompt)
+        self.assertRegex(prompt, r'`<SYSTEM id="sys-LF39"[^`]*>`\n\n')
+        self.assertIn("\n\n`</SYSTEM>`", prompt)
+        self.assertRegex(prompt, r'`<UNIT id="unit-LF39.18_Outservice"[^`]*>`\n\n')
+        self.assertIn("\n\n`</UNIT>`", prompt)
+        # 标签不会与紧随的 Markdown 标题直接相连（杜绝 "<SCOPE> ## 适用范围" 同块）
+        self.assertNotIn("`<SCOPE>`\n## 适用范围", prompt)
 
 
 class RenderLocalFallbackTest(unittest.TestCase):
