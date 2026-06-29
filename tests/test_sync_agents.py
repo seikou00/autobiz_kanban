@@ -114,7 +114,7 @@ class SyncRepoEndToEndTest(unittest.TestCase):
         _git(["add", "-A"], src)
         _git(["commit", "-m", "add LA64"], src)
 
-        # 第二次：走更新分支（.git 已存在）
+        # 第二次：删旧目录后重新克隆，拿到最新提交
         info2 = sync_agents.sync_repo(str(src), "main", dest)
         self.assertNotEqual(info2["commit"], info["commit"])
         self.assertTrue((dest / "LA64" / "AGENTS.md").is_file())
@@ -123,14 +123,17 @@ class SyncRepoEndToEndTest(unittest.TestCase):
             payload2["supported_service_units"], ["LF39.18_Outservice", "LA64.05_UEXgateway"]
         )
 
-    def test_clone_into_nonempty_nongit_dir_fails(self):
+    def test_nonempty_nongit_dir_is_wiped_and_recloned(self):
+        # 旧的非 git 残留目录不再报错：整目录删掉后重新克隆。
         src = _make_source_repo()
         plugin_root = Path(tempfile.mkdtemp())
         dest = plugin_root / "sys"
         dest.mkdir()
         (dest / "stray.txt").write_text("x", encoding="utf-8")
-        with self.assertRaises(RuntimeError):
-            sync_agents.sync_repo(str(src), "main", dest)
+        info = sync_agents.sync_repo(str(src), "main", dest)
+        self.assertTrue(info["commit"])
+        self.assertFalse((dest / "stray.txt").exists())
+        self.assertTrue((dest / "agents.manifest.json").is_file())
 
 
 class WriteBoardConfigTest(unittest.TestCase):

@@ -10,8 +10,8 @@ board_config.json 注册::
 
     "agentsRepo": { "url": "https://git.example.com/agents-kb.git", "ref": "main" }
 
-行为：克隆/更新到 ``<pluginPath>/sys/``（已 .gitignore）；仓库内含
-``agents.manifest.json`` 与 ``<systemId>/AGENTS.md``。随后把清单整形为 stdout JSON。
+行为：每次都删掉旧 ``<pluginPath>/sys/``（已 .gitignore）再重新克隆，始终拿到远端
+最新内容；仓库内含 ``agents.manifest.json`` 与 ``<systemId>/AGENTS.md``。随后把清单整形为 stdout JSON。
 
 输出（stdout，宿主据此把 supported_service_units 合并进 board.json）::
 
@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -93,30 +94,26 @@ def _git_error(proc: subprocess.CompletedProcess, action: str) -> str:
 
 
 def sync_repo(url: str, ref: str, dest: Path) -> dict:
-    """克隆或更新仓库到 dest；返回 {commit} 或抛 RuntimeError(消息)。"""
-    git_dir = dest / ".git"
-    if git_dir.is_dir():
-        fetch = _run_git(["fetch", "--depth", "1", "origin", ref], cwd=dest)
-        if fetch.returncode != 0:
-            raise RuntimeError(_git_error(fetch, f"更新 fetch origin/{ref}"))
-        reset = _run_git(["reset", "--hard", "FETCH_HEAD"], cwd=dest)
-        if reset.returncode != 0:
-            raise RuntimeError(_git_error(reset, "更新 reset --hard"))
-        # 清掉残留的旧系统目录/未跟踪文件，保持缓存与远端一致。
-        _run_git(["clean", "-fd"], cwd=dest)
-    else:
-        if dest.exists() and any(dest.iterdir()):
-            raise RuntimeError(f"缓存目录已存在且非 git 仓库，请手动清理后重试: {dest}")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        clone = _run_git(["clone", "--depth", "1", "--branch", ref, url, str(dest)])
-        if clone.returncode != 0:
-            # ref 可能是 commit/tag，--branch 不适用：退回普通 clone 再切换。
-            fallback = _run_git(["clone", "--depth", "1", url, str(dest)])
-            if fallback.returncode != 0:
-                raise RuntimeError(_git_error(fallback, "克隆"))
-            checkout = _run_git(["checkout", ref], cwd=dest)
-            if checkout.returncode != 0:
-                raise RuntimeError(_git_error(checkout, f"切换到 {ref}"))
+    """每次都删掉旧 ``sys/`` 再重新克隆到 dest；返回 {commit} 或抛 RuntimeError(消息)。
+
+    不做增量 fetch：无论 dest 之前是 git 仓库、残留的非 git 目录、还是不存在，
+    都先整目录删除再 clone。这样始终拿到远端最新内容，也避免「旧目录非 git」
+    之类的边角错误（简单、可预测）。
+    """
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    clone = _run_git(["clone", "--depth", "1", "--branch", ref, url, str(dest)])
+    if clone.returncode != 0:
+        # ref 可能是 commit/tag，--branch 不适用：退回普通 clone 再切换。
+        if dest.exists():
+            shutil.rmtree(dest)
+        fallback = _run_git(["clone", "--depth", "1", url, str(dest)])
+        if fallback.returncode != 0:
+            raise RuntimeError(_git_error(fallback, "克隆"))
+        checkout = _run_git(["checkout", ref], cwd=dest)
+        if checkout.returncode != 0:
+            raise RuntimeError(_git_error(checkout, f"切换到 {ref}"))
 
     rev = _run_git(["rev-parse", "HEAD"], cwd=dest)
     commit = rev.stdout.strip() if rev.returncode == 0 else ""
