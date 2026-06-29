@@ -131,14 +131,15 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertIn('<unit_description id="unit-LF39.18_Outservice"', prompt)
         self.assertIn("</unit_description>", prompt)
         self.assertIn("[LF39.18_Outservice](#unit-LF39.18_Outservice)", prompt)  # 锚点链接仍指向 id 属性
-        # 两条加载状态，均 remote 成功
+        # agentmdLoadStatus 只反映单元级：仅一条（系统级不进状态），remote 成功
         status = res["agentmdLoadStatus"]
-        self.assertEqual(len(status), 2)
-        self.assertTrue(all(s["loaded"] and s["source"] == "remote" for s in status))
-        paths = sorted(s["path"] for s in status)
-        self.assertEqual(paths, ["sys/LF3905/AGENTS.md", "sys/LF3918/descition.md"])
+        self.assertEqual(len(status), 1)
+        self.assertTrue(status[0]["loaded"] and status[0]["source"] == "remote")
+        self.assertEqual(status[0]["path"], "sys/LF3918/descition.md")
+        # 系统级文件不出现在状态里
+        self.assertFalse(any(s["path"] == "sys/LF3905/AGENTS.md" for s in status))
 
-    def test_two_units_same_system_system_md_recorded_and_pasted_once(self):
+    def test_two_units_same_system_system_md_pasted_once_not_in_status(self):
         res = render(
             [
                 {"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"},
@@ -155,12 +156,11 @@ class RenderRemoteTest(unittest.TestCase):
         # 两个单元都在适用范围
         self.assertIn("/repo/out", prompt)
         self.assertIn("/repo/in", prompt)
-        # B: 系统级文件状态只记一条；LF39.20 无独立 md 不产出条目
+        # agentmdLoadStatus 只反映单元级：系统级文件不进状态；LF39.20 无独立 md 不产出条目
         status = res["agentmdLoadStatus"]
-        system_entries = [s for s in status if s["path"] == "sys/LF3905/AGENTS.md"]
-        self.assertEqual(len(system_entries), 1)
-        self.assertEqual(system_entries[0]["serviceUnitId"], "LF39.18_Outservice")  # 首个被选中单元
-        self.assertEqual(len(status), 2)  # 系统级 + LF39.18 单元级
+        self.assertFalse(any(s["path"] == "sys/LF3905/AGENTS.md" for s in status))
+        self.assertEqual(len(status), 1)  # 仅 LF39.18 单元级
+        self.assertEqual(status[0]["serviceUnitId"], "LF39.18_Outservice")
 
     def test_multiple_systems_both_injected(self):
         res = render(
@@ -185,9 +185,11 @@ class RenderLocalFallbackTest(unittest.TestCase):
             plugin_root=_plugin_root(write_remote=("LF39.system",)),  # 仅系统级远端存在
         )
         status = res["agentmdLoadStatus"]
-        sources = sorted((s["source"], s["loaded"]) for s in status)
-        # 系统级 remote 成功 + 单元级 remote 缺失→local 兜底成功
-        self.assertEqual(sources, [("local", True), ("remote", True)])
+        # agentmdLoadStatus 只反映单元级：系统级 remote 成功仍不进状态；
+        # 单元级 remote 缺失→local 兜底成功
+        self.assertEqual(len(status), 1)
+        self.assertEqual((status[0]["source"], status[0]["loaded"]), ("local", True))
+        self.assertIn("# LF39 系统级", res["sessionContext"])  # 系统段仍被拼入正文
         self.assertIn("# 本地知识库", res["sessionContext"])
 
     def test_unknown_unit_local_loaded(self):
@@ -219,28 +221,30 @@ class RenderLocalFallbackTest(unittest.TestCase):
         self.assertIn("缺 1", res["message"])
         self.assertNotIn("#unit-GHOST.1", res["sessionContext"])  # 无内容→不加锚点链接
 
-    def test_matched_unit_both_levels_fallback_local_reports_once(self):
-        # 命中清单的单元：系统级 AGENTS.md 与单元级 description.md 远端都缺，
-        # 二者 local 兜底同指 <localRepoPath>/AGENTS.md（同一文件）→ 只报一条状态。
+    def test_system_not_in_status_only_unit_reported(self):
+        # 命中清单的单元：系统级 remote 缺失既不走 local 兜底、也不进 agentmdLoadStatus；
+        # 状态只反映单元级（remote 缺失→local 兜底成功）。
         local = _local_repo()
         res = render(
             [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
             plugin_root=_plugin_root(write_remote=()),  # 无任何远端文件
         )
         status = res["agentmdLoadStatus"]
-        self.assertEqual(len(status), 1)  # 不再重复两条
-        self.assertTrue(status[0]["loaded"])
+        self.assertEqual(len(status), 1)  # 只有单元级一条
         self.assertEqual(status[0]["source"], "local")
+        self.assertTrue(status[0]["loaded"])
+        # 没有任何 remote 来源（系统级）的状态条目
+        self.assertFalse(any(s["source"] == "remote" for s in status))
 
-    def test_matched_unit_both_levels_fallback_local_missing_reports_once(self):
-        # 同上但 local AGENTS.md 也不存在：两条同路径的 "file not exist" 去重为一条。
+    def test_system_and_unit_both_missing_reports_only_unit(self):
+        # 系统级 + 单元级 remote 都缺、local 也无：状态只剩单元级一条 local 未命中。
         res = render(
             [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/no/such/dir"}],
             plugin_root=_plugin_root(write_remote=()),
         )
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
-        self.assertFalse(status[0]["loaded"])
+        self.assertEqual((status[0]["source"], status[0]["loaded"]), ("local", False))
         self.assertIn("缺 1", res["message"])
 
     def test_manifest_absent_degrades_to_local(self):

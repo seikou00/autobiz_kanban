@@ -21,9 +21,12 @@ XML 风格标签外包，使被嵌入 md 自带的 ``#``/``##`` 标题被「外�
   ② 系统级 AGENTS.md ``<system_agents>``：选中单元所属系统 agentsPath 全文，按 systemId 去重。
   ③ 各单元 description.md ``<unit_description>``：选中单元 agentsPath 全文，按选择顺序；空则跳过。
 
-每个 md 文件按 remote 优先 → local 兜底（``<localRepoPath>/AGENTS.md``）→ 都无则
-``loaded:false`` 解析，并各产出一条 agentmdLoadStatus（系统级文件按 systemId 去重，
-归属该系统首个被选中单元）。
+加载策略按层次不同：
+  · 系统级（②）只认 remote：本机不知道用户把系统级文件放在哪，**不走 local 兜底**（否则会拿
+    单元级的 ``<localRepoPath>/AGENTS.md`` 冒名顶替）。找到就生成 ``<system_agents>`` 段，
+    找不到就不生成。**系统级结果不进 agentmdLoadStatus**——状态只反映单元级（③）的加载结果。
+  · 单元级（③）remote 优先 → local 兜底（``<localRepoPath>/AGENTS.md``）→ 都无则 ``loaded:false``，
+    每个选中单元产出一条 agentmdLoadStatus。
 
 设计原则：除入参 JSON 非法外，任何情况都返回 ok:true，绝不抛异常中断会话；
 缺清单 / 未匹配单元 / 缺 AGENTS.md 都降级为「少注入一点」并在 message 说明。
@@ -95,8 +98,13 @@ def _resolve_one(
     local_repo: str,
     *,
     plugin_root: Optional[Path],
+    allow_local_fallback: bool = True,
 ) -> Tuple[dict, Optional[Path], Optional[str]]:
-    """一个 md 文件：remote 优先 → local 兜底 → 都无则 loaded:false。
+    """一个 md 文件：remote 优先 →（可选）local 兜底 → 都无则 loaded:false。
+
+    ``allow_local_fallback=False`` 时只认 remote：系统级 AGENTS.md 用此模式——本机不知道用户
+    把系统级文件放在哪，不能拿 ``<localRepoPath>/AGENTS.md``（那是单元级兜底）冒名顶替，
+    remote 缺失就直接报 remote 未命中，不走 local。
 
     返回 (status, abs_path, content)；content 非 None 表示成功加载、可进正文。
     """
@@ -117,6 +125,17 @@ def _resolve_one(
                     "message": "",
                 }
                 return status, abs_path, content
+
+    # 不允许 local 兜底（系统级）：remote 缺失即报 remote 未命中，不去碰 <localRepoPath>/AGENTS.md。
+    if not allow_local_fallback:
+        status = {
+            "serviceUnitId": owner_uid,
+            "path": sys_display(rel_in_manifest, plugin_root) if rel_in_manifest else "",
+            "loaded": False,
+            "source": "remote",
+            "message": "file not exist",
+        }
+        return status, None, None
 
     # ② local 兜底：未命中清单 或 remote 文件缺失 → 读 <localRepoPath>/AGENTS.md。
     local_abs = (Path(local_repo) / LOCAL_AGENTS_MD) if local_repo else None
@@ -244,19 +263,8 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
     unit_sections: List[dict] = []    # ③ 按选择顺序
     seen_systems: set[str] = set()
     seen_paths: set[Path] = set()     # 正文按解析后绝对路径去重
-    seen_status_paths: set[str] = set()  # load_status 按状态 path 去重（local 兜底时系统级/单元级同指一个 AGENTS.md）
     system_loaded: set[str] = set()   # 实际产出系统段的 systemId（供锚点回退）
     unit_has_section: set[str] = set()  # 实际产出单元段的 serviceUnitId（供锚点指向）
-
-    def _append_status(status: dict) -> None:
-        # 同一个解析后物理路径只报一条：local 兜底时系统级与单元级会同指 <localRepoPath>/AGENTS.md，
-        # 否则缺文件/命中同一文件都会重复产出。path 为空（既无 remote 又无 local）不参与去重。
-        path = status.get("path") or ""
-        if path and path in seen_status_paths:
-            return
-        if path:
-            seen_status_paths.add(path)
-        load_status.append(status)
 
     def _append_body(abs_path: Optional[Path], bucket: List[dict], section: dict) -> bool:
         if abs_path is not None and abs_path not in seen_paths:
@@ -274,10 +282,12 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
             # ② 系统级 AGENTS.md —— 每个系统一次（归属首个被选中单元）。
             if system.system_id not in seen_systems:
                 seen_systems.add(system.system_id)
-                status, abs_path, content = _resolve_one(
-                    uid, system.agents_relpath(), local, plugin_root=plugin_root
+                # 系统级只查 remote；不进 agentmdLoadStatus（状态只反映单元级结果）。
+                # 找到就生成 <system_agents> 段，找不到就不生成（status 丢弃，仅取 content）。
+                _status, abs_path, content = _resolve_one(
+                    uid, system.agents_relpath(), local,
+                    plugin_root=plugin_root, allow_local_fallback=False,
                 )
-                _append_status(status)
                 if content is not None:
                     title = system.system_id
                     if system.system_name:
@@ -292,7 +302,7 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
                 status, abs_path, content = _resolve_one(
                     uid, unit.agents_rel, local, plugin_root=plugin_root
                 )
-                _append_status(status)
+                load_status.append(status)
                 if content is not None and _append_body(
                     abs_path, unit_sections,
                     {"serviceUnitId": uid, "ref": unit.name, "content": content},
@@ -301,7 +311,7 @@ def render(selected: List[dict], *, plugin_root: Optional[Path] = None) -> dict:
         else:
             # 未命中清单：只走 local 兜底（rel 为空）。
             status, abs_path, content = _resolve_one(uid, "", local, plugin_root=plugin_root)
-            _append_status(status)
+            load_status.append(status)
             if content is not None and _append_body(
                 abs_path, unit_sections,
                 {"serviceUnitId": uid, "ref": "", "content": content},
