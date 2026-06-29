@@ -22,6 +22,7 @@ from artifact_check import (  # noqa: E402
     validate_design_contract,
     validate_e2e_report_contract,
     validate_fix_request_json,
+    validate_plan_json_initial_tasks,
     validate_plan_finished_tasks,
     validate_review_findings_json,
     validate_specs_contract,
@@ -39,6 +40,24 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
     def _ctx(self, feature_dir: Path) -> HookContext:
         root = feature_dir.parent.parent.parent
         return HookContext(skill="autodev-sample", slug="alpha", root=root)
+
+    def _plan_ctx(self, feature_dir: Path) -> HookContext:
+        root = feature_dir.parent.parent.parent
+        return HookContext(
+            skill="autodev-sample",
+            slug="alpha",
+            root=root,
+            required_inputs=("plan.json",),
+        )
+
+    def _required_output_ctx(self, feature_dir: Path, artifact: str) -> HookContext:
+        root = feature_dir.parent.parent.parent
+        return HookContext(
+            skill="autodev-sample",
+            slug="alpha",
+            root=root,
+            required_outputs=(artifact,),
+        )
 
     def _feature_dir(self, tmp: str) -> Path:
         feature_dir = Path(tmp) / ".autobizdevops" / "features" / "alpha"
@@ -100,6 +119,44 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
                 "changedFiles": ["src/foo.py"],
                 "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+            },
+        )
+
+    def _write_plan_json(
+        self,
+        feature_dir: Path,
+        *,
+        status: str = "done",
+        spec_refs: list[str] | None = None,
+        design_refs: list[str] | None = None,
+        api_ids: list[str] | None = None,
+        data_ids: list[str] | None = None,
+        decision_ids: list[str] | None = None,
+        evidence_ids: list[str] | None = None,
+        blockers: list[str] | None = None,
+    ) -> None:
+        write_plan_json(
+            feature_dir / "plan.json",
+            {
+                "version": 1,
+                "featureId": "alpha",
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "title": "do",
+                        "status": status,
+                        "deps": [],
+                        "specRefs": spec_refs or ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                        "designRefs": design_refs or ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                        "apiIds": [] if api_ids is None else api_ids,
+                        "dataIds": [] if data_ids is None else data_ids,
+                        "decisionIds": ["D-001"] if decision_ids is None else decision_ids,
+                        "validationCommands": [{"command": "echo ok"}],
+                        "expectedFiles": [],
+                        "evidenceIds": ["ev_0001"] if evidence_ids is None else evidence_ids,
+                        "blockers": [] if blockers is None else blockers,
+                    }
+                ],
             },
         )
 
@@ -246,7 +303,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             feature_dir = self._feature_dir(tmp)
             self._write_specs(feature_dir)
             self._write_design(feature_dir)
-            self._write_plan(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
             (feature_dir / "UNIT_TEST_REPORT.md").write_text(
                 "\n".join(
                     [
@@ -277,9 +334,30 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
             (feature_dir / "test-output.log").write_text("2026-06-24 ok\n", encoding="utf-8")
+            self._write_json(
+                feature_dir,
+                "UNIT_TEST_RESULT.json",
+                {
+                    "version": 1,
+                    "verdict": "PASS",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                    "targets": [
+                        {
+                            "targetId": "UT-001",
+                            "taskId": "T001",
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "evidenceIds": ["ev_0001"],
+                            "result": "PASS",
+                            "command": "pytest tests/test_foo.py",
+                        }
+                    ],
+                },
+            )
             ctx = self._ctx(feature_dir)
             self.assertEqual(validate_design_contract(ctx), 0)
-            self.assertEqual(validate_plan_finished_tasks(ctx), 0)
+            self.assertEqual(validate_plan_finished_tasks(self._plan_ctx(feature_dir)), 0)
             self.assertEqual(validate_unit_test_report_contract(ctx), 0)
 
     def test_plan_accepts_structured_task_ids(self) -> None:
@@ -287,8 +365,8 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             feature_dir = self._feature_dir(tmp)
             self._write_specs(feature_dir)
             self._write_design(feature_dir)
-            self._write_plan(feature_dir, use_structured_ids=True)
-            ctx = self._ctx(feature_dir)
+            self._write_plan_json(feature_dir)
+            ctx = self._plan_ctx(feature_dir)
             self.assertEqual(validate_plan_finished_tasks(ctx), 0)
 
     def test_plan_accepts_multi_value_structured_ids(self) -> None:
@@ -303,15 +381,14 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 data_ids=["DATA-001", "DATA-002"],
                 decision_ids=["D-001", "D-002"],
             )
-            self._write_plan(
+            self._write_plan_json(
                 feature_dir,
-                api_id="API-001 / API-002",
-                data_id="DATA-001, DATA-002",
-                decision_id="D-001 / D-002",
-                design_ref="design.md#API-999 / #DATA-999 / #D-999",
-                use_structured_ids=True,
+                design_refs=["design.md#API-001", "design.md#API-002", "design.md#DATA-001", "design.md#DATA-002", "design.md#D-001", "design.md#D-002"],
+                api_ids=["API-001", "API-002"],
+                data_ids=["DATA-001", "DATA-002"],
+                decision_ids=["D-001", "D-002"],
             )
-            ctx = self._ctx(feature_dir)
+            ctx = self._plan_ctx(feature_dir)
             self.assertEqual(validate_plan_finished_tasks(ctx), 0)
 
     def test_plan_accepts_data_none_even_if_summary_mentions_data_id(self) -> None:
@@ -319,13 +396,12 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             feature_dir = self._feature_dir(tmp)
             self._write_specs(feature_dir)
             self._write_design(feature_dir, include_data=False, no_sql=True)
-            self._write_plan(
+            self._write_plan_json(
                 feature_dir,
-                data_id="无",
-                design_ref="design.md#API-001 / #DATA-001 / #D-001",
-                use_structured_ids=True,
+                design_refs=["design.md#API-001", "design.md#D-001"],
+                data_ids=[],
             )
-            ctx = self._ctx(feature_dir)
+            ctx = self._plan_ctx(feature_dir)
             self.assertEqual(validate_plan_finished_tasks(ctx), 0)
 
     def test_design_escape_hatches_allow_absent_api_and_data_ids(self) -> None:
@@ -333,10 +409,15 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             feature_dir = self._feature_dir(tmp)
             self._write_specs(feature_dir)
             self._write_design(feature_dir, include_api=False, include_data=False)
-            self._write_plan(feature_dir, design_ref="design.md#D-001")
+            self._write_plan_json(
+                feature_dir,
+                design_refs=["design.md#D-001"],
+                api_ids=[],
+                data_ids=[],
+            )
             ctx = self._ctx(feature_dir)
             self.assertEqual(validate_design_contract(ctx), 0)
-            self.assertEqual(validate_plan_finished_tasks(ctx), 0)
+            self.assertEqual(validate_plan_finished_tasks(self._plan_ctx(feature_dir)), 0)
 
     def test_design_requires_api_and_data_ids_when_escape_hatches_are_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -356,10 +437,15 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             feature_dir = self._feature_dir(tmp)
             self._write_specs(feature_dir)
             self._write_design(feature_dir, include_api=False, include_data=False)
-            self._write_plan(feature_dir, design_ref="design.md#API-001 / #D-001")
-            self.assertGreater(validate_plan_finished_tasks(self._ctx(feature_dir)), 0)
+            self._write_plan_json(
+                feature_dir,
+                design_refs=["design.md#API-001", "design.md#D-001"],
+                api_ids=[],
+                data_ids=[],
+            )
+            self.assertGreater(validate_plan_finished_tasks(self._plan_ctx(feature_dir)), 0)
 
-    def test_legacy_plan_format_degrades_instead_of_blocking(self) -> None:
+    def test_plan_markdown_without_plan_json_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
             self._write_specs(feature_dir)
@@ -375,34 +461,26 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            self.assertEqual(validate_plan_finished_tasks(self._ctx(feature_dir)), 0)
+            self.assertGreater(validate_plan_finished_tasks(self._ctx(feature_dir)), 0)
 
     def test_each_stable_task_block_requires_own_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
             self._write_specs(feature_dir)
             self._write_design(feature_dir)
-            self._write_plan(feature_dir)
-            with (feature_dir / "PLAN.md").open("a", encoding="utf-8") as handle:
-                handle.write(
-                    "\n".join(
-                        [
-                            "",
-                            "### Task [T002]: missing refs",
-                            "- **做什么:** only mentions nothing",
-                            "- **状态:** 完成",
-                        ]
-                    )
-                )
-            self.assertGreater(validate_plan_finished_tasks(self._ctx(feature_dir)), 0)
+            self._write_plan_json(feature_dir, spec_refs=[], design_refs=[], decision_ids=[])
+            self.assertGreater(validate_plan_finished_tasks(self._plan_ctx(feature_dir)), 0)
 
     def test_plan_refs_must_exist_in_specs_and_design(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
             self._write_specs(feature_dir)
             self._write_design(feature_dir)
-            self._write_plan(feature_dir, spec_ref="REQ-999 / #SCN-999")
-            self.assertGreater(validate_plan_finished_tasks(self._ctx(feature_dir)), 0)
+            self._write_plan_json(
+                feature_dir,
+                spec_refs=["specs/cap/spec.md#REQ-999", "specs/cap/spec.md#SCN-999"],
+            )
+            self.assertGreater(validate_plan_finished_tasks(self._plan_ctx(feature_dir)), 0)
 
     def test_duplicate_spec_ids_fail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -413,6 +491,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
     def test_e2e_and_verify_reports_require_trace_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
             (feature_dir / "E2E_TEST_CASES.yaml").write_text(
                 "\n".join(
                     [
@@ -434,6 +515,29 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
             (feature_dir / "e2e-run.log").write_text("ok\n", encoding="utf-8")
+            self._write_json(
+                feature_dir,
+                "E2E_RESULT.json",
+                {
+                    "version": 1,
+                    "verdict": "PASS",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                    "cases": [
+                        {
+                            "caseId": "E2E-alpha-001",
+                            "taskId": "T001",
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "evidenceIds": ["ev_0001"],
+                            "uiRequired": True,
+                            "executionMode": "mixed",
+                            "steps": [],
+                            "verdict": "PASS",
+                        }
+                    ],
+                },
+            )
             (feature_dir / "VERIFY_REPORT.md").write_text(
                 "\n".join(
                     [
@@ -452,6 +556,23 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            self._write_json(
+                feature_dir,
+                "VERIFY_DECISION.json",
+                {
+                    "version": 1,
+                    "verdict": "pass",
+                    "passedScenarioRefs": ["SCN-001"],
+                    "failedScenarioRefs": [],
+                    "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
+                    "evidenceIds": ["ev_0001"],
+                    "nextCheckpoint": "verify_done",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+                    ],
+                },
+            )
             ctx = self._ctx(feature_dir)
             self.assertEqual(validate_e2e_report_contract(ctx), 0)
             self.assertEqual(validate_verify_report_contract(ctx), 0)
@@ -467,6 +588,41 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             (feature_dir / "e2e-run.log").write_text("ok\n", encoding="utf-8")
             self.assertGreater(validate_e2e_report_contract(self._ctx(feature_dir)), 0)
 
+    def test_e2e_result_rejects_fail_summary_when_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "E2E_RESULT.json",
+                {
+                    "version": 1,
+                    "verdict": "FAIL",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "fail"}
+                    ],
+                    "cases": [
+                        {
+                            "caseId": "E2E-alpha-001",
+                            "taskId": "T001",
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "evidenceIds": ["ev_0001"],
+                            "uiRequired": True,
+                            "executionMode": "manual",
+                            "steps": [],
+                            "verdict": "FAIL",
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(
+                validate_e2e_result_json(self._required_output_ctx(feature_dir, "E2E_RESULT.json")),
+                0,
+            )
+
     def test_json_sidecars_validate_trace_refs_and_scenario_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
@@ -480,6 +636,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "REVIEW_FINDINGS.json",
                 {
                     "version": 1,
+                    "verdict": "PASS_WITH_WARNINGS",
                     "findings": [
                         {
                             "id": "R001",
@@ -520,6 +677,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "E2E_RESULT.json",
                 {
                     "version": 1,
+                    "verdict": "PASS",
                     "scenarioCoverage": [
                         {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
                     ],
@@ -729,6 +887,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "UNIT_TEST_RESULT.json",
                 {
                     "version": 1,
+                    "verdict": "PASS",
                     "scenarioCoverage": [
                         {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
                     ],
@@ -749,6 +908,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "E2E_RESULT.json",
                 {
                     "version": 1,
+                    "verdict": "PASS",
                     "scenarioCoverage": [
                         {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
                     ],
@@ -782,6 +942,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "UNIT_TEST_RESULT.json",
                 {
                     "version": 1,
+                    "verdict": "PASS",
                     "scenarioCoverage": [
                         {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
                     ],
@@ -835,6 +996,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "UNIT_TEST_RESULT.json",
                 {
                     "version": 1,
+                    "verdict": "PASS",
                     "scenarioCoverage": [
                         {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
                     ],
@@ -852,6 +1014,53 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertGreater(validate_unit_test_result_json(self._ctx(feature_dir)), 0)
+
+    def test_unit_test_result_rejects_fail_summary_when_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "UNIT_TEST_RESULT.json",
+                {
+                    "version": 1,
+                    "verdict": "FAIL",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "fail"}
+                    ],
+                    "targets": [
+                        {
+                            "targetId": "UT-001",
+                            "taskId": "T001",
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "evidenceIds": ["ev_0001"],
+                            "result": "FAIL",
+                            "command": "pytest tests/test_foo.py",
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(
+                validate_unit_test_result_json(self._required_output_ctx(feature_dir, "UNIT_TEST_RESULT.json")),
+                0,
+            )
+
+    def test_plan_json_initial_tasks_accepts_initial_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(feature_dir, status="todo")
+
+            self.assertEqual(validate_plan_json_initial_tasks(self._ctx(feature_dir)), 0)
+
+    def test_plan_json_initial_tasks_rejects_non_initial_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(feature_dir, status="done")
+
+            self.assertGreater(validate_plan_json_initial_tasks(self._ctx(feature_dir)), 0)
 
     def test_plan_json_success_skips_stale_plan_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

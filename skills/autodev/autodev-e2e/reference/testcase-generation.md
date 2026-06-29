@@ -5,20 +5,24 @@
 1. `proposal.md`
 2. `specs/**/*.md`
 3. `design.md`
-4. `UNIT_TEST_REPORT.md` / `test-output.log`
-5. `PLAN.md`
-6. 直接相关的代码与配置
+4. `UNIT_TEST_RESULT.json`
+5. `plan.json`
+6. `evidence/EVIDENCE.jsonl`
+7. `test-output.log`（仅排查时补充）
+8. 直接相关的代码与配置
 
 各输入用途：
 
 - `proposal.md`：提取能力边界、影响面、非目标
 - `specs/**/*.md`：提取 Requirement / Scenario 行为契约，作为 pass/fail 的主要行为依据
 - `design.md`：提取接口决策、数据决策、成功与失败路径
-- `UNIT_TEST_REPORT.md` / `test-output.log`：提取当前单测覆盖、失败历史、轻量单测命令线索和回归优先级
-- `PLAN.md`：只提供任务顺序和已有验证提示
+- `UNIT_TEST_RESULT.json`：提取当前单测 verdict、scenarioCoverage、target 结果和回归优先级
+- `plan.json`：提供任务顺序、taskId、specRefs、designRefs 和已有验证提示
+- `evidence/EVIDENCE.jsonl`：提供已执行验证的 evidenceId 与 spec/design 回链
+- `test-output.log`：只在排查失败或跳过原因时补充阅读
 - 代码与配置：补充路由、入口 URL、测试数据、稳定断言点
 
-`PLAN.md` 和代码上下文可以影响优先级与可执行性，但永远不是 pass/fail 依据。行为是否通过以 `specs/**/*.md` 为准。
+`plan.json`、evidence 和代码上下文可以影响优先级与可执行性，但永远不是 pass/fail 依据。行为是否通过以 `specs/**/*.md` 为准，测试结论以 `E2E_RESULT.json` 为机器事实源。
 
 ## 硬规则
 

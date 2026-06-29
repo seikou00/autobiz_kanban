@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_integrity_gate import check_code_done, check_integrity  # noqa: E402
 from hooks.evidence_store import append_evidence, index_path, stream_path, validate_record  # noqa: E402
-from hooks.plan_json import parse_plan_markdown, validate_plan_data, write_plan_json  # noqa: E402
+from hooks.plan_json import validate_plan_data, write_plan_json  # noqa: E402
 
 
 def valid_plan(
@@ -100,38 +100,6 @@ class PlanJsonTest(unittest.TestCase):
         errors = validate_plan_data(plan)
 
         self.assertTrue(any(error.startswith("task_dependency_cycle:") for error in errors))
-
-    def test_parse_plan_markdown_reads_deps_from_summary_table(self) -> None:
-        data = parse_plan_markdown(
-            "\n".join(
-                [
-                    "## 任务总览",
-                    "| Task ID | 任务 | 依赖 | 覆盖规格/设计项 | 状态 |",
-                    "| ------- | ---- | ---- | --------------- | ---- |",
-                    "| T001 | one | 无 | REQ-001/SCN-001 / D-001 | 待做 |",
-                    "| T002 | two | T001 | REQ-001/SCN-001 / D-001 | 待做 |",
-                    "",
-                    "## 任务详情",
-                    "### Task [T001]: one",
-                    "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
-                    "- **decision_id:** D-001",
-                    "- **证据依据:** ev_0001",
-                    "- **验证命令:** echo one",
-                    "- **状态:** 待做",
-                    "",
-                    "### Task [T002]: two",
-                    "- **规格依据:** specs/capability/spec.md#REQ-001 / #SCN-001",
-                    "- **decision_id:** D-001",
-                    "- **证据依据:** ev_0002",
-                    "- **验证命令:** echo two",
-                    "- **状态:** 待做",
-                ]
-            ),
-            feature_id="alpha",
-        )
-
-        self.assertEqual(data["tasks"][1]["deps"], ["T001"])
-
 
 class EvidenceStoreTest(unittest.TestCase):
     def test_validation_evidence_requires_structured_result(self) -> None:

@@ -26,7 +26,7 @@ from board_core.state_store import (  # noqa: E402
 )
 from board_core.workflow import build_workflow_shell  # noqa: E402
 from hooks.update_checkpoint import prepare_checkpoint_update  # noqa: E402
-from hooks.update_checkpoint import sync_plan_json_if_needed  # noqa: E402
+from hooks.update_checkpoint import validate_plan_json_for_checkpoint  # noqa: E402
 from hooks.evidence_store import append_evidence  # noqa: E402
 
 
@@ -501,14 +501,14 @@ class StateIntegrationTests(unittest.TestCase):
             }
             (feature_dir / "plan.json").write_text(json.dumps(rich_plan, ensure_ascii=False), encoding="utf-8")
 
-            synced, error = sync_plan_json_if_needed(workspace=workspace, feature="alpha", checkpoint="plan_done")
+            synced, error = validate_plan_json_for_checkpoint(workspace=workspace, feature="alpha", checkpoint="plan_done")
 
             self.assertTrue(synced, error)
             preserved = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(preserved["tasks"][1]["deps"], ["T001"])
             self.assertEqual(preserved["tasks"][1]["expectedFiles"], ["src/b.py"])
 
-    def test_plan_done_sync_backfills_deps_from_task_summary_table_when_missing_json(self) -> None:
+    def test_plan_done_validation_rejects_missing_plan_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -543,12 +543,11 @@ class StateIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            synced, error = sync_plan_json_if_needed(workspace=workspace, feature="alpha", checkpoint="plan_done")
+            synced, error = validate_plan_json_for_checkpoint(workspace=workspace, feature="alpha", checkpoint="plan_done")
 
-            self.assertTrue(synced, error)
-            generated = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(generated["tasks"][0]["deps"], [])
-            self.assertEqual(generated["tasks"][1]["deps"], ["T001"])
+            self.assertFalse(synced)
+            self.assertIn("缺少", error)
+            self.assertFalse((feature_dir / "plan.json").exists())
 
     def test_update_checkpoint_cli_writes_json_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

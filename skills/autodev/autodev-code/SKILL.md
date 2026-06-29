@@ -32,7 +32,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 
 把上游确认的契约落成代码。输入/输出/读取方式以「流程契约」一节取到的契约为唯一事实源。
 
-**核心：** 你的 input 就是契约 Source Bundle 里列出的那几个，逐个**按其 Method Bundle（focus/method）**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的 method 里。契约没列的 id 不属于本工作流——不读、不等、不索要，也不要设想"如果有 X"。**每个 input 的 method 优先于本文通用默认。** 若 Source Bundle 含 `plan.json`，任务 DAG、依赖、状态与 evidenceIds 一律以 `plan.json` 为事实源，`PLAN.md` 只作为人类可读视图同步维护。
+**核心：** 你的 input 就是契约 Source Bundle 里列出的那几个，逐个**按其 Method Bundle（focus/method）**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的 method 里。契约没列的 id 不属于本工作流——不读、不等、不索要，也不要设想"如果有 X"。**每个 input 的 method 优先于本文通用默认。** 若 Source Bundle 含 `plan.json`，任务 DAG、依赖、状态与 evidenceIds 一律以 `plan.json` 为事实源；`PLAN.md` 若存在只作为人类可读视图按需同步维护，不参与机器判断。
 
 输出：业务代码 / 测试 / 配置的最小必要修改；刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
@@ -78,7 +78,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 对每个 input 按其 `extract.focus` / `method` 抽取并记住关键信息。
 
-**任务队列：** 若契约提供 `plan.json`，直接读取 `tasks[]`，按其中的 `deps/status/specRefs/designRefs/apiIds/dataIds/decisionIds/validationCommands/evidenceIds` 建立队列，不得重新拆分任务；更新任务时同步修改 `plan.json` 与 `PLAN.md` 视图。只有当前 workflow 未提供 `plan.json` 时，才把本轮变更拆成 2–5 个需求闭环任务并在完成摘要中维护。
+**任务队列：** 必须读取契约提供的 `plan.json`，直接按 `tasks[]` 中的 `deps/status/specRefs/designRefs/apiIds/dataIds/decisionIds/validationCommands/evidenceIds` 建立队列，不得重新拆分任务；更新任务时必须修改 `plan.json`，`PLAN.md` 若存在只作为人类视图同步。若当前 workflow 未提供 `plan.json`，停止执行并回到 Plan 阶段补齐结构化计划，不得在 Code 阶段临时拆分或维护 Markdown 任务清单。
 - 若当前运行模式支持 `write_todos`，把 `plan.json.tasks[]` 映射成可见任务清单，状态用 待做 / 进行中 / 完成 / 失败，并与 `plan.json` 保持同步；每次只置一个任务为"进行中"。`write_todos` 只反映任务进度，不替代 checkpoint 脚本与产物校验。
 （依"方法优先"：若某 input 的 method 给了更具体读写要求，按其指示执行。）
 
@@ -97,7 +97,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
-6. 执行任务「验证方法」（优先 `plan.json.tasks[].validationCommands`；缺失则基于 AGENTS.md / 项目脚本选最小可行验证并记回任务）。每次验证完成后用 `hooks/evidence_store.py append` 追加一条 evidence，记录 taskId、specRefs、designRefs、changedFiles、validation.command/exitCode/result；不要截断或重写 `evidence/EVIDENCE.jsonl`。通过 → 状态「完成」+ 将新增 evidenceId 写回 `plan.json.tasks[].evidenceIds` 与 `PLAN.md`；失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
+6. 执行任务「验证方法」（优先 `plan.json.tasks[].validationCommands`；缺失则基于 AGENTS.md / 项目脚本选最小可行验证并记回任务）。每次验证完成后用 `hooks/evidence_store.py append` 追加一条 evidence，记录 taskId、specRefs、designRefs、changedFiles、validation.command/exitCode/result；不要截断或重写 `evidence/EVIDENCE.jsonl`。通过 → 状态「完成」+ 将新增 evidenceId 写回 `plan.json.tasks[].evidenceIds`，`PLAN.md` 若存在再同步人类视图；失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
 
 > 一致性：任务的依据在对应 input 里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 

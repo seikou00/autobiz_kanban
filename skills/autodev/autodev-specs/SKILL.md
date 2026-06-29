@@ -61,7 +61,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 - 业务代码、测试代码、配置、迁移脚本
 - `design.md`
-- `PLAN.md`
+- `plan.json`
+- `PLAN.md`（可选人类视图）
 - 后续阶段报告
 
 ## 写入 checkpoint

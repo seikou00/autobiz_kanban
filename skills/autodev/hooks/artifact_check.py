@@ -17,8 +17,6 @@ from common import (
     is_nonempty,
     load_artifact_config,
     read_text,
-    task_count,
-    task_statuses,
     validate_required_files,
 )
 from board_core.contracts import (  # noqa: E402
@@ -34,23 +32,13 @@ from hooks.evidence_store import EvidenceStoreError, read_records, stream_path  
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
     load_and_validate_plan,
-    parse_plan_markdown,
     plan_json_path,
     unfinished_tasks,
-    validate_plan_data,
-    write_plan_json,
 )
 
 
-PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
-VALID_VERDICT = re.compile(r"verdict\s*[:=]\s*(PASS_WITH_WARNINGS|PASS|FAIL|DEGRADED)\b", re.IGNORECASE)
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
-UNIT_TEST_VERDICT = re.compile(
-    r"verdict\W*[:=]\W*(PASS_WITH_WARNINGS|PASS|FAIL|BLOCKED)\b",
-    re.IGNORECASE,
-)
 E2E_ID = re.compile(r"\bE2E-[A-Za-z0-9_-]+-\d{3}\b")
-UNIT_TEST_PASS = {"PASS", "PASS_WITH_WARNINGS"}
 REQ_ID = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
 TASK_ID = re.compile(r"\bT\d{3}\b")
@@ -61,13 +49,6 @@ DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DATA_DEF_RE = re.compile(r"^\|\s*(DATA-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
 DETAIL_DESIGN_ID = re.compile(r"\bDD-\d{2,3}\b")
-STABLE_TASK_HEADING_RE = re.compile(r"^###\s+Task\s+\[T\d{3}\]\s*:\s+.+$", re.MULTILINE)
-LEGACY_TASK_HEADING_RE = re.compile(r"^###\s+\d+[.)]\s+.+$", re.MULTILINE)
-TASK_BLOCK_RE = re.compile(
-    r"^###\s+Task\s+\[(T\d{3})\]\s*:\s+.+?(?=^###\s+Task\s+\[T\d{3}\]\s*:\s+|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
-OLD_PLAN_TASK_BLOCK_RE = re.compile(r"^###\s+\d+[.)]\s+.+?(?=^###\s+\d+[.)]\s+|\Z)", re.MULTILINE | re.DOTALL)
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -500,6 +481,11 @@ def validate_review_findings_json(ctx: HookContext) -> int:
         return failures
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_review_findings_version")
+    verdict = data.get("verdict")
+    if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "DEGRADED"}:
+        failures += fail_line(ctx, "invalid_review_findings_verdict")
+    elif ctx.requires_artifact("REVIEW_FINDINGS.json") and verdict.upper() not in TERMINAL_PASS:
+        failures += fail_line(ctx, "non_terminal_review_findings_verdict")
     findings = data.get("findings")
     if not isinstance(findings, list):
         return failures + fail_line(ctx, "invalid_review_findings_items")
@@ -532,8 +518,10 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_unit_test_result_version")
     verdict = data.get("verdict")
-    if verdict is not None and (not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED"}):
+    if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED"}:
         failures += fail_line(ctx, "invalid_unit_test_result_verdict")
+    elif ctx.requires_artifact("UNIT_TEST_RESULT.json") and verdict.upper() not in TERMINAL_PASS:
+        failures += fail_line(ctx, "non_terminal_unit_test_result_verdict")
     targets = data.get("targets")
     if not isinstance(targets, list) or not targets:
         return failures + fail_line(ctx, "invalid_unit_test_targets")
@@ -547,6 +535,12 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
         result = target.get("result")
         if not isinstance(result, str) or result.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED", "SKIP"}:
             failures += fail_line(ctx, "invalid_unit_test_target_result", f" item={context}")
+        elif (
+            isinstance(verdict, str)
+            and verdict.upper() in TERMINAL_PASS
+            and result.upper() in {"FAIL", "BLOCKED"}
+        ):
+            failures += fail_line(ctx, "unit_test_result_summary_mismatch", f" item={context}")
         failures += _check_string_field(ctx, target, "command", context=context)
         coverage = target.get("coverage")
         if coverage is not None and not isinstance(coverage, (dict, list, int, float, str)):
@@ -571,6 +565,11 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
         return failures
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_e2e_result_version")
+    verdict = data.get("verdict")
+    if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED"}:
+        failures += fail_line(ctx, "invalid_e2e_result_summary_verdict")
+    elif ctx.requires_artifact("E2E_RESULT.json") and verdict.upper() not in TERMINAL_PASS:
+        failures += fail_line(ctx, "non_terminal_e2e_result_verdict")
     cases = data.get("cases")
     if not isinstance(cases, list) or not cases:
         return failures + fail_line(ctx, "invalid_e2e_result_cases")
@@ -592,6 +591,8 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
         verdict = case.get("verdict")
         if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
             failures += fail_line(ctx, "invalid_e2e_result_verdict", f" item={context}")
+        elif isinstance(data.get("verdict"), str) and data["verdict"].upper() in TERMINAL_PASS and verdict.upper() in {"FAIL", "BLOCKED"}:
+            failures += fail_line(ctx, "e2e_result_summary_mismatch", f" item={context}")
     failures += _validate_scenario_coverage(
         ctx,
         data,
@@ -791,35 +792,6 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     return failures
 
 
-def _plan_is_legacy_format(plan_text: str) -> bool:
-    return bool(LEGACY_TASK_HEADING_RE.search(plan_text)) and not STABLE_TASK_HEADING_RE.search(plan_text)
-
-
-def _task_field(block_text: str, label: str) -> str | None:
-    match = re.search(rf"^\s*-\s*\*\*{re.escape(label)}[:：]\*\*\s*(.+)$", block_text, re.MULTILINE)
-    if not match:
-        return None
-    return match.group(1).strip()
-
-
-def _task_id_values(block_text: str, label: str, pattern: str) -> list[str] | None:
-    value = _task_field(block_text, label)
-    if value is None:
-        return None
-    value = value.strip()
-    if not value or value.lower() == "无":
-        return []
-    return list(dict.fromkeys(re.findall(pattern, value)))
-
-
-def _ids_from_design_refs(design_refs: str) -> dict[str, list[str]]:
-    return {
-        "API": re.findall(r"\bAPI-\d{3}\b", design_refs),
-        "DATA": re.findall(r"\bDATA-\d{3}\b", design_refs),
-        "D": re.findall(r"\bD-\d{3}\b", design_refs),
-    }
-
-
 def _boolean_marker_value(text: str, marker: str) -> bool | None:
     match = re.search(rf"{re.escape(marker)}\W*:\W*(true|false)\b", text, re.IGNORECASE)
     if not match:
@@ -836,6 +808,61 @@ def _design_escape_hatches(ctx: HookContext) -> tuple[bool, bool]:
         _boolean_marker_value(text, "x-auto-no-http-api") is True,
         _boolean_marker_value(text, "x-auto-no-sql") is True,
     )
+
+
+def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
+    failures = 0
+    spec_ids, spec_failures = collect_spec_definition_index(ctx)
+    design_ids, design_failures = collect_design_definition_index(ctx)
+    no_http_api, no_sql = _design_escape_hatches(ctx)
+    failures += spec_failures + design_failures
+
+    raw_tasks = data.get("tasks")
+    if not isinstance(raw_tasks, list):
+        return failures
+
+    for index, task in enumerate(raw_tasks):
+        context = f"tasks[{index}]"
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id") if isinstance(task.get("id"), str) else context
+
+        spec_refs = _string_list_value(task.get("specRefs")) or []
+        req_refs = set(REQ_ID.findall(" ".join(spec_refs)))
+        scn_refs = _scenario_refs_from_spec_refs(spec_refs)
+        if not req_refs:
+            failures += fail_line(ctx, "missing_plan_json_requirement_ref", f" task={task_id}")
+        if not scn_refs:
+            failures += fail_line(ctx, "missing_plan_json_scenario_ref", f" task={task_id}")
+        for req_id in sorted(req_refs):
+            if req_id not in spec_ids["REQ"]:
+                failures += fail_line(ctx, "unknown_plan_json_requirement_ref", f" task={task_id} id={req_id}")
+        for scn_id in sorted(scn_refs):
+            if scn_id not in spec_ids["SCN"]:
+                failures += fail_line(ctx, "unknown_plan_json_scenario_ref", f" task={task_id} id={scn_id}")
+
+        design_refs = _string_list_value(task.get("designRefs")) or []
+        design_ref_text = " ".join(design_refs)
+        api_refs = set(_string_list_value(task.get("apiIds")) or []) | set(re.findall(r"\bAPI-\d{3}\b", design_ref_text))
+        data_refs = set(_string_list_value(task.get("dataIds")) or []) | set(re.findall(r"\bDATA-\d{3}\b", design_ref_text))
+        decision_refs = set(_string_list_value(task.get("decisionIds")) or []) | set(re.findall(r"\bD-\d{3}\b", design_ref_text))
+
+        if not no_http_api and not api_refs:
+            failures += fail_line(ctx, "missing_plan_json_api_ref", f" task={task_id}")
+        if not no_sql and not data_refs:
+            failures += fail_line(ctx, "missing_plan_json_data_ref", f" task={task_id}")
+        if not decision_refs:
+            failures += fail_line(ctx, "missing_plan_json_decision_ref", f" task={task_id}")
+        for api_id in sorted(api_refs):
+            if api_id not in design_ids["API"]:
+                failures += fail_line(ctx, "unknown_plan_json_api_ref", f" task={task_id} id={api_id}")
+        for data_id in sorted(data_refs):
+            if data_id not in design_ids["DATA"]:
+                failures += fail_line(ctx, "unknown_plan_json_data_ref", f" task={task_id} id={data_id}")
+        for decision_id in sorted(decision_refs):
+            if decision_id not in design_ids["D"]:
+                failures += fail_line(ctx, "unknown_plan_json_decision_ref", f" task={task_id} id={decision_id}")
+    return failures
 
 
 def spec_files(ctx: HookContext) -> list[Path]:
@@ -932,21 +959,16 @@ def validate_design_contract(ctx: HookContext) -> int:
     return failures
 
 
-def validate_plan_initial_tasks(ctx: HookContext) -> int:
-    plan = ctx.file("PLAN.md")
-    if not is_nonempty(plan):
-        return fail_line(ctx, "missing_plan")
+def validate_plan_json_initial_tasks(ctx: HookContext) -> int:
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(ctx.file("plan.json")):
+        if is_nonempty(ctx.file("PLAN.md")):
+            return fail_line(ctx, "missing_plan_json", " detail=PLAN.md_present_but_not_machine_source")
+        info(ctx, "plan_json_not_in_contract_degrade")
+        return 0
+    _, errors = load_and_validate_plan(ctx.file("plan.json"), require_initial_status=True)
     failures = 0
-    plan_text = read_text(plan)
-    if "任务总览" not in plan_text or "任务详情" not in plan_text:
-        failures += fail_line(ctx, "invalid_plan_structure")
-    if task_count(plan) <= 0:
-        failures += fail_line(ctx, "invalid_plan_no_tasks")
-    statuses = task_statuses(plan)
-    if not statuses:
-        failures += fail_line(ctx, "missing_task_statuses")
-    elif any("待做" not in status for status in statuses):
-        failures += fail_line(ctx, "invalid_initial_task_status")
+    for error in errors:
+        failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
     return failures
 
 
@@ -960,52 +982,28 @@ def validate_plan_json_contract(ctx: HookContext) -> int:
         return failures
     if data is None:
         return fail_line(ctx, "missing_plan_json")
-    return 0
+    failures += _validate_plan_json_traceability(ctx, data)
+    return failures
 
 
 def validate_plan_finished_tasks(ctx: HookContext) -> int:
     plan_json = ctx.file("plan.json")
-    if is_nonempty(plan_json):
-        data, errors = load_and_validate_plan(plan_json, require_all_done=True)
-        failures = 0
-        for error in errors:
-            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
-        if data is not None:
-            if unfinished := unfinished_tasks(data):
-                failures += fail_line(ctx, "plan_json_has_pending_tasks", f" tasks={','.join(unfinished)}")
-            if failed := failed_tasks(data):
-                failures += fail_line(ctx, "plan_json_has_failed_tasks", f" tasks={','.join(failed)}")
-        if failures:
-            return failures
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        if is_nonempty(ctx.file("PLAN.md")):
+            return fail_line(ctx, "missing_plan_json", " detail=PLAN.md_present_but_not_machine_source")
+        info(ctx, "plan_json_not_in_contract_degrade")
         return 0
 
-    plan = ctx.file("PLAN.md")
-    if not is_nonempty(plan):
-        # PLAN.md not in this workflow's contract (e.g. lean): degrade,
-        # task closure lives in the completion summary instead.
-        if not ctx.requires_artifact("PLAN.md"):
-            info(ctx, "plan_not_in_contract_degrade")
-            return 0
-        return fail_line(ctx, "missing_plan")
+    data, errors = load_and_validate_plan(plan_json, require_all_done=True)
     failures = 0
-    plan_text = read_text(plan)
-    if task_count(plan) <= 0:
-        failures += fail_line(ctx, "invalid_plan_no_tasks")
-    statuses = task_statuses(plan)
-    if not statuses:
-        failures += fail_line(ctx, "missing_task_statuses")
-    elif any(PENDING_STATUS.search(status) for status in statuses):
-        failures += fail_line(ctx, "plan_has_pending_tasks")
-    elif any("失败" in status for status in statuses):
-        failures += fail_line(ctx, "plan_has_failed_tasks")
-    elif any("完成" not in status for status in statuses):
-        failures += fail_line(ctx, "invalid_task_status")
-    if STABLE_TASK_HEADING_RE.search(plan_text):
-        failures += validate_stable_plan_contract(ctx, plan_text)
-    elif _plan_is_legacy_format(plan_text):
-        info(ctx, "plan_legacy_format_degrade")
-    else:
-        failures += fail_line(ctx, "missing_task_id_heading")
+    for error in errors:
+        failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+    if data is not None:
+        if unfinished := unfinished_tasks(data):
+            failures += fail_line(ctx, "plan_json_has_pending_tasks", f" tasks={','.join(unfinished)}")
+        if failed := failed_tasks(data):
+            failures += fail_line(ctx, "plan_json_has_failed_tasks", f" tasks={','.join(failed)}")
+        failures += _validate_plan_json_traceability(ctx, data)
     return failures
 
 
@@ -1032,169 +1030,39 @@ def validate_evidence_integrity(ctx: HookContext) -> int:
     return failures
 
 
-def validate_stable_plan_contract(ctx: HookContext, plan_text: str) -> int:
-    failures = 0
-    spec_ids, spec_failures = collect_spec_definition_index(ctx)
-    design_ids, design_failures = collect_design_definition_index(ctx)
-    no_http_api, no_sql = _design_escape_hatches(ctx)
-    failures += spec_failures + design_failures
-    blocks = list(TASK_BLOCK_RE.finditer(plan_text))
-    if not blocks:
-        return fail_line(ctx, "missing_task_id_heading")
-
-    seen_ids: set[str] = set()
-    for block in blocks:
-        task_id = block.group(1)
-        if task_id in seen_ids:
-            failures += fail_line(ctx, "duplicate_task_id", f" task={task_id}")
-        seen_ids.add(task_id)
-
-        block_text = block.group(0)
-        spec_refs = _task_field(block_text, "规格依据")
-        design_refs = _task_field(block_text, "设计依据")
-        api_ids = _task_id_values(block_text, "api_id", r"\bAPI-\d{3}\b")
-        data_ids = _task_id_values(block_text, "data_id", r"\bDATA-\d{3}\b")
-        decision_ids = _task_id_values(block_text, "decision_id", r"\bD-\d{3}\b")
-        evidence_refs = _task_field(block_text, "证据依据")
-        if spec_refs is None:
-            failures += fail_line(ctx, "missing_task_spec_refs", f" task={task_id}")
-            spec_refs = ""
-        if design_refs is None and not any(
-            values is not None for values in [api_ids, data_ids, decision_ids]
-        ):
-            failures += fail_line(ctx, "missing_task_design_refs", f" task={task_id}")
-        if evidence_refs is None:
-            failures += fail_line(ctx, "missing_task_evidence_refs", f" task={task_id}")
-            evidence_refs = ""
-
-        req_refs = REQ_ID.findall(spec_refs)
-        scn_refs = SCN_ID.findall(spec_refs)
-        if not req_refs:
-            failures += fail_line(ctx, "missing_task_requirement_id", f" task={task_id}")
-        if not scn_refs:
-            failures += fail_line(ctx, "missing_task_scenario_id", f" task={task_id}")
-        for req_id in req_refs:
-            if req_id not in spec_ids["REQ"]:
-                failures += fail_line(ctx, "unknown_task_requirement_id", f" task={task_id} id={req_id}")
-        for scn_id in scn_refs:
-            if scn_id not in spec_ids["SCN"]:
-                failures += fail_line(ctx, "unknown_task_scenario_id", f" task={task_id} id={scn_id}")
-
-        summary_refs = _ids_from_design_refs(design_refs) if design_refs is not None else {"API": [], "DATA": [], "D": []}
-        if api_ids is None:
-            api_refs = summary_refs["API"]
-            if not no_http_api and not api_refs:
-                failures += fail_line(ctx, "missing_task_api_id", f" task={task_id}")
-        else:
-            api_refs = api_ids
-            if not no_http_api and not api_refs:
-                failures += fail_line(ctx, "missing_task_api_id", f" task={task_id}")
-        if data_ids is None:
-            data_refs = summary_refs["DATA"]
-            if not no_sql and not data_refs:
-                failures += fail_line(ctx, "missing_task_data_id", f" task={task_id}")
-        else:
-            data_refs = data_ids
-            if not no_sql and not data_refs:
-                failures += fail_line(ctx, "missing_task_data_id", f" task={task_id}")
-        if decision_ids is None:
-            decision_refs = summary_refs["D"]
-            if not decision_refs:
-                failures += fail_line(ctx, "missing_task_decision_id", f" task={task_id}")
-        else:
-            decision_refs = decision_ids
-            if not decision_refs:
-                failures += fail_line(ctx, "missing_task_decision_id", f" task={task_id}")
-        for api_id in api_refs:
-            if api_id not in design_ids["API"]:
-                failures += fail_line(ctx, "unknown_task_api_id", f" task={task_id} id={api_id}")
-        for data_id in data_refs:
-            if data_id not in design_ids["DATA"]:
-                failures += fail_line(ctx, "unknown_task_data_id", f" task={task_id} id={data_id}")
-        for decision_id in decision_refs:
-            if decision_id not in design_ids["D"]:
-                failures += fail_line(ctx, "unknown_task_decision_id", f" task={task_id} id={decision_id}")
-
-        if not EVIDENCE_ID.search(evidence_refs):
-            failures += fail_line(ctx, "missing_task_evidence_id", f" task={task_id}")
-    return failures
+def _ctx_requiring_json(ctx: HookContext, artifact: str) -> HookContext:
+    if ctx.requires_artifact(artifact):
+        return ctx
+    return HookContext(
+        skill=ctx.skill,
+        slug=ctx.slug,
+        root=ctx.root,
+        required_inputs=ctx.required_inputs,
+        required_outputs=(*ctx.required_outputs, artifact),
+    )
 
 
 def validate_requirements_eval_verdict(ctx: HookContext) -> int:
-    eval_report = ctx.file("REQUIREMENTS_EVAL.md")
-    if not is_nonempty(eval_report):
-        return fail_line(ctx, "missing_requirements_eval")
-
-    content = read_text(eval_report)
-    if not re.search(r"verdict\s*[:=]", content, re.IGNORECASE):
-        return fail_line(ctx, "missing_verdict_in_eval")
-    verdict_match = VALID_VERDICT.search(content)
-    if not verdict_match:
-        return fail_line(ctx, "invalid_verdict")
-    if verdict_match.group(1).upper() not in TERMINAL_PASS:
-        return fail_line(ctx, "non_terminal_verdict")
-    return 0
+    info(ctx, "legacy_markdown_validator_uses_json_source", " validator=requirements_eval_verdict json=REVIEW_FINDINGS.json")
+    return validate_review_findings_json(_ctx_requiring_json(ctx, "REVIEW_FINDINGS.json"))
 
 
 def validate_unit_test_report_contract(ctx: HookContext) -> int:
-    report = ctx.file("UNIT_TEST_REPORT.md")
-    log = ctx.file("test-output.log")
-    failures = 0
-
-    if not is_nonempty(report):
-        return fail_line(ctx, "missing_unit_test_report")
-    if not is_nonempty(log):
-        failures += fail_line(ctx, "missing_test_output_log")
-
-    content = read_text(report)
-    required_sections = [
-        "Test Plan",
-        "Execution Summary",
-        "Coverage Matrix",
-        "Failure Analysis",
-        "Fix Attempts",
-        "Commands",
-        "Handoff",
-    ]
-    for section in required_sections:
-        if section not in content:
-            failures += fail_line(ctx, "invalid_unit_test_report_missing_section", f" section={section!r}")
-
-    if not re.search(r"verdict\W*[:=]", content, re.IGNORECASE):
-        failures += fail_line(ctx, "missing_unit_test_verdict")
-    else:
-        verdict_match = UNIT_TEST_VERDICT.search(content)
-        if not verdict_match:
-            failures += fail_line(ctx, "invalid_unit_test_verdict")
-        elif verdict_match.group(1).upper() not in UNIT_TEST_PASS:
-            failures += fail_line(ctx, "non_terminal_unit_test_verdict")
-
-    if "test-output.log" not in content:
-        failures += fail_line(ctx, "missing_test_log_reference")
-    if not re.search(
-        r"\|\s*Source\s*\|\s*Requirement(?:\s*/\s*Scenario)?\s*\|\s*Test\s*\|\s*Result\s*\|",
-        content,
-    ):
-        failures += fail_line(ctx, "missing_coverage_matrix_table")
-    if not re.search(r"\|\s*ID\s*\|\s*Classification\s*\|\s*Files Changed\s*\|", content):
-        failures += fail_line(ctx, "missing_fix_attempts_table")
-    if not TASK_ID.search(content):
-        failures += fail_line(ctx, "missing_task_id_reference")
-    if not EVIDENCE_ID.search(content):
-        failures += fail_line(ctx, "missing_evidence_id_reference")
-    return failures
+    info(ctx, "legacy_markdown_validator_uses_json_source", " validator=unit_test_report_contract json=UNIT_TEST_RESULT.json")
+    return validate_unit_test_result_json(_ctx_requiring_json(ctx, "UNIT_TEST_RESULT.json"))
 
 
 def validate_e2e_report_contract(ctx: HookContext) -> int:
+    info(ctx, "legacy_markdown_validator_uses_json_source", " validator=e2e_report_contract json=E2E_RESULT.json")
+    json_failures = validate_e2e_result_json(_ctx_requiring_json(ctx, "E2E_RESULT.json"))
+    if json_failures:
+        return json_failures
     cases = ctx.file("E2E_TEST_CASES.yaml")
-    report = ctx.file("E2E_REPORT.md")
     log = ctx.file("e2e-run.log")
     failures = 0
 
     if not is_nonempty(cases):
         return fail_line(ctx, "missing_e2e_cases")
-    if not is_nonempty(report):
-        failures += fail_line(ctx, "missing_e2e_report")
     if not is_nonempty(log):
         failures += fail_line(ctx, "missing_e2e_run_log")
 
@@ -1209,40 +1077,12 @@ def validate_e2e_report_contract(ctx: HookContext) -> int:
         failures += fail_line(ctx, "missing_e2e_execution_mode")
     if "ui_required:" not in cases_text:
         failures += fail_line(ctx, "missing_e2e_ui_required")
-
-    if is_nonempty(report):
-        report_text = read_text(report)
-        if not E2E_ID.search(report_text):
-            failures += fail_line(ctx, "missing_e2e_report_case_id")
-        if not REQ_ID.search(report_text):
-            failures += fail_line(ctx, "missing_e2e_report_requirement_id")
-        if not SCN_ID.search(report_text):
-            failures += fail_line(ctx, "missing_e2e_report_scenario_id")
     return failures
 
 
 def validate_verify_report_contract(ctx: HookContext) -> int:
-    report = ctx.file("VERIFY_REPORT.md")
-    if not is_nonempty(report):
-        return fail_line(ctx, "missing_verify_report")
-
-    content = read_text(report)
-    failures = 0
-    required_sections = [
-        "验证总览",
-        "Specs / Design Contract 验证",
-        "结论",
-    ]
-    for section in required_sections:
-        if section not in content:
-            failures += fail_line(ctx, "invalid_verify_report_missing_section", f" section={section!r}")
-    if not REQ_ID.search(content):
-        failures += fail_line(ctx, "missing_verify_requirement_id")
-    if not SCN_ID.search(content):
-        failures += fail_line(ctx, "missing_verify_scenario_id")
-    if "UNIT_TEST_REPORT" not in content and "E2E_REPORT" not in content and "e2e-run.log" not in content:
-        failures += fail_line(ctx, "missing_verify_evidence_source")
-    return failures
+    info(ctx, "legacy_markdown_validator_uses_json_source", " validator=verify_report_contract json=VERIFY_DECISION.json")
+    return validate_verify_decision_json(_ctx_requiring_json(ctx, "VERIFY_DECISION.json"))
 
 
 VALIDATORS = {
@@ -1250,7 +1090,7 @@ VALIDATORS = {
     "specs_contract": validate_specs_contract,
     "design_contract": validate_design_contract,
     "plan_json_contract": validate_plan_json_contract,
-    "plan_initial_tasks": validate_plan_initial_tasks,
+    "plan_json_initial_tasks": validate_plan_json_initial_tasks,
     "plan_finished_tasks": validate_plan_finished_tasks,
     "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,
@@ -1376,7 +1216,6 @@ def run_postcheck(
             workflow_decisions=workflow_decisions,
             workflow_record=workflow_record,
         )
-        maybe_sync_plan_json_for_plan_skill(workspace_root, slug, skill, config.required_outputs)
         validate_required_files(workspace_root, slug, config.required_outputs)
         for validator in config.validators:
             if validator not in VALIDATORS:
@@ -1400,29 +1239,6 @@ def run_postcheck(
     if failures:
         return 1, f"POST_SKILL_FAIL skill={skill} failures={failures}"
     return 0, f"POST_SKILL_PASS skill={skill}"
-
-
-def maybe_sync_plan_json_for_plan_skill(
-    workspace_root: Path,
-    slug: str,
-    skill: str,
-    required_outputs: tuple[str, ...],
-) -> None:
-    if skill != "autodev-plan" or "plan.json" not in required_outputs:
-        return
-    feature_dir = workspace_root / ".autobizdevops" / "features" / slug
-    target = feature_dir / "plan.json"
-    if is_nonempty(target):
-        return
-    plan = feature_dir / "PLAN.md"
-    if not is_nonempty(plan):
-        return
-    data = parse_plan_markdown(read_text(plan), feature_id=slug)
-    errors = validate_plan_data(data)
-    if errors:
-        raise HookCheckError("invalid_plan_json_sync", "; ".join(errors))
-    write_plan_json(target, data)
-
 
 def run_check(
     kind: str,

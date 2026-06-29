@@ -25,26 +25,15 @@ API_ID_RE = re.compile(r"^API-\d{3}$")
 DATA_ID_RE = re.compile(r"^DATA-\d{3}$")
 DECISION_ID_RE = re.compile(r"^D-\d{3}$")
 EVIDENCE_ID_RE = re.compile(r"^ev_\d{4}$")
-TASK_BLOCK_RE = re.compile(
-    r"^###\s+Task\s+\[(T\d{3})\]\s*:\s*(.+?)\s*$"
-    r"(?P<body>.*?)(?=^###\s+Task\s+\[T\d{3}\]\s*:|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
-TASK_SUMMARY_ROW_RE = re.compile(r"^\|\s*(T\d{3})\s*\|(?P<cells>.+)$", re.MULTILINE)
 
 TODO_STATUSES = {"todo", "pending", "not_started", "not-started", "待做", "未开始"}
 IN_PROGRESS_STATUSES = {"in_progress", "in-progress", "doing", "进行中"}
 DONE_STATUSES = {"done", "completed", "complete", "pass", "passed", "完成", "已完成"}
 FAILED_STATUSES = {"failed", "fail", "blocked", "失败", "阻断"}
-VALID_STATUS_CATEGORIES = {"todo", "in_progress", "done", "failed"}
 
 
 class PlanJsonError(ValueError):
     """Raised when a plan.json file cannot be loaded or validated."""
-
-
-def feature_dir(workspace: Path, feature: str) -> Path:
-    return workspace / ".autobizdevops" / "features" / feature
 
 
 def plan_json_path(target_feature_dir: Path) -> Path:
@@ -271,67 +260,6 @@ def blocked_tasks(data: dict[str, Any]) -> list[str]:
     return blocked
 
 
-def _task_field(block_text: str, label: str) -> str:
-    match = re.search(rf"^\s*-\s*\*\*{re.escape(label)}[:：]\*\*\s*(.+)$", block_text, re.MULTILINE)
-    return match.group(1).strip() if match else ""
-
-
-def _split_ids(value: str, pattern: re.Pattern[str]) -> list[str]:
-    if not value or value.strip().lower() == "无":
-        return []
-    return list(dict.fromkeys(pattern.findall(value)))
-
-
-def _table_cell_values(cells: str) -> list[str]:
-    return [cell.strip() for cell in cells.strip().strip("|").split("|")]
-
-
-def _task_summary_deps(plan_text: str) -> dict[str, list[str]]:
-    deps_by_task: dict[str, list[str]] = {}
-    for row in TASK_SUMMARY_ROW_RE.finditer(plan_text):
-        values = _table_cell_values(row.group("cells"))
-        if len(values) < 2:
-            continue
-        deps_by_task[row.group(1)] = _split_ids(values[1], TASK_ID_RE)
-    return deps_by_task
-
-
-def parse_plan_markdown(plan_text: str, *, feature_id: str) -> dict[str, Any]:
-    """Best-effort PLAN.md to plan.json converter.
-
-    This is for backfilling and tests only. Runtime task execution should read
-    ``plan.json`` directly.
-    """
-
-    parsed_tasks: list[dict[str, Any]] = []
-    summary_deps = _task_summary_deps(plan_text)
-    for block in TASK_BLOCK_RE.finditer(plan_text):
-        task_id = block.group(1)
-        title = block.group(2).strip()
-        body = block.group("body")
-        validation = _task_field(body, "验证命令") or _task_field(body, "验证方法")
-        evidence_ids = _split_ids(_task_field(body, "证据依据"), re.compile(r"ev_\d{4}"))
-        detail_deps = _split_ids(_task_field(body, "依赖"), TASK_ID_RE)
-        parsed_tasks.append(
-            {
-                "id": task_id,
-                "title": title,
-                "status": _task_field(body, "状态") or "todo",
-                "deps": detail_deps or summary_deps.get(task_id, []),
-                "specRefs": [ref for ref in re.split(r"\s*/\s*|\s*,\s*", _task_field(body, "规格依据")) if ref],
-                "designRefs": [ref for ref in re.split(r"\s*/\s*|\s*,\s*", _task_field(body, "设计依据")) if ref],
-                "apiIds": _split_ids(_task_field(body, "api_id"), re.compile(r"API-\d{3}")),
-                "dataIds": _split_ids(_task_field(body, "data_id"), re.compile(r"DATA-\d{3}")),
-                "decisionIds": _split_ids(_task_field(body, "decision_id"), re.compile(r"D-\d{3}")),
-                "validationCommands": [{"command": validation}] if validation else [],
-                "expectedFiles": [],
-                "evidenceIds": evidence_ids,
-                "blockers": [],
-            }
-        )
-    return {"version": PLAN_VERSION, "featureId": feature_id, "tasks": parsed_tasks}
-
-
 def write_plan_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -362,24 +290,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_sync(args: argparse.Namespace) -> int:
-    target = feature_dir(Path(args.workspace).resolve(), args.feature)
-    plan_md = target / "PLAN.md"
-    if not plan_md.is_file():
-        print(f"missing PLAN.md: {plan_md}", file=sys.stderr)
-        return 1
-    data = parse_plan_markdown(plan_md.read_text(encoding="utf-8", errors="ignore"), feature_id=args.feature)
-    errors = validate_plan_data(data)
-    if errors:
-        print("\n".join(errors), file=sys.stderr)
-        return 1
-    write_plan_json(target / "plan.json", data)
-    print(f"PLAN_JSON_SYNCED path={target / 'plan.json'}")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate or sync Autodev plan.json")
+    parser = argparse.ArgumentParser(description="Validate Autodev plan.json")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser("validate")
@@ -387,11 +299,6 @@ def main(argv: list[str] | None = None) -> int:
     validate.add_argument("--initial", action="store_true")
     validate.add_argument("--done", action="store_true")
     validate.set_defaults(func=_cmd_validate)
-
-    sync = subparsers.add_parser("sync")
-    sync.add_argument("--workspace", default=str(Path.cwd().resolve()))
-    sync.add_argument("--feature", required=True)
-    sync.set_defaults(func=_cmd_sync)
 
     args = parser.parse_args(argv)
     return args.func(args)

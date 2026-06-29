@@ -55,7 +55,7 @@ from board_core.workflow_compiler import (  # noqa: E402
     normalize_workflow_profile,
     normalize_workflow_skipped_nodes,
 )
-from plan_json import load_and_validate_plan, parse_plan_markdown, validate_plan_data, write_plan_json  # noqa: E402
+from plan_json import load_and_validate_plan  # noqa: E402
 
 
 STATE_RELATIVE_PATH = Path(".autobizdevops") / "STATE.md"
@@ -680,7 +680,7 @@ def write_hook_logs(result: CheckpointUpdate, *, workspace: Path, feature: str) 
         )
 
 
-def sync_plan_json_if_needed(
+def validate_plan_json_for_checkpoint(
     *,
     workspace: Path,
     feature: str,
@@ -695,16 +695,7 @@ def sync_plan_json_if_needed(
         if validate_errors:
             return False, "plan_done 校验 plan.json 失败: " + "; ".join(validate_errors)
         return True, ""
-
-    plan_md = feature_dir / "PLAN.md"
-    if not plan_md.is_file():
-        return False, f"plan_done 同步 plan.json 失败: 缺少 {plan_md}"
-    data = parse_plan_markdown(plan_md.read_text(encoding="utf-8", errors="ignore"), feature_id=feature)
-    validate_errors = validate_plan_data(data)
-    if validate_errors:
-        return False, "plan_done 同步 plan.json 失败: " + "; ".join(validate_errors)
-    write_plan_json(plan_json, data)
-    return True, ""
+    return False, f"plan_done 校验 plan.json 失败: 缺少 {plan_json}"
 
 
 def write_result_json(
@@ -865,7 +856,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_logs()
         return 1
     if not args.dry_run:
-        synced, sync_error = sync_plan_json_if_needed(
+        synced, sync_error = validate_plan_json_for_checkpoint(
             workspace=workspace,
             feature=feature,
             checkpoint=result.new_checkpoint or requested_checkpoint,
