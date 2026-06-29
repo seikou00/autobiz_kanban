@@ -663,6 +663,40 @@ class SkipRouteTests(unittest.TestCase):
             self.assertFalse(blocked.ok)
             self.assertIn("suggestedCheckpoint 不在允许回流中", "\n".join(blocked.errors))
 
+    def test_needs_fix_allows_dynamic_detail_design_checkpoint_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            seed_feature(workspace, "needs_fix")
+            records = load_state_json_records_result(workspace).records
+            records["alpha"]["workflowDecisions"] = {"detail_design_before_code": "enabled"}
+            write_state_records(workspace, records)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            (feature_dir / "FIX_REQUEST.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "featureId": "alpha",
+                        "sourceCheckpoint": "verify_in_progress",
+                        "sourceNodeId": "dev.verify",
+                        "suggestedCheckpoint": "detail_design_in_progress",
+                        "rootCause": "design_conflict",
+                        "blockingReason": "detail design fix",
+                        "humanActionRequired": False,
+                        "failedSpecRefs": [],
+                        "failedEvidenceIds": [],
+                        "failedDesignRefs": [],
+                        "createdAt": "2026-06-24T00:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(validate_fix_request_for_needs_fix(workspace, "alpha", "needs_fix"), ())
+            payload, exit_code = resolve_route(workspace, "alpha")
+
+            self.assertEqual(exit_code, 0, payload)
+            self.assertEqual(payload["allowedNextCheckpoints"], ["detail_design_in_progress"])
+
 
 class SkipInspectStateTests(unittest.TestCase):
     def test_workflow_marker_includes_skips(self) -> None:

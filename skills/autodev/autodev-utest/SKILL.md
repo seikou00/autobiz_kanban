@@ -304,12 +304,15 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - 仍需人工确认的项。
 - 若失败，建议回流阶段：`autodev-code`、`autobiz` 或 `environment`。
 
-同时必须写入 `UNIT_TEST_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。
+同时必须写入 `UNIT_TEST_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。
 
 ```json
 {
   "version": 1,
   "verdict": "PASS",
+  "scenarioCoverage": [
+    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+  ],
   "targets": [
     {
       "targetId": "UT-001",

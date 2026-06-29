@@ -21,9 +21,15 @@ from common import (
     task_statuses,
     validate_required_files,
 )
-from board_core.contracts import BoardConfigError, load_board_config, load_repo_workflow_contracts  # noqa: E402
+from board_core.contracts import (  # noqa: E402
+    BoardConfigError,
+    load_board_config,
+    load_record_workflow_contracts,
+    load_repo_workflow_contracts,
+)
+from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
-from hooks.evidence_integrity_gate import check_integrity, check_plan_evidence_refs  # noqa: E402
+from hooks.evidence_integrity_gate import check_code_done, check_integrity, check_plan_evidence_refs  # noqa: E402
 from hooks.evidence_store import EvidenceStoreError, read_records, stream_path  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
@@ -54,6 +60,7 @@ SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", 
 DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DATA_DEF_RE = re.compile(r"^\|\s*(DATA-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
+DETAIL_DESIGN_ID = re.compile(r"\bDD-\d{2,3}\b")
 STABLE_TASK_HEADING_RE = re.compile(r"^###\s+Task\s+\[T\d{3}\]\s*:\s+.+$", re.MULTILINE)
 LEGACY_TASK_HEADING_RE = re.compile(r"^###\s+\d+[.)]\s+.+$", re.MULTILINE)
 TASK_BLOCK_RE = re.compile(
@@ -61,6 +68,7 @@ TASK_BLOCK_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 OLD_PLAN_TASK_BLOCK_RE = re.compile(r"^###\s+\d+[.)]\s+.+?(?=^###\s+\d+[.)]\s+|\Z)", re.MULTILINE | re.DOTALL)
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _spec_definition_index(text: str) -> tuple[dict[str, set[str]], list[str]]:
@@ -318,6 +326,159 @@ def _scenario_covering_evidence(ctx: HookContext) -> dict[str, set[str]]:
     return result
 
 
+def _validate_scenario_coverage(
+    ctx: HookContext,
+    data: dict,
+    *,
+    field: str,
+    required: bool,
+    require_pass_evidence: bool,
+    covering_evidence: dict[str, set[str]] | None = None,
+) -> int:
+    failures = 0
+    spec_ids, spec_failures = collect_spec_definition_index(ctx)
+    failures += spec_failures
+    defined_scenarios = set(spec_ids["SCN"])
+    matrix = data.get(field)
+    if matrix is None:
+        if required:
+            return failures + fail_line(ctx, "missing_scenario_coverage", f" field={field}")
+        return failures
+    if not isinstance(matrix, list):
+        return failures + fail_line(ctx, "invalid_scenario_coverage", f" field={field}")
+
+    seen_scenarios: set[str] = set()
+    known_evidence = _known_evidence_ids(ctx)
+    evidence_by_scenario = covering_evidence if covering_evidence is not None else _scenario_covering_evidence(ctx)
+    allowed_verdicts = {"pass", "fail", "manual", "missing"}
+    for index, row in enumerate(matrix):
+        context = f"{field}[{index}]"
+        if not isinstance(row, dict):
+            failures += fail_line(ctx, "invalid_scenario_coverage_row", f" item={context}")
+            continue
+        scenario_ref = row.get("scenarioRef")
+        if not isinstance(scenario_ref, str) or scenario_ref not in defined_scenarios:
+            failures += fail_line(ctx, "unknown_scenario_coverage_ref", f" item={context} id={scenario_ref}")
+            continue
+        if scenario_ref in seen_scenarios:
+            failures += fail_line(ctx, "duplicate_scenario_coverage_row", f" item={context} id={scenario_ref}")
+        seen_scenarios.add(scenario_ref)
+        row_verdict = row.get("verdict")
+        normalized_verdict = row_verdict.lower() if isinstance(row_verdict, str) else ""
+        if normalized_verdict not in allowed_verdicts:
+            failures += fail_line(ctx, "invalid_scenario_coverage_verdict", f" item={context}")
+        row_evidence, row_evidence_failures = _check_string_array_field(
+            ctx,
+            row,
+            "evidenceIds",
+            context=context,
+            required=normalized_verdict == "pass" and require_pass_evidence,
+            item_re=EVIDENCE_ID,
+        )
+        failures += row_evidence_failures
+        failures += _check_evidence_stream_for_refs(ctx, row_evidence, context=context)
+        for evidence_id in row_evidence:
+            if known_evidence and evidence_id not in known_evidence:
+                failures += fail_line(ctx, "unknown_scenario_coverage_evidence_id", f" item={context} evidenceId={evidence_id}")
+        if normalized_verdict == "pass" and require_pass_evidence:
+            covering_ids = evidence_by_scenario.get(scenario_ref, set())
+            if not row_evidence:
+                failures += fail_line(ctx, "scenario_coverage_pass_without_evidence", f" item={context} id={scenario_ref}")
+            elif not any(evidence_id in covering_ids for evidence_id in row_evidence):
+                failures += fail_line(ctx, "scenario_coverage_pass_evidence_mismatch", f" item={context} id={scenario_ref}")
+
+    missing_rows = defined_scenarios - seen_scenarios
+    if missing_rows:
+        failures += fail_line(ctx, "missing_scenario_coverage_rows", f" field={field} ids={','.join(sorted(missing_rows))}")
+    return failures
+
+
+def _known_design_refs(ctx: HookContext) -> set[str]:
+    design_ids, _ = collect_design_definition_index(ctx)
+    refs = {
+        f"design.md#{item}"
+        for kind in ("API", "DATA", "D")
+        for item in design_ids[kind]
+    }
+    detail = ctx.file("DETAIL_DESIGN.md")
+    if is_nonempty(detail):
+        refs.update(f"DETAIL_DESIGN.md#{item}" for item in DETAIL_DESIGN_ID.findall(read_text(detail)))
+    return refs
+
+
+def _effective_needs_fix_targets(ctx: HookContext) -> set[str]:
+    result = load_state_json_records_result(ctx.root)
+    if result.exists and not result.errors:
+        record = result.records.get(ctx.slug)
+        if record is not None:
+            try:
+                return set(load_record_workflow_contracts(REPO_ROOT, record, workspace=ctx.root).allowed_next.get("needs_fix", frozenset()))
+            except BoardConfigError:
+                return set()
+    try:
+        return set(load_repo_workflow_contracts(REPO_ROOT, workspace=ctx.root).allowed_next.get("needs_fix", frozenset()))
+    except BoardConfigError:
+        return set()
+
+
+def _check_verify_scenario_decisions(
+    ctx: HookContext,
+    data: dict,
+    *,
+    defined_scenarios: set[str],
+    passed: list[str],
+    failed: list[str],
+    manual: list[str],
+) -> int:
+    failures = 0
+    passed_set = set(passed)
+    failed_set = set(failed)
+    manual_set = set(manual)
+    overlaps = (passed_set & failed_set) | (passed_set & manual_set) | (failed_set & manual_set)
+    if overlaps:
+        failures += fail_line(ctx, "duplicate_verify_scenario_decision", f" ids={','.join(sorted(overlaps))}")
+
+    decided = passed_set | failed_set | manual_set
+    missing_decisions = defined_scenarios - decided
+    if missing_decisions:
+        failures += fail_line(ctx, "missing_verify_scenario_decision", f" ids={','.join(sorted(missing_decisions))}")
+
+    verdict = data.get("verdict")
+    if isinstance(verdict, str):
+        normalized_verdict = verdict.lower()
+        if normalized_verdict == "pass" and (failed_set or manual_set or missing_decisions):
+            failures += fail_line(ctx, "invalid_verify_decision_summary")
+        if normalized_verdict == "fail" and not failed_set:
+            failures += fail_line(ctx, "invalid_verify_decision_summary")
+        if normalized_verdict == "manual" and not manual_set:
+            failures += fail_line(ctx, "invalid_verify_decision_summary")
+
+    matrix = data.get("scenarioCoverage")
+    if not isinstance(matrix, list):
+        return failures
+    for index, row in enumerate(matrix):
+        context = f"scenarioCoverage[{index}]"
+        if not isinstance(row, dict):
+            continue
+        scenario_ref = row.get("scenarioRef")
+        row_verdict = row.get("verdict")
+        if not isinstance(scenario_ref, str) or scenario_ref not in defined_scenarios or not isinstance(row_verdict, str):
+            continue
+        normalized_row_verdict = row_verdict.lower()
+        mismatch = False
+        if normalized_row_verdict == "pass":
+            mismatch = scenario_ref not in passed_set
+        elif normalized_row_verdict == "fail":
+            mismatch = scenario_ref not in failed_set
+        elif normalized_row_verdict == "manual":
+            mismatch = scenario_ref not in manual_set
+        elif normalized_row_verdict == "missing":
+            mismatch = scenario_ref in passed_set or scenario_ref not in (failed_set | manual_set)
+        if mismatch:
+            failures += fail_line(ctx, "verify_scenario_coverage_decision_mismatch", f" item={context} id={scenario_ref}")
+    return failures
+
+
 def validate_review_findings_json(ctx: HookContext) -> int:
     data, failures = load_json_artifact(
         ctx,
@@ -379,6 +540,13 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
         coverage = target.get("coverage")
         if coverage is not None and not isinstance(coverage, (dict, list, int, float, str)):
             failures += fail_line(ctx, "invalid_json_field", f" item={context} field=coverage")
+    failures += _validate_scenario_coverage(
+        ctx,
+        data,
+        field="scenarioCoverage",
+        required=True,
+        require_pass_evidence=True,
+    )
     return failures
 
 
@@ -413,6 +581,13 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
         verdict = case.get("verdict")
         if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
             failures += fail_line(ctx, "invalid_e2e_result_verdict", f" item={context}")
+    failures += _validate_scenario_coverage(
+        ctx,
+        data,
+        field="scenarioCoverage",
+        required=True,
+        require_pass_evidence=True,
+    )
     return failures
 
 
@@ -432,6 +607,14 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
     next_checkpoint = data.get("nextCheckpoint")
     if not isinstance(next_checkpoint, str) or next_checkpoint not in {"verify_done", "needs_fix", "verify_in_progress"}:
         failures += fail_line(ctx, "invalid_verify_next_checkpoint")
+    elif isinstance(verdict, str):
+        normalized_verdict = verdict.lower()
+        if normalized_verdict == "pass" and next_checkpoint != "verify_done":
+            failures += fail_line(ctx, "invalid_verify_decision_transition")
+        if normalized_verdict == "fail" and next_checkpoint != "needs_fix":
+            failures += fail_line(ctx, "invalid_verify_decision_transition")
+        if normalized_verdict == "manual" and next_checkpoint not in {"verify_in_progress", "needs_fix"}:
+            failures += fail_line(ctx, "invalid_verify_decision_transition")
 
     spec_ids, spec_failures = collect_spec_definition_index(ctx)
     failures += spec_failures
@@ -485,47 +668,22 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
         if known_evidence and evidence_id not in known_evidence:
             failures += fail_line(ctx, "unknown_verify_evidence_id", f" evidenceId={evidence_id}")
 
-    scenario_matrix = data.get("scenarioCoverage")
-    if scenario_matrix is not None:
-        if not isinstance(scenario_matrix, list):
-            failures += fail_line(ctx, "invalid_verify_scenario_coverage")
-        else:
-            seen_scenarios: set[str] = set()
-            allowed_verdicts = {"pass", "fail", "manual", "missing"}
-            for index, row in enumerate(scenario_matrix):
-                context = f"scenarioCoverage[{index}]"
-                if not isinstance(row, dict):
-                    failures += fail_line(ctx, "invalid_verify_scenario_coverage_row", f" item={context}")
-                    continue
-                scenario_ref = row.get("scenarioRef")
-                if not isinstance(scenario_ref, str) or scenario_ref not in defined_scenarios:
-                    failures += fail_line(ctx, "unknown_verify_scenario_ref", f" item={context} id={scenario_ref}")
-                    continue
-                seen_scenarios.add(scenario_ref)
-                row_verdict = row.get("verdict")
-                if not isinstance(row_verdict, str) or row_verdict.lower() not in allowed_verdicts:
-                    failures += fail_line(ctx, "invalid_verify_scenario_verdict", f" item={context}")
-                row_evidence, row_evidence_failures = _check_string_array_field(
-                    ctx,
-                    row,
-                    "evidenceIds",
-                    context=context,
-                    required=False,
-                    item_re=EVIDENCE_ID,
-                )
-                failures += row_evidence_failures
-                failures += _check_evidence_stream_for_refs(ctx, row_evidence, context=context)
-                for evidence_id in row_evidence:
-                    if known_evidence and evidence_id not in known_evidence:
-                        failures += fail_line(ctx, "unknown_verify_evidence_id", f" item={context} evidenceId={evidence_id}")
-            missing_rows = defined_scenarios - seen_scenarios
-            if missing_rows:
-                failures += fail_line(ctx, "missing_verify_scenario_rows", f" ids={','.join(sorted(missing_rows))}")
-    else:
-        decided = set(passed) | set(failed) | set(manual)
-        missing = defined_scenarios - decided
-        if missing:
-            failures += fail_line(ctx, "missing_verify_scenario_decision", f" ids={','.join(sorted(missing))}")
+    failures += _validate_scenario_coverage(
+        ctx,
+        data,
+        field="scenarioCoverage",
+        required=True,
+        require_pass_evidence=True,
+        covering_evidence=covered_by_evidence,
+    )
+    failures += _check_verify_scenario_decisions(
+        ctx,
+        data,
+        defined_scenarios=defined_scenarios,
+        passed=passed,
+        failed=failed,
+        manual=manual,
+    )
 
     passed_without_evidence = [scenario for scenario in passed if not covered_by_evidence.get(scenario)]
     if passed_without_evidence:
@@ -559,14 +717,8 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     }:
         failures += fail_line(ctx, "invalid_fix_request_root_cause")
     suggested = data.get("suggestedCheckpoint")
-    if isinstance(suggested, str) and suggested not in {
-        "discuss_in_progress",
-        "prd_in_progress",
-        "specs_in_progress",
-        "plan_in_progress",
-        "code_in_progress",
-        "cicd_in_progress",
-    }:
+    allowed_fix_targets = _effective_needs_fix_targets(ctx)
+    if isinstance(suggested, str) and allowed_fix_targets and suggested not in allowed_fix_targets:
         failures += fail_line(ctx, "invalid_fix_request_suggested_checkpoint")
     human_action = data.get("humanActionRequired")
     if not isinstance(human_action, bool):
@@ -610,6 +762,10 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     for evidence_id in failed_evidence_ids:
         if known_evidence and evidence_id not in known_evidence:
             failures += fail_line(ctx, "unknown_fix_request_evidence_id", f" evidenceId={evidence_id}")
+    known_design_refs = _known_design_refs(ctx)
+    for design_ref in data.get("failedDesignRefs", []) if isinstance(data.get("failedDesignRefs"), list) else []:
+        if isinstance(design_ref, str) and known_design_refs and design_ref not in known_design_refs:
+            failures += fail_line(ctx, "unknown_fix_request_design_ref", f" ref={design_ref}")
     return failures
 
 
@@ -799,6 +955,7 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
                 failures += fail_line(ctx, "plan_json_has_failed_tasks", f" tasks={','.join(failed)}")
         if failures:
             return failures
+        return 0
 
     plan = ctx.file("PLAN.md")
     if not is_nonempty(plan):
@@ -827,6 +984,16 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
         info(ctx, "plan_legacy_format_degrade")
     else:
         failures += fail_line(ctx, "missing_task_id_heading")
+    return failures
+
+
+def validate_code_done_gate(ctx: HookContext) -> int:
+    if not ctx.requires_artifact("evidence/EVIDENCE.jsonl"):
+        info(ctx, "code_done_gate_not_in_contract_degrade")
+        return 0
+    failures = 0
+    for error in check_code_done(ctx.feature_dir):
+        failures += fail_line(ctx, "invalid_code_done_gate", f" detail={error}")
     return failures
 
 
@@ -1063,6 +1230,7 @@ VALIDATORS = {
     "plan_json_contract": validate_plan_json_contract,
     "plan_initial_tasks": validate_plan_initial_tasks,
     "plan_finished_tasks": validate_plan_finished_tasks,
+    "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
     "review_findings_json": validate_review_findings_json,
