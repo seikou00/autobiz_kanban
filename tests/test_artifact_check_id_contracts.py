@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,7 @@ from artifact_check import (  # noqa: E402
     validate_verify_decision_json,
     validate_verify_report_contract,
 )
+from board_core.contracts import BoardConfigError  # noqa: E402
 from hooks.evidence_store import append_evidence  # noqa: E402
 from hooks.plan_json import write_plan_json  # noqa: E402
 
@@ -544,6 +546,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "passedScenarioRefs": ["SCN-001"],
                     "failedScenarioRefs": [],
                     "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
                     "evidenceIds": ["ev_0001"],
                     "nextCheckpoint": "verify_done",
                     "scenarioCoverage": [
@@ -594,6 +597,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "passedScenarioRefs": ["SCN-001"],
                     "failedScenarioRefs": [],
                     "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
                     "evidenceIds": ["ev_0001"],
                     "nextCheckpoint": "verify_done",
                     "scenarioCoverage": [
@@ -603,6 +607,35 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertGreater(validate_verify_decision_json(self._ctx(feature_dir)), 0)
+
+    def test_verify_decision_allows_explicit_missing_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            with (feature_dir / "specs" / "cap" / "spec.md").open("a", encoding="utf-8") as handle:
+                handle.write("\n### Requirement [REQ-002]: another\n#### Scenario [SCN-002]: uncovered\n")
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "VERIFY_DECISION.json",
+                {
+                    "version": 1,
+                    "verdict": "fail",
+                    "passedScenarioRefs": ["SCN-001"],
+                    "failedScenarioRefs": [],
+                    "manualVerificationRefs": [],
+                    "missingScenarioRefs": ["SCN-002"],
+                    "evidenceIds": ["ev_0001"],
+                    "nextCheckpoint": "needs_fix",
+                    "scenarioCoverage": [
+                        {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"},
+                        {"scenarioRef": "SCN-002", "evidenceIds": [], "verdict": "missing"},
+                    ],
+                },
+            )
+
+            self.assertEqual(validate_verify_decision_json(self._ctx(feature_dir)), 0)
 
     def test_verify_decision_rejects_pass_rows_without_covering_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -619,6 +652,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "passedScenarioRefs": ["SCN-001"],
                     "failedScenarioRefs": [],
                     "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
                     "evidenceIds": ["ev_0001"],
                     "nextCheckpoint": "verify_done",
                     "scenarioCoverage": [
@@ -644,6 +678,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "passedScenarioRefs": [],
                     "failedScenarioRefs": ["SCN-001"],
                     "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
                     "evidenceIds": ["ev_0001"],
                     "nextCheckpoint": "verify_done",
                     "scenarioCoverage": [
@@ -669,6 +704,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "passedScenarioRefs": ["SCN-001"],
                     "failedScenarioRefs": [],
                     "manualVerificationRefs": [],
+                    "missingScenarioRefs": [],
                     "evidenceIds": ["ev_0001"],
                     "nextCheckpoint": "verify_done",
                     "scenarioCoverage": [
@@ -900,6 +936,39 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertGreater(validate_fix_request_json(self._ctx(feature_dir)), 0)
+
+    def test_fix_request_record_contract_error_falls_back_to_repo_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json_and_evidence(feature_dir)
+            self._write_json(
+                feature_dir,
+                "FIX_REQUEST.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "sourceCheckpoint": "verify_in_progress",
+                    "sourceNodeId": "dev.verify",
+                    "suggestedCheckpoint": "verify_done",
+                    "rootCause": "implementation_bug",
+                    "blockingReason": "fix",
+                    "humanActionRequired": False,
+                    "failedSpecRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                    "failedEvidenceIds": ["ev_0001"],
+                    "failedDesignRefs": ["design.md#D-001"],
+                    "createdAt": "2026-06-24T00:00:00Z",
+                },
+            )
+            state_dir = feature_dir.parent.parent
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "state.json").write_text(
+                json.dumps({"features": {"alpha": {"checkpoint": "needs_fix"}}}),
+                encoding="utf-8",
+            )
+            with mock.patch("artifact_check.load_record_workflow_contracts", side_effect=BoardConfigError("bad record")):
+                self.assertGreater(validate_fix_request_json(self._ctx(feature_dir)), 0)
 
 
 if __name__ == "__main__":

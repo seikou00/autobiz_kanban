@@ -161,7 +161,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 写入 `VERIFY_REPORT.md` 后，必须使用 `hooks/evidence_store.py append` 追加一条 verify 汇总 evidence，记录本阶段 verdict、引用的 evidenceIds、覆盖的 specRefs/designRefs。verify 阶段仍不得运行测试命令；这里追加的是汇总结论证据，不是新的测试执行证据。
 
-同时必须写入 `VERIFY_DECISION.json` 作为机器事实源。JSON 只保留裁决字段，Markdown 只给人读；不要做 Markdown ↔ JSON 文本对账。`scenarioCoverage` 的行必须来自 specs 中定义的全部 `SCN-xxx` 分母，未覆盖的场景显式写 `missing` 或 `manual`，不能只列命中项。`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence；顶层 `passedScenarioRefs` / `failedScenarioRefs` / `manualVerificationRefs` 必须和 `scenarioCoverage` 的行级 verdict 保持一致，且 `verdict` 与 `nextCheckpoint` 必须匹配。
+同时必须写入 `VERIFY_DECISION.json` 作为机器事实源。JSON 只保留裁决字段，Markdown 只给人读；不要做 Markdown ↔ JSON 文本对账。`scenarioCoverage` 的行必须来自 specs 中定义的全部 `SCN-xxx` 分母，未覆盖的场景显式写 `missing` 或 `manual`，不能只列命中项。`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence；顶层 `passedScenarioRefs` / `failedScenarioRefs` / `manualVerificationRefs` / `missingScenarioRefs` 必须和 `scenarioCoverage` 的行级 verdict 保持一致，且 `verdict` 与 `nextCheckpoint` 必须匹配。
 
 ```json
 {
@@ -170,6 +170,7 @@ specs/[capability]/spec.md / Requirement / Scenario
   "passedScenarioRefs": ["SCN-001"],
   "failedScenarioRefs": [],
   "manualVerificationRefs": [],
+  "missingScenarioRefs": [],
   "evidenceIds": ["ev_0001"],
   "nextCheckpoint": "verify_done",
   "scenarioCoverage": [
