@@ -1,6 +1,6 @@
 ---
 name: code-frontend-with-absolute-html
-description: `/autodev-code` 内部绝对定位高保真 HTML 路线。它负责定义绝对定位 / 碎片 div / Figma 导出类 HTML 的适用条件、主流程 write_todos 与失败兜底方式。
+description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责定义绝对定位 / 碎片 div / Figma 导出类 HTML 的适用条件、主流程 write_todos 与失败兜底方式。
 ---
 
 # 绝对定位高保真 HTML 路线
@@ -164,7 +164,7 @@ description: `/autodev-code` 内部绝对定位高保真 HTML 路线。它负责
   - [ ] `hasManifest=true`：表示脚本产物可用，但它们只是辅助。
   - [ ] `hasManifest=false`：表示脚本失败，后续完全以原始 HTML 为主。
 - [ ] 完成主线代码生成、页面拆分 / 抽取与最低校验。
-- [ ] 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明"已跳过 Stage 1 脚本及原因"），再返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、模块编译清单校验和 `code_done` 推进；不得发起独立回检选择。
+- [ ] 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明"已跳过 Stage 1 脚本及原因"），并带回统一前端回检输入：目标源码路径、原始 HTML 路径、可用 `.frontend/html-analysis/*.json` 路径（没有或降级时写 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`；再返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检、模块编译清单校验和 `code_done` 推进；不得发起独立回检选择。
 
 ## 5. 转交规则
 
@@ -211,4 +211,4 @@ description: `/autodev-code` 内部绝对定位高保真 HTML 路线。它负责
 | `../../../SKILL.md` | `/autodev-code` 总入口 + 全局优先级与执行清单 |
 | `SKILL.md` | 绝对定位高保真 HTML 路线入口、读取顺序与转交规则 |
 | `deps/html-parser.md` | 真正把路走完（分类、整页恢复、组件替换、写代码） |
-| `/autodev-code` 主流程 | HTML 上下文完成后执行项目级验证、模块编译清单校验与 `code_done` 推进 |
+| `/autodev-code` 主流程 | HTML 上下文完成后执行项目级验证、统一前端回检、模块编译清单校验与 `code_done` 推进 |

@@ -378,6 +378,7 @@ HTML 类型：<type>
 图表类型映射：<区域 / 语义 -> 最终图表类型>
 是否触发 ECharts：是 / 否
 新增依赖：<若本次经用户确认后安装了组件库 / 图表库或相关封装，则明确列出新增的包；否则写“不涉及”>
+统一前端回检输入：target=<生成/修改的源码文件或目录>; sourceHtml=<原始 HTML 路径>; analysis=<.frontend/html-analysis/*.json 或 none>; plan=<PLAN.md 或 none>; uiLibraryTarget=<project|antd|antd-mobile|native>; antdMode=<required|selected|notApplicable>; auditRequired=<true|false>
 验证：通过 / 待修正
 ```
 
@@ -385,6 +386,6 @@ HTML 类型：<type>
 
 | 动作 | 规则 |
 | --- | --- |
-| 1 | 输出完 `【HTML 转换结果】` 后，返回 `/autodev-code` 主流程按 code 节点收尾规则推进到 `code_done` |
+| 1 | 输出完 `【HTML 转换结果】` 后，返回 `/autodev-code` 主流程执行项目级验证、统一前端回检，并按 code 节点收尾规则推进到 `code_done` |
 | 2 | 不发起额外回检选择，不询问是否进入独立回检流程 |
 | 3 | 禁止引用已移除的内部回检路线或其依赖文件 |

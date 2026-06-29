@@ -1,7 +1,6 @@
 ---
 name: autodev-code
 description: 按工作流契约逐任务执行代码，并在 code 阶段内部处理可选前端 HTML 实现分支。消费契约 Source Bundle 列出的正式流程产物 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不作为上游阶段产物读取或索要，但不阻止用户直供 HTML/DOM 素材和内部 route SKILL。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
-version: v1.1.1604
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
@@ -55,6 +54,8 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 4. PRD / specs / PLAN 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
 5. 如果任务明确要求 HTML 转换但没有可读取 HTML/DOM/静态素材，停止并要求补充；如果任务可由 specs/design/PLAN 直接实现且没有可读 HTML 素材，则跳过本分支。
 
+内部分流：
+
 HTML 分流规则：
 
 | 输入形态 | 路线 |
@@ -81,13 +82,14 @@ HTML 分流规则：
 实现与收尾要求：
 
 1. 先建立本分支任务队列。若当前运行模式支持 `write_todos`，必须先把本分支主线写成可见清单，再读取 route SKILL/deps 或改代码；未完成这一步，不得进入后续分流。清单至少覆盖：`判断 HTML 路线并读取对应 SKILL` / `完成 HTML 解析与页面结构还原` / `映射真实工程组件、样式与交互` / `执行分支验证并回到 /autodev-code 主流程`；可按实际任务细化，但不得缺项、不得只放在脑内。
-2. 标准 HTML 路线进入 `with-standard-html/SKILL.md` 后，必须先完成路线判定、页面模块、转换、Ant Design 审计四类清单，并带 `routeType`、`absoluteSignalsCleared`、`moduleTodosReady`、`conversionTodosReady`、`uiLibraryTarget`、`antdMode`、`auditRequired` 交接状态转给 `deps/standard-html-parser.md`。
-3. 绝对定位高保真路线进入 `with-absolute-html/SKILL.md` 后，必须先完成页面模块清单与独立脚本清单；脚本清单至少覆盖参数确认、执行脚本、检查 `.frontend/html-analysis/<task-stem>.*` 产物、失败降级。脚本异常不阻塞主流程，降级后以原始 HTML 为唯一视觉源继续。
-4. 主线结束前必须做样式细节收尾，补齐 padding、边框、圆角、阴影、字色、字号、字重、行高、内外边距、对齐、状态色、文本内容、hover / active / selected 等用户一眼能看出的差异。
-5. 主线里完成页面拆分，以及函数、常量、类型、helper / hook、图表配置与同页公共内容抽取；不要把明显的可维护性工作留给后续 `/autodev-reviewer`。
-6. 执行本分支验证，确认已回到 `/autodev-code` 主流程后，再按本文件的「执行协议」与「完成条件」收尾；在显式完成“回到 `/autodev-code` 主流程并按 code 节点收尾”前，不得把本分支视为完成。
+2. 判断 HTML 路线并读取对应 SKILL：按上方内部分流规则选择 `with-standard-html/SKILL.md` 或 `with-absolute-html/SKILL.md`。
+3. 标准 HTML 路线进入 `with-standard-html/SKILL.md` 后，必须先完成路线判定、页面模块、转换、Ant Design 审计四类清单，并带 `routeType`、`absoluteSignalsCleared`、`moduleTodosReady`、`conversionTodosReady`、`uiLibraryTarget`、`antdMode`、`auditRequired` 交接状态转给 `deps/standard-html-parser.md`。
+4. 绝对定位高保真路线进入 `with-absolute-html/SKILL.md` 后，必须先完成页面模块清单与独立脚本清单；脚本清单至少覆盖参数确认、执行脚本、检查 `.frontend/html-analysis/<task-stem>.*` 产物、失败降级。脚本异常不阻塞主流程，降级后以原始 HTML 为唯一视觉源继续。
+5. 主线结束前必须做样式细节收尾，补齐 padding、边框、圆角、阴影、字色、字号、字重、行高、内外边距、对齐、状态色、文本内容、hover / active / selected 等用户一眼能看出的差异。
+6. 主线里完成页面拆分，以及函数、常量、类型、helper / hook、图表配置与同页公共内容抽取；不要把明显的可维护性工作留给后续 `/autodev-reviewer`。
+7. 执行本分支验证，确认已回到 `/autodev-code` 主流程后，再按本文件的「执行协议」与「完成条件」收尾；在显式完成“回到 `/autodev-code` 主流程并按 code 节点收尾”前，不得把本分支视为完成。
 
-分支返回契约：两个 HTML 路线完成后都必须返回 `/autodev-code` 主流程，由 code 根技能继续项目级验证、`.autobizdevops/modules_compile.json` 编译清单校验和 `code_done` checkpoint 推进。HTML 分支内部不得发起独立回检选择，不得调用或引用已移除的 `autodev-frontend`、`frontend_done` 或内部回检路线。
+分支返回契约：两个 HTML 路线完成后都必须返回 `/autodev-code` 主流程，由 code 根技能继续项目级验证、统一前端回检、`.autobizdevops/modules_compile.json` 编译清单校验和 `code_done` checkpoint 推进。HTML 分支内部不得发起独立回检选择，不得调用或引用已移除的 `autodev-frontend`、`frontend_done` 或内部回检路线。返回主流程时必须带回回检输入：生成/修改的目标源码路径、原始 HTML 路径、可用的 `.frontend/html-analysis/*.json` 路径（没有则写 none）、`PLAN.md` 路径（没有则写 none）、`uiLibraryTarget`、`antdMode`、`auditRequired`。
 
 ## 准入检查
 
@@ -154,7 +156,21 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ### 4. 全部任务完成后的验证
 
-队列无「待做」「进行中」后，跑项目级验证（优先 AGENTS.md / 契约指定命令；Java/Maven 至少编译）。失败回到相关任务，不推进。通过后：
+队列无「待做」「进行中」后，跑项目级验证（优先 AGENTS.md / 契约指定命令；Java/Maven 至少编译）。失败回到相关任务，不推进。
+
+如本轮触发 HTML 分支，或变更了前端源码（`.tsx` / `.jsx` / `.ts` / `.js` / `.vue` 及相关样式文件），项目级验证通过后必须运行统一前端回检；只有用户明确要求“跳过回检 / 先不回检 / 不要跑回检 / 先不验证”时才跳过，并在最终摘要写 `reviewStatus=skipped-by-user`。默认命令：
+
+```bash
+python "{PLUGIN_ROOT}/skills/autodev/autodev-code/deps/frontend-html/scripts/review_runner.py" --target "<file-or-dir>" --antd-audit auto --format markdown
+```
+
+- `--target` 指向本轮生成/修改的前端页面、组件文件或包含它们的目录；`--source-html`、`--analysis`、`--plan` 只在对应文件真实存在时追加，标准 HTML 路线没有 analysis JSON 时不要传 `--analysis`。
+- 退出码 `0`：回检通过，记 `reviewStatus=passed`。
+- 退出码 `1`：读取 findings；`must-fix` 是阻塞项，按最小修复同轮重跑，默认最多 2 轮；仅剩 `suggestion` 时允许推进，但必须记录 `reviewStatus=has-suggestions` 和建议项。
+- 退出码 `2`：回检执行异常，记 `reviewStatus=failed`，不得声称完整验证通过，不得推进 `code_done`，除非用户明确选择跳过回检。
+- 本回检只属于 code 阶段前端生成质量自检，不替代后续 `/autodev-reviewer` 的独立需求实现评审。
+
+项目级验证与必要的统一前端回检均收敛后：
 
 ```bash
 python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_done
@@ -173,6 +189,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 - 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
 - 必要验证通过；项目编译通过（code_done execute hook 另记模块编译结果，非阻断）。
+- HTML 分支或前端源码变更已完成统一前端回检，或用户明确跳过；仍有 `must-fix` / 执行异常时不得推进 `code_done`。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
 **Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：

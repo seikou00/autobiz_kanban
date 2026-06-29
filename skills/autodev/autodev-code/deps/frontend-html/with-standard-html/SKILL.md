@@ -1,6 +1,6 @@
 ---
 name: code-frontend-with-standard-html
-description: 处理 `/autodev-code` 内部标准 DOM / 语义明确 HTML 的路线技能。适用于标准 DOM、`<style>`、class 命名清晰、表单/按钮/label/flex 结构明显的 HTML 输入；既覆盖普通 HTML，也覆盖结构标准但视觉仍要求高保真的 HTML。
+description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线技能。适用于标准 DOM、style 标签、class 命名清晰、表单/按钮/label/flex 结构明显的 HTML 输入；既覆盖普通 HTML，也覆盖结构标准但视觉仍要求高保真的 HTML。
 ---
 
 # 标准 HTML 路线
@@ -82,8 +82,8 @@ description: 处理 `/autodev-code` 内部标准 DOM / 语义明确 HTML 的路�
   - [ ] 交接状态必须包含：`routeType=standard-html`、`absoluteSignalsCleared=true`、`moduleTodosReady=true`、`conversionTodosReady=true`、`uiLibraryTarget=<project|antd|antd-mobile|native>`、`antdMode=<required|candidate|selected|notApplicable>`、`auditRequired=<true|false>`。
   - [ ] 该依赖已作为 `standard-html-parser` 承载标准 HTML 转 React 工程代码能力，是本路线主执行入口。
 - [ ] 主线完成后返回 `/autodev-code` 主流程。
-  - [ ] `standard-html-parser` 主线完成后先输出交付总结。
-  - [ ] 随后控制权必须返回 `/autodev-code`，由 code 根技能执行项目级验证、模块编译清单校验和 `code_done` 推进。
+  - [ ] `standard-html-parser` 主线完成后先输出交付总结，并带回统一前端回检输入：目标源码路径、原始 HTML 路径、analysis JSON 路径（标准 HTML 路线通常为 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`。
+  - [ ] 随后控制权必须返回 `/autodev-code`，由 code 根技能执行项目级验证、统一前端回检、模块编译清单校验和 `code_done` 推进。
   - [ ] 不发起独立回检选择，不调用或引用已移除的内部回检路线。
 
 ## 3. 交接状态
