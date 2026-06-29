@@ -17,7 +17,7 @@
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits} --session-workspace-path ${sessionWorkspacePath}"
     },
     "linux": {
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -30,7 +30,7 @@
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits} --session-workspace-path ${sessionWorkspacePath}"
     },
     "win32": {
       "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
@@ -43,7 +43,7 @@
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --write-board-config",
-      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --selected-serviceUnit ${selectedServiceUnits}"
+      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --selected-serviceUnit ${selectedServiceUnits} --session-workspace-path ${sessionWorkspacePath}"
     }
   },
   "workflow": {
