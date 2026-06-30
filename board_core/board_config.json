@@ -73,33 +73,6 @@
       "standard": {
         "label": "不需要，进入 autodev-specs",
         "description": "不先转换 HTML 设计稿，直接进入 autodev-specs。"
-      },
-      "frontend_before_specs": {
-        "label": "需要，进入 HTML 转前端",
-        "description": "先将 HTML 转换为项目内前端工程文件；在 autodev-frontend 内部按标准 HTML 或绝对定位高保真 HTML 分流，再进入后续阶段。",
-        "nodes": [
-          {
-            "id": "dev.frontend",
-            "phase": "Dev",
-            "label": "前端实现",
-            "skill": "autodev-frontend",
-            "insertBefore": "dev.specs",
-            "checkpointPrefix": "frontend",
-            "description": "基于 PRD 与 HTML 进行前端实现，并在 autodev-frontend 内部按标准 HTML 或绝对定位高保真 HTML 分流 \n 产物：项目内前端工程文件（无独立文档产物）",
-            "artifacts": {
-              "inputs": [
-                { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
-                  "extract": {
-                    "focus": ["页面/交互需求与验收标准", "HTML 设计稿的引用与格式"],
-                    "method": "按 HTML 格式分流转换入口，再以 PRD 验收标准核对前端实现",
-                    "degrade": "无 PRD 时基于用户提供的 HTML 与描述实现，并记录验收基准缺失"
-                  } }
-              ],
-              "outputs": []
-            },
-            "validators": []
-          }
-        ]
       }
     },
     "dynamicStages": [
@@ -243,7 +216,8 @@
         "artifacts": {
           "inputs": [],
           "outputs": [
-            { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true }
+            { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true }
           ]
         },
         "validators": [],
@@ -261,7 +235,7 @@
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
-          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "通过 /autodev-specs 路由到行为规格；是否需要先将 HTML 转换为项目内前端工程文件？需要则进入 autodev-frontend，并在该节点内按标准 HTML 或绝对定位高保真 HTML 分流；不需要则直接进入 autodev-specs 阶段。" } }
+          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "通过 /autodev-specs 路由到行为规格；UI 范围以 UI_CONTEXT.json 为机器事实源，前端实现后续在 /autodev-code 内部按 FRONTEND_ROUTE.json 分流。" } }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {
@@ -271,10 +245,17 @@
                 "focus": ["已澄清的需求结论与边界", "未决问题与待确认项"],
                 "method": "把讨论稿中已确认的结论转写为正式 PRD 结构；未决问题显式保留、不要替用户补齐；讨论稿尚未收敛（仍有大量 P0/P1 未解决）时先回到需求澄清",
                 "degrade": "无讨论稿时先与用户完成需求澄清，再生成 PRD"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "decisionStatus", "pages/interactions/visualSources", "notApplicableReason"],
+                "method": "读取 UI_CONTEXT.json 作为 UI 范围机器事实源；PRD 只描述行为，不从 PRD 正文重新推导 UI 范围；生成 PRD 后必须把 decisionStatus 至少推进到 confirmed",
+                "degrade": "无 UI_CONTEXT.json 时回到需求澄清补齐，不用 PRD_DISCUSS.md 或 PRD.md 文本替代 UI 范围事实源"
               } }
           ],
           "outputs": [
-            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
+            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true }
           ]
         },
         "validators": [],
@@ -302,14 +283,21 @@
                 "focus": ["业务目标与用户场景", "验收标准与能力边界"],
                 "method": "作为行为契约的上游依据；规格缺口处回到用户澄清，不要凭空补齐行为",
                 "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs（轻量路径）"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": false,
+              "extract": {
+                "focus": ["uiRequired", "decisionStatus", "pages/interactions/visualSources/capabilities"],
+                "method": "优先读取 UI_CONTEXT.json 判断是否需要 UI；若当前工作流无 Biz 输入或文件缺失，本阶段必须基于用户描述生成并锁定 UI_CONTEXT.json，不从 PRD/specs Markdown 关键词推导 UI 范围",
+                "degrade": "无 UI_CONTEXT.json 时由 specs 阶段创建；Markdown 只做人类说明，不作为 UI 范围机器事实源"
               } }
           ],
           "outputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true }
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true }
           ]
         },
-        "validators": ["proposal_contract", "specs_contract"]
+        "validators": ["proposal_contract", "specs_contract", "ui_context_json"]
       },
       {
         "id": "dev.plan",
@@ -337,6 +325,12 @@
                 "focus": ["每个 capability 的 Requirement / Scenario", "验收场景、边界条件与失败路径"],
                 "method": "specs 驱动设计：先确认行为契约，再生成 design.md 与 plan.json；行为缺口回到 /autodev-specs",
                 "degrade": "无 specs 时与用户确认行为预期后再设计，未确认行为全部记为待确认风险"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "pages/interactions/visualSources/capabilities", "capabilities[].specRefs"],
+                "method": "作为 plan 阶段 UI 范围机器事实源；只从 UI_CONTEXT.json 投影 plan.json.tasks[].uiRequired/uiRefs，PLAN.md 只作人类视图",
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 生成并锁定，不能从 specs/PRD Markdown 推导 UI 任务"
               } }
           ],
           "outputs": [
@@ -345,7 +339,7 @@
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true }
           ]
         },
-        "validators": ["design_contract", "plan_json_contract", "plan_json_initial_tasks"]
+        "validators": ["design_contract", "ui_context_json", "plan_json_contract", "plan_json_initial_tasks"]
       },
       {
         "id": "dev.code",
@@ -388,16 +382,22 @@
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers"],
-                "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，PLAN.md 只作可选同步视图",
+                "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers", "tasks[].uiRequired/uiRefs"],
+                "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，UI 任务只按 tasks[].uiRequired/uiRefs 执行，PLAN.md 只作可选同步视图",
                 "degrade": "无 plan.json 时仅在当前 workflow 不包含 plan 阶段时降级；标准 workflow 下缺失必须回到 /autodev-plan 生成"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "decisionStatus", "visualSources[].type/path/route", "capabilities[].specRefs"],
+                "method": "作为 code 阶段 UI 范围机器事实源；resolve_frontend_html_route.py 优先读取 UI_CONTEXT.json 与 plan.json，Markdown 只作迁移兜底",
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 PRD/specs/PLAN Markdown 推导是否写前端"
               } }
           ],
           "outputs": [
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["plan_json_contract", "plan_finished_tasks", "frontend_route_gate", "code_done_gate", "evidence_integrity"],
+        "validators": ["ui_context_json", "plan_json_contract", "plan_finished_tasks", "frontend_route_gate", "code_done_gate", "evidence_integrity"],
         "guards": ["code_compile"]
       },
       {

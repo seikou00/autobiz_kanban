@@ -17,12 +17,16 @@ if str(ROOT) not in sys.path:
 from board_core.state_store import load_state_json_records_result  # noqa: E402
 from paths import get_plugin_output_workspace, resolve_project_dir  # noqa: E402
 from resolve_frontend_html_route import (  # noqa: E402
+    FrontendRouteError,
     ROUTE_ABSOLUTE,
+    ROUTE_NONE,
+    ROUTE_SPEC_DRIVEN,
     ROUTE_STANDARD,
     evidence_path,
     read_json,
     resolve_frontend_route,
 )
+from ui_context import UIContextError, load_ui_context  # noqa: E402
 
 
 BLOCK_EXIT_CODE = 2
@@ -139,12 +143,27 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
     evidence_file = evidence_path(workspace, feature)
     evidence = read_json(evidence_file)
     if not evidence:
-        resolved = resolve_frontend_route(workspace, feature, write_evidence=False)
+        try:
+            resolved = resolve_frontend_route(workspace, feature, write_evidence=False)
+        except FrontendRouteError as exc:
+            return block(f"UI_CONTEXT.json 非法，无法解析前端 route: {exc}")
+        if resolved.get("source") == "UI_CONTEXT.json" and resolved.get("route") == ROUTE_NONE:
+            return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
         if resolved.get("triggered"):
             return block(f"写前端代码前缺少 FRONTEND_ROUTE.json: {evidence_file}")
+        try:
+            ui_context = load_ui_context(workspace / ".autobizdevops" / "features" / feature)
+        except UIContextError:
+            ui_context = None
+        if isinstance(ui_context, dict) and ui_context.get("uiRequired") is False:
+            return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
         return 0
 
     route = evidence.get("route")
+    if route == ROUTE_NONE and evidence.get("source") == "UI_CONTEXT.json":
+        return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
+    if route == ROUTE_SPEC_DRIVEN:
+        return 0
     if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
         return block(f"当前 frontend route 不允许写前端代码: {route}")
     if evidence.get("routeSkillReadComplete") is not True:

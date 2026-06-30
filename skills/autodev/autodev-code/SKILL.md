@@ -5,7 +5,7 @@ description: 按工作流契约逐任务执行代码，并在 code 阶段内部�
 
 ## 前端 Route 强制闸门（必须优先执行）
 
-当本轮任务是前端代码生成、HTML/DOM/设计导出稿转工程代码，或触发「前端 HTML 实现分支」时，`/autodev-code` 不得自行改写成普通前端编码任务。必须先进入内部 route，并以 route SKILL 的 `write_todos` 为权威流程。
+当本轮任务是前端代码生成、HTML/DOM/设计导出稿转工程代码，或触发「前端 HTML 实现分支」时，`/autodev-code` 不得自行改写成普通前端编码任务。必须先解析内部 route。UI 范围以 `UI_CONTEXT.json` 和 `plan.json.tasks[].uiRequired/uiRefs` 为机器事实源，Markdown 只作迁移兜底。
 
 1. 推进到 `code_in_progress` 后，先解析并记录 route：
 
@@ -18,6 +18,8 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
 2. 按输出的 `route` 读取 route SKILL 到 EOF：
    - `route=absolute-html`：完整读取 `skills/autodev/autodev-code/deps/frontend-html/with-absolute-html/SKILL.md`
    - `route=standard-html`：完整读取 `skills/autodev/autodev-code/deps/frontend-html/with-standard-html/SKILL.md`
+   - `route=spec-driven-ui`：有 UI 任务但没有 HTML/设计稿输入，按 specs/design/plan 实现前端；不读取 HTML parser，不要求 route SKILL。
+   - `route=none`：`UI_CONTEXT.json` 标记 `uiRequired=false`，不得写前端业务代码。
    - 如果读取工具返回截断内容，继续续读直到 EOF；未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码。
 
 3. 把 route SKILL 中定义的 `write_todos` 主流程转成可见任务清单，逐项执行并更新状态，不能合并成一句“实现前端页面”。清单创建后立即记录机器证据：
@@ -45,7 +47,7 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
 
 允许值：`passed`、`has-suggestions`、`skipped-by-user`、`failed`。`failed` 或未写明且未明确跳过时，`frontend_route_gate` 会阻断 `code_done`。
 
-`{FEATURE_DIR}/FRONTEND_ROUTE.json` 是本闸门的机器证据。前端代码生成任务缺少该文件、route SKILL 未读完、route todos 未创建/未完成、parser 未读、回检未通过或未明确跳过时，不得推进 `code_done`。
+`{FEATURE_DIR}/FRONTEND_ROUTE.json` 是本闸门的机器证据。HTML 路线下，前端代码生成任务缺少该文件、route SKILL 未读完、route todos 未创建/未完成、parser 未读、回检未通过或未明确跳过时，不得推进 `code_done`。`spec-driven-ui` 不要求 HTML parser；`none` 不允许写前端业务代码。
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（Source Bundle + Method Bundle）
@@ -88,16 +90,18 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 
 触发条件（任一满足即进入本分支）：
 
+- `UI_CONTEXT.json` 中 `uiRequired=true`，或当前 plan task 中 `uiRequired=true`。
 - `PLAN.md` / specs / 用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
 - 用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段、设计导出稿或静态页面素材。
 
 总优先级：
 
-1. 行为契约以 `specs/**/*.md` 为最高依据。
-2. 技术边界以 `design.md` 与 `PLAN.md` 为实现依据。
-3. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位、文案内容和交互线索，不得覆盖 specs/design/PLAN。
-4. PRD / specs / PLAN 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
-5. 如果任务明确要求 HTML 转换但没有可读取 HTML/DOM/静态素材，停止并要求补充；如果任务可由 specs/design/PLAN 直接实现且没有可读 HTML 素材，则跳过本分支。
+1. UI 范围以 `UI_CONTEXT.json` 为最高机器事实源。
+2. 行为契约以 `specs/**/*.md` 为最高依据。
+3. 技术边界以 `design.md` 与 `plan.json` 为实现依据。
+4. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位、文案内容和交互线索，不得覆盖 UI_CONTEXT/specs/design/plan.json。
+5. PRD / specs / plan.json 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
+6. 如果 route=`missing-html`，停止并要求补充 HTML 或回到上游修改 UI_CONTEXT/plan；如果 route=`spec-driven-ui`，按 specs/design/plan 直接实现，不得假装读取 HTML。
 
 内部分流：
 
@@ -109,6 +113,7 @@ HTML 分流规则：
 | 普通静态 HTML、复制 DOM、小型静态站点、HTML 转 React，且页面主体不是绝对定位碎片结构 | `deps/frontend-html/with-standard-html/SKILL.md` |
 | 高保真 HTML、Figma/MasterGo/低代码导出稿、坐标稿、碎片 div、页面主体或关键分区由 `position:absolute` / `left/top` / 固定像素尺寸主导 | `deps/frontend-html/with-absolute-html/SKILL.md` |
 | 高保真但绝对定位仅局部、稀疏、装饰性存在，整体仍以标准 DOM / flex / grid 为主 | `deps/frontend-html/with-standard-html/SKILL.md` |
+| 有 UI 任务但没有 HTML/设计稿输入 | `spec-driven-ui`，按 specs/design/plan 直接实现 |
 
 高保真 / 绝对定位强信号（命中且主导页面主体、关键分区或多个视觉块时，必须走 absolute 路线）：
 

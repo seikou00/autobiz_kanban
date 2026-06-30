@@ -156,7 +156,33 @@ Expected output: 已完成原始需求材料读取，并形成后续分析所需
 
 ### Step 4: 对话式引导并沉淀 `PRD_DISCUSS.md`
 
-【关键方法】这一阶段的主要目标不是直接写正式 PRD，而是通过对话循环结合原始需求文档和用户回复，把需求内容调整结果稳定沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。
+【关键方法】这一阶段的主要目标不是直接写正式 PRD，而是通过对话循环结合原始需求文档和用户回复，把需求内容调整结果稳定沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`，并同步写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` 作为 UI 范围机器事实源。
+
+#### UI 范围收口
+
+- 必须生成或更新 `UI_CONTEXT.json`，不要只在 `PRD_DISCUSS.md` 中用自然语言描述是否有页面。
+- `uiRequired` 默认可为 `false`，但必须通过 `decisionStatus` 区分 `defaulted` 与用户已确认。
+- 若用户确认有页面、前端交互、设计稿、HTML、Figma/MasterGo 或原型链接，写 `uiRequired=true`，并尽量补 `pages[]`、`interactions[]`、`visualSources[]`。
+- 若用户确认本 feature 纯后端/纯规则/纯数据能力，写 `uiRequired=false`，并填写 `notApplicableReason`。
+- discuss/PRD 阶段不要编造 `capabilities[].specRefs`；REQ/SCN 由 specs 阶段定义并在 `decisionStatus=locked` 时回填。
+- 高保真 HTML、标准 HTML、设计稿、原型链接只写入 `visualSources[]`，不要混入需求正文作为行为契约。
+
+最小结构：
+
+```json
+{
+  "version": 1,
+  "featureId": "{feature}",
+  "uiRequired": false,
+  "decisionStatus": "defaulted",
+  "decisionSource": "default_false",
+  "notApplicableReason": "未确认存在 UI 范围",
+  "pages": [],
+  "interactions": [],
+  "visualSources": [],
+  "capabilities": []
+}
+```
 
 #### Step 4.1 问题清单引导策略
 

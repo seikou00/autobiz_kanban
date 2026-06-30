@@ -24,9 +24,13 @@ from artifact_check import validate_frontend_route_gate  # noqa: E402
 from board_core.state_store import state_json_content_from_records  # noqa: E402
 from common import HookContext  # noqa: E402
 from hooks.resolve_frontend_html_route import (  # noqa: E402
+    FrontendRouteError,
     PARSERS,
     ROUTE_ABSOLUTE,
+    ROUTE_MISSING,
+    ROUTE_NONE,
     ROUTE_SKILLS,
+    ROUTE_SPEC_DRIVEN,
     ROUTE_STANDARD,
     evidence_path,
     read_json,
@@ -63,6 +67,39 @@ def write_feature_file(workspace: Path, name: str, content: str) -> Path:
     return path
 
 
+def write_ui_context(workspace: Path, payload: dict) -> None:
+    write_json(workspace / ".autobizdevops" / "features" / "alpha" / "UI_CONTEXT.json", payload)
+
+
+def base_ui_context(*, ui_required: bool = True) -> dict:
+    return {
+        "version": 1,
+        "featureId": "alpha",
+        "uiRequired": ui_required,
+        "decisionStatus": "locked",
+        "decisionSource": "user_confirmed" if ui_required else "default_false",
+        "confirmedAtCheckpoint": "prd_done",
+        "lockedAtCheckpoint": "specs_done",
+        "notApplicableReason": "" if ui_required else "纯后端能力",
+        "pages": [
+            {"pageId": "PAGE-001", "name": "页面", "goal": "展示能力", "states": ["success"]}
+        ] if ui_required else [],
+        "interactions": [
+            {"interactionId": "UIX-001", "pageId": "PAGE-001", "summary": "点击提交"}
+        ] if ui_required else [],
+        "visualSources": [],
+        "capabilities": [
+            {
+                "capabilityId": "alpha-ui",
+                "uiRequired": True,
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": ["UIX-001"],
+                "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+            }
+        ] if ui_required else [],
+    }
+
+
 def gate_context(workspace: Path) -> HookContext:
     return HookContext(skill="autodev-code", slug="alpha", root=workspace)
 
@@ -85,6 +122,89 @@ def complete_evidence(route: str) -> dict:
 
 
 class FrontendRouteResolverTests(unittest.TestCase):
+    def test_ui_context_false_resolves_none_even_if_markdown_mentions_frontend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, base_ui_context(ui_required=False))
+            write_feature_file(workspace, "PLAN.md", "需要根据 HTML 实现前端页面。\n")
+            write_feature_file(workspace, "frontend-html/page.html", "<form><button>OK</button></form>\n")
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["source"], "UI_CONTEXT.json")
+        self.assertEqual(payload["route"], ROUTE_NONE)
+        self.assertFalse(payload["uiRequired"])
+
+    def test_ui_context_required_without_html_resolves_spec_driven(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, base_ui_context(ui_required=True))
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["source"], "UI_CONTEXT.json")
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertTrue(payload["uiRequired"])
+
+    def test_invalid_ui_context_does_not_fallback_to_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_feature_file(workspace, "UI_CONTEXT.json", "{")
+            write_feature_file(workspace, "PLAN.md", "需要根据 HTML 实现前端页面。\n")
+            write_feature_file(workspace, "frontend-html/page.html", "<form><button>OK</button></form>\n")
+
+            with self.assertRaises(FrontendRouteError):
+                resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+    def test_ui_context_high_fidelity_html_resolves_absolute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            html_path = write_feature_file(
+                workspace,
+                "frontend-html/page.html",
+                """
+                <div style="position:absolute; left:10px; top:10px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:20px; top:60px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:30px; top:110px; width:120px; height:40px"></div>
+                """,
+            )
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [
+                {
+                    "sourceId": "VIS-001",
+                    "type": "high_fidelity_html",
+                    "path": str(html_path),
+                    "route": ROUTE_ABSOLUTE,
+                    "required": True,
+                }
+            ]
+            write_ui_context(workspace, context)
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
+        self.assertEqual(payload["visualSourceIds"], ["VIS-001"])
+
+    def test_explicit_html_route_without_readable_html_resolves_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [
+                {
+                    "sourceId": "VIS-001",
+                    "type": "high_fidelity_html",
+                    "path": "frontend-html/missing.html",
+                    "route": ROUTE_ABSOLUTE,
+                    "required": True,
+                }
+            ]
+            write_ui_context(workspace, context)
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_MISSING)
+        self.assertEqual(payload["htmlSourcePaths"], [])
+
     def test_absolute_html_is_classified_and_written(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
@@ -129,6 +249,29 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
 
 class FrontendRouteGateValidatorTests(unittest.TestCase):
+    def test_spec_driven_ui_allows_code_done_without_html_protocol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    "version": 1,
+                    "feature": "alpha",
+                    "uiRequired": True,
+                    "triggered": True,
+                    "route": ROUTE_SPEC_DRIVEN,
+                    "source": "UI_CONTEXT.json",
+                    "visualSourceIds": [],
+                    "htmlSourcePaths": [],
+                    "reasons": ["UI_CONTEXT uiRequired without HTML visual source"],
+                    "docPaths": [],
+                },
+            )
+
+            failures = validate_frontend_route_gate(gate_context(workspace))
+
+        self.assertEqual(failures, 0)
+
     def test_missing_evidence_blocks_frontend_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
@@ -258,6 +401,59 @@ class FrontendRouteReadHookTests(unittest.TestCase):
 
 
 class FrontendRouteWriteGuardTests(unittest.TestCase):
+    def test_frontend_write_allows_spec_driven_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    "version": 1,
+                    "feature": "alpha",
+                    "uiRequired": True,
+                    "triggered": True,
+                    "route": ROUTE_SPEC_DRIVEN,
+                    "source": "UI_CONTEXT.json",
+                    "visualSourceIds": [],
+                    "htmlSourcePaths": [],
+                    "reasons": [],
+                    "docPaths": [],
+                },
+            )
+
+            result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(result, 0)
+
+    def test_frontend_write_blocks_when_ui_context_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, base_ui_context(ui_required=False))
+
+            output = io.StringIO()
+            error = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stderr(error):
+                    result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("uiRequired=false", error.getvalue())
+
+    def test_frontend_write_blocks_invalid_ui_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_feature_file(workspace, "UI_CONTEXT.json", "{")
+            write_feature_file(workspace, "PLAN.md", "需要根据 HTML 实现前端页面。\n")
+            write_feature_file(workspace, "frontend-html/page.html", "<form><button>OK</button></form>\n")
+
+            output = io.StringIO()
+            error = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stderr(error):
+                    result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("UI_CONTEXT.json 非法", error.getvalue())
+
     def test_frontend_write_blocks_when_route_evidence_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))

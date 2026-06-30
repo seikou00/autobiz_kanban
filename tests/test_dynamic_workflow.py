@@ -305,6 +305,28 @@ def write_plan_artifacts(feature_dir: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+    (feature_dir / "UI_CONTEXT.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "featureId": "alpha",
+                "uiRequired": False,
+                "decisionStatus": "locked",
+                "decisionSource": "default_false",
+                "confirmedAtCheckpoint": "prd_done",
+                "lockedAtCheckpoint": "specs_done",
+                "notApplicableReason": "纯后端能力",
+                "pages": [],
+                "interactions": [],
+                "visualSources": [],
+                "capabilities": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def record(checkpoint: str, *, profile: str = "quality") -> dict[str, str]:
@@ -320,24 +342,17 @@ def record(checkpoint: str, *, profile: str = "quality") -> dict[str, str]:
 
 
 def states_by_id(node: dict) -> dict[str, dict]:
-    return {state["id"]: state for state in node["states"]}
+    return {state.get("id") or state["nodeStatus"]: state for state in node["states"]}
 
 
 class DynamicWorkflowCompilerTests(unittest.TestCase):
-    def test_frontend_profile_changes_workflow_shell_nodes(self) -> None:
+    def test_legacy_frontend_profile_is_removed_from_configured_options(self) -> None:
         standard = load_effective_board_config(ROOT / "board_core" / "board_config.json", repo_root=ROOT)
-        frontend = compile_board_config(
-            copy.deepcopy(load_board_config(ROOT / "board_core" / "board_config.json")),
-            repo_root=None,
-            profile="frontend_before_specs",
-        )
-
         standard_nodes = [node["id"] for node in build_workflow_shell(standard)["nodes"]]
-        frontend_nodes = [node["id"] for node in build_workflow_shell(frontend)["nodes"]]
+        profiles = standard["workflow"].get("profiles", {})
 
         self.assertNotIn("dev.frontend", standard_nodes)
-        self.assertLess(frontend_nodes.index("biz.prd"), frontend_nodes.index("dev.frontend"))
-        self.assertLess(frontend_nodes.index("dev.frontend"), frontend_nodes.index("dev.specs"))
+        self.assertNotIn("frontend_before_specs", profiles)
 
     def test_profile_insert_preserves_compatible_state_content(self) -> None:
         base_config = copy.deepcopy(load_board_config(ROOT / "board_core" / "board_config.json"))
@@ -353,7 +368,7 @@ class DynamicWorkflowCompilerTests(unittest.TestCase):
         config = compile_board_config(
             base_config,
             repo_root=None,
-            profile="frontend_before_specs",
+            profile="standard",
         )
         compiled_nodes = {node["id"]: node for node in config["workflow"]["nodes"]}
         compiled_plan_done = states_by_id(compiled_nodes["dev.plan"])["done"]
@@ -371,14 +386,13 @@ class DynamicWorkflowCompilerTests(unittest.TestCase):
         config = compile_board_config(
             copy.deepcopy(load_board_config(ROOT / "board_core" / "board_config.json")),
             repo_root=None,
-            profile="frontend_before_specs",
+            profile="standard",
         )
         nodes = {node["id"]: node for node in config["workflow"]["nodes"]}
         prd_done = states_by_id(nodes["biz.prd"])["done"]
 
-        self.assertEqual(prd_done["nextAction"]["slashSkill"], "autodev-frontend")
-        self.assertEqual(prd_done["nextAction"]["dialogTips"], "当前阶段：前端实现。")
-        self.assertNotIn("是否需要将 HTML", prd_done["nextAction"]["dialogTips"])
+        self.assertEqual(prd_done["nextAction"]["slashSkill"], "autodev-specs")
+        self.assertNotIn("autodev-frontend", prd_done["nextAction"]["dialogTips"])
 
     def test_inserted_node_preserves_custom_states_when_target_skill_matches(self) -> None:
         overlay = quality_overlay()
@@ -604,14 +618,18 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             self.assertFalse(frontend.ok)
             self.assertIn("未知 checkpoint: frontend_in_progress", "\n".join(frontend.errors))
 
-    def test_legacy_frontend_profile_is_retained_but_not_installed(self) -> None:
+    def test_legacy_frontend_profile_no_longer_changes_standard_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             (feature_dir / "PRD.md").write_text("prd", encoding="utf-8")
+            write_state_records(workspace, {"alpha": record("prd_done", profile="frontend_before_specs")})
 
-            with self.assertRaisesRegex(ValueError, "autodev-frontend"):
-                write_state_records(workspace, {"alpha": record("prd_done", profile="frontend_before_specs")})
+            payload, exit_code = resolve_route(workspace, "alpha")
+
+            self.assertEqual(exit_code, 0, payload)
+            self.assertEqual(payload["recommendedNextSkill"], "autodev-specs")
+            self.assertNotEqual(payload["recommendedNextSkill"], "autodev-frontend")
 
     def test_inspect_hides_frontend_node_for_standard_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -644,7 +662,7 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             self.assertNotIn("dev.frontend", workflow_nodes)
             self.assertNotIn("dev.frontend", run_nodes)
 
-    def test_legacy_frontend_profile_shell_is_retained_without_skill_validation(self) -> None:
+    def test_legacy_frontend_profile_shell_is_removed_from_config_asset(self) -> None:
         config = compile_board_config(
             copy.deepcopy(load_board_config(ROOT / "board_core" / "board_config.json")),
             repo_root=None,
@@ -652,9 +670,7 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
         )
 
         workflow_nodes = [node["id"] for node in config["workflow"]["nodes"]]
-        frontend_node = next(node for node in config["workflow"]["nodes"] if node["id"] == "dev.frontend")
-        self.assertIn("dev.frontend", workflow_nodes)
-        self.assertEqual(frontend_node["skill"], "autodev-frontend")
+        self.assertNotIn("dev.frontend", workflow_nodes)
 
     def test_route_checkpoint_uses_feature_workflow_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -750,7 +766,7 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
             )
             self.assertTrue(finished.ok, finished.errors)
 
-    def test_legacy_frontend_profile_can_still_be_composed_as_config_asset(self) -> None:
+    def test_legacy_frontend_profile_no_longer_composes_frontend_node(self) -> None:
         config = compile_board_config(
             copy.deepcopy(load_board_config(ROOT / "board_core" / "board_config.json")),
             repo_root=None,
@@ -759,10 +775,10 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
         )
 
         workflow_nodes = [node["id"] for node in config["workflow"]["nodes"]]
-        self.assertIn("dev.frontend", workflow_nodes)
+        self.assertNotIn("dev.frontend", workflow_nodes)
         self.assertIn("dev.detail_design", workflow_nodes)
 
-    def test_legacy_frontend_profile_next_actions_are_retained_in_config_asset(self) -> None:
+    def test_legacy_frontend_profile_next_actions_are_removed_from_config_asset(self) -> None:
         config = compile_board_config(
             copy.deepcopy(load_board_config(ROOT / "board_core" / "board_config.json")),
             repo_root=None,
@@ -771,9 +787,8 @@ class DynamicWorkflowRuntimeTests(unittest.TestCase):
         nodes = {node["id"]: node for node in config["workflow"]["nodes"]}
 
         prd_done = states_by_id(nodes["biz.prd"])["done"]
-        frontend_in_progress = states_by_id(nodes["dev.frontend"])["in_progress"]
-        self.assertEqual(prd_done["nextAction"]["slashSkill"], "autodev-frontend")
-        self.assertEqual(frontend_in_progress["nextAction"]["slashSkill"], "autodev-frontend")
+        self.assertEqual(prd_done["nextAction"]["slashSkill"], "autodev-specs")
+        self.assertNotIn("dev.frontend", nodes)
 
     def test_project_inspect_restores_dynamic_decision_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

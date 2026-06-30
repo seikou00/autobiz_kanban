@@ -169,6 +169,34 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
     )
 
 
+def write_non_ui_context(feature_dir: Path, *, feature: str = "alpha", locked: bool = True) -> None:
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "featureId": feature,
+        "uiRequired": False,
+        "decisionStatus": "locked" if locked else "confirmed",
+        "decisionSource": "default_false",
+        "confirmedAtCheckpoint": "prd_done",
+        "notApplicableReason": "纯后端能力",
+        "pages": [],
+        "interactions": [],
+        "visualSources": [],
+        "capabilities": [],
+    }
+    if locked:
+        payload["lockedAtCheckpoint"] = "specs_done"
+    (feature_dir / "UI_CONTEXT.json").write_text(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class StateStoreTests(unittest.TestCase):
     def test_loads_v2_state_and_repairs_markdown_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -584,6 +612,7 @@ class StateIntegrationTests(unittest.TestCase):
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             feature_dir.mkdir(parents=True)
             (feature_dir / "PRD_DISCUSS.md").write_text("discussion", encoding="utf-8")
+            write_non_ui_context(feature_dir, locked=False)
 
             result = subprocess.run(
                 [
@@ -610,6 +639,7 @@ class StateIntegrationTests(unittest.TestCase):
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             feature_dir.mkdir(parents=True)
             write_minimal_trace_sources(feature_dir)
+            write_non_ui_context(feature_dir)
             (feature_dir / "PLAN.md").write_text(
                 "\n".join(
                     [
@@ -1131,6 +1161,7 @@ class StateIntegrationTests(unittest.TestCase):
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             feature_dir.mkdir(parents=True)
             write_minimal_trace_sources(feature_dir)
+            write_non_ui_context(feature_dir)
             (feature_dir / "PLAN.md").write_text(
                 "\n".join(
                     [

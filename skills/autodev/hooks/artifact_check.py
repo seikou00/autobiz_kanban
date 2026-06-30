@@ -36,13 +36,22 @@ from hooks.plan_json import (  # noqa: E402
     unfinished_tasks,
 )
 from hooks.resolve_frontend_html_route import (  # noqa: E402
+    FrontendRouteError,
     ROUTE_ABSOLUTE,
     ROUTE_MISSING,
     ROUTE_NONE,
+    ROUTE_SPEC_DRIVEN,
     ROUTE_STANDARD,
     evidence_path as frontend_evidence_path,
     read_json as read_frontend_json,
     resolve_frontend_route,
+)
+from hooks.ui_context import (  # noqa: E402
+    UIContextError,
+    load_ui_context,
+    ui_context_indexes,
+    ui_context_path,
+    validate_ui_context_data,
 )
 
 
@@ -802,6 +811,104 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     return failures
 
 
+def validate_ui_context_json(ctx: HookContext) -> int:
+    data, failures = load_json_artifact(
+        ctx,
+        "UI_CONTEXT.json",
+        required=ctx.requires_artifact("UI_CONTEXT.json"),
+    )
+    if data is None:
+        return failures
+    spec_ids, spec_failures = collect_spec_definition_index(ctx)
+    failures += spec_failures
+    for error in validate_ui_context_data(
+        data,
+        feature_id=ctx.slug,
+        require_locked=ctx.requires_artifact("UI_CONTEXT.json"),
+        defined_requirements=spec_ids["REQ"],
+        defined_scenarios=spec_ids["SCN"],
+    ):
+        failures += fail_line(ctx, "invalid_ui_context_json", f" detail={error}")
+    return failures
+
+
+def _load_ui_context_for_projection(ctx: HookContext) -> tuple[dict | None, int]:
+    try:
+        data = load_ui_context(ctx.feature_dir)
+    except UIContextError as exc:
+        return None, fail_line(ctx, "invalid_ui_context_json", f" detail={exc}")
+    if data is None:
+        if ctx.requires_artifact("UI_CONTEXT.json"):
+            return None, fail_line(ctx, "missing_json_artifact", " file=UI_CONTEXT.json")
+        info(ctx, "ui_context_not_in_contract_degrade")
+        return None, 0
+    return data, 0
+
+
+def validate_plan_ui_projection(ctx: HookContext) -> int:
+    ui_data, failures = _load_ui_context_for_projection(ctx)
+    if ui_data is None:
+        return failures
+    indexes = ui_context_indexes(ui_data)
+
+    plan_data, errors = load_and_validate_plan(plan_json_path(ctx.feature_dir))
+    if errors or plan_data is None:
+        return failures
+
+    raw_tasks = plan_data.get("tasks")
+    if not isinstance(raw_tasks, list):
+        return failures
+
+    feature_ui_required = ui_data.get("uiRequired") is True
+    ui_task_count = 0
+    for index, task in enumerate(raw_tasks):
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id") if isinstance(task.get("id"), str) else f"tasks[{index}]"
+        task_ui_required = task.get("uiRequired") is True
+        ui_refs = task.get("uiRefs")
+
+        if not feature_ui_required:
+            if task_ui_required:
+                failures += fail_line(ctx, "plan_ui_task_when_feature_not_ui", f" task={task_id}")
+            if isinstance(ui_refs, dict) and ui_refs:
+                failures += fail_line(ctx, "plan_ui_refs_when_feature_not_ui", f" task={task_id}")
+            continue
+
+        if task_ui_required:
+            ui_task_count += 1
+            if not isinstance(ui_refs, dict):
+                failures += fail_line(ctx, "plan_ui_task_missing_uiRefs", f" task={task_id}")
+                continue
+            for field, known in (
+                ("pageRefs", indexes["page"]),
+                ("interactionRefs", indexes["interaction"]),
+                ("visualSourceRefs", indexes["visualSource"]),
+            ):
+                refs = _string_list_value(ui_refs.get(field))
+                if refs is None:
+                    failures += fail_line(ctx, "invalid_plan_ui_refs", f" task={task_id} field={field}")
+                    continue
+                if field in {"pageRefs", "interactionRefs"} and not refs:
+                    failures += fail_line(ctx, "missing_plan_ui_refs", f" task={task_id} field={field}")
+                for ref in refs:
+                    if ref not in known:
+                        failures += fail_line(ctx, "unknown_plan_ui_ref", f" task={task_id} field={field} ref={ref}")
+            frontend_route = ui_refs.get("frontendRoute")
+            if not isinstance(frontend_route, str) or frontend_route not in {
+                ROUTE_NONE,
+                ROUTE_SPEC_DRIVEN,
+                ROUTE_ABSOLUTE,
+                ROUTE_STANDARD,
+                ROUTE_MISSING,
+            }:
+                failures += fail_line(ctx, "invalid_plan_ui_frontend_route", f" task={task_id}")
+
+    if feature_ui_required and ui_task_count == 0:
+        failures += fail_line(ctx, "plan_ui_required_without_ui_task")
+    return failures
+
+
 def _boolean_marker_value(text: str, marker: str) -> bool | None:
     match = re.search(rf"{re.escape(marker)}\W*:\W*(true|false)\b", text, re.IGNORECASE)
     if not match:
@@ -993,6 +1100,7 @@ def validate_plan_json_contract(ctx: HookContext) -> int:
     if data is None:
         return fail_line(ctx, "missing_plan_json")
     failures += _validate_plan_json_traceability(ctx, data)
+    failures += validate_plan_ui_projection(ctx)
     return failures
 
 
@@ -1032,7 +1140,10 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
     evidence = read_frontend_json(evidence_file)
 
     if not evidence:
-        resolved = resolve_frontend_route(ctx.root, ctx.slug, write_evidence=False)
+        try:
+            resolved = resolve_frontend_route(ctx.root, ctx.slug, write_evidence=False)
+        except FrontendRouteError as exc:
+            return fail_line(ctx, "invalid_frontend_route_source", f" detail={exc}")
         if resolved.get("triggered"):
             return fail_line(
                 ctx,
@@ -1043,6 +1154,8 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
 
     route = evidence.get("route")
     if route == ROUTE_NONE and evidence.get("triggered") is not True:
+        return 0
+    if route == ROUTE_SPEC_DRIVEN:
         return 0
     if route == ROUTE_MISSING:
         return fail_line(ctx, "frontend_html_source_missing", f" evidence={evidence_file}")
@@ -1142,9 +1255,11 @@ def validate_verify_report_contract(ctx: HookContext) -> int:
 VALIDATORS = {
     "proposal_contract": validate_proposal_contract,
     "specs_contract": validate_specs_contract,
+    "ui_context_json": validate_ui_context_json,
     "design_contract": validate_design_contract,
     "plan_json_contract": validate_plan_json_contract,
     "plan_json_initial_tasks": validate_plan_json_initial_tasks,
+    "plan_ui_projection": validate_plan_ui_projection,
     "plan_finished_tasks": validate_plan_finished_tasks,
     "frontend_route_gate": validate_frontend_route_gate,
     "code_done_gate": validate_code_done_gate,

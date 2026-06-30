@@ -24,16 +24,19 @@ from artifact_check import (  # noqa: E402
     validate_fix_request_json,
     validate_plan_json_initial_tasks,
     validate_plan_finished_tasks,
+    validate_plan_ui_projection,
     validate_review_findings_json,
     validate_specs_contract,
     validate_unit_test_result_json,
     validate_unit_test_report_contract,
+    validate_ui_context_json,
     validate_verify_decision_json,
     validate_verify_report_contract,
 )
 from board_core.contracts import BoardConfigError  # noqa: E402
 from hooks.evidence_store import append_evidence  # noqa: E402
 from hooks.plan_json import write_plan_json  # noqa: E402
+from hooks.ui_context import validate_ui_context_data  # noqa: E402
 
 
 class ArtifactCheckIdContractsTest(unittest.TestCase):
@@ -157,6 +160,46 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                         "blockers": [] if blockers is None else blockers,
                     }
                 ],
+            },
+        )
+
+    def _write_ui_context(self, feature_dir: Path, *, ui_required: bool = True) -> None:
+        self._write_json(
+            feature_dir,
+            "UI_CONTEXT.json",
+            {
+                "version": 1,
+                "featureId": "alpha",
+                "uiRequired": ui_required,
+                "decisionStatus": "locked",
+                "decisionSource": "user_confirmed" if ui_required else "default_false",
+                "confirmedAtCheckpoint": "prd_done",
+                "lockedAtCheckpoint": "specs_done",
+                "notApplicableReason": "" if ui_required else "纯后端能力",
+                "pages": [
+                    {"pageId": "PAGE-001", "name": "页面", "goal": "展示能力", "states": ["success"]}
+                ] if ui_required else [],
+                "interactions": [
+                    {"interactionId": "UIX-001", "pageId": "PAGE-001", "summary": "点击提交"}
+                ] if ui_required else [],
+                "visualSources": [
+                    {
+                        "sourceId": "VIS-001",
+                        "type": "high_fidelity_html",
+                        "path": ".autobizdevops/features/alpha/frontend-html/page.html",
+                        "route": "absolute-html",
+                        "required": True,
+                    }
+                ] if ui_required else [],
+                "capabilities": [
+                    {
+                        "capabilityId": "alpha-ui",
+                        "uiRequired": True,
+                        "pageRefs": ["PAGE-001"],
+                        "interactionRefs": ["UIX-001"],
+                        "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                    }
+                ] if ui_required else [],
             },
         )
 
@@ -390,6 +433,145 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
             ctx = self._plan_ctx(feature_dir)
             self.assertEqual(validate_plan_finished_tasks(ctx), 0)
+
+    def test_ui_context_json_accepts_locked_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_ui_context(feature_dir)
+
+            self.assertEqual(validate_ui_context_json(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+
+    def test_ui_context_json_rejects_unlocked_required_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_json(
+                feature_dir,
+                "UI_CONTEXT.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "uiRequired": False,
+                    "decisionStatus": "confirmed",
+                    "decisionSource": "default_false",
+                    "confirmedAtCheckpoint": "prd_done",
+                    "notApplicableReason": "纯后端能力",
+                    "pages": [],
+                    "interactions": [],
+                    "visualSources": [],
+                    "capabilities": [],
+                },
+            )
+
+            self.assertGreater(validate_ui_context_json(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+
+    def test_ui_context_capability_spec_refs_optional_before_locked(self) -> None:
+        data = {
+            "version": 1,
+            "featureId": "alpha",
+            "uiRequired": True,
+            "decisionStatus": "confirmed",
+            "decisionSource": "user_confirmed",
+            "confirmedAtCheckpoint": "prd_done",
+            "notApplicableReason": "",
+            "pages": [
+                {"pageId": "PAGE-001", "name": "页面", "goal": "展示能力"}
+            ],
+            "interactions": [
+                {"interactionId": "UIX-001", "pageId": "PAGE-001", "summary": "点击提交"}
+            ],
+            "visualSources": [],
+            "capabilities": [
+                {
+                    "capabilityId": "alpha-ui",
+                    "uiRequired": True,
+                    "pageRefs": ["PAGE-001"],
+                    "interactionRefs": ["UIX-001"],
+                }
+            ],
+        }
+
+        self.assertEqual(validate_ui_context_data(data, feature_id="alpha", require_confirmed=True), [])
+        self.assertIn(
+            "capabilities[0].specRefs_must_be_string_array",
+            validate_ui_context_data(data, feature_id="alpha", require_locked=True),
+        )
+
+    def test_plan_ui_projection_accepts_task_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_ui_context(feature_dir)
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "ui",
+                            "status": "todo",
+                            "deps": [],
+                            "uiRequired": True,
+                            "uiRefs": {
+                                "pageRefs": ["PAGE-001"],
+                                "interactionRefs": ["UIX-001"],
+                                "visualSourceRefs": ["VIS-001"],
+                                "frontendRoute": "absolute-html",
+                            },
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                            "apiIds": ["API-001"],
+                            "dataIds": ["DATA-001"],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+
+    def test_plan_ui_projection_rejects_ui_task_when_feature_not_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_ui_context(feature_dir, ui_required=False)
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "bad ui",
+                            "status": "todo",
+                            "deps": [],
+                            "uiRequired": True,
+                            "uiRefs": {"pageRefs": ["PAGE-001"], "interactionRefs": [], "visualSourceRefs": [], "frontendRoute": "spec-driven-ui"},
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                            "apiIds": ["API-001"],
+                            "dataIds": ["DATA-001"],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
 
     def test_plan_accepts_data_none_even_if_summary_mentions_data_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

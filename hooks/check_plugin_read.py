@@ -15,6 +15,7 @@ from paths import get_plugin_output_workspace, resolve_project_dir
 from resolve_frontend_html_route import (
     PARSERS,
     ROUTE_ABSOLUTE,
+    ROUTE_SPEC_DRIVEN,
     ROUTE_SKILLS,
     ROUTE_STANDARD,
     evidence_path as frontend_evidence_path,
@@ -262,8 +263,8 @@ def block_frontend_route(reason: str, workspace: Path) -> int:
     return block(
         reason,
         workspace,
-        "前端 HTML 路线未按规定进入。请先运行 resolve_frontend_html_route.py，完整读取对应 route SKILL.md，"
-        "按该 SKILL.md 的 write_todos 建立可见清单后再继续。",
+        "前端 HTML 路线未按规定进入。请先运行 resolve_frontend_html_route.py；若 route 为 HTML 路线，"
+        "完整读取对应 route SKILL.md，并按该 SKILL.md 的 write_todos 建立可见清单后再继续。",
     )
 
 
@@ -290,6 +291,8 @@ def enforce_html_read(workspace: Path, feature: str) -> int:
     evidence = read_frontend_evidence(frontend_evidence_path(workspace, feature))
     if not evidence:
         return block_frontend_route("code 阶段读取 HTML 前必须先解析并记录 frontend route", workspace)
+    if evidence.get("route") == ROUTE_SPEC_DRIVEN:
+        return block_frontend_route("当前 route=spec-driven-ui，没有 HTML 输入，不允许读取 HTML 作为实现依据", workspace)
     if evidence.get("route") not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
         return block_frontend_route(f"当前 frontend route 不允许读取 HTML: {evidence.get('route')}", workspace)
     if evidence.get("routeSkillReadComplete") is not True:

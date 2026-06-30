@@ -22,9 +22,10 @@ from hooks.paths import get_plugin_output_workspace, resolve_env_feature  # noqa
 EVIDENCE_NAME = "FRONTEND_ROUTE.json"
 ROUTE_ABSOLUTE = "absolute-html"
 ROUTE_STANDARD = "standard-html"
+ROUTE_SPEC_DRIVEN = "spec-driven-ui"
 ROUTE_MISSING = "missing-html"
 ROUTE_NONE = "none"
-VALID_ROUTES = {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_MISSING, ROUTE_NONE}
+VALID_ROUTES = {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_SPEC_DRIVEN, ROUTE_MISSING, ROUTE_NONE}
 VALID_REVIEW_STATUSES = {"passed", "has-suggestions", "skipped-by-user", "failed"}
 
 FRONTEND_ROOT = ROOT / "skills" / "autodev" / "autodev-code" / "deps" / "frontend-html"
@@ -43,6 +44,19 @@ FRONTEND_INTENT_RE = re.compile(
     r"(前端|页面|组件|Vue|React|ElementUI|AntD|tsx|jsx|\.vue)", re.IGNORECASE
 )
 HTML_INTENT_RE = re.compile(r"(HTML|DOM|设计导出|设计稿|静态页面|Figma|MasterGo)", re.IGNORECASE)
+
+
+class FrontendRouteError(ValueError):
+    """Raised when the frontend route cannot be resolved from machine facts."""
+
+
+def _import_ui_context_helpers():
+    try:
+        from hooks.ui_context import UIContextError, load_ui_context  # noqa: PLC0415
+        from hooks.plan_json import load_plan  # noqa: PLC0415
+    except Exception:
+        return None, None, None
+    return UIContextError, load_ui_context, load_plan
 
 
 def feature_dir(workspace: Path, feature: str) -> Path:
@@ -126,6 +140,170 @@ def collect_html_sources(workspace: Path, feature: str, html_files: Iterable[str
     return existing_paths(candidates)
 
 
+def _existing_visual_source_paths(workspace: Path, fd: Path, visual_sources: list[dict[str, Any]]) -> list[Path]:
+    paths: list[Path] = []
+    for source in visual_sources:
+        raw_path = source.get("path") if isinstance(source, dict) else None
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        normalized = normalize_path(raw_path, workspace)
+        if not normalized.is_file():
+            normalized = normalize_path(raw_path, fd)
+        paths.append(normalized)
+    return existing_paths(paths)
+
+
+def _route_from_visual_sources(visual_sources: list[dict[str, Any]], html_sources: list[Path]) -> tuple[str, list[str]]:
+    visual_routes = [
+        source.get("route")
+        for source in visual_sources
+        if isinstance(source, dict) and isinstance(source.get("route"), str)
+    ]
+    if ROUTE_ABSOLUTE in visual_routes:
+        return (
+            ROUTE_ABSOLUTE if html_sources else ROUTE_MISSING,
+            ["UI_CONTEXT visualSources route=absolute-html"],
+        )
+    if ROUTE_STANDARD in visual_routes:
+        return (
+            ROUTE_STANDARD if html_sources else ROUTE_MISSING,
+            ["UI_CONTEXT visualSources route=standard-html"],
+        )
+    if ROUTE_MISSING in visual_routes:
+        return ROUTE_MISSING, ["UI_CONTEXT visualSources route=missing-html"]
+    if ROUTE_SPEC_DRIVEN in visual_routes:
+        return ROUTE_SPEC_DRIVEN, ["UI_CONTEXT visualSources route=spec-driven-ui"]
+    visual_types = {
+        source.get("type")
+        for source in visual_sources
+        if isinstance(source, dict) and isinstance(source.get("type"), str)
+    }
+    if "high_fidelity_html" in visual_types:
+        return (ROUTE_ABSOLUTE if html_sources else ROUTE_MISSING), ["UI_CONTEXT high_fidelity_html source"]
+    if "standard_html" in visual_types:
+        return (ROUTE_STANDARD if html_sources else ROUTE_MISSING), ["UI_CONTEXT standard_html source"]
+    if html_sources:
+        route, reasons = classify_html(html_sources)
+        return route, [f"UI_CONTEXT visual source classified as {route}", *reasons]
+    if any(source.get("required") is True for source in visual_sources if isinstance(source, dict)):
+        return ROUTE_MISSING, ["UI_CONTEXT required visual source is not readable"]
+    return ROUTE_SPEC_DRIVEN, ["UI_CONTEXT uiRequired without HTML visual source"]
+
+
+def _plan_ui_routes(fd: Path) -> list[str]:
+    _, _, load_plan = _import_ui_context_helpers()
+    if load_plan is None:
+        return []
+    path = fd / "plan.json"
+    if not path.is_file():
+        return []
+    try:
+        data = load_plan(path)
+    except Exception:
+        return []
+    tasks = data.get("tasks")
+    if not isinstance(tasks, list):
+        return []
+    routes: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("uiRequired") is not True:
+            continue
+        ui_refs = task.get("uiRefs")
+        if not isinstance(ui_refs, dict):
+            continue
+        route = ui_refs.get("frontendRoute")
+        if isinstance(route, str) and route in VALID_ROUTES:
+            routes.append(route)
+    return routes
+
+
+def _route_from_plan(fd: Path) -> tuple[str | None, list[str]]:
+    routes = _plan_ui_routes(fd)
+    if not routes:
+        return None, []
+    for route in (ROUTE_MISSING, ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_SPEC_DRIVEN):
+        if route in routes:
+            return route, [f"plan.json uiRefs frontendRoute={route}"]
+    return ROUTE_NONE, ["plan.json UI tasks not found"]
+
+
+def _ui_context_payload(workspace: Path, feature: str) -> dict[str, Any] | None:
+    ui_context_error, load_ui_context, _ = _import_ui_context_helpers()
+    if load_ui_context is None:
+        return None
+    fd = feature_dir(workspace, feature)
+    ui_path = fd / "UI_CONTEXT.json"
+    if not ui_path.is_file() or ui_path.stat().st_size <= 0:
+        return None
+    try:
+        return load_ui_context(fd)
+    except Exception as exc:
+        if ui_context_error is not None and isinstance(exc, ui_context_error):
+            raise FrontendRouteError(f"invalid UI_CONTEXT.json: {exc}") from exc
+        raise
+
+
+def route_payload_from_ui_context(
+    workspace: Path,
+    feature: str,
+    data: dict[str, Any],
+    *,
+    html_files: Iterable[str] = (),
+) -> dict[str, Any]:
+    fd = feature_dir(workspace, feature)
+    cli_html_sources = existing_paths(normalize_path(raw) for raw in html_files if raw.strip())
+    visual_sources = [
+        source
+        for source in data.get("visualSources", [])
+        if isinstance(source, dict)
+    ] if isinstance(data.get("visualSources"), list) else []
+    html_sources = existing_paths([*cli_html_sources, *_existing_visual_source_paths(workspace, fd, visual_sources)])
+    ui_required = data.get("uiRequired") is True
+
+    if not ui_required:
+        route = ROUTE_NONE
+        route_reasons = ["UI_CONTEXT uiRequired=false"]
+    else:
+        plan_route, plan_reasons = _route_from_plan(fd)
+        if plan_route in {ROUTE_ABSOLUTE, ROUTE_STANDARD} and html_sources:
+            route = plan_route
+            route_reasons = plan_reasons
+        elif plan_route == ROUTE_MISSING:
+            route = ROUTE_MISSING
+            route_reasons = plan_reasons
+        elif plan_route == ROUTE_SPEC_DRIVEN and not html_sources:
+            route = ROUTE_SPEC_DRIVEN
+            route_reasons = plan_reasons
+        else:
+            route, route_reasons = _route_from_visual_sources(visual_sources, html_sources)
+
+    payload: dict[str, Any] = {
+        "version": 1,
+        "feature": feature,
+        "uiRequired": ui_required,
+        "triggered": ui_required,
+        "route": route,
+        "source": "UI_CONTEXT.json",
+        "visualSourceIds": [
+            source["sourceId"]
+            for source in visual_sources
+            if isinstance(source.get("sourceId"), str)
+        ],
+        "htmlSourcePaths": [str(path) for path in html_sources],
+        "reasons": route_reasons,
+        "docPaths": [],
+    }
+    if route in ROUTE_SKILLS:
+        payload["routeSkillPath"] = str(ROUTE_SKILLS[route])
+        payload["parserPath"] = str(PARSERS[route])
+        payload.setdefault("routeSkillRead", False)
+        payload.setdefault("routeSkillReadComplete", False)
+        payload.setdefault("routeTodosCreated", False)
+        payload.setdefault("routeTodosCompleted", False)
+        payload.setdefault("parserRead", False)
+    return payload
+
+
 def has_frontend_intent(text: str) -> bool:
     if not text.strip():
         return False
@@ -188,6 +366,10 @@ def route_payload(
     *,
     html_files: Iterable[str] = (),
 ) -> dict[str, Any]:
+    ui_context = _ui_context_payload(workspace, feature)
+    if ui_context is not None:
+        return route_payload_from_ui_context(workspace, feature, ui_context, html_files=html_files)
+
     fd = feature_dir(workspace, feature)
     docs_text, docs = collect_doc_texts(fd)
     html_sources = collect_html_sources(workspace, feature, html_files)
@@ -326,7 +508,7 @@ def main(argv: list[str] | None = None) -> int:
                 html_files=args.html_file,
                 write_evidence=args.write_evidence,
             )
-    except ValueError as exc:
+    except (FrontendRouteError, ValueError) as exc:
         print(f"frontend route resolve failed: {exc}", file=sys.stderr)
         return 1
 

@@ -42,8 +42,8 @@
           "timeout": 10,
           "onBlock": {
             "reason": "前端 Route 检查不通过",
-            "systemMessage": "前端代码生成必须先进入 with-absolute-html 或 with-standard-html，并完成 route SKILL.md 的 write_todos 前置流程。",
-            "additionalContext": "运行 resolve_frontend_html_route.py，完整读取 route SKILL.md，创建 route todos，并由 route SKILL 转交 parser 后再写前端源码。"
+            "systemMessage": "前端代码生成必须先解析 FRONTEND_ROUTE.json；HTML 路线需完成 route SKILL.md 的 write_todos 前置流程，spec-driven-ui 不需要 HTML parser。",
+            "additionalContext": "运行 resolve_frontend_html_route.py。absolute-html/standard-html 路线需完整读取 route SKILL.md、创建 route todos 并由 route SKILL 转交 parser；spec-driven-ui 按 UI_CONTEXT.json、specs、design 和 plan.json 直接实现。"
           },
           "persistAfterInterrupt": true
 
