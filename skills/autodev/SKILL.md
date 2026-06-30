@@ -84,7 +84,7 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_
 
 - 用户说需要先转 HTML、先把设计稿转工程文件、HTML 转 React、静态 HTML 转前端代码、按 PRD 先做前端页面等，视为本轮 code 阶段需要使用 HTML 实现素材；仍推进到 `specs_in_progress`，先沉淀行为规格，后续由 `/autodev-code` 在 code 阶段按内部 HTML route 分流处理。
 - 用户说不需要、直接进规格、先走 `autodev-specs` 等，同样推进到 `specs_in_progress`。
-- 只有用户明确说“启用旧 `/autodev-frontend`”、“使用旧 frontend profile”、“进入 frontend_before_specs”时，才把 `frontend_before_specs` 视为 legacy fallback；若该旧 skill 未安装或路由脚本返回不可用，停止并说明旧路线当前不可执行，不得擅自新增 wrapper 或改写 board_config。
+- 旧 `/autodev-frontend` / `frontend_before_specs` 路线已移除；即使用户明确要求旧路线，也只能说明该路线当前不可执行，并转为 `/autodev-code` 内部 `FRONTEND_ROUTE.json` 分流，不得新增 wrapper 或改写 board_config。
 - 如果用户只触发 `/autodev`，且没有表达需要或不需要：直接推进到 `specs_in_progress`；不要为了 HTML 转前端发起 profile 选择，也不要写入 `frontend_in_progress`。
 
 若脚本返回 `requiresWorkflowChoice: true`，读取 `workflowChoices` 中的 `stageId`、`decision` 和 `targetCheckpoint`，按用户表达选择 dynamic stage：
@@ -157,7 +157,7 @@ HTML 转前端现在归属 `/autodev-code`，作为 code 阶段的内部实现�
 
 - HTML 只是 code 阶段的视觉与结构输入，不得覆盖 specs/design/PLAN。
 - 缺少 HTML 但任务明确要求高保真转换时，由 `/autodev-code` 停止并要求补充；可由 specs/design/PLAN 直接实现时跳过 HTML 分支。
-- 默认不得直接调用 `/autodev-frontend` 或写入旧 frontend checkpoint；旧 `frontend_before_specs -> autodev-frontend` 编排仅作为明确启用时的 legacy fallback 配置保留。
+- 不得直接调用 `/autodev-frontend` 或写入旧 frontend checkpoint；旧 `frontend_before_specs -> autodev-frontend` 编排已移除，不再作为可启用配置。
 
 ---
 
