@@ -12,7 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.render_session_context import _parse_selected, render  # noqa: E402
+from hooks.render_session_context import (  # noqa: E402
+    _heading_slug,
+    _parse_selected,
+    _unit_heading_label,
+    render,
+)
 
 
 MANIFEST = {
@@ -70,7 +75,7 @@ def _local_repo(body="# 本地知识库\n- 本地约束\n"):
     return str(d)
 
 
-def _workspace(body="# 当前工作区指令\n- 工作区约束\n"):
+def _workspace(body="# 会话工作区指令\n- 工作区约束\n"):
     """临时会话工作区目录；body 为 None 时不写 AGENTS.md（目录存在但无指令文件）。"""
     d = Path(tempfile.mkdtemp())
     if body is not None:
@@ -86,7 +91,14 @@ class ParseSelectedTest(unittest.TestCase):
 
     def test_valid(self):
         out = _parse_selected('[{"serviceUnitId":"U1","localRepoPath":"/r"}]')
-        self.assertEqual(out, [{"serviceUnitId": "U1", "localRepoPath": "/r"}])
+        self.assertEqual(out, [{"serviceUnitId": "U1", "localRepoPath": "/r", "description": ""}])
+
+    def test_valid_with_description_and_extra_fields_ignored(self):
+        # UI 实际传参：带 description，并含 serviceUnitIdMapping 等脚本不关心的字段（原样忽略）。
+        out = _parse_selected(
+            '[{"serviceUnitIdMapping":"abc-123","serviceUnitId":"LX34","localRepoPath":"/d","description":"测试"}]'
+        )
+        self.assertEqual(out, [{"serviceUnitId": "LX34", "localRepoPath": "/d", "description": "测试"}])
 
     def test_invalid_json_raises(self):
         with self.assertRaises(ValueError):
@@ -128,17 +140,20 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertIn("外联出站服务", prompt)
         self.assertIn("/repo/out", prompt)
         self.assertIn("LF39.18_Outservice", prompt)
-        # ② 系统级 + ③ 单元级（三个层次各用 XML 标签外包，不再用 ## <a id> / ===== 围栏）
+        # ② 系统级 + ③ 单元级（三个层次各用裸 XML 标签外包，不再反引号包成 inline code）
         self.assertIn("# LF39 系统级", prompt)  # 被嵌入 md 自带标题，现包在标签内
         self.assertIn("# LF39.18 单元", prompt)
         self.assertNotIn("=====", prompt)
-        self.assertIn("`<SCOPE>`", prompt)
-        self.assertIn("`</SCOPE>`", prompt)
-        self.assertIn('`<SYSTEM id="sys-LF39"', prompt)
-        self.assertIn("`</SYSTEM>`", prompt)
-        self.assertIn('`<UNIT id="unit-section"', prompt)  # 单元级整段只一对 <UNIT>
-        self.assertIn("`</UNIT>`", prompt)
-        self.assertIn("[LF39.18_Outservice](#unit-section)", prompt)  # 命中单元锚点指向单元级整段
+        self.assertIn("<SCOPE>", prompt)
+        self.assertIn("</SCOPE>", prompt)
+        self.assertIn('<SYSTEM id="sys-LF39"', prompt)
+        self.assertIn("</SYSTEM>", prompt)
+        self.assertIn('<UNIT id="unit-section"', prompt)  # 单元级整段只一对 <UNIT>
+        self.assertIn("</UNIT>", prompt)
+        # 命中单元：③ 里有 ## serviceUnitId（描述）标题，① 表锚点指向它的 slug
+        label = _unit_heading_label("LF39.18_Outservice", "外联出站服务")
+        self.assertIn(f"## {label}", prompt)
+        self.assertIn(f"[LF39.18_Outservice](#{_heading_slug(label)})", prompt)
         # agentmdLoadStatus 只反映单元级：仅一条（系统级不进状态），remote 成功
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
@@ -157,12 +172,13 @@ class RenderRemoteTest(unittest.TestCase):
         )
         prompt = res["sessionContext"]
         # 正文系统段只拼一次（按 systemId 去重）
-        self.assertEqual(prompt.count('`<SYSTEM id="sys-LF39"'), 1)
-        # serviceUnitId 锚点：有单元正文→指向单元级整段；无单元正文→回退指向系统段
-        self.assertIn("[LF39.18_Outservice](#unit-section)", prompt)
+        self.assertEqual(prompt.count('<SYSTEM id="sys-LF39"'), 1)
+        # serviceUnitId 锚点：有单元正文→指向该单元 ## 标题 slug；无单元正文→回退指向系统段
+        unit_anchor = _heading_slug(_unit_heading_label("LF39.18_Outservice", "外联出站服务"))
+        self.assertIn(f"[LF39.18_Outservice](#{unit_anchor})", prompt)
         self.assertIn("[LF39.20_Inservice](#sys-LF39)", prompt)
         # 单元级整段只一对 <UNIT>（不再每单元一块）
-        self.assertEqual(prompt.count("`<UNIT "), 1)
+        self.assertEqual(prompt.count("<UNIT "), 1)
         # 两个单元都在适用范围
         self.assertIn("/repo/out", prompt)
         self.assertIn("/repo/in", prompt)
@@ -207,28 +223,32 @@ class RenderRemoteTest(unittest.TestCase):
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
-        self.assertIn('`<SYSTEM id="sys-LF39"', prompt)
-        self.assertIn('`<SYSTEM id="sys-LA64"', prompt)
+        self.assertIn('<SYSTEM id="sys-LF39"', prompt)
+        self.assertIn('<SYSTEM id="sys-LA64"', prompt)
         # LA64.05 无独立 description.md → 锚点回退到系统段
         self.assertIn("[LA64.05_UEXgateway](#sys-LA64)", prompt)
 
-    def test_tags_are_backtick_wrapped_and_blank_line_separated(self):
-        # 每个标签用反引号包成 inline code、前后留空行：渲染时各自独占一个 <p><code> 块，
-        # 字符原样保留、块间换行；否则裸标签会被当原始 HTML 折叠到一行 / 整块不解析。
+    def test_tags_are_raw_html_and_blank_line_separated(self):
+        # 标签为裸标签（无反引号）、前后留空行：裸标签使 id 成真 HTML 锚点；空行让裸标签各自成
+        # HTML 块，紧随其后的 ## 标题照常按 Markdown 渲染、不被折进 HTML 块。
         res = render(
             [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
-        # 反引号包裹 + 开标签后、闭标签前都有空行
-        self.assertIn("`<SCOPE>`\n\n", prompt)
-        self.assertIn("\n\n`</SCOPE>`", prompt)
-        self.assertRegex(prompt, r'`<SYSTEM id="sys-LF39"[^`]*>`\n\n')
-        self.assertIn("\n\n`</SYSTEM>`", prompt)
-        self.assertRegex(prompt, r'`<UNIT id="unit-section"[^`]*>`\n\n')
-        self.assertIn("\n\n`</UNIT>`", prompt)
-        # 标签不会与紧随的 Markdown 标题直接相连（杜绝 "<SCOPE> ## 适用范围" 同块）
-        self.assertNotIn("`<SCOPE>`\n## 适用范围", prompt)
+        # 裸标签 + 开标签后、闭标签前都有空行
+        self.assertIn("<SCOPE>\n\n", prompt)
+        self.assertIn("\n\n</SCOPE>", prompt)
+        self.assertRegex(prompt, r'<SYSTEM id="sys-LF39"[^>]*>\n\n')
+        self.assertIn("\n\n</SYSTEM>", prompt)
+        self.assertRegex(prompt, r'<UNIT id="unit-section"[^>]*>\n\n')
+        self.assertIn("\n\n</UNIT>", prompt)
+        # 不再用反引号把标签包成 inline code
+        self.assertNotIn("`<SCOPE>`", prompt)
+        self.assertNotIn("`<UNIT", prompt)
+        self.assertNotIn("`<SYSTEM", prompt)
+        # 标签与紧随的 Markdown 标题之间留空行（杜绝 "<SCOPE>\n## 适用范围" 同块）
+        self.assertNotIn("<SCOPE>\n## 适用范围", prompt)
 
 
 class RenderLocalFallbackTest(unittest.TestCase):
@@ -258,8 +278,10 @@ class RenderLocalFallbackTest(unittest.TestCase):
         self.assertTrue(status[0]["loaded"])
         self.assertEqual(status[0]["source"], "local")
         self.assertTrue(status[0]["path"].endswith("AGENTS.md"))
-        self.assertIn("[GHOST.1](#unit-section)", res["sessionContext"])  # 锚点指向单元级整段
-        self.assertIn("# 本地知识库", res["sessionContext"])
+        prompt = res["sessionContext"]
+        self.assertIn("## GHOST.1", prompt)  # 未命中清单单元也产出 ## 标题
+        self.assertIn(f"[GHOST.1](#{_heading_slug('GHOST.1')})", prompt)  # 锚点指向该标题 slug
+        self.assertIn("# 本地知识库", prompt)
 
     def test_unknown_unit_local_missing_reports_not_loaded(self):
         res = render(
@@ -273,7 +295,44 @@ class RenderLocalFallbackTest(unittest.TestCase):
         self.assertEqual(status[0]["source"], "local")
         self.assertEqual(status[0]["message"], "未找到知识库 AGENTS.md 和本地 AGENTS.md")
         self.assertIn("缺 1", res["message"])
-        self.assertNotIn("#unit-section", res["sessionContext"])  # 无内容→不加锚点链接
+        self.assertNotIn("[GHOST.1](#", res["sessionContext"])  # 无内容→不加锚点链接
+
+    def test_unknown_unit_uses_ui_description_as_ref(self):
+        # 远端无配置（未命中清单）+ 本地有 AGENTS.md → 引用范围用 UI 传入的 description，
+        # 不再是「(未匹配知识库)」；③ 标题与 ① 锚点都用该 description（三处同源）。
+        local = _local_repo()
+        res = render(
+            [{"serviceUnitId": "LX34", "localRepoPath": local, "description": "测试"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        self.assertNotIn("(未匹配知识库)", prompt)
+        self.assertIn("| 测试 |", prompt)  # ① 引用范围列 = UI description
+        self.assertIn("## LX34（测试）", prompt)  # ③ 标题含 description
+        self.assertIn(f"[LX34](#{_heading_slug(_unit_heading_label('LX34', '测试'))})", prompt)
+
+    def test_unknown_unit_missing_local_still_shows_ui_description(self):
+        # 未命中清单 + 本地也无 AGENTS.md（NO_AGENTS.MD 那种）→ ① 引用范围仍显示 UI description，
+        # 不再「(未匹配知识库)」；无正文则不加锚点。
+        res = render(
+            [{"serviceUnitId": "NO_AGENTS.MD", "localRepoPath": "/no/such/dir", "description": "没有 AGENT.MD"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        self.assertNotIn("(未匹配知识库)", prompt)
+        self.assertIn("| 没有 AGENT.MD |", prompt)
+        self.assertNotIn("[NO_AGENTS.MD](#", prompt)  # 无正文→无锚点链接
+        self.assertFalse(res["agentmdLoadStatus"][0]["loaded"])
+
+    def test_matched_unit_prefers_manifest_description_over_ui(self):
+        # 命中清单的单元：引用范围仍用清单 description，UI 传入的 description 不顶替（仅兜底用）。
+        res = render(
+            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out", "description": "UI叫法"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        self.assertIn("外联出站服务", prompt)  # 清单 description 优先
+        self.assertNotIn("UI叫法", prompt)
 
     def test_system_not_in_status_only_unit_reported(self):
         # 命中清单的单元：系统级 remote 缺失既不走 local 兜底、也不进 agentmdLoadStatus；
@@ -322,16 +381,21 @@ class RenderWorkspaceTest(unittest.TestCase):
         res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
         self.assertTrue(res["ok"])
         prompt = res["sessionContext"]
-        self.assertIn('`<UNIT id="unit-section" unit="单元级">`', prompt)
-        self.assertIn("`</UNIT>`", prompt)
-        self.assertIn("**当前工作区指令**", prompt)  # 工作区指令的加粗标签
-        self.assertIn("# 当前工作区指令", prompt)  # AGENTS.md 正文
-        self.assertNotIn("`<WORKSPACE", prompt)  # 不再用 WORKSPACE 标签
-        self.assertNotIn("`<SYSTEM", prompt)  # 未选单元 → 无系统段
-        self.assertEqual(res["agentmdLoadStatus"], [])
+        self.assertIn('<UNIT id="unit-section" unit="单元级">', prompt)
+        self.assertIn("</UNIT>", prompt)
+        self.assertIn("## 会话工作区指令", prompt)  # 工作区指令的 ## 标题
+        self.assertIn("- 工作区约束", prompt)  # AGENTS.md 正文（用正文独有的项目符号校验，避免与 ## 标题串味）
+        self.assertNotIn("<WORKSPACE", prompt)  # 不再用 WORKSPACE 标签
+        self.assertNotIn("<SYSTEM", prompt)  # 未选单元 → 无系统段
+        # 工作区指令进 agentmdLoadStatus：serviceUnitId=本地工作区、source=local、loaded=True。
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(len(status), 1)
+        self.assertEqual(status[0]["serviceUnitId"], "本地工作区")
+        self.assertEqual(status[0]["source"], "local")
+        self.assertTrue(status[0]["loaded"])
 
     def test_workspace_appears_in_scope_table(self):
-        # 工作区指令在适用范围表里占一行：引用范围=当前工作区指令、代码地址=工作区路径、锚点指向 unit-section。
+        # 工作区指令在适用范围表里占一行：引用范围=会话工作区指令、代码地址=工作区路径、锚点指向其 ## 标题。
         ws = _workspace()
         res = render(
             [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
@@ -339,21 +403,21 @@ class RenderWorkspaceTest(unittest.TestCase):
             session_workspace_path=ws,
         )
         prompt = res["sessionContext"]
-        self.assertIn("[当前工作区](#unit-section)", prompt)  # 工作区行的链接单元格
-        self.assertIn("当前工作区指令", prompt)  # 引用范围列
+        ws_link = f"[会话工作区](#{_heading_slug('会话工作区指令')})"
+        unit_link = f"[LF39.18_Outservice](#{_heading_slug(_unit_heading_label('LF39.18_Outservice', '外联出站服务'))})"
+        self.assertIn(ws_link, prompt)  # 工作区行的链接单元格指向其 ## 标题
+        self.assertIn("会话工作区指令", prompt)  # 引用范围列
         self.assertIn(f"| {ws} |", prompt)  # 代码地址列 = 工作区路径
         # 工作区行排在选中单元行之前
-        ws_row = prompt.index("[当前工作区](#unit-section)")
-        unit_row = prompt.index("[LF39.18_Outservice](#unit-section)")
-        self.assertLess(ws_row, unit_row)
+        self.assertLess(prompt.index(ws_link), prompt.index(unit_link))
 
     def test_workspace_only_no_selection_has_scope_row(self):
         # 未选单元但工作区有正文：适用范围表仍渲染、且含工作区那一行。
         ws = _workspace()
         res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
         prompt = res["sessionContext"]
-        self.assertIn("`<SCOPE>`", prompt)
-        self.assertIn("[当前工作区](#unit-section)", prompt)
+        self.assertIn("<SCOPE>", prompt)
+        self.assertIn(f"[会话工作区](#{_heading_slug('会话工作区指令')})", prompt)
 
     def test_workspace_path_empty_is_noop_when_no_selection(self):
         res = render([], plugin_root=_plugin_root(), session_workspace_path="")
@@ -379,14 +443,69 @@ class RenderWorkspaceTest(unittest.TestCase):
             session_workspace_path=ws,
         )
         prompt = res["sessionContext"]
-        self.assertEqual(prompt.count("`<UNIT "), 1)  # 只一对 <UNIT>
-        sys_at = prompt.index('`<SYSTEM id="sys-LF39"')
-        unit_tag_at = prompt.index('`<UNIT id="unit-section"')
-        ws_label_at = prompt.index("**当前工作区指令**")
-        unit_label_at = prompt.index("**LF39.18_Outservice")
+        self.assertEqual(prompt.count("<UNIT "), 1)  # 只一对 <UNIT>
+        sys_at = prompt.index('<SYSTEM id="sys-LF39"')
+        unit_tag_at = prompt.index('<UNIT id="unit-section"')
+        ws_label_at = prompt.index("## 会话工作区指令")
+        unit_label_at = prompt.index("## LF39.18_Outservice")
         self.assertLess(sys_at, unit_tag_at)  # 系统级在单元级整段之前
         self.assertLess(unit_tag_at, ws_label_at)  # 工作区指令在 <UNIT> 开标签之后
         self.assertLess(ws_label_at, unit_label_at)  # 工作区指令排在选中单元之前
+
+    def test_workspace_same_file_as_selected_unit_local_dedups(self):
+        # 会话工作区路径 == 选中单元的 localRepoPath，且单元走 local 兜底（remote 缺失）→
+        # 同一 AGENTS.md 只注入一次：丢掉会话工作区段，由带 serviceUnitId 身份的单元段承载。
+        local = _local_repo()  # 该目录下有 AGENTS.md（# 本地知识库）
+        res = render(
+            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            plugin_root=_plugin_root(write_remote=("LF39.system",)),  # 单元 remote 缺失→local 兜底
+            session_workspace_path=local,  # 会话工作区 == 单元 localRepoPath
+        )
+        prompt = res["sessionContext"]
+        # 同一文件正文只出现一次
+        self.assertEqual(prompt.count("# 本地知识库"), 1)
+        # 会话工作区段被丢弃（无其 ## 标题、无 ① 表链接）
+        self.assertNotIn("## 会话工作区指令", prompt)
+        self.assertNotIn("[会话工作区]", prompt)
+        # 单元段仍在，带 serviceUnitId 身份
+        self.assertIn("## LF39.18_Outservice（外联出站服务）", prompt)
+        # agentmdLoadStatus：只有单元一条，没有「本地工作区」
+        status = res["agentmdLoadStatus"]
+        self.assertFalse(any(s["serviceUnitId"] == "本地工作区" for s in status))
+        self.assertEqual(len(status), 1)
+        self.assertEqual(status[0]["serviceUnitId"], "LF39.18_Outservice")
+        self.assertEqual(status[0]["source"], "local")
+
+    def test_workspace_kept_when_unit_loads_remote_not_local(self):
+        # 会话工作区 == 单元 localRepoPath，但单元命中 remote（加载 sys/ 下文件，非本地 AGENTS.md）→
+        # 二者非同一文件，不去重：会话工作区段照常注入。
+        local = _local_repo()
+        res = render(
+            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            plugin_root=_plugin_root(),  # 单元 remote 存在 → 命中 remote
+            session_workspace_path=local,
+        )
+        prompt = res["sessionContext"]
+        self.assertIn("## 会话工作区指令", prompt)  # 工作区段保留
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(status[0]["serviceUnitId"], "本地工作区")
+        self.assertEqual(status[1]["source"], "remote")  # 单元走 remote
+
+    def test_workspace_is_first_status_entry_with_selection(self):
+        # 选中单元 + 工作区有正文：agentmdLoadStatus 首条是工作区（本地工作区/local），
+        # 其后才是各服务单元；message 的单元摘要不把工作区算进去。
+        ws = _workspace()
+        res = render(
+            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+            session_workspace_path=ws,
+        )
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(status[0]["serviceUnitId"], "本地工作区")
+        self.assertEqual(status[0]["source"], "local")
+        self.assertTrue(status[0]["loaded"])
+        self.assertEqual(status[1]["serviceUnitId"], "LF39.18_Outservice")
+        self.assertIn("remote 1", res["message"])  # 单元摘要只数单元，不含工作区
 
 
 if __name__ == "__main__":

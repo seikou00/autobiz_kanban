@@ -104,6 +104,8 @@ class SyncRepoEndToEndTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["supported_service_units"], ["LF39.18_Outservice"])
         self.assertTrue(payload["systems"][0]["agentsReady"])
+        # 下载落盘路径与 repo 同级，指向克隆缓存根 <pluginPath>/sys。
+        self.assertEqual(payload["downloadPath"], str(dest))
 
         # 远端新增系统并提交
         manifest = json.loads((src / "agents.manifest.json").read_text(encoding="utf-8"))
