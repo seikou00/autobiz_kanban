@@ -397,7 +397,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["plan_json_contract", "plan_finished_tasks", "code_done_gate", "evidence_integrity"],
+        "validators": ["plan_json_contract", "plan_finished_tasks", "frontend_route_gate", "code_done_gate", "evidence_integrity"],
         "guards": ["code_compile"]
       },
       {

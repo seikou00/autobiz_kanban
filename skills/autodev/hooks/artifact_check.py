@@ -35,9 +35,19 @@ from hooks.plan_json import (  # noqa: E402
     plan_json_path,
     unfinished_tasks,
 )
+from hooks.resolve_frontend_html_route import (  # noqa: E402
+    ROUTE_ABSOLUTE,
+    ROUTE_MISSING,
+    ROUTE_NONE,
+    ROUTE_STANDARD,
+    evidence_path as frontend_evidence_path,
+    read_json as read_frontend_json,
+    resolve_frontend_route,
+)
 
 
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
+FRONTEND_REVIEW_PASS = {"passed", "has-suggestions", "skipped-by-user"}
 E2E_ID = re.compile(r"\bE2E-[A-Za-z0-9_-]+-\d{3}\b")
 REQ_ID = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
@@ -1017,6 +1027,50 @@ def validate_code_done_gate(ctx: HookContext) -> int:
     return failures
 
 
+def validate_frontend_route_gate(ctx: HookContext) -> int:
+    evidence_file = frontend_evidence_path(ctx.root, ctx.slug)
+    evidence = read_frontend_json(evidence_file)
+
+    if not evidence:
+        resolved = resolve_frontend_route(ctx.root, ctx.slug, write_evidence=False)
+        if resolved.get("triggered"):
+            return fail_line(
+                ctx,
+                "missing_frontend_route_evidence",
+                f" route={resolved.get('route')} evidence={evidence_file}",
+            )
+        return 0
+
+    route = evidence.get("route")
+    if route == ROUTE_NONE and evidence.get("triggered") is not True:
+        return 0
+    if route == ROUTE_MISSING:
+        return fail_line(ctx, "frontend_html_source_missing", f" evidence={evidence_file}")
+    if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
+        return fail_line(ctx, "invalid_frontend_route", f" route={route!r} evidence={evidence_file}")
+
+    failures = 0
+    required_flags = (
+        "routeSkillRead",
+        "routeSkillReadComplete",
+        "routeTodosCreated",
+        "routeTodosCompleted",
+        "parserRead",
+    )
+    for flag in required_flags:
+        if evidence.get(flag) is not True:
+            failures += fail_line(ctx, f"frontend_route_{flag}_missing", f" evidence={evidence_file}")
+
+    review_status = evidence.get("reviewStatus")
+    if review_status not in FRONTEND_REVIEW_PASS:
+        failures += fail_line(
+            ctx,
+            "frontend_review_not_passed_or_skipped",
+            f" reviewStatus={review_status!r} evidence={evidence_file}",
+        )
+    return failures
+
+
 def validate_evidence_integrity(ctx: HookContext) -> int:
     if not ctx.requires_artifact("evidence/EVIDENCE.jsonl"):
         info(ctx, "evidence_not_in_contract_degrade")
@@ -1092,6 +1146,7 @@ VALIDATORS = {
     "plan_json_contract": validate_plan_json_contract,
     "plan_json_initial_tasks": validate_plan_json_initial_tasks,
     "plan_finished_tasks": validate_plan_finished_tasks,
+    "frontend_route_gate": validate_frontend_route_gate,
     "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,
     "requirements_eval_verdict": validate_requirements_eval_verdict,

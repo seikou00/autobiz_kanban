@@ -154,10 +154,10 @@
 
 当 Ant Design 被请求、被选择，或被后台 / 产品 UI 强烈暗示时，实现后必须审计 JSX / TSX 源码。不要审计运行时 DOM，因为 Ant Design 组件自身会渲染原生 `button`、`input`、`table` 等节点。
 
-从本技能仓库根目录运行：
+从 `autodev-code` 技能根目录运行：
 
 ```bash
-python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
 ```
 
 退出码 `0` 表示未发现候选项；退出码 `1` 表示发现可能遗漏的转换候选项，应把输出作为待处理清单继续处理，不视为脚本故障。
