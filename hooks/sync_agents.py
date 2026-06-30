@@ -17,6 +17,7 @@ board_config.json 注册::
 
     { "ok": true, "schemaVersion": "...", "message": "...",
       "repo": {"url","ref","commit"},
+      "downloadPath": "<pluginPath>/sys",  # 克隆落盘路径，与 repo 同级，供宿主写进 board.json
       "supported_service_units": [...],
       "systems": [ {"systemId","systemName","agentsReady","agentsPath","serviceUnits":[...]} ] }
 
@@ -146,6 +147,7 @@ def run(repo_url: Optional[str], ref: Optional[str]) -> dict:
     except AgentsManifestError as exc:
         result = _fail(f"仓库已拉取但清单不可用: {exc}")
         result["repo"] = repo_info
+        result["downloadPath"] = str(dest)  # 已克隆，给出落盘路径（与 repo 同级）
         return result
     return payload
 

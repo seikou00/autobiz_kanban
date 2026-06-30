@@ -305,6 +305,8 @@ def build_sync_payload(
         "schemaVersion": SYNC_SCHEMA_VERSION,
         "message": message,
         "repo": dict(repo_info or {}),
+        # 下载落盘路径（克隆缓存根 <pluginPath>/sys/）；与 repo 同级，供宿主写进 board.json。
+        "downloadPath": str(agents_root),
         "supported_service_units": supported_units,
         "systems": systems_payload,
     }
