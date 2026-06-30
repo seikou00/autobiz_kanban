@@ -17,6 +17,42 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 - 如果当前目录是 `autodev-code` 技能根目录，使用 `deps/frontend-html/with-absolute-html/scripts/...`
 - 如果当前目录已经是 `deps/frontend-html/with-absolute-html/`，使用 `scripts/...`
 
+## 0. WriteTodos Protocol
+
+进入本 route 后，必须立即创建固定的 top-level `write_todos`。可见清单只放下面 7 个一级任务，不要把细节步骤拆成嵌套 todo，也不要改写 ID。
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --emit-route-todos --format markdown
+```
+
+| id | title | doneWhen | evidenceKey |
+| --- | --- | --- | --- |
+| `ABS-01-html-source` | 读取 HTML 来源 | HTML source paths are confirmed and readable. | `htmlSourcePaths` |
+| `ABS-02-project-context` | 读取项目上下文 | AGENTS.md, architecture, component docs, similar pages, and source evidence are checked or marked unavailable. | `projectContextRead` |
+| `ABS-03-page-modules` | 建立页面模块清单 | Entry, visual sections, local components, style/assets, and existing-page delta are listed. | `pageModuleTodosReady` |
+| `ABS-04-analysis-script` | 执行 absolute 分析脚本 | `prepare_html_analysis.py` is attempted and artifacts or downgrade reason are recorded. | `analysisScriptStatus` |
+| `ABS-05-context-handoff` | 读取分析上下文并确定 handoff | Checklist/handoff or downgrade path is read, then original HTML is rechecked as visual truth. | `contextHandoffReady` |
+| `ABS-06-parser-handoff` | 转交 html-parser | `hasManifest` state is decided and `deps/html-parser.md` is now allowed to be read. | `routeTodosReadyForParser` |
+| `ABS-07-return-to-code` | 返回 autodev-code 主流程 | Generated targets, HTML source, analysis JSON/none, PLAN path, and review inputs are handed back. | `returnToCodeReady` |
+
+创建可见 todos 后，必须把完整 ID 镜像写入机器证据：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todos-created --todo-id ABS-01-html-source --todo-id ABS-02-project-context --todo-id ABS-03-page-modules --todo-id ABS-04-analysis-script --todo-id ABS-05-context-handoff --todo-id ABS-06-parser-handoff --todo-id ABS-07-return-to-code --json
+```
+
+每完成一个一级任务，立即记录：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todo-completed --todo-id <ABS-ID> --json
+```
+
+只有 `ABS-06-parser-handoff` 完成后，才允许读取 `deps/html-parser.md`。全部 7 个 ID 完成后，再运行：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todos-completed --json
+```
+
 ## 1. 这条路线什么时候使用
 
 当满足任一条件时，使用本路线：
@@ -115,56 +151,37 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 
 ## 4. 默认读取顺序
 
-进入本 route 后，先把下面这组 write_todos 视为主流程骨架；**未完成前不得提前转交 `deps/html-parser.md`**。脚本仍然默认必跑，任何异常都按 §7 降级处理，不阻塞后续步骤。
+进入本 route 后，先执行 §0 的固定 top-level todos；**未完成 `ABS-06-parser-handoff` 前不得提前转交 `deps/html-parser.md`**。下面是每个 ID 的执行说明，不要把这些说明改造成额外的可见 todo。
 
-- [ ] 读取 HTML 来源。
-- [ ] 写出页面模块清单（write_todos）。
-  - [ ] 读取项目 `AGENTS.md`
-  - [ ] 读取项目 `architecture/`
-  - [ ] 读取组件说明，优先 `architecture/components/`
-  - [ ] 读取相似页面 / 相似模块
-  - [ ] 读取真实源码证据，例如 import、实际使用方式、路由 / 菜单 / API helper / 样式文件
-  - [ ] 将以上证据与原始 HTML / 脚本产物交叉核对，再继续后续实现
-  - [ ] 这份清单是固定前置检查，不会因为原稿是高保真 HTML 就省略；只有当项目里确实不存在对应资料时，才把该项标记为“无可用证据”并继续下一项。
-  - [ ] 页面模块清单只负责实现范围盘点，不承担脚本执行。
-- [ ] 写出脚本清单（write_todos）。
-  - [ ] 建立独立的脚本清单，不并入页面模块清单
-  - [ ] 确认 `--project-root`、`--task-stem`、`--html-file` 参数完整
-  - [ ] 确认 HTML 来源可读，且多片段输入已按页面模块合并
-  - [ ] 执行 `prepare_html_analysis.py`
-  - [ ] 检查 `.frontend/html-analysis/<task-stem>.md`
-  - [ ] 检查 `.frontend/html-analysis/<task-stem>.json`
-  - [ ] 检查 `.frontend/html-analysis/<task-stem>-checklist.md`
-  - [ ] 若脚本失败，保留失败原因并切回降级路径
-  - [ ] 脚本清单必须和页面模块清单同时存在，最低粒度至少要覆盖 `参数确认 / 执行脚本 / 检查产物 / 失败降级` 四类事项，不能只用一句“脚本执行”代替。
-  - [ ] 使用完整命令模板，参数齐全后再执行：
-    - `autodev-code` 技能根目录：
-      ```
-      python deps/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
-        --project-root . \
-        --task-stem <task-stem> \
-        --html-file <HTML_PATH>
-      ```
-    - `deps/frontend-html/with-absolute-html/` 目录：
-      ```
-      python scripts/prepare_html_analysis.py \
-        --project-root <CODE_WORKSPACE> \
-        --task-stem <task-stem> \
-        --html-file <HTML_PATH>
-      ```
-    - `<task-stem>` 由调用方自定义，建议格式 `task-1` / `task-<页面短名>`（如 `task-1-create-course`），仅用于命名产物；全套技能里所有出现 `<task-stem>` 的路径都指同一个值。
-    - 同一页面多个 HTML 片段时，重复 `--html-file` 或用逗号分隔。
-    - 对多片段输入，脚本会生成 merged analysis input 做聚合分析；但原始 HTML 仍然是视觉真相。
-    - 只要原始 HTML 与脚本结论冲突，就优先相信原始 HTML。
-- [ ] 读取上下文。
-  - [ ] 若脚本产物齐全：先读取 `<task-stem>-checklist.md`，再读取 `<task-stem>.md`（完整版 handoff），最后回到原始高保真 HTML 做主判断。
-  - [ ] 若走降级路径：直接以原始高保真 HTML 为主。
-  - [ ] 若 checklist / handoff 标记 `componentizationMode=conservative` 或 `analysisConfidence.level != high`：先锁定原始 HTML 的宏观布局、模块边界、表格/图表/时间线/上传等所有权，再把脚本产物仅用于缺项点查与 whole-section 保留，不要让 `replacementSlots` 主导大块组件化。
-- [ ] 转交 `deps/html-parser.md`。
-  - [ ] `hasManifest=true`：表示脚本产物可用，但它们只是辅助。
-  - [ ] `hasManifest=false`：表示脚本失败，后续完全以原始 HTML 为主。
-- [ ] 完成主线代码生成、页面拆分 / 抽取与最低校验。
-- [ ] 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明"已跳过 Stage 1 脚本及原因"），并带回统一前端回检输入：目标源码路径、原始 HTML 路径、可用 `.frontend/html-analysis/*.json` 路径（没有或降级时写 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`；再返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检、模块编译清单校验和 `code_done` 推进；不得发起独立回检选择。
+| id | 执行说明 |
+| --- | --- |
+| `ABS-01-html-source` | 读取并确认 HTML 来源；多片段输入先判断是否属于同一页面，并统一成页面级实现方案。 |
+| `ABS-02-project-context` | 读取项目 `AGENTS.md`、`architecture/`、组件说明、相似页面/模块和真实源码证据；不存在的资料标记为“无可用证据”。 |
+| `ABS-03-page-modules` | 基于原始 HTML 和项目证据列出入口、视觉分区、局部组件、样式/资产、已有页面增量范围；页面模块清单不承担脚本执行。 |
+| `ABS-04-analysis-script` | 默认必跑 `prepare_html_analysis.py`；确认 `--project-root`、`--task-stem`、`--html-file` 后执行并检查 `.frontend/html-analysis/<task-stem>.md/.json/-checklist.md`；失败按 §7 降级。 |
+| `ABS-05-context-handoff` | 产物齐全时先读 checklist，再读完整版 handoff，最后回到原始 HTML；降级时直接以原始 HTML 为主。低置信度或 conservative 时，不让 `replacementSlots` 主导大块组件化。 |
+| `ABS-06-parser-handoff` | 决定 `hasManifest=true/false`，记录到交接状态，完成该 ID 后才读取 `deps/html-parser.md`。 |
+| `ABS-07-return-to-code` | 主线完成后输出交付总结，带回目标源码路径、原始 HTML 路径、analysis JSON 或 none、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`，再返回 `/autodev-code`。 |
+
+脚本命令模板：
+
+```bash
+python deps/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
+  --project-root . \
+  --task-stem <task-stem> \
+  --html-file <HTML_PATH>
+```
+
+如果当前目录已经是 `deps/frontend-html/with-absolute-html/`：
+
+```bash
+python scripts/prepare_html_analysis.py \
+  --project-root <CODE_WORKSPACE> \
+  --task-stem <task-stem> \
+  --html-file <HTML_PATH>
+```
+
+`<task-stem>` 建议使用 `task-1` / `task-<页面短名>`；同一页面多个 HTML 片段时重复 `--html-file` 或用逗号分隔。脚本产物与原始 HTML 冲突时，原始 HTML 赢。
 
 ## 5. 转交规则
 

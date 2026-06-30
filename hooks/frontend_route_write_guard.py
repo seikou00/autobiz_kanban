@@ -22,6 +22,7 @@ from resolve_frontend_html_route import (  # noqa: E402
     evidence_path,
     read_json,
     resolve_frontend_route,
+    sync_route_todo_flags,
 )
 
 
@@ -144,6 +145,7 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
             return block(f"写前端代码前缺少 FRONTEND_ROUTE.json: {evidence_file}")
         return 0
 
+    evidence = sync_route_todo_flags(evidence)
     route = evidence.get("route")
     if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
         return block(f"当前 frontend route 不允许写前端代码: {route}")
@@ -151,6 +153,8 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
         return block("写前端代码前必须完整读取对应 route SKILL.md")
     if evidence.get("routeTodosCreated") is not True:
         return block("写前端代码前必须按 route SKILL.md 创建 write_todos 清单")
+    if evidence.get("routeTodosReadyForParser") is not True:
+        return block("写前端代码前必须先完成 route 的 parser-handoff todo")
     if evidence.get("parserRead") is not True:
         return block("写前端代码前必须由 route SKILL 转交并读取对应 parser 文档")
     return 0

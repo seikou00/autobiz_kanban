@@ -23,13 +23,22 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
 3. 把 route SKILL 中定义的 `write_todos` 主流程转成可见任务清单，逐项执行并更新状态，不能合并成一句“实现前端页面”。清单创建后立即记录机器证据：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todos-created --json
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --emit-route-todos --format markdown
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todos-created --todo-id "<ROUTE-01-...>" --todo-id "<ROUTE-02-...>" --todo-id "<ROUTE-03-...>" --todo-id "<ROUTE-04-...>" --todo-id "<ROUTE-05-...>" --todo-id "<ROUTE-06-parser-handoff>" --todo-id "<ROUTE-07-return-to-code>" --json
 ```
+
+上面 `<ROUTE-...>` 必须替换为 `--emit-route-todos` 输出的真实 `ABS-*` 或 `STD-*` ID；缺任一固定 ID 时，机器证据会拒绝标记 `routeTodosCreated=true`。
 
 4. 只有 route SKILL 的清单推进到“转交 parser”步骤时，才能读取 parser：
    - `absolute-html` 只能由 `with-absolute-html/SKILL.md` 转交 `deps/html-parser.md`
    - `standard-html` 只能由 `with-standard-html/SKILL.md` 转交 `deps/standard-html-parser.md`
    - `/autodev-code` 根技能不得直接跳入 parser 文档。
+
+每完成一个 route todo，立即写入对应 ID：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todo-completed --todo-id "<ROUTE-ID>" --json
+```
 
 5. route SKILL 的全部主流程清单完成后记录：
 

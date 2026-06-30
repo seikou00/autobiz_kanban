@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -29,8 +30,12 @@ from hooks.resolve_frontend_html_route import (  # noqa: E402
     ROUTE_SKILLS,
     ROUTE_STANDARD,
     evidence_path,
+    mark_evidence,
+    main as route_main,
     read_json,
     resolve_frontend_route,
+    route_todo_ids,
+    route_todo_output,
     write_json,
 )
 
@@ -79,6 +84,11 @@ def complete_evidence(route: str) -> dict:
         "routeSkillReadComplete": True,
         "routeTodosCreated": True,
         "routeTodosCompleted": True,
+        "routeTodoProtocolVersion": 1,
+        "requiredRouteTodoIds": route_todo_ids(route),
+        "routeTodoIdsCreated": route_todo_ids(route),
+        "routeTodoIdsCompleted": route_todo_ids(route),
+        "routeTodosReadyForParser": True,
         "parserRead": True,
         "reviewStatus": "passed",
     }
@@ -126,6 +136,66 @@ class FrontendRouteResolverTests(unittest.TestCase):
             payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
 
         self.assertEqual(payload["route"], ROUTE_STANDARD)
+
+    def test_route_todo_template_uses_fixed_ids(self) -> None:
+        payload = {"route": ROUTE_ABSOLUTE}
+        todos = route_todo_output(payload)["todos"]
+
+        self.assertEqual(
+            [todo["id"] for todo in todos],
+            [
+                "ABS-01-html-source",
+                "ABS-02-project-context",
+                "ABS-03-page-modules",
+                "ABS-04-analysis-script",
+                "ABS-05-context-handoff",
+                "ABS-06-parser-handoff",
+                "ABS-07-return-to-code",
+            ],
+        )
+
+    def test_route_todos_created_requires_all_fixed_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_json(evidence_path(workspace, "alpha"), complete_evidence(ROUTE_STANDARD))
+            evidence = read_json(evidence_path(workspace, "alpha"))
+            evidence["routeTodoIdsCreated"] = []
+            evidence["routeTodoIdsCompleted"] = []
+            write_json(evidence_path(workspace, "alpha"), evidence)
+
+            with self.assertRaisesRegex(ValueError, "missing required todo id"):
+                mark_evidence(
+                    workspace,
+                    "alpha",
+                    mark="route-todos-created",
+                    todo_ids=route_todo_ids(ROUTE_STANDARD)[:-1],
+                )
+
+    def test_emit_route_todos_cli_outputs_fixed_json_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_feature_file(workspace, "PLAN.md", "需要根据 HTML 实现前端页面。\n")
+            write_feature_file(workspace, "frontend-html/page.html", "<form><button>OK</button></form>\n")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = route_main(
+                    [
+                        "--workspace",
+                        str(workspace),
+                        "--feature",
+                        "alpha",
+                        "--write-evidence",
+                        "--emit-route-todos",
+                        "--json",
+                    ]
+                )
+            payload = json.loads(output.getvalue())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["route"], ROUTE_STANDARD)
+        self.assertEqual(payload["todos"][0]["id"], "STD-01-route-confirm")
+        self.assertEqual(payload["todos"][-1]["id"], "STD-07-return-to-code")
 
 
 class FrontendRouteGateValidatorTests(unittest.TestCase):
@@ -181,7 +251,7 @@ class FrontendRouteReadHookTests(unittest.TestCase):
                 evidence_path(workspace, "alpha"),
                 {
                     **complete_evidence(ROUTE_ABSOLUTE),
-                    "routeTodosCreated": False,
+                    "routeTodoIdsCreated": [],
                     "parserRead": False,
                 },
             )
@@ -201,6 +271,31 @@ class FrontendRouteReadHookTests(unittest.TestCase):
         self.assertEqual(result, check_plugin_read.BLOCK_EXIT_CODE)
         self.assertFalse(stored["parserRead"])
         self.assertIn("block", output.getvalue())
+
+    def test_parser_read_is_blocked_until_parser_handoff_todo_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            evidence = complete_evidence(ROUTE_ABSOLUTE)
+            evidence["routeTodoIdsCompleted"] = [
+                todo_id for todo_id in route_todo_ids(ROUTE_ABSOLUTE) if todo_id != "ABS-06-parser-handoff"
+            ]
+            evidence["routeTodosReadyForParser"] = False
+            evidence["parserRead"] = False
+            write_json(evidence_path(workspace, "alpha"), evidence)
+
+            output = io.StringIO()
+            error = io.StringIO()
+            with mock.patch.dict(os.environ, {"FEATURE_ID": "alpha"}):
+                with contextlib.redirect_stdout(output):
+                    with contextlib.redirect_stderr(error):
+                        result = check_plugin_read.enforce_frontend_route_reads(
+                            {"tool_input": {}},
+                            [PARSERS[ROUTE_ABSOLUTE]],
+                            workspace,
+                        )
+
+        self.assertEqual(result, check_plugin_read.BLOCK_EXIT_CODE)
+        self.assertIn("parser-handoff", error.getvalue())
 
     def test_parser_read_marks_evidence_after_route_todos_created(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -293,6 +388,25 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
 
         self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
         self.assertIn("parser", error.getvalue())
+
+    def test_frontend_write_blocks_until_parser_handoff_todo_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            evidence = complete_evidence(ROUTE_STANDARD)
+            evidence["routeTodoIdsCompleted"] = [
+                todo_id for todo_id in route_todo_ids(ROUTE_STANDARD) if todo_id != "STD-06-parser-handoff"
+            ]
+            evidence["routeTodosReadyForParser"] = False
+            write_json(evidence_path(workspace, "alpha"), evidence)
+
+            output = io.StringIO()
+            error = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stderr(error):
+                    result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("parser-handoff", error.getvalue())
 
     def test_frontend_write_allows_complete_route_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

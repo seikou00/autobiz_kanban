@@ -19,6 +19,8 @@ from resolve_frontend_html_route import (
     ROUTE_STANDARD,
     evidence_path as frontend_evidence_path,
     read_json as read_frontend_evidence,
+    route_todo_metadata,
+    sync_route_todo_flags,
     write_json as write_frontend_evidence,
 )
 
@@ -226,9 +228,8 @@ def base_frontend_evidence(route: str) -> dict:
         "parserPath": str(PARSERS[route]),
         "routeSkillRead": False,
         "routeSkillReadComplete": False,
-        "routeTodosCreated": False,
-        "routeTodosCompleted": False,
         "parserRead": False,
+        **route_todo_metadata(route),
     }
 
 
@@ -247,7 +248,7 @@ def mark_route_skill_read(workspace: Path, feature: str, route: str, path: Path,
         ranges.append([span[0], span[1]])
         evidence["routeSkillReadRanges"] = merged_ranges(ranges)
         evidence["routeSkillReadComplete"] = range_covers_file(evidence["routeSkillReadRanges"], path)
-    write_frontend_evidence(evidence_file, evidence)
+    write_frontend_evidence(evidence_file, sync_route_todo_flags(evidence))
 
 
 def mark_parser_read(workspace: Path, feature: str, route: str) -> None:
@@ -255,7 +256,7 @@ def mark_parser_read(workspace: Path, feature: str, route: str) -> None:
     evidence = read_frontend_evidence(evidence_file)
     evidence["parserRead"] = True
     evidence["parserPath"] = str(PARSERS[route])
-    write_frontend_evidence(evidence_file, evidence)
+    write_frontend_evidence(evidence_file, sync_route_todo_flags(evidence))
 
 
 def block_frontend_route(reason: str, workspace: Path) -> int:
@@ -278,8 +279,11 @@ def enforce_parser_read(workspace: Path, feature: str, route: str) -> int:
         )
     if evidence.get("routeSkillReadComplete") is not True:
         return block_frontend_route("读取 parser 前必须完整读取对应 route SKILL.md", workspace)
+    evidence = sync_route_todo_flags(evidence)
     if evidence.get("routeTodosCreated") is not True:
         return block_frontend_route("读取 parser 前必须先按 route SKILL.md 创建 write_todos 清单", workspace)
+    if evidence.get("routeTodosReadyForParser") is not True:
+        return block_frontend_route("读取 parser 前必须先完成 route 的 parser-handoff todo", workspace)
     mark_parser_read(workspace, feature, route)
     return 0
 
@@ -290,6 +294,7 @@ def enforce_html_read(workspace: Path, feature: str) -> int:
     evidence = read_frontend_evidence(frontend_evidence_path(workspace, feature))
     if not evidence:
         return block_frontend_route("code 阶段读取 HTML 前必须先解析并记录 frontend route", workspace)
+    evidence = sync_route_todo_flags(evidence)
     if evidence.get("route") not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
         return block_frontend_route(f"当前 frontend route 不允许读取 HTML: {evidence.get('route')}", workspace)
     if evidence.get("routeSkillReadComplete") is not True:

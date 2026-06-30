@@ -26,6 +26,7 @@ ROUTE_MISSING = "missing-html"
 ROUTE_NONE = "none"
 VALID_ROUTES = {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_MISSING, ROUTE_NONE}
 VALID_REVIEW_STATUSES = {"passed", "has-suggestions", "skipped-by-user", "failed"}
+ROUTE_TODO_PROTOCOL_VERSION = 1
 
 FRONTEND_ROOT = ROOT / "skills" / "autodev" / "autodev-code" / "deps" / "frontend-html"
 ROUTE_SKILLS = {
@@ -36,6 +37,100 @@ PARSERS = {
     ROUTE_ABSOLUTE: FRONTEND_ROOT / "with-absolute-html" / "deps" / "html-parser.md",
     ROUTE_STANDARD: FRONTEND_ROOT / "with-standard-html" / "deps" / "standard-html-parser.md",
 }
+ROUTE_TODOS: dict[str, list[dict[str, str]]] = {
+    ROUTE_ABSOLUTE: [
+        {
+            "id": "ABS-01-html-source",
+            "title": "读取 HTML 来源",
+            "doneWhen": "HTML source paths are confirmed and readable.",
+            "evidenceKey": "htmlSourcePaths",
+        },
+        {
+            "id": "ABS-02-project-context",
+            "title": "读取项目上下文",
+            "doneWhen": "AGENTS.md, architecture, component docs, similar pages, and source evidence are checked or marked unavailable.",
+            "evidenceKey": "projectContextRead",
+        },
+        {
+            "id": "ABS-03-page-modules",
+            "title": "建立页面模块清单",
+            "doneWhen": "Entry, visual sections, local components, style/assets, and existing-page delta are listed.",
+            "evidenceKey": "pageModuleTodosReady",
+        },
+        {
+            "id": "ABS-04-analysis-script",
+            "title": "执行 absolute 分析脚本",
+            "doneWhen": "prepare_html_analysis.py is attempted and artifacts or downgrade reason are recorded.",
+            "evidenceKey": "analysisScriptStatus",
+        },
+        {
+            "id": "ABS-05-context-handoff",
+            "title": "读取分析上下文并确定 handoff",
+            "doneWhen": "Checklist/handoff or downgrade path is read, then original HTML is rechecked as visual truth.",
+            "evidenceKey": "contextHandoffReady",
+        },
+        {
+            "id": "ABS-06-parser-handoff",
+            "title": "转交 html-parser",
+            "doneWhen": "hasManifest state is decided and deps/html-parser.md is now allowed to be read.",
+            "evidenceKey": "routeTodosReadyForParser",
+        },
+        {
+            "id": "ABS-07-return-to-code",
+            "title": "返回 autodev-code 主流程",
+            "doneWhen": "Generated targets, HTML source, analysis JSON/none, PLAN path, and review inputs are handed back.",
+            "evidenceKey": "returnToCodeReady",
+        },
+    ],
+    ROUTE_STANDARD: [
+        {
+            "id": "STD-01-route-confirm",
+            "title": "确认 standard route",
+            "doneWhen": "Standard DOM evidence is recorded and absolute/Figma/MasterGo hard signals are cleared.",
+            "evidenceKey": "absoluteSignalsCleared",
+        },
+        {
+            "id": "STD-02-project-context",
+            "title": "读取项目上下文",
+            "doneWhen": "Nearest AGENTS.md, architecture, component/API docs, similar pages, and source evidence are checked.",
+            "evidenceKey": "projectContextRead",
+        },
+        {
+            "id": "STD-03-page-modules",
+            "title": "建立页面模块清单",
+            "doneWhen": "Entry, page sections, local components, reusable logic, styles/assets, and existing-page delta are listed.",
+            "evidenceKey": "moduleTodosReady",
+        },
+        {
+            "id": "STD-04-conversion-matrix",
+            "title": "建立转换矩阵",
+            "doneWhen": "Project/AntD/AntD Mobile/native mapping and uiLibraryTarget/antdMode are decided.",
+            "evidenceKey": "conversionTodosReady",
+        },
+        {
+            "id": "STD-05-antd-audit",
+            "title": "完成 Ant Design 审计判定",
+            "doneWhen": "auditRequired is decided; desktop Ant Design audit is run or explicitly not applicable.",
+            "evidenceKey": "auditRequired",
+        },
+        {
+            "id": "STD-06-parser-handoff",
+            "title": "转交 standard-html-parser",
+            "doneWhen": "All handoff state is ready and deps/standard-html-parser.md is now allowed to be read.",
+            "evidenceKey": "routeTodosReadyForParser",
+        },
+        {
+            "id": "STD-07-return-to-code",
+            "title": "返回 autodev-code 主流程",
+            "doneWhen": "Generated targets, HTML source, analysis none, PLAN path, uiLibraryTarget, antdMode, and auditRequired are handed back.",
+            "evidenceKey": "returnToCodeReady",
+        },
+    ],
+}
+PARSER_HANDOFF_TODO_IDS = {
+    ROUTE_ABSOLUTE: "ABS-06-parser-handoff",
+    ROUTE_STANDARD: "STD-06-parser-handoff",
+}
 
 DOC_NAMES = ("PLAN.md", "DETAIL_DESIGN.md", "design.md", "proposal.md", "PRD.md")
 HTML_PATH_RE = re.compile(r"[A-Za-z]:[^\s\"'<>|]+?\.html?", re.IGNORECASE)
@@ -43,6 +138,54 @@ FRONTEND_INTENT_RE = re.compile(
     r"(前端|页面|组件|Vue|React|ElementUI|AntD|tsx|jsx|\.vue)", re.IGNORECASE
 )
 HTML_INTENT_RE = re.compile(r"(HTML|DOM|设计导出|设计稿|静态页面|Figma|MasterGo)", re.IGNORECASE)
+
+
+def route_todos(route: str) -> list[dict[str, str]]:
+    return [dict(todo) for todo in ROUTE_TODOS.get(route, [])]
+
+
+def route_todo_ids(route: str) -> list[str]:
+    return [todo["id"] for todo in ROUTE_TODOS.get(route, [])]
+
+
+def ordered_known_todo_ids(route: str, todo_ids: Iterable[str]) -> list[str]:
+    wanted = {todo_id for todo_id in todo_ids if todo_id}
+    ordered = [todo_id for todo_id in route_todo_ids(route) if todo_id in wanted]
+    extras = sorted(wanted - set(ordered))
+    return [*ordered, *extras]
+
+
+def validate_route_todo_ids(route: str, todo_ids: Iterable[str]) -> list[str]:
+    valid = set(route_todo_ids(route))
+    return sorted({todo_id for todo_id in todo_ids if todo_id and todo_id not in valid})
+
+
+def route_todo_metadata(route: str) -> dict[str, Any]:
+    return {
+        "routeTodoProtocolVersion": ROUTE_TODO_PROTOCOL_VERSION,
+        "requiredRouteTodoIds": route_todo_ids(route),
+        "routeTodoIdsCreated": [],
+        "routeTodoIdsCompleted": [],
+        "routeTodosReadyForParser": False,
+    }
+
+
+def sync_route_todo_flags(payload: dict[str, Any]) -> dict[str, Any]:
+    route = str(payload.get("route") or "")
+    if route not in ROUTE_TODOS:
+        return payload
+    required = set(route_todo_ids(route))
+    parser_handoff_id = PARSER_HANDOFF_TODO_IDS[route]
+    created = set(item for item in payload.get("routeTodoIdsCreated", []) if isinstance(item, str))
+    completed = set(item for item in payload.get("routeTodoIdsCompleted", []) if isinstance(item, str))
+    payload["routeTodoProtocolVersion"] = ROUTE_TODO_PROTOCOL_VERSION
+    payload["requiredRouteTodoIds"] = route_todo_ids(route)
+    payload["routeTodoIdsCreated"] = ordered_known_todo_ids(route, created)
+    payload["routeTodoIdsCompleted"] = ordered_known_todo_ids(route, completed)
+    payload["routeTodosCreated"] = required.issubset(created)
+    payload["routeTodosReadyForParser"] = parser_handoff_id in completed
+    payload["routeTodosCompleted"] = required.issubset(completed)
+    return payload
 
 
 def feature_dir(workspace: Path, feature: str) -> Path:
@@ -219,11 +362,11 @@ def route_payload(
     if route in ROUTE_SKILLS:
         payload["routeSkillPath"] = str(ROUTE_SKILLS[route])
         payload["parserPath"] = str(PARSERS[route])
+        payload.update(route_todo_metadata(route))
         payload.setdefault("routeSkillRead", False)
         payload.setdefault("routeSkillReadComplete", False)
-        payload.setdefault("routeTodosCreated", False)
-        payload.setdefault("routeTodosCompleted", False)
         payload.setdefault("parserRead", False)
+        payload = sync_route_todo_flags(payload)
     return payload
 
 
@@ -235,13 +378,18 @@ def merge_existing_flags(payload: dict[str, Any], existing: dict[str, Any]) -> d
         "routeSkillReadComplete",
         "routeTodosCreated",
         "routeTodosCompleted",
+        "routeTodoProtocolVersion",
+        "requiredRouteTodoIds",
+        "routeTodoIdsCreated",
+        "routeTodoIdsCompleted",
+        "routeTodosReadyForParser",
         "parserRead",
         "reviewStatus",
         "routeSkillReadRanges",
     ):
         if key in existing:
             payload[key] = existing[key]
-    return payload
+    return sync_route_todo_flags(payload)
 
 
 def resolve_frontend_route(
@@ -265,6 +413,7 @@ def mark_evidence(
     *,
     mark: str | None = None,
     review_status: str | None = None,
+    todo_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     path = evidence_path(workspace, feature)
     payload = read_json(path)
@@ -273,10 +422,48 @@ def mark_evidence(
     if payload.get("route") not in VALID_ROUTES:
         raise ValueError(f"invalid frontend route evidence: {payload.get('route')}")
 
+    route = str(payload.get("route") or "")
+    provided_todo_ids = [todo_id.strip() for todo_id in todo_ids if todo_id.strip()]
+    if route in ROUTE_TODOS:
+        payload = sync_route_todo_flags(payload)
+    elif mark in {"route-todos-created", "route-todo-completed", "route-todos-completed"}:
+        raise ValueError(f"route todo protocol is not supported for route={route}")
+
     if mark == "route-todos-created":
-        payload["routeTodosCreated"] = True
+        invalid = validate_route_todo_ids(route, provided_todo_ids)
+        if invalid:
+            raise ValueError(f"unknown route todo id(s): {', '.join(invalid)}")
+        required = set(route_todo_ids(route))
+        missing = sorted(required - set(provided_todo_ids))
+        if missing:
+            raise ValueError(f"route-todos-created missing required todo id(s): {', '.join(missing)}")
+        payload["routeTodoIdsCreated"] = ordered_known_todo_ids(route, provided_todo_ids)
+        payload = sync_route_todo_flags(payload)
+    elif mark == "route-todo-completed":
+        if route not in ROUTE_TODOS:
+            raise ValueError(f"route todo completion is not supported for route={route}")
+        if not provided_todo_ids:
+            raise ValueError("route-todo-completed requires at least one --todo-id")
+        invalid = validate_route_todo_ids(route, provided_todo_ids)
+        if invalid:
+            raise ValueError(f"unknown route todo id(s): {', '.join(invalid)}")
+        created = set(payload.get("routeTodoIdsCreated", []))
+        uncreated = sorted(set(provided_todo_ids) - created)
+        if uncreated:
+            raise ValueError(f"cannot complete todo id(s) before route-todos-created: {', '.join(uncreated)}")
+        completed = set(payload.get("routeTodoIdsCompleted", []))
+        completed.update(provided_todo_ids)
+        payload["routeTodoIdsCompleted"] = ordered_known_todo_ids(route, completed)
+        payload = sync_route_todo_flags(payload)
     elif mark == "route-todos-completed":
-        payload["routeTodosCompleted"] = True
+        if route not in ROUTE_TODOS:
+            raise ValueError(f"route todo completion is not supported for route={route}")
+        payload = sync_route_todo_flags(payload)
+        if payload.get("routeTodosCompleted") is not True:
+            required = set(route_todo_ids(route))
+            completed = set(payload.get("routeTodoIdsCompleted", []))
+            missing = sorted(required - completed)
+            raise ValueError(f"route-todos-completed missing completed todo id(s): {', '.join(missing)}")
     elif mark is not None:
         raise ValueError(f"unknown mark: {mark}")
 
@@ -286,8 +473,36 @@ def mark_evidence(
             raise ValueError(f"reviewStatus must be one of: {allowed}")
         payload["reviewStatus"] = review_status
 
+    payload = sync_route_todo_flags(payload)
     write_json(path, payload)
     return payload
+
+
+def route_todo_output(payload: dict[str, Any]) -> dict[str, Any]:
+    route = str(payload.get("route") or "")
+    if route not in ROUTE_TODOS:
+        raise ValueError(f"route todos are only available for frontend routes, got route={route}")
+    return {
+        "version": 1,
+        "route": route,
+        "routeTodoProtocolVersion": ROUTE_TODO_PROTOCOL_VERSION,
+        "todos": route_todos(route),
+    }
+
+
+def format_route_todos_markdown(payload: dict[str, Any]) -> str:
+    todo_payload = route_todo_output(payload)
+    lines = [
+        f"# Route write_todos: {todo_payload['route']}",
+        "",
+        "| id | title | doneWhen | evidenceKey |",
+        "| --- | --- | --- | --- |",
+    ]
+    for todo in todo_payload["todos"]:
+        lines.append(
+            f"| `{todo['id']}` | {todo['title']} | {todo['doneWhen']} | `{todo['evidenceKey']}` |"
+        )
+    return "\n".join(lines)
 
 
 def resolve_workspace(raw: str | None) -> Path:
@@ -302,9 +517,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--feature", "-f", help="feature slug; defaults to FEATURE_ID")
     parser.add_argument("--html-file", action="append", default=[], help="HTML source path; may be repeated")
     parser.add_argument("--write-evidence", action="store_true")
-    parser.add_argument("--mark", choices=("route-todos-created", "route-todos-completed"))
+    parser.add_argument("--emit-route-todos", action="store_true", help="emit the fixed route write_todos template")
+    parser.add_argument("--todo-id", action="append", default=[], help="route write_todos id; may be repeated")
+    parser.add_argument("--mark", choices=("route-todos-created", "route-todo-completed", "route-todos-completed"))
     parser.add_argument("--review-status", choices=tuple(sorted(VALID_REVIEW_STATUSES)))
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--format", choices=("json", "markdown"), help="output format for --emit-route-todos")
     args = parser.parse_args(argv)
 
     try:
@@ -318,19 +536,32 @@ def main(argv: list[str] | None = None) -> int:
                 feature,
                 mark=args.mark,
                 review_status=args.review_status,
+                todo_ids=args.todo_id,
             )
         else:
-            payload = resolve_frontend_route(
-                workspace,
-                feature,
-                html_files=args.html_file,
-                write_evidence=args.write_evidence,
-            )
+            existing = read_json(evidence_path(workspace, feature))
+            if args.emit_route_todos and existing.get("route") in ROUTE_TODOS:
+                payload = sync_route_todo_flags(existing)
+            else:
+                payload = resolve_frontend_route(
+                    workspace,
+                    feature,
+                    html_files=args.html_file,
+                    write_evidence=args.write_evidence,
+                )
+            if args.emit_route_todos:
+                route_todo_output(payload)
     except ValueError as exc:
         print(f"frontend route resolve failed: {exc}", file=sys.stderr)
         return 1
 
-    if args.json:
+    if args.emit_route_todos:
+        output_format = args.format or ("json" if args.json else "markdown")
+        if output_format == "json":
+            print(json.dumps(route_todo_output(payload), ensure_ascii=False, indent=2))
+        else:
+            print(format_route_todos_markdown(payload))
+    elif args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"frontendRoute={payload.get('route')} triggered={payload.get('triggered')}")

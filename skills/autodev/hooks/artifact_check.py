@@ -30,6 +30,8 @@ from hooks.resolve_frontend_html_route import (  # noqa: E402
     evidence_path as frontend_evidence_path,
     read_json as read_frontend_json,
     resolve_frontend_route,
+    route_todo_ids,
+    sync_route_todo_flags,
 )
 
 
@@ -234,6 +236,7 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
             )
         return 0
 
+    evidence = sync_route_todo_flags(evidence)
     route = evidence.get("route")
     if route == ROUTE_NONE and evidence.get("triggered") is not True:
         return 0
@@ -247,12 +250,21 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
         "routeSkillRead",
         "routeSkillReadComplete",
         "routeTodosCreated",
+        "routeTodosReadyForParser",
         "routeTodosCompleted",
         "parserRead",
     )
     for flag in required_flags:
         if evidence.get(flag) is not True:
             failures += fail_line(ctx, f"frontend_route_{flag}_missing", f" evidence={evidence_file}")
+
+    required_todo_ids = set(route_todo_ids(route))
+    created_todo_ids = set(item for item in evidence.get("routeTodoIdsCreated", []) if isinstance(item, str))
+    completed_todo_ids = set(item for item in evidence.get("routeTodoIdsCompleted", []) if isinstance(item, str))
+    for todo_id in sorted(required_todo_ids - created_todo_ids):
+        failures += fail_line(ctx, "frontend_route_todo_not_created", f" todoId={todo_id} evidence={evidence_file}")
+    for todo_id in sorted(required_todo_ids - completed_todo_ids):
+        failures += fail_line(ctx, "frontend_route_todo_not_completed", f" todoId={todo_id} evidence={evidence_file}")
 
     review_status = evidence.get("reviewStatus")
     if review_status not in FRONTEND_REVIEW_PASS:
