@@ -7,6 +7,7 @@
   "supported_service_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
   "inspectCommands": {
     "darwin": {
+      "knowledge_path": "${pluginPath}/sys",
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
       "feature_status": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature}",
       "create_project": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${projectDir}",
@@ -20,6 +21,7 @@
       "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits} --session-workspace-path ${sessionWorkspacePath}"
     },
     "linux": {
+      "knowledge_path": "${pluginPath}/sys",
       "project_status": "python3 ${pluginPath}/inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
       "feature_status": "python3 ${pluginPath}/inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature}",
       "create_project": "python3 ${pluginPath}/hooks/init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${projectDir}",
@@ -33,6 +35,7 @@
       "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits} --session-workspace-path ${sessionWorkspacePath}"
     },
     "win32": {
+      "knowledge_path": "${pluginPath}\\sys",
       "project_status": "python ${pluginPath}\\inspect_state.py --mode project --workspace ${pluginWorkspace} --projects ${projectDirs...}",
       "feature_status": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature}",
       "create_project": "python ${pluginPath}\\hooks\\init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${projectDir}",
@@ -384,7 +387,7 @@
               "extract": {
                 "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers", "tasks[].uiRequired/uiRefs"],
                 "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，UI 任务只按 tasks[].uiRequired/uiRefs 执行，PLAN.md 只作可选同步视图",
-                "degrade": "无 plan.json 时仅在当前 workflow 不包含 plan 阶段时降级；标准 workflow 下缺失必须回到 /autodev-plan 生成"
+                "degrade": "Source Bundle 未列出 plan.json 时，基于 proposal 与 specs 建轻量任务队列，不回到 Plan 阶段索要；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {

@@ -134,12 +134,17 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
     return errors
 
 
-def check_code_done(target_feature_dir: Path) -> list[str]:
+def check_code_done(target_feature_dir: Path, *, require_plan: bool = True) -> list[str]:
     errors = check_integrity(target_feature_dir, require_index=True)
+    plan_path = plan_json_path(target_feature_dir)
+    plan_exists = plan_path.is_file() and plan_path.stat().st_size > 0
+    if not require_plan and not plan_exists:
+        return errors
+
     if not errors:
         errors.extend(check_plan_evidence_refs(target_feature_dir))
 
-    plan, plan_errors = load_and_validate_plan(plan_json_path(target_feature_dir), require_all_done=True)
+    plan, plan_errors = load_and_validate_plan(plan_path, require_all_done=True)
     if plan_errors:
         errors.extend(f"plan_json:{error}" for error in plan_errors)
         if plan is not None and (blocked := blocked_tasks(plan)):

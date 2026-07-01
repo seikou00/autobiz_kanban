@@ -181,9 +181,9 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 对每个 input 按其 `extract.focus` / `method` 抽取并记住关键信息。
 
-**任务队列：** 把本轮变更拆成 2–5 个需求闭环任务，逐个推进，每个含 做什么 / 依据（指向对应 input 中的具体条目）/ 验证方法；队列与状态记录在完成摘要。
-- 若当前运行模式支持 `write_todos`，必须把这 2–5 个任务写成可见任务清单，状态用 待做 / 进行中 / 完成 / 失败，并与"完成摘要"保持同步；每次只置一个任务为"进行中"，完成或失败后立即更新对应条目。若不支持 `write_todos`，仍按完成摘要维护同一份队列与状态，不得省略。`write_todos` 只反映任务进度，不替代 checkpoint 脚本与产物校验。
-（依"方法优先"：若某 input 的 method 给了现成队列，按其指示执行、不再自行拆解。）
+**任务队列：** 若 Source Bundle 含 `plan.json`，必须读取它，并直接按 `tasks[]` 中的 `deps/status/specRefs/designRefs/apiIds/dataIds/decisionIds/validationCommands/evidenceIds` 建立队列，不得重新拆分任务；更新任务时必须修改 `plan.json`，`PLAN.md` 若存在只作为人类视图同步。若当前 workflow 的 Source Bundle 未列出 `plan.json`（如 lean/custom 链已从契约中移除），不得回到 Plan 阶段索要它；基于 `proposal.md` 与 `specs/**/*.md` 建立本轮轻量任务队列，并在完成摘要和 evidence 中记录任务依据。
+- 若当前运行模式支持 `write_todos`，把任务队列映射成可见任务清单，状态用 待做 / 进行中 / 完成 / 失败；存在 `plan.json` 时与 `plan.json` 保持同步，每次只置一个任务为"进行中"。`write_todos` 只反映任务进度，不替代 checkpoint 脚本与产物校验。
+（依"方法优先"：若某 input 的 method 给了更具体读写要求，按其指示执行。）
 
 ### 2. 选择下一个任务
 
@@ -200,7 +200,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
-6. 执行任务「验证方法」（缺失则基于 AGENTS.md / 项目脚本选最小可行验证并记回任务）。通过 → 状态「完成」+ 记录验证；失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
+6. 执行任务「验证方法」（存在 `plan.json` 时优先 `plan.json.tasks[].validationCommands`；缺失或契约未列出 `plan.json` 时，基于 specs、AGENTS.md 和项目脚本选最小可行验证）。每次验证完成后用 `hooks/evidence_store.py append` 追加一条 evidence，记录 taskId（无 plan 时使用本轮轻量任务 ID）、specRefs、designRefs（无 design 契约时可为空）、changedFiles、validation.command/exitCode/result；不要截断或重写 `evidence/EVIDENCE.jsonl`。通过 → 状态「完成」；存在 `plan.json` 时还要将新增 evidenceId 写回 `plan.json.tasks[].evidenceIds`，`PLAN.md` 若存在再同步人类视图。失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
 
 > 一致性：任务的依据在对应 input 里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 
@@ -238,7 +238,9 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ## 完成条件
 
 - 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
-- 必要验证通过；项目编译通过（code_done execute hook 另记模块编译结果，非阻断）。
+- 若 Source Bundle 含 `plan.json`：`plan.json` 中所有任务为完成态，每个任务至少有一条通过的 evidence；若 Source Bundle 未列出 `plan.json`：本轮轻量任务队列全部完成，并在 evidence 中记录对应 specs/proposal 依据。
+- `evidence/EVIDENCE.jsonl` 与 `evidence/EVIDENCE.index.json` 完整性校验通过，不存在截断/重写。
+- 必要验证通过；项目编译通过（code_done execute hook 会在推进前再次校验 plan/evidence 闭环与模块编译）。
 - HTML 分支或前端源码变更已完成统一前端回检，或用户明确跳过；仍有 `must-fix` / 执行异常时不得推进 `code_done`。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
