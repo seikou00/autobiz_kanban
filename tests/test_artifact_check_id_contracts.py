@@ -22,6 +22,7 @@ from artifact_check import (  # noqa: E402
     validate_design_contract,
     validate_e2e_report_contract,
     validate_fix_request_json,
+    validate_plan_json_contract,
     validate_plan_json_initial_tasks,
     validate_plan_finished_tasks,
     validate_review_findings_json,
@@ -403,6 +404,15 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
             ctx = self._plan_ctx(feature_dir)
             self.assertEqual(validate_plan_finished_tasks(ctx), 0)
+
+    def test_plan_json_contract_degrades_when_plan_not_in_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+
+            self.assertEqual(validate_plan_json_contract(self._ctx(feature_dir)), 0)
+
+            (feature_dir / "PLAN.md").write_text("# stale human plan\n", encoding="utf-8")
+            self.assertGreater(validate_plan_json_contract(self._ctx(feature_dir)), 0)
 
     def test_design_escape_hatches_allow_absent_api_and_data_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1118,6 +1128,33 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertGreater(validate_code_done_gate(ctx), 0)
+
+    def test_code_done_gate_degrades_plan_check_when_plan_not_in_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "validation",
+                    "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": ["src/foo.py"],
+                    "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+                },
+            )
+            ctx = HookContext(
+                skill="autodev-code",
+                slug="alpha",
+                root=feature_dir.parent.parent.parent,
+                required_outputs=("evidence/EVIDENCE.jsonl",),
+            )
+
+            self.assertEqual(validate_code_done_gate(ctx), 0)
 
     def test_fix_request_rejects_unknown_design_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

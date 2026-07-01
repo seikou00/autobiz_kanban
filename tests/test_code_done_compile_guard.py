@@ -79,6 +79,12 @@ def sample_record(checkpoint: str = "code_in_progress") -> dict[str, str]:
     }
 
 
+def sample_lean_record(checkpoint: str = "code_in_progress") -> dict[str, str]:
+    record = sample_record(checkpoint)
+    record["workflowTemplate"] = "lean"
+    return record
+
+
 def write_modules(workspace: Path, modules: list[dict]) -> None:
     (workspace / ".autobizdevops" / "modules_compile.json").write_text(
         json.dumps({"version": 1, "modules": modules}, ensure_ascii=False),
@@ -140,6 +146,26 @@ def seed_done_plan_and_evidence(workspace: Path, feature: str = "alpha") -> None
             "action": "validation",
             "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
             "designRefs": ["design.md#D-001"],
+            "changedFiles": ["src/example.py"],
+            "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+        },
+    )
+
+
+def seed_evidence_without_plan(workspace: Path, feature: str = "alpha") -> None:
+    feature_dir = workspace / ".autobizdevops" / "features" / feature
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    append_evidence(
+        feature_dir,
+        {
+            "featureId": feature,
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+            "designRefs": [],
             "changedFiles": ["src/example.py"],
             "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
         },
@@ -265,6 +291,31 @@ class CodeDoneCompileGuardTest(unittest.TestCase):
             self.assertEqual(events[0]["eventId"], "code-compile")
             self.assertEqual(events[0]["eventStatus"], "success")
             self.assertIn("code_done 编译校验通过", events[0]["message"])
+
+    def test_code_done_hook_allows_lean_contract_without_plan_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = make_workspace(root)
+            write_state_records(workspace, {"alpha": sample_lean_record("code_in_progress")})
+            seed_evidence_without_plan(workspace)
+            service = root / "service"
+            service.mkdir()
+            write_modules(
+                workspace,
+                [{"module": "service", "path": str(service), "compile_command": py_command("print('ok')")}],
+            )
+
+            result = run_guard(
+                execute_payload("python hooks/update_checkpoint.py --checkpoint code_done", Path(tmp)),
+                env=plugin_env(workspace),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("missing_plan_json", result.stderr)
+            events = read_hook_events(workspace)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["eventId"], "code-compile")
+            self.assertEqual(events[0]["eventStatus"], "success")
 
     def test_code_done_hook_skips_when_feature_is_not_in_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

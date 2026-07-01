@@ -25,6 +25,7 @@ from paths import (
     get_plugin_output_workspace,
     resolve_env_feature,
 )
+from board_core.contracts import BoardConfigError, load_record_workflow_contracts
 from board_core.state_store import load_state_json_records_result
 from evidence_integrity_gate import check_code_done
 from state_checkpoint import append_checkpoint_hook_logs
@@ -274,6 +275,21 @@ def current_checkpoint(workspace: Path, feature: str) -> str | None:
     return record.get("checkpoint", "")
 
 
+def code_contract_requires_plan(workspace: Path, feature: str) -> bool:
+    result = load_state_json_records_result(workspace)
+    if not result.exists or result.errors:
+        return True
+    record = result.records.get(feature)
+    if record is None:
+        return True
+    try:
+        contracts = load_record_workflow_contracts(ROOT, record, workspace=workspace)
+        contract = contracts.contract_for_skill("autodev-code")
+    except BoardConfigError:
+        return True
+    return "plan.json" in contract.required_inputs
+
+
 def write_compile_result(
     workspace: Path,
     feature: str,
@@ -348,7 +364,7 @@ def write_evidence_gate_result(
             "decision": "block",
             "reason": reason,
             "systemMessage": f"code 证据门禁未通过：\n{reason}",
-            "additionalContext": f"请先补齐 plan.json 与 EVIDENCE.jsonl 证据闭环：\n{reason}",
+            "additionalContext": f"请先补齐当前工作流契约要求的 code 证据闭环：\n{reason}",
         },
         sys.stdout,
         ensure_ascii=False,
@@ -368,7 +384,10 @@ def run_code_done_compile_hook() -> int:
         return 0
 
     feature_dir = workspace / ".autobizdevops" / "features" / feature
-    evidence_errors = check_code_done(feature_dir)
+    evidence_errors = check_code_done(
+        feature_dir,
+        require_plan=code_contract_requires_plan(workspace, feature),
+    )
     if evidence_errors:
         return write_evidence_gate_result(
             workspace,

@@ -390,7 +390,7 @@
               "extract": {
                 "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers"],
                 "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，PLAN.md 只作可选同步视图",
-                "degrade": "无 plan.json 时仅在当前 workflow 不包含 plan 阶段时降级；标准 workflow 下缺失必须回到 /autodev-plan 生成"
+                "degrade": "Source Bundle 未列出 plan.json 时，基于 proposal 与 specs 建轻量任务队列，不回到 Plan 阶段索要；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成"
               } }
           ],
           "outputs": [

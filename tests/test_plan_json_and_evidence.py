@@ -204,6 +204,15 @@ class EvidenceGateTest(unittest.TestCase):
 
             self.assertEqual(check_code_done(feature_dir), [])
 
+    def test_code_done_gate_can_degrade_when_plan_not_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            append_pass_evidence(feature_dir, task_id="T001")
+
+            self.assertTrue(any("missing_plan_json" in error for error in check_code_done(feature_dir)))
+            self.assertEqual(check_code_done(feature_dir, require_plan=False), [])
+
     def test_code_done_gate_rejects_unresolved_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
