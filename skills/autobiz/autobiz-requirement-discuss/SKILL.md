@@ -1,7 +1,7 @@
 ---
 name: autobiz-requirement-discuss
-description: Biz 阶段需求澄清技能。读取原始需求材料，通过分析评估、问题清单、对话循环收敛需求，沉淀中间讨论稿 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。适用于需求评审、需求完善、协助 PM 补齐信息。
-version: v1.1.1604
+description: Biz 阶段需求澄清技能。
+version: v1.2.1701
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清技能
@@ -14,7 +14,7 @@ version: v1.1.1604
 
 ## 产物协议
 
-- 中间产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
+- 产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
 - `PRD_DISCUSS.md` 用于承接循环中的讨论结论、待确认项、假设与阶段性方案
 - 除非用户明确要求只停在讨论阶段，否则本技能应在收敛后结束，并提示用户运行 `/autobiz-prd-generate` 生成正式 PRD。
 
@@ -53,10 +53,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 在开始工作流程前，必须加载以下参考文档：
 
-1. `references/analysis-guide.md`
+1. `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md`
    - 需求内容评估准则，包含检查项和优化建议
-2. `references/default-rules.md`
-   - 默认规则，生成问题清单时需豁免的默认项
 
 执行流程时，必须以评估准则作为判断依据，确保分析有据可依。
 
@@ -78,56 +76,63 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ### Step 1: 建立需求上下文
 
+```
+1. 读取产品经理上传的需求材料
+
+<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
+## 流程契约（执行清单）
+
+当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源。
+进入执行前，取当前 Feature 的执行清单：
+
+```bash
+python "${F}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --plain
+```
+
+<!-- AUTODEV_RUNTIME_CONTRACT:END -->
+### Step 0: 缓存检测与清理
+
+在开始分析前，检测用户是否要求重新讨论：
+- 若用户明确提到"重新 DISCUSS"、"重新讨论"、"重新分析"、"重新梳理需求"等关键词
+- 且 `{FEATURE_DIR}/PRD_DISCUSS.md` 已存在
+
+则执行缓存清理：
+1. 删除 `{FEATURE_DIR}/PRD_DISCUSS.md`
+2. 清理问题清单缓存
+3. 重新执行完整 DISCUSS 流程
+
+### Step 1: 建立需求上下文
+
 1. 读取产品经理上传的需求材料
    - 优先读取 Word 文档（`.docx` / `.doc`）
    - 若用户提供 Markdown、需求说明、会议纪要、飞书导出内容，也可作为输入
-2. 提取以下信息
-   - 特性概述 / 背景 / 目标
-   - 功能任务描述
-   - 验收标准
-   - 角色、流程、边界、外部依赖
-3. 记录原始文档的结构、编号规范、术语和文风特点
-
-**确定 FEATURE_DIR：**
-
-```
-FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
-```
-
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
-
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
-
-```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --json
-```
-
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
-
+2. **动态提取原始文档的所有章节内容**：按原始文档的实际目录结构逐章逐节提取，不预设固定的信息类别
+   - 识别并记录原始文档的完整章节树（章节编号、标题层级、子章节关系）
+   - 提取每个章节下的具体内容,完整详细
+3. 记录原始文档的目录结构、编号规范、术语和文风特点
+4. **【必须】删除内容检查**：识别确认不做的功能点，**此步骤不可跳过**
+   - **关键词识别**：扫描文档中以下标记词
+     | 识别类型 | 示例关键词 |
+     |----------|------------|
+     | 格式识别 | 删除线文本（~~删除线~~） |
+     | 格式识别 | w:strike |
+     | 方案标记 | 已删除、废弃、方案2取消、方案3不用 |
+     | 状态标记 | 二期做、暂不开发、本期不做、后续处理 |
+   - **结果处理**：将识别结果记录到需求上下文中，注明标识为删除内容。
 
 Expected output: 已完成原始需求材料读取，并形成后续分析所需上下文。
 
 ### Step 2: 需求分析
 
-【核心原则】严格按照 `references/analysis-guide.md` 的评估规则检查，生成需求分析的问题清单。
+【核心原则】严格按照 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成需求分析的问题清单。
 
 【关键约束】 - 仅输出有问题、需求有遗漏、需求不明确的事项；无问题则不制造问题
 
 
 ### Step 3: 问题清单展示与用户确认
 
-将 Step 2 发现的问题整理成结构化问题清单，并按重要性分类：
+#### Step 3.1 问题清单展示
+将 Step 2 发现的问题整理成结构化问题清单并按重要性分类，然后展示给用户。
 
 | 优先级 | 分类 | 说明 |
 |--------|------|------|
@@ -145,56 +150,105 @@ Expected output: 已完成原始需求材料读取，并形成后续分析所需
 | 2 | P1 - 重要问题 | [检查项] | [问题描述] | [优化建议] |
 | 3 | P2 - 优化建议 | [检查项] | [问题描述] | [优化建议] |
 ```
+
+#### Step 3.2 询问用户是否需要补充
+
+展示问题清单后，使用 `request_user_input` 询问用户：
+
+问题清单已生成，请确认是否需要补充其他问题？
+- **选项1**：确认讨论当前问题清单
+- **选项2**：补充其他问题
+
+**处理逻辑**：
+- 若用户选择「确认讨论当前问题清单」→直接进入 Step 4 逐项确认
+- 若选择「补充其他问题」或者 「其他」→ 引导用户补充说明 → 记录补充内容，合并到问题清单再进入 Step 4
+
 【关键约束 - 必须展示并等待确认】
 
 **禁止假设用户确认：无论需求文档多详细、用户意图多明确，都必须在展示问题清单后停止输出并等待用户回复。**
-
-"需求已经很清楚所以跳过确认"是**错误推理**。即使没有问题清单，也必须告知用户"需求检查完毕，未发现问题，是否确认进入下一阶段？"
-
-- 展示问题清单（或"未发现问题"结论）后，若当前运行模式支持 `request_user_input`，必须优先用它发起确认，选项至少包含 `逐项讨论这些问题 (Recommended)` / `确认无误、进入下一阶段`；若不支持，必须显式追问：`需求检查完毕，是否确认进入下一阶段？请回复"逐项讨论"或"确认进入下一阶段"。` 未拿到明确答复前，不得继续推进，也不得自行假设用户已确认。
 
 
 ### Step 4: 对话式引导并沉淀 `PRD_DISCUSS.md`
 
 【关键方法】这一阶段的主要目标不是直接写正式 PRD，而是通过对话循环结合原始需求文档和用户回复，把需求内容调整结果稳定沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。
 
-#### Step 4.1 问题清单引导策略
+#### Step 4.1 深度对话引导策略
 
-1. 按优先级排序：先解决 P0，再解决 P1，最后讨论 P2
-2. 逐项确认：每个问题都要与 PM 确认当前状态和真实意图
-3. 引导补充：针对缺失项，用提问帮助 PM 补齐
-4. 记录回复：详细记录PM的回复和补充内容
+基于 Step 3 已确认的问题清单，按优先级（P0→P1→P2）逐项进行单独对话确认。
+
+**对话流程（每个问题单独执行）：**
+
+1. **展示当前问题**：展示问题的检查项、问题描述和优化建议
+2. **智能生成选项**：根据问题类型生成 1-2 个选项 + 「其他」选项
+   - P0 问题示例选项：「已明确」「暂时搁置」
+   - P1 问题示例选项：「确认按建议处理」「后续讨论」
+   - P2 问题示例选项：「确认按建议处理」「本期不做」
+3. **使用 request_user_input 询问**：
+   - 问题：描述当前问题，询问 PM 的处理意向
+   - 选项：智能生成的选项 + 「其他」选项
+4. **处理用户回复**：
+   - 若选择预设选项 → 记录选择结果，继续下一问题
+   - 若选择「其他」→ 引导用户补充说明 → 记录补充内容，继续下一问题
+5. **记录完整对话**：将每个问题的对话内容（问题、选项、用户选择、补充内容）记录到 PRD_DISCUSS.md
+
+**示例对话流程：**
+
+```
+问题 1：P0 - 字段定义缺失
+- 检查项：字段定义完整性
+- 问题描述：用户ID字段未定义类型和长度
+- 优化建议：补充 userId 字段的类型为 VARCHAR(32)
+
+【询问】
+问题：用户ID字段未明确定义，请问如何处理？
+选项：
+1. 补充字段定义为 VARCHAR(32)（推荐）
+2. 后续讨论
+3. 其他（自行补充）
+
+【用户选择后记录】
+- 用户选择：补充字段定义为 VARCHAR(32)
+- 补充说明：[如有]
+- 确认结论：[记录最终决策]
+```
 
 #### Step 4.2 需求摘要总结策略
 
 **核心原则**：PRD_DISCUSS.md 的需求摘要必须包含需求的完整开发内容，而非仅记录讨论的问题。
 
+**【关键】格式还原优先**：
+- **动态识别并完整保留原始需求文档的实际目录结构**：包括章节编号、标题层级、编号规范、术语体系、文风特点
+- 若原始文档结构松散/缺失必要章节（如缺少痛点），可参考 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/doc_module.md` 补充基础结构
+
 **需求摘要必须包含**：
-1. **需求概述**
-2. **痛点与解决方案**
-3. **特性说明**（核心，**逐任务详细展开**，格式参照 `references/doc_module.md`）
-   每个任务必须包含：业务逻辑、字段定义、筛选条件、状态流转、验收标准、第三方依赖等，**禁止遗漏原文档任何细节**
+1. **原始文档的完整目录结构**（按原始文档的实际章节组织，而非自定义简化结构）
+   - 逐章逐节保留原始文档的所有章节，包括：需求概述、需求解析、用户现状、方案设计、功能清单、非功能需求、验收标准、附件等
+   - 章节顺序与原始文档完全保持一致，必须保留原始文档的章节划分
+2. **每个任务(功能）的完整描述**：包含业务逻辑、字段定义、筛选条件、状态流转、验收标准、第三方依赖等关键信息，**禁止遗漏原文档任何细节**
 
 **【强制完整性校验 — 生成后立即执行】**
 生成需求摘要后，**必须**执行以下校验，不得跳过：
 
-| # | 检查项 | 内容 |
-|---|--------|------|
-| 1 | 逐任务对照 | 每个任务与原始文档逐字逐句比对 |
-| 2 | 字段完整性 | 字段名称、类型、长度、枚举值、默认值、校验规则 |
-| 3 | 筛选条件完整性 | 筛选字段、方式、数据来源、默认值 |
-| 4 | 验收标准完整性 | 所有验收标准 |
-| 5 | 状态流转完整性 | 状态定义、流转规则、操作权限 |
-| 6 | 第三方依赖完整性 | 接口、对接系统、外部数据源 |
-| 7 | 删除线/不做标记 | "不做""二期""已废弃"内容已在任务标题标注 |
-
-校验结果写入 PRD_DISCUSS.md 的 `## 完整性校验` 章节（格式：`- 逐任务对照：✅`）。**校验未通过则立即补充，直至全部通过再进入下一步。**
+| # | 检查项 | 内容                         |
+|---|--------|----------------------------|
+| 1 | 目录结构一致性 | 需求摘要的章节结构与原始文档完全一致，未丢失任何章节 |
+| 2 | 逐任务(功能）对照 | 每个任务(功能）与原始文档逐字逐句比对        |
+| 3 | 字段完整性 | 字段名称、类型、长度、枚举值、默认值、校验规则    |
+| 4 | 筛选条件完整性 | 筛选字段、方式、数据来源、默认值           |
+| 5 | 验收标准完整性 | 所有验收标准                     |
+| 6 | 状态流转完整性 | 状态定义、流转规则、操作权限             |
+| 7 | 第三方依赖完整性 | 接口、对接系统、外部数据源              |
+| 8 | 删除线/不做标记 | "不做""二期""已废弃"内容已在任务内容标注    |
 
 
 #### Step 4.3 调整需求摘要
-- 根据用户回答调整需求摘要，确保需求摘要内容的准确性
-- 不做的任务在任务标题上明确标注"（二期）"或"本期不做"
+	- **【关键】根据用户回答直接修改需求摘要**：每个问题确认后，必须将确认结果**直接写入需求摘要**的对应位置，而非仅记录在讨论记录中
+	  - 用户补充字段定义 → 直接在需求摘要正文中补充该字段定义
+	  - 用户修改业务逻辑 → 直接在需求摘要正文中修改对应逻辑描述
+	  - 用户补充验收标准 → 直接在需求摘要正文中补充验收标准
+	- 不做的任务功能在任务上明确标注"本期不做"
 - 对于需求摘要内容中描述不明确的内容，应在对应位置标注"【待确认】"并在"待确认事项"中记录
+	- **最终校验**：所有问题处理完毕后，需求摘要正文应已完整反映所有已确认的修改，读者无需翻阅讨论记录即可获取完整准确的需求内容
 
 
 #### Step 4.4 讨论沉淀生成
@@ -213,7 +267,7 @@ Expected output: 已完成原始需求材料读取，并形成后续分析所需
 - 讨论稿可以保留"待确认""候选方案""暂定结论"这类中间状态
 - 每次新增或修改都要明确哪些内容是已确认，哪些仍待确认
 - 讨论稿不要求完全标准化，但必须保证信息可追溯、语义稳定、便于后续提炼
-- 若用户指定"只先讨论，不输出正式 PRD"，可以停留在本文件；否则提示用户运行 `/autobiz-prd-generate`。
+- 若用户指定"只先讨论，不输出正式 PRD"，可以停留在本文件；否则提示用户运行 `/autobiz-prd-generate`
 
 Expected output: `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 已沉淀当前轮次的需求结论、待确认项和风险。
 
@@ -224,10 +278,7 @@ Expected output: `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${fea
 1. 检查原问题是否已解决
 2. 检查是否引入新问题或新歧义
 3. 若仍存在 P0 / P1，继续回到 Step 2-4
-4. 每轮都要向用户展示检查结果，并发起一次"继续讨论 / 需求已收敛"的选择：若当前运行模式支持 `request_user_input`，必须优先用它，选项至少包含 `继续讨论` / `需求已收敛、去生成正式 PRD (Recommended)`；若不支持，必须显式追问：`本轮检查结果如上，是否继续讨论？请回复"继续讨论"或"需求已收敛"。` 未拿到明确答复前，不得推进到 discuss_done，也不得自行判定收敛。
-
-**【完整性检查 — 每轮迭代必执行】**
-按 Step 4.2 的 7 项完整性校验标准，将 PRD_DISCUSS.md 与原始需求文档逐项对照。发现遗漏立即补充后再进入下一轮。
+4. 每轮都要向用户展示检查结果，由用户判断是否可以终止循环
 
 #### 迭代终止条件
 
@@ -260,11 +311,10 @@ python autobiz/hooks/biz_validate.py discuss --feature {slug}
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 完整性校验章节所有检查项均为检查通过
 - `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 
-**Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
+**Skill 完成。** 下一步以 `resolve_next_skill.py` 为准：
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

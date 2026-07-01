@@ -1,28 +1,27 @@
 ---
 name: autodev-code
-description: 按工作流契约逐任务执行代码。消费契约 Source Bundle 列出的 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不属于本工作流，不读不等。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
+description: 按工作流契约逐任务执行代码。消费执行清单列出的 input，逐个按其读取方式执行（input 专属指令优先于通用默认）；清单未列出的 id 不属于本工作流，不读不等。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
 version: v1.1.1604
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，把每个 input 解析成一条确定指令）：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
 ```
 
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
+- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
+- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
+- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
 - **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
+- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
 
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -32,7 +31,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 
 把上游确认的契约落成代码。输入/输出/读取方式以「流程契约」一节取到的契约为唯一事实源。
 
-**核心：** 你的 input 就是契约 Source Bundle 里列出的那几个，逐个**按其 Method Bundle（focus/method）**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的 method 里。契约没列的 id 不属于本工作流——不读、不等、不索要，也不要设想"如果有 X"。**每个 input 的 method 优先于本文通用默认。** 若 Source Bundle 含 `plan.json`，任务 DAG、依赖、状态与 evidenceIds 一律以 `plan.json` 为事实源；`PLAN.md` 若存在只作为人类可读视图按需同步维护，不参与机器判断。
+**核心：** 你的 input 就是执行清单 `## 输入产物` 里列出的那几个，逐个**按其 `读取方式`**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的读取方式里。清单没列的 id 不属于本工作流——不读、不等、不索要，也不要设想"如果有 X"。**每个 input 的读取方式优先于本文通用默认。** 若清单含 `plan.json`，任务 DAG、依赖、状态与 evidenceIds 一律以 `plan.json` 为事实源；`PLAN.md` 若存在只作为人类可读视图按需同步维护，不参与机器判断。
 
 输出：业务代码 / 测试 / 配置的最小必要修改；刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
@@ -48,7 +47,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 `CHECKPOINT` 为空、未知→停止并请用户选择。确认 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 存在。
 
-读取输入：按「流程契约」取契约 JSON，按 `sourceBundle` 逐项读原件、按各自 `extract` 抽取上下文。仅当 `required_inputs` 缺失时停止，不要生成替代文件。
+读取输入：按「流程契约」取执行清单，`## 输入产物` 逐项读原件、按各自 `读取方式` 抽取上下文。仅当标『未生成』的必需 input 存在时才停止，不要生成替代文件。
 
 开始任何业务代码修改前，根据 AGENTS.md 与项目 manifest 生成模块编译清单 `.autobizdevops/modules_compile.json`：
 
@@ -76,11 +75,11 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ### 1. 建立执行上下文与任务队列
 
-对每个 input 按其 `extract.focus` / `method` 抽取并记住关键信息。
+对每个 input 按其 `读取方式` 抽取并记住关键信息。
 
 **任务队列：** 必须读取契约提供的 `plan.json`，直接按 `tasks[]` 中的 `deps/status/specRefs/designRefs/apiIds/dataIds/decisionIds/validationCommands/evidenceIds` 建立队列，不得重新拆分任务；更新任务时必须修改 `plan.json`，`PLAN.md` 若存在只作为人类视图同步。若当前 workflow 未提供 `plan.json`，停止执行并回到 Plan 阶段补齐结构化计划，不得在 Code 阶段临时拆分或维护 Markdown 任务清单。
 - 若当前运行模式支持 `write_todos`，把 `plan.json.tasks[]` 映射成可见任务清单，状态用 待做 / 进行中 / 完成 / 失败，并与 `plan.json` 保持同步；每次只置一个任务为"进行中"。`write_todos` 只反映任务进度，不替代 checkpoint 脚本与产物校验。
-（依"方法优先"：若某 input 的 method 给了更具体读写要求，按其指示执行。）
+（依"方法优先"：若某 input 的读取方式给了更具体读写要求，按其指示执行。）
 
 ### 2. 选择下一个任务
 
@@ -89,11 +88,11 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ### 3. 执行单个任务
 
 1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。
-2. 读任务的 做什么 / 依据 / 验证方法。先依各 input 的 method 确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（method 优先于此默认）。
+2. 读任务的 做什么 / 依据 / 验证方法。先依各 input 的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。
 3. 改代码前做有界探索定位真实文件与既有模式：只读契约 input、AGENTS.md 指向的或 `rg` 命中的相关文件；先识别项目分层、命名、错误处理、校验、日志、测试风格；形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
 4. 实现并自检：
-   - 行为满足各 input method 确立的行为契约条目（method 已标明何者为最高依据）。
-   - 遵守各 input method 施加的约束。
+   - 行为满足各 input 读取方式确立的行为契约条目（读取方式已标明何者为最高依据）。
+   - 遵守各 input 读取方式施加的约束。
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
@@ -112,11 +111,11 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ## 写入边界
 
-允许：与当前任务需求闭环直接相关的业务代码/测试/配置；能追溯到任务依据与队列的新增文件；各 input method 指示你更新的产物。
+允许：与当前任务需求闭环直接相关的业务代码/测试/配置；能追溯到任务依据与队列的新增文件；各 input 读取方式指示你更新的产物。
 
-禁止：**Source Bundle 中的任何 input**（凡在 bundle 中即只读）；本节点未在 `board_core/board_config.json` outputs 中声明的其他阶段产物；与当前任务无关的业务文件。
+禁止：**执行清单列出的任何 input**（凡在清单中即只读）；本节点未在 `board_core/board_config.json` outputs 中声明的其他阶段产物；与当前任务无关的业务文件。
 
-为完成任务必须改队列未直接提到的业务文件时，先确认与各 input method 确立的依据一致，再把文件与原因记入验证证据或完成/失败摘要，不要悄悄扩大范围。
+为完成任务必须改队列未直接提到的业务文件时，先确认与各 input 读取方式确立的依据一致，再把文件与原因记入验证证据或完成/失败摘要，不要悄悄扩大范围。
 
 ## 完成条件
 

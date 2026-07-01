@@ -1,20 +1,18 @@
 ---
 name: autobiz-prd-generate
-description: Biz 阶段 PRD 生成技能。按上游产物契约（Source Bundle）读取输入并按各 input 的 Method Bundle 提炼已确认需求，追加用户故事、验收口径、验收标准和关键约束，生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`。适用于需求确认后，输出可供下游阶段消费的正式需求文档。
-version: v1.1.1604
+description: Biz 阶段 PRD 生成技能。
+version: v1.2.1701
 ---
 
 # /autobiz-prd-generate — Biz 阶段 PRD 生成技能
 
-> 本技能专注生成正式 PRD（按各 input 的 Method Bundle 提炼上游已确认需求），不负责需求澄清循环。
-
 ## 概述
 
-本技能用于生成可交付的正式 `PRD.md`，输入以 Source Bundle 为准：按各 input 的 Method Bundle 提炼上游已确认需求生成正式稿（上游素材的收敛要求与缺失时的澄清路径由各 input 的 `method`/`degrade` 规定）。
+本技能用于生成可交付的正式 `PRD.md`，输入以执行清单为准：按各 input 的 `读取方式` 提炼上游已确认需求生成正式稿（上游素材的收敛要求与缺失时的澄清路径由各 input 的读取方式/缺失处理规定）。
 
 ## 核心能力
 
-- 提炼上游素材：按其 Method Bundle 读取已收敛的需求摘要、确认结论、问题处理状态、假设与风险
+- 提炼上游素材：按其 `读取方式` 读取已收敛的需求摘要、确认结论、问题处理状态、假设与风险
 - 正式稿整理：正式稿标题固定为 `# 需求正式稿`，剔除讨论稿说明句、讨论记录、待确认事项和外部依赖章节
 - 正式段落追加：直接包含 `用户故事`、`验收口径`、`验收标准`、`关键约束`
 - PRD 质量检查：确保追加段落可供下游 Dev 阶段消费，且正式 PRD 不包含讨论记录正文、包装标题、待确认事项或外部依赖章节
@@ -30,9 +28,9 @@ version: v1.1.1604
 
 ## 输入前提
 
-输入清单以本 Feature 契约的 Source Bundle 为准，按可信度从高到低使用：
+输入清单以本 Feature 的执行清单为准，按可信度从高到低使用：
 
-1. bundle 列出的上游产物（按其 Method Bundle 提炼）
+1. 清单列出的上游产物（按其 `读取方式` 提炼）
 2. 用户明确给出的已确认需求结论、功能范围、验收标准
 
 上游素材的使用前提由各 input 的 `method`/`degrade` 规定：讨论稿类素材须在需求已收敛后使用，未收敛（仍有大量 P0 / P1 未解决）时先回到需求澄清；契约未提供讨论稿时按其 `degrade`，与用户确认需求结论、功能范围和验收标准后直接生成。
@@ -50,44 +48,27 @@ version: v1.1.1604
 ```bash
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
-
 后续准入检查直接取用 `CHECKPOINT`；若 `CHECKPOINT` 为空、未知或 Feature 不存在，必须停止并提示用户选择 Feature。执行 `update_checkpoint.py` 后必须刷新 `CHECKPOINT`。
 
-**确定 FEATURE_DIR：**
-
-```
-FEATURE_DIR = ${projectDir}/.autobizdevops/features/${feature}
-```
-
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-prd-generate --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-prd-generate --feature "${feature}" --plain
 ```
-
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
-由父级入口统一调用脚本校验上游产物（校验范围以本 Feature 契约的 `required_inputs` 为准）：
+由父级入口统一调用脚本校验上游产物：
 
 ```bash
 python autobiz/hooks/biz_validate.py discuss --feature {slug}
 ```
 
-脚本通过后，按 Source Bundle 读取上游产物原件，按各自 `method`/`degrade` 处理：上游讨论稿类素材仍有大量 P0 / P1 未解决时先回到需求澄清；已收敛（或只剩可接受的 P2）则继续；契约未提供该素材时不读取不索要，与用户确认需求结论后直接生成。
+脚本通过后，按执行清单读取上游产物原件：已生成的按其 `读取方式` 处理，未生成的按其 `缺失处理`——上游讨论稿类素材仍有大量 P0 / P1 未解决时先回到需求澄清；已收敛（或只剩可接受的 P2）则继续；清单未列出该素材时不读取不索要，与用户确认需求结论后直接生成。
 
 ### Step 2: 更新状态
 
@@ -131,7 +112,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 #### 输出文件
 
-- 输入稿：以 Source Bundle 为准
+- 输入稿：以执行清单为准
 - 正式稿：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
 - 格式：Markdown
 
@@ -139,7 +120,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 完成 PRD 生成后，检查以下事项：
 
-- 上游讨论稿（若属于本工作流）已保留完整收敛过程
+- 上游讨论稿已保留完整收敛过程
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已存在，且以 `# 需求正式稿` 开头
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 不包含讨论稿说明句 `本文档为需求讨论中间稿，用于记录需求讨论过程和结论`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 不包含 `审理提炼`、`待确认事项`、`待确认项`、`外部依赖`、`第三方依赖` 标题
@@ -149,7 +130,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 向用户明确说明：
 
-- 上游讨论稿（若属于本工作流）的位置见 Source Bundle
+- 上游讨论稿的位置见执行清单
 - 正式 PRD 位于 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
 - 下一步按工作流推进（以 `resolve_next_skill.py` 为准）。
 
