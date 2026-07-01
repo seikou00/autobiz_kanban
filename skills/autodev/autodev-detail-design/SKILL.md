@@ -1,13 +1,9 @@
 ---
 name: autodev-detail-design
-description: Autodev dynamic detailed design node. When the `detail_design_before_code` workflow decision is enabled at `plan_done`, use after /autodev-plan and before /autodev-code to write `DETAIL_DESIGN.md` with file-level change design, implementation logic, and overall flow. This skill updates detail_design checkpoints but must not modify business code.
-version: v1.1.1604
+description: Autodev dynamic detailed design node.
+version: v1.2.1702
 ---
 # /autodev-detail-design - 详细计划
-
-## 阶段定位
-
-autodev-detail-design 是 `detail_design_before_code` dynamic stage 启用后的正式 Dev 节点，通常在 /autodev-plan 已生成 `plan.json` 后、进入 /autodev-code 前调用。
 
 本 skill 只回答：
 
@@ -49,12 +45,11 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 
 读取输入（消费执行清单，进入本节点后可用 `--feature "${feature}" --plain` 取状态感知清单）：
 
-- 按执行清单 `## 输入产物` 读取上游产物原件（本节点为 proposal.md、specs/**/*.md、design.md、plan.json），按各自 `读取方式` 抽取重点。
-- 从 `plan.json.tasks[]` 读取任务 DAG、taskId、deps、status、specRefs、designRefs、validationCommands、expectedFiles；`PLAN.md` 若存在只作人类可读计划视图和叙述补充，不作为机器事实源。
-- AGENTS.md（如存在）
+- 按执行清单 `## 输入产物` 读取上游产物原件，按各自 `读取方式`读取
+- 从 `plan.json.tasks[]` 读取任务 DAG、taskId、deps、status、specRefs、designRefs、validationCommands、expectedFiles
 - 与本 Feature 相关的现有业务代码、测试、配置和接口定义
 
-清单中任一标『未生成』的必需 input 出现时停止并提示先完成对应上游阶段（本节点仅在标准链启用 detail_design 决策后插入，design.md 与 plan.json 为必需）；本 skill 不补写上游设计契约。
+清单中任一标『未生成』的必需 input 出现时停止并提示先完成对应上游阶段；本 skill 不补写上游设计契约。
 
 ## 工作原则
 
@@ -62,7 +57,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 - **比 PLAN 更具体，但仍不编码。** 可以写文件级改动说明、伪代码、流程图和调用链；不得直接改实现文件。
 - **保留不确定性。** 无法确认的文件路径、接口字段、权限、数据模型、状态流必须标为待确认，不要写成硬结论。
 - **面向读者。**DETAIL_DESIGN.md 是给用户和后续编码者读的，应清楚说明“为什么改这里、怎么改、怎么流转、怎么验证”。
-- **按动态节点推进流程。** 完成后必须调用 update_checkpoint.py 推进到 `detail_design_done`；若用户不需要详细设计，应在 `plan_done` 选择 skip 并直接进入 code，而不是进入本 skill。
 
 ## 生成 DETAIL_DESIGN.md
 
@@ -155,5 +149,3 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"
 ```
-
-$ARGUMENTS

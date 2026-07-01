@@ -8,7 +8,7 @@ version: v1.1.1604
 ## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，把每个 input 解析成一条确定指令）：
+进入执行前，取当前 Feature 的执行清单：
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
