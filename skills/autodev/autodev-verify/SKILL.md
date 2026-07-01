@@ -207,13 +207,13 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ---
 
-## Step 5.5: 生成 FEATURE_API_DETAIL.md（可选接口详细说明）
+## Step 6: 生成 FEATURE_API_DETAIL.md（可选）
 
-本步骤只在当前 Feature 的实际代码改动涉及新增或修改接口时执行。`FEATURE_API_DETAIL.md` 是面向测试设计和接口交付说明的辅助文档，不影响 `verify_done` / `needs_fix` 分支判断。
+仅当当前 Feature 的实际代码改动涉及新增或修改接口时执行。该文件是可选额外交付物，不影响 `verify_done` / `needs_fix` 分支判断。
 
 > 本步骤允许执行只读 git 命令和读取代码文件；仍然不得运行测试、不得启动服务、不得修改业务代码。
 
-### 5.5.1 判定是否涉及接口新增或修改
+### 6.1 判定是否需要生成
 
 必须先查看当前 Feature 的实际代码改动，不得只根据 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md` 或 `PLAN.md` 推断接口细节。
 
@@ -227,41 +227,18 @@ git diff
 git diff --cached
 ```
 
-重点识别以下文件或代码区域：
-
-- Controller / Router / Handler
-- Request DTO / Response DTO / Schema
-- Service / Domain Service / Use Case
-- Mapper / Repository / DAO
-- SQL / XML Mapper / ORM 查询
-- 外部接口 Client / Adapter
-- 错误码 / 枚举 / 常量
-- 权限、租户、审计、幂等、分页、排序、过滤、事务逻辑
-
-满足任一条件时，视为“涉及接口新增或修改”：
+满足以下任一情况，才生成 `FEATURE_API_DETAIL.md`：
 
 - 新增接口入口、修改接口路径或请求方式。
 - 修改请求参数、响应字段、字段类型、字段是否必填、默认值、枚举值或错误码。
 - 修改接口内部数据源、SQL、分页、排序、过滤、外部接口调用、权限校验或异常处理。
 - 修改影响接口行为的 Service / Mapper / Repository / DAO 逻辑。
 
-如果没有发现接口新增或修改：
+如果没有发现接口新增或修改，不生成该文件，并在 `VERIFY_REPORT.md` 中说明原因。
 
-1. 不生成 `FEATURE_API_DETAIL.md`。
-2. 在 `VERIFY_REPORT.md` 中写入：“未从当前 Feature 实际代码改动中发现新增或修改接口，因此未生成 `FEATURE_API_DETAIL.md`。”
+如果上游设计提到接口变更，但代码中无法确认接口入口或请求响应定义，也不生成该文件，并在 `VERIFY_REPORT.md` 中说明原因。
 
-如果上游设计提到接口变更，但代码中无法确认接口入口或请求响应定义：
-
-1. 不生成 `FEATURE_API_DETAIL.md`。
-2. 在 `VERIFY_REPORT.md` 中写入：“上游设计提到接口变更，但当前代码改动中未能确认接口入口或请求响应定义，因此未生成 `FEATURE_API_DETAIL.md`。请人工确认是否需要补充接口详细说明。”
-
-如果工作区没有可用 git diff：
-
-1. 先从上游产物定位可能相关模块，再读取实际代码文件确认接口入口、DTO、Service、Mapper、错误码和枚举。
-2. 只有能从实际代码文件确认接口新增或修改时，才生成 `FEATURE_API_DETAIL.md`。
-3. 在文档“生成依据”中注明：“未发现可用 git diff，本文件基于实际代码文件反查生成。”
-
-### 5.5.2 生成模板与写回要求
+### 6.2 生成要求
 
 如果需要生成 `FEATURE_API_DETAIL.md`，必须先读取同级 reference：
 
@@ -269,23 +246,24 @@ git diff --cached
 {PLUGIN_ROOT}/skills/autodev/autodev-verify/references/feature-api-detail.md
 ```
 
-按 reference 中的模板写入 `{FEATURE_DIR}/FEATURE_API_DETAIL.md`，并按其中的回写片段更新 `VERIFY_REPORT.md`。
-
 生成时必须遵守：
 
-- 每个接口必须包含代码依据。
-- 无法从代码确认的信息必须标注“代码中未确认”。
-- 不得根据 PRD、proposal、specs、design 或 PLAN 编造接口字段、SQL、错误码、枚举或内部逻辑。
+- 只基于实际代码生成，不根据需求文档编造字段、SQL、错误码、枚举或内部逻辑。
+- 尽量定位 Controller / Router、DTO / VO、Service 实现、Mapper / Repository、错误码 / 枚举 / 统一异常处理。
+- 复杂入参 / 出参必须展开到字段级，不能停留在 `List<XxxVO>`、`Result<XxxVO>`、`XxxDTO` 类型名。
+- 没有找到 Service 实现类或核心处理方法时，不得编写实现类内部逻辑。
+- 正文写到的字段、SQL、错误码、枚举、外部调用或特殊逻辑，必须能在“代码依据”中找到支撑。
+- 文档结构和兜底写法按 reference 模板执行。
 
-### ⛔ 步骤完成检查 — Step 5.5
+### ⛔ 步骤完成检查 — Step 6
 - [ ] 已通过只读 git 命令或实际代码文件检查接口新增/修改情况
-- [ ] 若生成 `FEATURE_API_DETAIL.md`：每个接口都有代码依据
-- [ ] 若生成 `FEATURE_API_DETAIL.md`：无法从代码确认的信息已标注“代码中未确认”，没有编造
+- [ ] 若生成 `FEATURE_API_DETAIL.md`：复杂入参 / 出参已经展开到字段级
+- [ ] 若生成 `FEATURE_API_DETAIL.md`：每个核心结论都有代码依据
 - [ ] 若未生成 `FEATURE_API_DETAIL.md`：已在 `VERIFY_REPORT.md` 说明原因
 
 ---
 
-## Step 6: 分支决策
+## Step 7: 分支决策
 
 ### 路径 A：全部通过 → `verify_done`
 
@@ -365,7 +343,7 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 - 选择"有问题" / 回复问题描述 → 标记为失败 → 路径 B
 未拿到用户裁定前，保持 `verify_in_progress`，不得擅自判 `verify_done` 或 `needs_fix`。
 
-### ⛔ 步骤完成检查 — Step 6
+### ⛔ 步骤完成检查 — Step 7
 - [ ] 通过：验收摘要已写入 `VERIFY_REPORT.md`
 - [ ] 失败：已知问题已更新，失败详情已记录（引用 UNIT_TEST_REPORT / E2E_REPORT / e2e-run.log 段落）
 
