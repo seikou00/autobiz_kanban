@@ -219,7 +219,7 @@ pytest tests/test_foo.py::test_rejects_empty_name
 ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log
 ```
 
-每次测试命令结束后，还必须用 `hooks/evidence_store.py append` 向 `evidence/EVIDENCE.jsonl` 追加 validation evidence，记录 taskId（优先来自 `plan.json`）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并将输出尾部写入 evidence tail 文件。不得截断或重写 `EVIDENCE.jsonl`；报告中的 Evidence 列优先引用新增的 `ev_XXXX`。
+每次测试命令结束后，还必须用 `hooks/evidence_store.py append` 向 `evidence/EVIDENCE.jsonl` 末尾追加 validation evidence，记录 taskId（必须来自 `plan.json.tasks[].id`，无 `plan.json` 契约时来自本阶段建立的轻量任务 ID）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并将输出尾部写入 evidence tail 文件。`ev_XXXX` 由 append 工具按当前流末尾自动递增；如果 code 阶段已写到 `ev_0014`，单测阶段追加 `ev_0015` 是正确顺序，不得为了按阶段分组而插入到旧记录前、重排、重编号、删除旧记录、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`。不得截断或重写 `EVIDENCE.jsonl`；报告中的 Evidence 列优先引用新增的 `ev_XXXX`。若 append 或 checkpoint 报 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，说明证据流已被改写或 index 与流不一致；不得运行 `evidence_store.py index` 或手改 `EVIDENCE.index.json` 绕过，必须先恢复被改写前的 `EVIDENCE.jsonl` / `EVIDENCE.index.json`，无法恢复时停止并向用户报告。
 
 日志中至少保留：
 
