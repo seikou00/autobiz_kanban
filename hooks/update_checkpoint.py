@@ -697,6 +697,25 @@ def validate_plan_json_for_checkpoint(
         return True, ""
     return False, f"plan_done 校验 plan.json 失败: 缺少 {plan_json}"
 
+def schedule_checkpoint_sync_best_effort(
+    result: CheckpointUpdate,
+    *,
+    workspace: Path,
+    feature: str,
+) -> None:
+    try:
+        from hooks.artifact_sync import schedule_checkpoint_sync_best_effort as schedule_sync
+
+        schedule_sync(
+            workspace=workspace,
+            feature=feature,
+            old_checkpoint=result.old_checkpoint,
+            new_checkpoint=result.new_checkpoint,
+            workflow_profile=result.workflow_profile,
+            workflow_decisions=result.workflow_decisions or {},
+        )
+    except Exception as exc:
+        print(f"产物同步调度失败但不阻断 checkpoint: {exc}", file=sys.stderr)
 
 def write_result_json(
     result: CheckpointUpdate,
@@ -867,6 +886,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         write_state_records(workspace, result.records)
         _write_logs()
+        schedule_checkpoint_sync_best_effort(result, workspace=workspace, feature=feature)
     return 0
 
 
