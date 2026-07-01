@@ -97,7 +97,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 ### 1.3 产出物校验
 
-根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按本 Feature 的工作流契约（Source Bundle，`inspect_skill_contract.py --feature` 输出）校验。
+根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按本 Feature 的执行清单（`inspect_skill_contract.py --feature ... --plain` 输出）校验。
 
 - 标准链下，`prd_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`；精简链（lean）等无 Biz 阶段的工作流中，契约不含 `PRD.md`，`/autodev-specs` 基于用户描述直接澄清，不得因缺 PRD 阻断。
 - `specs_done` 之后的 Dev 阶段不再把 `PRD.md` 作为硬输入，统一以 `proposal.md` 与 `specs/**/*.md` 作为行为契约源。
@@ -140,7 +140,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --plain
 ```
 
 ---

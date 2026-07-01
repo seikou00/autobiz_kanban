@@ -44,16 +44,17 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_
 可查看动态节点契约：
 
 ```
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --plain
 ```
 
-读取输入（消费 Source Bundle）：
+读取输入（消费执行清单，进入本节点后可用 `--feature "${feature}" --plain` 取状态感知清单）：
 
-- 按契约 `sourceBundle` 读取上游产物原件（本节点为 proposal.md、specs/**/*.md、design.md、PLAN.md），按各自 `extract` 抽取重点。
+- 按执行清单 `## 输入产物` 读取上游产物原件（本节点为 proposal.md、specs/**/*.md、design.md、plan.json），按各自 `读取方式` 抽取重点。
+- 从 `plan.json.tasks[]` 读取任务 DAG、taskId、deps、status、specRefs、designRefs、validationCommands、expectedFiles；`PLAN.md` 若存在只作人类可读计划视图和叙述补充，不作为机器事实源。
 - AGENTS.md（如存在）
 - 与本 Feature 相关的现有业务代码、测试、配置和接口定义
 
-`required_inputs` 中任一产物缺失时停止并提示先完成对应上游阶段（本节点仅在标准链启用 detail_design 决策后插入，design.md/PLAN.md 均为必需）；本 skill 不补写上游设计契约。
+清单中任一标『未生成』的必需 input 出现时停止并提示先完成对应上游阶段（本节点仅在标准链启用 detail_design 决策后插入，design.md 与 plan.json 为必需）；本 skill 不补写上游设计契约。
 
 ## 工作原则
 

@@ -1,29 +1,28 @@
 ---
 name: autodev-specs
-description: Dev 阶段行为规格生成。按上游产物契约（Source Bundle）读取输入（缺上游 PRD 时基于用户描述澄清），探索需求、现有代码和隐性约束，与用户确认行为/API/数据边界后生成 proposal.md 与 specs/**/*.md；不得生成技术设计、任务计划或修改业务代码。
+description: Dev 阶段行为规格生成。按执行清单读取输入（缺上游 PRD 时基于用户描述澄清），探索需求、现有代码和隐性约束，与用户确认行为/API/数据边界后生成 proposal.md 与 specs/**/*.md；不得生成技术设计、任务计划或修改业务代码。
 version: v1.1.1604
 ---
 
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，把每个 input 解析成一条确定指令）：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --plain
 ```
 
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
+- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
+- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
+- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
 - **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
+- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
 
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -45,9 +44,9 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 ## 输入与输出
 
-读取输入（消费 Source Bundle）：
+读取输入（消费执行清单）：
 
-- 按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的上游产物原件，按对应methodBundle `extract` 抽取重点；契约未列出的上游产物不读不等，按其 `degrade` 处理（如基于用户直供需求澄清行为）。
+- 按「流程契约」一节取本 Feature 的执行清单，读取 `## 输入产物` 列出的上游产物原件，按各自 `读取方式` 抽取重点；清单未列出的上游产物不读不等，标『未生成』的可选 input 按其 `缺失处理`（降级）处理（如基于用户直供需求澄清行为）。
 - 用户补充说明(如有)
 - AGENTS.md 与项目约束
 - 与当前 feature 相关的现有代码、接口、数据模型、测试、配置

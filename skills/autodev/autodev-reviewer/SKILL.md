@@ -1,28 +1,27 @@
 ---
 name: autodev-reviewer
-description: "当实现工作准备宣称完成、准备交接、准备创建 PR，或用户要求独立只读 review 时使用此技能。该技能将完成流程封装为生产级两阶段协议：主 agent 只写结构化 completion proposal，然后必须启动独立 reviewer agent（子代理或任务）；reviewer 自己通过 shell/git 获取真实仓库状态，读取 proposal.md、specs/**/*.md、design.md、PLAN.md，并按需读取用户提供的 PRD 引用，核对 completion proposal、真实 diff 与行为规格是否一致，直接产出 feature 级 REQUIREMENTS_EVAL.md。适用于单仓库或跨多个 git 仓库共同完成的代码修改、bug 修复、重构、测试、多文件变更、按规格验收，以及任何自评不可靠的开发任务。默认通过独立 reviewer 子代理执行"
+description: "当实现工作准备宣称完成、准备交接、准备创建 PR，或用户要求独立只读 review 时使用此技能。该技能将完成流程封装为生产级两阶段协议：主 agent 只写结构化 completion proposal，然后必须启动独立 reviewer agent（子代理或任务）；reviewer 自己通过 shell/git 获取真实仓库状态，读取执行清单列出的 proposal/specs/design/plan.json/evidence，按需读取用户提供的 PRD 引用，核对 completion proposal、真实 diff 与行为规格是否一致，直接产出 REVIEW_FINDINGS.json 机器事实源，并可同步写 REQUIREMENTS_EVAL.md 人类报告。适用于单仓库或跨多个 git 仓库共同完成的代码修改、bug 修复、重构、测试、多文件变更、按规格验收，以及任何自评不可靠的开发任务。默认通过独立 reviewer 子代理执行"
 version: v1.1.1604
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，把每个 input 解析成一条确定指令）：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --feature "${feature}" --plain
 ```
 
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
+- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
+- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
+- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
 - **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
+- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
 
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -56,10 +55,10 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ## 核心协议
 
 1. **主 agent 写 completion proposal。**按 references/schemas.md 创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/completion-proposal.json`。proposal 应描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。跨仓库任务必须写 `affected_repositories`；单仓库任务可以省略该字段。
-2. **主 agent 启动独立 reviewer agent。**使用 subagent 机制启动独立 reviewer。启动子代理，并把 references/reviewer-agent.md 中的 reviewer 指令作为 prompt。启动子agent附带用户提供的原始 PRD 路径列表；没有则写 none，供 reviewer 与 proposal.prd_references 交叉核对。如果流程希望 reviewer 核对用户主动输入的仓库是否被遗漏，启动 prompt 还必须附带 `User repository references`；否则 reviewer 只以 completion proposal、proposal.md、specs、design、PLAN、可选 PRD 和真实仓库状态为依据。
-3. **reviewer 自己获取真实状态。**reviewer 必须自行通过工具获取仓库状态，并读取 feature 目录中的 proposal.md、specs/**/*.md，以及 design.md、PLAN.md（如果存在；当前 Feature 工作流契约未提供时跳过并在评估中标注基准缺失）；PRD 只在用户或 completion proposal 显式引用时读取。若 completion proposal 有 `affected_repositories`，reviewer 必须对每个仓库逐个执行 git status/diff/log 等只读检查；若没有，则按旧流程把当前 cwd 当作唯一仓库。不要依赖主 agent 预先生成的 diff snapshot 或规格摘要。
-4. **reviewer 直接写需求评估文件。**reviewer 必须直接写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md`。
-5. **主 agent 读取 verdict 并分支。**如果 verdict 是 `PASS` 或 `PASS_WITH_WARNINGS`，报告 verdict 与 `REQUIREMENTS_EVAL.md` 路径后结束本阶段。如果 verdict 是 `FAIL`，主 agent 必须按 `REQUIREMENTS_EVAL.md` 中的 blockers 做最小修复，更新 `completion-proposal.json`，重新启动独立 reviewer，直到 verdict 变为 `PASS` 或 `PASS_WITH_WARNINGS`。如果 verdict 是 `DEGRADED`，停止并报告独立审查未成立。
+2. **主 agent 启动独立 reviewer agent。**使用 subagent 机制启动独立 reviewer。启动子代理，并把 references/reviewer-agent.md 中的 reviewer 指令作为 prompt。启动子agent附带用户提供的原始 PRD 路径列表；没有则写 none，供 reviewer 与 proposal.prd_references 交叉核对。如果流程希望 reviewer 核对用户主动输入的仓库是否被遗漏，启动 prompt 还必须附带 `User repository references`；否则 reviewer 只以 completion proposal、执行清单输入、可选 PRD 和真实仓库状态为依据。
+3. **reviewer 自己获取真实状态。**reviewer 必须自行通过工具获取仓库状态，并读取执行清单列出的 proposal.md、specs/**/*.md、design.md、plan.json、evidence/EVIDENCE.jsonl；PRD 只在用户或 completion proposal 显式引用时读取。若 completion proposal 有 `affected_repositories`，reviewer 必须对每个仓库逐个执行 git status/diff/log 等只读检查；若没有，则按旧流程把当前 cwd 当作唯一仓库。不要依赖主 agent 预先生成的 diff snapshot 或规格摘要。
+4. **reviewer 直接写结构化评审事实源。**reviewer 必须直接写入机器事实源 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json`，可同步写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md` 作为人类报告。
+5. **主 agent 读取 verdict 并分支。**如果 `REVIEW_FINDINGS.json.verdict` 是 `PASS` 或 `PASS_WITH_WARNINGS`，报告 verdict 与 `REVIEW_FINDINGS.json` 路径后结束本阶段。如果 verdict 是 `FAIL`，主 agent 必须按 `REVIEW_FINDINGS.json.findings` 中的 blockers/high severity 项做最小修复，更新 `completion-proposal.json`，重新启动独立 reviewer，直到 verdict 变为 `PASS` 或 `PASS_WITH_WARNINGS`。如果 verdict 是 `DEGRADED`，停止并报告独立审查未成立。
 
 ## 严格职责边界
 
@@ -135,7 +134,7 @@ npm install
 - `source_evidence` 必须写明纳入该仓库的依据。用户主动输入仓库信息时，必须使用 `source: "user_input"` 并把输入事实转写到 `source_evidence`。
 - `expected_changes` 描述该仓库声称完成的行为或改动，不要只写“已修改”。
 
-reviewer 没有隐式用户对话上下文。所有可审查上下文必须来自 completion proposal、proposal.md、specs、design、PLAN、可选 PRD、启动 prompt 或真实 repo 状态。reviewer 只能核验 completion proposal 中已经记录的用户输入来源是否自洽；如果要检查用户主动输入是否被 proposal 遗漏，启动 reviewer 时必须额外传入 `User repository references`。
+reviewer 没有隐式用户对话上下文。所有可审查上下文必须来自 completion proposal、执行清单输入、可选 PRD、启动 prompt 或真实 repo 状态。reviewer 只能核验 completion proposal 中已经记录的用户输入来源是否自洽；如果要检查用户主动输入是否被 proposal 遗漏，启动 reviewer 时必须额外传入 `User repository references`。
 
 跨仓库任务中，`files_changed` 每项必须写 `repository_id`。单仓库旧流程可以继续只写 `path`。
 

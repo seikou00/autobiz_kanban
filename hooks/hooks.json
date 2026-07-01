@@ -1,16 +1,6 @@
 {
   "PreToolUse": [
     {
-      "matcher": "read_file",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "python hooks/check_plugin_read.py",
-          "timeout": 10
-        }
-      ]
-    },
-    {
       "matcher": "write_file|edit_file",
       "hooks": [
         {
@@ -35,6 +25,12 @@
           },
           "persistAfterInterrupt": true
 
+        },
+        {
+          "type": "command",
+          "command": "python hooks/check-secrets-new.py",
+          "timeout": 1000,
+          "persistAfterInterrupt": true
         }
       ]
     },

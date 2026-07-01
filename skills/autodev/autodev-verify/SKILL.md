@@ -5,24 +5,23 @@ version: v1.1.1604
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，把每个 input 解析成一条确定指令）：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature "${feature}" --plain
 ```
 
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
+- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
+- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
+- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
+- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
 - **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
+- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
 
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
+无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -33,7 +32,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature 
 
 本 skill 默认且只能由当前会话内联执行：
 
-- 当前会话直接读取 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md`、`e2e-run.log`、`proposal.md`、`specs/**/*.md`、`design.md`，生成 `VERIFY_REPORT.md` 并做最终分支决策。
+- 当前会话直接读取执行清单列出的结构化事实源，使用 `UNIT_TEST_RESULT.json`、`E2E_RESULT.json`、`REVIEW_FINDINGS.json`、`evidence/EVIDENCE.jsonl` 与 `plan.json` 做机器裁决；Markdown 报告只做人类叙述补充，生成 `VERIFY_DECISION.json`，并可同步生成 `VERIFY_REPORT.md`。
 - 不得把验收汇总或分支决策委派给下级 agent或子agent。
 
 本 skill 负责记录失败事实、问题来源和建议回流阶段，不默认把问题绑定回 Biz。
@@ -72,7 +71,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ## Step 3: 提取验收契约
 
-按「流程契约」一节取本 Feature 的 Source Bundle，对其中每个输入按 `extract` 抽取；`required: false` 的输入缺失时按其降级读法处理。bundle 未列出的输入不读取：其所属阶段在契约 JSON 的 `workflow.workflowSkippedNodes` 中（中途跳过）或不在当前工作流链中时，在报告中标注「该阶段已跳过 / 不在本工作流」，而非「缺失」。
+按「流程契约」一节取本 Feature 的执行清单，对其中每个输入按 `读取方式` 抽取；标『未生成』的可选输入按其 `缺失处理`（降级读法）处理。清单未列出的输入不读取：其所属阶段被跳过或不在当前工作流链，在报告中统一标注「不在本工作流产物清单」，而非「缺失」。
 
 从 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md` 提取本轮能力边界、影响面和非目标。
 
@@ -85,7 +84,15 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 共 M 项待裁决。
 
-按各输入的 Method Bundle 提取验收验证项：
+要求在验收报告里使用稳定 ID 回链：
+
+- Requirement: `specs/<capability>/spec.md#REQ-001`
+- Scenario: `specs/<capability>/spec.md#SCN-001`
+- Task: `T001`
+- Evidence: `ev_0001`
+- Eval: `eval_0001`
+
+按各输入的 `读取方式` 提取验收验证项：
 
 - 从行为契约 Requirement / Scenario 提取行为验证项 C1, C2, ...
 - 从在场的设计决策提取接口/数据契约验证项；遇 `x-auto-no-http-api: true` / `x-auto-no-sql: true` 记录本轮无对应验证项。
@@ -109,13 +116,13 @@ specs/[capability]/spec.md / Requirement / Scenario
 4. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_REPORT.md` — E2E 结果、失败归因、修复尝试与重跑摘要。
 5. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/e2e-run.log` — E2E 原始运行日志、服务/鉴权/UI 执行证据。
 
-**从 `UNIT_TEST_REPORT.md` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
+**从 `UNIT_TEST_RESULT.json` 中抽取（按其 `读取方式` 抽取）：**
 
 - 每个 Requirement / Scenario 对应的测试方法名 / 文件路径 / 执行结果（PASS/FAIL/SKIP）
 - 每个 specs/design 契约验证项 `Cn` 对应的验证结果（如报告涵盖）
 - 整体通过率（P/M、P/K）
 
-**从 `E2E_REPORT.md` 与 `e2e-run.log` 中抽取（按 Method Bundle 的 `extract` 抽取）：**
+**从 `E2E_RESULT.json` 中抽取（按其 `读取方式` 抽取）：**
 
 - 每个 E2E 用例的执行结果（PASS/FAIL/BLOCKED/SKIP）
 - 服务启动证据、鉴权处理证据、UI Execution Evidence / UI执行证据
