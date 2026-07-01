@@ -1,25 +1,18 @@
 ---
 name: autodev-reviewer
-description: "当实现工作准备宣称完成、准备交接、准备创建 PR，或用户要求独立只读 review 时使用此技能。该技能将完成流程封装为生产级两阶段协议：主 agent 只写结构化 completion proposal，然后必须启动独立 reviewer agent（子代理或任务）；reviewer 自己通过 shell/git 获取真实仓库状态，读取执行清单列出的 proposal/specs/design/plan.json/evidence，按需读取用户提供的 PRD 引用，核对 completion proposal、真实 diff 与行为规格是否一致，直接产出 REVIEW_FINDINGS.json 机器事实源，并可同步写 REQUIREMENTS_EVAL.md 人类报告。适用于单仓库或跨多个 git 仓库共同完成的代码修改、bug 修复、重构、测试、多文件变更、按规格验收，以及任何自评不可靠的开发任务。默认通过独立 reviewer 子代理执行"
-version: v1.1.1604
+description: "默认通过独立 reviewer 子代理执行"
+version: v1.2.1702
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，把每个 input 解析成一条确定指令）：
+进入执行前，取当前 Feature 的执行清单：
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --feature "${feature}" --plain
 ```
-
-- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
-- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
-- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
-- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
 
 无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
@@ -35,7 +28,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --featur
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-后续准入和分支判断直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+后续准入和分支判断直接取用 `CHECKPOINT`。
 
 开始审查前，使用统一脚本写入 `requirements_eval_in_progress`：
 

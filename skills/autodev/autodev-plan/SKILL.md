@@ -1,27 +1,18 @@
 ---
 name: autodev-plan
-description: Dev 阶段技术设计与执行计划生成。按执行清单读取输入原件和现有代码，生成 design.md 与 plan.json；PLAN.md 仅为可选人类视图，不得修改业务代码。
-version: v1.1.1604
+description: Dev 阶段技术设计与执行计划生成。
+version: v1.2.1701
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，把每个 input 解析成一条确定指令）：
+进入执行前，取当前 Feature 的执行清单：
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "${feature}" --plain
 ```
-
-- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
-- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
-- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
-- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -34,7 +25,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 > 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 PLAN.md` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
-**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取 AGENTS.md、执行清单里已有的设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
+**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取执行清单里已有的设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
 
 **这是一种工作姿态，不是固定流程。** 没有必须照搬的问题清单，也没有强制产物。你的任务是作为技术设计伙伴，把 specs 中的行为契约变成可实现、可验证的设计上下文：明确接口、数据、模块边界、风险、待确认项，以及后续 Plan 可以使用的结论。
 
@@ -111,10 +102,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。若 Feature slug、工作目录或 `CHECKPOINT` 为空、未知，或无法唯一确定，停止并提示用户选择 Feature；若本轮是用户直供需求并允许 `plan_in_progress --allow-create` 创建状态，创建后必须刷新 `CHECKPOINT`。
+后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
 
-- 按执行清单读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）；`PLAN.md` 若存在仅作人类叙述参考，不作为机器事实源。清单里标『未生成』的可选上游产物按其 `缺失处理`（降级读法）处理，不要硬等。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
-- 读取 AGENTS.md 和与本 Feature 相关的代码/测试/配置，用于理解现有约束。
+- 按执行清单读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。清单里标『未生成』的可选上游产物按其 `缺失处理`（降级读法）处理。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
+- 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
 
 当探索发现不同类型的信息时，按下面方式准备给 Plan 使用：
@@ -294,15 +285,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - design.md: [API 决策/数据决策/技术设计需要覆盖什么]
 - PLAN.md: [建议任务边界和验证重点]
 
-是否结束探索并进入 Plan 生成/更新？
 ```
-
-- 提出上面的结束询问时，若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `进入 Plan 生成/更新 (Recommended)` / `继续探索` / `暂不生成、停在澄清结果`；若不支持，必须显式追问：`是否结束探索并进入 Plan 生成/更新？请回复"进入 Plan"、"继续探索"或"暂不生成"。` 未拿到明确答复前，不得写入 `plan_in_progress`，也不得开始生成 design.md / PLAN.md。
-
-用户确认后，才进入 `PLAN阶段`。
-
----
-
 ### 探索约束
 
 - **不要实施** - 不写业务代码、不改实现文件、不创建迁移脚本。
@@ -317,6 +300,14 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ## explore 结束
 **结束决策**：当你判断 explore 已足够支撑 Plan 时，必须询问用户是否结束探索并进入 Plan 生成/更新。
 
+- 提出上面的结束询问时，用 `request_user_input`发起选择，选项至少含 `进入 Plan 生成/更新 (Recommended)` / `继续探索` / `暂不生成、停在澄清结果` / `其他`；
+- **自由表达即退出结构化**：若用户不点选项、而是直接给出实质回复（补需求、改约束、抛新问题），
+  当作普通文本吸收、更新探索结论后继续探索，**不得机械重复同一结构化选择**；下一轮再择机重发该门。
+- 未拿到明确答复前，不得写入 `plan_in_progress`，也不得生成 design.md / plan.json。
+
+用户确认后，才进入 `PLAN阶段`。
+
+---
 
 ### PLAN阶段
 基于执行清单输入的结论，先生成 `design.md`，再基于这些输入与 design 生成 `plan.json`；可同步生成 `PLAN.md` 作为人类视图。
@@ -364,16 +355,16 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 #### 生成 PLAN
 
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。PLAN 只承载执行任务，不再重复写需求契约、行为规格或完整技术设计；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`。`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` ；`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 用户补充信息沉淀规则：
-- 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。
-- 如果用户补充内容改变了外部可观察行为、验收标准或能力边界，停止并建议回到 `/autodev-specs` 更新 `proposal.md` / `specs/**/*.md`。
-- 必须在 PLAN.md 中新增或更新「用户补充说明 / 技术细节」章节。
+- 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
+- 必须在 `plan.json` 对应任务或风险字段中记录用户补充说明 / 技术细节； `PLAN.md`同步新增或更新「用户补充说明 / 技术细节」章节。
+- 若生成 `PLAN.md`，它必须从 `plan.json` 投影，任务 id / deps / status / specRefs / designRefs / validationCommands / evidenceIds 不能漂移。
 - 用户明确确认的内容，标记为「已确认」。
 - 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
-- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 与 PLAN.md 的「风险与待确认项」中记录，并回到用户确认，不得擅自覆盖 specs。
+- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 与 plan.json 的风险/阻断字段中记录，并回到用户确认，不得擅自覆盖 specs； `PLAN.md`同步更新。
 - 用户补充的实现细节只能作为计划依据，不得在 Plan 阶段创建或修改业务代码文件。
 
 任务拆分粒度：
@@ -395,7 +386,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
-按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
+`plan.json` 必须满足 `plan_json_contract`；生成 `PLAN.md` ，按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘
@@ -411,7 +402,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ---
 
 ## 整体完成条件
-- `design.md`、`PLAN.md` 已完成
+- `design.md`、`plan.json` 已完成；`PLAN.md`
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")

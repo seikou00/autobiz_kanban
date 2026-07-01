@@ -1,14 +1,14 @@
 ---
 name: autodev-verify
-description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的单测、E2E 报告，以及 proposal/specs/design 契约，汇总生成 VERIFY_REPORT.md 并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作。默认由当前会话内联执行。
-version: v1.1.1604
+description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的结构化单测、E2E 结果，以及 proposal/specs/design 契约，汇总生成 VERIFY_DECISION.json；VERIFY_REPORT.md 仅为可选人类报告，并做最终 verify_done / needs_fix 分支决策。不再自己生成测试、不再启动服务、不再执行命令验证。支持 --feature 多人协作。默认由当前会话内联执行。
+version: v1.2.1701
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
 ## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单（脚本已按 feature 目录的真实产物状态，把每个 input 解析成一条确定指令）：
+进入执行前，取当前 Feature 的执行清单：
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature "${feature}" --plain

@@ -50,26 +50,7 @@ prd_done → resolve_next_skill.py --json
 
 ## 1. 准入检查
 
-### 1.1 解析参数
-
-扫描 `/ARGUMENTS`：
-
-| 标志 | 含义 |
-|------|------|
-| `--feature {slug}` | 指定 Feature |
-
-### 1.2 确定 Feature
-
-- `--feature {slug}` 优先
-- 否则先读取全部 State 快照，再从 `STATE.records` 列出候选让用户选择：
-
-```bash
-python "${pluginPath}/read_state_json.py"
-```
-
-- 需要用户从候选 Feature 中选择时，若当前运行模式支持 `request_user_input`，必须优先用它把 `STATE.records` 中的候选列成结构化选项供用户单选；若不支持，必须列出候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
-
-确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
@@ -109,8 +90,6 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 1. **禁止在 Dev 阶段凭空生成 PRD；只有 `/autodev-specs` 可以生成或更新 proposal.md 与 specs/**/*.md，只有 `/autodev-plan` 可以生成或更新 design.md 与 PLAN.md。**
 2. **禁止跳跃 checkpoint。**
-3. **在执行autobiz与子技能时，约束必须参考AGENTS.md中存在的定制约束，不能仅遵守技能的约束。**
-4. **本 skill 的规则不得覆盖 AGENTS.md；如冲突，以 AGENTS.md 中项目约束为准，除非系统级指令另有要求。**
 ---
 
 
@@ -120,7 +99,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 - `requiresProfileChoice: true`：先完成 workflow profile 选择并写入 checkpoint。
 - `requiresWorkflowChoice: true`：先完成 dynamic stage 选择，使用 `--workflow-decision {stageId}=enabled|skipped` 写入 state.json 后再路由。
-- `recommendedNextSkill` 非空：调用对应子技能，所有非终止状态默认将 `/ARGUMENTS` 透传至子技能。
+- `recommendedNextSkill` 非空：调用对应子技能。
 - `recommendedNextSkill` 为空且当前 checkpoint 为 `verify_done`：Dev 阶段结束，进入 Ops。
 - `checkpoint` 为 `needs_fix`：停止，读取最近阶段报告中的建议回流阶段并提示用户。
 - `ok: false`：展示 `errors` 并停止。
@@ -185,5 +164,3 @@ Dev 阶段的可选步骤由 `${pluginPath}/board_core/board_config.json` 的 `w
 - 已启用的 dynamic stage 与 `workflowProfile` 叠加生效；例如先走过 `frontend_before_specs` 的 Feature，启用详细设计后仍必须保留 frontend 节点历史。
 
 ---
-
-$ARGUMENTS
