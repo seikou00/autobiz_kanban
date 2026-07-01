@@ -104,8 +104,8 @@ class SyncRepoEndToEndTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["supported_service_units"], ["LF39.18_Outservice"])
         self.assertTrue(payload["systems"][0]["agentsReady"])
-        # 下载落盘路径与 repo 同级，指向克隆缓存根 <pluginPath>/sys。
-        self.assertEqual(payload["downloadPath"], str(dest))
+        # 知识库落盘路径与 repo 同级，指向克隆缓存根 <pluginPath>/sys。
+        self.assertEqual(payload["knowledge_path"], str(dest))
 
         # 远端新增系统并提交
         manifest = json.loads((src / "agents.manifest.json").read_text(encoding="utf-8"))
@@ -197,6 +197,64 @@ class WriteBoardConfigTest(unittest.TestCase):
             sync_agents.merge_supported_units_into_board_config(["A"], cfg)
         self.assertEqual(cfg.read_text(encoding="utf-8"), text)  # 未落盘
 
+    KP_SAMPLE = (
+        "{\n"
+        '  "agentsRepo": { "url": "", "ref": "main" },\n'
+        '  "inspectCommands": {\n'
+        '    "darwin": {\n'
+        '      "knowledge_path": "${pluginPath}/sys",\n'
+        '      "project_status": "python3 a"\n'
+        "    },\n"
+        '    "linux": {\n'
+        '      "knowledge_path": "${pluginPath}/sys",\n'
+        '      "project_status": "python3 b"\n'
+        "    },\n"
+        '    "win32": {\n'
+        '      "knowledge_path": "${pluginPath}\\\\sys",\n'
+        '      "project_status": "python c"\n'
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def test_knowledge_path_replaces_only_current_platform_block(self):
+        cfg = self._write(self.KP_SAMPLE)
+        sync_agents.merge_knowledge_path_into_board_config(
+            "/abs/plugin/sys", cfg, platform="darwin"
+        )
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(data["inspectCommands"]["darwin"]["knowledge_path"], "/abs/plugin/sys")
+        # 其余平台的模板不动
+        self.assertEqual(data["inspectCommands"]["linux"]["knowledge_path"], "${pluginPath}/sys")
+        self.assertEqual(data["inspectCommands"]["win32"]["knowledge_path"], "${pluginPath}\\sys")
+        # 定点替换、不重排：行数不变
+        out = cfg.read_text(encoding="utf-8")
+        self.assertEqual(len(out.splitlines()), len(self.KP_SAMPLE.splitlines()))
+
+    def test_knowledge_path_targets_win32_block(self):
+        cfg = self._write(self.KP_SAMPLE)
+        sync_agents.merge_knowledge_path_into_board_config(
+            "C:\\plugin\\sys", cfg, platform="win32"
+        )
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(data["inspectCommands"]["win32"]["knowledge_path"], "C:\\plugin\\sys")
+        self.assertEqual(data["inspectCommands"]["darwin"]["knowledge_path"], "${pluginPath}/sys")
+
+    def test_knowledge_path_missing_key_raises_and_does_not_write(self):
+        text = '{\n  "inspectCommands": { "darwin": { "project_status": "x" } }\n}\n'
+        cfg = self._write(text)
+        with self.assertRaises(RuntimeError):
+            sync_agents.merge_knowledge_path_into_board_config(
+                "/abs/sys", cfg, platform="darwin"
+            )
+        self.assertEqual(cfg.read_text(encoding="utf-8"), text)  # 未落盘
+
+    def test_platform_key_normalizes(self):
+        self.assertEqual(sync_agents._platform_key("darwin"), "darwin")
+        self.assertEqual(sync_agents._platform_key("linux"), "linux")
+        self.assertEqual(sync_agents._platform_key("win32"), "win32")
+        self.assertEqual(sync_agents._platform_key("windows"), "win32")
+
     def test_against_real_board_config_copy_changes_exactly_one_line(self):
         real = (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
         cfg = self._write(real)
@@ -214,37 +272,58 @@ class WriteBoardConfigWiringTest(unittest.TestCase):
     """main() 里 --write-board-config 的触发条件（monkeypatch，不碰真实文件）。"""
 
     def _run_main(self, argv, run_payload):
-        calls = []
+        unit_calls = []
+        kp_calls = []
         orig_run = sync_agents.run
-        orig_merge = sync_agents.merge_supported_units_into_board_config
+        orig_units = sync_agents.merge_supported_units_into_board_config
+        orig_kp = sync_agents.merge_knowledge_path_into_board_config
         sync_agents.run = lambda *a, **k: dict(run_payload)
         sync_agents.merge_supported_units_into_board_config = (
-            lambda units, *a, **k: calls.append(list(units))
+            lambda units, *a, **k: unit_calls.append(list(units))
+        )
+        sync_agents.merge_knowledge_path_into_board_config = (
+            lambda path, *a, **k: kp_calls.append(path)
         )
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 sync_agents.main(argv)
         finally:
             sync_agents.run = orig_run
-            sync_agents.merge_supported_units_into_board_config = orig_merge
-        return calls
+            sync_agents.merge_supported_units_into_board_config = orig_units
+            sync_agents.merge_knowledge_path_into_board_config = orig_kp
+        return unit_calls, kp_calls
 
     def test_flag_triggers_write_with_synced_units(self):
-        calls = self._run_main(
+        unit_calls, _ = self._run_main(
             ["--write-board-config"],
             {"ok": True, "supported_service_units": ["U1", "U2"], "message": "x"},
         )
-        self.assertEqual(calls, [["U1", "U2"]])
+        self.assertEqual(unit_calls, [["U1", "U2"]])
+
+    def test_flag_triggers_knowledge_path_write(self):
+        unit_calls, kp_calls = self._run_main(
+            ["--write-board-config"],
+            {
+                "ok": True,
+                "supported_service_units": ["U1"],
+                "knowledge_path": "/abs/plugin/sys",
+                "message": "x",
+            },
+        )
+        self.assertEqual(unit_calls, [["U1"]])
+        self.assertEqual(kp_calls, ["/abs/plugin/sys"])
 
     def test_no_flag_does_not_write(self):
-        calls = self._run_main(
-            [], {"ok": True, "supported_service_units": ["U1"], "message": "x"}
+        unit_calls, kp_calls = self._run_main(
+            [], {"ok": True, "supported_service_units": ["U1"], "knowledge_path": "/s", "message": "x"}
         )
-        self.assertEqual(calls, [])
+        self.assertEqual(unit_calls, [])
+        self.assertEqual(kp_calls, [])
 
     def test_flag_skips_write_when_sync_failed(self):
-        calls = self._run_main(["--write-board-config"], {"ok": False, "message": "fail"})
-        self.assertEqual(calls, [])
+        unit_calls, kp_calls = self._run_main(["--write-board-config"], {"ok": False, "message": "fail"})
+        self.assertEqual(unit_calls, [])
+        self.assertEqual(kp_calls, [])
 
 
 if __name__ == "__main__":
