@@ -453,6 +453,12 @@
                 "method": "用 plan.json 核对 code 阶段任务闭环；PLAN.md 只作可选人类摘要参考",
                 "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
               } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "pages/interactions/visualSources/capabilities", "capabilities[].specRefs"],
+                "method": "作为 review 阶段 UI 分母；UI 相关 finding 必须投影 uiRequired/pageRefs/interactionRefs/visualSourceRefs，Markdown 只作人类叙述补充",
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 PRD/specs Markdown 推导 UI 范围"
+              } },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
                 "focus": ["code 阶段每个 taskId 的 pass/fail validation evidence", "changedFiles", "specRefs/designRefs"],
@@ -465,7 +471,7 @@
             { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true }
           ]
         },
-        "validators": ["review_findings_json"]
+        "validators": ["ui_context_json", "review_findings_json"]
       },
       {
         "id": "dev.utest",
@@ -512,6 +518,12 @@
                 "method": "按 plan.json 的 taskId 与 validationCommands 组织测试覆盖，并把新增测试证据追加回 EVIDENCE.jsonl",
                 "degrade": "Source Bundle 未列出 plan.json 时使用本阶段轻量任务 ID 组织测试覆盖；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成，不能以 PLAN.md 替代机器事实源"
               } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "capabilities[].specRefs", "pages/interactions/visualSources"],
+                "method": "作为单测阶段 UI 分母；UNIT_TEST_RESULT.json.targets[] 的 uiRequired 必须从 UI_CONTEXT.json 与 plan.json 投影，Markdown 只作人类叙述补充",
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 PRD/specs Markdown 推导 UI 范围"
+              } },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
                 "focus": ["code 阶段验证证据", "taskId/specRefs/designRefs 与 changedFiles"],
@@ -538,7 +550,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["unit_test_result_json", "evidence_integrity"]
+        "validators": ["ui_context_json", "unit_test_result_json", "evidence_integrity"]
       },
       {
         "id": "dev.e2e",
@@ -584,6 +596,12 @@
                 "focus": ["tasks[].id/specRefs/designRefs/evidenceIds", "validationCommands"],
                 "method": "用 plan.json 的任务与证据映射决定 E2E 覆盖缺口，并把 E2E 运行结果用 hooks/evidence_store.py append 追加到 EVIDENCE.jsonl",
                 "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "capabilities[].specRefs", "pages/interactions/visualSources"],
+                "method": "作为 E2E 阶段 UI 分母；E2E_RESULT.json.cases[] 的 uiRequired/pageRefs/interactionRefs/visualSourceRefs 必须从 UI_CONTEXT.json 与 plan.json 投影",
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 PRD/specs Markdown 推导 UI 范围"
               } },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
@@ -631,7 +649,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["e2e_result_json", "fix_request_json", "evidence_integrity"]
+        "validators": ["ui_context_json", "e2e_result_json", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "dev.verify",
@@ -671,6 +689,12 @@
                 "focus": ["tasks[].id/status/specRefs/designRefs/evidenceIds", "blockers"],
                 "method": "用 plan.json 汇总任务与证据闭环；VERIFY_DECISION.json 的任务结论必须回链到 plan.json 中的 taskId/evidenceIds",
                 "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "capabilities[].specRefs", "pages/interactions/visualSources"],
+                "method": "作为 verify 阶段 UI 验收分母；VERIFY_DECISION.json.uiSummary 与 scenarioCoverage[].uiApplicability 必须从 UI_CONTEXT.json 投影",
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 验收范围"
               } },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
@@ -740,7 +764,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["verify_decision_json", "fix_request_json", "evidence_integrity"]
+        "validators": ["ui_context_json", "verify_decision_json", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "ops.cicd",

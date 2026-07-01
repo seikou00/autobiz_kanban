@@ -125,6 +125,36 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
 
+    def test_ui_context_flows_through_downstream_dev_stages(self) -> None:
+        required_nodes = {"dev.review", "dev.utest", "dev.e2e", "dev.verify"}
+        missing: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict) or node.get("id") not in required_nodes:
+                continue
+            inputs = (node.get("artifacts") or {}).get("inputs", [])
+            ui_input = next(
+                (
+                    artifact
+                    for artifact in inputs
+                    if isinstance(artifact, dict) and artifact.get("path") == "UI_CONTEXT.json"
+                ),
+                None,
+            )
+            if ui_input is None or ui_input.get("required") is not True:
+                missing.append(f"{context}[{node.get('id', '?')}]")
+        self.assertEqual(missing, [], "downstream dev stages must read UI_CONTEXT.json: " + ", ".join(missing))
+
+    def test_ui_context_validator_on_downstream_dev_stages(self) -> None:
+        required_nodes = {"dev.review", "dev.utest", "dev.e2e", "dev.verify"}
+        missing: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict) or node.get("id") not in required_nodes:
+                continue
+            validators = node.get("validators", [])
+            if not isinstance(validators, list) or "ui_context_json" not in validators:
+                missing.append(f"{context}[{node.get('id', '?')}]")
+        self.assertEqual(missing, [], "downstream dev stages must validate UI_CONTEXT.json: " + ", ".join(missing))
+
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:
         offenders: list[str] = []
         for context, node in _iter_nodes(_board_config()):

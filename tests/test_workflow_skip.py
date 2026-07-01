@@ -90,7 +90,29 @@ def seed_feature(
     for name in artifacts:
         path = feature_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"# {name}\ncontent\n", encoding="utf-8")
+        if name == "UI_CONTEXT.json":
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "featureId": "alpha",
+                        "uiRequired": False,
+                        "decisionStatus": "locked",
+                        "decisionSource": "default_false",
+                        "confirmedAtCheckpoint": "prd_done",
+                        "lockedAtCheckpoint": "specs_done",
+                        "notApplicableReason": "test fixture has no UI",
+                        "pages": [],
+                        "interactions": [],
+                        "visualSources": [],
+                        "capabilities": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        else:
+            path.write_text(f"# {name}\ncontent\n", encoding="utf-8")
 
 
 E2E_PRECHECK_ARTIFACTS = [
@@ -98,6 +120,7 @@ E2E_PRECHECK_ARTIFACTS = [
     "specs/alpha.md",
     "design.md",
     "plan.json",
+    "UI_CONTEXT.json",
     "REVIEW_FINDINGS.json",
     "evidence/EVIDENCE.jsonl",
     "UNIT_TEST_RESULT.json",

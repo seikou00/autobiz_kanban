@@ -183,7 +183,7 @@ FAIL 修复规则：
 - 每轮修复后必须更新 `completion-proposal.json`，使 files_changed、behavior_changed、verification、known_limitations 与真实状态一致。
 - 如果修复需要超出当前任务范围、缺少信息、工具不可用或存在人工决策点，停止并报告 blocker，不要伪造 PASS。
 
-`REVIEW_FINDINGS.json` 是下游机器主入口，只放结构化评审 verdict 与发现项，不和 Markdown 做文本对账。顶层 `verdict` 必须是 `PASS` / `PASS_WITH_WARNINGS` / `FAIL` / `DEGRADED`；每条 finding 必须包含 `taskId`、`specRefs`、`evidenceIds`、`severity`、`message`，可带 `suggestedCheckpoint`：
+`REVIEW_FINDINGS.json` 是下游机器主入口，只放结构化评审 verdict 与发现项，不和 Markdown 做文本对账。顶层 `verdict` 必须是 `PASS` / `PASS_WITH_WARNINGS` / `FAIL` / `DEGRADED`；每条 finding 必须包含 `taskId`、`specRefs`、`evidenceIds`、`severity`、`message`，可带 `suggestedCheckpoint`。若 finding 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须同时投影 `uiRequired=true`、`pageRefs`、`interactionRefs`、`visualSourceRefs`；非 UI finding 不要伪造 UI refs：
 
 ```json
 {
@@ -197,6 +197,10 @@ FAIL 修复规则：
       "evidenceIds": ["ev_0001"],
       "severity": "high",
       "message": "Missing assertion for SCN-001",
+      "uiRequired": true,
+      "pageRefs": ["PAGE-001"],
+      "interactionRefs": ["UIX-001"],
+      "visualSourceRefs": ["VIS-001"],
       "suggestedCheckpoint": "code_in_progress"
     }
   ]
