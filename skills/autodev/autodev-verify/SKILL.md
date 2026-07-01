@@ -114,7 +114,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 1. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json` — 上游单测结构化 verdict、scenarioCoverage 与 target 结果；在场时作为单测机器事实源。
 2. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_RESULT.json` — 上游 E2E 结构化 scenarioCoverage 与 case verdict；在场时作为 E2E 机器事实源。
 3. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json` — 结构化评审发现；在场时纳入风险和建议回流判断。
-4. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` — append-only 证据事实流；若存在，优先用其中的 taskId/specRefs/designRefs/validation.result 建立验收证据回链。
+4. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` — append-only 证据事实流；若存在，优先用其中的 taskId/specRefs/designRefs/validation.result 建立验收证据回链。verify 阶段严格只读，不得重排、重编号、截断、重写、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`；若发现 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，停止并要求恢复证据流。
 5. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md` / `E2E_REPORT.md` / `test-output.log` / `e2e-run.log` — 人类叙述与原始日志补充；不得替代对应 JSON 做 verdict / scenarioCoverage 裁决。
 6. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml` — 上游阶段技能 `autodev-e2e` 产出的结构化 E2E 用例。
 

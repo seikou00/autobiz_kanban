@@ -126,7 +126,14 @@ def load_index(target_feature_dir: Path) -> dict[str, Any] | None:
     return data
 
 
-def write_index(target_feature_dir: Path, *, feature_id: str | None = None) -> None:
+def write_index(
+    target_feature_dir: Path,
+    *,
+    feature_id: str | None = None,
+    verify_existing: bool = True,
+) -> None:
+    if verify_existing:
+        _ensure_index_matches(target_feature_dir)
     snap = snapshot(target_feature_dir)
     payload = {
         "version": INDEX_VERSION,
@@ -194,9 +201,13 @@ def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
-def _ensure_index_matches(target_feature_dir: Path) -> None:
+def _ensure_index_matches(target_feature_dir: Path, *, allow_missing_for_empty_stream: bool = False) -> None:
     existing = load_index(target_feature_dir)
     if existing is None:
+        if allow_missing_for_empty_stream and not read_records(stream_path(target_feature_dir)):
+            return
+        if stream_path(target_feature_dir).is_file() and stream_path(target_feature_dir).stat().st_size > 0:
+            raise EvidenceStoreError("missing_evidence_index_for_nonempty_stream")
         return
     snap = snapshot(target_feature_dir)
     mismatches: list[str] = []
@@ -223,7 +234,7 @@ def append_evidence(
     noticed before new evidence is added.
     """
 
-    _ensure_index_matches(target_feature_dir)
+    _ensure_index_matches(target_feature_dir, allow_missing_for_empty_stream=True)
     records = read_records(stream_path(target_feature_dir))
     payload = dict(record)
     payload.setdefault("version", EVIDENCE_VERSION)
@@ -259,7 +270,11 @@ def append_evidence(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-    write_index(target_feature_dir, feature_id=str(payload.get("featureId") or target_feature_dir.name))
+    write_index(
+        target_feature_dir,
+        feature_id=str(payload.get("featureId") or target_feature_dir.name),
+        verify_existing=False,
+    )
     return payload
 
 
@@ -308,7 +323,7 @@ def _cmd_append(args: argparse.Namespace) -> int:
 def _cmd_index(args: argparse.Namespace) -> int:
     target = feature_dir(Path(args.workspace).resolve(), args.feature)
     try:
-        write_index(target, feature_id=args.feature)
+        write_index(target, feature_id=args.feature, verify_existing=True)
     except EvidenceStoreError as exc:
         print(str(exc), file=sys.stderr)
         return 1

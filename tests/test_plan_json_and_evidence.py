@@ -12,7 +12,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_integrity_gate import check_code_done, check_integrity  # noqa: E402
-from hooks.evidence_store import append_evidence, index_path, stream_path, validate_record  # noqa: E402
+from hooks.evidence_store import (  # noqa: E402
+    EvidenceStoreError,
+    append_evidence,
+    index_path,
+    stream_path,
+    validate_record,
+    write_index,
+)
 from hooks.plan_json import validate_plan_data, write_plan_json  # noqa: E402
 
 
@@ -171,10 +178,54 @@ class EvidenceStoreTest(unittest.TestCase):
             first_line = stream_path(feature_dir).read_text(encoding="utf-8").splitlines()[0]
             stream_path(feature_dir).write_text(first_line + "\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "evidence_stream_rewritten_or_truncated"):
+            with self.assertRaisesRegex(EvidenceStoreError, "evidence_stream_rewritten_or_truncated"):
                 append_pass_evidence(feature_dir)
 
             self.assertIn("evidence_index_mismatch:lineCount", check_integrity(feature_dir))
+
+    def test_write_index_rejects_rewritten_stream_after_index_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            append_pass_evidence(feature_dir)
+            record = json.loads(stream_path(feature_dir).read_text(encoding="utf-8"))
+            record["checkpoint"] = "unit_test_in_progress"
+            stream_path(feature_dir).write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(EvidenceStoreError, "evidence_stream_rewritten_or_truncated"):
+                write_index(feature_dir)
+
+            self.assertIn("evidence_stream_rewritten_or_truncated:sha256", check_integrity(feature_dir))
+
+    def test_write_index_rejects_missing_index_for_nonempty_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            append_pass_evidence(feature_dir)
+            index_path(feature_dir).unlink()
+
+            with self.assertRaisesRegex(EvidenceStoreError, "missing_evidence_index_for_nonempty_stream"):
+                write_index(feature_dir)
+
+            self.assertIn("missing_evidence_index", "\n".join(check_integrity(feature_dir)))
+
+    def test_append_evidence_rejects_missing_index_for_nonempty_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            append_pass_evidence(feature_dir)
+            index_path(feature_dir).unlink()
+
+            with self.assertRaisesRegex(EvidenceStoreError, "missing_evidence_index_for_nonempty_stream"):
+                append_evidence(
+                    feature_dir,
+                    {
+                        "featureId": "alpha",
+                        "checkpoint": "unit_test_in_progress",
+                        "nodeId": "dev.utest",
+                        "skill": "autodev-utest",
+                        "taskId": "T001",
+                        "action": "validation",
+                        "validation": {"command": "pytest", "exitCode": 0, "result": "pass"},
+                    },
+                )
 
     def test_check_integrity_detects_non_sequential_id_and_sha_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
