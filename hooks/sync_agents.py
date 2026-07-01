@@ -17,13 +17,16 @@ board_config.json 注册::
 
     { "ok": true, "schemaVersion": "...", "message": "...",
       "repo": {"url","ref","commit"},
-      "downloadPath": "<pluginPath>/sys",  # 克隆落盘路径，与 repo 同级，供宿主写进 board.json
+      "knowledge_path": "<pluginPath>/sys",  # 克隆落盘路径，与 repo 同级；写进 board.json 的
+                                             # inspectCommands.<platform>.knowledge_path
       "supported_service_units": [...],
       "systems": [ {"systemId","systemName","agentsReady","agentsPath","serviceUnits":[...]} ] }
 
 ``--write-board-config``（已写进注册的 pull_knowledge 命令，UI 每次拉取即触发）：同步成功后
-把 ``supported_service_units`` 定点写回 board_config.json 顶层同名字段（正则只改那一处数组、
-不重排整份文件；写前校验仍为合法 JSON，否则放弃写入并在结果里给出 boardConfigWriteError）。
+把 ``supported_service_units`` 定点写回 board_config.json 顶层同名字段，并把克隆落盘路径写回
+``inspectCommands.<当前平台>.knowledge_path``（把预置的 ``${pluginPath}/sys`` 静态模板改写成解析出的
+绝对路径，只改当前 OS 那一处）。两处都正则定点替换、不重排整份文件；写前校验仍为合法 JSON，
+否则放弃写入并在结果里给出 boardConfigWriteError。
 只读安装环境可从命令里去掉该参数、改为打包前手动 bake 一次。
 
 UI 直调约定：逻辑失败也输出 ok:false 的 JSON 并 exit 0，绝不让 UI 收到非 JSON。
@@ -147,7 +150,7 @@ def run(repo_url: Optional[str], ref: Optional[str]) -> dict:
     except AgentsManifestError as exc:
         result = _fail(f"仓库已拉取但清单不可用: {exc}")
         result["repo"] = repo_info
-        result["downloadPath"] = str(dest)  # 已克隆，给出落盘路径（与 repo 同级）
+        result["knowledge_path"] = str(dest)  # 已克隆，给出落盘路径（与 repo 同级）
         return result
     return payload
 
@@ -184,6 +187,54 @@ def merge_supported_units_into_board_config(
     config_path.write_text(new_text, encoding="utf-8")
 
 
+def _platform_key(platform: Optional[str] = None) -> str:
+    """把 ``sys.platform`` 归一到 board_config.json inspectCommands 的三平台键。"""
+    p = (platform or sys.platform).lower()
+    if p.startswith("win"):
+        return "win32"
+    if p == "darwin":
+        return "darwin"
+    return "linux"
+
+
+def merge_knowledge_path_into_board_config(
+    knowledge_path: str,
+    config_path: Path = BOARD_CONFIG_PATH,
+    platform: Optional[str] = None,
+) -> None:
+    """把克隆落盘路径定点写回 board_config.json 的
+    ``inspectCommands.<platform>.knowledge_path``（仅当前运行平台那一处）。
+
+    knowledge_path 在三平台块里都以 ``${pluginPath}/sys`` 静态模板预置；本机拉取后把它
+    改写成解析出的绝对路径（machine-specific，只对当前 OS 有效，故只改当前平台块、不动另外
+    两个平台的模板）。``knowledge_path`` 是各平台块的首个键，正则以「平台名 + 首键」定位，
+    只替换那一处字符串值、不重排整份文件。写盘前用 ``json.loads`` 校验结果仍合法且该字段已
+    等于 knowledge_path，否则抛 RuntimeError 不落盘。
+    """
+    key = _platform_key(platform)
+    text = config_path.read_text(encoding="utf-8")
+    serialized = json.dumps(knowledge_path, ensure_ascii=False)  # JSON 字符串字面量（转义反斜杠等）
+    # 以「"<platform>": { "knowledge_path":」为锚（knowledge_path 是平台块首键），只命中本平台那处。
+    value_pat = re.compile(
+        r'("' + re.escape(key) + r'"\s*:\s*\{\s*"knowledge_path"\s*:\s*)"(?:[^"\\]|\\.)*"'
+    )
+    if not value_pat.search(text):
+        raise RuntimeError(
+            f"board_config.json 的 inspectCommands.{key} 缺少 knowledge_path 首键，无法写回"
+        )
+    new_text = value_pat.sub(lambda m: m.group(1) + serialized, text, count=1)
+
+    try:
+        parsed = json.loads(new_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"写回后 board_config.json 非合法 JSON，已放弃写入: {exc}") from exc
+    commands = parsed.get("inspectCommands")
+    block = commands.get(key) if isinstance(commands, dict) else None
+    if not isinstance(block, dict) or block.get("knowledge_path") != knowledge_path:
+        raise RuntimeError("写回校验失败：knowledge_path 未按预期更新，已放弃写入")
+    config_path.write_text(new_text, encoding="utf-8")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="拉取 agents 知识库仓库并产出 service units（UI 触发）",
@@ -203,6 +254,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.write_board_config and result.get("ok") and isinstance(result.get("supported_service_units"), list):
         try:
             merge_supported_units_into_board_config(result["supported_service_units"])
+            # 知识库落盘路径写回 inspectCommands.<当前平台>.knowledge_path（把静态模板改写成绝对路径）。
+            if isinstance(result.get("knowledge_path"), str) and result["knowledge_path"]:
+                merge_knowledge_path_into_board_config(result["knowledge_path"])
             result["boardConfigWritten"] = True
         except (OSError, RuntimeError) as exc:
             result["boardConfigWritten"] = False
