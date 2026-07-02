@@ -17,15 +17,6 @@ version: v1.2.1701
 - 正式段落追加：直接包含 `用户故事`、`验收口径`、`验收标准`、`关键约束`
 - PRD 质量检查：确保追加段落可供下游 Dev 阶段消费，且正式 PRD 不包含讨论记录正文、包装标题、待确认事项或外部依赖章节
 
-## 触发条件
-
-以下场景应自动触发本技能：
-
-- 用户要求"生成正式 PRD""整理 PRD""输出标准需求文档"
-- 用户要求"基于讨论稿写 PRD"
-- 用户在 `/autobiz-requirement-discuss` 收敛后，要求继续生成正式文档
-- 用户提到"PRD 定稿""需求定稿""输出最终需求"
-
 ## 输入前提
 
 输入清单以本 Feature 的执行清单为准，按可信度从高到低使用：
@@ -83,8 +74,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 - 基于上游已确认内容（按各 input 的 `method`/`degrade`）提炼正式需求，未确认的内容不得写入；不要求 `PRD.md` 正文与上游素材逐字一致
 - 正式稿必须以 `# 需求正式稿` 开头，直接剔除独立出现的 `本文档为需求讨论中间稿，用于记录需求讨论过程和结论`
-- 正式稿不得包含 `待确认事项`、`待确认项`、`外部依赖`、`第三方依赖` Markdown 章节及其正文
-- 正式稿不得包含讨论记录正文，也不得输出包装标题
+- 正式稿只保留已确认的正式需求，剔除讨论记录正文与讨论态章节、不输出包装标题
 - 正式稿必须直接包含用户故事、验收口径、验收标准和关键约束
 
 #### `PRD.md` 结构要求
@@ -102,7 +92,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 #### 要求
 
 - 若讨论稿包含 `历次讨论记录` 或 `讨论记录`，该标题及其后的讨论记录正文不得进入 `PRD.md`
-- `PRD.md` 不得包含 `审理提炼`、`待确认事项`、`待确认项`、`外部依赖`、`第三方依赖` 标题
+- `PRD.md` 不得包含 `审理提炼`、`待确认事项`、`待确认项`、`外部依赖`、`第三方依赖` 标题（本条为禁用标题的单一事实源，由 `biz_validate.py prd` 强制）
 - 正式需求段落不得把讨论稿内容改写成旧 PRD 模板
 - 用户故事应描述角色、目标和业务价值，避免写成内部实现任务
 - 验收口径应拆分用户视角、工程视角和回归视角
@@ -123,8 +113,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 上游讨论稿已保留完整收敛过程
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已存在，且以 `# 需求正式稿` 开头
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 不包含讨论稿说明句 `本文档为需求讨论中间稿，用于记录需求讨论过程和结论`
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 不包含 `审理提炼`、`待确认事项`、`待确认项`、`外部依赖`、`第三方依赖` 标题
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 不包含 `历次讨论记录` 或 `讨论记录` 标题及其后的讨论记录正文
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已追加 `用户故事`、`验收口径`、`验收标准`、`关键约束`
 - 正式 PRD 足以支撑后续 Dev 阶段工作
 

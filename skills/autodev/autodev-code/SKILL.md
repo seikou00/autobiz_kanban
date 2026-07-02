@@ -1,6 +1,6 @@
 ---
 name: autodev-code
-description: 按工作流契约逐任务执行代码。消费执行清单列出的 input，逐个按其读取方式执行（input 专属指令优先于通用默认）；清单未列出的 id 不属于本工作流，不读不等。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
+description: Dev 阶段逐任务代码执行。
 version: v1.1.1604
 ---
 
