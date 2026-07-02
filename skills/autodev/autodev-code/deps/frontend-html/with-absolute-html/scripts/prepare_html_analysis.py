@@ -447,7 +447,7 @@ def main() -> int:
     if missing_html:
         raise SystemExit("HTML source not found:\n" + "\n".join(missing_html))
 
-    output_root = project_root / "output"
+    output_root = project_root / ".frontend"
     analysis_dir = output_root / "html-analysis"
     html_input_dir = output_root / "html-input"
     ensure_dir(analysis_dir)

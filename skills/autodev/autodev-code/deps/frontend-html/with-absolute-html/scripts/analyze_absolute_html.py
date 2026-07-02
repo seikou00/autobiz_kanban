@@ -3,8 +3,8 @@
 Analyze large absolute-position HTML exports before LLM conversion.
 
 The script turns noisy Figma/MasterGo-style div HTML into compact artifacts:
-- output/html-analysis/<name>.json: machine-readable manifest
-- output/html-analysis/<name>.md: human/LLM handoff report
+- .frontend/html-analysis/<name>.json: machine-readable manifest
+- .frontend/html-analysis/<name>.md: human/LLM handoff report
 
 It uses only the Python standard library so it can run in restricted projects.
 """
@@ -710,6 +710,7 @@ def extract_text_items(nodes: list[Node]) -> list[dict[str, Any]]:
             "bbox": box,
             "fontSize": px(node.style.get("font-size")),
             "color": node.style.get("color", ""),
+            "cursor": node.style.get("cursor", "").strip().lower(),
             "sequence": node.idx,
             "depth": node.depth,
             "nodeDisplay": node.style.get("display", "").strip().lower(),
@@ -1755,17 +1756,27 @@ def extract_subsection_titles(
     return unique_preserve_order(titles)
 
 
-def extract_tag_strip_texts(selected_items: list[dict[str, Any]], title_item: dict[str, Any]) -> list[str]:
+def extract_tag_strip_texts(
+    selected_items: list[dict[str, Any]],
+    title_item: dict[str, Any],
+    visual_boxes: list[dict[str, Any]] | None = None,
+) -> list[str]:
     tags: list[str] = []
     for item in selected_items:
         text = item["text"]
-        if item["bbox"]["y"] <= title_item["bbox"]["y"] + 20 or item["bbox"]["y"] >= title_item["bbox"]["y"] + 78:
+        if item["bbox"]["y"] <= title_item["bbox"]["y"] + 18 or item["bbox"]["y"] >= title_item["bbox"]["y"] + 120:
             continue
-        if (item.get("fontSize") or 0) > 12.5:
+        if (item.get("fontSize") or 0) > 14.5:
             continue
-        if not text or len(text) > 16:
+        if not text or len(text) > 20:
             continue
-        if infer_kind(text) in {"placeholder", "action", "index", "score"}:
+        kind = infer_kind(text)
+        tab_like = bool(visual_boxes) and is_tab_or_chip_label(item, visual_boxes or [])
+        if kind in {"placeholder", "index", "score"}:
+            continue
+        if kind == "action" and text not in {"查看", "全部", "更多", "对比"} and not tab_like:
+            continue
+        if not tab_like and text not in {"查看", "选中标签", "全部", "更多", "对比"}:
             continue
         tags.append(text)
     return unique_preserve_order(tags)
@@ -1785,7 +1796,10 @@ def infer_render_contract(
     kind = "section"
     must_render_whole = False
     if container_bbox["w"] >= 520 and len(visible_texts) >= 18:
-        if subsection_titles:
+        if len(tag_strip_texts) >= 2:
+            kind = "detail-panel-with-tab-strip"
+            must_render_whole = True
+        elif subsection_titles:
             kind = "detail-panel-with-subsections"
             must_render_whole = True
         elif title.endswith(("信息", "结果", "记录", "详情", "列表")):
@@ -1877,7 +1891,7 @@ def infer_sections(
         layout_hint = infer_layout_hint(selected, item["text"])
         content_bbox = combined_bbox([it["bbox"] for it in selected])
         subsection_titles = extract_subsection_titles(selected, visual_boxes, item, container_bbox)
-        tag_strip_texts = extract_tag_strip_texts(selected, item)
+        tag_strip_texts = extract_tag_strip_texts(selected, item, visual_boxes)
         parent_heading = next(
             (
                 other for other in sorted(
@@ -1982,7 +1996,7 @@ def infer_sections(
             continue
         layout_hint = infer_layout_hint(selected, title)
         subsection_titles = extract_subsection_titles(selected, visual_boxes, match, container_bbox)
-        tag_strip_texts = extract_tag_strip_texts(selected, match)
+        tag_strip_texts = extract_tag_strip_texts(selected, match, visual_boxes)
         sections.append({
             "title": title,
             "ownerPath": title,
@@ -2114,7 +2128,7 @@ def maybe_build_workflow_detail_sections(
         content_bbox = combined_bbox([item["bbox"] for item in selected])
         container_bbox = expand_bbox(content_bbox, 18.0)
         subsection_titles = subsection_titles or []
-        tag_strip_texts = extract_tag_strip_texts(selected, anchor)
+        tag_strip_texts = extract_tag_strip_texts(selected, anchor, visual_boxes)
         return {
             "title": title,
             "ownerPath": title,
@@ -2305,6 +2319,7 @@ def maybe_build_regions_from_sections(
 def refine_workflow_compare_columns(
     sections: list[dict[str, Any]],
     items: list[dict[str, Any]],
+    visual_boxes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     title_to_section = {str(section.get("title", "")): dict(section) for section in sections}
     left = title_to_section.get("我行受益所有人留存信息")
@@ -2348,6 +2363,17 @@ def refine_workflow_compare_columns(
             "h": float(left["contentBbox"].get("h", 0) or 0) + 32.0,
         }
         left["texts"] = [item["text"] for item in left_items]
+        anchor = next((item for item in left_items if str(item.get("text", "")) == "我行受益所有人留存信息"), left_items[0])
+        left["tagStripTexts"] = extract_tag_strip_texts(left_items, anchor, visual_boxes)
+        left["renderContract"] = infer_render_contract(
+            left.get("title", "我行受益所有人留存信息"),
+            str(left.get("layoutHint", "") or ""),
+            left_items,
+            anchor,
+            left.get("containerBbox", {}) or left.get("contentBbox", {}) or left.get("bbox", {}),
+            left.get("subsectionTitles", []) or [],
+            left.get("tagStripTexts", []) or [],
+        )
     if right_items:
         right["contentBbox"] = combined_bbox([item["bbox"] for item in right_items])
         right["containerBbox"] = {
@@ -2357,6 +2383,17 @@ def refine_workflow_compare_columns(
             "h": float(right["contentBbox"].get("h", 0) or 0) + 32.0,
         }
         right["texts"] = [item["text"] for item in right_items]
+        anchor = next((item for item in right_items if str(item.get("text", "")) == "人行受益所有人查询结果"), right_items[0])
+        right["tagStripTexts"] = extract_tag_strip_texts(right_items, anchor, visual_boxes)
+        right["renderContract"] = infer_render_contract(
+            right.get("title", "人行受益所有人查询结果"),
+            str(right.get("layoutHint", "") or ""),
+            right_items,
+            anchor,
+            right.get("containerBbox", {}) or right.get("contentBbox", {}) or right.get("bbox", {}),
+            right.get("subsectionTitles", []) or [],
+            right.get("tagStripTexts", []) or [],
+        )
 
     refined = []
     for section in sections:
@@ -2460,11 +2497,11 @@ def refine_workflow_detail_sections(
             "drop": ["受益所有人信息", "差异报告", "任务处理信息", "节点记录", "审批通过", "审批驳回", "报告被退回"],
         },
         "我行受益所有人留存信息": {
-            "keep": ["我行受益所有人留存信息", "所有权信息", "基本信息", "受益人编码", "姓名", "证件类型", "国籍", "证件号码", "证件有效期", "生日", "手机号", "地址", "固定电话", "受益所有权形成日期", "受益所有权终止日期", "实施实际控制"],
+            "keep": ["我行受益所有人留存信息", "查看", "选中标签", "所有权信息", "基本信息", "受益人编码", "姓名", "证件类型", "国籍", "证件号码", "证件有效期", "生日", "手机号", "地址", "固定电话", "受益所有权形成日期", "受益所有权终止日期", "实施实际控制"],
             "drop": ["任务处理信息", "差异报告", "节点记录", "审批通过", "审批驳回", "报告被退回"],
         },
         "人行受益所有人查询结果": {
-            "keep": ["人行受益所有人查询结果", "所有权信息", "基本信息", "受益人编码", "姓名", "证件类型", "国籍", "证件号码", "证件有效期", "生日", "手机号", "地址", "固定电话", "受益所有权形成日期", "受益所有权终止日期", "实施实际控制", "重大差异：受益所有人不匹配"],
+            "keep": ["人行受益所有人查询结果", "查看", "选中标签", "所有权信息", "基本信息", "受益人编码", "姓名", "证件类型", "国籍", "证件号码", "证件有效期", "生日", "手机号", "地址", "固定电话", "受益所有权形成日期", "受益所有权终止日期", "实施实际控制", "重大差异：受益所有人不匹配"],
             "drop": ["任务处理信息", "差异报告", "节点记录", "审批通过", "审批驳回", "报告被退回"],
         },
         "任务处理信息": {
@@ -3302,10 +3339,20 @@ def build_replacement_slots(
         texts = " ".join(section.get("texts", []))
         lower = texts.lower()
         if description_like_layout(section):
-            decision = "fidelity-or-descriptions"
-            candidate = "Descriptions or fidelity structure"
-            path = ""
-            evidence = "field-heavy detail section; preserve vertical Descriptions/field-block layout unless the local region has explicit control evidence"
+            if len(section.get("tagStripTexts", [])) >= 2:
+                decision = "reuse-project-component-or-pattern" if tabs_candidate else "use-ui-library"
+                candidate = tabs_candidate["name"] if tabs_candidate else component_name(ui_library, "tabs")
+                path = first_component_path(tabs_candidate) if tabs_candidate else ""
+                evidence = (
+                    "field-heavy detail section also has a stable tab strip; keep detail layout inside each tab panel"
+                    if tabs_candidate
+                    else f"field-heavy detail section with stable tab strip; uiLibrary={ui_library_name}"
+                )
+            else:
+                decision = "fidelity-or-descriptions"
+                candidate = "Descriptions or fidelity structure"
+                path = ""
+                evidence = "field-heavy detail section; preserve vertical Descriptions/field-block layout unless the local region has explicit control evidence"
         elif section_has_real_table_evidence(section):
             if table_candidate:
                 decision = "reuse-project-component-or-pattern"
@@ -3857,6 +3904,55 @@ def infer_chart_type(texts: list[str], line_count: int, bar_count: int, dot_coun
     return "chart"
 
 
+def chart_type_family(chart_type: str) -> str:
+    low = str(chart_type or "").lower()
+    if low in {"line", "area-line"}:
+        return "line-family"
+    if low in {"bar", "bar-ranking"}:
+        return "bar-family"
+    if low in {"pie", "donut"}:
+        return "pie-family"
+    return low or "unknown"
+
+
+def bbox_center(box: dict[str, Any]) -> tuple[float, float]:
+    return (
+        float(box.get("x", 0) or 0) + float(box.get("w", 0) or 0) / 2,
+        float(box.get("y", 0) or 0) + float(box.get("h", 0) or 0) / 2,
+    )
+
+
+def chart_candidates_duplicate(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    bbox_a = a.get("bbox") or {}
+    bbox_b = b.get("bbox") or {}
+    if not bbox_a or not bbox_b:
+        return False
+    family_a = chart_type_family(str(a.get("chartType", "")))
+    family_b = chart_type_family(str(b.get("chartType", "")))
+    if family_a != family_b:
+        return False
+    if str(a.get("owner", "")) and str(a.get("owner", "")) == str(b.get("owner", "")):
+        return True
+    if overlap_ratio(bbox_a, bbox_b) >= 0.74 or overlap_ratio(bbox_b, bbox_a) >= 0.74:
+        return True
+    source_pair = {str(a.get("source", "")), str(b.get("source", ""))}
+    if "metric-card" not in source_pair:
+        return False
+    ax, ay = bbox_center(bbox_a)
+    bx, by = bbox_center(bbox_b)
+    center_distance = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+    smaller_edge = max(
+        48.0,
+        min(
+            float(bbox_a.get("w", 0) or 0),
+            float(bbox_a.get("h", 0) or 0),
+            float(bbox_b.get("w", 0) or 0),
+            float(bbox_b.get("h", 0) or 0),
+        ),
+    )
+    return center_distance <= smaller_edge * 1.25
+
+
 def conservative_chart_expression(chart_type: str) -> str:
     return {
         "bar": "conservative-bar-series-block",
@@ -4400,13 +4496,22 @@ def detect_chart_candidates(
             "evidence": evidence,
         })
 
+    source_priority = {
+        "metric-card": 4,
+        "visual-panel": 3,
+        "section": 2,
+        "region": 1,
+    }
     deduped: list[dict[str, Any]] = []
-    for candidate in sorted(candidates, key=lambda item: (-int(item.get("score", 0)), -area(item.get("bbox", {})))):
-        if any(
-            overlap_ratio(candidate.get("bbox", {}), kept.get("bbox", {})) >= 0.74
-            or overlap_ratio(kept.get("bbox", {}), candidate.get("bbox", {})) >= 0.74
-            for kept in deduped
-        ):
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (
+            -int(item.get("score", 0)),
+            -source_priority.get(str(item.get("source", "")), 0),
+            area(item.get("bbox", {})),
+        ),
+    ):
+        if any(chart_candidates_duplicate(candidate, kept) for kept in deduped):
             continue
         deduped.append(candidate)
     return deduped[:20]
@@ -4516,6 +4621,8 @@ def detect_interaction_candidates(
             candidates.append({"kind": "reset-action", "label": text, "bbox": bbox, "evidence": "explicit reset action text"})
         elif text in {"展开", "收起"}:
             candidates.append({"kind": "expand-toggle", "label": text, "bbox": bbox, "evidence": "explicit expand/collapse text"})
+        elif str(item.get("cursor", "")) == "pointer":
+            candidates.append({"kind": "click-affordance", "label": text, "bbox": bbox, "evidence": "cursor:pointer indicates a real interaction contract, not decoration only"})
     for box in visual_boxes:
         bbox = box.get("bbox") or {}
         if not bbox:
@@ -4612,6 +4719,68 @@ def apply_table_context_to_sections(sections: list[dict[str, Any]], table_struct
     return sections
 
 
+def attach_section_title_controls(
+    sections: list[dict[str, Any]],
+    interaction_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not sections or not interaction_candidates:
+        return sections
+
+    control_candidates = [
+        candidate
+        for candidate in interaction_candidates
+        if str(candidate.get("kind", "")) in {"collapse-icon", "expand-toggle"}
+        and candidate.get("bbox")
+    ]
+    if not control_candidates:
+        return sections
+
+    updated: list[dict[str, Any]] = []
+    for section in sections:
+        title_bbox = section.get("bbox") or {}
+        container_bbox = section.get("containerBbox") or section.get("contentBbox") or title_bbox
+        if not title_bbox or not container_bbox:
+            updated.append(section)
+            continue
+
+        title_center_y = float(title_bbox.get("y", 0) or 0) + float(title_bbox.get("h", 0) or 0) / 2
+        title_right = float(title_bbox.get("x", 0) or 0) + float(title_bbox.get("w", 0) or 0)
+        container_right = float(container_bbox.get("x", 0) or 0) + float(container_bbox.get("w", 0) or 0)
+
+        matched = []
+        for candidate in control_candidates:
+            bbox = candidate.get("bbox") or {}
+            center_y = float(bbox.get("y", 0) or 0) + float(bbox.get("h", 0) or 0) / 2
+            center_x = float(bbox.get("x", 0) or 0) + float(bbox.get("w", 0) or 0) / 2
+            if abs(center_y - title_center_y) > max(18.0, float(title_bbox.get("h", 0) or 0) * 0.85):
+                continue
+            if center_x < title_right + 80:
+                continue
+            if center_x < container_right - 96:
+                continue
+            if center_x > container_right + 24:
+                continue
+            matched.append(candidate)
+
+        if not matched:
+            updated.append(section)
+            continue
+
+        section = dict(section)
+        section["titleRightControls"] = ["collapse-toggle"]
+        section["titleRightControlBboxes"] = [candidate.get("bbox", {}) for candidate in matched[:2]]
+        contract = dict(section.get("renderContract") or {})
+        contract["hasCollapseToggle"] = True
+        contract["titleRightControls"] = ["collapse-toggle"]
+        contract["interactionContract"] = (
+            "section title row contains a right-side collapse/expand affordance; "
+            "final implementation must provide a real expand/collapse state transition, not a static icon only"
+        )
+        section["renderContract"] = contract
+        updated.append(section)
+    return updated
+
+
 def build_manifest(html_file: Path, project_root: Path | None = None) -> dict[str, Any]:
     html = ""
     encodings = ["utf-8", "utf-8-sig", "gb18030", "gbk"]
@@ -4654,10 +4823,12 @@ def build_manifest(html_file: Path, project_root: Path | None = None) -> dict[st
     elif len(workflow_sections) >= len(sections):
         sections = workflow_sections
     sections = refine_workflow_detail_sections(sections, items, visual_boxes)
-    sections = refine_workflow_compare_columns(sections, items)
+    sections = refine_workflow_compare_columns(sections, items, visual_boxes)
     sections = split_task_processing_sections(sections, items)
     sections = apply_table_context_to_sections(sections, table_structures)
     regions = maybe_build_regions_from_sections(sections, regions, fidelity_html)
+    interaction_candidates = detect_interaction_candidates(items, visual_boxes)
+    sections = attach_section_title_controls(sections, interaction_candidates)
     expected_blocks = detect_expected_blocks(items, page_archetypes, sections)
     source_content_inventory = build_content_inventory(items, sections, regions)
     terms = extract_terms(items, fields, sections)
@@ -4666,7 +4837,6 @@ def build_manifest(html_file: Path, project_root: Path | None = None) -> dict[st
     components = scan_project_components(project_root)
     matches = match_components(fields, regions, components, chart_candidates, progress_candidates)
     icon_candidates = detect_icon_candidates(items, visual_boxes, ui_libraries, project_root)
-    interaction_candidates = detect_interaction_candidates(items, visual_boxes)
     similar_pages = scan_similar_pages(project_root, terms)
     absolute_nodes = sum(1 for n in nodes if n.style.get("position", "").replace(" ", "") == "absolute")
     analysis_confidence = estimate_analysis_confidence(items, regions, chart_candidates, visual_boxes, fidelity_html)
@@ -5566,7 +5736,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Analyze large absolute-position HTML exports.")
     ap.add_argument("html_file")
     ap.add_argument("--project-root", default="")
-    ap.add_argument("--out-dir", default="output/html-analysis")
+    ap.add_argument("--out-dir", default=".frontend/html-analysis")
     ap.add_argument("--output-name", default="", help="Stable ASCII output stem, e.g. task-1-create-course.")
     ap.add_argument("--emit-section-html", action="store_true", help="Optional debug mode: split source into section HTML slices.")
     ap.add_argument("--emit-reference-html", action="store_true", help="Optional debug mode: emit page-level helper HTML files.")

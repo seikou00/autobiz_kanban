@@ -48,8 +48,8 @@ class CompileNodeSubsetTest(unittest.TestCase):
 
     def test_profile_and_decision_compiles_still_work(self) -> None:
         base = base_config()
-        frontend = compile_board_config(copy.deepcopy(base), repo_root=ROOT, profile="frontend_before_specs")
-        self.assertIn("dev.frontend", [node["id"] for node in frontend["workflow"]["nodes"]])
+        frontend = compile_board_config(copy.deepcopy(base), repo_root=None, profile="frontend_before_specs")
+        self.assertNotIn("dev.frontend", [node["id"] for node in frontend["workflow"]["nodes"]])
 
         detail = compile_board_config(
             copy.deepcopy(base),
@@ -74,7 +74,7 @@ class CompileNodeSubsetTest(unittest.TestCase):
         self.assertEqual(
             effective["workflowDroppedInputs"],
             {
-                "dev.specs": ["PRD.md"],
+                "dev.specs": ["PRD.md", "UI_CONTEXT.json"],
                 "dev.code": ["PRD.md", "design.md", "plan.json", "SMOKE_TEST_PLAN.json"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
@@ -82,7 +82,7 @@ class CompileNodeSubsetTest(unittest.TestCase):
         code_node = effective["workflow"]["nodes"][1]
         self.assertEqual(
             [artifact["path"] for artifact in code_node["artifacts"]["inputs"]],
-            ["proposal.md", "specs/**/*.md"],
+            ["proposal.md", "specs/**/*.md", "UI_CONTEXT.json"],
         )
         for node in effective["workflow"]["nodes"]:
             for artifact in node["artifacts"]["inputs"]:
@@ -115,7 +115,7 @@ class SolveNodeClosureTest(unittest.TestCase):
         self.assertEqual(result.added, ())
         self.assertEqual(
             result.dropped,
-            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "plan.json", "SMOKE_TEST_PLAN.json")},
+            {"dev.code": ("proposal.md", "specs/**/*.md", "PRD.md", "design.md", "plan.json", "SMOKE_TEST_PLAN.json", "UI_CONTEXT.json")},
         )
         self.assertEqual(result.entry_nodes, ("dev.code",))
         self.assertEqual(
@@ -128,6 +128,7 @@ class SolveNodeClosureTest(unittest.TestCase):
                     "design.md": "dev.plan",
                     "plan.json": "dev.plan",
                     "SMOKE_TEST_PLAN.json": "dev.plan",
+                    "UI_CONTEXT.json": "biz.discuss",
                 }
             },
         )
@@ -135,8 +136,8 @@ class SolveNodeClosureTest(unittest.TestCase):
     def test_default_selecting_prd_drops_discuss_draft(self) -> None:
         result = solve_node_closure(base_config(), ["biz.prd"])
         self.assertEqual(result.nodes, ("biz.prd",))
-        self.assertEqual(result.dropped, {"biz.prd": ("PRD_DISCUSS.md",)})
-        self.assertEqual(result.suggestions, {"biz.prd": {"PRD_DISCUSS.md": "biz.discuss"}})
+        self.assertEqual(result.dropped, {"biz.prd": ("PRD_DISCUSS.md", "UI_CONTEXT.json")})
+        self.assertEqual(result.suggestions, {"biz.prd": {"PRD_DISCUSS.md": "biz.discuss", "UI_CONTEXT.json": "biz.discuss"}})
 
     def test_optional_only_drop_is_not_entry_node(self) -> None:
         # With specs+plan selected, dev.code keeps every required input and
@@ -210,9 +211,9 @@ class WorkflowTemplateTest(unittest.TestCase):
             {"workflowProfile": "standard", "workflowDecisions": {}, "workflowTemplate": "lean"},
         )
         code = contracts.contract_for_skill("autodev-code")
-        self.assertEqual(list(code.required_inputs), ["proposal.md", "specs/**/*.md"])
+        self.assertEqual(list(code.required_inputs), ["proposal.md", "specs/**/*.md", "UI_CONTEXT.json"])
         # Dropped inputs vanish from the bundle entirely (no optional PRD.md).
-        self.assertEqual([artifact.path for artifact in code.inputs], ["proposal.md", "specs/**/*.md"])
+        self.assertEqual([artifact.path for artifact in code.inputs], ["proposal.md", "specs/**/*.md", "UI_CONTEXT.json"])
         self.assertIn("specs_in_progress", contracts.known_checkpoints)
         self.assertNotIn("plan_in_progress", contracts.known_checkpoints)
         self.assertEqual(contracts.allowed_next["code_done"], frozenset({"archived"}))

@@ -25,6 +25,7 @@ from hooks.paths import (
 )
 from board_core.contracts import BoardConfigError, SkillContract, load_record_workflow_contracts
 from board_core.state_store import check_or_fix_state_sync
+from hooks.ui_context import UIContextError, load_ui_context, validate_ui_context_data
 
 
 BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR = (
@@ -136,6 +137,24 @@ def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
             if missing:
                 errors.append(f"PRD_DISCUSS.md 缺少必要章节: {', '.join(missing)}")
 
+    if "UI_CONTEXT.json" in contract.required_outputs:
+        try:
+            ui_context = load_ui_context(feature_dir)
+        except UIContextError as exc:
+            errors.append(str(exc))
+            ui_context = None
+        if ui_context is None:
+            errors.append(f"UI_CONTEXT.json 不存在: {feature_dir / 'UI_CONTEXT.json'}")
+        else:
+            errors.extend(
+                f"UI_CONTEXT.json 非法: {error}"
+                for error in validate_ui_context_data(
+                    ui_context,
+                    feature_id=slug,
+                    require_confirmed=False,
+                )
+            )
+
     _check_done_checkpoint(record, contract, errors)
 
     if errors:
@@ -170,6 +189,24 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     # custom 链未选 biz.discuss 时该输入已从 bundle 中移除。
     if "PRD_DISCUSS.md" in contract.required_inputs and not discuss_md.exists():
         errors.append(f"PRD_DISCUSS.md 不存在: {discuss_md}")
+
+    if "UI_CONTEXT.json" in contract.required_inputs or "UI_CONTEXT.json" in contract.required_outputs:
+        try:
+            ui_context = load_ui_context(feature_dir)
+        except UIContextError as exc:
+            errors.append(str(exc))
+            ui_context = None
+        if ui_context is None:
+            errors.append(f"UI_CONTEXT.json 不存在: {feature_dir / 'UI_CONTEXT.json'}")
+        else:
+            errors.extend(
+                f"UI_CONTEXT.json 非法: {error}"
+                for error in validate_ui_context_data(
+                    ui_context,
+                    feature_id=slug,
+                    require_confirmed=True,
+                )
+            )
 
     if not prd_md.exists():
         errors.append(f"PRD.md 不存在: {prd_md}")

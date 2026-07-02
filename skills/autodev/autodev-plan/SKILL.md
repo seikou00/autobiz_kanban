@@ -281,6 +281,12 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 与 plan.json 的风险/阻断字段中记录，并回到用户确认，不得擅自覆盖 specs； `PLAN.md`同步更新。
 - 用户补充的实现细节只能作为计划依据，不得在 Plan 阶段创建或修改业务代码文件。
 
+UI 任务投影规则：
+- 必须读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json`；UI 范围只从该 JSON 投影，不从 PRD/specs/PLAN Markdown 关键词推导。
+- `UI_CONTEXT.uiRequired=true` 时，只为 UI capability 生成 `uiRequired=true` 的任务，并补齐 `uiRefs.pageRefs`、`uiRefs.interactionRefs`、`uiRefs.visualSourceRefs` 和 `uiRefs.frontendRoute`。
+- `UI_CONTEXT.uiRequired=false` 时，不生成 UI task；纯后端任务不得夹带前端实现。
+- `uiRefs.frontendRoute` 取值为 `none`、`spec-driven-ui`、`absolute-html`、`standard-html` 或 `missing-html`。有 UI 但无 HTML/设计稿时使用 `spec-driven-ui`，不要伪造 HTML 输入。
+
 任务拆分粒度：
 
 - 默认按 specs 中的 Requirement / Scenario、用户主流程或验收闭环拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件、测试文件等代码层步骤拆任务。
