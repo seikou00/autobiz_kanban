@@ -16,6 +16,8 @@ from hooks.evidence_store import (  # noqa: E402
     EvidenceStoreError,
     append_evidence,
     index_path,
+    main as evidence_store_main,
+    read_records,
     stream_path,
     validate_record,
     write_index,
@@ -246,6 +248,39 @@ class EvidenceStoreTest(unittest.TestCase):
             self.assertIn("non_sequential_evidence_id:line=1:id=ev_0002", errors)
             self.assertIn("evidence_stream_rewritten_or_truncated:sha256", errors)
 
+    def test_append_smoke_cli_writes_smoke_without_validation_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            exit_code = evidence_store_main(
+                [
+                    "append-smoke",
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                    "--test-id",
+                    "SMK-001",
+                    "--checkpoint",
+                    "code_in_progress",
+                    "--node-id",
+                    "dev.code",
+                    "--skill",
+                    "autodev-code",
+                    "--task-id",
+                    "T001",
+                    "--command",
+                    "echo ok",
+                    "--exit-code",
+                    "0",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            records = read_records(stream_path(workspace / ".autobizdevops" / "features" / "alpha"))
+            self.assertEqual(records[0]["action"], "smoke")
+            self.assertIn("smoke", records[0])
+            self.assertNotIn("validation", records[0])
+
 
 class EvidenceGateTest(unittest.TestCase):
     def test_code_done_gate_requires_done_plan_and_pass_evidence(self) -> None:
@@ -284,6 +319,30 @@ class EvidenceGateTest(unittest.TestCase):
 
             self.assertIn("plan_json:T001.blockers_unresolved", errors)
             self.assertIn("unresolved_blocker:T001", errors)
+
+    def test_code_done_gate_does_not_count_smoke_pass_as_validation_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            write_plan_json(feature_dir / "plan.json", valid_plan(status="done", evidence_ids=["ev_0001"]))
+            append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "smoke",
+                    "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+                    "designRefs": ["design.md#D-001"],
+                    "changedFiles": ["tests/smoke/cap_smoke.py"],
+                    "validation": {"command": "python tests/smoke/cap_smoke.py", "exitCode": 0, "result": "pass"},
+                    "smoke": {"testId": "SMK-001", "command": "python tests/smoke/cap_smoke.py", "exitCode": 0, "result": "pass"},
+                },
+            )
+
+            self.assertIn("missing_pass_evidence_for_task:T001", check_code_done(feature_dir))
 
 
 if __name__ == "__main__":

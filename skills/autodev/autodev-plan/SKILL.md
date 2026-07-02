@@ -249,13 +249,27 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
 
-`plan.json` 的字段结构、类型与初始值以 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json` 为准；`version` / `featureId` / `id` 编号、`status` 初始 `todo`、`specRefs` 必含 `REQ-xxx`+`SCN-xxx`、`deps` 构成无环 DAG、`evidenceIds` 初始为空等结构规则由 `plan_json.py validate` 强制，不在此重复。
+`plan.json` 顶层字段固定为：
 
-模板与 validator 不覆盖、写入前须自行遵守的语义约束：
+- `version`: 固定为 `1`
+- `featureId`: 当前 `{feature}`
+- `tasks`: 任务数组，非空
 
-- `designRefs` / `apiIds` / `dataIds` 跟随 `design.md` 决策：`x-auto-no-http-api: true` 或 `x-auto-no-sql: true` 时对应数组写 `[]`，不要伪造引用。
-- `expectedFiles`：拿不准真实路径写 `[]`，不要凭空造路径。
-- `blockers`：待确认且影响执行的事项写成阻断说明。
+每个 `tasks[]` 必须按模板包含以下字段：
+
+- `id`: `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID
+- `title`: 需求闭环任务名
+- `status`: Plan 阶段初始值必须为 `todo`
+- `deps`: 依赖任务 ID 数组，无依赖写 `[]`
+- `specRefs`: 至少同时包含一个 `REQ-xxx` 和一个 `SCN-xxx` 引用，格式使用 `specs/<capability>/spec.md#REQ-001` / `specs/<capability>/spec.md#SCN-001`
+- `designRefs`: 引用 `design.md#API-xxx` / `design.md#DATA-xxx` / `design.md#D-xxx`；无 API 或无数据变更时不要伪造对应引用
+- `apiIds`: API 决策 ID 数组；`x-auto-no-http-api: true` 时写 `[]`
+- `dataIds`: Data 决策 ID 数组；`x-auto-no-sql: true` 时写 `[]`
+- `decisionIds`: 技术决策 ID 数组，至少覆盖本任务依赖的 `D-xxx`
+- `validationCommands`: 非空数组；每项至少包含 `command`，且必须是可直接运行并自行判读的命令
+- `expectedFiles`: 预计修改/新增文件路径数组；不能确定真实路径时写 `[]`，不要凭空造路径
+- `evidenceIds`: Plan 初始阶段必须写 `[]`
+- `blockers`: 无阻断写 `[]`；待确认且影响执行的事项写成阻断说明
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
@@ -269,16 +283,20 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 任务拆分粒度：
 
-- **一个任务 = 一个需求闭环**：按 specs 的 Requirement / Scenario、用户主流程或验收闭环拆分，可同时涉及接口、服务、数据、前端、测试和配置；不按 Controller / DTO / Mapper / SQL / 样式 / 测试文件等代码层拆，任务名用业务结果命名（如“实现订单导出主链路”“支持审批超时提醒”），不要用“新增某类”“修改某文件”。
-- 只有满足以下之一才继续拆：可独立验证；风险或决策明显不同；存在明确依赖顺序；可被多个需求复用的基础能力；任务过大无法在一次编码闭环中完成。
-- 小需求通常 2-5 个任务，中等需求 4-8 个；超过 10 个先检查是否把代码步骤误拆成任务并合并。
-- 不要生成“实现某能力”“补充验证”“更新相关代码”这类泛泛任务；任务内部要写到执行者能直接开工的中等粒度。
+- 默认按 specs 中的 Requirement / Scenario、用户主流程或验收闭环拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件、测试文件等代码层步骤拆任务。
+- 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
+- 只有在满足以下条件之一时才继续拆分：可独立验证；风险或决策明显不同；存在明确依赖顺序；可被多个需求复用的基础能力；任务过大导致执行者无法在一次编码闭环中完成。
+- 小需求通常 2-5 个任务，中等需求通常 4-8 个任务；如果超过 10 个任务，必须检查是否把代码步骤误拆成了任务，并优先合并。
+- 不要生成“新增 DTO”“修改 Controller”“补 Mapper”“写单测”这类单纯代码操作任务。
+- 不要生成只有“实现某能力”“补充验证”“更新相关代码”这类泛泛描述的任务；任务内部必须写到执行者能直接开工的中等粒度。
 - 每个任务必须包含「涉及范围」「执行要点」「验证命令」「预期结果」：
   - 「涉及范围」写模块、入口、服务、模型、配置、测试等方向；能确定真实路径时写路径，不能确定时写现有代码中要定位的范围，不要凭空发明文件。
-  - 「执行要点」建议 3-6 条，每条是可执行动作或关键约束，覆盖实现切入点、关键改动、复用现有能力、边界/失败路径和测试补充；钉住真实文件/符号/入口与真实命令，但不要拆成 2-5 分钟步骤、完整代码块、逐文件微任务或频繁 commit。
-  - 「验证命令」必须是执行者（大模型）能直接运行并自行判读的命令：自动化测试（如 `mvn test -Dtest=XxxTest`）、构建、lint，或接口级 `curl`/HTTP 脚本断言。**禁止任何需要人参与的验证**（不写"手工""人工验证""Postman""浏览器点击"）；HTTP 接口用 `curl ... | 断言` 或集成测试覆盖。缺少可自动执行手段时，在本任务补一个最小可运行测试/脚本，并把其运行命令写进「验证命令」。
+  - 「执行要点」建议 3-6 条，每条是一个可执行动作或关键约束，覆盖实现切入点、关键改动、复用现有能力、边界/失败路径和测试补充。
+  - 「验证命令」必须是执行者（大模型）能直接在命令行运行、并自行判读结果的命令：自动化测试（如 `mvn test -Dtest=XxxTest`）、构建、lint，或接口级的 `curl`/HTTP 脚本断言。**禁止任何需要人参与的验证**——不写"手工""人工验证""用 Postman 调一下""在浏览器里点一下"这类步骤。HTTP 接口用 `curl ... | 断言`（或等价脚本/集成测试）覆盖，而不是描述人去点 Postman。若当前确实缺少可自动执行的验证手段，则在本任务里补一个最小可运行的测试/脚本，并把该测试/脚本的运行命令写进「验证命令」。
   - 「预期结果」写可观察结果，不要只写“通过”。
+- 执行要点要写到可直接开工的可执行程度：钉住真实文件/符号/入口、真实命令与预期结果；但不要拆成 2-5 分钟步骤、完整代码块、逐文件微任务或频繁 commit，PLAN 仍保持需求闭环任务粒度。
 - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
+- 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
 
 每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
@@ -288,12 +306,29 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json" --initial
 ```
 
-校验通过后再推进 checkpoint。若生成 `PLAN.md`，按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构从 `plan.json` 投影输出。
+校验通过后，再生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json`。必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。
+
+`SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 的粒度：每个案例必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码。
+
+`SMOKE_TEST_PLAN.json` 规则：
+- 顶层 `version` 固定为 `1`，`featureId` 为当前 `{feature}`，`flowBlocking` 必须为 `false`。
+- `tests[]` 可以为空；为空时必须写 `skipReason` 说明为什么本轮没有旁路冒烟价值。
+- 每个 `tests[]` 必须包含 `id`（`SMK-001` 起）、`taskId`、`scenarioRefs`、`title`、`smokeType`、`sourcePath`、`command`、`expectedSignals`、`preconditions`、`timeoutSeconds`。
+- `taskId` 必须引用 `plan.json.tasks[].id`；`scenarioRefs` 必须引用 specs 中真实 `SCN-xxx`。
+- `sourcePath` 只写计划中的目标测试源码或脚本路径，必须落在测试/冒烟目录，例如 `src/test/`、`tests/smoke/`、`scripts/smoke/`、`e2e/smoke/`；Plan 阶段不要求文件已存在。
+- `command` 必须是只运行对应冒烟案例的 opt-in 命令，例如 `mvn -q -Psmoke -Dtest=OrderSmokeIT verify`、`npm run smoke -- order.spec.ts`；不得写需要人工参与的步骤。
+- `expectedSignals` 写可观察信号，例如 HTTP 状态、关键响应字段、页面路由可达、CLI 输出片段；机器校验以测试断言和命令退出码为准，不解析自然语言信号。
+- 冒烟案例覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号；不要用它替代单测/E2E。
+- 不得把冒烟命令复制进 `plan.json.tasks[].validationCommands`。`validationCommands` 是强门禁，必须快、稳、可重复；`SMOKE_TEST_PLAN.json` 是旁路风险信号，失败不阻断 `code_done`。
+
+写入 `SMOKE_TEST_PLAN.json` 后，必须通过本阶段 artifact validator；若生成 `PLAN.md`，按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构从 `plan.json` 投影输出，冒烟计划可另行投影为人类摘要但不作为机器事实源。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘
+- [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json` 文件已写入磁盘，`flowBlocking=false`
 - [ ] `plan.json` 可作为任务 DAG 的机器事实源被后续阶段优先读取
-- [ ] JSON 结构、ID 引用与 DAG 通过 `plan_json.py validate --initial`；每个任务的「涉及范围」「执行要点」「验证命令」「预期结果」四段齐备
+- [ ] 每个任务都包含「做什么」「规格依据」「api_id」「data_id」「decision_id」「设计依据」「涉及范围」「执行要点」「验证命令」「预期结果」「状态: 待做」
+- [ ] 冒烟案例按 `SMK-001` 起编号，并绑定真实 `taskId` 与 `SCN-xxx`；没有冒烟案例时写明 `skipReason`
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx），验证命令带具体目标而非裸 mvn test/npm test；但没有写成逐行代码、逐文件微任务或 commit 步骤
 - [ ] 每个任务的「验证命令」都是大模型能直接运行并自行判读的命令（测试/构建/lint/curl/脚本），没有任何"手工""人工验证""Postman""浏览器点击"等需要人参与的步骤；HTTP 接口用 curl 或集成测试覆盖

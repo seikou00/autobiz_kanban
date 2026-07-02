@@ -95,6 +95,17 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
    - 最小 patch：观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 6. 执行任务「验证方法」（存在 `plan.json` 时优先 `plan.json.tasks[].validationCommands`；缺失或契约未列出 `plan.json` 时，基于 specs、AGENTS.md 和项目脚本选最小可行验证）。每次验证完成后用 `hooks/evidence_store.py append` 向 `evidence/EVIDENCE.jsonl` 末尾追加一条 evidence，记录 taskId（无 plan 时使用本轮轻量任务 ID）、specRefs、designRefs（无 design 契约时可为空）、changedFiles、validation.command/exitCode/result；`ev_XXXX` 按全流顺序自动递增，不按阶段重排，不得插入旧记录前、重编号、截断、重写、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`。若 append 或 checkpoint 报 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，必须恢复被改写前的 `EVIDENCE.jsonl` / `EVIDENCE.index.json`，无法恢复时停止并向用户报告。通过 → 状态「完成」；存在 `plan.json` 时还要将新增 evidenceId 写回 `plan.json.tasks[].evidenceIds`，`PLAN.md` 若存在再同步人类视图。失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
+7. 若 Source Bundle 含 `SMOKE_TEST_PLAN.json`，按其中 `tests[]` 生成或补齐旁路冒烟测试源码/脚本。冒烟测试必须是 opt-in：Java/Spring 可用 `*SmokeIT` + `-Psmoke`，前端可用 `tests/smoke/` + 单独 smoke script，CLI/API 可用 `scripts/smoke/`；不得通过 `.gitignore` 隐藏，也不得让默认 `validationCommands` 无意中跑到慢/脆的冒烟。全部强 validation 通过后，运行：
+
+```bash
+python "${pluginPath}/hooks/run_advisory_smoke.py" --feature "${feature}"
+```
+
+`run_advisory_smoke.py` 会写入 `SMOKE_RESULT.json` 并向 `EVIDENCE.jsonl` 追加 `action=smoke` evidence。冒烟 PASS/FAIL/BLOCKED/SKIPPED 都只作为旁路风险信号：不得把 smoke evidence 写入 `plan.json.tasks[].evidenceIds`，不得把冒烟失败改成任务失败，不得因为 `SMOKE_RESULT.json.verdict` 非 PASS 而阻断 `code_done`。但如果 `SMOKE_TEST_PLAN.json.tests[]` 非空，必须产出覆盖每个 `SMK-xxx` 的 `SMOKE_RESULT.json`。
+
+若 `run_advisory_smoke.py` 在执行前置检查阶段返回非 0（例如 `sourcePath` 对应测试源码不存在、测试条目非法或命令缺失），这表示 Code 阶段尚未按 `SMOKE_TEST_PLAN.json` 补齐冒烟测试资产；必须先补齐测试源码/修正计划后重跑。只有冒烟命令已经实际执行后的 PASS/FAIL/BLOCKED/SKIPPED 结果才属于不阻断流转的旁路风险信号。
+
+策略边界：`plan.json.tasks[].validationCommands`、`action=validation` evidence、`code_done_gate` 与模块编译检查仍是强门禁；`SMOKE_TEST_PLAN.json` / `SMOKE_RESULT.json` 只表达旁路冒烟风险。不要把启动/主链路 smoke 命令同时放进强门禁和 advisory smoke；除非用户明确要求恢复阻断式 startup gate，否则不得让 `SMOKE_RESULT.json.verdict` 影响 `code_done` 流转。
 
 > 一致性：任务的依据在对应 input 里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 
@@ -120,6 +131,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
 - 若 Source Bundle 含 `plan.json`：`plan.json` 中所有任务为完成态，每个任务至少有一条通过的 evidence；若 Source Bundle 未列出 `plan.json`：本轮轻量任务队列全部完成，并在 evidence 中记录对应 specs/proposal 依据。
 - `evidence/EVIDENCE.jsonl` 与 `evidence/EVIDENCE.index.json` 完整性校验通过，不存在截断、重写、重排、重编号或 index 缺失绕过。
+- 若 Source Bundle 含 `SMOKE_TEST_PLAN.json`：已按计划生成/补齐冒烟测试源码并运行 `run_advisory_smoke.py`；`SMOKE_RESULT.json` 已写入。`SMOKE_RESULT.json.verdict` 为 `FAIL` / `BLOCKED` / `SKIPPED` 时，记录为风险但不阻断本阶段流转。
 - 必要验证通过；项目编译通过（code_done execute hook 会在推进前再次校验 plan/evidence 闭环与模块编译）。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 

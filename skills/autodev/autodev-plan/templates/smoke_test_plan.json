@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "featureId": "{feature}",
+  "flowBlocking": false,
+  "skipReason": "",
+  "tests": [
+    {
+      "id": "SMK-001",
+      "taskId": "T001",
+      "scenarioRefs": [
+        "specs/[capability]/spec.md#SCN-001"
+      ],
+      "title": "[主链路/启动/路由冒烟案例名]",
+      "smokeType": "api",
+      "sourcePath": "src/test/java/[package]/[Feature]SmokeIT.java",
+      "command": "[只运行该冒烟案例的命令，如 mvn -q -Psmoke -Dtest=[Feature]SmokeIT verify]",
+      "expectedSignals": [
+        "[可观察信号，如 HTTP 200]",
+        "[关键字段或状态断言]"
+      ],
+      "preconditions": [
+        "[运行该冒烟案例所需的 profile/fixture/stub]"
+      ],
+      "timeoutSeconds": 300
+    }
+  ]
+}
