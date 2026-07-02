@@ -269,7 +269,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 UI 任务投影规则：
 - 必须读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json`；UI 范围只从该 JSON 投影，不从 PRD/specs/PLAN Markdown 关键词推导。
 - UI 任务需要在基础模板上投影 UI 条件字段；具体结构以本节规则和 validator 为准，缺失或与 `UI_CONTEXT.json` 不一致会被拒绝。
+- `UI_CONTEXT.uiRequired=true` 但缺少带 `REQ/SCN specRefs` 的 UI capability 时，不生成 UI 任务，回到 `/autodev-specs` 补齐 UI 场景分母。
 - `UI_CONTEXT.uiRequired=true` 时，只为 UI capability 生成 `uiRequired=true` 的任务，并补齐 `uiRefs.pageRefs`、`uiRefs.interactionRefs`、`uiRefs.visualSourceRefs` 和 `uiRefs.frontendRoute`。
+- UI feature 下，`uiRequired` 不是 `true` 的任务不得带非空 `uiRefs`；纯后端支撑任务只保留业务/设计/验证依据。
 - `UI_CONTEXT.uiRequired=false` 时，不生成 UI task；纯后端任务不得夹带前端实现。
 - `uiRefs.frontendRoute` 取值为 `none`、`spec-driven-ui`、`absolute-html`、`standard-html` 或 `missing-html`。有 UI 但无 HTML/设计稿时使用 `spec-driven-ui`，不要伪造 HTML 输入。
 

@@ -1422,6 +1422,11 @@ def validate_plan_ui_projection(ctx: HookContext) -> int:
                 failures += fail_line(ctx, "plan_ui_refs_when_feature_not_ui", f" task={task_id}")
             continue
 
+        if not task_ui_required:
+            if isinstance(ui_refs, dict) and ui_refs:
+                failures += fail_line(ctx, "plan_ui_refs_for_non_ui_task", f" task={task_id}")
+            continue
+
         if task_ui_required:
             ui_task_count += 1
             if not isinstance(ui_refs, dict):
@@ -1906,6 +1911,13 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
     if route == ROUTE_NONE and evidence.get("triggered") is not True:
         return 0
     if route == ROUTE_SPEC_DRIVEN:
+        review_status = evidence.get("reviewStatus")
+        if review_status not in FRONTEND_REVIEW_PASS:
+            return fail_line(
+                ctx,
+                "frontend_review_not_passed_or_skipped",
+                f" reviewStatus={review_status!r} evidence={evidence_file}",
+            )
         return 0
     if route == ROUTE_MISSING:
         return fail_line(ctx, "frontend_html_source_missing", f" evidence={evidence_file}")

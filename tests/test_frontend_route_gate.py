@@ -249,7 +249,31 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
 
 class FrontendRouteGateValidatorTests(unittest.TestCase):
-    def test_spec_driven_ui_allows_code_done_without_html_protocol(self) -> None:
+    def test_spec_driven_ui_allows_code_done_without_html_protocol_after_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    "version": 1,
+                    "feature": "alpha",
+                    "uiRequired": True,
+                    "triggered": True,
+                    "route": ROUTE_SPEC_DRIVEN,
+                    "source": "UI_CONTEXT.json",
+                    "visualSourceIds": [],
+                    "htmlSourcePaths": [],
+                    "reasons": ["UI_CONTEXT uiRequired without HTML visual source"],
+                    "docPaths": [],
+                    "reviewStatus": "passed",
+                },
+            )
+
+            failures = validate_frontend_route_gate(gate_context(workspace))
+
+        self.assertEqual(failures, 0)
+
+    def test_spec_driven_ui_requires_frontend_review_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             write_json(
@@ -268,9 +292,12 @@ class FrontendRouteGateValidatorTests(unittest.TestCase):
                 },
             )
 
-            failures = validate_frontend_route_gate(gate_context(workspace))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                failures = validate_frontend_route_gate(gate_context(workspace))
 
-        self.assertEqual(failures, 0)
+        self.assertGreater(failures, 0)
+        self.assertIn("frontend_review_not_passed_or_skipped", output.getvalue())
 
     def test_missing_evidence_blocks_frontend_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
