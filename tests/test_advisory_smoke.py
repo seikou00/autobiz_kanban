@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,15 @@ class AdvisorySmokeRunnerTest(unittest.TestCase):
         feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
         feature_dir.mkdir(parents=True, exist_ok=True)
         return feature_dir
+
+    def _init_git_repo(self, root: Path) -> None:
+        subprocess.run(["git", "init"], cwd=root, check=True, text=True, capture_output=True)
+
+    def _git_ignore_path(self, root: Path, path: str) -> None:
+        exclude = root / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n{path}\n")
 
     def test_failing_smoke_command_writes_result_and_returns_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,6 +116,46 @@ class AdvisorySmokeRunnerTest(unittest.TestCase):
 
             self.assertEqual(smoke_main(["--workspace", str(workspace), "--feature", "alpha"]), 1)
             self.assertFalse((feature_dir / "SMOKE_RESULT.json").exists())
+
+    def test_unignored_source_path_returns_error_without_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            self._init_git_repo(workspace)
+            feature_dir = self._feature_dir(workspace)
+            source_path = "tests/smoke/cap_smoke.py"
+            source = workspace / source_path
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("raise SystemExit(3)\n", encoding="utf-8")
+            command = f'"{sys.executable}" tests/smoke/cap_smoke.py'
+            (feature_dir / "SMOKE_TEST_PLAN.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "featureId": "alpha",
+                        "flowBlocking": False,
+                        "tests": [
+                            {
+                                "id": "SMK-001",
+                                "taskId": "T001",
+                                "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                                "title": "cap smoke",
+                                "smokeType": "cli",
+                                "sourcePath": source_path,
+                                "command": command,
+                                "expectedSignals": ["exit 0"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(smoke_main(["--workspace", str(workspace), "--feature", "alpha"]), 1)
+            self.assertFalse((feature_dir / "SMOKE_RESULT.json").exists())
+
+            self._git_ignore_path(workspace, source_path)
+            self.assertEqual(smoke_main(["--workspace", str(workspace), "--feature", "alpha"]), 0)
+            self.assertTrue((feature_dir / "SMOKE_RESULT.json").exists())
 
     def test_invalid_smoke_test_item_returns_error_without_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

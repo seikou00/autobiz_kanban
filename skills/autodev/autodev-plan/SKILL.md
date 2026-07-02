@@ -426,7 +426,7 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 - `tests[]` 可以为空；为空时必须写 `skipReason` 说明为什么本轮没有旁路冒烟价值。
 - 每个 `tests[]` 必须包含 `id`（`SMK-001` 起）、`taskId`、`scenarioRefs`、`title`、`smokeType`、`sourcePath`、`command`、`expectedSignals`、`preconditions`、`timeoutSeconds`。
 - `taskId` 必须引用 `plan.json.tasks[].id`；`scenarioRefs` 必须引用 specs 中真实 `SCN-xxx`。
-- `sourcePath` 只写计划中的目标测试源码或脚本路径，必须落在测试/冒烟目录，例如 `src/test/`、`tests/smoke/`、`scripts/smoke/`、`e2e/smoke/`；Plan 阶段不要求文件已存在。
+- `sourcePath` 只写计划中的目标测试源码或脚本路径，必须落在业务项目测试/冒烟目录，例如 `src/test/`、`tests/smoke/`、`scripts/smoke/`、`e2e/smoke/`；Plan 阶段不要求文件已存在。这些是 AutoDev 本地验证资产，不是业务项目长期测试资产，Code 阶段必须确保对应路径被目标项目 Git 忽略。
 - `command` 必须是只运行对应冒烟案例的 opt-in 命令，例如 `mvn -q -Psmoke -Dtest=OrderSmokeIT verify`、`npm run smoke -- order.spec.ts`；不得写需要人工参与的步骤。
 - `expectedSignals` 写可观察信号，例如 HTTP 状态、关键响应字段、页面路由可达、CLI 输出片段；机器校验以测试断言和命令退出码为准，不解析自然语言信号。
 - 冒烟案例覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号；不要用它替代单测/E2E。

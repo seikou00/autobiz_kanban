@@ -399,7 +399,7 @@
             { "id": "smoke_test_plan_json", "label": "旁路冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": false,
               "extract": {
                 "focus": ["tests[].id/taskId/scenarioRefs", "sourcePath/command/expectedSignals", "flowBlocking=false"],
-                "method": "按 SMOKE_TEST_PLAN.json 生成或补齐旁路冒烟测试源码，并在强 validationCommands 全部通过后执行；冒烟结果只写 SMOKE_RESULT.json 与 action=smoke evidence，不写入 plan.json.tasks[].evidenceIds",
+                "method": "按 SMOKE_TEST_PLAN.json 在业务项目测试目录生成或补齐本地旁路冒烟测试源码，并确保 sourcePath 被目标项目 Git 忽略；在强 validationCommands 全部通过后执行；冒烟结果只写 SMOKE_RESULT.json 与 action=smoke evidence，不写入 plan.json.tasks[].evidenceIds",
                 "degrade": "无 SMOKE_TEST_PLAN.json 时回到 /autodev-plan 补齐；lean/custom 未列出该输入时可生成 tests=[] 的 NOT_APPLICABLE 结果"
               } }
           ],

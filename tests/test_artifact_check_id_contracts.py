@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 import json
+import subprocess
 from pathlib import Path
 from unittest import mock
 
@@ -187,6 +188,15 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    def _init_git_repo(self, root: Path) -> None:
+        subprocess.run(["git", "init"], cwd=root, check=True, text=True, capture_output=True)
+
+    def _git_ignore_path(self, root: Path, path: str) -> None:
+        exclude = root / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n{path}\n")
 
     def _write_design(
         self,
@@ -1341,6 +1351,145 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertEqual(validate_smoke_result_json(self._required_output_ctx(feature_dir, "SMOKE_RESULT.json")), 0)
+
+    def test_smoke_result_requires_generated_source_to_be_git_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="done", evidence_ids=["ev_0001"])
+            source_path = "tests/smoke/cap_smoke.py"
+            source = root / source_path
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("raise SystemExit(1)\n", encoding="utf-8")
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": source_path,
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+            appended = append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "smoke",
+                    "specRefs": ["specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": [source_path],
+                    "smoke": {"testId": "SMK-001", "command": "python tests/smoke/cap_smoke.py", "exitCode": 1, "result": "fail"},
+                },
+                output_tail="boom",
+            )
+            self._write_json(
+                feature_dir,
+                "SMOKE_RESULT.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "flowBlocking": False,
+                    "verdict": "FAIL",
+                    "results": [
+                        {
+                            "testId": "SMK-001",
+                            "taskId": "T001",
+                            "command": "python tests/smoke/cap_smoke.py",
+                            "exitCode": 1,
+                            "result": "fail",
+                            "evidenceId": appended["evidenceId"],
+                            "outputTailPath": appended["smoke"]["outputTailPath"],
+                            "failureSummary": "boom",
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_smoke_result_json(self._required_output_ctx(feature_dir, "SMOKE_RESULT.json")), 0)
+
+            self._git_ignore_path(root, source_path)
+            self.assertEqual(validate_smoke_result_json(self._required_output_ctx(feature_dir, "SMOKE_RESULT.json")), 0)
+
+    def test_smoke_result_rejects_tracked_generated_source_even_when_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_git_repo(root)
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="done", evidence_ids=["ev_0001"])
+            source_path = "tests/smoke/cap_smoke.py"
+            source = root / source_path
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("raise SystemExit(1)\n", encoding="utf-8")
+            subprocess.run(["git", "add", source_path], cwd=root, check=True, text=True, capture_output=True)
+            self._git_ignore_path(root, source_path)
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": source_path,
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+            appended = append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "smoke",
+                    "specRefs": ["specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": [source_path],
+                    "smoke": {"testId": "SMK-001", "command": "python tests/smoke/cap_smoke.py", "exitCode": 1, "result": "fail"},
+                },
+                output_tail="boom",
+            )
+            self._write_json(
+                feature_dir,
+                "SMOKE_RESULT.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "flowBlocking": False,
+                    "verdict": "FAIL",
+                    "results": [
+                        {
+                            "testId": "SMK-001",
+                            "taskId": "T001",
+                            "command": "python tests/smoke/cap_smoke.py",
+                            "exitCode": 1,
+                            "result": "fail",
+                            "evidenceId": appended["evidenceId"],
+                            "outputTailPath": appended["smoke"]["outputTailPath"],
+                            "failureSummary": "boom",
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_smoke_result_json(self._required_output_ctx(feature_dir, "SMOKE_RESULT.json")), 0)
 
     def test_smoke_result_rejects_missing_planned_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
