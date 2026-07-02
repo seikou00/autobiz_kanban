@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "featureId": "{feature}",
+  "tasks": [
+    {
+      "id": "T001",
+      "title": "[需求闭环任务名]",
+      "status": "todo",
+      "deps": [],
+      "specRefs": [
+        "specs/[capability]/spec.md#REQ-001",
+        "specs/[capability]/spec.md#SCN-001"
+      ],
+      "designRefs": [
+        "design.md#API-001",
+        "design.md#DATA-001",
+        "design.md#D-001"
+      ],
+      "apiIds": [
+        "API-001"
+      ],
+      "dataIds": [
+        "DATA-001"
+      ],
+      "decisionIds": [
+        "D-001"
+      ],
+      "validationCommands": [
+        {
+          "command": "[可直接运行并自行判读的测试/构建/lint/curl 命令]"
+        }
+      ],
+      "expectedFiles": [],
+      "evidenceIds": [],
+      "blockers": []
+    },
+    {
+      "id": "T002",
+      "title": "[依赖 T001 的需求闭环任务名]",
+      "status": "todo",
+      "deps": [
+        "T001"
+      ],
+      "specRefs": [
+        "specs/[capability]/spec.md#REQ-002",
+        "specs/[capability]/spec.md#SCN-002"
+      ],
+      "designRefs": [
+        "design.md#D-002"
+      ],
+      "apiIds": [],
+      "dataIds": [],
+      "decisionIds": [
+        "D-002"
+      ],
+      "validationCommands": [
+        {
+          "command": "[可直接运行并自行判读的验证命令]"
+        }
+      ],
+      "expectedFiles": [],
+      "evidenceIds": [],
+      "blockers": []
+    }
+  ]
+}
