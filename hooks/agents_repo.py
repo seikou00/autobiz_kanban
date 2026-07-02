@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared helpers for the agents knowledge-base repo (service units + AGENTS.md).
+"""Shared helpers for the agents knowledge-base repo (deploy units + AGENTS.md).
 
 This module is the single source of truth shared by:
-- ``hooks/sync_agents.py``           (UI 触发：克隆/更新 agents 仓库 + 产出 service units)
-- ``hooks/render_session_context.py`` (createFeature 时：把选中服务单元映射到 AGENTS.md 注入)
+- ``hooks/sync_agents.py``           (UI 触发：克隆/更新 agents 仓库 + 产出 deploy units)
+- ``hooks/render_session_context.py`` (createFeature 时：把选中部署单元映射到 AGENTS.md 注入)
 
 它统一定义三件事，避免两个脚本各写一份：
 1. 克隆缓存的磁盘布局：``<pluginPath>/sys/``。
-2. 清单 schema：``agents.manifest.json``——把 system_id 与其下的后端单元 id
-   (serviceUnitId) 以及每个系统的 AGENTS.md 对应起来。
-3. 清单的解析/校验、serviceUnitId -> systemId 的索引、以及 sync 脚本输出形状的整形。
+2. 清单 schema：``agents.manifest.json``——把 system_id 与其下的部署单元 id
+   (deployUnitId) 以及每个系统的 AGENTS.md 对应起来。
+3. 清单的解析/校验、deployUnitId -> systemId 的索引、以及 sync 脚本输出形状的整形。
 
-清单（克隆后位于 ``<pluginPath>/sys/agents.manifest.json``）::
+清单（克隆后位于 ``<pluginPath>/sys/agents.manifest.json``）。字段名兼容旧写法：
+``deployUnits``/``deployUnitId`` 为新名，旧的 ``serviceUnits``/``serviceUnitId`` 仍可解析::
 
     {
       "schemaVersion": "autobizdevops.agents.manifest.v1",
       "systems": [
         {
           "systemId": "LF39",
-          "systemName": "外联服务系统",
-          "agents": "LF39/AGENTS.md",
-          "serviceUnits": [
-            { "serviceUnitId": "LF39.18_Outservice", "name": "外联出站服务" }
+          "description": "外联服务系统",
+          "agentsPath": "LF39/AGENTS.md",
+          "deployUnits": [
+            { "deployUnitId": "LF39.18_Outservice", "description": "外联出站服务" }
           ]
         }
       ]
@@ -57,8 +58,8 @@ class AgentsManifestError(Exception):
 
 
 @dataclass(frozen=True)
-class ServiceUnit:
-    service_unit_id: str
+class DeployUnit:
+    deploy_unit_id: str
     name: str = ""          # 展示名（清单 description；兼容旧 name）→ §4 引用范围
     agents_rel: str = ""    # 单元级 description.md 相对路径（清单 agentsPath）；空则无独立 md
 
@@ -68,7 +69,7 @@ class SystemEntry:
     system_id: str
     system_name: str = ""
     agents_rel: str = ""  # relative to agents root; default "<systemId>/AGENTS.md"
-    service_units: Tuple[ServiceUnit, ...] = ()
+    deploy_units: Tuple[DeployUnit, ...] = ()
 
     def agents_relpath(self) -> str:
         return self.agents_rel or f"{self.system_id}/{AGENTS_MD_NAME}"
@@ -139,7 +140,7 @@ def parse_manifest(data: object) -> Manifest:
 
     systems: List[SystemEntry] = []
     seen_systems: set[str] = set()
-    seen_units: dict[str, str] = {}  # serviceUnitId -> systemId（全局唯一）
+    seen_units: dict[str, str] = {}  # deployUnitId -> systemId（全局唯一）
 
     for idx, raw in enumerate(raw_systems):
         ctx = f"systems[{idx}]"
@@ -167,25 +168,27 @@ def parse_manifest(data: object) -> Manifest:
             # 提前校验路径合法性（穿越/绝对路径），失败即报错。
             _safe_join(Path("/__agents_root__"), agents_rel)
 
-        raw_units = raw.get("serviceUnits")
+        # 部署单元数组：新字段 deployUnits 优先，兼容旧 serviceUnits。
+        raw_units = raw.get("deployUnits", raw.get("serviceUnits"))
         if not isinstance(raw_units, list):
             actual = "缺失" if raw_units is None else f"当前是 {type(raw_units).__name__}"
             raise AgentsManifestError(
-                f"{ctx}.serviceUnits 必须是数组（{actual}），系统 {system_id}"
+                f"{ctx}.deployUnits 必须是数组（{actual}），系统 {system_id}"
             )
 
-        units: List[ServiceUnit] = []
+        units: List[DeployUnit] = []
         for uidx, raw_unit in enumerate(raw_units):
-            uctx = f"{ctx}.serviceUnits[{uidx}]"
+            uctx = f"{ctx}.deployUnits[{uidx}]"
             if not isinstance(raw_unit, dict):
                 raise AgentsManifestError(f"{uctx} 必须是对象")
-            unit_id = raw_unit.get("serviceUnitId")
+            # 单元 id：新字段 deployUnitId 优先，兼容旧 serviceUnitId。
+            unit_id = raw_unit.get("deployUnitId", raw_unit.get("serviceUnitId"))
             if not isinstance(unit_id, str) or not unit_id.strip():
-                raise AgentsManifestError(f"{uctx}.serviceUnitId 必须是非空字符串")
+                raise AgentsManifestError(f"{uctx}.deployUnitId 必须是非空字符串")
             unit_id = unit_id.strip()
             if unit_id in seen_units:
                 raise AgentsManifestError(
-                    f"serviceUnitId 全局重复: {unit_id} "
+                    f"deployUnitId 全局重复: {unit_id} "
                     f"(系统 {seen_units[unit_id]} 与 {system_id})"
                 )
             seen_units[unit_id] = system_id
@@ -200,7 +203,7 @@ def parse_manifest(data: object) -> Manifest:
             if unit_agents_rel:
                 _safe_join(Path("/__agents_root__"), unit_agents_rel)
             units.append(
-                ServiceUnit(service_unit_id=unit_id, name=name, agents_rel=unit_agents_rel)
+                DeployUnit(deploy_unit_id=unit_id, name=name, agents_rel=unit_agents_rel)
             )
 
         systems.append(
@@ -208,7 +211,7 @@ def parse_manifest(data: object) -> Manifest:
                 system_id=system_id,
                 system_name=system_name,
                 agents_rel=agents_rel,
-                service_units=tuple(units),
+                deploy_units=tuple(units),
             )
         )
 
@@ -227,11 +230,11 @@ def load_manifest(plugin_root: Optional[Path] = None) -> Manifest:
 
 
 def index_units(manifest: Manifest) -> Dict[str, str]:
-    """serviceUnitId -> systemId（清单已保证全局唯一）。"""
+    """deployUnitId -> systemId（清单已保证全局唯一）。"""
     return {
-        unit.service_unit_id: system.system_id
+        unit.deploy_unit_id: system.system_id
         for system in manifest.systems
-        for unit in system.service_units
+        for unit in system.deploy_units
     }
 
 
@@ -239,12 +242,12 @@ def systems_by_id(manifest: Manifest) -> Dict[str, SystemEntry]:
     return {system.system_id: system for system in manifest.systems}
 
 
-def index_unit_pairs(manifest: Manifest) -> Dict[str, Tuple[SystemEntry, ServiceUnit]]:
-    """serviceUnitId -> (所属系统, 单元)；注入段一步取到系统级与单元级两条路径。"""
+def index_unit_pairs(manifest: Manifest) -> Dict[str, Tuple[SystemEntry, DeployUnit]]:
+    """deployUnitId -> (所属系统, 单元)；注入段一步取到系统级与单元级两条路径。"""
     return {
-        unit.service_unit_id: (system, unit)
+        unit.deploy_unit_id: (system, unit)
         for system in manifest.systems
-        for unit in system.service_units
+        for unit in system.deploy_units
     }
 
 
@@ -253,10 +256,14 @@ def sys_abspath(rel: str, plugin_root: Optional[Path] = None) -> Path:
     return _safe_join(get_agents_root(plugin_root), rel)
 
 
-def sys_display(rel: str, plugin_root: Optional[Path] = None) -> str:
-    """sys/ 前缀的展示路径（字符串拼接，避免 macOS symlink 解析偏差）。"""
-    root = get_agents_root(plugin_root)
-    return f"{root.name}/{rel}".replace("\\", "/")
+def sys_abs_display(rel: str, plugin_root: Optional[Path] = None) -> str:
+    """sys/ 下文件的绝对展示路径（原生分隔符，与 local 条目一致）。
+
+    直接 Path 拼接、不对整条路径 resolve —— get_agents_root 已在 import 期一次性
+    resolve（plugin_root=None 时），拼接不再触发 resolve，避免 macOS /var→/private/var
+    symlink 漂移。
+    """
+    return str(get_agents_root(plugin_root) / rel)
 
 
 # ---- sync 输出整形（与 git 解耦，便于单测）-------------------------------
@@ -286,22 +293,22 @@ def build_sync_payload(
         # 解析，避免 macOS /var->/private/var 等 symlink 造成的相对路径偏差。
         agents_rel_display = f"{agents_root.name}/{system.agents_relpath()}".replace("\\", "/")
         units_payload = []
-        for unit in system.service_units:
-            supported_units.append(unit.service_unit_id)
-            units_payload.append({"serviceUnitId": unit.service_unit_id, "name": unit.name})
+        for unit in system.deploy_units:
+            supported_units.append(unit.deploy_unit_id)
+            units_payload.append({"deployUnitId": unit.deploy_unit_id, "name": unit.name})
         systems_payload.append(
             {
                 "systemId": system.system_id,
                 "systemName": system.system_name,
                 "agentsReady": agents_ready,
                 "agentsPath": agents_rel_display,
-                "serviceUnits": units_payload,
+                "deployUnits": units_payload,
             }
         )
 
     message = (
         f"agents 仓库已同步：{len(manifest.systems)} 个系统、"
-        f"{len(supported_units)} 个服务单元，AGENTS.md 就绪 {ready_count}/{len(manifest.systems)}"
+        f"{len(supported_units)} 个部署单元，AGENTS.md 就绪 {ready_count}/{len(manifest.systems)}"
     )
     return {
         "ok": True,
@@ -311,6 +318,6 @@ def build_sync_payload(
         # 知识库落盘路径（克隆缓存根 <pluginPath>/sys/）；与 repo 同级，供宿主写进 board.json
         # 的 inspectCommands.<platform>.knowledge_path。
         "knowledge_path": str(agents_root),
-        "supported_service_units": supported_units,
+        "supported_deploy_units": supported_units,
         "systems": systems_payload,
     }

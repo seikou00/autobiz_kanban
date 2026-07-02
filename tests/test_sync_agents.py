@@ -75,8 +75,8 @@ def _make_source_repo() -> Path:
     manifest = {
         "schemaVersion": "autobizdevops.agents.manifest.v1",
         "systems": [
-            {"systemId": "LF39", "systemName": "外联", "serviceUnits": [
-                {"serviceUnitId": "LF39.18_Outservice", "name": "出站"}]},
+            {"systemId": "LF39", "systemName": "外联", "deployUnits": [
+                {"deployUnitId": "LF39.18_Outservice", "name": "出站"}]},
         ],
     }
     (src / "agents.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
@@ -102,14 +102,14 @@ class SyncRepoEndToEndTest(unittest.TestCase):
 
         payload = build_sync_payload(plugin_root=plugin_root, repo_info={"url": str(src), "ref": "main", **info})
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["supported_service_units"], ["LF39.18_Outservice"])
+        self.assertEqual(payload["supported_deploy_units"], ["LF39.18_Outservice"])
         self.assertTrue(payload["systems"][0]["agentsReady"])
         # 知识库落盘路径与 repo 同级，指向克隆缓存根 <pluginPath>/sys。
         self.assertEqual(payload["knowledge_path"], str(dest))
 
         # 远端新增系统并提交
         manifest = json.loads((src / "agents.manifest.json").read_text(encoding="utf-8"))
-        manifest["systems"].append({"systemId": "LA64", "serviceUnits": [{"serviceUnitId": "LA64.05_UEXgateway"}]})
+        manifest["systems"].append({"systemId": "LA64", "deployUnits": [{"deployUnitId": "LA64.05_UEXgateway"}]})
         (src / "agents.manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
         (src / "LA64").mkdir()
         (src / "LA64" / "AGENTS.md").write_text("# LA64\n", encoding="utf-8")
@@ -122,7 +122,7 @@ class SyncRepoEndToEndTest(unittest.TestCase):
         self.assertTrue((dest / "LA64" / "AGENTS.md").is_file())
         payload2 = build_sync_payload(plugin_root=plugin_root)
         self.assertEqual(
-            payload2["supported_service_units"], ["LF39.18_Outservice", "LA64.05_UEXgateway"]
+            payload2["supported_deploy_units"], ["LF39.18_Outservice", "LA64.05_UEXgateway"]
         )
 
     def test_nonempty_nongit_dir_is_wiped_and_recloned(self):
@@ -164,7 +164,7 @@ class WriteBoardConfigTest(unittest.TestCase):
         '    "url": "",\n'
         '    "ref": "main"\n'
         "  },\n"
-        '  "supported_service_units": ["OLD1", "OLD2"],\n'
+        '  "supported_deploy_units": ["OLD1", "OLD2"],\n'
         '  "inspectCommands": { "darwin": { "x": "y" } }\n'
         "}\n"
     )
@@ -178,10 +178,10 @@ class WriteBoardConfigTest(unittest.TestCase):
         cfg = self._write(self.SAMPLE)
         sync_agents.merge_supported_units_into_board_config(["A", "B", "C"], cfg)
         out = cfg.read_text(encoding="utf-8")
-        self.assertEqual(json.loads(out)["supported_service_units"], ["A", "B", "C"])
+        self.assertEqual(json.loads(out)["supported_deploy_units"], ["A", "B", "C"])
         self.assertIn('  "apiVersion": 1,\n', out)
         self.assertIn('  "inspectCommands": { "darwin": { "x": "y" } }\n', out)
-        self.assertIn('"supported_service_units": ["A", "B", "C"],', out)
+        self.assertIn('"supported_deploy_units": ["A", "B", "C"],', out)
         # 仅定点替换、不重排：总行数不变
         self.assertEqual(len(out.splitlines()), len(self.SAMPLE.splitlines()))
 
@@ -198,15 +198,15 @@ class WriteBoardConfigTest(unittest.TestCase):
         cfg = self._write(text)
         sync_agents.merge_supported_units_into_board_config(["A"], cfg)
         data = json.loads(cfg.read_text(encoding="utf-8"))
-        self.assertEqual(data["supported_service_units"], ["A"])
+        self.assertEqual(data["supported_deploy_units"], ["A"])
         self.assertEqual(data["inspectCommands"], {})
 
     def test_empty_list_writes_empty_array(self):
         cfg = self._write(self.SAMPLE)
         sync_agents.merge_supported_units_into_board_config([], cfg)
         out = cfg.read_text(encoding="utf-8")
-        self.assertEqual(json.loads(out)["supported_service_units"], [])
-        self.assertIn('"supported_service_units": [],', out)
+        self.assertEqual(json.loads(out)["supported_deploy_units"], [])
+        self.assertIn('"supported_deploy_units": [],', out)
 
     def test_missing_agentsRepo_anchor_raises_and_does_not_write(self):
         text = '{\n  "inspectCommands": {}\n}\n'
@@ -279,11 +279,11 @@ class WriteBoardConfigTest(unittest.TestCase):
         sync_agents.merge_supported_units_into_board_config(["X1", "X2"], cfg)
         after = cfg.read_text(encoding="utf-8").splitlines()
         before = real.splitlines()
-        self.assertEqual(json.loads("\n".join(after))["supported_service_units"], ["X1", "X2"])
+        self.assertEqual(json.loads("\n".join(after))["supported_deploy_units"], ["X1", "X2"])
         self.assertEqual(len(before), len(after))
         diffs = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
         self.assertEqual(len(diffs), 1)
-        self.assertIn("supported_service_units", before[diffs[0]])
+        self.assertIn("supported_deploy_units", before[diffs[0]])
 
 
 class WriteBoardConfigWiringTest(unittest.TestCase):
@@ -314,7 +314,7 @@ class WriteBoardConfigWiringTest(unittest.TestCase):
     def test_flag_triggers_write_with_synced_units(self):
         unit_calls, _ = self._run_main(
             ["--write-board-config"],
-            {"ok": True, "supported_service_units": ["U1", "U2"], "message": "x"},
+            {"ok": True, "supported_deploy_units": ["U1", "U2"], "message": "x"},
         )
         self.assertEqual(unit_calls, [["U1", "U2"]])
 
@@ -323,7 +323,7 @@ class WriteBoardConfigWiringTest(unittest.TestCase):
             ["--write-board-config"],
             {
                 "ok": True,
-                "supported_service_units": ["U1"],
+                "supported_deploy_units": ["U1"],
                 "knowledge_path": "/abs/plugin/sys",
                 "message": "x",
             },
@@ -333,7 +333,7 @@ class WriteBoardConfigWiringTest(unittest.TestCase):
 
     def test_no_flag_does_not_write(self):
         unit_calls, kp_calls = self._run_main(
-            [], {"ok": True, "supported_service_units": ["U1"], "knowledge_path": "/s", "message": "x"}
+            [], {"ok": True, "supported_deploy_units": ["U1"], "knowledge_path": "/s", "message": "x"}
         )
         self.assertEqual(unit_calls, [])
         self.assertEqual(kp_calls, [])

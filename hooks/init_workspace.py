@@ -348,11 +348,11 @@ def main() -> None:
         help="JSON list of node ids, e.g. '[\"dev.specs\",\"dev.code\"]'",
     )
     parser.add_argument(
-        "--selected-serviceUnit",
-        dest="selected_service_units",
+        "--selected-deployUnit",
+        dest="selected_deploy_units",
         default="",
         help=(
-            "占位参数：UI 在 createFeature 勾选的服务单元（JSON 数组字符串）。"
+            "占位参数：UI 在 createFeature 勾选的部署单元（JSON 数组字符串）。"
             "当前仅接收以保证命令可解析，不落库（沿用「选择不落库」决策），"
             "由 session_context_inject 在会话期现传消费。"
         ),

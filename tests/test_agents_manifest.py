@@ -30,12 +30,12 @@ VALID = _manifest(
         {
             "systemId": "LF39",
             "systemName": "外联服务系统",
-            "serviceUnits": [
-                {"serviceUnitId": "LF39.18_Outservice", "name": "外联出站服务"},
-                {"serviceUnitId": "LF39.20_Inservice", "name": "外联入站服务"},
+            "deployUnits": [
+                {"deployUnitId": "LF39.18_Outservice", "name": "外联出站服务"},
+                {"deployUnitId": "LF39.20_Inservice", "name": "外联入站服务"},
             ],
         },
-        {"systemId": "LA64", "serviceUnits": [{"serviceUnitId": "LA64.05_UEXgateway"}]},
+        {"systemId": "LA64", "deployUnits": [{"deployUnitId": "LA64.05_UEXgateway"}]},
     ]
 )
 
@@ -44,9 +44,29 @@ class ParseManifestTest(unittest.TestCase):
     def test_parse_valid(self):
         manifest = parse_manifest(VALID)
         self.assertEqual([s.system_id for s in manifest.systems], ["LF39", "LA64"])
-        self.assertEqual(manifest.systems[0].service_units[0].service_unit_id, "LF39.18_Outservice")
+        self.assertEqual(manifest.systems[0].deploy_units[0].deploy_unit_id, "LF39.18_Outservice")
         # 默认 AGENTS.md 路径 = <systemId>/AGENTS.md
         self.assertEqual(manifest.systems[0].agents_relpath(), "LF39/AGENTS.md")
+
+    def test_parse_new_deploy_unit_field_names(self):
+        # 新清单字段：deployUnits / deployUnitId（对应旧 serviceUnits / serviceUnitId）。
+        manifest = parse_manifest(_manifest([
+            {"systemId": "LF3919", "description": "合规驾驶舱", "deployUnits": [
+                {"deployUnitId": "LB47.02_complycockpit", "description": "后端"},
+                {"deployUnitId": "LB47.02_wmcomplymnui", "description": "前端"},
+            ]},
+        ]))
+        units = manifest.systems[0].deploy_units
+        self.assertEqual([u.deploy_unit_id for u in units],
+                         ["LB47.02_complycockpit", "LB47.02_wmcomplymnui"])
+        self.assertEqual(units[0].name, "后端")
+
+    def test_missing_deploy_units_error_names_new_field(self):
+        with self.assertRaises(AgentsManifestError) as ctx:
+            parse_manifest(_manifest([{"systemId": "A"}]))
+        msg = str(ctx.exception)
+        self.assertIn("deployUnits 必须是数组", msg)
+        self.assertIn("缺失", msg)
 
     def test_index_units_maps_unit_to_system(self):
         idx = index_units(parse_manifest(VALID))
@@ -56,17 +76,17 @@ class ParseManifestTest(unittest.TestCase):
 
     def test_duplicate_system_id_rejected(self):
         bad = _manifest([
-            {"systemId": "X", "serviceUnits": []},
-            {"systemId": "X", "serviceUnits": []},
+            {"systemId": "X", "deployUnits": []},
+            {"systemId": "X", "deployUnits": []},
         ])
         with self.assertRaises(AgentsManifestError) as ctx:
             parse_manifest(bad)
         self.assertIn("systemId 重复", str(ctx.exception))
 
-    def test_duplicate_service_unit_id_rejected_globally(self):
+    def test_duplicate_deploy_unit_id_rejected_globally(self):
         bad = _manifest([
-            {"systemId": "A", "serviceUnits": [{"serviceUnitId": "U1"}]},
-            {"systemId": "B", "serviceUnits": [{"serviceUnitId": "U1"}]},
+            {"systemId": "A", "deployUnits": [{"deployUnitId": "U1"}]},
+            {"systemId": "B", "deployUnits": [{"deployUnitId": "U1"}]},
         ])
         with self.assertRaises(AgentsManifestError) as ctx:
             parse_manifest(bad)
@@ -74,20 +94,20 @@ class ParseManifestTest(unittest.TestCase):
 
     def test_path_traversal_in_agents_rejected(self):
         bad = _manifest([
-            {"systemId": "A", "agents": "../escape/AGENTS.md", "serviceUnits": []},
+            {"systemId": "A", "agents": "../escape/AGENTS.md", "deployUnits": []},
         ])
         with self.assertRaises(AgentsManifestError) as ctx:
             parse_manifest(bad)
         self.assertIn("越界", str(ctx.exception))
 
     def test_absolute_agents_path_rejected(self):
-        bad = _manifest([{"systemId": "A", "agents": "/etc/passwd", "serviceUnits": []}])
+        bad = _manifest([{"systemId": "A", "agents": "/etc/passwd", "deployUnits": []}])
         with self.assertRaises(AgentsManifestError):
             parse_manifest(bad)
 
     def test_missing_system_id_rejected(self):
         with self.assertRaises(AgentsManifestError):
-            parse_manifest(_manifest([{"serviceUnits": []}]))
+            parse_manifest(_manifest([{"deployUnits": []}]))
 
     def test_systems_not_a_list_rejected(self):
         with self.assertRaises(AgentsManifestError):
@@ -105,13 +125,13 @@ V1 = {
             "systemId": "LF39",
             "description": "外联服务系统",
             "agentsPath": "LF3905/AGENTS.md",
-            "serviceUnits": [
+            "deployUnits": [
                 {
-                    "serviceUnitId": "LF39.18_Outservice",
+                    "deployUnitId": "LF39.18_Outservice",
                     "description": "外联出站服务",
                     "agentsPath": "LF3918/descition.md",
                 },
-                {"serviceUnitId": "LF39.20_Inservice", "description": "外联入站服务", "agentsPath": ""},
+                {"deployUnitId": "LF39.20_Inservice", "description": "外联入站服务", "agentsPath": ""},
             ],
         }
     ],
@@ -125,7 +145,7 @@ class ParseV1SchemaTest(unittest.TestCase):
         # description -> system_name；agentsPath -> 系统级路径
         self.assertEqual(system.system_name, "外联服务系统")
         self.assertEqual(system.agents_relpath(), "LF3905/AGENTS.md")
-        out, inn = system.service_units
+        out, inn = system.deploy_units
         # 单元 description -> name；单元 agentsPath -> agents_rel（可空）
         self.assertEqual(out.name, "外联出站服务")
         self.assertEqual(out.agents_rel, "LF3918/descition.md")
@@ -142,8 +162,8 @@ class ParseV1SchemaTest(unittest.TestCase):
         bad = {
             "schemaVersion": "v1",
             "systems": [
-                {"systemId": "A", "serviceUnits": [
-                    {"serviceUnitId": "U1", "agentsPath": "../escape.md"}]}
+                {"systemId": "A", "deployUnits": [
+                    {"deployUnitId": "U1", "agentsPath": "../escape.md"}]}
             ],
         }
         with self.assertRaises(AgentsManifestError) as ctx:
@@ -154,7 +174,7 @@ class ParseV1SchemaTest(unittest.TestCase):
         # 向后兼容：旧字段 systemName/name/agents 仍可解析
         manifest = parse_manifest(VALID)
         self.assertEqual(manifest.systems[0].system_name, "外联服务系统")
-        self.assertEqual(manifest.systems[0].service_units[0].name, "外联出站服务")
+        self.assertEqual(manifest.systems[0].deploy_units[0].name, "外联出站服务")
 
 
 class BuildSyncPayloadTest(unittest.TestCase):
@@ -175,7 +195,7 @@ class BuildSyncPayloadTest(unittest.TestCase):
         payload = build_sync_payload(plugin_root=tmp, repo_info={"url": "u", "ref": "main", "commit": "c"})
         self.assertTrue(payload["ok"])
         self.assertEqual(
-            payload["supported_service_units"],
+            payload["supported_deploy_units"],
             ["LF39.18_Outservice", "LF39.20_Inservice", "LA64.05_UEXgateway"],
         )
         lf39, la64 = payload["systems"]

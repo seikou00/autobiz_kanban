@@ -13,17 +13,17 @@ board_config.json 注册::
 行为：每次都删掉旧 ``<pluginPath>/sys/``（已 .gitignore）再重新克隆，始终拿到远端
 最新内容；仓库内含 ``agents.manifest.json`` 与 ``<systemId>/AGENTS.md``。随后把清单整形为 stdout JSON。
 
-输出（stdout，宿主据此把 supported_service_units 合并进 board.json）::
+输出（stdout，宿主据此把 supported_deploy_units 合并进 board.json）::
 
     { "ok": true, "schemaVersion": "...", "message": "...",
       "repo": {"url","ref","commit"},
       "knowledge_path": "<pluginPath>/sys",  # 克隆落盘路径，与 repo 同级；写进 board.json 的
                                              # inspectCommands.<platform>.knowledge_path
-      "supported_service_units": [...],
-      "systems": [ {"systemId","systemName","agentsReady","agentsPath","serviceUnits":[...]} ] }
+      "supported_deploy_units": [...],
+      "systems": [ {"systemId","systemName","agentsReady","agentsPath","deployUnits":[...]} ] }
 
 ``--write-board-config``（已写进注册的 pull_knowledge 命令，UI 每次拉取即触发）：同步成功后
-把 ``supported_service_units`` 定点写回 board_config.json 顶层同名字段，并把克隆落盘路径写回
+把 ``supported_deploy_units`` 定点写回 board_config.json 顶层同名字段，并把克隆落盘路径写回
 ``inspectCommands.<当前平台>.knowledge_path``（把预置的 ``${pluginPath}/sys`` 静态模板改写成解析出的
 绝对路径，只改当前 OS 那一处）。两处都正则定点替换、不重排整份文件；写前校验仍为合法 JSON，
 否则放弃写入并在结果里给出 boardConfigWriteError。
@@ -177,32 +177,32 @@ def run(repo_url: Optional[str], ref: Optional[str]) -> dict:
 def merge_supported_units_into_board_config(
     units: List[str], config_path: Path = BOARD_CONFIG_PATH
 ) -> None:
-    """把同步得到的 supported_service_units 定点写回 board_config.json（打包前 bake）。
+    """把同步得到的 supported_deploy_units 定点写回 board_config.json（打包前 bake）。
 
-    只替换顶层 ``"supported_service_units": [...]`` 这一处的数组值（正则定点替换、
+    只替换顶层 ``"supported_deploy_units": [...]`` 这一处的数组值（正则定点替换、
     不重排整份文件，保留其余手写格式）；该键不存在时插到 ``agentsRepo`` 块之后。
     写盘前用 ``json.loads`` 校验结果仍是合法 JSON 且该字段已等于 units，否则抛
     RuntimeError 不落盘——确保任何情况下都不会写坏 board_config.json。
     """
     text = config_path.read_text(encoding="utf-8")
     serialized = json.dumps(units, ensure_ascii=False)  # 形如 ["a", "b"]，与手写风格一致
-    array_pat = re.compile(r'("supported_service_units"\s*:\s*)\[[^\]]*\]')
+    array_pat = re.compile(r'("supported_deploy_units"\s*:\s*)\[[^\]]*\]')
     if array_pat.search(text):
         new_text = array_pat.sub(lambda m: m.group(1) + serialized, text, count=1)
     else:
         # 键缺失：插到 agentsRepo 对象（含其后逗号）之后，沿用顶层两空格缩进。
         anchor = re.search(r'"agentsRepo"\s*:\s*\{[^}]*\}\s*,', text)
         if not anchor:
-            raise RuntimeError("board_config.json 缺少 agentsRepo 锚点，无法插入 supported_service_units")
-        insertion = anchor.group(0) + f'\n  "supported_service_units": {serialized},'
+            raise RuntimeError("board_config.json 缺少 agentsRepo 锚点，无法插入 supported_deploy_units")
+        insertion = anchor.group(0) + f'\n  "supported_deploy_units": {serialized},'
         new_text = text[: anchor.start()] + insertion + text[anchor.end() :]
 
     try:
         parsed = json.loads(new_text)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"写回后 board_config.json 非合法 JSON，已放弃写入: {exc}") from exc
-    if parsed.get("supported_service_units") != units:
-        raise RuntimeError("写回校验失败：supported_service_units 未按预期更新，已放弃写入")
+    if parsed.get("supported_deploy_units") != units:
+        raise RuntimeError("写回校验失败：supported_deploy_units 未按预期更新，已放弃写入")
     config_path.write_text(new_text, encoding="utf-8")
 
 
@@ -265,14 +265,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--write-board-config",
         dest="write_board_config",
         action="store_true",
-        help="同步成功后把 supported_service_units 定点写回 board_config.json（打包前 bake 用；UI 常规拉取不必带）",
+        help="同步成功后把 supported_deploy_units 定点写回 board_config.json（打包前 bake 用；UI 常规拉取不必带）",
     )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     result = run(args.repo_url, args.ref)
-    if args.write_board_config and result.get("ok") and isinstance(result.get("supported_service_units"), list):
+    if args.write_board_config and result.get("ok") and isinstance(result.get("supported_deploy_units"), list):
         try:
-            merge_supported_units_into_board_config(result["supported_service_units"])
+            merge_supported_units_into_board_config(result["supported_deploy_units"])
             # 知识库落盘路径写回 inspectCommands.<当前平台>.knowledge_path（把静态模板改写成绝对路径）。
             if isinstance(result.get("knowledge_path"), str) and result["knowledge_path"]:
                 merge_knowledge_path_into_board_config(result["knowledge_path"])
