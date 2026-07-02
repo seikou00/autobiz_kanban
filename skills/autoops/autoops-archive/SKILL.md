@@ -1,29 +1,19 @@
 ---
 name: autoops-archive
-description: Ops 归档阶段技能。负责在上游阶段完成后将当前 Feature 过程目录移入 archive，并把 checkpoint 从上游 done checkpoint（以契约转移表为准）推进到 archived。
-version: v1.1.1604
+description: Ops 归档阶段技能。
+version: v1.2.1701
 author: zhangQiuFeng
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+进入执行前，取当前 Feature 的执行清单：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-archive --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-archive --feature "${feature}" --plain
 ```
-
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 # /autoops-archive — Feature 过程归档
@@ -32,33 +22,24 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-archive --feature
 
 在 CI/CD 已由用户确认完成后，将当前 Feature 的过程产物从 active features 目录移动到 archive 目录，并把状态推进到终态。
 
-## 合法入口
+## 恢复入口
+若 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 已不存在、`.autobizdevops/archive/{slug}-iter*` 已存在且 `state.json` 为 `archived`，直接提示已归档并退出
 
-- 上游入口：当前工作流中允许转移到 `archived` 的上游 done checkpoint（以本 Feature 工作流契约的转移表为准，`update_checkpoint.py` 会强制校验）
-- 恢复入口：若 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 已不存在、`.autobizdevops/archive/{slug}-iter*` 已存在且 `state.json` 为 `archived`，直接提示已归档并退出
-
-其他 checkpoint 均不得执行归档。
-
-## 输入参数
-
-- `--feature {slug}`（推荐）：指定当前 Feature
-
-确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
 
 ```bash
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-后续准入和恢复直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
-
+后续准入和恢复直接取用 `CHECKPOINT`。
 ## 路径约定
 
 | 项目 | 路径 |
 |------|------|
 | 活跃 Feature 目录 | `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` |
-| 归档根目录 | `.autobizdevops/archive/` |
-| 归档目标目录 | `.autobizdevops/archive/{slug}-iter{N}/` |
-| 全局状态 | `.autobizdevops/state.json` |
+| 归档根目录 | `${pluginWorkspace}/${projectDir}/.autobizdevops/archive/` |
+| 归档目标目录 | `${pluginWorkspace}/${projectDir}/.autobizdevops/archive/{slug}-iter{N}/` |
+| 全局状态 | `${pluginWorkspace}/${projectDir}/.autobizdevops/state.json` |
 
 `iter{N}` 的确定规则：
 
@@ -71,10 +52,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ### Step 1: 前置检查
 
-1. 确定 `{slug}`。
-2. 确认 `CHECKPOINT` 为当前工作流中允许进入 `archived` 的上游 done checkpoint（以契约转移表为准）。
-3. 确认 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 存在。
-4. 确认 `.autobizdevops/archive/` 存在；若缺失，可创建该目录。
+- 确认 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 存在。
+- 确认 `.autobizdevops/archive/` 存在；若缺失，无法归档。
 
 ### Step 2: 选择归档目标
 

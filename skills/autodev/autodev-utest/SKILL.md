@@ -1,28 +1,19 @@
 ---
 name: autodev-utest
-description: "Dev 阶段单元测试生成与单测驱动最小修复技能。读取 proposal.md、specs/**/*.md、design.md、plan.json、evidence/EVIDENCE.jsonl 与 REVIEW_FINDINGS.json，按 specs 行为契约生成单测、执行验证、归因失败，并在当前 feature 范围内做最小测试代码或业务代码修复。默认由当前会话内联执行。"
-version: v1.1.1604
+description: "Dev 阶段单元测试生成与单测驱动最小修复技能。"
+version: v1.2.1701
 ---
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+进入执行前，取当前 Feature 的执行清单：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "${feature}" --plain
 ```
 
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -30,11 +21,11 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "
 
 ## 阶段定位
 
-本技能位于 `autodev-reviewer` 之后、`autodev-e2e` 之前。它的职责不是只补测试，也不是自由修代码，而是用单元测试把当前 feature 的实现拉到可验证状态。
+本技能的职责不是只补测试，也不是自由修代码，而是用单元测试把当前 feature 的实现拉到可验证状态。
 
 核心目标：
 
-- 从 Source Bundle 中的 `proposal.md`、`specs/**/*.md`、`design.md`、`plan.json`、`evidence/EVIDENCE.jsonl`、`REVIEW_FINDINGS.json` 提取需要单测覆盖的行为，其中 specs 是主要行为契约，plan/evidence/review 均以 JSON 为机器事实源。
+- 从执行清单列出的内容提取需要单测覆盖的行为，其中 JSON 为机器事实源。
 - 为当前 feature 生成或补齐单元测试。
 - 逐个运行测试，保留原始测试日志。
 - 对失败进行根因归类。
@@ -56,15 +47,13 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "
 - 不得把测试生成、失败归因、代码修复或报告编写委派给下级 agent 或子 agent。
 - 后台进程只允许用于运行构建或测试命令，不承担 agent 工作。
 
-状态文件统一使用 `.autobizdevops/state.json`；`.autobizdevops/STATE.md` 仅为自动生成视图。每次推进 checkpoint 时，只允许更新当前 `{slug}` 对应的 Feature 记录，不得改写其他 slug 的状态。
-
-确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+调用脚本读取当前 Feature 快照：
 
 ```bash
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
+后续准入、恢复和完成判断直接取用 `CHECKPOINT`。
 
 ## 参数
 
@@ -72,28 +61,21 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--feature {slug}` | 自动推断 | 指定当前 Feature |
 | `--mode auto` | 是 | 先归因，再决定修测试还是修业务代码 |
 | `--mode test` | 否 | 只允许修改测试代码、fixture、mock、测试辅助文件 |
 | `--mode code` | 否 | 只允许在已有失败测试锚定下修当前 feature 的业务代码 |
 | `--no-fix` | 否 | 只生成、运行、记录，不做任何修复 |
 | `--max-fix N` | `3` | 单个根因最多修复尝试次数 |
 
-没有显式传入 mode 时使用 `auto`。
-
 ## 输入与产物
-
-FEATURE_DIR：
-
 ```text
 FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
 ```
 
-读取输入（消费 Source Bundle）：
+读取输入（消费执行清单）：
 
-- 按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的上游产物原件，按各自 `extract` 抽取重点。
-- `required: false` 的输入缺失时按其 `extract.degrade` 继续，不要硬等；bundle 未列出的产物不读不等。
-- `AGENTS.md` 与项目内相关约束
+- 按「流程契约」一节取本 Feature 的执行清单，读取 `## 输入产物` 列出的上游产物原件，按各自 `读取方式` 抽取重点。
+- 标『未生成』的可选 input 按其 `缺失处理`（降级）继续，不要硬等；清单未列出的产物不读不等。
 - 与当前 feature 相关的源码、已有测试、构建配置
 
 输出产物：
@@ -101,12 +83,12 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`（append-only 证据流）
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`（可选人类报告）
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`
 - `.autobizdevops/state.json` 与自动生成视图 `.autobizdevops/STATE.md`
 
 禁止修改：
 
-- Source Bundle 中的任何 input（凡在 bundle 中即只读）
+- 执行清单列出的任何 input
 - 本节点 outputs 之外的其他阶段产物
 - 与当前 feature 无关的业务代码
 - 生产代码中的测试专用入口、测试专用分支、伪造实现
@@ -148,13 +130,11 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 ### Step 1: 前置检查
 
-1. 确定 `{slug}` 与工作目录。
-2. 检查当前 checkpoint 应为本节点的准入 checkpoint（以契约为准）。
-3. 确认 `required_inputs` 中的产物存在。
-4. 读取 `AGENTS.md` 与项目测试约定。
-5. 识别构建工具：Maven、Gradle、npm、pnpm、yarn、pytest、go test 等。不要假设一定是 Java/Maven。
+- 确认执行清单中的产物存在。
+- 读取项目测试约定。
+- 识别构建工具：Maven、Gradle、npm、pnpm、yarn、pytest、go test 等。不要假设一定是 Java/Maven。
 
-`required_inputs` 中任一产物缺失时，保持 checkpoint 不变，向用户列出缺失文件后结束；`required: false` 的输入缺失不阻断，bundle 未列出的产物不参与检查。
+执行清单中任一产物缺失时，保持 checkpoint 不变，向用户列出缺失文件后结束。
 
 ### Step 2: 写入开始 checkpoint
 
@@ -164,8 +144,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### Step 3: 建立单测计划
-
-按 Method Bundle（各输入的 `extract.focus`/`method`）从输入产物中提取测试所需的行为契约、覆盖重点、风险与受影响范围。
 
 生成测试矩阵，优先沉淀到 `UNIT_TEST_RESULT.json.targets[]`；若生成 `UNIT_TEST_REPORT.md`，可同步写入其 `## Test Plan`：
 
@@ -302,7 +280,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 
 - E2E 阶段应重点覆盖的链路。
 - 仍需人工确认的项。
-- 若失败，建议回流阶段：`autodev-code`、`autobiz` 或 `environment`。
+- 若失败，返回用户确认。
 
 同时必须写入 `UNIT_TEST_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。若 target 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`；非 UI target 不要伪造 UI 标记。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。
 
@@ -358,7 +336,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 5. 不得为测试向生产代码添加测试专用方法、测试专用开关或伪实现。
 6. 每个“已修复”结论都必须有新鲜测试命令和退出码证据。
 7. 不能确定根因时，停止并记录，不猜修。
-8. 本 skill 的规则不得覆盖 AGENTS.md；如冲突，以 AGENTS.md 中项目约束为准，除非系统级指令另有要求。
 
 ## 输出清单
 
@@ -368,13 +345,12 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] 已生成或补齐单测。
 - [ ] 已运行精确测试并记录到 `test-output.log`。
 - [ ] 已将单测运行结果 append 到 `evidence/EVIDENCE.jsonl`，并在报告中引用 evidenceId。
-- [ ] 失败均已归因。
 - [ ] 允许范围内的最小修复均已验证。
 - [ ] 已执行扩大验证。
 - [ ] `UNIT_TEST_RESULT.json` 已写入，JSON 是下游机器主入口。
 - [ ] 成功时已推进 `unit_test_done`。
 
-**Skill 完成。** 推进 `unit_test_done` 后下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
+**Skill 完成。** 推进 `unit_test_done` 后下一步以 `resolve_next_skill.py` 为准：
 
 ```bash
 python "${pluginPath}/hooks/resolve_next_skill.py"

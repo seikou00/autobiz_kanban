@@ -20,6 +20,7 @@ from board_core.contracts import (  # noqa: E402
     load_record_workflow_contracts,
     load_repo_workflow_contracts,
 )
+from board_core.state import find_feature_dir  # noqa: E402
 from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_PROFILE,
@@ -71,6 +72,117 @@ def render_contract(contract: SkillContract) -> str:
         lines.extend(f"- `{validator}`" for validator in contract.validators)
     else:
         lines.append("- 无")
+    return "\n".join(lines) + "\n"
+
+
+_GLOB_CHARS = frozenset("*?[")
+
+
+def _artifact_present(feature_dir: Path, path: str) -> bool:
+    """Whether an input artifact already exists (non-empty) under the feature dir.
+
+    Glob-aware and mirrors the precheck gate's notion of "generated"
+    (skills/autodev/hooks/common.py::artifact_exists): a file counts only when it
+    exists with size > 0, so empty placeholders are treated as missing.
+    """
+    if any(char in path for char in _GLOB_CHARS):
+        return any(
+            match.is_file() and match.stat().st_size > 0 for match in feature_dir.glob(path)
+        )
+    target = feature_dir / path
+    return target.is_file() and target.stat().st_size > 0
+
+
+def _plain_artifact_block(index: int, artifact: ArtifactSpec, feature_dir: Path | None) -> list[str]:
+    """Render one input as a single, state-resolved instruction.
+
+    When ``feature_dir`` is known the on-disk state picks exactly one line so the
+    skill never has to reason: present → how to read it (method); missing →
+    what to do (required → stop and go upstream; optional → its degrade path).
+    Without a feature dir (baseline preview) existence is unknown, so the method
+    line is always shown. ``focus`` is intentionally dropped.
+    """
+    required = "必需" if artifact.required else "可选"
+    extract = artifact.extract
+    method = (extract.method if extract is not None else "") or "按产物内容读取并纳入上下文"
+
+    if feature_dir is None:
+        return [f"{index}. {artifact.path}（{required}）：{artifact.label}", f"   读取方式：{method}"]
+
+    if _artifact_present(feature_dir, artifact.path):
+        header = f"{index}. {artifact.path}（{required}·已生成）：{artifact.label}"
+        return [header, f"   读取方式：{method}"]
+
+    header = f"{index}. {artifact.path}（{required}·未生成）：{artifact.label}"
+    if artifact.required:
+        return [header, "   缺失处理：停止——必需输入未生成，回流上游补齐后再执行"]
+    degrade = (extract.degrade if extract is not None else "") or "直接跳过，不影响执行"
+    return [header, f"   缺失处理：{degrade}"]
+
+
+def _plain_context_line(workflow_context: dict) -> str | None:
+    parts: list[str] = []
+    if workflow_context.get("feature"):
+        parts.append(f"feature={workflow_context['feature']}")
+    if workflow_context.get("workflowProfile"):
+        parts.append(f"profile={workflow_context['workflowProfile']}")
+    if workflow_context.get("workflowTemplate"):
+        parts.append(f"template={workflow_context['workflowTemplate']}")
+    decisions = workflow_context.get("workflowDecisions") or {}
+    if decisions:
+        parts.append("decisions=" + ",".join(f"{key}={value}" for key, value in decisions.items()))
+    return "上下文：" + " ｜ ".join(parts) if parts else None
+
+
+def render_contract_plain(
+    contract: SkillContract,
+    workflow_context: dict | None = None,
+    feature_dir: Path | None = None,
+) -> str:
+    """Flatten the contract into a state-resolved execution checklist.
+
+    Unlike ``--json`` (which emits overlapping inputs/sourceBundle/methodBundle
+    views the skill must cross-reference and apply meta-rules to), this collapses
+    each input into a single ordered instruction. When ``feature_dir`` is given,
+    on-disk existence already picks method-vs-missing per input, so no judgment
+    is left for the consuming skill.
+    """
+    checkpoints = ", ".join(contract.checkpoints) or "无"
+    lines = [
+        f"# {contract.skill} · 执行清单（plain）",
+        f"节点：{contract.node_id}｜{contract.label}  checkpoint：{checkpoints}",
+    ]
+    if workflow_context:
+        context_line = _plain_context_line(workflow_context)
+        if context_line:
+            lines.append(context_line)
+
+    lines.append("")
+    lines.append("## 输入产物（按序执行；读取方式优先于技能正文默认）")
+    if contract.inputs:
+        for index, artifact in enumerate(contract.inputs, start=1):
+            lines.extend(_plain_artifact_block(index, artifact, feature_dir))
+    else:
+        lines.append("- 无")
+
+    lines.append("")
+    lines.append("## 边界（确定性）")
+    lines.append("- 未在上表列出的 id 不属于本工作流：不读、不等、不索要，也不要设想。")
+    lines.append("- 任一必需输入未生成即停止。")
+
+    lines.append("")
+    lines.append("## 输出产物")
+    if contract.outputs:
+        for artifact in contract.outputs:
+            required = "必需" if artifact.required else "可选"
+            lines.append(f"- {artifact.path}（{required}）：{artifact.label}")
+    else:
+        lines.append("- 无")
+
+    lines.append("")
+    lines.append("## Validators：" + ("，".join(contract.validators) or "无"))
+    if contract.guards:
+        lines.append("## Guards：" + "，".join(contract.guards))
     return "\n".join(lines) + "\n"
 
 
@@ -144,6 +256,14 @@ def _resolve_feature_workspace(workspace_arg: str | None) -> Path:
     return get_plugin_output_workspace()
 
 
+def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
+    """Feature artifact directory (active→archive), falling back to the active
+    path when absent so existence checks run and report everything missing."""
+    from hooks.paths import get_feature_active_dir  # noqa: PLC0415
+
+    return find_feature_dir(workspace, feature) or get_feature_active_dir(workspace, feature)
+
+
 def _find_feature_contract(
     repo_root: Path,
     *,
@@ -190,10 +310,18 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="workflow decision in stage=enabled|skipped form; may be repeated",
     )
-    parser.add_argument("--json", action="store_true", help="emit machine-readable contract JSON")
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument("--json", action="store_true", help="emit machine-readable contract JSON")
+    output_group.add_argument(
+        "--plain",
+        action="store_true",
+        help="emit a state-resolved execution checklist; with --feature, per-input "
+        "present→method / missing→stop-or-degrade is resolved from the feature dir",
+    )
     args = parser.parse_args(argv)
 
     workflow_context: dict = {}
+    feature_dir: Path | None = None
     try:
         repo_root = Path(args.repo_root).resolve()
         if args.feature is not None:
@@ -206,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
                 feature=args.feature,
                 workspace=workspace,
             )
+            feature_dir = _resolve_feature_dir(workspace, args.feature)
         else:
             workspace = Path(args.workspace).resolve() if args.workspace else None
             workflow_decisions = {}
@@ -237,6 +366,10 @@ def main(argv: list[str] | None = None) -> int:
         if workflow_context:
             payload["workflow"] = workflow_context
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.plain:
+        print(render_contract_plain(contract, workflow_context, feature_dir), end="")
         return 0
 
     print(render_contract(contract), end="")

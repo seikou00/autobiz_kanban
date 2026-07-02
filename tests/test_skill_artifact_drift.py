@@ -68,6 +68,15 @@ class SkillArtifactDriftTests(unittest.TestCase):
 
         self.assertEqual(findings, [])
 
+    def test_spec_template_does_not_emit_stable_id_instruction_section(self) -> None:
+        template = (ROOT / "skills" / "autodev" / "autodev-specs" / "templates" / "spec.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("## 稳定 ID 规范", template)
+        self.assertIn("### Requirement [REQ-001]:", template)
+        self.assertIn("#### Scenario [SCN-001]:", template)
+
 
 if __name__ == "__main__":
     unittest.main()

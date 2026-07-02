@@ -2,13 +2,6 @@
 
 来源: proposal.md + PRD.md + explore 阶段结论
 
-## 稳定 ID 规范
-
-- Requirement ID 统一使用 `REQ-001`、`REQ-002` ...，并写在 Requirement 标题中。
-- Scenario ID 统一使用 `SCN-001`、`SCN-002` ...，并写在 Scenario 标题中。
-- 其他阶段引用规格时，使用 `specs/<capability>/spec.md#REQ-001` 或 `specs/<capability>/spec.md#SCN-001`。
-- 一个 Requirement 可以有多个 Scenario，但每个 Scenario 只属于一个 Requirement。
-
 ## ADDED Requirements
 
 ### Requirement [REQ-001]: [能力名]

@@ -1,29 +1,19 @@
 ---
 name: autodev-specs
-description: Dev 阶段行为规格生成。按上游产物契约（Source Bundle）读取输入（缺上游 PRD 时基于用户描述澄清），探索需求、现有代码和隐性约束，与用户确认行为/API/数据边界后生成 proposal.md 与 specs/**/*.md；不得生成技术设计、任务计划或修改业务代码。
-version: v1.1.1604
+description: Dev 阶段行为规格生成。
+version: v1.2.1701
 ---
 
 
 <!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+## 流程契约（执行清单）
 
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+进入执行前，取当前 Feature 的执行清单：
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --plain
 ```
-
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
 <!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
@@ -31,7 +21,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 ## 阶段定位
 
-`autodev-specs` 是 Dev 阶段的第一个上下文边界，负责把上游需求输入转成稳定的行为契约。
+`autodev-specs` 是 Dev 阶段的上下文边界，负责把上游需求输入转成稳定的行为契约。
 
 本阶段只回答：
 
@@ -45,11 +35,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 ## 输入与输出
 
-读取输入（消费 Source Bundle）：
+读取输入（消费执行清单）：
 
-- 按「流程契约」一节取本 Feature 的契约，读取 `sourceBundle` 列出的上游产物原件，按对应methodBundle `extract` 抽取重点；契约未列出的上游产物不读不等，按其 `degrade` 处理（如基于用户直供需求澄清行为）。
+- 按「流程契约」一节取本 Feature 的执行清单，读取 `## 输入产物` 列出的上游产物原件，按各自 `读取方式` 抽取重点；清单未列出的上游产物不读不等，标『未生成』的可选 input 按其 `缺失处理`（降级）处理。
 - 用户补充说明(如有)
-- AGENTS.md 与项目约束
 - 与当前 feature 相关的现有代码、接口、数据模型、测试、配置
 
 输出产物：
@@ -62,7 +51,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 - 业务代码、测试代码、配置、迁移脚本
 - `design.md`
 - `plan.json`
-- `PLAN.md`（可选人类视图）
+- `PLAN.md`
 - 后续阶段报告
 
 ## 写入 checkpoint
@@ -94,8 +83,13 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据语义还不准确，先讨论。
 - 讨论时只提出影响实现路径或验收结果的关键问题，并给出当前建议、备选方案和影响面；不要机械问卷。
 - 仍有 `待确认` 且会影响接口形态、数据模型、权限/租户/审计、幂等、分页、异步、状态流、迁移或验收结果时，不要结束探索进入 specs 生成。
-- 待确认决策逐项与用户对齐后，是否结束探索进入 specs 生成必须由用户拍板：若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `这些决策已确认、生成 specs (Recommended)` / `继续讨论待确认项`；若不支持，必须显式追问：`以上行为/API/数据决策是否已确认？确认后我才生成 specs。请回复"生成 specs"或"继续讨论"。` 仍有影响行为契约的待确认项时，不得进入 specs 生成。
-
+- 待确认决策逐项与用户对齐后，是否结束探索进入 specs 生成必须由用户拍板：
+- 用 `request_user_input`发起选择，选项至少含
+  `这些决策已确认、生成 specs (Recommended)` / `继续讨论待确认项` / `其他`；
+- **自由表达即退出结构化**：若用户不点选项、而是直接给出实质回复（补一条决策、
+  改一个字段、提新问题），当作普通文本吸收进待确认表并更新建议，**不得机械重复弹同一个
+  结构化选择**；下一轮合适时机再重新发起该门。
+- 仍有影响行为契约的待确认项时，不得进入 specs 生成。
 讨论输出建议：
 
 ```markdown
@@ -136,6 +130,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - specs 完成时必须将 `UI_CONTEXT.json.decisionStatus` 固化为 `locked`，`lockedAtCheckpoint` 写 `specs_done`。
 - Requirement 使用 `### Requirement [REQ-001]: <name>`。
 - Scenario 使用四级标题 `#### Scenario [SCN-001]: <name>`。
+- `REQ-*` / `SCN-*` 只是标题中的稳定锚点规则，不要在真实 `spec.md` 中写入“稳定 ID 规范”说明章节。
 - 每个 Requirement 至少一个 Scenario。
 - 使用 SHALL/MUST 表达可验证行为。
 - 修改已有行为时，写完整的新行为，不要只写差异片段。
