@@ -77,9 +77,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 对每个 input 按其 `读取方式` 抽取并记住关键信息。
 
-**任务队列：** 必须读取契约提供的 `plan.json`，直接按 `tasks[]` 中的 `deps/status/specRefs/designRefs/apiIds/dataIds/decisionIds/validationCommands/evidenceIds` 建立队列，不得重新拆分任务；更新任务时必须修改 `plan.json`，`PLAN.md` 若存在只作为人类视图同步。若当前 workflow 未提供 `plan.json`，停止执行并回到 Plan 阶段补齐结构化计划，不得在 Code 阶段临时拆分或维护 Markdown 任务清单。
-- 若当前运行模式支持 `write_todos`，把 `plan.json.tasks[]` 映射成可见任务清单，状态用 待做 / 进行中 / 完成 / 失败，并与 `plan.json` 保持同步；每次只置一个任务为"进行中"。`write_todos` 只反映任务进度，不替代 checkpoint 脚本与产物校验。
-（依"方法优先"：若某 input 的读取方式给了更具体读写要求，按其指示执行。）
+- 使用`write_todos`，把 `plan.json`（如有） 映射成可见任务清单，状态用 待做 / 进行中 / 完成 / 失败；每次只置一个任务为"进行中"。`write_todos` 只反映任务进度。
 
 ### 2. 选择下一个任务
 
@@ -96,7 +94,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
-6. 执行任务「验证方法」（优先 `plan.json.tasks[].validationCommands`；缺失则基于 AGENTS.md / 项目脚本选最小可行验证并记回任务）。每次验证完成后用 `hooks/evidence_store.py append` 追加一条 evidence，记录 taskId、specRefs、designRefs、changedFiles、validation.command/exitCode/result；不要截断或重写 `evidence/EVIDENCE.jsonl`。通过 → 状态「完成」+ 将新增 evidenceId 写回 `plan.json.tasks[].evidenceIds`，`PLAN.md` 若存在再同步人类视图；失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
+6. 执行任务「验证方法」（存在 `plan.json` 时优先 `plan.json.tasks[].validationCommands`；缺失或契约未列出 `plan.json` 时，基于 specs、AGENTS.md 和项目脚本选最小可行验证）。每次验证完成后用 `hooks/evidence_store.py append` 向 `evidence/EVIDENCE.jsonl` 末尾追加一条 evidence，记录 taskId（无 plan 时使用本轮轻量任务 ID）、specRefs、designRefs（无 design 契约时可为空）、changedFiles、validation.command/exitCode/result；`ev_XXXX` 按全流顺序自动递增，不按阶段重排，不得插入旧记录前、重编号、截断、重写、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`。若 append 或 checkpoint 报 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，必须恢复被改写前的 `EVIDENCE.jsonl` / `EVIDENCE.index.json`，无法恢复时停止并向用户报告。通过 → 状态「完成」；存在 `plan.json` 时还要将新增 evidenceId 写回 `plan.json.tasks[].evidenceIds`，`PLAN.md` 若存在再同步人类视图。失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
 
 > 一致性：任务的依据在对应 input 里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 
@@ -120,7 +118,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ## 完成条件
 
 - 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
-- `plan.json` 中所有任务为完成态，每个任务至少有一条通过的 evidence；`evidence/EVIDENCE.jsonl` 与 `evidence/EVIDENCE.index.json` 完整性校验通过，不存在截断/重写。
+- 若 Source Bundle 含 `plan.json`：`plan.json` 中所有任务为完成态，每个任务至少有一条通过的 evidence；若 Source Bundle 未列出 `plan.json`：本轮轻量任务队列全部完成，并在 evidence 中记录对应 specs/proposal 依据。
+- `evidence/EVIDENCE.jsonl` 与 `evidence/EVIDENCE.index.json` 完整性校验通过，不存在截断、重写、重排、重编号或 index 缺失绕过。
 - 必要验证通过；项目编译通过（code_done execute hook 会在推进前再次校验 plan/evidence 闭环与模块编译）。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 

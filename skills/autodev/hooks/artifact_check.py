@@ -974,6 +974,12 @@ def validate_plan_json_initial_tasks(ctx: HookContext) -> int:
 
 def validate_plan_json_contract(ctx: HookContext) -> int:
     plan_json = ctx.file("plan.json")
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        if is_nonempty(ctx.file("PLAN.md")):
+            return fail_line(ctx, "missing_plan_json", " detail=PLAN.md_present_but_not_machine_source")
+        info(ctx, "plan_json_not_in_contract_degrade")
+        return 0
+
     data, errors = load_and_validate_plan(plan_json)
     failures = 0
     if errors:
@@ -1012,7 +1018,7 @@ def validate_code_done_gate(ctx: HookContext) -> int:
         info(ctx, "code_done_gate_not_in_contract_degrade")
         return 0
     failures = 0
-    for error in check_code_done(ctx.feature_dir):
+    for error in check_code_done(ctx.feature_dir, require_plan=ctx.requires_artifact("plan.json")):
         failures += fail_line(ctx, "invalid_code_done_gate", f" detail={error}")
     return failures
 
