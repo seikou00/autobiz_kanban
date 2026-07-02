@@ -12,14 +12,14 @@
       ],
       "title": "[主链路/启动/路由冒烟案例名]",
       "smokeType": "api",
-      "sourcePath": "src/test/java/[package]/[Feature]SmokeIT.java",
+      "sourcePath": "src/test/java/[package]/autodev_smoke/[Feature]SmokeIT.java",
       "command": "[只运行该冒烟案例的命令，如 mvn -q -Psmoke -Dtest=[Feature]SmokeIT verify]",
       "expectedSignals": [
         "[可观察信号，如 HTTP 200]",
         "[关键字段或状态断言]"
       ],
       "preconditions": [
-        "[运行该冒烟案例所需的 profile/fixture/stub]"
+        "[运行该冒烟案例所需的 profile/fixture/stub；Code 阶段需确保 sourcePath 被目标项目 Git 忽略]"
       ],
       "timeoutSeconds": 300
     }

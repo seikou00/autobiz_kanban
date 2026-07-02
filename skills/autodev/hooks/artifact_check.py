@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -321,6 +322,64 @@ def _smoke_source_path_allowed(path: str) -> bool:
     if any(part == ".." for part in normalized.split("/")):
         return False
     return any(normalized.startswith(prefix) for prefix in SMOKE_SOURCE_PREFIXES)
+
+
+def _git_repo_root(root: Path) -> Path | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return Path(value).resolve() if value else None
+
+
+def _git_path_state(root: Path, source_path: str) -> tuple[bool, bool] | None:
+    repo_root = _git_repo_root(root)
+    if repo_root is None:
+        return None
+    absolute_path = (root / source_path).resolve()
+    try:
+        relative_path = absolute_path.relative_to(repo_root)
+    except ValueError:
+        return None
+    rel = relative_path.as_posix()
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--", rel],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+        ignored = subprocess.run(
+            ["git", "-C", str(repo_root), "check-ignore", "--quiet", "--no-index", "--", rel],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+    except OSError:
+        return None
+    return tracked, ignored
+
+
+def _check_smoke_source_git_ignored(ctx: HookContext, source_path: str, *, test_id: str) -> int:
+    state = _git_path_state(ctx.root, source_path)
+    if state is None:
+        info(ctx, "smoke_source_git_ignore_check_skipped", f" id={test_id} path={source_path}")
+        return 0
+    tracked, ignored = state
+    failures = 0
+    if tracked:
+        failures += fail_line(ctx, "tracked_smoke_source_file", f" id={test_id} path={source_path}")
+    if not ignored:
+        failures += fail_line(ctx, "unignored_smoke_source_file", f" id={test_id} path={source_path}")
+    return failures
 
 
 def _check_smoke_scenario_refs(
@@ -1059,8 +1118,11 @@ def validate_smoke_result_json(ctx: HookContext) -> int:
         failures += fail_line(ctx, "invalid_smoke_result_summary")
     for test_id, plan_item in planned_tests.items():
         source_path = plan_item.get("sourcePath")
-        if isinstance(source_path, str) and source_path and not (ctx.root / source_path).is_file():
-            failures += fail_line(ctx, "missing_smoke_source_file", f" id={test_id} path={source_path}")
+        if isinstance(source_path, str) and source_path:
+            if not (ctx.root / source_path).is_file():
+                failures += fail_line(ctx, "missing_smoke_source_file", f" id={test_id} path={source_path}")
+            else:
+                failures += _check_smoke_source_git_ignored(ctx, source_path, test_id=test_id)
     return failures
 
 

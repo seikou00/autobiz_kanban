@@ -85,6 +85,54 @@ def _run_command(command: str, *, cwd: Path, timeout: int) -> tuple[int, str, st
     return completed.returncode, "pass" if completed.returncode == 0 else "fail", output
 
 
+def _git_repo_root(root: Path) -> Path | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return Path(value).resolve() if value else None
+
+
+def _git_source_errors(workspace: Path, source_path: str) -> list[str]:
+    repo_root = _git_repo_root(workspace)
+    if repo_root is None:
+        return []
+    absolute_path = (workspace / source_path).resolve()
+    try:
+        rel = absolute_path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return []
+    errors: list[str] = []
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--", rel],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+        ignored = subprocess.run(
+            ["git", "-C", str(repo_root), "check-ignore", "--quiet", "--no-index", "--", rel],
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+    except OSError:
+        return []
+    if tracked:
+        errors.append(f"sourcePath is tracked by git: {source_path}")
+    if not ignored:
+        errors.append(f"sourcePath is not git-ignored: {source_path}")
+    return errors
+
+
 def _result_verdict(results: list[dict[str, Any]]) -> str:
     if not results:
         return "NOT_APPLICABLE"
@@ -116,6 +164,8 @@ def _preflight_tests(workspace: Path, tests: list[Any]) -> list[str]:
             errors.append(f"{context}.sourcePath missing")
         elif not (workspace / source_path).is_file():
             errors.append(f"{context}.sourcePath missing on disk: {source_path}")
+        else:
+            errors.extend(f"{context}.{error}" for error in _git_source_errors(workspace, source_path))
     return errors
 
 
