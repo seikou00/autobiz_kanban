@@ -137,6 +137,24 @@ class SyncRepoEndToEndTest(unittest.TestCase):
         self.assertFalse((dest / "stray.txt").exists())
         self.assertTrue((dest / "agents.manifest.json").is_file())
 
+    def test_readonly_leftover_is_wiped_and_recloned(self):
+        # Windows 上 git 给 .git/objects/pack 等文件加只读位，第二次同步删旧目录时
+        # 曾直接 PermissionError。模拟只读残留文件，确认清理会先去只读位再删。
+        import stat
+
+        src = _make_source_repo()
+        plugin_root = Path(tempfile.mkdtemp())
+        dest = plugin_root / "sys"
+        packs = dest / ".git" / "objects" / "pack"
+        packs.mkdir(parents=True)
+        readonly = packs / "pack-x.idx"
+        readonly.write_text("x", encoding="utf-8")
+        readonly.chmod(stat.S_IREAD)
+        info = sync_agents.sync_repo(str(src), "main", dest)
+        self.assertTrue(info["commit"])
+        self.assertFalse(readonly.exists())
+        self.assertTrue((dest / "agents.manifest.json").is_file())
+
 
 class WriteBoardConfigTest(unittest.TestCase):
     SAMPLE = (
