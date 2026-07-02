@@ -92,6 +92,8 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
 
 
 def _validation_passed(record: dict[str, Any]) -> bool:
+    if record.get("action") != "validation":
+        return False
     validation = record.get("validation")
     if not isinstance(validation, dict):
         return False

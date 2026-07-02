@@ -320,7 +320,7 @@
         "group": "Dev",
         "skill": "autodev-plan",
         "order": 40,
-        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、plan.json（执行计划机器事实源：任务 DAG 与各任务依据/验证/状态）；PLAN.md 为可选人类视图",
+        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、plan.json（执行计划机器事实源：任务 DAG 与各任务依据/验证/状态）、SMOKE_TEST_PLAN.json（旁路冒烟案例计划）；PLAN.md 为可选人类视图",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
@@ -345,10 +345,11 @@
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
             { "id": "plan", "label": "执行计划人类视图", "artifactType": "file", "path": "PLAN.md", "required": false },
-            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true }
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true },
+            { "id": "smoke_test_plan_json", "label": "旁路冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": true }
           ]
         },
-        "validators": ["design_contract", "plan_json_contract", "plan_json_initial_tasks"]
+        "validators": ["design_contract", "plan_json_contract", "plan_json_initial_tasks", "smoke_test_plan_json"]
       },
       {
         "id": "dev.code",
@@ -394,6 +395,12 @@
                 "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers"],
                 "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，PLAN.md 只作可选同步视图",
                 "degrade": "Source Bundle 未列出 plan.json 时，基于 proposal 与 specs 建轻量任务队列，不回到 Plan 阶段索要；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成"
+              } },
+            { "id": "smoke_test_plan_json", "label": "旁路冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": false,
+              "extract": {
+                "focus": ["tests[].id/taskId/scenarioRefs", "sourcePath/command/expectedSignals", "flowBlocking=false"],
+                "method": "按 SMOKE_TEST_PLAN.json 生成或补齐旁路冒烟测试源码，并在强 validationCommands 全部通过后执行；冒烟结果只写 SMOKE_RESULT.json 与 action=smoke evidence，不写入 plan.json.tasks[].evidenceIds",
+                "degrade": "无 SMOKE_TEST_PLAN.json 时回到 /autodev-plan 补齐；lean/custom 未列出该输入时可生成 tests=[] 的 NOT_APPLICABLE 结果"
               } }
           ],
           "outputs": [
@@ -402,10 +409,11 @@
                 "focus": ["validation evidence", "taskId/specRefs/designRefs/changedFiles/validation.result"],
                 "method": "用 hooks/evidence_store.py append 向流末尾追加 validation evidence；evidenceId 按全流顺序递增，不按阶段重排；有 plan.json 时 taskId 必须来自 plan.json.tasks[].id，无 plan 契约时使用本阶段轻量任务 ID；不得插入旧记录前、重编号、截断、重写、删除 EVIDENCE.index.json 后重建或手动修改 EVIDENCE.index.json",
                 "degrade": "缺失时由 append 工具首次创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
-              } }
+              } },
+            { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false }
           ]
         },
-        "validators": ["plan_json_contract", "plan_finished_tasks", "code_done_gate", "evidence_integrity"],
+        "validators": ["plan_json_contract", "plan_finished_tasks", "smoke_result_json", "code_done_gate", "evidence_integrity"],
         "guards": ["code_compile"]
       },
       {
@@ -458,6 +466,12 @@
                 "focus": ["code 阶段每个 taskId 的 pass/fail validation evidence", "changedFiles", "specRefs/designRefs"],
                 "method": "作为任务完成证据事实源，核对每个结论是否能回链到 task/spec/design；证据流只能通过 hooks/evidence_store.py append 向末尾追加，不得重排、重编号、截断、重写、删除 EVIDENCE.index.json 后重建或手动修改 EVIDENCE.index.json",
                 "degrade": "缺失时回到 code 阶段补齐证据流，不能用 Markdown 报告替代"
+              } },
+            { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false,
+              "extract": {
+                "focus": ["verdict", "results[].testId/taskId/result/failureSummary", "flowBlocking=false"],
+                "method": "只作为 code 阶段旁路冒烟风险参考；FAIL/BLOCKED/SKIPPED 不改变评审 terminal verdict，也不能替代 validation evidence",
+                "degrade": "缺失时按无旁路冒烟风险信号处理，不用 Markdown 替代"
               } }
           ],
           "outputs": [
@@ -529,6 +543,12 @@
                 "focus": ["verdict", "findings[].taskId/specRefs/evidenceIds/severity/message/suggestedCheckpoint"],
                 "method": "读取 REVIEW_FINDINGS.json 的结构化 verdict/findings，并据此补强高风险测试覆盖；REQUIREMENTS_EVAL.md 只作人类叙述补充",
                 "degrade": "无 REVIEW_FINDINGS.json 时回到 review 阶段补齐结构化评审结果"
+              } },
+            { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false,
+              "extract": {
+                "focus": ["verdict", "失败或阻断的 smoke results", "failureSummary"],
+                "method": "作为补强单测优先级的风险参考；不把 SMOKE_RESULT verdict 作为单测通过/失败的机器事实源",
+                "degrade": "缺失时跳过，不影响 UNIT_TEST_RESULT.json 的生成与门禁"
               } }
           ],
           "outputs": [
@@ -614,6 +634,12 @@
                 "focus": ["verdict", "scenarioCoverage", "targets[].taskId/specRefs/evidenceIds/result/command"],
                 "method": "读取 UNIT_TEST_RESULT.json 的 verdict、scenarioCoverage 与 target 结果，决定 E2E 覆盖缺口；UNIT_TEST_REPORT.md 只作人类叙述补充",
                 "degrade": "无 UNIT_TEST_RESULT.json 时回到单测阶段补齐结构化结果"
+              } },
+            { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false,
+              "extract": {
+                "focus": ["verdict", "失败或阻断的 smoke results", "failureSummary"],
+                "method": "作为 E2E 主链路选择与环境风险识别参考；不把 SMOKE_RESULT verdict 作为 E2E 通过/失败的机器事实源",
+                "degrade": "缺失时跳过，不影响 E2E_RESULT.json 的生成与门禁"
               } },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
@@ -719,6 +745,12 @@
                 "focus": ["verdict", "scenarioCoverage", "cases[].taskId/specRefs/evidenceIds/verdict/executionMode"],
                 "method": "读取 E2E_RESULT.json 的顶层 verdict、scenarioCoverage 与 case verdict 生成验收矩阵；E2E_REPORT.md 只作人类叙述补充",
                 "degrade": "无 E2E_RESULT.json 时回到 E2E 阶段补齐结构化结果"
+              } },
+            { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false,
+              "extract": {
+                "focus": ["verdict", "results[].testId/taskId/result/failureSummary"],
+                "method": "纳入最终风险汇总；SMOKE_RESULT 只表达旁路冒烟风险，不改变 VERIFY_DECISION 的 terminal verdict 与 nextCheckpoint",
+                "degrade": "缺失时按无旁路冒烟信号处理"
               } },
             { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true,
               "extract": {

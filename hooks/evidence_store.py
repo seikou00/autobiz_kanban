@@ -21,6 +21,7 @@ EVIDENCE_ID_RE = re.compile(r"^ev_(\d{4})$")
 DEFAULT_STREAM_RELATIVE_PATH = Path("evidence") / "EVIDENCE.jsonl"
 DEFAULT_INDEX_RELATIVE_PATH = Path("evidence") / "EVIDENCE.index.json"
 VALIDATION_RESULTS = {"pass", "fail", "blocked", "skipped"}
+SMOKE_RESULTS = {"pass", "fail", "blocked", "skipped"}
 
 
 class EvidenceStoreError(ValueError):
@@ -185,6 +186,29 @@ def validate_record(record: dict[str, Any]) -> list[str]:
             output_tail_path = validation.get("outputTailPath")
             if result == "fail" and (not isinstance(output_tail_path, str) or not output_tail_path.strip()):
                 errors.append("validation.outputTailPath_missing")
+    if record.get("action") == "smoke":
+        smoke = record.get("smoke")
+        if not isinstance(smoke, dict):
+            errors.append("smoke_missing")
+        else:
+            test_id = smoke.get("testId")
+            if not isinstance(test_id, str) or not test_id.strip():
+                errors.append("smoke.testId_missing")
+            command = smoke.get("command")
+            if not isinstance(command, str) or not command.strip():
+                errors.append("smoke.command_missing")
+            exit_code = smoke.get("exitCode")
+            if not isinstance(exit_code, int):
+                errors.append("smoke.exitCode_missing")
+            raw_result = smoke.get("result")
+            result = raw_result.strip().lower() if isinstance(raw_result, str) else ""
+            if result not in SMOKE_RESULTS:
+                errors.append("smoke.result_invalid")
+            if result == "pass" and isinstance(exit_code, int) and exit_code != 0:
+                errors.append("smoke.result_exitCode_mismatch")
+            output_tail_path = smoke.get("outputTailPath")
+            if result in {"fail", "blocked"} and (not isinstance(output_tail_path, str) or not output_tail_path.strip()):
+                errors.append("smoke.outputTailPath_missing")
     changed_files = record.get("changedFiles")
     if changed_files is not None and not _string_list(changed_files):
         errors.append("invalid_changedFiles")
@@ -243,7 +267,8 @@ def append_evidence(
     payload.setdefault("specRefs", [])
     payload.setdefault("designRefs", [])
     payload.setdefault("changedFiles", [])
-    payload.setdefault("validation", {})
+    if payload.get("action") == "validation":
+        payload.setdefault("validation", {})
     payload["evidenceId"] = payload.get("evidenceId") or next_evidence_id(records)
 
     evidence_id = payload["evidenceId"]
@@ -256,11 +281,12 @@ def append_evidence(
         tail_path = evidence_dir(target_feature_dir) / f"{evidence_id}.log"
         tail_path.parent.mkdir(parents=True, exist_ok=True)
         tail_path.write_text(output_tail, encoding="utf-8")
-        validation = payload.get("validation")
-        if not isinstance(validation, dict):
-            validation = {}
-            payload["validation"] = validation
-        validation["outputTailPath"] = f"evidence/{evidence_id}.log"
+        tail_container_name = "smoke" if payload.get("action") == "smoke" else "validation"
+        tail_container = payload.get(tail_container_name)
+        if not isinstance(tail_container, dict):
+            tail_container = {}
+            payload[tail_container_name] = tail_container
+        tail_container["outputTailPath"] = f"evidence/{evidence_id}.log"
 
     errors = validate_record(payload)
     if errors:
@@ -320,6 +346,36 @@ def _cmd_append(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_append_smoke(args: argparse.Namespace) -> int:
+    target = feature_dir(Path(args.workspace).resolve(), args.feature)
+    result = args.result or ("pass" if args.exit_code == 0 else "fail")
+    record = {
+        "featureId": args.feature,
+        "checkpoint": args.checkpoint,
+        "nodeId": args.node_id,
+        "skill": args.skill,
+        "taskId": args.task_id,
+        "action": "smoke",
+        "specRefs": args.spec_ref or [],
+        "designRefs": args.design_ref or [],
+        "changedFiles": args.changed_file or [],
+        "smoke": {
+            "testId": args.test_id,
+            "command": args.command,
+            "exitCode": args.exit_code,
+            "result": result,
+        },
+    }
+    tail = Path(args.output_tail).read_text(encoding="utf-8", errors="ignore") if args.output_tail else None
+    try:
+        appended = append_evidence(target, record, output_tail=tail)
+    except EvidenceStoreError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(appended, ensure_ascii=False))
+    return 0
+
+
 def _cmd_index(args: argparse.Namespace) -> int:
     target = feature_dir(Path(args.workspace).resolve(), args.feature)
     try:
@@ -348,6 +404,23 @@ def main(argv: list[str] | None = None) -> int:
     append.add_argument("--exit-code", type=int)
     append.add_argument("--output-tail", help="File whose text should be stored as evidence/<id>.log")
     append.set_defaults(func=_cmd_append)
+
+    append_smoke = subparsers.add_parser("append-smoke")
+    append_smoke.add_argument("--workspace", default=str(Path.cwd().resolve()))
+    append_smoke.add_argument("--feature", required=True)
+    append_smoke.add_argument("--test-id", required=True)
+    append_smoke.add_argument("--checkpoint", required=True)
+    append_smoke.add_argument("--node-id", required=True)
+    append_smoke.add_argument("--skill", required=True)
+    append_smoke.add_argument("--task-id", required=True)
+    append_smoke.add_argument("--command", required=True)
+    append_smoke.add_argument("--exit-code", type=int, required=True)
+    append_smoke.add_argument("--result", choices=sorted(SMOKE_RESULTS))
+    append_smoke.add_argument("--spec-ref", action="append")
+    append_smoke.add_argument("--design-ref", action="append")
+    append_smoke.add_argument("--changed-file", action="append")
+    append_smoke.add_argument("--output-tail", help="File whose text should be stored as evidence/<id>.log")
+    append_smoke.set_defaults(func=_cmd_append_smoke)
 
     index = subparsers.add_parser("index")
     index.add_argument("--workspace", default=str(Path.cwd().resolve()))

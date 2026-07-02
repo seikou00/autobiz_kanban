@@ -43,6 +43,7 @@ REQ_ID = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
 TASK_ID = re.compile(r"\bT\d{3}\b")
 EVIDENCE_ID = re.compile(r"\bev_\d{4}\b")
+SMOKE_ID = re.compile(r"SMK-\d{3}")
 SPEC_REQUIREMENT_DEF_RE = re.compile(r"^###\s+Requirement\s+\[(REQ-\d{3})\]:\s+.+$", re.MULTILINE)
 SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
 DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
@@ -50,6 +51,18 @@ DESIGN_DATA_DEF_RE = re.compile(r"^\|\s*(DATA-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
 DETAIL_DESIGN_ID = re.compile(r"\bDD-\d{2,3}\b")
 REPO_ROOT = Path(__file__).resolve().parents[3]
+SMOKE_TYPES = {"startup", "api", "ui", "cli", "migration", "health", "custom"}
+SMOKE_RESULTS = {"pass", "fail", "blocked", "skipped"}
+SMOKE_VERDICTS = {"PASS", "FAIL", "BLOCKED", "SKIPPED", "NOT_APPLICABLE"}
+SMOKE_SOURCE_PREFIXES = (
+    "src/test/",
+    "test/smoke/",
+    "tests/smoke/",
+    "scripts/smoke/",
+    "e2e/smoke/",
+    "cypress/e2e/smoke/",
+    "playwright/smoke/",
+)
 
 
 def _spec_definition_index(text: str) -> tuple[dict[str, set[str]], list[str]]:
@@ -166,6 +179,17 @@ def _known_evidence_ids(ctx: HookContext) -> set[str]:
         }
     except EvidenceStoreError:
         return set()
+
+
+def _evidence_records_by_id(ctx: HookContext) -> dict[str, dict]:
+    try:
+        return {
+            evidence_id: record
+            for record in read_records(stream_path(ctx.feature_dir))
+            if isinstance((evidence_id := record.get("evidenceId")), str)
+        }
+    except EvidenceStoreError:
+        return {}
 
 
 def _evidence_stream_exists(ctx: HookContext) -> bool:
@@ -288,6 +312,61 @@ def _check_trace_refs(
             failures += fail_line(ctx, "unknown_json_evidence_id", f" item={context} evidenceId={evidence_id}")
     failures += _check_scenario_ref_projection(ctx, item, spec_refs, context=context)
     return spec_refs, evidence_ids, failures
+
+
+def _smoke_source_path_allowed(path: str) -> bool:
+    normalized = path.replace("\\", "/").strip()
+    if not normalized or normalized.startswith("/") or normalized.endswith("/"):
+        return False
+    if any(part == ".." for part in normalized.split("/")):
+        return False
+    return any(normalized.startswith(prefix) for prefix in SMOKE_SOURCE_PREFIXES)
+
+
+def _check_smoke_scenario_refs(
+    ctx: HookContext,
+    item: dict,
+    *,
+    context: str,
+    spec_ids: dict[str, set[str]],
+) -> int:
+    values, failures = _check_string_array_field(
+        ctx,
+        item,
+        "scenarioRefs",
+        context=context,
+        required=True,
+    )
+    if not values:
+        return failures
+    scenario_ids: set[str] = set()
+    for value in values:
+        found = set(SCN_ID.findall(value))
+        if not found:
+            failures += fail_line(ctx, "missing_smoke_scenario_ref", f" item={context} value={value}")
+        scenario_ids.update(found)
+    for scenario_id in sorted(scenario_ids):
+        if scenario_id not in spec_ids["SCN"]:
+            failures += fail_line(ctx, "unknown_smoke_scenario_ref", f" item={context} id={scenario_id}")
+    return failures
+
+
+def _smoke_plan_tests(ctx: HookContext) -> tuple[dict[str, dict], int]:
+    data, failures = load_json_artifact(ctx, "SMOKE_TEST_PLAN.json", required=False)
+    if data is None:
+        return {}, failures
+    tests = data.get("tests")
+    if not isinstance(tests, list):
+        return {}, failures + fail_line(ctx, "invalid_smoke_test_plan_items")
+    result: dict[str, dict] = {}
+    for index, item in enumerate(tests):
+        if not isinstance(item, dict):
+            failures += fail_line(ctx, "invalid_smoke_test_item", f" item=tests[{index}]")
+            continue
+        test_id = item.get("id")
+        if isinstance(test_id, str) and SMOKE_ID.fullmatch(test_id):
+            result[test_id] = item
+    return result, failures
 
 
 def _scenario_covering_evidence(ctx: HookContext) -> dict[str, set[str]]:
@@ -792,6 +871,199 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     return failures
 
 
+def validate_smoke_test_plan_json(ctx: HookContext) -> int:
+    data, failures = load_json_artifact(
+        ctx,
+        "SMOKE_TEST_PLAN.json",
+        required=ctx.requires_artifact("SMOKE_TEST_PLAN.json"),
+    )
+    if data is None:
+        return failures
+    if data.get("version") != 1:
+        failures += fail_line(ctx, "invalid_smoke_test_plan_version")
+    failures += _check_string_field(ctx, data, "featureId", context="SMOKE_TEST_PLAN")
+    if data.get("flowBlocking") is not False:
+        failures += fail_line(ctx, "invalid_smoke_flow_blocking")
+
+    tests = data.get("tests")
+    if not isinstance(tests, list):
+        return failures + fail_line(ctx, "invalid_smoke_test_plan_items")
+    if not tests:
+        skip_reason = data.get("skipReason")
+        if not isinstance(skip_reason, str) or not skip_reason.strip():
+            failures += fail_line(ctx, "missing_smoke_skip_reason")
+        return failures
+
+    known_tasks = _known_plan_task_ids(ctx)
+    spec_ids, spec_failures = collect_spec_definition_index(ctx)
+    failures += spec_failures
+    seen: set[str] = set()
+    for index, item in enumerate(tests):
+        context = f"tests[{index}]"
+        if not isinstance(item, dict):
+            failures += fail_line(ctx, "invalid_smoke_test_item", f" item={context}")
+            continue
+        test_id = item.get("id")
+        if not isinstance(test_id, str) or not SMOKE_ID.fullmatch(test_id):
+            failures += fail_line(ctx, "invalid_smoke_test_id", f" item={context}")
+        elif test_id in seen:
+            failures += fail_line(ctx, "duplicate_smoke_test_id", f" item={context} id={test_id}")
+        else:
+            seen.add(test_id)
+
+        task_id = item.get("taskId")
+        if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
+            failures += fail_line(ctx, "invalid_smoke_task_id", f" item={context} taskId={task_id}")
+        elif known_tasks and task_id not in known_tasks:
+            failures += fail_line(ctx, "unknown_smoke_task_id", f" item={context} taskId={task_id}")
+
+        failures += _check_string_field(ctx, item, "title", context=context)
+        smoke_type = item.get("smokeType")
+        if not isinstance(smoke_type, str) or smoke_type.strip().lower() not in SMOKE_TYPES:
+            failures += fail_line(ctx, "invalid_smoke_type", f" item={context}")
+        failures += _check_string_field(ctx, item, "command", context=context)
+        source_path = item.get("sourcePath")
+        if not isinstance(source_path, str) or not _smoke_source_path_allowed(source_path):
+            failures += fail_line(ctx, "invalid_smoke_source_path", f" item={context} path={source_path}")
+        expected_signals, expected_failures = _check_string_array_field(
+            ctx,
+            item,
+            "expectedSignals",
+            context=context,
+            required=True,
+        )
+        failures += expected_failures
+        if not expected_signals:
+            failures += fail_line(ctx, "missing_smoke_expected_signals", f" item={context}")
+        _, precondition_failures = _check_string_array_field(
+            ctx,
+            item,
+            "preconditions",
+            context=context,
+            required=False,
+            allow_empty=True,
+        )
+        failures += precondition_failures
+        timeout_seconds = item.get("timeoutSeconds")
+        if timeout_seconds is not None and (not isinstance(timeout_seconds, int) or timeout_seconds <= 0):
+            failures += fail_line(ctx, "invalid_smoke_timeout", f" item={context}")
+        failures += _check_smoke_scenario_refs(ctx, item, context=context, spec_ids=spec_ids)
+    return failures
+
+
+def validate_smoke_result_json(ctx: HookContext) -> int:
+    result_path = ctx.file("SMOKE_RESULT.json")
+    if not is_nonempty(result_path):
+        planned_tests, plan_failures = _smoke_plan_tests(ctx)
+        if ctx.requires_artifact("SMOKE_RESULT.json") or planned_tests:
+            return plan_failures + fail_line(ctx, "missing_json_artifact", " file=SMOKE_RESULT.json")
+        info(ctx, "json_artifact_missing_degrade", " file=SMOKE_RESULT.json")
+        return plan_failures
+
+    data, failures = load_json_artifact(ctx, "SMOKE_RESULT.json", required=True)
+    if data is None:
+        return failures
+    if data.get("version") != 1:
+        failures += fail_line(ctx, "invalid_smoke_result_version")
+    failures += _check_string_field(ctx, data, "featureId", context="SMOKE_RESULT")
+    if data.get("flowBlocking") is not False:
+        failures += fail_line(ctx, "invalid_smoke_flow_blocking")
+    verdict = data.get("verdict")
+    normalized_verdict = verdict.upper() if isinstance(verdict, str) else ""
+    if normalized_verdict not in SMOKE_VERDICTS:
+        failures += fail_line(ctx, "invalid_smoke_result_verdict")
+
+    results = data.get("results")
+    if not isinstance(results, list):
+        return failures + fail_line(ctx, "invalid_smoke_result_items")
+
+    planned_tests, plan_failures = _smoke_plan_tests(ctx)
+    failures += plan_failures
+    expected_ids = set(planned_tests)
+    seen_ids: set[str] = set()
+    evidence_records = _evidence_records_by_id(ctx)
+    known_tasks = _known_plan_task_ids(ctx)
+    non_pass_results: list[str] = []
+    result_statuses: list[str] = []
+    for index, item in enumerate(results):
+        context = f"results[{index}]"
+        if not isinstance(item, dict):
+            failures += fail_line(ctx, "invalid_smoke_result_item", f" item={context}")
+            continue
+        test_id = item.get("testId")
+        if not isinstance(test_id, str) or not SMOKE_ID.fullmatch(test_id):
+            failures += fail_line(ctx, "invalid_smoke_result_test_id", f" item={context}")
+        else:
+            if test_id in seen_ids:
+                failures += fail_line(ctx, "duplicate_smoke_result_test_id", f" item={context} id={test_id}")
+            seen_ids.add(test_id)
+            if expected_ids and test_id not in expected_ids:
+                failures += fail_line(ctx, "unknown_smoke_result_test_id", f" item={context} id={test_id}")
+
+        task_id = item.get("taskId")
+        if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
+            failures += fail_line(ctx, "invalid_smoke_result_task_id", f" item={context} taskId={task_id}")
+        elif known_tasks and task_id not in known_tasks:
+            failures += fail_line(ctx, "unknown_smoke_result_task_id", f" item={context} taskId={task_id}")
+
+        failures += _check_string_field(ctx, item, "command", context=context)
+        exit_code = item.get("exitCode")
+        if not isinstance(exit_code, int):
+            failures += fail_line(ctx, "invalid_smoke_result_exit_code", f" item={context}")
+        result = item.get("result")
+        normalized_result = result.strip().lower() if isinstance(result, str) else ""
+        if normalized_result not in SMOKE_RESULTS:
+            failures += fail_line(ctx, "invalid_smoke_result_status", f" item={context}")
+        else:
+            result_statuses.append(normalized_result)
+            if normalized_result != "pass":
+                non_pass_results.append(str(test_id))
+        if normalized_result == "pass" and isinstance(exit_code, int) and exit_code != 0:
+            failures += fail_line(ctx, "smoke_result_exit_code_mismatch", f" item={context}")
+
+        evidence_id = item.get("evidenceId")
+        if not isinstance(evidence_id, str) or not EVIDENCE_ID.fullmatch(evidence_id):
+            failures += fail_line(ctx, "invalid_smoke_result_evidence_id", f" item={context}")
+        else:
+            record = evidence_records.get(evidence_id)
+            if not record:
+                failures += fail_line(ctx, "unknown_smoke_result_evidence_id", f" item={context} evidenceId={evidence_id}")
+            elif record.get("action") != "smoke":
+                failures += fail_line(ctx, "smoke_result_evidence_not_smoke", f" item={context} evidenceId={evidence_id}")
+            else:
+                smoke = record.get("smoke")
+                record_test_id = smoke.get("testId") if isinstance(smoke, dict) else None
+                if isinstance(test_id, str) and record_test_id != test_id:
+                    failures += fail_line(ctx, "smoke_result_evidence_test_mismatch", f" item={context} evidenceId={evidence_id}")
+
+        output_tail_path = item.get("outputTailPath")
+        if normalized_result in {"fail", "blocked"} and (not isinstance(output_tail_path, str) or not output_tail_path.strip()):
+            failures += fail_line(ctx, "missing_smoke_result_output_tail", f" item={context}")
+        if normalized_result in {"fail", "blocked"}:
+            failures += _check_string_field(ctx, item, "failureSummary", context=context)
+
+    missing_results = expected_ids - seen_ids
+    if missing_results and (ctx.requires_artifact("SMOKE_RESULT.json") or expected_ids):
+        failures += fail_line(ctx, "missing_smoke_result_rows", f" ids={','.join(sorted(missing_results))}")
+    result_status_set = set(result_statuses)
+    if normalized_verdict == "PASS" and (not results or non_pass_results):
+        detail = f" ids={','.join(sorted(non_pass_results))}" if non_pass_results else ""
+        failures += fail_line(ctx, "invalid_smoke_result_summary", detail)
+    if normalized_verdict == "FAIL" and "fail" not in result_status_set:
+        failures += fail_line(ctx, "invalid_smoke_result_summary")
+    if normalized_verdict == "BLOCKED" and ("fail" in result_status_set or "blocked" not in result_status_set):
+        failures += fail_line(ctx, "invalid_smoke_result_summary")
+    if normalized_verdict == "SKIPPED" and result_status_set != {"skipped"}:
+        failures += fail_line(ctx, "invalid_smoke_result_summary")
+    if normalized_verdict == "NOT_APPLICABLE" and results:
+        failures += fail_line(ctx, "invalid_smoke_result_summary")
+    for test_id, plan_item in planned_tests.items():
+        source_path = plan_item.get("sourcePath")
+        if isinstance(source_path, str) and source_path and not (ctx.root / source_path).is_file():
+            failures += fail_line(ctx, "missing_smoke_source_file", f" id={test_id} path={source_path}")
+    return failures
+
+
 def _boolean_marker_value(text: str, marker: str) -> bool | None:
     match = re.search(rf"{re.escape(marker)}\W*:\W*(true|false)\b", text, re.IGNORECASE)
     if not match:
@@ -1109,6 +1381,8 @@ VALIDATORS = {
     "verify_report_contract": validate_verify_report_contract,
     "verify_decision_json": validate_verify_decision_json,
     "fix_request_json": validate_fix_request_json,
+    "smoke_test_plan_json": validate_smoke_test_plan_json,
+    "smoke_result_json": validate_smoke_result_json,
 }
 
 

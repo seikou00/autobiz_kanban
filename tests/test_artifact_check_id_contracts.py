@@ -26,6 +26,8 @@ from artifact_check import (  # noqa: E402
     validate_plan_json_initial_tasks,
     validate_plan_finished_tasks,
     validate_review_findings_json,
+    validate_smoke_result_json,
+    validate_smoke_test_plan_json,
     validate_specs_contract,
     validate_unit_test_result_json,
     validate_unit_test_report_contract,
@@ -158,6 +160,25 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                         "blockers": [] if blockers is None else blockers,
                     }
                 ],
+            },
+        )
+
+    def _write_smoke_plan(
+        self,
+        feature_dir: Path,
+        *,
+        tests: list[dict] | None = None,
+        flow_blocking: bool = False,
+    ) -> None:
+        self._write_json(
+            feature_dir,
+            "SMOKE_TEST_PLAN.json",
+            {
+                "version": 1,
+                "featureId": "alpha",
+                "flowBlocking": flow_blocking,
+                "skipReason": "" if tests else "no smoke needed",
+                "tests": tests if tests is not None else [],
             },
         )
 
@@ -1155,6 +1176,335 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertEqual(validate_code_done_gate(ctx), 0)
+
+    def test_smoke_test_plan_accepts_missing_source_path_during_plan_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                        "preconditions": [],
+                        "timeoutSeconds": 60,
+                    }
+                ],
+            )
+
+            self.assertEqual(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_blocking_or_untracked_source_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                flow_blocking=True,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": "tmp/cap_smoke.py",
+                        "command": "python tmp/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_unknown_task_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T999",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_unknown_scenario_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-999"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_result_degrades_when_no_plan_and_no_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+
+            self.assertEqual(validate_smoke_result_json(self._ctx(feature_dir)), 0)
+
+    def test_smoke_result_allows_failed_verdict_and_requires_smoke_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="done", evidence_ids=["ev_0001"])
+            source = feature_dir.parent.parent.parent / "tests" / "smoke" / "cap_smoke.py"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("raise SystemExit(1)\n", encoding="utf-8")
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+            appended = append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "smoke",
+                    "specRefs": ["specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": ["tests/smoke/cap_smoke.py"],
+                    "smoke": {"testId": "SMK-001", "command": "python tests/smoke/cap_smoke.py", "exitCode": 1, "result": "fail"},
+                },
+                output_tail="boom",
+            )
+            self._write_json(
+                feature_dir,
+                "SMOKE_RESULT.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "flowBlocking": False,
+                    "verdict": "FAIL",
+                    "results": [
+                        {
+                            "testId": "SMK-001",
+                            "taskId": "T001",
+                            "command": "python tests/smoke/cap_smoke.py",
+                            "exitCode": 1,
+                            "result": "fail",
+                            "evidenceId": appended["evidenceId"],
+                            "outputTailPath": appended["smoke"]["outputTailPath"],
+                            "failureSummary": "boom",
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(validate_smoke_result_json(self._required_output_ctx(feature_dir, "SMOKE_RESULT.json")), 0)
+
+    def test_smoke_result_rejects_missing_planned_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="done", evidence_ids=["ev_0001"])
+            smoke_dir = feature_dir.parent.parent.parent / "tests" / "smoke"
+            smoke_dir.mkdir(parents=True, exist_ok=True)
+            (smoke_dir / "one.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+            (smoke_dir / "two.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "one",
+                        "smokeType": "cli",
+                        "sourcePath": "tests/smoke/one.py",
+                        "command": "python tests/smoke/one.py",
+                        "expectedSignals": ["exit 0"],
+                    },
+                    {
+                        "id": "SMK-002",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "two",
+                        "smokeType": "cli",
+                        "sourcePath": "tests/smoke/two.py",
+                        "command": "python tests/smoke/two.py",
+                        "expectedSignals": ["exit 0"],
+                    },
+                ],
+            )
+            appended = append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "smoke",
+                    "specRefs": ["specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": ["tests/smoke/one.py"],
+                    "smoke": {"testId": "SMK-001", "command": "python tests/smoke/one.py", "exitCode": 0, "result": "pass"},
+                },
+            )
+            self._write_json(
+                feature_dir,
+                "SMOKE_RESULT.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "flowBlocking": False,
+                    "verdict": "PASS",
+                    "results": [
+                        {
+                            "testId": "SMK-001",
+                            "taskId": "T001",
+                            "command": "python tests/smoke/one.py",
+                            "exitCode": 0,
+                            "result": "pass",
+                            "evidenceId": appended["evidenceId"],
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_smoke_result_json(self._ctx(feature_dir)), 0)
+
+    def test_smoke_result_rejects_summary_verdict_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="done", evidence_ids=["ev_0001"])
+            smoke_dir = feature_dir.parent.parent.parent / "tests" / "smoke"
+            smoke_dir.mkdir(parents=True, exist_ok=True)
+            (smoke_dir / "one.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "one",
+                        "smokeType": "cli",
+                        "sourcePath": "tests/smoke/one.py",
+                        "command": "python tests/smoke/one.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+            appended = append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "smoke",
+                    "specRefs": ["specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": ["tests/smoke/one.py"],
+                    "smoke": {"testId": "SMK-001", "command": "python tests/smoke/one.py", "exitCode": 0, "result": "pass"},
+                },
+            )
+            self._write_json(
+                feature_dir,
+                "SMOKE_RESULT.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "flowBlocking": False,
+                    "verdict": "FAIL",
+                    "results": [
+                        {
+                            "testId": "SMK-001",
+                            "taskId": "T001",
+                            "command": "python tests/smoke/one.py",
+                            "exitCode": 0,
+                            "result": "pass",
+                            "evidenceId": appended["evidenceId"],
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_smoke_result_json(self._ctx(feature_dir)), 0)
+
+    def test_code_done_gate_does_not_accept_smoke_evidence_as_validation_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="done", evidence_ids=["ev_0001"])
+            append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "smoke",
+                    "specRefs": ["specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": ["tests/smoke/cap_smoke.py"],
+                    "validation": {"command": "python tests/smoke/cap_smoke.py", "exitCode": 0, "result": "pass"},
+                    "smoke": {"testId": "SMK-001", "command": "python tests/smoke/cap_smoke.py", "exitCode": 0, "result": "pass"},
+                },
+            )
+            ctx = HookContext(
+                skill="autodev-code",
+                slug="alpha",
+                root=feature_dir.parent.parent.parent,
+                required_inputs=("plan.json",),
+                required_outputs=("evidence/EVIDENCE.jsonl",),
+            )
+
+            self.assertGreater(validate_code_done_gate(ctx), 0)
 
     def test_fix_request_rejects_unknown_design_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
