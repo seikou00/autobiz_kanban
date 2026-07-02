@@ -247,29 +247,14 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；可同步生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 作为人类视图。`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
-生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
+生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
 
-`plan.json` 顶层字段固定为：
+`plan.json` 语义规则：
 
-- `version`: 固定为 `1`
-- `featureId`: 当前 `{feature}`
-- `tasks`: 任务数组，非空
-
-每个 `tasks[]` 必须按模板包含以下字段：
-
-- `id`: `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID
-- `title`: 需求闭环任务名
-- `status`: Plan 阶段初始值必须为 `todo`
-- `deps`: 依赖任务 ID 数组，无依赖写 `[]`
-- `specRefs`: 至少同时包含一个 `REQ-xxx` 和一个 `SCN-xxx` 引用，格式使用 `specs/<capability>/spec.md#REQ-001` / `specs/<capability>/spec.md#SCN-001`
-- `designRefs`: 引用 `design.md#API-xxx` / `design.md#DATA-xxx` / `design.md#D-xxx`；无 API 或无数据变更时不要伪造对应引用
-- `apiIds`: API 决策 ID 数组；`x-auto-no-http-api: true` 时写 `[]`
-- `dataIds`: Data 决策 ID 数组；`x-auto-no-sql: true` 时写 `[]`
-- `decisionIds`: 技术决策 ID 数组，至少覆盖本任务依赖的 `D-xxx`
-- `validationCommands`: 非空数组；每项至少包含 `command`，且必须是可直接运行并自行判读的命令
-- `expectedFiles`: 预计修改/新增文件路径数组；不能确定真实路径时写 `[]`，不要凭空造路径
-- `evidenceIds`: Plan 初始阶段必须写 `[]`
-- `blockers`: 无阻断写 `[]`；待确认且影响执行的事项写成阻断说明
+- Task ID 使用 `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID。
+- Plan 阶段所有任务初始状态为 `todo`，初始 `evidenceIds` 为空；无阻断时 `blockers` 为空，有影响执行的待确认事项才写 blocker。
+- 每个任务必须追溯到真实 specs 与 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的决策。`x-auto-no-http-api: true` 或 `x-auto-no-sql: true` 时不要伪造 API/Data 引用。
+- `validationCommands` 是强门禁验证命令，必须可直接运行并由命令退出码/断言自行判读；不能确定真实文件时不要凭空填写 `expectedFiles`。
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
@@ -283,6 +268,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 UI 任务投影规则：
 - 必须读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json`；UI 范围只从该 JSON 投影，不从 PRD/specs/PLAN Markdown 关键词推导。
+- UI 任务需要在基础模板上投影 UI 条件字段；具体结构以本节规则和 validator 为准，缺失或与 `UI_CONTEXT.json` 不一致会被拒绝。
 - `UI_CONTEXT.uiRequired=true` 时，只为 UI capability 生成 `uiRequired=true` 的任务，并补齐 `uiRefs.pageRefs`、`uiRefs.interactionRefs`、`uiRefs.visualSourceRefs` 和 `uiRefs.frontendRoute`。
 - `UI_CONTEXT.uiRequired=false` 时，不生成 UI task；纯后端任务不得夹带前端实现。
 - `uiRefs.frontendRoute` 取值为 `none`、`spec-driven-ui`、`absolute-html`、`standard-html` 或 `missing-html`。有 UI 但无 HTML/设计稿时使用 `spec-driven-ui`，不要伪造 HTML 输入。
@@ -317,17 +303,15 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 `SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 与 TDD 的克制粒度：每个案例只描述一个站在公开 seam 上的 vertical slice，必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码，不批量设计覆盖想象行为的测试矩阵。
 
 `SMOKE_TEST_PLAN.json` 规则：
-- 顶层 `version` 固定为 `1`，`featureId` 为当前 `{feature}`，`flowBlocking` 必须为 `false`。
-- `tests[]` 可以为空；为空时必须写 `skipReason` 说明为什么本轮没有旁路冒烟价值。
-- 每个 `tests[]` 必须包含 `id`（`SMK-001` 起）、`taskId`、`scenarioRefs`、`title`、`smokeType`、`seam`、`verticalSlice`、`mockPolicy`、`sourcePath`、`command`、`expectedSignals`、`preconditions`、`timeoutSeconds`。
-- `taskId` 必须引用 `plan.json.tasks[].id`；每条 smoke 只能绑定一个 `taskId` 与一个 specs 中真实 `SCN-xxx`，不要把多个场景塞进一条冒烟。
+- 字段结构以 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json` 和 artifact validator 为准；本文只说明生成语义，不重复维护完整字段清单。
+- `flowBlocking` 必须为 `false`；`tests[]` 可以为空，确实没有旁路冒烟价值时写清 `skipReason`，不要为了填表编造案例。
+- 每条 smoke 按 `SMK-001` 起编号，引用一个真实 `plan.json.tasks[].id` 和一个 specs 中真实 `SCN-xxx`，不要把多个场景塞进一条冒烟。
 - `seam` 描述测试站立的公开边界：`type` 使用 `startup/api/http/ui/cli/job/migration/health/custom` 之一，`entrypoint` 写调用方真实使用的入口，`observable` 写通过公开响应、页面、CLI 输出或健康信号观察到的结果；不得把私有方法、内部类、内部表查询当作 seam。
 - `verticalSlice` 只写一个最小闭环：`trigger` 是单一用户动作或系统触发，`expectedOutcome` 是来自 specs/design 的独立可观察结果；不要先规划一批横向用例再等 Code 阶段一起实现。
 - `mockPolicy.externalOnly` 必须为 `true`；`allowedMocks` 只能列外部 API、支付、邮件、时间、随机、文件系统或受控测试数据库等系统边界 mock。不得计划 mock 自有模块、内部服务或私有协作者。
-- 三类预期不要同义反复：`seam.observable` 写站在公开边界能看见什么，`verticalSlice.expectedOutcome` 写来自 specs/design 的行为结论，`expectedSignals[]` 写测试命令或断言可检查的机器信号。
+- 三类预期不要同义反复：`seam.observable` 写站在公开边界能看见什么，`verticalSlice.expectedOutcome` 写来自 specs/design 的行为结论，`expectedSignals[]` 写测试命令或断言可检查的机器信号（如 HTTP 状态、关键响应字段、页面路由可达、CLI 输出片段；机器校验以断言和退出码为准，不解析自然语言）。
 - `sourcePath` 只写计划中的目标测试源码或脚本路径，必须落在业务项目测试/冒烟目录，例如 `src/test/`、`tests/smoke/`、`scripts/smoke/`、`e2e/smoke/`；Plan 阶段不要求文件已存在。这些是 AutoDev 本地验证资产，不是业务项目长期测试资产，Code 阶段必须确保对应路径被目标项目 Git 忽略。
 - `command` 必须是只运行对应冒烟案例的 opt-in 命令，例如 `mvn -q -Psmoke -Dtest=OrderSmokeIT verify`、`npm run smoke -- order.spec.ts`；不得写需要人工参与的步骤。
-- `expectedSignals` 写可观察信号，例如 HTTP 状态、关键响应字段、页面路由可达、CLI 输出片段；机器校验以测试断言和命令退出码为准，不解析自然语言信号。
 - 冒烟案例可覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号，但必须按场景拆成多条 SMK，每条只覆盖一个 vertical slice；不要用它替代单测/E2E。
 - 不得把冒烟命令复制进 `plan.json.tasks[].validationCommands`。`validationCommands` 是强门禁，必须快、稳、可重复；`SMOKE_TEST_PLAN.json` 是旁路风险信号，失败不阻断 `code_done`。
 
@@ -337,8 +321,8 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json` 文件已写入磁盘，`flowBlocking=false`
 - [ ] `plan.json` 可作为任务 DAG 的机器事实源被后续阶段优先读取
-- [ ] 每个任务都包含「做什么」「规格依据」「api_id」「data_id」「decision_id」「设计依据」「涉及范围」「执行要点」「验证命令」「预期结果」「状态: 待做」
-- [ ] 冒烟案例按 `SMK-001` 起编号，并绑定真实 `taskId` 与 `SCN-xxx`；每条 smoke 含 `seam`、`verticalSlice`、`mockPolicy.externalOnly=true`；没有冒烟案例时写明 `skipReason`
+- [ ] 每个任务符合 `templates/plan.json` 与 validator，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；Plan 初始状态为 `todo`，初始 evidence 为空
+- [ ] 冒烟案例符合 `templates/smoke_test_plan.json` 与 validator；每条 smoke 绑定真实 `taskId` 与单个 `SCN-xxx`，包含公开 seam、单个 vertical slice 与 `mockPolicy.externalOnly=true`；没有冒烟案例时写明 `skipReason`
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx），验证命令带具体目标而非裸 mvn test/npm test；但没有写成逐行代码、逐文件微任务或 commit 步骤
 - [ ] 每个任务的「验证命令」都是大模型能直接运行并自行判读的命令（测试/构建/lint/curl/脚本），没有任何"手工""人工验证""Postman""浏览器点击"等需要人参与的步骤；HTTP 接口用 curl 或集成测试覆盖
