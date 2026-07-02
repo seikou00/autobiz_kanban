@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -97,6 +99,20 @@ def _git_error(proc: subprocess.CompletedProcess, action: str) -> str:
     return f"{action} 失败: {tail}"
 
 
+def _rmtree(path: Path) -> None:
+    """删除目录树；Windows 上 git 会给 ``.git/objects/pack`` 等文件加只读位，
+    直接 rmtree 抛 PermissionError——去掉只读位后重试删除。"""
+
+    def _clear_readonly(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly)
+    else:
+        shutil.rmtree(path, onerror=_clear_readonly)
+
+
 def sync_repo(url: str, ref: str, dest: Path) -> dict:
     """每次都删掉旧 ``sys/`` 再重新克隆到 dest；返回 {commit} 或抛 RuntimeError(消息)。
 
@@ -105,13 +121,13 @@ def sync_repo(url: str, ref: str, dest: Path) -> dict:
     之类的边角错误（简单、可预测）。
     """
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     clone = _run_git(["clone", "--depth", "1", "--branch", ref, url, str(dest)])
     if clone.returncode != 0:
         # ref 可能是 commit/tag，--branch 不适用：退回普通 clone 再切换。
         if dest.exists():
-            shutil.rmtree(dest)
+            _rmtree(dest)
         fallback = _run_git(["clone", "--depth", "1", url, str(dest)])
         if fallback.returncode != 0:
             raise RuntimeError(_git_error(fallback, "克隆"))
@@ -143,6 +159,9 @@ def run(repo_url: Optional[str], ref: Optional[str]) -> dict:
         return _fail("未找到 git 可执行文件，请确认运行环境已安装 git")
     except RuntimeError as exc:
         return _fail(str(exc))
+    except OSError as exc:
+        # 如清理旧 sys/ 时文件仍被占用（杀毒软件/编辑器锁定）：保持 UI 只收 JSON 的契约。
+        return _fail(f"同步 agents 仓库失败: {exc}")
 
     repo_info = {"url": url, "ref": resolved_ref, **repo_info}
     try:
