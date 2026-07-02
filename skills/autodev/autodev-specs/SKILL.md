@@ -126,6 +126,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
 - Requirement 使用 `### Requirement [REQ-001]: <name>`。
 - Scenario 使用四级标题 `#### Scenario [SCN-001]: <name>`。
+- `REQ-*` / `SCN-*` 只是标题中的稳定锚点规则，不要在真实 `spec.md` 中写入“稳定 ID 规范”说明章节。
 - 每个 Requirement 至少一个 Scenario。
 - 使用 SHALL/MUST 表达可验证行为。
 - 修改已有行为时，写完整的新行为，不要只写差异片段。
