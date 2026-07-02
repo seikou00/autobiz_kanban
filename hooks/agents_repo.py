@@ -169,7 +169,10 @@ def parse_manifest(data: object) -> Manifest:
 
         raw_units = raw.get("serviceUnits")
         if not isinstance(raw_units, list):
-            raise AgentsManifestError(f"{ctx}.serviceUnits 必须是数组")
+            actual = "缺失" if raw_units is None else f"当前是 {type(raw_units).__name__}"
+            raise AgentsManifestError(
+                f"{ctx}.serviceUnits 必须是数组（{actual}），系统 {system_id}"
+            )
 
         units: List[ServiceUnit] = []
         for uidx, raw_unit in enumerate(raw_units):
