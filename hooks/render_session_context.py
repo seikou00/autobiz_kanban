@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""session_context_inject 动态提示词注入（createFeature 选中服务单元 -> sessionContext）。
+"""session_context_inject 动态提示词注入（createFeature 选中部署单元 -> sessionContext）。
 
 board_config.json 注册（样例，附件约定）::
 
-    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-serviceUnit ${selectedServiceUnits} --session-workspace-path ${sessionWorkspacePath}"
+    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
 
 入参：
-  · ``--selected-serviceUnit`` 是一个 JSON 数组字符串（serviceUnitId = 后端单元 id）::
+  · ``--selected-deployUnit`` 是一个 JSON 数组字符串（deployUnitId = 后端单元 id）::
 
-        --selected-serviceUnit '[{"serviceUnitId":"LF39.18_Outservice","localRepoPath":"/repo/out"}]'
+        --selected-deployUnit '[{"deployUnitId":"LF39.18_Outservice","localRepoPath":"/repo/out"}]'
 
   · ``--session-workspace-path`` 是会话工作区目录的路径字符串（可空）；脚本读取该目录下的
     ``AGENTS.md`` 作为「会话工作区指令」。路径为空 / 该文件缺失 / 全空白 → 不生成该段。
@@ -17,23 +17,23 @@ board_config.json 注册（样例，附件约定）::
 输出（固定形状，注入项目模式系统提示词）::
 
     { "ok": true, "message": "...", "sessionContext": "...",
-      "agentmdLoadStatus": [ {serviceUnitId, path, loaded, source, message} ] }
+      "agentmdLoadStatus": [ {deployUnitId, path, loaded, source, message} ] }
 
 ``sessionContext`` 分段拼接（见 docs/agents-loading-remote-local.md），各层次各用一对
 **裸 XML 风格标签**外包（不再用反引号包成 inline code——那会让标签变字面量、id 不成锚点）：
   ① 适用范围 ``<SCOPE>``：清单 description（引用范围）+ UI localRepoPath（代码地址）。每行
-     ``serviceUnitId`` 用 ``[id](#slug)`` 跳到 ③ 里对应单元的 ``## 标题``（slug 见 _heading_slug）。
+     ``deployUnitId`` 用 ``[id](#slug)`` 跳到 ③ 里对应单元的 ``## 标题``（slug 见 _heading_slug）。
   ② 系统级 AGENTS.md ``<SYSTEM>``：选中单元所属系统 agentsPath 全文，按 systemId 去重；标签
      ``id="sys-<systemId>"`` 供 ① 表里无独立 md 的单元回退锚点。
   ③ 单元级 ``<UNIT>``：整段**只用一对** ``<UNIT id="unit-section">`` 外包，内部顺序拼接：
      先「会话工作区指令」（``<sessionWorkspacePath>/AGENTS.md`` 全文，排第一），再各选中单元
-     description.md 全文（按选择顺序）。每段前置一行 ``## serviceUnitId（描述）`` 标题作为锚点目标。
-     工作区指令独立于服务单元选择——
+     description.md 全文（按选择顺序）。每段前置一行 ``## deployUnitId（描述）`` 标题作为锚点目标。
+     工作区指令独立于部署单元选择——
      即使未选任何单元，只要其存在也会注入；整段为空则跳过。注入工作区指令时，``agentmdLoadStatus``
-     首条即为它（``serviceUnitId`` = ``本地工作区``、``source:"local"``、``loaded:true``），不计入
+     首条即为它（``deployUnitId`` = ``本地工作区``、``source:"local"``、``loaded:true``），不计入
      单元级的 remote/local/缺 摘要。**去重**：若会话工作区的 ``AGENTS.md`` 与某选中单元实际加载的
      本地 ``AGENTS.md`` 是同一文件（按 resolve 比对），则不重复注入——丢掉会话工作区段（连同其
-     ``本地工作区`` 状态条目与 ① 表行），由带 serviceUnitId 身份的单元段承载该文件。
+     ``本地工作区`` 状态条目与 ① 表行），由带 deployUnitId 身份的单元段承载该文件。
 
 加载策略按层次不同：
   · 系统级（②）只认 remote：本机不知道用户把系统级文件放在哪，**不走 local 兜底**（否则会拿
@@ -69,7 +69,7 @@ from hooks.agents_repo import (  # noqa: E402
     index_unit_pairs,
     load_manifest,
     sys_abspath,
-    sys_display,
+    sys_abs_display,
 )
 
 PROJECT_ROOT_PLACEHOLDER = "{project_root}"  # md 正文里的占位符，替换为该系统 sys/<systemId> 绝对路径
@@ -80,30 +80,31 @@ WORKSPACE_AGENTS_MD = "AGENTS.md"  # 工程级「会话工作区指令」文件�
 
 
 def _parse_selected(raw: Optional[str]) -> List[dict]:
-    """解析 --selected-serviceUnit。空/缺省 -> []；非法 -> ValueError。"""
+    """解析 --selected-deployUnit。空/缺省 -> []；非法 -> ValueError。"""
     text = (raw or "").strip()
     if not text:
         return []
     try:
         value = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"--selected-serviceUnit 不是合法 JSON: {exc}") from exc
+        raise ValueError(f"--selected-deployUnit 不是合法 JSON: {exc}") from exc
     if not isinstance(value, list):
-        raise ValueError("--selected-serviceUnit 必须是 JSON 数组")
+        raise ValueError("--selected-deployUnit 必须是 JSON 数组")
     selected: List[dict] = []
     for idx, item in enumerate(value):
         if not isinstance(item, dict):
-            raise ValueError(f"--selected-serviceUnit[{idx}] 必须是对象")
-        unit_id = item.get("serviceUnitId")
+            raise ValueError(f"--selected-deployUnit[{idx}] 必须是对象")
+        # 新字段 deployUnitId 优先，兼容宿主灰度期仍回传旧 serviceUnitId。
+        unit_id = item.get("deployUnitId", item.get("serviceUnitId"))
         if not isinstance(unit_id, str) or not unit_id.strip():
-            raise ValueError(f"--selected-serviceUnit[{idx}].serviceUnitId 必须是非空字符串")
+            raise ValueError(f"--selected-deployUnit[{idx}].deployUnitId 必须是非空字符串")
         local_repo = item.get("localRepoPath", "")
         # UI 传入的 description：未命中清单（remote 无配置、走 local 兜底）时用作「引用范围」展示名，
-        # 顶替旧的「(未匹配知识库)」占位。其余字段（如 serviceUnitIdMapping）脚本不关心、原样忽略。
+        # 顶替旧的「(未匹配知识库)」占位。其余字段（如 deployUnitIdMapping）脚本不关心、原样忽略。
         description = item.get("description", "")
         selected.append(
             {
-                "serviceUnitId": unit_id.strip(),
+                "deployUnitId": unit_id.strip(),
                 "localRepoPath": local_repo if isinstance(local_repo, str) else "",
                 "description": description if isinstance(description, str) else "",
             }
@@ -169,8 +170,8 @@ def _resolve_one(
             content = _read_nonempty(abs_path)
             if content is not None:
                 status = {
-                    "serviceUnitId": owner_uid,
-                    "path": sys_display(rel_in_manifest, plugin_root),
+                    "deployUnitId": owner_uid,
+                    "path": sys_abs_display(rel_in_manifest, plugin_root),
                     "loaded": True,
                     "source": "remote",
                     "message": "",
@@ -180,8 +181,8 @@ def _resolve_one(
     # 不允许 local 兜底（系统级）：remote 缺失即报 remote 未命中，不去碰 <localRepoPath>/AGENTS.md。
     if not allow_local_fallback:
         status = {
-            "serviceUnitId": owner_uid,
-            "path": sys_display(rel_in_manifest, plugin_root) if rel_in_manifest else "",
+            "deployUnitId": owner_uid,
+            "path": sys_abs_display(rel_in_manifest, plugin_root) if rel_in_manifest else "",
             "loaded": False,
             "source": "remote",
             "message": "file not exist",
@@ -194,7 +195,7 @@ def _resolve_one(
         content = _read_nonempty(local_abs)
         if content is not None:
             status = {
-                "serviceUnitId": owner_uid,
+                "deployUnitId": owner_uid,
                 "path": str(local_abs),
                 "loaded": True,
                 "source": "local",
@@ -204,7 +205,7 @@ def _resolve_one(
 
     # ③ remote 与 local 都没有。
     status = {
-        "serviceUnitId": owner_uid,
+        "deployUnitId": owner_uid,
         "path": str(local_abs) if local_abs is not None else "",
         "loaded": False,
         "source": "local",
@@ -231,7 +232,7 @@ UNIT_SECTION_ANCHOR = "unit-section"  # <UNIT> 标签 id（语义/结构边界�
 
 def _heading_slug(text: str) -> str:
     """把 ``## 标题`` 文本转成 GitHub 风格锚点 slug，供 ① 适用范围表的
-    ``[serviceUnitId](#slug)`` 跳转到 ③ 单元级里对应的 ``## 标题``。
+    ``[deployUnitId](#slug)`` 跳转到 ③ 单元级里对应的 ``## 标题``。
 
     规则对齐 github-slugger（GitHub / 多数 Markdown 渲染器采用）：转小写、去首尾空白、
     删除非「单词字符/空格/连字符」的标点（``.``、全角 ``（）`` 等被删，``_`` 保留，CJK 保留）、
@@ -243,7 +244,7 @@ def _heading_slug(text: str) -> str:
 
 
 def _unit_heading_label(uid: str, ref: str) -> str:
-    """单元级 ``## 标题`` 文本：``serviceUnitId（描述）``，无描述时仅 serviceUnitId。
+    """单元级 ``## 标题`` 文本：``deployUnitId（描述）``，无描述时仅 deployUnitId。
     标题与 ① 表锚点 slug 同源于此函数，避免两边算偏。"""
     return f"{uid}（{ref}）" if ref else uid
 
@@ -260,7 +261,7 @@ def _build_workspace_content(session_workspace_path: Optional[str]) -> Optional[
     """读取 ``<sessionWorkspacePath>/AGENTS.md`` 作为「会话工作区指令」正文。
 
     路径为空 / 该目录下无 AGENTS.md / 文件全空白 → 返回 None（不生成该段）。
-    与服务单元选择无关：独立判断、独立注入。
+    与部署单元选择无关：独立判断、独立注入。
     """
     path = (session_workspace_path or "").strip()
     if not path:
@@ -268,12 +269,12 @@ def _build_workspace_content(session_workspace_path: Optional[str]) -> Optional[
     return _read_nonempty(Path(path) / WORKSPACE_AGENTS_MD)
 
 
-# 适用范围表里「会话工作区指令」那一行：serviceUnitId 列用此展示文本（链接指向单元级整段）。
+# 适用范围表里「会话工作区指令」那一行：deployUnitId 列用此展示文本（链接指向单元级整段）。
 WORKSPACE_SCOPE_ID = "会话工作区"
 WORKSPACE_SCOPE_REF = "会话工作区指令"
 
-# 「会话工作区指令」进 agentmdLoadStatus 时的 serviceUnitId（= 本地工作区），
-# 与各服务单元的加载状态同列，让宿主能据此渲染工作区 AGENTS.md 的加载情况。
+# 「会话工作区指令」进 agentmdLoadStatus 时的 deployUnitId（= 本地工作区），
+# 与各部署单元的加载状态同列，让宿主能据此渲染工作区 AGENTS.md 的加载情况。
 WORKSPACE_STATUS_ID = "本地工作区"
 
 
@@ -282,7 +283,7 @@ def _workspace_status(session_workspace_path: Optional[str]) -> dict:
     故 ``loaded:True``、``source:"local"``（工作区指令始终读本地文件，无 remote）。"""
     path = (session_workspace_path or "").strip()
     return {
-        "serviceUnitId": WORKSPACE_STATUS_ID,
+        "deployUnitId": WORKSPACE_STATUS_ID,
         "path": str(Path(path) / WORKSPACE_AGENTS_MD) if path else "",
         "loaded": True,
         "source": "local",
@@ -294,7 +295,7 @@ def _workspace_binding(session_workspace_path: Optional[str]) -> dict:
     """工作区指令在适用范围表里的一行：引用范围=「会话工作区指令」、代码地址=工作区路径、
     锚点指向单元级里工作区指令那条 ``## 标题``。仅在已确认工作区有正文时调用。"""
     return {
-        "serviceUnitId": WORKSPACE_SCOPE_ID,
+        "deployUnitId": WORKSPACE_SCOPE_ID,
         "ref": WORKSPACE_SCOPE_REF,
         "localRepoPath": (session_workspace_path or "").strip(),
         "anchor": _heading_slug(WORKSPACE_SCOPE_REF),
@@ -317,12 +318,12 @@ def _compose_prompt(
     workspace_content: Optional[str],
     unit_sections: List[dict],
 ) -> str:
-    """① 适用范围（绑定表，serviceUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md。
+    """① 适用范围（绑定表，deployUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md。
 
     三个层次各用一对 XML 风格标签外包（``<SCOPE>`` / ``<SYSTEM>`` /
     ``<UNIT>``）；被嵌入 md 自带的 ``#``/``##`` 标题被包在标签内，不再与结构
-    标记同级交错。单元锚点改为各单元自己的 ``## serviceUnitId（描述）`` 标题 slug；适用范围表里
-    的 serviceUnitId 以 ``[id](#slug)`` 指向该标题（有单元段指向单元标题，否则指向所属系统段的
+    标记同级交错。单元锚点改为各单元自己的 ``## deployUnitId（描述）`` 标题 slug；适用范围表里
+    的 deployUnitId 以 ``[id](#slug)`` 指向该标题（有单元段指向单元标题，否则指向所属系统段的
     ``<SYSTEM id="sys-…">``；无内容则不加链接）。
 
     标签为**裸标签**（不再用反引号包成 inline code）并前后留空行：
@@ -333,7 +334,7 @@ def _compose_prompt(
     lines: List[str] = []
     lines.append("# 统一 Agent 指令")
     lines.append("")
-    # ① 适用范围：绑定表（serviceUnitId 锚点链接指向下方 ②/③ 段的 id 属性）。
+    # ① 适用范围：绑定表（deployUnitId 锚点链接指向下方 ②/③ 段的 id 属性）。
     # 无绑定（未选任何单元、仅注入工作区指令时）则整段跳过。
     if bindings:
         lines.append(f"<{SCOPE_TAG}>")
@@ -341,15 +342,15 @@ def _compose_prompt(
         lines.append("## 适用范围")
         lines.append(
             "本文件是 产品的前端、后端工程工作的统一入口，执行任务前必须先确认下面的工程映射，避免把前端、后端或文档索引路径识别错。"
-            "开发、排查与代码修改时优先在这些路径内进行（serviceUnitId 链接指向下方对应知识库段）："
+            "开发、排查与代码修改时优先在这些路径内进行（deployUnitId 链接指向下方对应知识库段）："
         )
         lines.append("")
-        lines.append("| 引用范围 | serviceUnitId | 代码地址（localRepoPath） |")
+        lines.append("| 引用范围 | deployUnitId | 代码地址（localRepoPath） |")
         lines.append("| --- | --- | --- |")
         for binding in bindings:
             ref = _md_cell(binding.get("ref") or "(未匹配知识库)")
             repo = _md_cell(binding.get("localRepoPath") or "(未提供)")
-            uid_text = _md_cell(binding["serviceUnitId"])
+            uid_text = _md_cell(binding["deployUnitId"])
             cell = f"[{uid_text}](#{binding['anchor']})" if binding.get("anchor") else uid_text
             lines.append(f"| {ref} | {cell} | {repo} |")
         lines.append("")
@@ -368,12 +369,12 @@ def _compose_prompt(
 
     # ③ 单元级：整段只用一对 <UNIT> 外包（裸标签，作语义/结构边界）。
     # 会话工作区指令排在最前，其后接各选中单元正文；每段前置一行 ``## 标题`` 作为 ① 表锚点目标
-    # （标题 slug 由 _heading_slug 生成，与 ① 表里的 [serviceUnitId](#slug) 同源）。空段跳过整对标签。
+    # （标题 slug 由 _heading_slug 生成，与 ① 表里的 [deployUnitId](#slug) 同源）。空段跳过整对标签。
     unit_blocks: List[str] = []
     if workspace_content is not None:
         unit_blocks.append(f"## {WORKSPACE_SCOPE_REF}\n\n{workspace_content.strip()}")
     for section in unit_sections:
-        label = _unit_heading_label(section["serviceUnitId"], section.get("ref") or "")
+        label = _unit_heading_label(section["deployUnitId"], section.get("ref") or "")
         unit_blocks.append(f"## {label}\n\n{section['content'].strip()}")
     if unit_blocks:
         lines.append("")
@@ -393,14 +394,14 @@ def render(
     session_workspace_path: Optional[str] = None,
 ) -> dict:
     """核心逻辑（无 I/O 边界外副作用），便于单测。"""
-    # 「会话工作区指令」独立于服务单元选择：先行构建，未选单元也可单独注入。
+    # 「会话工作区指令」独立于部署单元选择：先行构建，未选单元也可单独注入。
     workspace_content = _build_workspace_content(session_workspace_path)
 
     if not selected:
         if workspace_content is None:
             return {
                 "ok": True,
-                "message": "未选择服务单元，无需注入",
+                "message": "未选择部署单元，无需注入",
                 "sessionContext": "",
                 "agentmdLoadStatus": [],
             }
@@ -409,7 +410,7 @@ def render(
         prompt = _compose_prompt(bindings, [], workspace_content, [])
         return {
             "ok": True,
-            "message": "未选择服务单元，仅注入会话工作区指令",
+            "message": "未选择部署单元，仅注入会话工作区指令",
             "sessionContext": prompt,
             "agentmdLoadStatus": [_workspace_status(session_workspace_path)],
         }
@@ -428,7 +429,7 @@ def render(
     seen_systems: set[str] = set()
     seen_paths: set[Path] = set()     # 正文按规范化后绝对路径去重（resolve 消除 symlink/.. 差异）
     system_loaded: set[str] = set()   # 实际产出系统段的 systemId（供锚点回退）
-    unit_has_section: set[str] = set()  # 实际产出单元段的 serviceUnitId（供锚点指向）
+    unit_has_section: set[str] = set()  # 实际产出单元段的 deployUnitId（供锚点指向）
 
     def _append_body(abs_path: Optional[Path], bucket: List[dict], section: dict) -> bool:
         if abs_path is None:
@@ -441,7 +442,7 @@ def render(
         return True
 
     for sel in selected:
-        uid = sel["serviceUnitId"]
+        uid = sel["deployUnitId"]
         local = sel["localRepoPath"]
         pair = pairs.get(uid)
         if pair is not None:
@@ -476,7 +477,7 @@ def render(
                 # 单元级不做 {project_root} 替换（占位符原样保留）。
                 if content is not None and _append_body(
                     abs_path, unit_sections,
-                    {"serviceUnitId": uid, "ref": _ref_for(pair, sel), "content": content},
+                    {"deployUnitId": uid, "ref": _ref_for(pair, sel), "content": content},
                 ):
                     unit_has_section.add(uid)
         else:
@@ -485,13 +486,13 @@ def render(
             load_status.append(status)
             if content is not None and _append_body(
                 abs_path, unit_sections,
-                {"serviceUnitId": uid, "ref": _ref_for(pair, sel), "content": content},
+                {"deployUnitId": uid, "ref": _ref_for(pair, sel), "content": content},
             ):
                 unit_has_section.add(uid)
 
     # 会话工作区指令与已选单元去重：若 <sessionWorkspacePath>/AGENTS.md 与某个选中单元实际
     # 加载的本地 AGENTS.md 是同一文件（会话工作区即该单元的 localRepoPath 且单元走了 local 兜底），
-    # 同一文件不重复注入——丢掉会话工作区段，由带 serviceUnitId 身份的单元段承载（它已在 seen_paths）。
+    # 同一文件不重复注入——丢掉会话工作区段，由带 deployUnitId 身份的单元段承载（它已在 seen_paths）。
     # 注意：单元若命中 remote，加载的是 sys/ 下的文件、与本地 AGENTS.md 非同一路径，不触发去重。
     if workspace_content is not None:
         ws_md = Path((session_workspace_path or "").strip()) / WORKSPACE_AGENTS_MD
@@ -499,13 +500,13 @@ def render(
             workspace_content = None
 
     # 适用范围：工作区指令（若有）占首行，其后每个选中单元一行（引用范围 = 清单 description；
-    # 代码地址 = localRepoPath）；serviceUnitId 锚点：有单元段→指向该单元 ## 标题 slug，否则→
+    # 代码地址 = localRepoPath）；deployUnitId 锚点：有单元段→指向该单元 ## 标题 slug，否则→
     # 指向所属系统段的 <SYSTEM id="sys-…">，再否则→无链接。
     bindings: List[dict] = []
     if workspace_content is not None:
         bindings.append(_workspace_binding(session_workspace_path))
     for sel in selected:
-        uid = sel["serviceUnitId"]
+        uid = sel["deployUnitId"]
         pair = pairs.get(uid)
         ref = _ref_for(pair, sel)
         if uid in unit_has_section:
@@ -516,7 +517,7 @@ def render(
             anchor = ""
         bindings.append(
             {
-                "serviceUnitId": uid,
+                "deployUnitId": uid,
                 "ref": ref,
                 "localRepoPath": sel["localRepoPath"],
                 "anchor": anchor,
@@ -529,7 +530,7 @@ def render(
     miss_n = sum(1 for s in load_status if not s["loaded"])
     message = f"remote {remote_n} / local {local_n} / 缺 {miss_n}"
     # 工作区指令（若有正文注入）在 agentmdLoadStatus 里占首条；其加载结果不计入上面的
-    # remote/local/缺 单元摘要（那行只反映服务单元），避免把工作区混进单元统计。
+    # remote/local/缺 单元摘要（那行只反映部署单元），避免把工作区混进单元统计。
     result_status = (
         [_workspace_status(session_workspace_path), *load_status]
         if workspace_content is not None
@@ -545,14 +546,14 @@ def render(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="session_context_inject: 选中服务单元 -> 注入 sessionContext（适用范围+系统级+各单元）",
+        description="session_context_inject: 选中部署单元 -> 注入 sessionContext（适用范围+系统级+各单元）",
         allow_abbrev=False,
     )
     parser.add_argument(
-        "--selected-serviceUnit",
+        "--selected-deployUnit",
         dest="selected",
         default="",
-        help="JSON 数组字符串：[{\"serviceUnitId\":\"...\",\"localRepoPath\":\"...\"}]",
+        help="JSON 数组字符串：[{\"deployUnitId\":\"...\",\"localRepoPath\":\"...\"}]",
     )
     parser.add_argument(
         "--session-workspace-path",

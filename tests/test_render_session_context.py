@@ -27,21 +27,21 @@ MANIFEST = {
             "systemId": "LF39",
             "description": "外联服务系统",
             "agentsPath": "LF3905/AGENTS.md",
-            "serviceUnits": [
+            "deployUnits": [
                 {
-                    "serviceUnitId": "LF39.18_Outservice",
+                    "deployUnitId": "LF39.18_Outservice",
                     "description": "外联出站服务",
                     "agentsPath": "LF3918/descition.md",
                 },
-                {"serviceUnitId": "LF39.20_Inservice", "description": "外联入站服务", "agentsPath": ""},
+                {"deployUnitId": "LF39.20_Inservice", "description": "外联入站服务", "agentsPath": ""},
             ],
         },
         {
             "systemId": "LA64",
             "description": "UEX 网关系统",
             "agentsPath": "shared/gateway/AGENTS.md",
-            "serviceUnits": [
-                {"serviceUnitId": "LA64.05_UEXgateway", "description": "UEX 网关", "agentsPath": ""}
+            "deployUnits": [
+                {"deployUnitId": "LA64.05_UEXgateway", "description": "UEX 网关", "agentsPath": ""}
             ],
         },
     ],
@@ -90,15 +90,15 @@ class ParseSelectedTest(unittest.TestCase):
         self.assertEqual(_parse_selected("   "), [])
 
     def test_valid(self):
-        out = _parse_selected('[{"serviceUnitId":"U1","localRepoPath":"/r"}]')
-        self.assertEqual(out, [{"serviceUnitId": "U1", "localRepoPath": "/r", "description": ""}])
+        out = _parse_selected('[{"deployUnitId":"U1","localRepoPath":"/r"}]')
+        self.assertEqual(out, [{"deployUnitId": "U1", "localRepoPath": "/r", "description": ""}])
 
     def test_valid_with_description_and_extra_fields_ignored(self):
-        # UI 实际传参：带 description，并含 serviceUnitIdMapping 等脚本不关心的字段（原样忽略）。
+        # UI 实际传参：带 description，并含 deployUnitIdMapping 等脚本不关心的字段（原样忽略）。
         out = _parse_selected(
-            '[{"serviceUnitIdMapping":"abc-123","serviceUnitId":"LX34","localRepoPath":"/d","description":"测试"}]'
+            '[{"deployUnitIdMapping":"abc-123","deployUnitId":"LX34","localRepoPath":"/d","description":"测试"}]'
         )
-        self.assertEqual(out, [{"serviceUnitId": "LX34", "localRepoPath": "/d", "description": "测试"}])
+        self.assertEqual(out, [{"deployUnitId": "LX34", "localRepoPath": "/d", "description": "测试"}])
 
     def test_invalid_json_raises(self):
         with self.assertRaises(ValueError):
@@ -106,9 +106,9 @@ class ParseSelectedTest(unittest.TestCase):
 
     def test_not_a_list_raises(self):
         with self.assertRaises(ValueError):
-            _parse_selected('{"serviceUnitId":"U1"}')
+            _parse_selected('{"deployUnitId":"U1"}')
 
-    def test_missing_service_unit_id_raises(self):
+    def test_missing_deploy_unit_id_raises(self):
         with self.assertRaises(ValueError):
             _parse_selected('[{"localRepoPath":"/r"}]')
 
@@ -129,9 +129,10 @@ class RenderShapeTest(unittest.TestCase):
 
 class RenderRemoteTest(unittest.TestCase):
     def test_single_unit_injects_system_and_unit_remote(self):
+        pr = _plugin_root()
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
-            plugin_root=_plugin_root(),
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=pr,
         )
         self.assertTrue(res["ok"])
         prompt = res["sessionContext"]
@@ -150,7 +151,7 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertIn("</SYSTEM>", prompt)
         self.assertIn('<UNIT id="unit-section"', prompt)  # 单元级整段只一对 <UNIT>
         self.assertIn("</UNIT>", prompt)
-        # 命中单元：③ 里有 ## serviceUnitId（描述）标题，① 表锚点指向它的 slug
+        # 命中单元：③ 里有 ## deployUnitId（描述）标题，① 表锚点指向它的 slug
         label = _unit_heading_label("LF39.18_Outservice", "外联出站服务")
         self.assertIn(f"## {label}", prompt)
         self.assertIn(f"[LF39.18_Outservice](#{_heading_slug(label)})", prompt)
@@ -158,22 +159,24 @@ class RenderRemoteTest(unittest.TestCase):
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
         self.assertTrue(status[0]["loaded"] and status[0]["source"] == "remote")
-        self.assertEqual(status[0]["path"], "sys/LF3918/descition.md")
+        # remote 路径为绝对（原生分隔符），前缀为 <pluginPath>/sys
+        self.assertEqual(status[0]["path"], str(pr / "sys" / "LF3918" / "descition.md"))
         # 系统级文件不出现在状态里
-        self.assertFalse(any(s["path"] == "sys/LF3905/AGENTS.md" for s in status))
+        self.assertFalse(any(s["path"] == str(pr / "sys" / "LF3905" / "AGENTS.md") for s in status))
 
     def test_two_units_same_system_system_md_pasted_once_not_in_status(self):
+        pr = _plugin_root()
         res = render(
             [
-                {"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"},
-                {"serviceUnitId": "LF39.20_Inservice", "localRepoPath": "/repo/in"},
+                {"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"},
+                {"deployUnitId": "LF39.20_Inservice", "localRepoPath": "/repo/in"},
             ],
-            plugin_root=_plugin_root(),
+            plugin_root=pr,
         )
         prompt = res["sessionContext"]
         # 正文系统段只拼一次（按 systemId 去重）
         self.assertEqual(prompt.count('<SYSTEM id="sys-LF39"'), 1)
-        # serviceUnitId 锚点：有单元正文→指向该单元 ## 标题 slug；无单元正文→回退指向系统段
+        # deployUnitId 锚点：有单元正文→指向该单元 ## 标题 slug；无单元正文→回退指向系统段
         unit_anchor = _heading_slug(_unit_heading_label("LF39.18_Outservice", "外联出站服务"))
         self.assertIn(f"[LF39.18_Outservice](#{unit_anchor})", prompt)
         self.assertIn("[LF39.20_Inservice](#sys-LF39)", prompt)
@@ -184,9 +187,9 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertIn("/repo/in", prompt)
         # agentmdLoadStatus 只反映单元级：系统级文件不进状态；LF39.20 无独立 md 不产出条目
         status = res["agentmdLoadStatus"]
-        self.assertFalse(any(s["path"] == "sys/LF3905/AGENTS.md" for s in status))
+        self.assertFalse(any(s["path"] == str(pr / "sys" / "LF3905" / "AGENTS.md") for s in status))
         self.assertEqual(len(status), 1)  # 仅 LF39.18 单元级
-        self.assertEqual(status[0]["serviceUnitId"], "LF39.18_Outservice")
+        self.assertEqual(status[0]["deployUnitId"], "LF39.18_Outservice")
 
     def test_project_root_placeholder_replaced_system_only(self):
         # 系统级（②）正文里的 {project_root} → <pluginPath>/sys/<systemId>；单元级（③）不替换。
@@ -204,7 +207,7 @@ class RenderRemoteTest(unittest.TestCase):
             "# 单元\n配置: {project_root}/conf\n", encoding="utf-8"
         )
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
             plugin_root=tmp,
         )
         expected = str(sysd / "LF39")  # systemId 是 LF39（不是路径段 LF3905）
@@ -217,8 +220,8 @@ class RenderRemoteTest(unittest.TestCase):
     def test_multiple_systems_both_injected(self):
         res = render(
             [
-                {"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/a"},
-                {"serviceUnitId": "LA64.05_UEXgateway", "localRepoPath": "/b"},
+                {"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/a"},
+                {"deployUnitId": "LA64.05_UEXgateway", "localRepoPath": "/b"},
             ],
             plugin_root=_plugin_root(),
         )
@@ -232,7 +235,7 @@ class RenderRemoteTest(unittest.TestCase):
         # 标签为裸标签（无反引号）、前后留空行：裸标签使 id 成真 HTML 锚点；空行让裸标签各自成
         # HTML 块，紧随其后的 ## 标题照常按 Markdown 渲染、不被折进 HTML 块。
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
@@ -255,7 +258,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
     def test_unit_remote_missing_falls_back_to_local(self):
         local = _local_repo()
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": local}],
             plugin_root=_plugin_root(write_remote=("LF39.system",)),  # 仅系统级远端存在
         )
         status = res["agentmdLoadStatus"]
@@ -269,7 +272,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
     def test_unknown_unit_local_loaded(self):
         local = _local_repo()
         res = render(
-            [{"serviceUnitId": "GHOST.1", "localRepoPath": local}],
+            [{"deployUnitId": "GHOST.1", "localRepoPath": local}],
             plugin_root=_plugin_root(),
         )
         self.assertTrue(res["ok"])
@@ -285,7 +288,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
 
     def test_unknown_unit_local_missing_reports_not_loaded(self):
         res = render(
-            [{"serviceUnitId": "GHOST.1", "localRepoPath": "/no/such/dir"}],
+            [{"deployUnitId": "GHOST.1", "localRepoPath": "/no/such/dir"}],
             plugin_root=_plugin_root(),
         )
         self.assertTrue(res["ok"])  # 绝不中断
@@ -302,7 +305,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
         # 不再是「(未匹配知识库)」；③ 标题与 ① 锚点都用该 description（三处同源）。
         local = _local_repo()
         res = render(
-            [{"serviceUnitId": "LX34", "localRepoPath": local, "description": "测试"}],
+            [{"deployUnitId": "LX34", "localRepoPath": local, "description": "测试"}],
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
@@ -315,7 +318,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
         # 未命中清单 + 本地也无 AGENTS.md（NO_AGENTS.MD 那种）→ ① 引用范围仍显示 UI description，
         # 不再「(未匹配知识库)」；无正文则不加锚点。
         res = render(
-            [{"serviceUnitId": "NO_AGENTS.MD", "localRepoPath": "/no/such/dir", "description": "没有 AGENT.MD"}],
+            [{"deployUnitId": "NO_AGENTS.MD", "localRepoPath": "/no/such/dir", "description": "没有 AGENT.MD"}],
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
@@ -327,7 +330,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
     def test_matched_unit_prefers_manifest_description_over_ui(self):
         # 命中清单的单元：引用范围仍用清单 description，UI 传入的 description 不顶替（仅兜底用）。
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out", "description": "UI叫法"}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out", "description": "UI叫法"}],
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
@@ -339,7 +342,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
         # 状态只反映单元级（remote 缺失→local 兜底成功）。
         local = _local_repo()
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": local}],
             plugin_root=_plugin_root(write_remote=()),  # 无任何远端文件
         )
         status = res["agentmdLoadStatus"]
@@ -352,7 +355,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
     def test_system_and_unit_both_missing_reports_only_unit(self):
         # 系统级 + 单元级 remote 都缺、local 也无：状态只剩单元级一条 local 未命中。
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/no/such/dir"}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/no/such/dir"}],
             plugin_root=_plugin_root(write_remote=()),
         )
         status = res["agentmdLoadStatus"]
@@ -365,7 +368,7 @@ class RenderLocalFallbackTest(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         (tmp / "sys").mkdir()  # 无 manifest
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": local}],
             plugin_root=tmp,
         )
         self.assertTrue(res["ok"])
@@ -387,10 +390,10 @@ class RenderWorkspaceTest(unittest.TestCase):
         self.assertIn("- 工作区约束", prompt)  # AGENTS.md 正文（用正文独有的项目符号校验，避免与 ## 标题串味）
         self.assertNotIn("<WORKSPACE", prompt)  # 不再用 WORKSPACE 标签
         self.assertNotIn("<SYSTEM", prompt)  # 未选单元 → 无系统段
-        # 工作区指令进 agentmdLoadStatus：serviceUnitId=本地工作区、source=local、loaded=True。
+        # 工作区指令进 agentmdLoadStatus：deployUnitId=本地工作区、source=local、loaded=True。
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
-        self.assertEqual(status[0]["serviceUnitId"], "本地工作区")
+        self.assertEqual(status[0]["deployUnitId"], "本地工作区")
         self.assertEqual(status[0]["source"], "local")
         self.assertTrue(status[0]["loaded"])
 
@@ -398,7 +401,7 @@ class RenderWorkspaceTest(unittest.TestCase):
         # 工作区指令在适用范围表里占一行：引用范围=会话工作区指令、代码地址=工作区路径、锚点指向其 ## 标题。
         ws = _workspace()
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
             plugin_root=_plugin_root(),
             session_workspace_path=ws,
         )
@@ -438,7 +441,7 @@ class RenderWorkspaceTest(unittest.TestCase):
         # 单元级只一对 <UNIT>；块内工作区指令排在选中单元正文之前，整段在系统级之后。
         ws = _workspace()
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
             plugin_root=_plugin_root(),
             session_workspace_path=ws,
         )
@@ -454,10 +457,10 @@ class RenderWorkspaceTest(unittest.TestCase):
 
     def test_workspace_same_file_as_selected_unit_local_dedups(self):
         # 会话工作区路径 == 选中单元的 localRepoPath，且单元走 local 兜底（remote 缺失）→
-        # 同一 AGENTS.md 只注入一次：丢掉会话工作区段，由带 serviceUnitId 身份的单元段承载。
+        # 同一 AGENTS.md 只注入一次：丢掉会话工作区段，由带 deployUnitId 身份的单元段承载。
         local = _local_repo()  # 该目录下有 AGENTS.md（# 本地知识库）
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": local}],
             plugin_root=_plugin_root(write_remote=("LF39.system",)),  # 单元 remote 缺失→local 兜底
             session_workspace_path=local,  # 会话工作区 == 单元 localRepoPath
         )
@@ -467,13 +470,13 @@ class RenderWorkspaceTest(unittest.TestCase):
         # 会话工作区段被丢弃（无其 ## 标题、无 ① 表链接）
         self.assertNotIn("## 会话工作区指令", prompt)
         self.assertNotIn("[会话工作区]", prompt)
-        # 单元段仍在，带 serviceUnitId 身份
+        # 单元段仍在，带 deployUnitId 身份
         self.assertIn("## LF39.18_Outservice（外联出站服务）", prompt)
         # agentmdLoadStatus：只有单元一条，没有「本地工作区」
         status = res["agentmdLoadStatus"]
-        self.assertFalse(any(s["serviceUnitId"] == "本地工作区" for s in status))
+        self.assertFalse(any(s["deployUnitId"] == "本地工作区" for s in status))
         self.assertEqual(len(status), 1)
-        self.assertEqual(status[0]["serviceUnitId"], "LF39.18_Outservice")
+        self.assertEqual(status[0]["deployUnitId"], "LF39.18_Outservice")
         self.assertEqual(status[0]["source"], "local")
 
     def test_workspace_kept_when_unit_loads_remote_not_local(self):
@@ -481,30 +484,30 @@ class RenderWorkspaceTest(unittest.TestCase):
         # 二者非同一文件，不去重：会话工作区段照常注入。
         local = _local_repo()
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": local}],
             plugin_root=_plugin_root(),  # 单元 remote 存在 → 命中 remote
             session_workspace_path=local,
         )
         prompt = res["sessionContext"]
         self.assertIn("## 会话工作区指令", prompt)  # 工作区段保留
         status = res["agentmdLoadStatus"]
-        self.assertEqual(status[0]["serviceUnitId"], "本地工作区")
+        self.assertEqual(status[0]["deployUnitId"], "本地工作区")
         self.assertEqual(status[1]["source"], "remote")  # 单元走 remote
 
     def test_workspace_is_first_status_entry_with_selection(self):
         # 选中单元 + 工作区有正文：agentmdLoadStatus 首条是工作区（本地工作区/local），
-        # 其后才是各服务单元；message 的单元摘要不把工作区算进去。
+        # 其后才是各部署单元；message 的单元摘要不把工作区算进去。
         ws = _workspace()
         res = render(
-            [{"serviceUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
             plugin_root=_plugin_root(),
             session_workspace_path=ws,
         )
         status = res["agentmdLoadStatus"]
-        self.assertEqual(status[0]["serviceUnitId"], "本地工作区")
+        self.assertEqual(status[0]["deployUnitId"], "本地工作区")
         self.assertEqual(status[0]["source"], "local")
         self.assertTrue(status[0]["loaded"])
-        self.assertEqual(status[1]["serviceUnitId"], "LF39.18_Outservice")
+        self.assertEqual(status[1]["deployUnitId"], "LF39.18_Outservice")
         self.assertIn("remote 1", res["message"])  # 单元摘要只数单元，不含工作区
 
 
