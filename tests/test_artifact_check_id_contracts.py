@@ -206,6 +206,34 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         tests: list[dict] | None = None,
         flow_blocking: bool = False,
     ) -> None:
+        normalized_tests: list[dict] | None = None
+        if tests is not None:
+            normalized_tests = []
+            for raw_test in tests:
+                item = dict(raw_test)
+                item.setdefault(
+                    "seam",
+                    {
+                        "type": "api",
+                        "entrypoint": "GET /health",
+                        "observable": "HTTP 200 response",
+                    },
+                )
+                item.setdefault(
+                    "verticalSlice",
+                    {
+                        "trigger": "call the public smoke endpoint",
+                        "expectedOutcome": "the endpoint returns a successful response",
+                    },
+                )
+                item.setdefault(
+                    "mockPolicy",
+                    {
+                        "externalOnly": True,
+                        "allowedMocks": [],
+                    },
+                )
+                normalized_tests.append(item)
         self._write_json(
             feature_dir,
             "SMOKE_TEST_PLAN.json",
@@ -214,7 +242,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "featureId": "alpha",
                 "flowBlocking": flow_blocking,
                 "skipReason": "" if tests else "no smoke needed",
-                "tests": tests if tests is not None else [],
+                "tests": normalized_tests if normalized_tests is not None else [],
             },
         )
 
@@ -1905,6 +1933,103 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertEqual(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_missing_tdd_seam_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "seam": None,
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_missing_vertical_slice_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "verticalSlice": None,
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_internal_mock_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "mockPolicy": {"externalOnly": False, "allowedMocks": ["internal service"]},
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_multi_scenario_smoke_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            with (feature_dir / "specs" / "cap" / "spec.md").open("a", encoding="utf-8") as handle:
+                handle.write("\n### Requirement [REQ-002]: another\n#### Scenario [SCN-002]: second path\n")
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001", "specs/cap/spec.md#SCN-002"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
 
     def test_smoke_test_plan_rejects_blocking_or_untracked_source_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -314,17 +314,21 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 
 校验通过后，再生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json`。必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。
 
-`SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 的粒度：每个案例必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码。
+`SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 与 TDD 的克制粒度：每个案例只描述一个站在公开 seam 上的 vertical slice，必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码，不批量设计覆盖想象行为的测试矩阵。
 
 `SMOKE_TEST_PLAN.json` 规则：
 - 顶层 `version` 固定为 `1`，`featureId` 为当前 `{feature}`，`flowBlocking` 必须为 `false`。
 - `tests[]` 可以为空；为空时必须写 `skipReason` 说明为什么本轮没有旁路冒烟价值。
-- 每个 `tests[]` 必须包含 `id`（`SMK-001` 起）、`taskId`、`scenarioRefs`、`title`、`smokeType`、`sourcePath`、`command`、`expectedSignals`、`preconditions`、`timeoutSeconds`。
-- `taskId` 必须引用 `plan.json.tasks[].id`；`scenarioRefs` 必须引用 specs 中真实 `SCN-xxx`。
+- 每个 `tests[]` 必须包含 `id`（`SMK-001` 起）、`taskId`、`scenarioRefs`、`title`、`smokeType`、`seam`、`verticalSlice`、`mockPolicy`、`sourcePath`、`command`、`expectedSignals`、`preconditions`、`timeoutSeconds`。
+- `taskId` 必须引用 `plan.json.tasks[].id`；每条 smoke 只能绑定一个 `taskId` 与一个 specs 中真实 `SCN-xxx`，不要把多个场景塞进一条冒烟。
+- `seam` 描述测试站立的公开边界：`type` 使用 `startup/api/http/ui/cli/job/migration/health/custom` 之一，`entrypoint` 写调用方真实使用的入口，`observable` 写通过公开响应、页面、CLI 输出或健康信号观察到的结果；不得把私有方法、内部类、内部表查询当作 seam。
+- `verticalSlice` 只写一个最小闭环：`trigger` 是单一用户动作或系统触发，`expectedOutcome` 是来自 specs/design 的独立可观察结果；不要先规划一批横向用例再等 Code 阶段一起实现。
+- `mockPolicy.externalOnly` 必须为 `true`；`allowedMocks` 只能列外部 API、支付、邮件、时间、随机、文件系统或受控测试数据库等系统边界 mock。不得计划 mock 自有模块、内部服务或私有协作者。
+- 三类预期不要同义反复：`seam.observable` 写站在公开边界能看见什么，`verticalSlice.expectedOutcome` 写来自 specs/design 的行为结论，`expectedSignals[]` 写测试命令或断言可检查的机器信号。
 - `sourcePath` 只写计划中的目标测试源码或脚本路径，必须落在业务项目测试/冒烟目录，例如 `src/test/`、`tests/smoke/`、`scripts/smoke/`、`e2e/smoke/`；Plan 阶段不要求文件已存在。这些是 AutoDev 本地验证资产，不是业务项目长期测试资产，Code 阶段必须确保对应路径被目标项目 Git 忽略。
 - `command` 必须是只运行对应冒烟案例的 opt-in 命令，例如 `mvn -q -Psmoke -Dtest=OrderSmokeIT verify`、`npm run smoke -- order.spec.ts`；不得写需要人工参与的步骤。
 - `expectedSignals` 写可观察信号，例如 HTTP 状态、关键响应字段、页面路由可达、CLI 输出片段；机器校验以测试断言和命令退出码为准，不解析自然语言信号。
-- 冒烟案例覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号；不要用它替代单测/E2E。
+- 冒烟案例可覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号，但必须按场景拆成多条 SMK，每条只覆盖一个 vertical slice；不要用它替代单测/E2E。
 - 不得把冒烟命令复制进 `plan.json.tasks[].validationCommands`。`validationCommands` 是强门禁，必须快、稳、可重复；`SMOKE_TEST_PLAN.json` 是旁路风险信号，失败不阻断 `code_done`。
 
 写入 `SMOKE_TEST_PLAN.json` 后，必须通过本阶段 artifact validator；若生成 `PLAN.md`，按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构从 `plan.json` 投影输出，冒烟计划可另行投影为人类摘要但不作为机器事实源。
@@ -334,7 +338,7 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json` 文件已写入磁盘，`flowBlocking=false`
 - [ ] `plan.json` 可作为任务 DAG 的机器事实源被后续阶段优先读取
 - [ ] 每个任务都包含「做什么」「规格依据」「api_id」「data_id」「decision_id」「设计依据」「涉及范围」「执行要点」「验证命令」「预期结果」「状态: 待做」
-- [ ] 冒烟案例按 `SMK-001` 起编号，并绑定真实 `taskId` 与 `SCN-xxx`；没有冒烟案例时写明 `skipReason`
+- [ ] 冒烟案例按 `SMK-001` 起编号，并绑定真实 `taskId` 与 `SCN-xxx`；每条 smoke 含 `seam`、`verticalSlice`、`mockPolicy.externalOnly=true`；没有冒烟案例时写明 `skipReason`
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx），验证命令带具体目标而非裸 mvn test/npm test；但没有写成逐行代码、逐文件微任务或 commit 步骤
 - [ ] 每个任务的「验证命令」都是大模型能直接运行并自行判读的命令（测试/构建/lint/curl/脚本），没有任何"手工""人工验证""Postman""浏览器点击"等需要人参与的步骤；HTTP 接口用 curl 或集成测试覆盖
