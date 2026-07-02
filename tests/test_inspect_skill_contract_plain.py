@@ -50,102 +50,144 @@ class RenderContractPlainStateTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
 
-    def test_present_input_shows_method_only(self) -> None:
+    def test_present_input_is_omitted_yielding_empty_output(self) -> None:
         self.write("proposal.md")
-        contract = make_contract(inputs=(spec("proposal.md", required=True, method="抽取范围约束"),))
+        contract = make_contract(inputs=(spec("proposal.md", required=True),))
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("1. proposal.md（必需·已生成）：proposal.md 标签", text)
-        self.assertIn("读取方式：抽取范围约束", text)
-        self.assertNotIn("缺失处理", text)
-        # focus is never rendered in any state.
-        self.assertNotIn("读取重点", text)
-        self.assertNotIn("聚焦点", text)
+        # A present input needs no runtime instruction; with nothing missing the
+        # command returns empty output.
+        self.assertEqual(text, "")
 
-    def test_missing_required_input_shows_stop_not_method(self) -> None:
-        contract = make_contract(inputs=(spec("design.md", required=True, method="怎么读设计"),))
+    def test_missing_required_input_uses_its_degrade(self) -> None:
+        contract = make_contract(
+            inputs=(spec("design.md", required=True, degrade="回到设计阶段补齐后再执行"),)
+        )
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("1. design.md（必需·未生成）：design.md 标签", text)
-        self.assertIn("缺失处理：停止——必需输入未生成，回流上游补齐后再执行", text)
-        # "读取方式：" (fullwidth colon) is the method line; the section title's
-        # "读取方式优先…" must not trip this.
-        self.assertNotIn("读取方式：", text)
+        # Required inputs draw their handling text from extract.degrade too — not
+        # a hardcoded stop message; the header carries no flag and no marker.
+        self.assertEqual(
+            text,
+            "## 缺失产物处理\n1. design.md：design.md 标签\n   缺失处理：回到设计阶段补齐后再执行\n",
+        )
 
-    def test_missing_optional_input_shows_degrade(self) -> None:
+    def test_missing_optional_input_uses_its_degrade(self) -> None:
         contract = make_contract(
             inputs=(spec("PRD.md", required=False, degrade="无 PRD 时直接跳过"),)
         )
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("1. PRD.md（可选·未生成）：PRD.md 标签", text)
-        self.assertIn("缺失处理：无 PRD 时直接跳过", text)
-        self.assertNotIn("读取方式：", text)
+        self.assertEqual(
+            text,
+            "## 缺失产物处理\n1. PRD.md：PRD.md 标签\n   缺失处理：无 PRD 时直接跳过\n",
+        )
 
-    def test_glob_input_present_when_a_match_exists(self) -> None:
+    def test_empty_degrade_falls_back_to_hardcoded_default(self) -> None:
+        # Nothing in board_config ships an empty degrade today; this pins the
+        # defensive fallback: required stops, optional skips.
+        required_no_extract = ArtifactSpec(id="a", label="A 标签", path="a.md", required=True)
+        optional_blank_degrade = ArtifactSpec(
+            id="b", label="B 标签", path="b.md", required=False, extract=ExtractSpec()
+        )
+        contract = make_contract(inputs=(required_no_extract, optional_blank_degrade))
+
+        text = render_contract_plain(contract, feature_dir=self.feature_dir)
+
+        self.assertIn("1. a.md：A 标签", text)
+        self.assertIn("缺失处理：停止——必需输入未生成，回流上游补齐后再执行", text)
+        self.assertIn("2. b.md：B 标签", text)
+        self.assertIn("缺失处理：直接跳过，不影响执行", text)
+
+    def test_only_missing_inputs_listed_and_renumbered(self) -> None:
+        self.write("PRD.md")
+        contract = make_contract(
+            inputs=(
+                spec("PRD.md", required=True),
+                spec("design.md", required=True, degrade="回流上游"),
+            )
+        )
+
+        text = render_contract_plain(contract, feature_dir=self.feature_dir)
+
+        # Present input dropped; the remaining missing one is renumbered to 1.
+        self.assertNotIn("PRD.md", text)
+        self.assertIn("1. design.md：design.md 标签", text)
+
+    def test_glob_input_present_is_omitted(self) -> None:
         self.write("specs/cap/a.md")
         contract = make_contract(inputs=(spec("specs/**/*.md", required=True),))
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("specs/**/*.md（必需·已生成）", text)
+        self.assertEqual(text, "")
 
     def test_glob_input_missing_when_no_match(self) -> None:
-        contract = make_contract(inputs=(spec("specs/**/*.md", required=True),))
+        contract = make_contract(inputs=(spec("specs/**/*.md", required=True, degrade="回流上游"),))
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("specs/**/*.md（必需·未生成）", text)
+        self.assertIn("specs/**/*.md：", text)
 
     def test_empty_file_counts_as_missing(self) -> None:
         self.write("plan.json", body="")
-        contract = make_contract(inputs=(spec("plan.json", required=True),))
+        contract = make_contract(inputs=(spec("plan.json", required=True, degrade="回流上游"),))
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("plan.json（必需·未生成）", text)
+        self.assertIn("plan.json：", text)
+
+    def test_header_carries_no_flag_no_marker_no_frame(self) -> None:
+        contract = make_contract(inputs=(spec("design.md", required=True, degrade="回流上游"),))
+
+        text = render_contract_plain(contract, feature_dir=self.feature_dir)
+
+        # No 必需/可选 flag, no 未生成 marker, and none of the old checklist frame
+        # (title / node / boundary / outputs / validators).
+        self.assertEqual(
+            text,
+            "## 缺失产物处理\n1. design.md：design.md 标签\n   缺失处理：回流上游\n",
+        )
 
 
 class RenderContractPlainBaselineTests(unittest.TestCase):
-    def test_baseline_without_feature_dir_shows_method_and_no_status(self) -> None:
+    def test_baseline_previews_every_input_handling(self) -> None:
         contract = make_contract(
             inputs=(
-                spec("proposal.md", required=True, method="抽取范围约束"),
-                spec("PRD.md", required=False),
+                spec("proposal.md", required=True, degrade="回流上游"),
+                spec("PRD.md", required=False, degrade="无 PRD 时跳过"),
             )
         )
 
         text = render_contract_plain(contract)
 
-        self.assertIn("1. proposal.md（必需）：proposal.md 标签", text)
-        self.assertIn("读取方式：抽取范围约束", text)
-        # No per-input status markers in baseline; the "·" prefix distinguishes
-        # header markers from the boundary rule's "…未生成即停止" text.
-        self.assertNotIn("·已生成", text)
-        self.assertNotIn("·未生成", text)
-        self.assertNotIn("缺失处理", text)
-        self.assertNotIn("读取重点", text)
+        # Existence unknown → all inputs previewed, each with its degrade text and
+        # no per-input status.
+        self.assertEqual(
+            text,
+            "## 缺失产物处理\n"
+            "1. proposal.md：proposal.md 标签\n"
+            "   缺失处理：回流上游\n"
+            "2. PRD.md：PRD.md 标签\n"
+            "   缺失处理：无 PRD 时跳过\n",
+        )
 
-    def test_plain_output_carries_frame_and_boundary(self) -> None:
-        text = render_contract_plain(make_contract())
+    def test_contract_without_inputs_renders_empty(self) -> None:
+        self.assertEqual(render_contract_plain(make_contract()), "")
 
-        self.assertIn("节点：dev.sample｜示例阶段", text)
-        self.assertIn("checkpoint：sample_in_progress, sample_done", text)
-        self.assertIn("未在上表列出的 id 不属于本工作流", text)
-        self.assertIn("任一必需输入未生成即停止", text)
-        self.assertIn("- REPORT.md（必需）：报告", text)
-        self.assertIn("## Validators：sample_gate", text)
+    def test_workflow_context_is_accepted_but_not_rendered(self) -> None:
+        contract = make_contract(inputs=(spec("design.md", required=True, degrade="回流上游"),))
 
-    def test_workflow_context_line_is_rendered(self) -> None:
         text = render_contract_plain(
-            make_contract(),
+            contract,
             {"feature": "alpha", "workflowProfile": "standard", "workflowDecisions": {"a": "enabled"}},
         )
 
-        self.assertIn("上下文：feature=alpha ｜ profile=standard ｜ decisions=a=enabled", text)
+        self.assertNotIn("上下文", text)
+        self.assertNotIn("feature=alpha", text)
 
 
 class PlainCliTests(unittest.TestCase):
@@ -154,7 +196,7 @@ class PlainCliTests(unittest.TestCase):
             main(["autodev-code", "--json", "--plain"])
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_plain_cli_emits_flat_text(self) -> None:
+    def test_plain_cli_returns_zero(self) -> None:
         self.assertEqual(main(["autodev-code", "--plain"]), 0)
 
 

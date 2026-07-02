@@ -93,45 +93,20 @@ def _artifact_present(feature_dir: Path, path: str) -> bool:
     return target.is_file() and target.stat().st_size > 0
 
 
-def _plain_artifact_block(index: int, artifact: ArtifactSpec, feature_dir: Path | None) -> list[str]:
-    """Render one input as a single, state-resolved instruction.
-
-    When ``feature_dir`` is known the on-disk state picks exactly one line so the
-    skill never has to reason: present → how to read it (method); missing →
-    what to do (required → stop and go upstream; optional → its degrade path).
-    Without a feature dir (baseline preview) existence is unknown, so the method
-    line is always shown. ``focus`` is intentionally dropped.
-    """
-    required = "必需" if artifact.required else "可选"
+def _missing_handling_line(artifact: ArtifactSpec) -> str:
+    """The instruction for one missing input, taken from its ``extract.degrade``
+    — authored per input in board_config.json for required and optional inputs
+    alike. Only when no degrade is declared do we fall back to a generic default
+    (a required input stops the flow; an optional one skips)."""
     extract = artifact.extract
-    method = (extract.method if extract is not None else "") or "按产物内容读取并纳入上下文"
-
-    if feature_dir is None:
-        return [f"{index}. {artifact.path}（{required}）：{artifact.label}", f"   读取方式：{method}"]
-
-    if _artifact_present(feature_dir, artifact.path):
-        header = f"{index}. {artifact.path}（{required}·已生成）：{artifact.label}"
-        return [header, f"   读取方式：{method}"]
-
-    header = f"{index}. {artifact.path}（{required}·未生成）：{artifact.label}"
-    if artifact.required:
-        return [header, "   缺失处理：停止——必需输入未生成，回流上游补齐后再执行"]
-    degrade = (extract.degrade if extract is not None else "") or "直接跳过，不影响执行"
-    return [header, f"   缺失处理：{degrade}"]
-
-
-def _plain_context_line(workflow_context: dict) -> str | None:
-    parts: list[str] = []
-    if workflow_context.get("feature"):
-        parts.append(f"feature={workflow_context['feature']}")
-    if workflow_context.get("workflowProfile"):
-        parts.append(f"profile={workflow_context['workflowProfile']}")
-    if workflow_context.get("workflowTemplate"):
-        parts.append(f"template={workflow_context['workflowTemplate']}")
-    decisions = workflow_context.get("workflowDecisions") or {}
-    if decisions:
-        parts.append("decisions=" + ",".join(f"{key}={value}" for key, value in decisions.items()))
-    return "上下文：" + " ｜ ".join(parts) if parts else None
+    degrade = extract.degrade if extract is not None else ""
+    if not degrade:
+        degrade = (
+            "停止——必需输入未生成，回流上游补齐后再执行"
+            if artifact.required
+            else "直接跳过，不影响执行"
+        )
+    return f"   缺失处理：{degrade}"
 
 
 def render_contract_plain(
@@ -139,50 +114,33 @@ def render_contract_plain(
     workflow_context: dict | None = None,
     feature_dir: Path | None = None,
 ) -> str:
-    """Flatten the contract into a state-resolved execution checklist.
+    """Emit only how missing inputs are handled — nothing else.
 
-    Unlike ``--json`` (which emits overlapping inputs/sourceBundle/methodBundle
-    views the skill must cross-reference and apply meta-rules to), this collapses
-    each input into a single ordered instruction. When ``feature_dir`` is given,
-    on-disk existence already picks method-vs-missing per input, so no judgment
-    is left for the consuming skill.
+    With ``feature_dir`` (i.e. ``--feature``) on-disk existence selects exactly
+    the inputs that are missing; present inputs carry no runtime instruction (the
+    skill body reads them) and are omitted, so when every input is present the
+    output is empty. Without a feature dir (baseline preview) existence is
+    unknown, so every input's handling is previewed. Each entry is just the
+    input path, its label and its ``缺失处理`` (from ``extract.degrade``); the
+    required/optional flag and a ``未生成`` marker are not printed — the section
+    already means "these are the ones to handle". The frame the checklist used to
+    carry — title, checkpoint, workflow context, boundary, outputs and
+    validators — is intentionally dropped; ``workflow_context`` is accepted for
+    call-site compatibility but no longer rendered.
     """
-    checkpoints = ", ".join(contract.checkpoints) or "无"
-    lines = [
-        f"# {contract.skill} · 执行清单（plain）",
-        f"节点：{contract.node_id}｜{contract.label}  checkpoint：{checkpoints}",
+    baseline = feature_dir is None
+    pending = [
+        artifact
+        for artifact in contract.inputs
+        if baseline or not _artifact_present(feature_dir, artifact.path)
     ]
-    if workflow_context:
-        context_line = _plain_context_line(workflow_context)
-        if context_line:
-            lines.append(context_line)
+    if not pending:
+        return ""
 
-    lines.append("")
-    lines.append("## 输入产物（按序执行；读取方式优先于技能正文默认）")
-    if contract.inputs:
-        for index, artifact in enumerate(contract.inputs, start=1):
-            lines.extend(_plain_artifact_block(index, artifact, feature_dir))
-    else:
-        lines.append("- 无")
-
-    lines.append("")
-    lines.append("## 边界（确定性）")
-    lines.append("- 未在上表列出的 id 不属于本工作流：不读、不等、不索要，也不要设想。")
-    lines.append("- 任一必需输入未生成即停止。")
-
-    lines.append("")
-    lines.append("## 输出产物")
-    if contract.outputs:
-        for artifact in contract.outputs:
-            required = "必需" if artifact.required else "可选"
-            lines.append(f"- {artifact.path}（{required}）：{artifact.label}")
-    else:
-        lines.append("- 无")
-
-    lines.append("")
-    lines.append("## Validators：" + ("，".join(contract.validators) or "无"))
-    if contract.guards:
-        lines.append("## Guards：" + "，".join(contract.guards))
+    lines = ["## 缺失产物处理"]
+    for index, artifact in enumerate(pending, start=1):
+        lines.append(f"{index}. {artifact.path}：{artifact.label}")
+        lines.append(_missing_handling_line(artifact))
     return "\n".join(lines) + "\n"
 
 
