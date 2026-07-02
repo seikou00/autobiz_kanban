@@ -354,9 +354,33 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ---
 
-#### 生成 PLAN
+#### 生成 plan.json / PLAN.md
 
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`。`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` ；`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；可同步生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 作为人类视图。`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+
+生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
+
+`plan.json` 顶层字段固定为：
+
+- `version`: 固定为 `1`
+- `featureId`: 当前 `{feature}`
+- `tasks`: 任务数组，非空
+
+每个 `tasks[]` 必须按模板包含以下字段：
+
+- `id`: `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID
+- `title`: 需求闭环任务名
+- `status`: Plan 阶段初始值必须为 `todo`
+- `deps`: 依赖任务 ID 数组，无依赖写 `[]`
+- `specRefs`: 至少同时包含一个 `REQ-xxx` 和一个 `SCN-xxx` 引用，格式使用 `specs/<capability>/spec.md#REQ-001` / `specs/<capability>/spec.md#SCN-001`
+- `designRefs`: 引用 `design.md#API-xxx` / `design.md#DATA-xxx` / `design.md#D-xxx`；无 API 或无数据变更时不要伪造对应引用
+- `apiIds`: API 决策 ID 数组；`x-auto-no-http-api: true` 时写 `[]`
+- `dataIds`: Data 决策 ID 数组；`x-auto-no-sql: true` 时写 `[]`
+- `decisionIds`: 技术决策 ID 数组，至少覆盖本任务依赖的 `D-xxx`
+- `validationCommands`: 非空数组；每项至少包含 `command`，且必须是可直接运行并自行判读的命令
+- `expectedFiles`: 预计修改/新增文件路径数组；不能确定真实路径时写 `[]`，不要凭空造路径
+- `evidenceIds`: Plan 初始阶段必须写 `[]`
+- `blockers`: 无阻断写 `[]`；待确认且影响执行的事项写成阻断说明
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
@@ -387,7 +411,13 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
-`plan.json` 必须满足 `plan_json_contract`；生成 `PLAN.md` ，按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
+写入 `plan.json` 后，必须立即运行：
+
+```bash
+python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json" --initial
+```
+
+校验通过后再推进 checkpoint。若生成 `PLAN.md`，按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构从 `plan.json` 投影输出。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘

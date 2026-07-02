@@ -72,6 +72,12 @@ def append_pass_evidence(feature_dir: Path, *, task_id: str = "T001") -> dict:
 
 
 class PlanJsonTest(unittest.TestCase):
+    def test_plan_json_template_matches_initial_contract(self) -> None:
+        template_path = ROOT / "skills" / "autodev" / "autodev-plan" / "templates" / "plan.json"
+        data = json.loads(template_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(validate_plan_data(data, require_initial_status=True), [])
+
     def test_plan_stage_allows_empty_evidence_ids_until_done_gate(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
 
