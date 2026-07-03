@@ -347,6 +347,30 @@ class FrontendRouteGateValidatorTests(unittest.TestCase):
 
         self.assertEqual(failures, 0)
 
+    def test_non_ui_context_ignores_stale_frontend_route_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, base_ui_context(ui_required=False))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    "version": 1,
+                    "feature": "alpha",
+                    "uiRequired": True,
+                    "triggered": True,
+                    "route": ROUTE_SPEC_DRIVEN,
+                    "source": "UI_CONTEXT.json",
+                    "visualSourceIds": [],
+                    "htmlSourcePaths": [],
+                    "reasons": ["stale evidence from an earlier UI run"],
+                    "docPaths": [],
+                },
+            )
+
+            failures = validate_frontend_route_gate(gate_context(workspace))
+
+        self.assertEqual(failures, 0)
+
     def test_spec_driven_ui_requires_frontend_review_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
@@ -500,6 +524,23 @@ class FrontendRouteReadHookTests(unittest.TestCase):
         self.assertEqual(second, 0)
         self.assertTrue(complete["routeSkillReadComplete"])
 
+    def test_html_read_blocks_when_ui_context_false_even_with_stale_html_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, base_ui_context(ui_required=False))
+            write_json(evidence_path(workspace, "alpha"), complete_evidence(ROUTE_ABSOLUTE))
+
+            output = io.StringIO()
+            error = io.StringIO()
+            with mock.patch.dict(os.environ, {"FEATURE_ID": "alpha"}):
+                with contextlib.redirect_stdout(output):
+                    with contextlib.redirect_stderr(error):
+                        result = check_plugin_read.enforce_html_read(workspace, "alpha")
+
+        self.assertEqual(result, check_plugin_read.BLOCK_EXIT_CODE)
+        self.assertIn("uiRequired=false", error.getvalue())
+        self.assertIn("block", output.getvalue())
+
 
 class FrontendRouteWriteGuardTests(unittest.TestCase):
     def test_frontend_write_allows_spec_driven_ui(self) -> None:
@@ -524,6 +565,35 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
             result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
 
         self.assertEqual(result, 0)
+
+    def test_frontend_write_blocks_when_ui_context_false_even_with_stale_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, base_ui_context(ui_required=False))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    "version": 1,
+                    "feature": "alpha",
+                    "uiRequired": True,
+                    "triggered": True,
+                    "route": ROUTE_SPEC_DRIVEN,
+                    "source": "UI_CONTEXT.json",
+                    "visualSourceIds": [],
+                    "htmlSourcePaths": [],
+                    "reasons": ["stale evidence from an earlier UI run"],
+                    "docPaths": [],
+                },
+            )
+
+            output = io.StringIO()
+            error = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stderr(error):
+                    result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("uiRequired=false", error.getvalue())
 
     def test_frontend_write_allows_missing_high_fidelity_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

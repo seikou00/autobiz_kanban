@@ -22,6 +22,7 @@ from resolve_frontend_html_route import (
     read_json as read_frontend_evidence,
     write_json as write_frontend_evidence,
 )
+from ui_context import UIContextError, load_ui_context
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -288,6 +289,12 @@ def enforce_parser_read(workspace: Path, feature: str, route: str) -> int:
 def enforce_html_read(workspace: Path, feature: str) -> int:
     if current_checkpoint(workspace, feature) != "code_in_progress":
         return 0
+    try:
+        ui_context = load_ui_context(workspace / ".autobizdevops" / "features" / feature)
+    except UIContextError as exc:
+        return block_frontend_route(f"UI_CONTEXT.json 非法，无法解析前端 route: {exc}", workspace)
+    if isinstance(ui_context, dict) and ui_context.get("uiRequired") is False:
+        return block_frontend_route("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许读取 HTML 作为实现依据", workspace)
     evidence = read_frontend_evidence(frontend_evidence_path(workspace, feature))
     if not evidence:
         return block_frontend_route("code 阶段读取 HTML 前必须先解析并记录 frontend route", workspace)
