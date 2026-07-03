@@ -185,7 +185,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
         self.assertEqual(payload["visualSourceIds"], ["VIS-001"])
 
-    def test_explicit_html_route_without_readable_html_resolves_missing(self) -> None:
+    def test_explicit_html_route_without_readable_html_falls_back_to_spec_driven(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             context = base_ui_context(ui_required=True)
@@ -202,8 +202,82 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
             payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
 
-        self.assertEqual(payload["route"], ROUTE_MISSING)
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
         self.assertEqual(payload["htmlSourcePaths"], [])
+        self.assertTrue(payload["htmlSourceMissing"])
+        self.assertIn("missing.html", payload["missingHtmlSourcePaths"][0])
+        self.assertIn("--html-file", payload["htmlRequestMessage"])
+        self.assertIn("不因缺少 HTML 阻断", payload["htmlRequestMessage"])
+
+    def test_missing_high_fidelity_fallback_allows_code_done_after_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [
+                {
+                    "sourceId": "VIS-001",
+                    "type": "high_fidelity_html",
+                    "path": "frontend-html/missing.html",
+                    "route": ROUTE_ABSOLUTE,
+                    "required": True,
+                }
+            ]
+            write_ui_context(workspace, context)
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+            payload["reviewStatus"] = "passed"
+            write_json(evidence_path(workspace, "alpha"), payload)
+
+            failures = validate_frontend_route_gate(gate_context(workspace))
+
+        self.assertEqual(failures, 0)
+
+    def test_direct_html_file_satisfies_missing_declared_high_fidelity_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            html_path = Path(tmp) / "provided.html"
+            html_path.write_text("<div style='position:absolute; left:1px; top:2px'>OK</div>", encoding="utf-8")
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [
+                {
+                    "sourceId": "VIS-001",
+                    "type": "high_fidelity_html",
+                    "path": "frontend-html/missing.html",
+                    "route": ROUTE_ABSOLUTE,
+                    "required": True,
+                }
+            ]
+            write_ui_context(workspace, context)
+
+            payload = resolve_frontend_route(workspace, "alpha", html_files=[str(html_path)], write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
+        self.assertNotIn("htmlSourceMissing", payload)
+
+    def test_legacy_missing_html_from_ui_context_allows_code_done_after_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    "version": 1,
+                    "feature": "alpha",
+                    "uiRequired": True,
+                    "triggered": True,
+                    "route": ROUTE_MISSING,
+                    "source": "UI_CONTEXT.json",
+                    "visualSourceIds": ["VIS-001"],
+                    "htmlSourcePaths": [],
+                    "htmlSourceMissing": True,
+                    "missingHtmlSourcePaths": [],
+                    "reasons": [],
+                    "docPaths": [],
+                    "reviewStatus": "passed",
+                },
+            )
+
+            failures = validate_frontend_route_gate(gate_context(workspace))
+
+        self.assertEqual(failures, 0)
 
     def test_absolute_html_is_classified_and_written(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -442,6 +516,67 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
                     "source": "UI_CONTEXT.json",
                     "visualSourceIds": [],
                     "htmlSourcePaths": [],
+                    "reasons": [],
+                    "docPaths": [],
+                },
+            )
+
+            result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(result, 0)
+
+    def test_frontend_write_allows_missing_high_fidelity_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    "version": 1,
+                    "feature": "alpha",
+                    "uiRequired": True,
+                    "triggered": True,
+                    "route": ROUTE_SPEC_DRIVEN,
+                    "source": "UI_CONTEXT.json",
+                    "visualSourceIds": ["VIS-001"],
+                    "htmlSourcePaths": [],
+                    "htmlSourceMissing": True,
+                    "missingHtmlSourcePaths": [
+                        str(
+                            workspace
+                            / ".autobizdevops"
+                            / "features"
+                            / "alpha"
+                            / "frontend-html"
+                            / "missing.html"
+                        )
+                    ],
+                    "htmlRequestMessage": "请先引导用户提供 HTML 文件；如果用户不提供，本轮按 spec-driven-ui 继续。",
+                    "htmlFallbackRoute": ROUTE_SPEC_DRIVEN,
+                    "reasons": [],
+                    "docPaths": [],
+                },
+            )
+
+            result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(result, 0)
+
+    def test_frontend_write_allows_legacy_missing_html_from_ui_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    "version": 1,
+                    "feature": "alpha",
+                    "uiRequired": True,
+                    "triggered": True,
+                    "route": ROUTE_MISSING,
+                    "source": "UI_CONTEXT.json",
+                    "visualSourceIds": ["VIS-001"],
+                    "htmlSourcePaths": [],
+                    "htmlSourceMissing": True,
+                    "missingHtmlSourcePaths": [],
                     "reasons": [],
                     "docPaths": [],
                 },

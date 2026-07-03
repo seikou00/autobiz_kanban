@@ -1919,6 +1919,15 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
                 f" reviewStatus={review_status!r} evidence={evidence_file}",
             )
         return 0
+    if route == ROUTE_MISSING and evidence.get("source") == "UI_CONTEXT.json":
+        review_status = evidence.get("reviewStatus")
+        if review_status not in FRONTEND_REVIEW_PASS:
+            return fail_line(
+                ctx,
+                "frontend_review_not_passed_or_skipped",
+                f" reviewStatus={review_status!r} evidence={evidence_file}",
+            )
+        return 0
     if route == ROUTE_MISSING:
         return fail_line(ctx, "frontend_html_source_missing", f" evidence={evidence_file}")
     if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:

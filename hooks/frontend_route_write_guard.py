@@ -19,6 +19,7 @@ from paths import get_plugin_output_workspace, resolve_project_dir  # noqa: E402
 from resolve_frontend_html_route import (  # noqa: E402
     FrontendRouteError,
     ROUTE_ABSOLUTE,
+    ROUTE_MISSING,
     ROUTE_NONE,
     ROUTE_SPEC_DRIVEN,
     ROUTE_STANDARD,
@@ -163,6 +164,8 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
     if route == ROUTE_NONE and evidence.get("source") == "UI_CONTEXT.json":
         return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
     if route == ROUTE_SPEC_DRIVEN:
+        return 0
+    if route == ROUTE_MISSING and evidence.get("source") == "UI_CONTEXT.json":
         return 0
     if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
         return block(f"当前 frontend route 不允许写前端代码: {route}")
