@@ -261,6 +261,87 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         ]
         self.assertEqual(missing, [], "Biz skill docs must show the unified biz_validate.py command path")
 
+    def test_plan_template_keeps_ui_projection_examples(self) -> None:
+        template = json.loads(
+            (ROOT / "skills/autodev/autodev-plan/templates/plan.json").read_text(encoding="utf-8")
+        )
+        tasks = template.get("tasks")
+        self.assertIsInstance(tasks, list)
+        self.assertTrue(tasks, "plan template must include task examples")
+
+        missing_base_fields: list[str] = []
+        for task in tasks:
+            task_id = task.get("id", "?") if isinstance(task, dict) else "?"
+            if not isinstance(task, dict):
+                missing_base_fields.append(f"{task_id}: not_object")
+                continue
+            for field in ("uiRequired", "apiIds", "dataIds"):
+                if field not in task:
+                    missing_base_fields.append(f"{task_id}: {field}")
+            if task.get("apiIds") == []:
+                missing_base_fields.append(f"{task_id}: apiIds_non_empty_example")
+            if task.get("dataIds") == []:
+                missing_base_fields.append(f"{task_id}: dataIds_non_empty_example")
+        self.assertEqual(
+            missing_base_fields,
+            [],
+            "plan template tasks must show UI and API/DATA fields so first generation matches validators: "
+            + ", ".join(missing_base_fields),
+        )
+
+        ui_tasks = [task for task in tasks if isinstance(task, dict) and task.get("uiRequired") is True]
+        self.assertTrue(ui_tasks, "plan template must include a uiRequired=true task example")
+        non_ui_tasks = [
+            task
+            for task in tasks
+            if isinstance(task, dict) and "UI capability" not in str(task.get("title", ""))
+        ]
+        non_ui_offenders = [
+            str(task.get("id", "?"))
+            for task in non_ui_tasks
+            if task.get("uiRequired") is not False
+        ]
+        self.assertEqual(
+            non_ui_offenders,
+            [],
+            "non-UI task examples must explicitly set uiRequired=false: " + ", ".join(non_ui_offenders),
+        )
+        for task in ui_tasks:
+            ui_refs = task.get("uiRefs")
+            self.assertIsInstance(ui_refs, dict)
+            self.assertNotIn("uiRequired", ui_refs, "uiRequired is a task-level field, not nested in uiRefs")
+            for field in ("pageRefs", "interactionRefs", "visualSourceRefs"):
+                self.assertIsInstance(ui_refs.get(field), list)
+            self.assertIn(
+                ui_refs.get("frontendRoute"),
+                {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"},
+            )
+
+    def test_plan_skill_keeps_ui_projection_generation_guidance(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "templates/plan.json",
+            "不得先自由生成再依赖 validator 反复修字段",
+            "模板同时包含非 UI task 与 UI task 示例",
+            "UI_CONTEXT.uiRequired=false",
+            "删除 UI 示例任务",
+            "UI_CONTEXT.uiRequired=true",
+            "至少一个 `uiRequired:true`",
+            "模板中的 API/Data/Decision ID 都是占位示例",
+            "x-auto-no-http-api: true",
+            "x-auto-no-sql: true",
+            "`uiRequired` 是 task 顶层字段",
+            "不在 `uiRefs` 内部",
+            "禁止原样复制占位 ID",
+            "必须显式写 `uiRequired:false`",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-plan skill must keep first-pass JSON generation guidance: " + ", ".join(missing),
+        )
+
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:
         offenders: list[str] = []
         for context, node in _iter_nodes(_board_config()):

@@ -7,6 +7,7 @@
       "title": "[需求闭环任务名]",
       "status": "todo",
       "deps": [],
+      "uiRequired": false,
       "specRefs": [
         "specs/[capability]/spec.md#REQ-001",
         "specs/[capability]/spec.md#SCN-001"
@@ -41,21 +42,73 @@
       "deps": [
         "T001"
       ],
+      "uiRequired": false,
       "specRefs": [
         "specs/[capability]/spec.md#REQ-002",
         "specs/[capability]/spec.md#SCN-002"
       ],
       "designRefs": [
+        "design.md#API-002",
+        "design.md#DATA-002",
         "design.md#D-002"
       ],
-      "apiIds": [],
-      "dataIds": [],
+      "apiIds": [
+        "API-002"
+      ],
+      "dataIds": [
+        "DATA-002"
+      ],
       "decisionIds": [
         "D-002"
       ],
       "validationCommands": [
         {
           "command": "[可直接运行并自行判读的验证命令]"
+        }
+      ],
+      "expectedFiles": [],
+      "evidenceIds": [],
+      "blockers": []
+    },
+    {
+      "id": "T003",
+      "title": "[UI capability 任务名，仅 UI_CONTEXT.uiRequired=true 时保留]",
+      "status": "todo",
+      "deps": [
+        "T001"
+      ],
+      "uiRequired": true,
+      "uiRefs": {
+        "pageRefs": [
+          "PAGE-001"
+        ],
+        "interactionRefs": [
+          "UIX-001"
+        ],
+        "visualSourceRefs": [],
+        "frontendRoute": "spec-driven-ui"
+      },
+      "specRefs": [
+        "specs/[ui-capability]/spec.md#REQ-003",
+        "specs/[ui-capability]/spec.md#SCN-003"
+      ],
+      "designRefs": [
+        "design.md#API-003",
+        "design.md#DATA-003",
+        "design.md#D-003"
+      ],
+      "apiIds": [
+        "API-003"
+      ],
+      "dataIds": [
+        "DATA-003"
+      ],
+      "decisionIds": [
+        "D-003"
+      ],
+      "validationCommands": [
+        {
+          "command": "[覆盖 UI 行为的可直接运行验证命令]"
         }
       ],
       "expectedFiles": [],
