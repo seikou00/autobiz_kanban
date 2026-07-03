@@ -268,10 +268,17 @@
                 "focus": ["已澄清的需求结论与边界", "未决问题与待确认项"],
                 "method": "把讨论稿中已确认的结论转写为正式 PRD 结构；未决问题显式保留、不要替用户补齐；讨论稿尚未收敛（仍有大量 P0/P1 未解决）时先回到需求澄清",
                 "degrade": "无讨论稿时先与用户完成需求澄清，再生成 PRD"
+              } },
+            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "decisionStatus", "pages/interactions/visualSources", "notApplicableReason"],
+                "method": "读取 UI_CONTEXT.json 作为 UI 范围；PRD 只描述行为，不从 PRD 正文重新推导 UI 范围；生成 PRD 后必须把 decisionStatus 至少推进到 confirmed",
+                "degrade": ""
               } }
           ],
           "outputs": [
-            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
+            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true },
+            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true }
           ]
         },
         "validators": [],
@@ -298,12 +305,19 @@
               "extract": {
                 "focus": ["业务目标与用户场景", "验收标准与能力边界"],
                 "method": "作为行为契约的上游依据；规格缺口处回到用户澄清，不要凭空补齐行为",
-                "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs（轻量路径）"
+                "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
+              } },
+            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": false,
+              "extract": {
+                "focus": ["uiRequired", "decisionStatus", "pages/interactions/visualSources/capabilities"],
+                "method": "优先读取 UI_CONTEXT.json 判断是否需要 UI",
+                "degrade": "无 UI_CONTEXT.json 时，本阶段必须基于用户描述生成并锁定 UI_CONTEXT.json"
               } }
           ],
           "outputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true }
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true }
           ]
         },
         "validators": ["proposal_contract", "specs_contract"]
@@ -334,11 +348,19 @@
                 "focus": ["每个 capability 的 Requirement / Scenario", "验收场景、边界条件与失败路径"],
                 "method": "specs 驱动设计：先确认行为契约，再生成 design.md 与 PLAN.md；行为缺口回到 /autodev-specs",
                 "degrade": "无 specs 时与用户确认行为预期后再设计，未确认行为全部记为待确认风险"
+              } },
+            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "pages/interactions/visualSources/capabilities", "capabilities[].specRefs"],
+                "method": "作为 plan 阶段 UI 范围；只从 UI_CONTEXT.json 投影 plan.json.tasks[].uiRequired/uiRefs，PLAN.md 只作人类视图",
+                "degrade": "无 UI_CONTEXT.json 时，与用户确认是否需要开发前端内容，如果需要，则从已有产物推导生成对应的UI_CONTEXT.json，不能自行直接推断ui任务"
               } }
           ],
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": false },
+            { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true },
+            { "id": "smoke_test_plan_json", "label": "冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": true }
           ]
         },
         "validators": ["design_contract", "plan_initial_tasks"]
@@ -362,31 +384,43 @@
               "extract": {
                 "focus": ["本轮目标、能力边界、影响面", "非目标与 Open Questions"],
                 "method": "抽取并记住本轮变更的范围约束，作为任务边界依据，不在范围外扩大修改",
-                "degrade": "无 proposal 时以用户直供需求与 specs 作为范围依据"
+                "degrade": "无 proposal 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
               } },
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
                 "focus": ["每个 capability 的 Requirement / Scenario", "ADDED / MODIFIED / REMOVED 行为变化", "SHALL/MUST 约束、边界条件、失败路径", "权限/租户/审计/幂等/异步等外部可观察行为"],
                 "method": "以 specs 为最高行为依据确认行为，不得被任务说明或代码现状覆盖；specs 冲突时停止并回流 /autodev-specs",
-                "degrade": "无 specs 时以 proposal 与用户确认的行为预期为依据，并在完成摘要中记录行为假设"
+                "degrade": "无 specs 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
                 "focus": ["排查上游规格缺口时的业务背景"],
                 "method": "只作可选参考，不得覆盖 specs",
-                "degrade": "无 PRD 时直接跳过，不影响执行"
+                "degrade": "无 PRD 时，以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
                 "focus": ["Spec Traceability", "API Decisions（API-*、x-auto-no-http-api）", "Data Decisions（DATA-*、x-auto-no-sql）", "Technical Design（D-*、模块边界、集成点）", "Risks / Open Questions"],
                 "method": "把设计决策映射到接口、数据模型与模块边界，限定实现选型，遵守 x-auto-no-http-api / x-auto-no-sql 等标记；design 冲突时停止并回流 /autodev-plan",
-                "degrade": "无 design 契约时基于 proposal+specs 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
+                "degrade": "无 design 时基于 已有产物 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
               } },
             { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
               "extract": {
-                "focus": ["任务 DAG 与依赖顺序", "每个任务的做什么/规格依据/设计依据/验证方法/状态", "specs 行为覆盖与设计决策覆盖"],
-                "method": "作为现成执行队列，按任务 DAG 逐项推进、不必再自行拆解；就地更新任务状态（保持 `- **状态:** 待做|进行中|完成|失败` 行格式，hook 据此识别）与验证证据",
-                "degrade": "无 PLAN 契约时从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务），逐项实现并在完成摘要中记录任务与验证结果"
+                "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers", "tasks[].uiRequired/uiRefs"],
+                "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，UI 任务只按 tasks[].uiRequired/uiRefs 执行，PLAN.md 只作可选同步视图",
+                "degrade": "无 plan.json 时，基于已有产物建轻量任务队列"
+              } },
+            { "id": "smoke_test_plan_json", "label": "旁路冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": false,
+              "extract": {
+                "focus": ["tests[].id/taskId/scenarioRefs", "seam/verticalSlice/mockPolicy", "sourcePath/command/expectedSignals", "flowBlocking=false"],
+                "method": "按 SMOKE_TEST_PLAN.json 在业务项目测试目录生成或补齐本地旁路冒烟测试源码；每条 smoke 只实现一个公开 seam 上的 vertical slice，只 mock 系统边界，并确保 sourcePath 被目标项目 Git 忽略；在强 validationCommands 全部通过后执行；冒烟结果只写 SMOKE_RESULT.json 与 action=smoke evidence，不写入 plan.json.tasks[].evidenceIds",
+                "degrade": "无 SMOKE_TEST_PLAN.json 时只得参考plan.json，如果无任何产物，则提示无法进行冒烟测试；lean/custom 未列出该输入时可生成 tests=[] 的 NOT_APPLICABLE 结果"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "focus": ["uiRequired", "decisionStatus", "visualSources[].type/path/route", "capabilities[].specRefs"],
+                "method": "作为 code 阶段 UI 范围机器事实源；resolve_frontend_html_route.py 优先读取 UI_CONTEXT.json 与 plan.json，Markdown 只作迁移兜底",
+                "degrade": "无 UI_CONTEXT.json 时，直接与用户询问是否需要生成前端代码"
               } }
           ],
           "outputs": [
