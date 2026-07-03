@@ -153,7 +153,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - P1：边界值、异常分支、权限/状态/幂等/数据一致性。
 - P2：兼容性、非核心边界、可维护性补充。
 
-**在 seam（公开边界）上测行为**：seam 是调用方真正使用的接口，测试站在 seam 上、不伸进内部。非 public 方法默认不直接测试，通过 public 行为间接覆盖；只有工具类、纯函数、复杂算法或项目约定允许时，才直接测非 public，并在报告中说明原因。别走侧信道（如直接查库断言），要通过接口取回验证——判定与好 / 坏例见 `${pluginPath}/skills/autodev/references/test-quality.md`。
+**在 seam（公开边界）上测行为**：seam 是调用方真正使用的接口，测试站在 seam 上、不伸进内部。非 public 方法默认不直接测试，通过 public 行为间接覆盖；只有工具类、纯函数、复杂算法或项目约定允许时，才直接测非 public，并在报告中说明原因。别走侧信道（如直接查库断言），要通过接口取回验证——判定与好 / 坏例见 `${pluginPath}/skills/references/test-quality.md`。
 
 ### 生成或补齐单测
 
@@ -161,7 +161,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 1. 读取最邻近的 2 到 3 个已有测试文件，匹配项目风格。
 2. 选择最小测试入口，优先测试真实行为。
-3. Mock 只在系统边界用（外部 API / DB / 时间 / 随机 / 文件系统）；绝不 mock 自己的类或内部协作者，也不得只测试 mock 行为。边界规则与可测性设计（DI / SDK 式接口）见 `${pluginPath}/skills/autodev/references/test-quality.md`。
+3. Mock 只在系统边界用（外部 API / DB / 时间 / 随机 / 文件系统）；绝不 mock 自己的类或内部协作者，也不得只测试 mock 行为。边界规则与可测性设计（DI / SDK 式接口）见 `${pluginPath}/skills/references/test-quality.md`。
 4. 写入一个测试方法或一个最小测试文件。
 5. 在 `UNIT_TEST_RESULT.json.targets[]` 立刻追加或更新该测试目标的状态；`UNIT_TEST_REPORT.md` 若生成，再同步人类视图。
 
@@ -323,7 +323,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ## 质量规则
 
-1. 测试必须验证业务行为、站在 seam 上，不以覆盖率数字替代断言质量；主动规避三个反模式——**实现耦合**（测内部 / 走侧信道，重构不改行为却挂）、**同义反复**（期望值按代码算法重算，恒过）、**水平切片**（先写全部测试；改用一测一实现的垂直切片）。判定与好 / 坏例见 `${pluginPath}/skills/autodev/references/test-quality.md`。
+1. 测试必须验证业务行为、站在 seam 上，不以覆盖率数字替代断言质量；主动规避三个反模式——**实现耦合**（测内部 / 走侧信道，重构不改行为却挂）、**同义反复**（期望值按代码算法重算，恒过）、**水平切片**（先写全部测试；改用一测一实现的垂直切片）。判定与好 / 坏例见 `${pluginPath}/skills/references/test-quality.md`。
 2. 不得只为提高覆盖率而生成无意义测试。
 3. 不得删除、跳过、弱化已有失败测试。
 4. 不得把 mock 调用次数当成唯一业务断言，除非该调用本身就是契约。

@@ -46,7 +46,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 **探索问题空间**
 
-- 梳理 proposal 的目标、范围、影响面，以及 specs 中的 Requirement / Scenario
+- 梳理 proposal 的目标、范围、影响面，以及 specs 中的 Reqrement / Scenario
 - 找出 specs 中描述模糊、互相冲突、缺少边界的行为
 - 将 specs 映射到接口、数据模型、权限、配置、前端交互或验证方式
 - 如果发现行为契约本身不准确，停止

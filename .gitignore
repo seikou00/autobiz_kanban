@@ -101,9 +101,9 @@ logs/
 *.temp
 *.swp
 *.swo
-*.md
 *.zip
 */docs/
+*/docs 2/
 */assets/
 *.pdf
 .claude/
