@@ -4,17 +4,10 @@ description: Dev 阶段行为规格生成。
 version: v1.2.1701
 ---
 
-
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（执行清单）
-
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单：
-
+## 缺失产物处理
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --plain
 ```
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
 # /autodev-specs — Proposal + Behavior Specs
@@ -152,8 +145,4 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-**Skill 完成。** 下一步以当前 Feature 的工作流为准：
-
-```bash
-python "${pluginPath}/hooks/resolve_next_skill.py"
-```
+**Skill 完成。**

@@ -4,18 +4,11 @@ description: "默认通过独立 reviewer 子代理执行"
 version: v1.2.1702
 ---
 
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（执行清单）
-
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单：
+## 缺失产物处理
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --feature "${feature}" --plain
 ```
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
 # Completion Reviewer

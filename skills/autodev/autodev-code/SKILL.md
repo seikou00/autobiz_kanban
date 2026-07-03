@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 按工作流契约逐任务执行代码，并在 code 阶段内部处理可选前端 HTML 实现分支。消费契约 Source Bundle 列出的正式流程产物 input，逐个按其 Method Bundle 执行（input 专属指令优先于通用默认）；契约未列出的 id 不作为上游阶段产物读取或索要，但不阻止用户直供 HTML/DOM 素材和内部 route SKILL。做最小实现、逐任务验证，全部完成后推进 code_done。支持中断恢复、--feature 多人协作。
-version: v1.1.1604
+version: v1.2.0703
 ---
 
 ## 前端 Route 强制闸门（必须优先执行）
@@ -50,25 +50,11 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
 
 `{FEATURE_DIR}/FRONTEND_ROUTE.json` 是本闸门的机器证据。HTML 路线下，前端代码生成任务缺少该文件、route SKILL 未读完、route todos 未创建/未完成、parser 未读、回检未通过或未明确跳过时，不得推进 `code_done`。`spec-driven-ui` 不要求 HTML parser；`none` 不允许写前端业务代码。
 
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（执行清单）
-
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单：
+## 缺失产物处理
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
 ```
-
-- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
-- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
-- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
-- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
 # /autodev-code — 代码执行

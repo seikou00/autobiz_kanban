@@ -4,25 +4,13 @@ description: 读取上游阶段技能 autodev-utest 与 autodev-e2e 产出的结
 version: v1.2.1701
 ---
 
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（执行清单）
-
+## 缺失产物处理
 当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
 进入执行前，取当前 Feature 的执行清单：
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature "${feature}" --plain
 ```
-
-- **逐条执行**：`## 输入产物` 下每个 input 只有一行确定指令，按序执行即可，不需要自己判断产物是否存在或该走哪个分支。
-- **已生成**：按其 `读取方式` 读原件并纳入上下文；`读取方式` 是该 input 在场时的专属指令，优先于技能正文的通用默认。
-- **未生成**：按其 `缺失处理` 执行——必需 input 停止并回流上游补齐；可选 input 按其降级动作继续，不因缺失而停止。
-- **不列即不存在**：清单未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **输出与校验**：`## 输出产物` 是本节点应产出的产物；`## Validators`/`## Guards` 是推进 checkpoint 的校验项。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线清单（此时按 `读取方式` 预览，不含产物状态）。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
 # /autodev-verify — 验收汇总 + 分支决策
@@ -39,7 +27,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature 
 
 ---
 
-## Step 1: 前置检查
+## 前置检查
 
 **当前 Feature **
 
@@ -62,14 +50,14 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ---
 
-## Step 2: 写入 Checkpoint（标记开始）
+## 写入 Checkpoint（标记开始）
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint verify_in_progress
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-## Step 3: 提取验收契约
+## 提取验收契约
 
 按「流程契约」一节取本 Feature 的执行清单，对其中每个输入按 `读取方式` 抽取；标『未生成』的可选输入按其 `缺失处理`（降级读法）处理。清单未列出的输入不读取：其所属阶段被跳过或不在当前工作流链，在报告中统一标注「不在本工作流产物清单」，而非「缺失」。
 
@@ -97,18 +85,18 @@ specs/[capability]/spec.md / Requirement / Scenario
 - 从行为契约 Requirement / Scenario 提取行为验证项 C1, C2, ...
 - 从在场的设计决策提取接口/数据契约验证项；遇 `x-auto-no-http-api: true` / `x-auto-no-sql: true` 记录本轮无对应验证项。
 
-### ⛔ 步骤完成检查 — Step 3
+### ⛔ 步骤完成检查 — 提取验收契约
 - [ ] 已从上游行为契约提取所有待验收行为并编号 1..m
 - [ ] 设计决策在场时：已提取 API/数据契约验证项或确认 `x-auto-no-http-api: true` / `x-auto-no-sql: true`；缺失时按其 degrade 标注设计基准缺失
 - [ ] 共 M 项已列出
 
 ---
 
-## Step 4: 读取单测与 E2E 结构化结果（证据源，不执行命令）
+## 读取单测与 E2E 结构化结果（证据源，不执行命令）
 
 > ✋ **本步骤严格只读。** 不得运行 `npm test` / `pytest` / `mvn test` / Playwright 等任何测试命令，不得启动任何服务，不得再生成新的测试代码。所有测试证据来自上游阶段产物。
 
-**证据文件（以 bundle 为准；bundle 未列出的证据文件不读取，按 Step 3 的约定在报告中标注所属阶段状态）：**
+**证据文件（以 bundle 为准；bundle 未列出的证据文件不读取，按『提取验收契约』的约定在报告中标注所属阶段状态）：**
 
 1. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` — UI 范围机器事实源；用于生成 `uiSummary` 与 `scenarioCoverage[].uiApplicability`。
 2. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json` — 上游单测结构化 verdict、scenarioCoverage 与 target 结果；在场时作为单测机器事实源。
@@ -146,7 +134,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 > 若上游 JSON 存在但格式与约定不符，**不要尝试用测试命令补齐**，直接在报告中标注"结构化结果格式异常"并将相关项置为 "⚠ 需人工验证"。Markdown 报告不得覆盖已校验 JSON 的结构化裁决。
 
-### ⛔ 步骤完成检查 — Step 4
+### ⛔ 步骤完成检查 — 读取单测与 E2E 结构化结果
 - [ ] 已读取 `UNIT_TEST_RESULT.json`
 - [ ] 已读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`（若存在；缺失已记录）
 - [ ] 已读取 `E2E_RESULT.json`
@@ -156,7 +144,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ---
 
-## Step 5: 生成 VERIFY_DECISION.json 与可选 VERIFY_REPORT.md
+## 生成 VERIFY_DECISION.json 与可选 VERIFY_REPORT.md
 
 必须先将裁定结果写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_DECISION.json`。可同步写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 作为人类汇总。**不得**在 VERIFY_REPORT.md 中夹带新的命令输出、新的测试代码、新的 HTTP 响应证据；结构化裁决来自 `UNIT_TEST_RESULT.json`、`E2E_RESULT.json` 与 `evidence/EVIDENCE.jsonl`，Markdown/log 只提供人类叙述与定位补充。
 
@@ -266,7 +254,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 - 分支决策: verify_done / needs_fix / 等待用户人工确认
 ```
 
-### ⛔ 步骤完成检查 — Step 5
+### ⛔ 步骤完成检查 — 生成 VERIFY_DECISION.json
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_DECISION.json` 已写入，且 `scenarioCoverage` 覆盖 specs 中全部 Scenario
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 若生成，仅作为人类汇总
 - [ ] 报告中每项都标注了结构化证据来源（指向 UNIT_TEST_RESULT.json / E2E_RESULT.json / evidenceId，或说明为何需人工验证；Markdown/log 仅作补充）
@@ -275,7 +263,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ---
 
-## Step 6: 分支决策
+## 分支决策
 
 ### 路径 A：全部通过 → `verify_done`
 
@@ -375,7 +363,7 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_RESULT.json / E2E_RESULT.
 - 选择"有问题" / 回复问题描述 → 标记为失败 → 路径 B
 未拿到用户裁定前，保持 `verify_in_progress`，不得擅自判 `verify_done` 或 `needs_fix`。
 
-### ⛔ 步骤完成检查 — Step 6
+### ⛔ 步骤完成检查 — 分支决策
 - [ ] 通过：验收裁决已写入 `VERIFY_DECISION.json`；`VERIFY_REPORT.md` 若生成只作人类摘要
 - [ ] 失败：已知问题已更新，失败详情已记录（引用 UNIT_TEST_RESULT.json / E2E_RESULT.json / evidenceId；Markdown/log 只作摘要补充）
 
