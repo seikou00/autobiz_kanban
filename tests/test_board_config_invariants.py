@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from hooks.ui_context import DECISION_SOURCES, DECISION_STATUSES, VISUAL_SOURCE_ROUTES, VISUAL_SOURCE_TYPES  # noqa: E402
+
 
 def _board_config() -> dict:
     return json.loads((ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8"))
@@ -154,6 +156,110 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             if not isinstance(validators, list) or "ui_context_json" not in validators:
                 missing.append(f"{context}[{node.get('id', '?')}]")
         self.assertEqual(missing, [], "downstream dev stages must validate UI_CONTEXT.json: " + ", ".join(missing))
+
+    def test_biz_skills_keep_ui_context_convergence_guidance(self) -> None:
+        self.assertTrue(
+            (ROOT / "skills/autobiz/references/ui-context.md").is_file(),
+            "UI_CONTEXT reference template must be tracked with Biz skills",
+        )
+        required_phrases = {
+            "skills/autobiz/autobiz-requirement-discuss/SKILL.md": [
+                "UI_CONTEXT.json",
+                "skills/autobiz/references/ui-context.md",
+                "uiRequired",
+                "页面数",
+                "核心交互",
+                "空态",
+                "错误态",
+                "高保真",
+                "visualSources[]",
+                "capabilities[].specRefs",
+                "格式符合 `ui-context.md`",
+            ],
+            "skills/autobiz/autobiz-prd-generate/SKILL.md": [
+                "skills/autobiz/references/ui-context.md",
+                "`UI_CONTEXT.json` 是 UI 范围机器事实源",
+                "不要从 PRD 正文重新推导",
+                "页面数",
+                "核心交互",
+                "空态",
+                "错误态",
+                "高保真",
+                "visualSources[]",
+                "capabilities[].specRefs",
+            ],
+        }
+        missing: list[str] = []
+        for relative_path, phrases in required_phrases.items():
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            for phrase in phrases:
+                if phrase not in content:
+                    missing.append(f"{relative_path}: {phrase}")
+        self.assertEqual(
+            missing,
+            [],
+            "Biz discuss/prd skills must keep UI_CONTEXT convergence guidance: " + ", ".join(missing),
+        )
+
+    def test_ui_context_reference_tracks_validator_enums(self) -> None:
+        content = (ROOT / "skills/autobiz/references/ui-context.md").read_text(encoding="utf-8")
+        missing: list[str] = []
+        for group_name, values in {
+            "decisionStatus": DECISION_STATUSES,
+            "decisionSource": DECISION_SOURCES,
+            "visualSources.type": VISUAL_SOURCE_TYPES,
+            "visualSources.route": VISUAL_SOURCE_ROUTES,
+        }.items():
+            for value in sorted(values):
+                if value not in content:
+                    missing.append(f"{group_name}:{value}")
+        self.assertEqual(missing, [], "ui-context.md must document validator enum values: " + ", ".join(missing))
+
+    def test_specs_skill_keeps_ui_context_lock_guidance(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-specs/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "UI_CONTEXT.json",
+            "decisionStatus` 固化为 `locked`",
+            "必须至少有一个 UI capability",
+            "REQ-xxx",
+            "SCN-xxx",
+            "specRefs",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(missing, [], "autodev-specs must keep UI_CONTEXT lock guidance: " + ", ".join(missing))
+
+    def test_biz_validate_invocation_paths_are_plugin_relative(self) -> None:
+        stale_patterns = {
+            "python autobiz/hooks/biz_validate.py",
+            "${pluginPath}/autobiz/hooks/biz_validate.py",
+            "python skills/autobiz/hooks/biz_validate.py",
+        }
+        required_path = 'python "${pluginPath}/skills/autobiz/hooks/biz_validate.py"'
+        files = [
+            "skills/autobiz/SKILL.md",
+            "skills/autobiz/autobiz-requirement-discuss/SKILL.md",
+            "skills/autobiz/autobiz-prd-generate/SKILL.md",
+            "skills/autobiz/hooks/biz_validate.py",
+        ]
+        offenders: list[str] = []
+        for relative_path in files:
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            for pattern in stale_patterns:
+                if pattern in content:
+                    offenders.append(f"{relative_path}: {pattern}")
+        self.assertEqual(offenders, [], "Biz validation commands must use the plugin-relative script path")
+
+        command_docs = [
+            "skills/autobiz/SKILL.md",
+            "skills/autobiz/autobiz-requirement-discuss/SKILL.md",
+            "skills/autobiz/autobiz-prd-generate/SKILL.md",
+        ]
+        missing = [
+            relative_path
+            for relative_path in command_docs
+            if required_path not in (ROOT / relative_path).read_text(encoding="utf-8")
+        ]
+        self.assertEqual(missing, [], "Biz skill docs must show the unified biz_validate.py command path")
 
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:
         offenders: list[str] = []

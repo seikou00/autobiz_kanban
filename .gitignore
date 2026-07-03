@@ -101,7 +101,6 @@ logs/
 *.temp
 *.swp
 *.swo
-*.md
 *.zip
 */docs/
 */assets/

@@ -83,10 +83,10 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 ```bash
 # 需求澄清完成后
-set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py discuss --feature "${feature}"
+set PYTHONIOENCODING=utf-8 && python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "${feature}"
 
 # PRD 生成完成后
-set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py prd --feature "${feature}"
+set PYTHONIOENCODING=utf-8 && python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 
 ### 校验不通过时的处理
