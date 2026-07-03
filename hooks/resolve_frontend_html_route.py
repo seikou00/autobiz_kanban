@@ -140,17 +140,54 @@ def collect_html_sources(workspace: Path, feature: str, html_files: Iterable[str
     return existing_paths(candidates)
 
 
+def _visual_source_candidate_path(workspace: Path, fd: Path, raw_path: str) -> Path:
+    normalized = normalize_path(raw_path, workspace)
+    if not normalized.is_file():
+        normalized = normalize_path(raw_path, fd)
+    return normalized
+
+
 def _existing_visual_source_paths(workspace: Path, fd: Path, visual_sources: list[dict[str, Any]]) -> list[Path]:
     paths: list[Path] = []
     for source in visual_sources:
         raw_path = source.get("path") if isinstance(source, dict) else None
         if not isinstance(raw_path, str) or not raw_path.strip():
             continue
-        normalized = normalize_path(raw_path, workspace)
-        if not normalized.is_file():
-            normalized = normalize_path(raw_path, fd)
-        paths.append(normalized)
+        paths.append(_visual_source_candidate_path(workspace, fd, raw_path))
     return existing_paths(paths)
+
+
+def _missing_declared_html_paths(workspace: Path, fd: Path, visual_sources: list[dict[str, Any]]) -> list[str]:
+    missing: list[str] = []
+    for source in visual_sources:
+        if not isinstance(source, dict):
+            continue
+        source_type = source.get("type")
+        route = source.get("route")
+        required = source.get("required") is True
+        declares_html = (
+            source_type in {"high_fidelity_html", "standard_html"}
+            or route in {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_MISSING}
+            or required
+        )
+        raw_path = source.get("path")
+        if not declares_html or not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        normalized = _visual_source_candidate_path(workspace, fd, raw_path)
+        if not normalized.is_file():
+            missing.append(str(normalized))
+    return missing
+
+
+def _html_request_message(fd: Path, missing_paths: list[str]) -> str:
+    path_hint = f" 缺失路径: {', '.join(missing_paths)}。" if missing_paths else ""
+    return (
+        "前面阶段已声明需要 HTML/高保真视觉输入，但 code 阶段没有找到可读取的 HTML 文件。"
+        f"{path_hint}"
+        f"请先引导用户提供 HTML 文件，优先放到 {fd / 'frontend-html'}，"
+        "或本轮运行 resolve_frontend_html_route.py 时追加 --html-file <HTML_PATH>。"
+        "如果用户不提供，本轮按 spec-driven-ui 的无高保真流程继续，不因缺少 HTML 阻断 code 阶段。"
+    )
 
 
 def _route_from_visual_sources(visual_sources: list[dict[str, Any]], html_sources: list[Path]) -> tuple[str, list[str]]:
@@ -258,7 +295,9 @@ def route_payload_from_ui_context(
         if isinstance(source, dict)
     ] if isinstance(data.get("visualSources"), list) else []
     html_sources = existing_paths([*cli_html_sources, *_existing_visual_source_paths(workspace, fd, visual_sources)])
+    missing_html_sources = _missing_declared_html_paths(workspace, fd, visual_sources)
     ui_required = data.get("uiRequired") is True
+    route_missing_declared = False
 
     if not ui_required:
         route = ROUTE_NONE
@@ -276,6 +315,13 @@ def route_payload_from_ui_context(
             route_reasons = plan_reasons
         else:
             route, route_reasons = _route_from_visual_sources(visual_sources, html_sources)
+        if route == ROUTE_MISSING:
+            route_missing_declared = True
+            route = ROUTE_SPEC_DRIVEN
+            route_reasons = [
+                *route_reasons,
+                "declared HTML visual source is missing; falling back to spec-driven-ui",
+            ]
 
     payload: dict[str, Any] = {
         "version": 1,
@@ -293,6 +339,16 @@ def route_payload_from_ui_context(
         "reasons": route_reasons,
         "docPaths": [],
     }
+    if route_missing_declared or (missing_html_sources and not html_sources):
+        payload["htmlSourceMissing"] = True
+        payload["missingHtmlSourcePaths"] = missing_html_sources
+        payload["htmlRequestMessage"] = _html_request_message(fd, missing_html_sources)
+        payload["htmlFallbackRoute"] = ROUTE_SPEC_DRIVEN
+        if missing_html_sources:
+            payload["reasons"] = [
+                *payload["reasons"],
+                "declared HTML visual source is not readable: " + ", ".join(missing_html_sources),
+            ]
     if route in ROUTE_SKILLS:
         payload["routeSkillPath"] = str(ROUTE_SKILLS[route])
         payload["parserPath"] = str(PARSERS[route])

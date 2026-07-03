@@ -161,6 +161,12 @@ def validate_ui_context_data(
 
     if ui_required is True and not (pages or interactions or capabilities):
         errors.append("ui_context_required_without_ui_scope")
+    if ui_required is True and (require_locked or status == "locked"):
+        active_ui_capabilities = [
+            capability for capability in capabilities if capability.get("uiRequired") is not False
+        ]
+        if not active_ui_capabilities:
+            errors.append("ui_context_locked_without_ui_capability")
     if ui_required is False:
         reason = data.get("notApplicableReason")
         if not isinstance(reason, str) or not reason.strip():

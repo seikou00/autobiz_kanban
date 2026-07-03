@@ -73,6 +73,7 @@ DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
 DETAIL_DESIGN_ID = re.compile(r"\bDD-\d{2,3}\b")
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SMOKE_TYPES = {"startup", "api", "ui", "cli", "migration", "health", "custom"}
+SMOKE_SEAM_TYPES = {"startup", "api", "http", "ui", "cli", "job", "migration", "health", "custom"}
 SMOKE_RESULTS = {"pass", "fail", "blocked", "skipped"}
 SMOKE_VERDICTS = {"PASS", "FAIL", "BLOCKED", "SKIPPED", "NOT_APPLICABLE"}
 SMOKE_SOURCE_PREFIXES = (
@@ -573,15 +574,56 @@ def _check_smoke_scenario_refs(
     )
     if not values:
         return failures
+    if len(values) != 1:
+        failures += fail_line(ctx, "invalid_smoke_vertical_slice_scope", f" item={context} field=scenarioRefs")
     scenario_ids: set[str] = set()
     for value in values:
         found = set(SCN_ID.findall(value))
         if not found:
             failures += fail_line(ctx, "missing_smoke_scenario_ref", f" item={context} value={value}")
         scenario_ids.update(found)
+    if len(scenario_ids) != 1:
+        failures += fail_line(ctx, "invalid_smoke_vertical_slice_scope", f" item={context} scenarioCount={len(scenario_ids)}")
     for scenario_id in sorted(scenario_ids):
         if scenario_id not in spec_ids["SCN"]:
             failures += fail_line(ctx, "unknown_smoke_scenario_ref", f" item={context} id={scenario_id}")
+    return failures
+
+
+def _check_smoke_tdd_contract(ctx: HookContext, item: dict, *, context: str) -> int:
+    failures = 0
+    seam = item.get("seam")
+    if not isinstance(seam, dict):
+        failures += fail_line(ctx, "missing_smoke_seam", f" item={context}")
+    else:
+        seam_type = seam.get("type")
+        if not isinstance(seam_type, str) or seam_type.strip().lower() not in SMOKE_SEAM_TYPES:
+            failures += fail_line(ctx, "invalid_smoke_seam_type", f" item={context}")
+        failures += _check_string_field(ctx, seam, "entrypoint", context=f"{context}.seam")
+        failures += _check_string_field(ctx, seam, "observable", context=f"{context}.seam")
+
+    vertical_slice = item.get("verticalSlice")
+    if not isinstance(vertical_slice, dict):
+        failures += fail_line(ctx, "missing_smoke_vertical_slice", f" item={context}")
+    else:
+        failures += _check_string_field(ctx, vertical_slice, "trigger", context=f"{context}.verticalSlice")
+        failures += _check_string_field(ctx, vertical_slice, "expectedOutcome", context=f"{context}.verticalSlice")
+
+    mock_policy = item.get("mockPolicy")
+    if not isinstance(mock_policy, dict):
+        failures += fail_line(ctx, "missing_smoke_mock_policy", f" item={context}")
+    else:
+        if mock_policy.get("externalOnly") is not True:
+            failures += fail_line(ctx, "invalid_smoke_mock_policy", f" item={context}")
+        _, mock_failures = _check_string_array_field(
+            ctx,
+            mock_policy,
+            "allowedMocks",
+            context=f"{context}.mockPolicy",
+            required=False,
+            allow_empty=True,
+        )
+        failures += mock_failures
     return failures
 
 
@@ -1380,6 +1422,11 @@ def validate_plan_ui_projection(ctx: HookContext) -> int:
                 failures += fail_line(ctx, "plan_ui_refs_when_feature_not_ui", f" task={task_id}")
             continue
 
+        if not task_ui_required:
+            if isinstance(ui_refs, dict) and ui_refs:
+                failures += fail_line(ctx, "plan_ui_refs_for_non_ui_task", f" task={task_id}")
+            continue
+
         if task_ui_required:
             ui_task_count += 1
             if not isinstance(ui_refs, dict):
@@ -1490,6 +1537,7 @@ def validate_smoke_test_plan_json(ctx: HookContext) -> int:
         timeout_seconds = item.get("timeoutSeconds")
         if timeout_seconds is not None and (not isinstance(timeout_seconds, int) or timeout_seconds <= 0):
             failures += fail_line(ctx, "invalid_smoke_timeout", f" item={context}")
+        failures += _check_smoke_tdd_contract(ctx, item, context=context)
         failures += _check_smoke_scenario_refs(ctx, item, context=context, spec_ids=spec_ids)
     return failures
 
@@ -1863,6 +1911,22 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
     if route == ROUTE_NONE and evidence.get("triggered") is not True:
         return 0
     if route == ROUTE_SPEC_DRIVEN:
+        review_status = evidence.get("reviewStatus")
+        if review_status not in FRONTEND_REVIEW_PASS:
+            return fail_line(
+                ctx,
+                "frontend_review_not_passed_or_skipped",
+                f" reviewStatus={review_status!r} evidence={evidence_file}",
+            )
+        return 0
+    if route == ROUTE_MISSING and evidence.get("source") == "UI_CONTEXT.json":
+        review_status = evidence.get("reviewStatus")
+        if review_status not in FRONTEND_REVIEW_PASS:
+            return fail_line(
+                ctx,
+                "frontend_review_not_passed_or_skipped",
+                f" reviewStatus={review_status!r} evidence={evidence_file}",
+            )
         return 0
     if route == ROUTE_MISSING:
         return fail_line(ctx, "frontend_html_source_missing", f" evidence={evidence_file}")

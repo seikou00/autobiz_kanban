@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -206,6 +208,34 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         tests: list[dict] | None = None,
         flow_blocking: bool = False,
     ) -> None:
+        normalized_tests: list[dict] | None = None
+        if tests is not None:
+            normalized_tests = []
+            for raw_test in tests:
+                item = dict(raw_test)
+                item.setdefault(
+                    "seam",
+                    {
+                        "type": "api",
+                        "entrypoint": "GET /health",
+                        "observable": "HTTP 200 response",
+                    },
+                )
+                item.setdefault(
+                    "verticalSlice",
+                    {
+                        "trigger": "call the public smoke endpoint",
+                        "expectedOutcome": "the endpoint returns a successful response",
+                    },
+                )
+                item.setdefault(
+                    "mockPolicy",
+                    {
+                        "externalOnly": True,
+                        "allowedMocks": [],
+                    },
+                )
+                normalized_tests.append(item)
         self._write_json(
             feature_dir,
             "SMOKE_TEST_PLAN.json",
@@ -214,7 +244,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "featureId": "alpha",
                 "flowBlocking": flow_blocking,
                 "skipReason": "" if tests else "no smoke needed",
-                "tests": tests if tests is not None else [],
+                "tests": normalized_tests if normalized_tests is not None else [],
             },
         )
 
@@ -562,6 +592,40 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             validate_ui_context_data(data, feature_id="alpha", require_locked=True),
         )
 
+    def test_ui_context_locked_ui_requires_capability_scenario_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            payload = {
+                "version": 1,
+                "featureId": "alpha",
+                "uiRequired": True,
+                "decisionStatus": "locked",
+                "decisionSource": "user_confirmed",
+                "confirmedAtCheckpoint": "prd_done",
+                "lockedAtCheckpoint": "specs_done",
+                "notApplicableReason": "",
+                "pages": [
+                    {"pageId": "PAGE-001", "name": "页面", "goal": "展示能力"}
+                ],
+                "interactions": [
+                    {"interactionId": "UIX-001", "pageId": "PAGE-001", "summary": "点击提交"}
+                ],
+                "visualSources": [],
+                "capabilities": [],
+            }
+            self.assertIn(
+                "ui_context_locked_without_ui_capability",
+                validate_ui_context_data(payload, feature_id="alpha", require_locked=True),
+            )
+            self._write_json(
+                feature_dir,
+                "UI_CONTEXT.json",
+                payload,
+            )
+
+            self.assertGreater(validate_ui_context_json(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+
     def test_plan_ui_projection_accepts_task_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
@@ -636,6 +700,73 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertGreater(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+
+    def test_plan_ui_projection_rejects_ui_refs_on_non_ui_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_ui_context(feature_dir)
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "backend",
+                            "status": "todo",
+                            "deps": [],
+                            "uiRequired": False,
+                            "uiRefs": {
+                                "pageRefs": ["PAGE-001"],
+                                "interactionRefs": ["UIX-001"],
+                                "visualSourceRefs": [],
+                                "frontendRoute": "spec-driven-ui",
+                            },
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                            "apiIds": ["API-001"],
+                            "dataIds": ["DATA-001"],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        },
+                        {
+                            "id": "T002",
+                            "title": "ui",
+                            "status": "todo",
+                            "deps": [],
+                            "uiRequired": True,
+                            "uiRefs": {
+                                "pageRefs": ["PAGE-001"],
+                                "interactionRefs": ["UIX-001"],
+                                "visualSourceRefs": [],
+                                "frontendRoute": "spec-driven-ui",
+                            },
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                            "apiIds": ["API-001"],
+                            "dataIds": ["DATA-001"],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        },
+                    ],
+                },
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                failures = validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json"))
+
+            self.assertGreater(failures, 0)
+            self.assertIn("plan_ui_refs_for_non_ui_task", output.getvalue())
 
     def test_plan_accepts_data_none_even_if_summary_mentions_data_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1905,6 +2036,103 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertEqual(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_missing_tdd_seam_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "seam": None,
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_missing_vertical_slice_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "verticalSlice": None,
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_internal_mock_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "mockPolicy": {"externalOnly": False, "allowedMocks": ["internal service"]},
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
+
+    def test_smoke_test_plan_rejects_multi_scenario_smoke_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            with (feature_dir / "specs" / "cap" / "spec.md").open("a", encoding="utf-8") as handle:
+                handle.write("\n### Requirement [REQ-002]: another\n#### Scenario [SCN-002]: second path\n")
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            self._write_smoke_plan(
+                feature_dir,
+                tests=[
+                    {
+                        "id": "SMK-001",
+                        "taskId": "T001",
+                        "scenarioRefs": ["specs/cap/spec.md#SCN-001", "specs/cap/spec.md#SCN-002"],
+                        "title": "cap smoke",
+                        "smokeType": "api",
+                        "sourcePath": "tests/smoke/cap_smoke.py",
+                        "command": "python tests/smoke/cap_smoke.py",
+                        "expectedSignals": ["exit 0"],
+                    }
+                ],
+            )
+
+            self.assertGreater(validate_smoke_test_plan_json(self._required_output_ctx(feature_dir, "SMOKE_TEST_PLAN.json")), 0)
 
     def test_smoke_test_plan_rejects_blocking_or_untracked_source_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
