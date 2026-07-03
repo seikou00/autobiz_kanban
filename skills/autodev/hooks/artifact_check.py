@@ -1891,6 +1891,13 @@ def validate_code_done_gate(ctx: HookContext) -> int:
 
 
 def validate_frontend_route_gate(ctx: HookContext) -> int:
+    try:
+        ui_context = load_ui_context(ctx.feature_dir)
+    except UIContextError as exc:
+        return fail_line(ctx, "invalid_ui_context_json", f" detail={exc}")
+    if isinstance(ui_context, dict) and ui_context.get("uiRequired") is False:
+        return 0
+
     evidence_file = frontend_evidence_path(ctx.root, ctx.slug)
     evidence = read_frontend_json(evidence_file)
 

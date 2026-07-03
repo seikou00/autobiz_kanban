@@ -141,6 +141,13 @@ def is_frontend_code_path(path: Path) -> bool:
 
 
 def validate_frontend_write(workspace: Path, feature: str) -> int:
+    try:
+        ui_context = load_ui_context(workspace / ".autobizdevops" / "features" / feature)
+    except UIContextError as exc:
+        return block(f"UI_CONTEXT.json 非法，无法解析前端 route: {exc}")
+    if isinstance(ui_context, dict) and ui_context.get("uiRequired") is False:
+        return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
+
     evidence_file = evidence_path(workspace, feature)
     evidence = read_json(evidence_file)
     if not evidence:
@@ -152,12 +159,6 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
             return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
         if resolved.get("triggered"):
             return block(f"写前端代码前缺少 FRONTEND_ROUTE.json: {evidence_file}")
-        try:
-            ui_context = load_ui_context(workspace / ".autobizdevops" / "features" / feature)
-        except UIContextError:
-            ui_context = None
-        if isinstance(ui_context, dict) and ui_context.get("uiRequired") is False:
-            return block("UI_CONTEXT.json 标记 uiRequired=false，当前任务不允许写前端业务代码")
         return 0
 
     route = evidence.get("route")
