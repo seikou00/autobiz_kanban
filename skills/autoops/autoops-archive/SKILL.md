@@ -5,25 +5,10 @@ version: v1.2.1701
 author: zhangQiuFeng
 ---
 
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（执行清单）
-
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
-
+## 缺失产物处理
 ```bash
 python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autoops-archive --feature "{FEATURE_ID}" --json
 ```
-
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 # /autoops-archive — Feature 过程归档
 
@@ -59,18 +44,18 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ## 执行步骤
 
-### Step 1: 前置检查
+### 前置检查
 
 - 确认 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 存在。
 - 确认 `.autobizdevops/archive/` 存在；若缺失，无法归档。
 
-### Step 2: 选择归档目标
+### 选择归档目标
 
 1. 按 `iter{N}` 规则计算目标目录。
 2. 输出即将归档的源目录和目标目录。
 3. 若目标目录已存在，不得覆盖，必须递增 N 后重新选择。
 
-### Step 3: 更新状态
+### 更新状态
 
 先更新状态、再移动目录：归档事件的 hook 日志会写入活跃 `features/{slug}/`，先更新可让该日志随目录一并归档，不会在 `features/` 留下空壳目录。
 
@@ -83,7 +68,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 只允许更新当前 `{slug}` 对应的 Feature 行，不得删除该行，不得改写其他 Feature 状态。
 
-### Step 4: 移动过程目录
+### 移动过程目录
 
 确认 `CHECKPOINT` 已为 `archived` 后，将当前 Feature 过程目录整体移动：
 
@@ -98,7 +83,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/
 - 目标目录 `.autobizdevops/archive/{slug}-iter{N}/` 存在
 - 目标目录中保留本工作流实际产生的过程产物（如 `proposal.md`、`specs/`、各阶段报告与日志；具体以本 Feature 工作流产物为准）
 
-### Step 5: 输出结果
+### 输出结果
 
 归档完成后输出：
 

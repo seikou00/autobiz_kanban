@@ -28,12 +28,12 @@ version: v1.1.1604
 **本 skill 的规则不得覆盖 AGENTS.md；如冲突，以 AGENTS.md 中项目约束为准，除非系统级指令另有要求。**
 **在执行autobiz与子技能时，约束必须参考AGENTS.md中存在的定制约束，不能仅遵守技能的约束。**
 
-### Step 1: 确定工作目录
+### 确定工作目录
 
 - `{slug}` 由用户指定，或从当前上下文推导
 - 若目录不存在，`init_workspace.py` 已确保 `.autobizdevops/features/` 父目录存在，可安全创建子目录
 
-### Step 2: 读取 State 快照
+### 读取 State 快照
 
 若 `{slug}` 未确定，先读取全部 State 快照，再从 `STATE.records` 选择或要求用户选择 Feature：
 
@@ -83,10 +83,10 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 ```bash
 # 需求澄清完成后
-set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py discuss --feature {slug}
+set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py discuss --feature "${feature}"
 
 # PRD 生成完成后
-set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py prd --feature {slug}
+set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py prd --feature "${feature}"
 ```
 
 ### 校验不通过时的处理

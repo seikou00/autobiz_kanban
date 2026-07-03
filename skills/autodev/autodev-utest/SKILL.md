@@ -4,25 +4,11 @@ description: "Dev 阶段单元测试生成与单测驱动最小修复技能。"
 version: v1.2.1701
 ---
 
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（执行清单）
-
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+## 缺失产物处理
 
 ```bash
 python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-utest --feature "{FEATURE_ID}" --json
 ```
-
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 
 # /autodev-utest - 单测生成与最小修复
@@ -129,7 +115,7 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 ## 工作流程
 
-### Step 1: 前置检查
+### 前置检查
 
 - 确认执行清单中的产物存在。
 - 读取项目测试约定。
@@ -137,14 +123,14 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 执行清单中任一产物缺失时，保持 checkpoint 不变，向用户列出缺失文件后结束。
 
-### Step 2: 写入开始 checkpoint
+### 写入开始 checkpoint
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-### Step 3: 建立单测计划
+### 建立单测计划
 
 生成测试矩阵，优先沉淀到 `UNIT_TEST_RESULT.json.targets[]`；若生成 `UNIT_TEST_REPORT.md`，可同步写入其 `## Test Plan`：
 
@@ -162,7 +148,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 **在 seam（公开边界）上测行为**：seam 是调用方真正使用的接口，测试站在 seam 上、不伸进内部。非 public 方法默认不直接测试，通过 public 行为间接覆盖；只有工具类、纯函数、复杂算法或项目约定允许时，才直接测非 public，并在报告中说明原因。别走侧信道（如直接查库断言），要通过接口取回验证——判定与好 / 坏例见 `${pluginPath}/skills/autodev/references/test-quality.md`。
 
-### Step 4: 生成或补齐单测
+### 生成或补齐单测
 
 每次只处理一个测试目标：
 
@@ -181,7 +167,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 若当前行为已经由实现支持，测试可能首次运行即通过。此时必须在报告中标记为 `characterization_pass`，不能伪造 red 阶段。**此路径是同义反复（tautological）高发区**：不要对着实现把断言写成它的镜像；期望值必须来自独立事实源（spec 的验收结果 / 已知常量 / 手算样例），绝不按代码的算法重算——否则测试构造上恒过、永不与代码分歧。
 
-### Step 5: 执行精确测试
+### 执行精确测试
 
 必须优先运行精确到测试方法或最小测试文件的命令，例如：
 
@@ -206,7 +192,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - 退出码。
 - 输出摘要或完整输出。
 
-### Step 6: 失败归因与最小修复
+### 失败归因与最小修复
 
 测试失败时，按顺序处理：
 
@@ -223,7 +209,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 
 单个根因修复尝试达到 `--max-fix` 仍失败时，停止修复，写入 `needs_fix` 证据，不得继续堆叠补丁。
 
-### Step 7: 扩大验证范围
+### 扩大验证范围
 
 当所有 P0/P1 单测目标通过后，执行扩大验证：
 
@@ -231,9 +217,9 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 2. 重跑受影响模块的轻量测试命令。
 3. 若项目约定要求，运行编译或测试编译命令。
 
-扩大验证失败时，必须回到 Step 6 归因。不得只因精确测试通过就推进完成。
+扩大验证失败时，必须回到『失败归因与最小修复』。不得只因精确测试通过就推进完成。
 
-### Step 8: 生成最终报告
+### 生成最终报告
 
 `UNIT_TEST_REPORT.md` 必须包含以下章节：
 
@@ -304,7 +290,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 }
 ```
 
-### Step 9: 分支决策
+### 分支决策
 
 可以推进 `unit_test_done` 的条件：
 
@@ -347,8 +333,4 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] `UNIT_TEST_REPORT.md` 包含必需章节和 verdict。
 - [ ] 成功时已推进 `unit_test_done`。
 
-**Skill 完成。** 推进 `unit_test_done` 后下一步以 `resolve_next_skill.py` 为准：
-
-```bash
-python "${pluginPath}/hooks/resolve_next_skill.py"
-```
+**Skill 完成。

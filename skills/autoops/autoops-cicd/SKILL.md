@@ -5,25 +5,11 @@ version: v1.1.1604
 author: zhangQiuFeng
 ---
 
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（执行清单）
-
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+## 缺失产物处理
 
 ```bash
 python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autoops-cicd --feature "{FEATURE_ID}" --json
 ```
-
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
 
 # /autoops-cicd — CI/CD 清单与流水线阻断处理
 
@@ -67,7 +53,7 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autoops-cicd --feature "{
 
 ## 执行步骤
 
-### Step 1: 标准化工作目录与 State 快照
+### 标准化工作目录与 State 快照
 
 1. 确定 `{slug}`，进入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/`
 2. 调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
@@ -86,7 +72,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress 
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-### Step 2: 生成交付文档
+### 生成交付文档
 
 1. 生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/CICD_CHECKLIST.md`
 2. 生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PR_BODY.md`
@@ -98,7 +84,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - **影响:** 仅能按当前代码仓库状态生成 CI/CD 清单，后续需人工复核需求一致性
 ```
 
-### Step 3: 构建流水线
+### 构建流水线
 
 1. 如用户提供 `pipeline_code`，可进入流水线构建与状态轮询
 2. 流水线构建：使用工具pipelineBuild构建流水线，员工编号为12345，用户姓名为张三，返回值为构建编号`pipeline_build_num`
@@ -110,7 +96,7 @@ python hooks/poll_pipeline_status.py --pipelineCode <pipeline_code> --pipelineNu
 
 4. 该脚本为耗时操作，可后台运行
 
-### Step 4: 处理流水线状态
+### 处理流水线状态
 
 1. 构建中：
    - 提示用户已达到最大轮询周期，需要人工继续观察
@@ -134,7 +120,7 @@ python hooks/poll_pipeline_status.py --pipelineCode <pipeline_code> --pipelineNu
   - 备注: [需要的人工动作或上下文]
 ```
 
-### Step 5: 用户确认后完成阶段
+### 用户确认后完成阶段
 
 1. 本技能不得执行 git 写命令
 2. 请用户确认 CI/CD 是否完成时，若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `已完成、推进到 cicd_done (Recommended)` / `尚未完成、保持当前状态`；若不支持，必须显式追问：`CI/CD 是否已完成？请回复”已完成”或”未完成”。`
@@ -148,13 +134,9 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-### Step 6: 是否再次执行
+### 是否再次执行
 
 1. 需要再次触发流水线或重新整理清单时，若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `重新触发流水线 / 重整清单` / `不再重跑 (Recommended)`；若不支持，必须显式追问：`是否需要再次执行流水线或重新整理清单？请回复"重跑"或"不重跑"。`
 2. 未拿到用户明确同意前，不得擅自重跑。
 
-**Skill 完成。** 推进 `cicd_done` 后下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-
-```bash
-python "${pluginPath}/hooks/resolve_next_skill.py"
-```
+**Skill 完成。**
