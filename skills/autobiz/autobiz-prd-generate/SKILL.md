@@ -79,7 +79,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ### UI 范围处理
 
 - 写入或更新 `UI_CONTEXT.json` 前，必须先读取 `{pluginPath}/skills/autobiz/references/ui-context.md`，按其中模板和枚举生成，不要等校验失败后再读取 Python validator 反推格式。
-- `UI_CONTEXT.json` 是 UI 范围；先读它，再写 `PRD.md`，不要从 PRD 正文重新推导 `uiRequired`。
+- `UI_CONTEXT.json` 是 UI 范围机器事实源；先读它，再写 `PRD.md`，不要从 PRD 正文重新推导 `uiRequired`。
 - `PRD.md` 只描述 UI 行为范围、页面目标、关键交互、加载态、空态、错误态和成功态，不描述前端实现方案、组件库选择或代码结构。
 - 生成 PRD 后必须同步更新 `UI_CONTEXT.json`：将已确认的 UI 决策推进到 `decisionStatus=confirmed`。
 - `uiRequired=true` 时，确保 `pages[]`、`interactions[]` 或 `visualSources[]` 至少能表达 UI 范围；页面数、页面列表、页面目标和核心交互必须能从这些结构化字段读出。

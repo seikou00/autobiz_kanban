@@ -64,6 +64,12 @@
         "label": "精简路线",
         "description": "修接口 / 小需求：specs（轻量）→ code → 归档；契约不含 design/PLAN，code 直接从 proposal 与 specs 推导任务。",
         "nodes": ["dev.specs", "dev.code", "ops.archive"]
+      },
+      "custom": {
+        "kind": "custom",
+        "label": "自定义",
+        "description": "自由选择并串联节点（必含代码实现与归档）；缺少上游产物的输入将从对应节点契约中移除（不读取、不向用户索要），可按建议选择性补充上游节点。",
+        "requiredNodes": ["dev.code", "ops.archive"]
       }
     },
     "profiles": {
@@ -119,7 +125,7 @@
                 { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
                   "extract": {
                     "focus": ["tasks[].id/status/deps/specRefs/designRefs/validationCommands/expectedFiles"],
-                    "method": "按 plan.json 的任务 DAG 与引用关系细化文件级设计；PLAN.md 只作可选人类摘要视图",
+                    "method": "按 plan.json 的任务 DAG 与引用关系细化文件级设计；PLAN.md 只作同步人类摘要视图",
                     "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能只依赖 PLAN.md 推进详细设计"
                   } }
               ],
@@ -247,7 +253,7 @@
               "extract": {
                 "focus": ["uiRequired", "decisionStatus", "pages/interactions/visualSources", "notApplicableReason"],
                 "method": "读取 UI_CONTEXT.json 作为 UI 范围；PRD 只描述行为，不从 PRD 正文重新推导 UI 范围；生成 PRD 后必须把 decisionStatus 至少推进到 confirmed",
-                "degrade": ""
+                "degrade": "无 UI_CONTEXT.json 时回到需求澄清或基于已确认 UI 决策补齐，不从 PRD 正文临时推导"
               } }
           ],
           "outputs": [
@@ -302,7 +308,7 @@
         "group": "Dev",
         "skill": "autodev-plan",
         "order": 40,
-        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、plan.json（执行计划机器事实源：任务 DAG 与各任务依据/验证/状态）、SMOKE_TEST_PLAN.json（旁路冒烟案例计划）；PLAN.md 为可选人类视图",
+        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、plan.json（执行计划机器事实源：任务 DAG 与各任务依据/验证/状态）、PLAN.md（从 plan.json 投影的人类视图）、SMOKE_TEST_PLAN.json（旁路冒烟案例计划）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
@@ -314,7 +320,7 @@
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
               "extract": {
                 "focus": ["本轮目标、范围、影响面", "非目标与 Open Questions"],
-                "method": "作为设计上下文与能力边界，约束 design 与 plan.json 的范围；PLAN.md 只作可选人类视图",
+                "method": "作为设计上下文与能力边界，约束 design 与 plan.json 的范围；PLAN.md 只作从 plan.json 投影的人类视图",
                 "degrade": "无 proposal 时基于用户直供需求与代码探索建立上下文，并把边界假设记入 design.md 风险"
               } },
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
@@ -332,7 +338,7 @@
           ],
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": false },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
             { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true },
             { "id": "smoke_test_plan_json", "label": "冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": true }
           ]
@@ -381,7 +387,7 @@
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
                 "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers", "tasks[].uiRequired/uiRefs"],
-                "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，UI 任务只按 tasks[].uiRequired/uiRefs 执行，PLAN.md 只作可选同步视图",
+                "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，UI 任务只按 tasks[].uiRequired/uiRefs 执行，PLAN.md 只作同步人类视图",
                 "degrade": "无 plan.json 时，基于已有产物建轻量任务队列"
               } },
             { "id": "smoke_test_plan_json", "label": "旁路冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": false,
@@ -452,7 +458,7 @@
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
                 "focus": ["tasks[].status/evidenceIds", "任务依赖闭环", "blockers"],
-                "method": "用 plan.json 核对 code 阶段任务闭环；PLAN.md 只作可选人类摘要参考",
+                "method": "用 plan.json 核对 code 阶段任务闭环；PLAN.md 只作同步人类摘要参考",
                 "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,

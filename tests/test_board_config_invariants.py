@@ -127,6 +127,24 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
 
+    def test_plan_stage_requires_human_plan_view_output(self) -> None:
+        offenders: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict) or node.get("id") != "dev.plan":
+                continue
+            outputs = (node.get("artifacts") or {}).get("outputs", [])
+            plan_output = next(
+                (
+                    artifact
+                    for artifact in outputs
+                    if isinstance(artifact, dict) and artifact.get("path") == "PLAN.md"
+                ),
+                None,
+            )
+            if plan_output is None or plan_output.get("required") is not True:
+                offenders.append(f"{context}[dev.plan]")
+        self.assertEqual(offenders, [], "dev.plan must generate PLAN.md as a required human view")
+
     def test_ui_context_flows_through_downstream_dev_stages(self) -> None:
         required_nodes = {"dev.review", "dev.utest", "dev.e2e", "dev.verify"}
         missing: list[str] = []
@@ -341,6 +359,31 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             [],
             "autodev-plan skill must keep first-pass JSON generation guidance: " + ", ".join(missing),
         )
+
+    def test_plan_skill_requires_plan_markdown_projection(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "plan.json + PLAN.md",
+            "本阶段必须生成",
+            "PLAN.md` 是从 `plan.json` 投影的人类视图",
+            "`PLAN.md` 必须从 `plan.json` 投影",
+            "PLAN.md` 文件已写入磁盘",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-plan skill must require PLAN.md human-view projection: " + ", ".join(missing),
+        )
+        stale_phrases = [
+            "optional PLAN.md",
+            "可同步生成 `PLAN.md`",
+            "若生成 `PLAN.md`",
+            "PLAN.md 为可选",
+            "PLAN.md 只作可选",
+        ]
+        offenders = [phrase for phrase in stale_phrases if phrase in content]
+        self.assertEqual(offenders, [], "autodev-plan skill must not treat PLAN.md as optional")
 
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:
         offenders: list[str] = []

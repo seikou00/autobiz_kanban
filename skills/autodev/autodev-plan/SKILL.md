@@ -15,7 +15,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 
 # /autodev-plan - Executable Task Plan
-**workflow** plan 阶段工作流: proposal/specs -> design.md -> plan.json (+ optional PLAN.md)
+**workflow** plan 阶段工作流: proposal/specs -> design.md -> plan.json + PLAN.md
 
 
 ## explore
@@ -102,8 +102,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 | 新增或变化的 HTTP 行为       | `design.md` 的 API Decisions；无 API 写 `x-auto-no-http-api: true` |
 | 数据表/字段/索引/迁移需求    | `design.md` 的 Data Decisions；无数据变更写 `x-auto-no-sql: true` |
 | 技术方案、模块边界、集成点   | `design.md` 的 Technical Design                              |
-| 实现切分、涉及文件、验证方法 | `plan.json` 的任务 DAG、任务详情和覆盖矩阵；`PLAN.md` 可同步人类视图 |
-| 未确认业务语义或技术假设     | `design.md` 与 `plan.json` 的风险与待确认项，并回到用户确认；`PLAN.md` 可同步人类视图 |
+| 实现切分、涉及文件、验证方法 | `plan.json` 的任务 DAG、任务详情和覆盖矩阵；`PLAN.md` 同步为人类视图 |
+| 未确认业务语义或技术假设     | `design.md` 与 `plan.json` 的风险与待确认项，并回到用户确认；`PLAN.md` 同步为人类视图 |
 
 接口/数据决策讨论触发：
 
@@ -198,7 +198,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ---
 
 ### PLAN阶段
-基于执行清单输入的结论，先生成 `design.md`，再基于这些输入与 design 生成 `plan.json`；可同步生成 `PLAN.md` 作为人类视图。
+基于执行清单输入的结论，先生成 `design.md`，再基于这些输入与 design 生成 `plan.json`，并同步生成 `PLAN.md` 作为人类视图。
 
 #### 工作目录
 若 `CHECKPOINT` 为空、未知，重新通过脚本获取当前checkpoint；后必须刷新 `CHECKPOINT`。
@@ -243,7 +243,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 #### 生成 plan.json / PLAN.md
 
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；可同步生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 作为人类视图。`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。`PLAN.md` 是从 `plan.json` 投影的人类视图；`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
 
@@ -257,7 +257,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
 - 必须在 `plan.json` 对应任务或风险字段中记录用户补充说明 / 技术细节； `PLAN.md`同步新增或更新「用户补充说明 / 技术细节」章节。
-- 若生成 `PLAN.md`，它必须从 `plan.json` 投影，任务 id / deps / status / specRefs / designRefs / validationCommands / evidenceIds 不能漂移。
+- `PLAN.md` 必须从 `plan.json` 投影，任务 id / deps / status / specRefs / designRefs / validationCommands / evidenceIds 不能漂移。
 - 用户明确确认的内容，标记为「已确认」。
 - 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
@@ -315,10 +315,11 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 - 冒烟案例可覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号，但必须按场景拆成多条 SMK，每条只覆盖一个 vertical slice；不要用它替代单测/E2E。
 - 不得把冒烟命令复制进 `plan.json.tasks[].validationCommands`。`validationCommands` 是强门禁，必须快、稳、可重复；`SMOKE_TEST_PLAN.json` 是旁路风险信号，失败不阻断 `code_done`。
 
-写入 `SMOKE_TEST_PLAN.json` 后，必须通过本阶段 artifact validator；若生成 `PLAN.md`，按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构从 `plan.json` 投影输出，冒烟计划可另行投影为人类摘要但不作为机器事实源。
+写入 `SMOKE_TEST_PLAN.json` 后，必须通过本阶段 artifact validator；按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构从 `plan.json` 投影输出 `PLAN.md`，冒烟计划可另行投影为人类摘要但不作为机器事实源。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘
+- [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘，且从 `plan.json` 投影生成
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json` 文件已写入磁盘，`flowBlocking=false`
 - [ ] `plan.json` 可作为任务 DAG 的机器事实源被后续阶段优先读取
 - [ ] 每个任务符合 `templates/plan.json` 与 validator，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；Plan 初始状态为 `todo`，初始 evidence 为空
@@ -333,7 +334,7 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 ---
 
 ## 整体完成条件
-- `design.md`、`plan.json` 已完成；`PLAN.md`
+- `design.md`、`plan.json`、`PLAN.md`、`SMOKE_TEST_PLAN.json` 已完成
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
