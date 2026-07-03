@@ -64,12 +64,6 @@
         "label": "精简路线",
         "description": "修接口 / 小需求：specs（轻量）→ code → 归档；契约不含 design/PLAN，code 直接从 proposal 与 specs 推导任务。",
         "nodes": ["dev.specs", "dev.code", "ops.archive"]
-      },
-      "custom": {
-        "kind": "custom",
-        "label": "自定义",
-        "description": "自由选择并串联节点（必含代码实现与归档）；缺少上游产物的输入将从对应节点契约中移除（不读取、不向用户索要），可按建议选择性补充上游节点。",
-        "requiredNodes": ["dev.code", "ops.archive"]
       }
     },
     "profiles": {
