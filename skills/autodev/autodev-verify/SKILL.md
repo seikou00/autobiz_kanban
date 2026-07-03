@@ -110,12 +110,13 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 **证据文件（以 bundle 为准；bundle 未列出的证据文件不读取，按 Step 3 的约定在报告中标注所属阶段状态）：**
 
-1. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json` — 上游单测结构化 verdict、scenarioCoverage 与 target 结果；在场时作为单测机器事实源。
-2. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_RESULT.json` — 上游 E2E 结构化 scenarioCoverage 与 case verdict；在场时作为 E2E 机器事实源。
-3. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json` — 结构化评审发现；在场时纳入风险和建议回流判断。
-4. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` — append-only 证据事实流；若存在，优先用其中的 taskId/specRefs/designRefs/validation.result 建立验收证据回链。verify 阶段严格只读，不得重排、重编号、截断、重写、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`；若发现 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，停止并要求恢复证据流。
-5. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md` / `E2E_REPORT.md` / `test-output.log` / `e2e-run.log` — 人类叙述与原始日志补充；不得替代对应 JSON 做 verdict / scenarioCoverage 裁决。
-6. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml` — 上游阶段技能 `autodev-e2e` 产出的结构化 E2E 用例。
+1. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` — UI 范围机器事实源；用于生成 `uiSummary` 与 `scenarioCoverage[].uiApplicability`。
+2. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json` — 上游单测结构化 verdict、scenarioCoverage 与 target 结果；在场时作为单测机器事实源。
+3. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_RESULT.json` — 上游 E2E 结构化 scenarioCoverage 与 case verdict；在场时作为 E2E 机器事实源。
+4. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json` — 结构化评审发现；在场时纳入风险和建议回流判断。
+5. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` — append-only 证据事实流；若存在，优先用其中的 taskId/specRefs/designRefs/validation.result 建立验收证据回链。verify 阶段严格只读，不得重排、重编号、截断、重写、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`；若发现 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，停止并要求恢复证据流。
+6. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md` / `E2E_REPORT.md` / `test-output.log` / `e2e-run.log` — 人类叙述与原始日志补充；不得替代对应 JSON 做 verdict / scenarioCoverage 裁决。
+7. `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml` — 上游阶段技能 `autodev-e2e` 产出的结构化 E2E 用例。
 
 **从 `UNIT_TEST_RESULT.json` 中抽取（按其 `读取方式` 抽取）：**
 
@@ -161,7 +162,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 写入 `VERIFY_DECISION.json` 后，必须使用 `hooks/evidence_store.py append` 追加一条 verify 汇总 evidence，记录本阶段 verdict、引用的 evidenceIds、覆盖的 specRefs/designRefs。verify 阶段仍不得运行测试命令；这里追加的是汇总结论证据，不是新的测试执行证据。
 
-`VERIFY_DECISION.json` 是机器事实源。JSON 只保留裁决字段，Markdown 只给人读；不要做 Markdown ↔ JSON 文本对账。`scenarioCoverage` 的行必须来自 specs 中定义的全部 `SCN-xxx` 分母，未覆盖的场景显式写 `missing` 或 `manual`，不能只列命中项。`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence；顶层 `passedScenarioRefs` / `failedScenarioRefs` / `manualVerificationRefs` / `missingScenarioRefs` 必须和 `scenarioCoverage` 的行级 verdict 保持一致，且 `verdict` 与 `nextCheckpoint` 必须匹配。
+`VERIFY_DECISION.json` 是机器事实源。JSON 只保留裁决字段，Markdown 只给人读；不要做 Markdown ↔ JSON 文本对账。`scenarioCoverage` 的行必须来自 specs 中定义的全部 `SCN-xxx` 分母，未覆盖的场景显式写 `missing` 或 `manual`，不能只列命中项。`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence；顶层 `passedScenarioRefs` / `failedScenarioRefs` / `manualVerificationRefs` / `missingScenarioRefs` 必须和 `scenarioCoverage` 的行级 verdict 保持一致，且 `verdict` 与 `nextCheckpoint` 必须匹配。每行还必须写 `uiApplicability`：UI scenario 的自动验证结论为 `required`，需人工验证/缺失时分别为 `manual` / `missing`；非 UI scenario 为 `not_applicable`。顶层 `uiSummary` 必须从 `UI_CONTEXT.json` 和行级裁决投影，不手写漂移。
 
 ```json
 {
@@ -174,8 +175,42 @@ specs/[capability]/spec.md / Requirement / Scenario
   "evidenceIds": ["ev_0001"],
   "nextCheckpoint": "verify_done",
   "scenarioCoverage": [
-    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
-  ]
+    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass", "uiApplicability": "required"}
+  ],
+  "uiSummary": {
+    "uiRequired": true,
+    "passedUiScenarioRefs": ["SCN-001"],
+    "failedUiScenarioRefs": [],
+    "manualUiScenarioRefs": [],
+    "missingUiScenarioRefs": [],
+    "notApplicableScenarioRefs": []
+  }
+}
+```
+
+`uiRequired=false` 的纯后端/纯规则 feature 也必须写 `uiSummary`，所有场景的 `uiApplicability` 为 `not_applicable`：
+
+```json
+{
+  "version": 1,
+  "verdict": "pass",
+  "passedScenarioRefs": ["SCN-001"],
+  "failedScenarioRefs": [],
+  "manualVerificationRefs": [],
+  "missingScenarioRefs": [],
+  "evidenceIds": ["ev_0001"],
+  "nextCheckpoint": "verify_done",
+  "scenarioCoverage": [
+    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass", "uiApplicability": "not_applicable"}
+  ],
+  "uiSummary": {
+    "uiRequired": false,
+    "passedUiScenarioRefs": [],
+    "failedUiScenarioRefs": [],
+    "manualUiScenarioRefs": [],
+    "missingUiScenarioRefs": [],
+    "notApplicableScenarioRefs": ["SCN-001"]
+  }
 }
 ```
 
@@ -298,7 +333,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-将失败详情写入 `VERIFY_DECISION.json` / `FIX_REQUEST.json`；若生成 `VERIFY_REPORT.md`，再同步人类可读失败详情：
+将失败详情写入 `VERIFY_DECISION.json` / `FIX_REQUEST.json`；若失败指向 UI 页面、交互或视觉输入，`FIX_REQUEST.json` 必须写 `failedUiRefs.pageRefs` / `interactionRefs` / `visualSourceRefs`，引用 `UI_CONTEXT.json` 中真实存在的 ID。若生成 `VERIFY_REPORT.md`，再同步人类可读失败详情：
 
 ```markdown
 ## 已知问题

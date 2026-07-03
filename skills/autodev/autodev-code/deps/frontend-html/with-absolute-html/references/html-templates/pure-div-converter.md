@@ -13,7 +13,7 @@ description: >
 
 # 纯 div 无语义元素 HTML 转换规则
 
-本文中提到的 `SKILL.md` 均指仓库根技能 `../../../SKILL.md`。
+本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../../SKILL.md`。
 
 当用户提供的 HTML 所有元素都是 `<div>`，没有 `<span>`、`<button>`、`<input>` 等语义元素时，通过 className、内联样式、嵌套关系、文字内容综合判断元素类型，进行语义推断转换。
 
@@ -26,16 +26,16 @@ description: >
 当 HTML 是 Figma/MasterGo 这类大体积绝对定位导出时，必须先运行：
 
 ```bash
-# 仓库根目录执行
-python route/with-absolute-html/scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
+# autodev-code 技能根目录执行
+python deps/frontend-html/with-absolute-html/scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir .frontend/html-analysis --output-name <task-stem>
 
-# route/with-absolute-html/ 目录执行
-python scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
+# deps/frontend-html/with-absolute-html/ 目录执行
+python scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir .frontend/html-analysis --output-name <task-stem>
 ```
 
-转换时优先读取 `output/html-analysis/<task-stem>.md`，只在需要核对局部样式或节点关系时回查原始 HTML。不要把完整原始 HTML 一次性交给模型转换。
+转换时优先读取 `.frontend/html-analysis/<task-stem>.md`，只在需要核对局部样式或节点关系时回查原始 HTML。不要把完整原始 HTML 一次性交给模型转换。
 
-默认模式是 `hybrid-fidelity`：先以原始 HTML 和 `output/html-analysis/<task-stem>.md` 作为视觉基准，严格保留整体坐标、尺寸、颜色、边框、层级和文本位置；之后按“替换槽位计划”把明确的公共组件、项目组件或 AntD/Element 标准控件放回原视觉槽位。未进入槽位计划的内容继续按高保真还原。
+默认模式是 `hybrid-fidelity`：先以原始 HTML 和 `.frontend/html-analysis/<task-stem>.md` 作为视觉基准，严格保留整体坐标、尺寸、颜色、边框、层级和文本位置；之后按“替换槽位计划”把明确的公共组件、项目组件或 AntD/Element 标准控件放回原视觉槽位。未进入槽位计划的内容继续按高保真还原。
 
 只有在以下场景才生成 `output/<task-stem>-fidelity.html`：
 
@@ -51,6 +51,7 @@ python scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-r
 - 必填 `*` 重复、丢失或位置明显不符合 Form 组件行为。
 - 控件内部文字、箭头、边框、选中态轻微错位，但外层槽位和相邻标签关系清楚。
 - HTML 视觉像 Tabs/Table/Modal，但导出结构破碎；可替换为对应 UI 库组件。
+- card 风格、带边框卡片感的 tabs 组合，只要本质是切换内容面板，也按 Tabs 处理。
 
 修正边界：
 
@@ -107,7 +108,7 @@ python scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-r
 | `<div class="btn" style="background:#1890ff">提交</div>` | `<Button type="primary">` | className 含 btn / 主色背景 / 操作类文字 |
 | `<div class="input" style="border:1px">请输入</div>` | `<Input placeholder="请输入" />` | className 含 input / 有 border |
 | `<div class="select">请选择</div>` | `<Select placeholder="请选择" />` | className 含 select |
-| `<div style="cursor:pointer">操作</div>` | `<Button onClick>` | cursor:pointer + padding + 操作词 |
+| `<div style="cursor:pointer">操作</div>` | `<Button onClick>` | cursor:pointer + padding + 操作词；不能只保留手型样式，必须落真实交互 |
 | `<div class="text" style="font-size:14px">段</div>` | `<div className={styles.text}>` | 字号 / 行高样式提取到 Less |
 
 核心原则：

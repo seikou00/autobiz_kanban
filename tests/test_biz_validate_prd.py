@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,30 @@ VALID_PRD = FORMAL_PREFIX + """## 用户故事
 """
 
 
+def write_confirmed_non_ui_context(feature_dir: Path) -> None:
+    (feature_dir / "UI_CONTEXT.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "featureId": "alpha",
+                "uiRequired": False,
+                "decisionStatus": "confirmed",
+                "decisionSource": "default_false",
+                "confirmedAtCheckpoint": "prd_done",
+                "notApplicableReason": "纯后端能力",
+                "pages": [],
+                "interactions": [],
+                "visualSources": [],
+                "capabilities": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class BizValidatePrdTests(unittest.TestCase):
     def make_workspace(self, prd_content: str, discuss_content: str = DISCUSS_WITH_HISTORY) -> Path:
         tempdir = tempfile.TemporaryDirectory()
@@ -107,6 +132,7 @@ class BizValidatePrdTests(unittest.TestCase):
         feature_dir.mkdir(parents=True)
         (feature_dir / "PRD_DISCUSS.md").write_text(discuss_content, encoding="utf-8")
         (feature_dir / "PRD.md").write_text(prd_content, encoding="utf-8")
+        write_confirmed_non_ui_context(feature_dir)
         write_state_records(workspace, {"alpha": sample_record("prd_done")})
         return workspace
 
@@ -166,7 +192,8 @@ class BizValidatePrdTests(unittest.TestCase):
                 result = self.run_biz_validate("prd", "--feature", "alpha", workspace=workspace, env=env)
 
                 self.assertEqual(result.returncode, 1)
-                self.assertIn(f"{key} 未设置", result.stderr)
+                expected_key = "PROJECT_DIR" if key == "PROJECT_CODE" else key
+                self.assertIn(f"{expected_key} 未设置", result.stderr)
 
     def test_cli_rejects_workspace_argument(self) -> None:
         workspace = self.make_workspace(VALID_PRD)

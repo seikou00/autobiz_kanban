@@ -90,7 +90,29 @@ def seed_feature(
     for name in artifacts:
         path = feature_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"# {name}\ncontent\n", encoding="utf-8")
+        if name == "UI_CONTEXT.json":
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "featureId": "alpha",
+                        "uiRequired": False,
+                        "decisionStatus": "locked",
+                        "decisionSource": "default_false",
+                        "confirmedAtCheckpoint": "prd_done",
+                        "lockedAtCheckpoint": "specs_done",
+                        "notApplicableReason": "test fixture has no UI",
+                        "pages": [],
+                        "interactions": [],
+                        "visualSources": [],
+                        "capabilities": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        else:
+            path.write_text(f"# {name}\ncontent\n", encoding="utf-8")
 
 
 E2E_PRECHECK_ARTIFACTS = [
@@ -98,6 +120,7 @@ E2E_PRECHECK_ARTIFACTS = [
     "specs/alpha.md",
     "design.md",
     "plan.json",
+    "UI_CONTEXT.json",
     "REVIEW_FINDINGS.json",
     "evidence/EVIDENCE.jsonl",
     "UNIT_TEST_RESULT.json",
@@ -155,18 +178,14 @@ class SkipCompileTests(unittest.TestCase):
                 copy.deepcopy(base_config()), repo_root=ROOT, skipped_nodes=all_ids
             )
 
-    def test_profile_dynamic_node_skippable(self) -> None:
-        effective = compile_board_config(
-            copy.deepcopy(base_config()),
-            repo_root=ROOT,
-            profile="frontend_before_specs",
-            skipped_nodes=["dev.frontend"],
-        )
-        by_id = {node["id"]: node for node in effective["workflow"]["nodes"]}
-        self.assertTrue(by_id["dev.frontend"].get("skipped"))
-        transitions = effective["workflow"]["checkpoints"]["transitions"]
-        self.assertEqual(transitions["prd_done"], ["specs_in_progress"])
-        self.assertNotIn("frontend_in_progress", transitions)
+    def test_removed_frontend_profile_node_cannot_be_skipped(self) -> None:
+        with self.assertRaises(WorkflowCompileError):
+            compile_board_config(
+                copy.deepcopy(base_config()),
+                repo_root=None,
+                profile="frontend_before_specs",
+                skipped_nodes=["dev.frontend"],
+            )
 
     def test_dynamic_stage_enabled_then_skipped(self) -> None:
         effective = compile_board_config(
@@ -191,7 +210,7 @@ class SkipCompileTests(unittest.TestCase):
         self.assertEqual(
             effective["workflowDroppedInputs"],
             {
-                "dev.code": ["proposal.md", "specs/**/*.md", "PRD.md", "design.md", "plan.json", "SMOKE_TEST_PLAN.json"],
+                "dev.code": ["proposal.md", "specs/**/*.md", "PRD.md", "design.md", "plan.json", "SMOKE_TEST_PLAN.json", "UI_CONTEXT.json"],
                 "ops.archive": ["CICD_CHECKLIST.md"],
             },
         )

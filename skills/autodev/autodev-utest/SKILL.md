@@ -159,7 +159,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - P1：边界值、异常分支、权限/状态/幂等/数据一致性。
 - P2：兼容性、非核心边界、可维护性补充。
 
-非 public 方法默认不直接测试，应通过 public 行为间接覆盖。只有工具类、纯函数、复杂算法或已有项目约定允许时，才直接测试非 public 行为，并在报告中说明原因。
+**在 seam（公开边界）上测行为**：seam 是调用方真正使用的接口，测试站在 seam 上、不伸进内部。非 public 方法默认不直接测试，通过 public 行为间接覆盖；只有工具类、纯函数、复杂算法或项目约定允许时，才直接测非 public，并在报告中说明原因。别走侧信道（如直接查库断言），要通过接口取回验证——判定与好 / 坏例见 `${pluginPath}/skills/autodev/references/test-quality.md`。
 
 ### Step 4: 生成或补齐单测
 
@@ -167,7 +167,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 1. 读取最邻近的 2 到 3 个已有测试文件，匹配项目风格。
 2. 选择最小测试入口，优先测试真实行为。
-3. Mock 只在不可避免时使用，不得只测试 mock 行为。
+3. Mock 只在系统边界用（外部 API / DB / 时间 / 随机 / 文件系统）；绝不 mock 自己的类或内部协作者，也不得只测试 mock 行为。边界规则与可测性设计（DI / SDK 式接口）见 `${pluginPath}/skills/autodev/references/test-quality.md`。
 4. 写入一个测试方法或一个最小测试文件。
 5. 在 `UNIT_TEST_RESULT.json.targets[]` 立刻追加或更新该测试目标的状态；`UNIT_TEST_REPORT.md` 若生成，再同步人类视图。
 
@@ -178,7 +178,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 3. 确认测试因预期原因失败。
 4. 再进入最小修复。
 
-若当前行为已经由实现支持，测试可能首次运行即通过。此时必须在报告中标记为 `characterization_pass`，不能伪造 red 阶段。
+若当前行为已经由实现支持，测试可能首次运行即通过。此时必须在报告中标记为 `characterization_pass`，不能伪造 red 阶段。**此路径是同义反复（tautological）高发区**：不要对着实现把断言写成它的镜像；期望值必须来自独立事实源（spec 的验收结果 / 已知常量 / 手算样例），绝不按代码的算法重算——否则测试构造上恒过、永不与代码分歧。
 
 ### Step 5: 执行精确测试
 
@@ -282,7 +282,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - 仍需人工确认的项。
 - 若失败，返回用户确认。
 
-同时必须写入 `UNIT_TEST_RESULT.json` 作为机器事实源。JSON 只承载结构化结论；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。
+同时必须写入 `UNIT_TEST_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。若 target 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`；非 UI target 不要伪造 UI 标记。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。
 
 ```json
 {
@@ -295,6 +295,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
     {
       "targetId": "UT-001",
       "taskId": "T001",
+      "uiRequired": true,
       "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
       "evidenceIds": ["ev_0001"],
       "result": "PASS",
@@ -328,7 +329,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ## 质量规则
 
-1. 测试必须验证业务行为，不以覆盖率数字替代断言质量。
+1. 测试必须验证业务行为、站在 seam 上，不以覆盖率数字替代断言质量；主动规避三个反模式——**实现耦合**（测内部 / 走侧信道，重构不改行为却挂）、**同义反复**（期望值按代码算法重算，恒过）、**水平切片**（先写全部测试；改用一测一实现的垂直切片）。判定与好 / 坏例见 `${pluginPath}/skills/autodev/references/test-quality.md`。
 2. 不得只为提高覆盖率而生成无意义测试。
 3. 不得删除、跳过、弱化已有失败测试。
 4. 不得把 mock 调用次数当成唯一业务断言，除非该调用本身就是契约。

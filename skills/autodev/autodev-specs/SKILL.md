@@ -124,6 +124,11 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 - 每个 capability 一个 spec 文件：`specs/<capability>/spec.md`。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
+- 必须读取或生成 `UI_CONTEXT.json`，它是 UI 范围机器事实源；不要从 PRD/specs Markdown 关键词反推 UI 范围。
+- `uiRequired=true` 时，UI 行为应形成独立 capability，例如 `order-create-ui`、`dashboard-filter-ui`，并在 `UI_CONTEXT.json.capabilities[]` 回链对应 `REQ/SCN`。
+- specs 完成并锁定 UI_CONTEXT 时，`uiRequired=true` 必须至少有一个 UI capability，且该 capability 必须带真实 `REQ-xxx` 与 `SCN-xxx` 的 `specRefs`；不能只写 pages/interactions 而没有 UI 场景分母。
+- `uiRequired=false` 时，不生成 UI capability，并在 `UI_CONTEXT.json.notApplicableReason` 说明原因。
+- specs 完成时必须将 `UI_CONTEXT.json.decisionStatus` 固化为 `locked`，`lockedAtCheckpoint` 写 `specs_done`。
 - Requirement 使用 `### Requirement [REQ-001]: <name>`。
 - Scenario 使用四级标题 `#### Scenario [SCN-001]: <name>`。
 - `REQ-*` / `SCN-*` 只是标题中的稳定锚点规则，不要在真实 `spec.md` 中写入“稳定 ID 规范”说明章节。
@@ -136,6 +141,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md` 已生成。
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/` 下至少存在一个 `spec.md`。
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` 已生成或更新，且 `decisionStatus=locked`。
 - proposal 的每个 capability 都有对应 spec 文件。
 - 每个 spec 至少包含一个 Requirement 和一个 Scenario。
 - specs 只描述行为契约，不包含实现任务。

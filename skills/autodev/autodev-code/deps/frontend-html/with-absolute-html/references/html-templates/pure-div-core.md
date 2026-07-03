@@ -1,6 +1,6 @@
 ﻿# 纯 div 核心规则
 
-本文中提到的 `SKILL.md` 均指仓库根技能 `../../../SKILL.md`。
+本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../../SKILL.md`。
 
 当处理纯 div 或绝对定位 HTML 时，把这份文件作为默认的小模型参考。
 
@@ -13,21 +13,22 @@
 ## 默认流程
 
 1. 运行 `prepare_html_analysis.py`（必填参数 `--project-root` / `--task-stem` / `--html-file`，完整命令以 `SKILL.md §4` 为准）：
-   - 仓库根目录：
+   - `autodev-code` 技能根目录：
      ```
-     python route/with-absolute-html/scripts/prepare_html_analysis.py \
+     python deps/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
        --project-root . \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>
      ```
-   - `route/with-absolute-html/` 目录：
+   - `deps/frontend-html/with-absolute-html/` 目录：
      ```
      python scripts/prepare_html_analysis.py \
-       --project-root ../.. \
+       --project-root <CODE_WORKSPACE> \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>
      ```
-2. 先读 `output/html-analysis/<task-stem>-checklist.md`，再按需读 `output/html-analysis/<task-stem>.md`。
+   - 脚本阶段要单独写成 `write_todos`，不要并入页面模块清单。
+2. 先读 `.frontend/html-analysis/<task-stem>-checklist.md`，再按需读 `.frontend/html-analysis/<task-stem>.md`。
 3. 以原始 HTML 加紧凑 handoff 作为视觉契约。
 4. 产出组件槽位计划：
    - 用户组件
@@ -51,6 +52,8 @@
 - 不要把整页重建成 Card/Grid/Tabs，除非用户明确要求组件优先重构。
 - 不要把 AntD / Element 组件默认 props 当成视觉事实。
 - 不要把原稿同一行的数字、单位、百分号、币种或短尾缀误拆成两行。
+- 不要把 `cursor:pointer` 只还原成手型样式而不补真实交互。
+- 不要漏掉同一小区域中的多个图表或多条趋势线。
 - 不要在大页面和大模块里层层写死 `width` / `height`。
 - 父容器已经是 `flex` 且子项明显等分时，不要在每个子项上继续写死宽度。
 - 明显上下排列的区域，不要误写成默认横向 `flex`；需要 `flex` 时显式写 `flex-direction: column`。
@@ -109,6 +112,7 @@
 常见区域：
 
 - Chip / Tab 行：水平重复标签且有一项激活 → 使用 `Tabs` 或项目本地 tab 组件，挂载后抑制原始 chip 文本与对应小盒子。
+- card 风格、分段式、带边框卡片感的 tab 行，只要本质仍是切换内容面板，也按 `Tabs` 处理。
 - 概要 / 信息卡：重复面板含标题 + 内容或标题 + 输入对 → 使用小型 card / list 结构，渲染后抑制内部原始段落与 placeholder。
 - 规则列表 / 评分面板：序号 + 标题 + 分数 + 正文 + “添加规则”动作 → 作为结构化列表组件，抑制原始规则文本与小分数盒子。
 
