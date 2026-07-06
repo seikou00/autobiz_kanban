@@ -666,6 +666,89 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
 
             self.assertEqual(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
 
+    def test_plan_ui_projection_rejects_visual_route_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_ui_context(feature_dir)
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "ui",
+                            "status": "todo",
+                            "deps": [],
+                            "uiRequired": True,
+                            "uiRefs": {
+                                "pageRefs": ["PAGE-001"],
+                                "interactionRefs": ["UIX-001"],
+                                "visualSourceRefs": ["VIS-001"],
+                                "frontendRoute": "standard-html",
+                            },
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                            "apiIds": ["API-001"],
+                            "dataIds": ["DATA-001"],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+
+    def test_plan_ui_projection_accepts_spec_driven_without_visual_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_ui_context(feature_dir)
+            data = json.loads((feature_dir / "UI_CONTEXT.json").read_text(encoding="utf-8"))
+            data["visualSources"] = []
+            self._write_json(feature_dir, "UI_CONTEXT.json", data)
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "ui",
+                            "status": "todo",
+                            "deps": [],
+                            "uiRequired": True,
+                            "uiRefs": {
+                                "pageRefs": ["PAGE-001"],
+                                "interactionRefs": ["UIX-001"],
+                                "visualSourceRefs": [],
+                                "frontendRoute": "spec-driven-ui",
+                            },
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                            "apiIds": ["API-001"],
+                            "dataIds": ["DATA-001"],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+
     def test_plan_ui_projection_rejects_ui_task_when_feature_not_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
