@@ -102,6 +102,9 @@ logs/
 *.swp
 *.swo
 *.zip
+__pycache__/
+*.py[cod]
+*$py.class
 */docs/
 */docs 2/
 */assets/
