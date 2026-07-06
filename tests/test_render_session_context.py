@@ -18,6 +18,7 @@ from hooks.render_session_context import (  # noqa: E402
     _unit_heading_label,
     render,
 )
+from hooks.agents_repo import display_path_join  # noqa: E402
 
 
 MANIFEST = {
@@ -191,8 +192,8 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertEqual(len(status), 1)  # 仅 LF39.18 单元级
         self.assertEqual(status[0]["deployUnitId"], "LF39.18_Outservice")
 
-    def test_project_root_placeholder_replaced_system_only(self):
-        # 系统级（②）正文里的 {project_root} → <pluginPath>/sys/<systemId>；单元级（③）不替换。
+    def test_plugin_root_placeholder_replaced_system_only(self):
+        # 系统级（②）正文里的 {plugin_root} → <pluginPath>/sys/<systemId>；单元级（③）不替换。
         tmp = Path(tempfile.mkdtemp())
         sysd = tmp / "sys"
         (sysd / "LF3905").mkdir(parents=True)
@@ -201,10 +202,10 @@ class RenderRemoteTest(unittest.TestCase):
             json.dumps(MANIFEST, ensure_ascii=False), encoding="utf-8"
         )
         (sysd / "LF3905" / "AGENTS.md").write_text(
-            "# 系统级\n后端入口: {project_root}/src/\n", encoding="utf-8"
+            "# 系统级\n后端入口: {plugin_root}/src/\n旧占位: {project_root}/legacy/\n", encoding="utf-8"
         )
         (sysd / "LF3918" / "descition.md").write_text(
-            "# 单元\n配置: {project_root}/conf\n", encoding="utf-8"
+            "# 单元\n配置: {plugin_root}/conf\n", encoding="utf-8"
         )
         res = render(
             [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
@@ -214,8 +215,10 @@ class RenderRemoteTest(unittest.TestCase):
         prompt = res["sessionContext"]
         # 系统级已替换
         self.assertIn(f"后端入口: {expected}/src/", prompt)
+        # 旧占位符不再替换
+        self.assertIn("旧占位: {project_root}/legacy/", prompt)
         # 单元级占位符原样保留
-        self.assertIn("配置: {project_root}/conf", prompt)
+        self.assertIn("配置: {plugin_root}/conf", prompt)
 
     def test_multiple_systems_both_injected(self):
         res = render(
@@ -252,6 +255,50 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertNotIn("`<SYSTEM", prompt)
         # 标签与紧随的 Markdown 标题之间留空行（杜绝 "<SCOPE>\n## 适用范围" 同块）
         self.assertNotIn("<SCOPE>\n## 适用范围", prompt)
+
+
+class RenderPlatformPathTest(unittest.TestCase):
+    def test_display_path_join_uses_target_platform_separator(self):
+        self.assertEqual(
+            display_path_join("C:\\plugin\\sys", "LF39/AGENTS.md", platform="win32"),
+            "C:\\plugin\\sys\\LF39\\AGENTS.md",
+        )
+        self.assertEqual(
+            display_path_join("C:\\plugin\\sys", "LF39\\AGENTS.md", platform="linux"),
+            "C:/plugin/sys/LF39/AGENTS.md",
+        )
+
+    def test_win32_remote_paths_use_backslash_in_status_and_plugin_root(self):
+        tmp = Path(tempfile.mkdtemp())
+        sysd = tmp / "sys"
+        (sysd / "LF3905").mkdir(parents=True)
+        (sysd / "LF3918").mkdir(parents=True)
+        (sysd / "agents.manifest.json").write_text(
+            json.dumps(MANIFEST, ensure_ascii=False), encoding="utf-8"
+        )
+        (sysd / "LF3905" / "AGENTS.md").write_text(
+            "# 系统级\n后端入口: {plugin_root}\n", encoding="utf-8"
+        )
+        (sysd / "LF3918" / "descition.md").write_text("# 单元\n", encoding="utf-8")
+
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "C:\\repo\\out"}],
+            plugin_root=tmp,
+            platform="win32",
+        )
+
+        expected_root = display_path_join(sysd, "LF39", platform="win32")
+        self.assertIn(f"后端入口: {expected_root}", res["sessionContext"])
+        self.assertIn("\\sys\\LF3918\\descition.md", res["agentmdLoadStatus"][0]["path"])
+        self.assertNotIn("/LF3918", res["agentmdLoadStatus"][0]["path"])
+
+    def test_win32_workspace_status_uses_backslash(self):
+        ws = _workspace()
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws, platform="win32")
+        self.assertEqual(
+            res["agentmdLoadStatus"][0]["path"],
+            display_path_join(ws, "AGENTS.md", platform="win32"),
+        )
 
 
 class RenderLocalFallbackTest(unittest.TestCase):

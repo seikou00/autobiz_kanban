@@ -272,6 +272,7 @@ class WriteBoardConfigTest(unittest.TestCase):
         self.assertEqual(sync_agents._platform_key("linux"), "linux")
         self.assertEqual(sync_agents._platform_key("win32"), "win32")
         self.assertEqual(sync_agents._platform_key("windows"), "win32")
+        self.assertEqual(sync_agents._platform_key(" win32 "), "win32")
 
     def test_against_real_board_config_copy_changes_exactly_one_line(self):
         real = (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")

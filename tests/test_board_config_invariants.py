@@ -145,6 +145,22 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must generate PLAN.md as a required human view")
 
+    def test_session_context_inject_passes_target_platform(self) -> None:
+        config = _board_config()
+        offenders: list[str] = []
+        for platform, commands in (config.get("inspectCommands") or {}).items():
+            if not isinstance(commands, dict):
+                continue
+            command = str(commands.get("session_context_inject", ""))
+            if f"--platform {platform}" not in command:
+                offenders.append(str(platform))
+        self.assertEqual(
+            offenders,
+            [],
+            "session_context_inject must pass target platform for path rendering: "
+            + ", ".join(offenders),
+        )
+
     def test_ui_context_flows_through_downstream_dev_stages(self) -> None:
         required_nodes = {"dev.review", "dev.utest", "dev.e2e", "dev.verify"}
         missing: list[str] = []
