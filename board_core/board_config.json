@@ -64,12 +64,6 @@
         "label": "精简路线",
         "description": "修接口 / 小需求：specs（轻量）→ code → 归档；契约不含 design/PLAN，code 直接从 proposal 与 specs 推导任务。",
         "nodes": ["dev.specs", "dev.code", "ops.archive"]
-      },
-      "custom": {
-        "kind": "custom",
-        "label": "自定义",
-        "description": "自由选择并串联节点（必含代码实现与归档）；缺少上游产物的输入将从对应节点契约中移除（不读取、不向用户索要），可按建议选择性补充上游节点。",
-        "requiredNodes": ["dev.code", "ops.archive"]
       }
     },
     "profiles": {
@@ -106,26 +100,18 @@
               "inputs": [
                 { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
                   "extract": {
-                    "focus": ["本轮目标与能力边界"],
-                    "method": "约束详细设计的范围",
                     "degrade": "无 proposal 时以 specs 与 design 界定范围"
                   } },
                 { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
                   "extract": {
-                    "focus": ["Requirement / Scenario 行为契约"],
-                    "method": "确保文件级设计满足全部外部可观察行为",
                     "degrade": "无 specs 时与用户确认行为预期"
                   } },
                 { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
                   "extract": {
-                    "focus": ["API / Data / Technical Decisions", "模块边界与集成点"],
-                    "method": "把设计决策细化到文件级修改方案，不得覆盖已确认决策",
                     "degrade": "无 design 时基于现有代码模式细化方案，并记录设计基准缺失"
                   } },
                 { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
                   "extract": {
-                    "focus": ["tasks[].id/status/deps/specRefs/designRefs/validationCommands/expectedFiles"],
-                    "method": "按 plan.json 的任务 DAG 与引用关系细化文件级设计；PLAN.md 只作同步人类摘要视图",
                     "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能只依赖 PLAN.md 推进详细设计"
                   } }
               ],
@@ -245,15 +231,11 @@
           "inputs": [
             { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true,
               "extract": {
-                "focus": ["已澄清的需求结论与边界", "未决问题与待确认项"],
-                "method": "把讨论稿中已确认的结论转写为正式 PRD 结构；未决问题显式保留、不要替用户补齐；讨论稿尚未收敛（仍有大量 P0/P1 未解决）时先回到需求澄清",
                 "degrade": "无讨论稿时先与用户完成需求澄清，再生成 PRD"
               } },
             { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
-                "focus": ["uiRequired", "decisionStatus", "pages/interactions/visualSources", "notApplicableReason"],
-                "method": "读取 UI_CONTEXT.json 作为 UI 范围；PRD 只描述行为，不从 PRD 正文重新推导 UI 范围；生成 PRD 后必须把 decisionStatus 至少推进到 confirmed",
-                "degrade": "无 UI_CONTEXT.json 时回到需求澄清或基于已确认 UI 决策补齐，不从 PRD 正文临时推导"
+                "degrade": ""
               } }
           ],
           "outputs": [
@@ -283,14 +265,10 @@
           "inputs": [
             { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
               "extract": {
-                "focus": ["业务目标与用户场景", "验收标准与能力边界"],
-                "method": "作为行为契约的上游依据；规格缺口处回到用户澄清，不要凭空补齐行为",
                 "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
               } },
             { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": false,
               "extract": {
-                "focus": ["uiRequired", "decisionStatus", "pages/interactions/visualSources/capabilities"],
-                "method": "优先读取 UI_CONTEXT.json 判断是否需要 UI",
                 "degrade": "无 UI_CONTEXT.json 时，本阶段必须基于用户描述生成并锁定 UI_CONTEXT.json"
               } }
           ],
@@ -308,7 +286,7 @@
         "group": "Dev",
         "skill": "autodev-plan",
         "order": 40,
-        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、plan.json（执行计划机器事实源：任务 DAG 与各任务依据/验证/状态）、PLAN.md（从 plan.json 投影的人类视图）、SMOKE_TEST_PLAN.json（旁路冒烟案例计划）",
+        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、plan.json（执行计划：任务 DAG 与各任务依据/验证/状态）、PLAN.md（从 plan.json 一一映射的内容）、SMOKE_TEST_PLAN.json（旁路冒烟案例计划）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
@@ -319,26 +297,20 @@
           "inputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
               "extract": {
-                "focus": ["本轮目标、范围、影响面", "非目标与 Open Questions"],
-                "method": "作为设计上下文与能力边界，约束 design 与 plan.json 的范围；PLAN.md 只作从 plan.json 投影的人类视图",
                 "degrade": "无 proposal 时基于用户直供需求与代码探索建立上下文，并把边界假设记入 design.md 风险"
               } },
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
-                "focus": ["每个 capability 的 Requirement / Scenario", "验收场景、边界条件与失败路径"],
-                "method": "specs 驱动设计：先确认行为契约，再生成 design.md 与 plan.json；行为缺口回到 /autodev-specs",
                 "degrade": "无 specs 时与用户确认行为预期后再设计，未确认行为全部记为待确认风险"
               } },
             { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
-                "focus": ["uiRequired", "pages/interactions/visualSources/capabilities", "capabilities[].specRefs"],
-                "method": "作为 plan 阶段 UI 范围；只从 UI_CONTEXT.json 投影 plan.json.tasks[].uiRequired/uiRefs，PLAN.md 只作人类视图",
                 "degrade": "无 UI_CONTEXT.json 时，与用户确认是否需要开发前端内容，如果需要，则从已有产物推导生成对应的UI_CONTEXT.json，不能自行直接推断ui任务"
               } }
           ],
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": false },
             { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true },
             { "id": "smoke_test_plan_json", "label": "冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": true }
           ]
@@ -362,52 +334,36 @@
           "inputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
               "extract": {
-                "focus": ["本轮目标、能力边界、影响面", "非目标与 Open Questions"],
-                "method": "抽取并记住本轮变更的范围约束，作为任务边界依据，不在范围外扩大修改",
                 "degrade": "无 proposal 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
               } },
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
-                "focus": ["每个 capability 的 Requirement / Scenario", "ADDED / MODIFIED / REMOVED 行为变化", "SHALL/MUST 约束、边界条件、失败路径", "权限/租户/审计/幂等/异步等外部可观察行为"],
-                "method": "以 specs 为最高行为依据确认行为，不得被任务说明或代码现状覆盖；specs 冲突时停止并回流 /autodev-specs",
                 "degrade": "无 specs 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "focus": ["排查上游规格缺口时的业务背景"],
-                "method": "只作可选参考，不得覆盖 specs",
                 "degrade": "无 PRD 时，以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
-                "focus": ["Spec Traceability", "API Decisions（API-*、x-auto-no-http-api）", "Data Decisions（DATA-*、x-auto-no-sql）", "Technical Design（D-*、模块边界、集成点）", "Risks / Open Questions"],
-                "method": "把设计决策映射到接口、数据模型与模块边界，限定实现选型，遵守 x-auto-no-http-api / x-auto-no-sql 等标记；design 冲突时停止并回流 /autodev-plan",
                 "degrade": "无 design 时基于 已有产物 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "focus": ["tasks[].id/title/status/deps", "specRefs/designRefs/apiIds/dataIds/decisionIds", "validationCommands", "evidenceIds/blockers", "tasks[].uiRequired/uiRefs"],
-                "method": "作为 code 阶段任务 DAG 和任务状态的机器事实源；选择下一个任务、判断依赖、推进完成状态都读写 plan.json，UI 任务只按 tasks[].uiRequired/uiRefs 执行，PLAN.md 只作同步人类视图",
                 "degrade": "无 plan.json 时，基于已有产物建轻量任务队列"
               } },
             { "id": "smoke_test_plan_json", "label": "旁路冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": false,
               "extract": {
-                "focus": ["tests[].id/taskId/scenarioRefs", "seam/verticalSlice/mockPolicy", "sourcePath/command/expectedSignals", "flowBlocking=false"],
-                "method": "按 SMOKE_TEST_PLAN.json 在业务项目测试目录生成或补齐本地旁路冒烟测试源码；每条 smoke 只实现一个公开 seam 上的 vertical slice，只 mock 系统边界，并确保 sourcePath 被目标项目 Git 忽略；在强 validationCommands 全部通过后执行；冒烟结果只写 SMOKE_RESULT.json 与 action=smoke evidence，不写入 plan.json.tasks[].evidenceIds",
                 "degrade": "无 SMOKE_TEST_PLAN.json 时只得参考plan.json，如果无任何产物，则提示无法进行冒烟测试；lean/custom 未列出该输入时可生成 tests=[] 的 NOT_APPLICABLE 结果"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
-                "focus": ["uiRequired", "decisionStatus", "visualSources[].type/path/route", "capabilities[].specRefs"],
-                "method": "作为 code 阶段 UI 范围机器事实源；resolve_frontend_html_route.py 优先读取 UI_CONTEXT.json 与 plan.json，Markdown 只作迁移兜底",
                 "degrade": "无 UI_CONTEXT.json 时，直接与用户询问是否需要生成前端代码"
               } }
           ],
           "outputs": [
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "focus": ["validation evidence", "taskId/specRefs/designRefs/changedFiles/validation.result"],
-                "method": "用 hooks/evidence_store.py append 向流末尾追加 validation evidence；evidenceId 按全流顺序递增，不按阶段重排；有 plan.json 时 taskId 必须来自 plan.json.tasks[].id，无 plan 契约时使用本阶段轻量任务 ID；不得插入旧记录前、重编号、截断、重写、删除 EVIDENCE.index.json 后重建或手动修改 EVIDENCE.index.json",
                 "degrade": "缺失时由 append 工具首次创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
               } },
             { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false }
@@ -433,50 +389,34 @@
           "inputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
               "extract": {
-                "focus": ["本轮目标、能力边界与非目标"],
-                "method": "作为评审范围基准，判断实现是否越界或遗漏",
                 "degrade": "无 proposal 时以 specs 与用户需求描述界定评审范围"
               } },
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
-                "focus": ["Requirement / Scenario 的外部可观察行为", "SHALL/MUST 约束与失败路径"],
-                "method": "作为最高行为基准，对照代码实现逐项核对覆盖与偏差",
                 "degrade": "无 specs 时对照 proposal 与用户确认的行为预期评审，并在报告中标注基准缺失"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "focus": ["业务意图核对"],
-                "method": "只作可选参考，不得覆盖 specs",
                 "degrade": "无 PRD 时直接跳过"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
-                "focus": ["API / Data / Technical Decisions 的落实情况"],
-                "method": "核对实现是否遵守已确认的设计决策与集成点",
                 "degrade": "无 design 时按现有代码模式评审实现合理性，并在报告中记录设计基准缺失"
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "focus": ["tasks[].status/evidenceIds", "任务依赖闭环", "blockers"],
-                "method": "用 plan.json 核对 code 阶段任务闭环；PLAN.md 只作同步人类摘要参考",
                 "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
-                "focus": ["uiRequired", "pages/interactions/visualSources/capabilities", "capabilities[].specRefs"],
-                "method": "作为 review 阶段 UI 分母；UI 相关 finding 必须投影 uiRequired/pageRefs/interactionRefs/visualSourceRefs，Markdown 只作人类叙述补充",
                 "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 PRD/specs Markdown 推导 UI 范围"
               } },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "focus": ["code 阶段每个 taskId 的 pass/fail validation evidence", "changedFiles", "specRefs/designRefs"],
-                "method": "作为任务完成证据事实源，核对每个结论是否能回链到 task/spec/design；证据流只能通过 hooks/evidence_store.py append 向末尾追加，不得重排、重编号、截断、重写、删除 EVIDENCE.index.json 后重建或手动修改 EVIDENCE.index.json",
                 "degrade": "缺失时回到 code 阶段补齐证据流，不能用 Markdown 报告替代"
               } },
             { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false,
               "extract": {
-                "focus": ["verdict", "results[].testId/taskId/result/failureSummary", "flowBlocking=false"],
-                "method": "只作为 code 阶段旁路冒烟风险参考；FAIL/BLOCKED/SKIPPED 不改变评审 terminal verdict，也不能替代 validation evidence",
                 "degrade": "缺失时按无旁路冒烟风险信号处理，不用 Markdown 替代"
               } }
           ],
@@ -504,62 +444,42 @@
           "inputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
               "extract": {
-                "focus": ["本轮变更范围与影响面"],
-                "method": "界定单测覆盖的变更范围",
                 "degrade": "无 proposal 时以本轮代码 diff 界定测试范围"
               } },
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
-                "focus": ["Requirement / Scenario 的行为与边界条件", "失败路径与异常分支"],
-                "method": "把行为契约转化为测试用例的预期断言",
                 "degrade": "无 specs 时以现有实现行为与用户确认预期生成测试，并标注行为基准缺失"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "focus": ["业务语义核对"],
-                "method": "只作可选参考",
                 "degrade": "无 PRD 时直接跳过"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
-                "focus": ["模块边界与集成点", "数据决策中的约束"],
-                "method": "定位被测单元与隔离边界（mock/stub 的切点）",
                 "degrade": "无 design 时按现有代码结构定位被测单元"
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "focus": ["tasks[].id/status/specRefs/designRefs/evidenceIds", "validationCommands"],
-                "method": "按 plan.json 的 taskId 与 validationCommands 组织测试覆盖，并把新增测试证据追加回 EVIDENCE.jsonl",
                 "degrade": "Source Bundle 未列出 plan.json 时使用本阶段轻量任务 ID 组织测试覆盖；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成，不能以 PLAN.md 替代机器事实源"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
-                "focus": ["uiRequired", "capabilities[].specRefs", "pages/interactions/visualSources"],
-                "method": "作为单测阶段 UI 分母；UNIT_TEST_RESULT.json.targets[] 的 uiRequired 必须从 UI_CONTEXT.json 与 plan.json 投影，Markdown 只作人类叙述补充",
                 "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 PRD/specs Markdown 推导 UI 范围"
               } },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "focus": ["code 阶段验证证据", "taskId/specRefs/designRefs 与 changedFiles"],
-                "method": "读取既有 code evidence，并在单测命令执行后用 hooks/evidence_store.py append 向流末尾追加新的 validation evidence；evidenceId 按全流顺序递增，不按阶段重排；有 plan.json 时 taskId 必须来自 plan.json.tasks[].id，无 plan 契约时使用本阶段轻量任务 ID；不得插入旧记录前、重编号、截断、重写、删除 EVIDENCE.index.json 后重建或手动修改 EVIDENCE.index.json",
                 "degrade": "缺失时先补齐 code 阶段证据，不能用 Markdown 报告替代；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
               } },
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": false,
               "extract": {
-                "focus": ["评审结论与发现项", "风险点"],
-                "method": "只作评审发现的人类叙述参考；结构化发现以 REVIEW_FINDINGS.json 为机器事实源",
                 "degrade": "缺失时跳过，不影响机器流程"
               } },
             { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
               "extract": {
-                "focus": ["verdict", "findings[].taskId/specRefs/evidenceIds/severity/message/suggestedCheckpoint"],
-                "method": "读取 REVIEW_FINDINGS.json 的结构化 verdict/findings，并据此补强高风险测试覆盖；REQUIREMENTS_EVAL.md 只作人类叙述补充",
                 "degrade": "无 REVIEW_FINDINGS.json 时回到 review 阶段补齐结构化评审结果"
               } },
             { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false,
               "extract": {
-                "focus": ["verdict", "失败或阻断的 smoke results", "failureSummary"],
-                "method": "作为补强单测优先级的风险参考；不把 SMOKE_RESULT verdict 作为单测通过/失败的机器事实源",
                 "degrade": "缺失时跳过，不影响 UNIT_TEST_RESULT.json 的生成与门禁"
               } }
           ],
@@ -589,80 +509,54 @@
           "inputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
               "extract": {
-                "focus": ["用户可感知的能力与主链路"],
-                "method": "界定 E2E 主链路场景范围",
                 "degrade": "无 proposal 时以 specs 场景界定主链路"
               } },
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
-                "focus": ["端到端可验证的 Scenario", "跨模块/跨接口的行为约束"],
-                "method": "把验收场景转化为 E2E 用例与断言",
                 "degrade": "无 specs 时与用户确认主链路预期后生成用例"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "focus": ["业务主流程核对"],
-                "method": "只作可选参考",
                 "degrade": "无 PRD 时直接跳过"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
-                "focus": ["接口入口、集成点与环境依赖"],
-                "method": "定位 E2E 驱动入口与环境准备要求",
                 "degrade": "无 design 时从现有路由/入口探索驱动方式"
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "focus": ["tasks[].id/specRefs/designRefs/evidenceIds", "validationCommands"],
-                "method": "用 plan.json 的任务与证据映射决定 E2E 覆盖缺口，并把 E2E 运行结果用 hooks/evidence_store.py append 追加到 EVIDENCE.jsonl",
                 "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
-                "focus": ["uiRequired", "capabilities[].specRefs", "pages/interactions/visualSources"],
-                "method": "作为 E2E 阶段 UI 分母；E2E_RESULT.json.cases[] 的 uiRequired/pageRefs/interactionRefs/visualSourceRefs 必须从 UI_CONTEXT.json 与 plan.json 投影",
                 "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 PRD/specs Markdown 推导 UI 范围"
               } },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "focus": ["code/unit test 阶段验证证据", "尚未端到端覆盖的 task/spec/design"],
-                "method": "读取既有 evidence 后用 hooks/evidence_store.py append 向流末尾追加 E2E validation evidence；evidenceId 按全流顺序递增，不按阶段重排；不得插入旧记录前、重编号、截断、重写、删除 EVIDENCE.index.json 后重建或手动修改 EVIDENCE.index.json",
                 "degrade": "缺失时先补齐证据流，不能用 Markdown 报告替代；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
               } },
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": false,
               "extract": {
-                "focus": ["评审发现的风险与薄弱点"],
-                "method": "只作评审发现的人类叙述参考；结构化发现以 REVIEW_FINDINGS.json 为机器事实源",
                 "degrade": "缺失时跳过，不影响机器流程"
               } },
             { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
               "extract": {
-                "focus": ["verdict", "findings[].scenarioRef/specRefs/evidenceIds/severity/message/suggestedCheckpoint"],
-                "method": "优先读取 REVIEW_FINDINGS.json 的结构化 findings，决定 E2E 高风险链路覆盖；REQUIREMENTS_EVAL.md 只作人类叙述补充",
                 "degrade": "无 REVIEW_FINDINGS.json 时回到 review 阶段补齐结构化评审结果"
               } },
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": false,
               "extract": {
-                "focus": ["单测覆盖结论与未覆盖区域"],
-                "method": "只作单测结果的人类叙述参考；结构化 verdict/scenarioCoverage 以 UNIT_TEST_RESULT.json 为机器事实源",
                 "degrade": "缺失时跳过，不影响机器流程"
               } },
             { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": true,
               "extract": {
-                "focus": ["verdict", "scenarioCoverage", "targets[].taskId/specRefs/evidenceIds/result/command"],
-                "method": "读取 UNIT_TEST_RESULT.json 的 verdict、scenarioCoverage 与 target 结果，决定 E2E 覆盖缺口；UNIT_TEST_REPORT.md 只作人类叙述补充",
                 "degrade": "无 UNIT_TEST_RESULT.json 时回到单测阶段补齐结构化结果"
               } },
             { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false,
               "extract": {
-                "focus": ["verdict", "失败或阻断的 smoke results", "failureSummary"],
-                "method": "作为 E2E 主链路选择与环境风险识别参考；不把 SMOKE_RESULT verdict 作为 E2E 通过/失败的机器事实源",
                 "degrade": "缺失时跳过，不影响 E2E_RESULT.json 的生成与门禁"
               } },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
-                "focus": ["失败/跳过用例线索"],
-                "method": "只在排查时按需查看",
                 "degrade": "缺失时跳过"
               } }
           ],
@@ -694,98 +588,66 @@
           "inputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true,
               "extract": {
-                "focus": ["验收范围与非目标"],
-                "method": "作为验收汇总的范围基准",
                 "degrade": "无 proposal 时以 specs 与实际交付物界定验收范围"
               } },
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
-                "focus": ["全部 Requirement / Scenario 验收项"],
-                "method": "逐项核对行为验收覆盖与结论",
                 "degrade": "无 specs 时以各阶段报告结论汇总验收，并标注行为基准缺失"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
-                "focus": ["设计决策落实与遗留风险"],
-                "method": "核对设计决策闭环与 Open Questions 处置",
                 "degrade": "无 design 时跳过设计核对，记录基准缺失"
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "focus": ["tasks[].id/status/specRefs/designRefs/evidenceIds", "blockers"],
-                "method": "用 plan.json 汇总任务与证据闭环；VERIFY_DECISION.json 的任务结论必须回链到 plan.json 中的 taskId/evidenceIds",
                 "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
-                "focus": ["uiRequired", "capabilities[].specRefs", "pages/interactions/visualSources"],
-                "method": "作为 verify 阶段 UI 验收分母；VERIFY_DECISION.json.uiSummary 与 scenarioCoverage[].uiApplicability 必须从 UI_CONTEXT.json 投影",
                 "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 验收范围"
               } },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "focus": ["code/unit/e2e 阶段全部 validation evidence", "taskId/specRefs/designRefs/changedFiles/validation.result"],
-                "method": "作为最终验收证据事实源；verify 只用 hooks/evidence_store.py append 向流末尾追加汇总 evidence，不得重排、重编号、截断、重写、删除 EVIDENCE.index.json 后重建或手动修改 EVIDENCE.index.json",
                 "degrade": "缺失时先补齐证据流，不能给出完整通过结论"
               } },
             { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
               "extract": {
-                "focus": ["verdict", "findings[].scenarioRef/specRefs/evidenceIds/severity/message/suggestedCheckpoint"],
-                "method": "读取 REVIEW_FINDINGS.json 的结构化 findings，纳入最终风险和回流判断；评审 Markdown 不是 verify 的机器事实源",
                 "degrade": "缺失时回到 review 阶段补齐结构化评审结果"
               } },
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": false,
               "extract": {
-                "focus": ["verdict 与未覆盖风险"],
-                "method": "只作单测结果的人类叙述参考；结构化 verdict/scenarioCoverage 以 UNIT_TEST_RESULT.json 为机器事实源",
                 "degrade": "缺失时跳过，不影响机器流程"
               } },
             { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": true,
               "extract": {
-                "focus": ["verdict", "scenarioCoverage", "targets[].taskId/specRefs/evidenceIds/result/command"],
-                "method": "读取 UNIT_TEST_RESULT.json 的 verdict、scenarioCoverage 与 target 结果生成验收矩阵；UNIT_TEST_REPORT.md 只作人类叙述补充",
                 "degrade": "无 UNIT_TEST_RESULT.json 时回到单测阶段补齐结构化结果"
               } },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
-                "focus": ["失败用例证据"],
-                "method": "只在核对证据时按需查看",
                 "degrade": "缺失时跳过"
               } },
             { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true,
               "extract": {
-                "focus": ["用例与 specs 场景的对应关系"],
-                "method": "核对场景覆盖完整性",
                 "degrade": "缺失时在验收报告中记为缺项"
               } },
             { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": false,
               "extract": {
-                "focus": ["verdict 与失败项"],
-                "method": "只作 E2E 结果的人类叙述参考；结构化 verdict/scenarioCoverage 以 E2E_RESULT.json 为机器事实源",
                 "degrade": "缺失时跳过，不影响机器流程"
               } },
             { "id": "e2e_result_json", "label": "结构化 E2E 结果", "artifactType": "json", "path": "E2E_RESULT.json", "required": true,
               "extract": {
-                "focus": ["verdict", "scenarioCoverage", "cases[].taskId/specRefs/evidenceIds/verdict/executionMode"],
-                "method": "读取 E2E_RESULT.json 的顶层 verdict、scenarioCoverage 与 case verdict 生成验收矩阵；E2E_REPORT.md 只作人类叙述补充",
                 "degrade": "无 E2E_RESULT.json 时回到 E2E 阶段补齐结构化结果"
               } },
             { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false,
               "extract": {
-                "focus": ["verdict", "results[].testId/taskId/result/failureSummary"],
-                "method": "纳入最终风险汇总；SMOKE_RESULT 只表达旁路冒烟风险，不改变 VERIFY_DECISION 的 terminal verdict 与 nextCheckpoint",
                 "degrade": "缺失时按无旁路冒烟信号处理"
               } },
             { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true,
               "extract": {
-                "focus": ["运行证据与异常"],
-                "method": "只在核对证据时按需查看",
                 "degrade": "缺失时在验收报告中记为缺项"
               } },
             { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false,
               "extract": {
-                "focus": ["上游 E2E 失败回流请求"],
-                "method": "若存在则读取并在 verify 失败决策中覆盖或沿用建议回流阶段",
                 "degrade": "缺失时 verify 根据本阶段裁决重新生成"
               } }
           ],
@@ -815,26 +677,18 @@
           "inputs": [
             { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": false,
               "extract": {
-                "focus": ["验收说明与遗留风险文字", "交付物清单"],
-                "method": "只作验收的人类叙述参考；是否可进入流水线以 VERIFY_DECISION.json 的 verdict/nextCheckpoint 为机器事实源",
                 "degrade": "缺失时跳过，不影响机器流程"
               } },
             { "id": "verify_decision_json", "label": "结构化验收决策", "artifactType": "json", "path": "VERIFY_DECISION.json", "required": true,
               "extract": {
-                "focus": ["verdict", "nextCheckpoint", "passedScenarioRefs", "failedScenarioRefs", "manualVerificationRefs", "missingScenarioRefs", "evidenceIds"],
-                "method": "读取 VERIFY_DECISION.json 的 verdict/nextCheckpoint 判断是否可进入 CI/CD，并把失败、人工验证或缺失场景写入交付风险",
                 "degrade": "无 VERIFY_DECISION.json 时回到 verify 阶段补齐结构化验收决策"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "focus": ["交付说明的业务背景"],
-                "method": "只作可选参考，在 CICD_CHECKLIST.md 中记录来源",
                 "degrade": "未提供时允许继续，写明需求文档缺失或未提供"
               } },
             { "id": "design_optional", "label": "技术设计参考", "artifactType": "file", "path": "design.md", "required": false,
               "extract": {
-                "focus": ["交付说明的设计背景"],
-                "method": "只作可选参考，在 CICD_CHECKLIST.md 中记录来源",
                 "degrade": "未提供时允许继续，写明设计文档缺失或未提供"
               } }
           ],
@@ -861,8 +715,6 @@
           "inputs": [
             { "id": "cicd_checklist", "label": "CI/CD 清单", "artifactType": "file", "path": "CICD_CHECKLIST.md", "required": true,
               "extract": {
-                "focus": ["清单完成项与未完成项"],
-                "method": "核对交付闭环后归档；未完成项记录到归档说明",
                 "degrade": "无清单时按 Feature 目录现有产物核对后归档，并标注缺项"
               } }
           ],

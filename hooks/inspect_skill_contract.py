@@ -42,13 +42,7 @@ def _artifact_lines(title: str, artifacts: tuple, *, heading: str = "##") -> lis
         required = "必需" if artifact.required else "可选"
         lines.append(f"- `{artifact.path}`：{artifact.label}（{required}）")
         extract = getattr(artifact, "extract", None)
-        if extract is None:
-            continue
-        if extract.focus:
-            lines.append(f"  - 读取重点: {'；'.join(extract.focus)}")
-        if extract.method:
-            lines.append(f"  - 读取方式: {extract.method}")
-        if extract.degrade:
+        if extract is not None and extract.degrade:
             lines.append(f"  - 缺失降级: {extract.degrade}")
     return lines
 
@@ -273,8 +267,8 @@ def main(argv: list[str] | None = None) -> int:
     output_group.add_argument(
         "--plain",
         action="store_true",
-        help="emit a state-resolved execution checklist; with --feature, per-input "
-        "present→method / missing→stop-or-degrade is resolved from the feature dir",
+        help="emit only how missing inputs are handled; with --feature, on-disk "
+        "existence selects exactly the missing inputs from the feature dir",
     )
     args = parser.parse_args(argv)
 

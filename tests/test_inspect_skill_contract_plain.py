@@ -27,15 +27,13 @@ def make_contract(*, inputs: tuple[ArtifactSpec, ...] = ()) -> SkillContract:
     )
 
 
-def spec(
-    path: str, *, required: bool, method: str = "怎么读", degrade: str = "降级动作"
-) -> ArtifactSpec:
+def spec(path: str, *, required: bool, degrade: str = "降级动作") -> ArtifactSpec:
     return ArtifactSpec(
         id=path,
         label=f"{path} 标签",
         path=path,
         required=required,
-        extract=ExtractSpec(focus=("聚焦点",), method=method, degrade=degrade),
+        extract=ExtractSpec(degrade=degrade),
     )
 
 
