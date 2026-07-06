@@ -227,6 +227,23 @@ def _route_from_plan(fd: Path) -> tuple[str | None, list[str]]:
     return ROUTE_NONE, ["plan.json UI tasks not found"]
 
 
+def _with_plan_override_reason(
+    route: str,
+    route_reasons: list[str],
+    plan_route: str | None,
+    plan_reasons: list[str],
+) -> list[str]:
+    if plan_route is None or plan_route == route:
+        return route_reasons
+    if plan_route in {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_MISSING, ROUTE_SPEC_DRIVEN}:
+        return [
+            *route_reasons,
+            "plan.json route overridden by HTML/UI_CONTEXT evidence",
+            *plan_reasons,
+        ]
+    return route_reasons
+
+
 def _ui_context_payload(workspace: Path, feature: str) -> dict[str, Any] | None:
     ui_context_error, load_ui_context, _ = _import_ui_context_helpers()
     if load_ui_context is None:
@@ -265,17 +282,22 @@ def route_payload_from_ui_context(
         route_reasons = ["UI_CONTEXT uiRequired=false"]
     else:
         plan_route, plan_reasons = _route_from_plan(fd)
-        if plan_route in {ROUTE_ABSOLUTE, ROUTE_STANDARD} and html_sources:
-            route = plan_route
-            route_reasons = plan_reasons
+        visual_route, visual_reasons = _route_from_visual_sources(visual_sources, html_sources)
+        if visual_route in {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_MISSING}:
+            route = visual_route
+            route_reasons = _with_plan_override_reason(route, visual_reasons, plan_route, plan_reasons)
+        elif plan_route in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
+            route = ROUTE_MISSING
+            route_reasons = [*plan_reasons, "plan.json HTML route has no readable HTML source"]
         elif plan_route == ROUTE_MISSING:
             route = ROUTE_MISSING
             route_reasons = plan_reasons
-        elif plan_route == ROUTE_SPEC_DRIVEN and not html_sources:
+        elif plan_route == ROUTE_SPEC_DRIVEN:
             route = ROUTE_SPEC_DRIVEN
             route_reasons = plan_reasons
         else:
-            route, route_reasons = _route_from_visual_sources(visual_sources, html_sources)
+            route = visual_route
+            route_reasons = visual_reasons
 
     payload: dict[str, Any] = {
         "version": 1,

@@ -1212,11 +1212,33 @@ def _load_ui_context_for_projection(ctx: HookContext) -> tuple[dict | None, int]
     return data, 0
 
 
+def _visual_source_expected_frontend_route(source: dict) -> str | None:
+    route = source.get("route")
+    if isinstance(route, str) and route in {
+        ROUTE_SPEC_DRIVEN,
+        ROUTE_ABSOLUTE,
+        ROUTE_STANDARD,
+        ROUTE_MISSING,
+    }:
+        return route
+    source_type = source.get("type")
+    if source_type == "high_fidelity_html":
+        return ROUTE_ABSOLUTE
+    if source_type == "standard_html":
+        return ROUTE_STANDARD
+    return None
+
+
 def validate_plan_ui_projection(ctx: HookContext) -> int:
     ui_data, failures = _load_ui_context_for_projection(ctx)
     if ui_data is None:
         return failures
     indexes = ui_context_indexes(ui_data)
+    visual_sources_by_id = {
+        item["sourceId"]: item
+        for item in ui_data.get("visualSources", [])
+        if isinstance(item, dict) and isinstance(item.get("sourceId"), str)
+    }
 
     plan_data, errors = load_and_validate_plan(plan_json_path(ctx.feature_dir))
     if errors or plan_data is None:
@@ -1270,6 +1292,19 @@ def validate_plan_ui_projection(ctx: HookContext) -> int:
                 ROUTE_MISSING,
             }:
                 failures += fail_line(ctx, "invalid_plan_ui_frontend_route", f" task={task_id}")
+                continue
+            visual_refs = _string_list_value(ui_refs.get("visualSourceRefs")) or []
+            for visual_ref in visual_refs:
+                visual_source = visual_sources_by_id.get(visual_ref)
+                if visual_source is None:
+                    continue
+                expected_route = _visual_source_expected_frontend_route(visual_source)
+                if expected_route is not None and frontend_route != expected_route:
+                    failures += fail_line(
+                        ctx,
+                        "plan_ui_frontend_route_mismatch",
+                        f" task={task_id} visualSource={visual_ref} expected={expected_route} actual={frontend_route}",
+                    )
 
     if feature_ui_required and ui_task_count == 0:
         failures += fail_line(ctx, "plan_ui_required_without_ui_task")

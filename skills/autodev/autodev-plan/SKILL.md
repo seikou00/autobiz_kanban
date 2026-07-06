@@ -397,6 +397,10 @@ UI 任务投影规则：
 - `UI_CONTEXT.uiRequired=true` 时，只为 UI capability 生成 `uiRequired=true` 的任务，并补齐 `uiRefs.pageRefs`、`uiRefs.interactionRefs`、`uiRefs.visualSourceRefs` 和 `uiRefs.frontendRoute`。
 - `UI_CONTEXT.uiRequired=false` 时，不生成 UI task；纯后端任务不得夹带前端实现。
 - `uiRefs.frontendRoute` 取值为 `none`、`spec-driven-ui`、`absolute-html`、`standard-html` 或 `missing-html`。有 UI 但无 HTML/设计稿时使用 `spec-driven-ui`，不要伪造 HTML 输入。
+- `uiRefs.frontendRoute` 必须从 `UI_CONTEXT.visualSources` 投影，不得只凭任务标题、Markdown 描述、PRD/specs 关键词或“普通前端页面”猜成 `standard-html`。
+- 若任务引用的 `visualSources[].route` 为 `absolute-html`、`standard-html`、`missing-html` 或 `spec-driven-ui`，必须原样写入 `uiRefs.frontendRoute`；其中 `absolute-html` 不得降级为 `standard-html`。
+- 若任务引用的 visual source 未显式写 `route`，但 `type=high_fidelity_html` 且存在 HTML 输入，必须写 `absolute-html`；若 `type=standard_html` 且存在 HTML 输入，写 `standard-html`。
+- 仅当 `UI_CONTEXT.uiRequired=true` 且没有可用 HTML/设计稿 visual source 时，才使用 `spec-driven-ui`；若 visual source 标记需要 HTML 但文件不可读，写 `missing-html`。
 
 任务拆分粒度：
 
