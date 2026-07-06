@@ -71,6 +71,40 @@ def write_ui_context(workspace: Path, payload: dict) -> None:
     write_json(workspace / ".autobizdevops" / "features" / "alpha" / "UI_CONTEXT.json", payload)
 
 
+def write_plan_route(workspace: Path, route: str) -> None:
+    write_json(
+        workspace / ".autobizdevops" / "features" / "alpha" / "plan.json",
+        {
+            "version": 1,
+            "featureId": "alpha",
+            "tasks": [
+                {
+                    "id": "T001",
+                    "title": "ui",
+                    "status": "todo",
+                    "deps": [],
+                    "uiRequired": True,
+                    "uiRefs": {
+                        "pageRefs": ["PAGE-001"],
+                        "interactionRefs": ["UIX-001"],
+                        "visualSourceRefs": ["VIS-001"],
+                        "frontendRoute": route,
+                    },
+                    "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                    "designRefs": ["design.md#D-001"],
+                    "apiIds": [],
+                    "dataIds": [],
+                    "decisionIds": ["D-001"],
+                    "validationCommands": [{"command": "echo ok"}],
+                    "expectedFiles": [],
+                    "evidenceIds": [],
+                    "blockers": [],
+                }
+            ],
+        },
+    )
+
+
 def base_ui_context(*, ui_required: bool = True) -> dict:
     return {
         "version": 1,
@@ -184,6 +218,80 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
         self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
         self.assertEqual(payload["visualSourceIds"], ["VIS-001"])
+
+    def test_ui_context_visual_route_overrides_plan_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            html_path = write_feature_file(
+                workspace,
+                "frontend-html/page.html",
+                """
+                <div style="position:absolute; left:10px; top:10px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:20px; top:60px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:30px; top:110px; width:120px; height:40px"></div>
+                """,
+            )
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [
+                {
+                    "sourceId": "VIS-001",
+                    "type": "high_fidelity_html",
+                    "path": str(html_path),
+                    "route": ROUTE_ABSOLUTE,
+                    "required": True,
+                }
+            ]
+            write_ui_context(workspace, context)
+            write_plan_route(workspace, ROUTE_STANDARD)
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
+        self.assertIn("plan.json route overridden by HTML/UI_CONTEXT evidence", payload["reasons"])
+
+    def test_absolute_html_classification_overrides_plan_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            html_path = write_feature_file(
+                workspace,
+                "frontend-html/page.html",
+                """
+                <div style="position:absolute; left:10px; top:10px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:20px; top:60px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:30px; top:110px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:40px; top:160px; width:120px; height:40px"></div>
+                """,
+            )
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [
+                {
+                    "sourceId": "VIS-001",
+                    "type": "other",
+                    "path": str(html_path),
+                    "required": True,
+                }
+            ]
+            write_ui_context(workspace, context)
+            write_plan_route(workspace, ROUTE_STANDARD)
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
+        self.assertIn("position:absolute count=4", payload["reasons"])
+        self.assertIn("plan.json route overridden by HTML/UI_CONTEXT evidence", payload["reasons"])
+
+    def test_plan_html_route_without_readable_html_falls_back_to_spec_driven(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_ui_context(workspace, base_ui_context(ui_required=True))
+            write_plan_route(workspace, ROUTE_ABSOLUTE)
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertTrue(payload["htmlSourceMissing"])
+        self.assertIn("plan.json HTML route has no readable HTML source", payload["reasons"])
+        self.assertTrue(any("falling back to spec-driven-ui" in reason for reason in payload["reasons"]))
 
     def test_explicit_html_route_without_readable_html_falls_back_to_spec_driven(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
