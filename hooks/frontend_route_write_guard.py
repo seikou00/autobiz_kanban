@@ -140,6 +140,33 @@ def is_frontend_code_path(path: Path) -> bool:
     return path.suffix.lower() in FRONTEND_CODE_SUFFIXES
 
 
+def missing_protocol_flags(evidence: dict) -> list[str]:
+    required = ("routeSkillReadComplete", "routeTodosCreated", "parserRead")
+    return [flag for flag in required if evidence.get(flag) is not True]
+
+
+def protocol_next_step(feature: str, missing: list[str]) -> str:
+    if "routeSkillReadComplete" in missing:
+        return (
+            "read route SKILL.md to EOF, then run "
+            f"`python hooks/resolve_frontend_html_route.py --feature {feature} "
+            "--mark route-skill-read-complete --json`"
+        )
+    if "routeTodosCreated" in missing:
+        return (
+            "create route write_todos, then run "
+            f"`python hooks/resolve_frontend_html_route.py --feature {feature} "
+            "--mark route-todos-created --json`"
+        )
+    if "parserRead" in missing:
+        return (
+            "read delegated parser, then run "
+            f"`python hooks/resolve_frontend_html_route.py --feature {feature} "
+            "--mark parser-read --json`"
+        )
+    return "rerun frontend route protocol"
+
+
 def validate_frontend_write(workspace: Path, feature: str) -> int:
     try:
         ui_context = load_ui_context(workspace / ".autobizdevops" / "features" / feature)
@@ -170,6 +197,12 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
         return 0
     if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
         return block(f"当前 frontend route 不允许写前端代码: {route}")
+    missing = missing_protocol_flags(evidence)
+    if missing:
+        return block(
+            "frontend route protocol incomplete: "
+            f"missing={','.join(missing)}; next={protocol_next_step(feature, missing)}"
+        )
     if evidence.get("routeSkillReadComplete") is not True:
         return block("写前端代码前必须完整读取对应 route SKILL.md")
     if evidence.get("routeTodosCreated") is not True:
