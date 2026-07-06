@@ -4,9 +4,12 @@
 
 board_config.json 注册（样例，附件约定）::
 
-    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
 
 入参：
+  · ``--platform`` 是目标平台键（``darwin`` / ``linux`` / ``win32``），用于把输出中的
+    ``sys`` 路径按目标平台分隔符拼接；缺省时使用当前 Python 运行平台。
+
   · ``--selected-deployUnit`` 是一个 JSON 数组字符串（deployUnitId = 后端单元 id）::
 
         --selected-deployUnit '[{"deployUnitId":"LF39.18_Outservice","localRepoPath":"/repo/out"}]'
@@ -42,7 +45,7 @@ board_config.json 注册（样例，附件约定）::
   · 单元级（③）remote 优先 → local 兜底（``<localRepoPath>/AGENTS.md``）→ 都无则 ``loaded:false``，
     每个选中单元产出一条 agentmdLoadStatus。
 
-系统级（②）正文里的 ``{project_root}`` 占位符在拼接前替换为该系统在 sys/ 下的目录绝对路径
+系统级（②）正文里的 ``{plugin_root}`` 占位符在拼接前替换为该系统在 sys/ 下的目录绝对路径
 （``<pluginPath>/sys/<systemId>``）；单元级（③）不做替换，占位符原样保留。
 
 设计原则：除入参 JSON 非法外，任何情况都返回 ok:true，绝不抛异常中断会话；
@@ -65,6 +68,7 @@ if str(ROOT) not in sys.path:
 from hooks.agents_repo import (  # noqa: E402
     AgentsManifestError,
     Manifest,
+    display_path_join,
     get_agents_root,
     index_unit_pairs,
     load_manifest,
@@ -72,7 +76,7 @@ from hooks.agents_repo import (  # noqa: E402
     sys_abs_display,
 )
 
-PROJECT_ROOT_PLACEHOLDER = "{project_root}"  # md 正文里的占位符，替换为该系统 sys/<systemId> 绝对路径
+PLUGIN_ROOT_PLACEHOLDER = "{plugin_root}"  # md 正文里的占位符，替换为该系统 sys/<systemId> 绝对路径
 
 LOCAL_AGENTS_MD = "AGENTS.md"  # local 兜底文件名（§8 #1：直接读用户仓库既有 AGENTS.md）
 
@@ -129,19 +133,23 @@ def _norm_path(path: Path) -> Path:
         return path
 
 
-def _fill_project_root(
-    content: str, system_id: str, *, plugin_root: Optional[Path]
+def _fill_plugin_root(
+    content: str,
+    system_id: str,
+    *,
+    plugin_root: Optional[Path],
+    platform: Optional[str] = None,
 ) -> str:
-    """把系统级正文里的 ``{project_root}`` 占位符替换为该系统在 sys/ 下的目录绝对路径
+    """把系统级正文里的 ``{plugin_root}`` 占位符替换为该系统在 sys/ 下的目录绝对路径
     （``<pluginPath>/sys/<systemId>``，即 sys 绝对路径 + systemId）。仅系统级（②）调用，
     单元级不替换。
 
     无占位符 / 无 systemId 时原样返回。
     """
-    if not system_id or PROJECT_ROOT_PLACEHOLDER not in content:
+    if not system_id or PLUGIN_ROOT_PLACEHOLDER not in content:
         return content
-    root_dir = get_agents_root(plugin_root) / system_id
-    return content.replace(PROJECT_ROOT_PLACEHOLDER, str(root_dir))
+    root_dir = display_path_join(get_agents_root(plugin_root), system_id, platform=platform)
+    return content.replace(PLUGIN_ROOT_PLACEHOLDER, root_dir)
 
 
 def _resolve_one(
@@ -150,6 +158,7 @@ def _resolve_one(
     local_repo: str,
     *,
     plugin_root: Optional[Path],
+    platform: Optional[str] = None,
     allow_local_fallback: bool = True,
 ) -> Tuple[dict, Optional[Path], Optional[str]]:
     """一个 md 文件：remote 优先 →（可选）local 兜底 → 都无则 loaded:false。
@@ -171,7 +180,7 @@ def _resolve_one(
             if content is not None:
                 status = {
                     "deployUnitId": owner_uid,
-                    "path": sys_abs_display(rel_in_manifest, plugin_root),
+                    "path": sys_abs_display(rel_in_manifest, plugin_root, platform=platform),
                     "loaded": True,
                     "source": "remote",
                     "message": "",
@@ -182,7 +191,11 @@ def _resolve_one(
     if not allow_local_fallback:
         status = {
             "deployUnitId": owner_uid,
-            "path": sys_abs_display(rel_in_manifest, plugin_root) if rel_in_manifest else "",
+            "path": (
+                sys_abs_display(rel_in_manifest, plugin_root, platform=platform)
+                if rel_in_manifest
+                else ""
+            ),
             "loaded": False,
             "source": "remote",
             "message": "file not exist",
@@ -191,12 +204,15 @@ def _resolve_one(
 
     # ② local 兜底：未命中清单 或 remote 文件缺失 → 读 <localRepoPath>/AGENTS.md。
     local_abs = (Path(local_repo) / LOCAL_AGENTS_MD) if local_repo else None
+    local_display = (
+        display_path_join(local_repo, LOCAL_AGENTS_MD, platform=platform) if local_repo else ""
+    )
     if local_abs is not None:
         content = _read_nonempty(local_abs)
         if content is not None:
             status = {
                 "deployUnitId": owner_uid,
-                "path": str(local_abs),
+                "path": local_display,
                 "loaded": True,
                 "source": "local",
                 "message": "",
@@ -206,7 +222,7 @@ def _resolve_one(
     # ③ remote 与 local 都没有。
     status = {
         "deployUnitId": owner_uid,
-        "path": str(local_abs) if local_abs is not None else "",
+        "path": local_display,
         "loaded": False,
         "source": "local",
         "message": "未找到知识库 AGENTS.md 和本地 AGENTS.md",
@@ -278,13 +294,13 @@ WORKSPACE_SCOPE_REF = "会话工作区指令"
 WORKSPACE_STATUS_ID = "本地工作区"
 
 
-def _workspace_status(session_workspace_path: Optional[str]) -> dict:
+def _workspace_status(session_workspace_path: Optional[str], *, platform: Optional[str] = None) -> dict:
     """工作区 AGENTS.md 进 agentmdLoadStatus 的一条。仅在已确认工作区有正文时调用，
     故 ``loaded:True``、``source:"local"``（工作区指令始终读本地文件，无 remote）。"""
     path = (session_workspace_path or "").strip()
     return {
         "deployUnitId": WORKSPACE_STATUS_ID,
-        "path": str(Path(path) / WORKSPACE_AGENTS_MD) if path else "",
+        "path": display_path_join(path, WORKSPACE_AGENTS_MD, platform=platform) if path else "",
         "loaded": True,
         "source": "local",
         "message": "",
@@ -392,6 +408,7 @@ def render(
     *,
     plugin_root: Optional[Path] = None,
     session_workspace_path: Optional[str] = None,
+    platform: Optional[str] = None,
 ) -> dict:
     """核心逻辑（无 I/O 边界外副作用），便于单测。"""
     # 「会话工作区指令」独立于部署单元选择：先行构建，未选单元也可单独注入。
@@ -412,7 +429,7 @@ def render(
             "ok": True,
             "message": "未选择部署单元，仅注入会话工作区指令",
             "sessionContext": prompt,
-            "agentmdLoadStatus": [_workspace_status(session_workspace_path)],
+            "agentmdLoadStatus": [_workspace_status(session_workspace_path, platform=platform)],
         }
 
     # 清单不可用（缺失/非法）时降级：所有单元当作未命中，直接走 local 兜底。
@@ -454,11 +471,14 @@ def render(
                 # 找到就生成 <SYSTEM> 段，找不到就不生成（status 丢弃，仅取 content）。
                 _status, abs_path, content = _resolve_one(
                     uid, system.agents_relpath(), local,
-                    plugin_root=plugin_root, allow_local_fallback=False,
+                    plugin_root=plugin_root, platform=platform, allow_local_fallback=False,
                 )
                 if content is not None:
-                    content = _fill_project_root(
-                        content, system.system_id, plugin_root=plugin_root
+                    content = _fill_plugin_root(
+                        content,
+                        system.system_id,
+                        plugin_root=plugin_root,
+                        platform=platform,
                     )
                     title = system.system_id
                     if system.system_name:
@@ -471,10 +491,14 @@ def render(
             # ③ 单元级 description.md —— 仅当单元自带 agentsPath。
             if unit.agents_rel:
                 status, abs_path, content = _resolve_one(
-                    uid, unit.agents_rel, local, plugin_root=plugin_root
+                    uid,
+                    unit.agents_rel,
+                    local,
+                    plugin_root=plugin_root,
+                    platform=platform,
                 )
                 load_status.append(status)
-                # 单元级不做 {project_root} 替换（占位符原样保留）。
+                # 单元级不做 {plugin_root} 替换（占位符原样保留）。
                 if content is not None and _append_body(
                     abs_path, unit_sections,
                     {"deployUnitId": uid, "ref": _ref_for(pair, sel), "content": content},
@@ -482,7 +506,9 @@ def render(
                     unit_has_section.add(uid)
         else:
             # 未命中清单：只走 local 兜底（rel 为空）；引用范围用 UI 传入的 description。
-            status, abs_path, content = _resolve_one(uid, "", local, plugin_root=plugin_root)
+            status, abs_path, content = _resolve_one(
+                uid, "", local, plugin_root=plugin_root, platform=platform
+            )
             load_status.append(status)
             if content is not None and _append_body(
                 abs_path, unit_sections,
@@ -532,7 +558,7 @@ def render(
     # 工作区指令（若有正文注入）在 agentmdLoadStatus 里占首条；其加载结果不计入上面的
     # remote/local/缺 单元摘要（那行只反映部署单元），避免把工作区混进单元统计。
     result_status = (
-        [_workspace_status(session_workspace_path), *load_status]
+        [_workspace_status(session_workspace_path, platform=platform), *load_status]
         if workspace_content is not None
         else load_status
     )
@@ -548,6 +574,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="session_context_inject: 选中部署单元 -> 注入 sessionContext（适用范围+系统级+各单元）",
         allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--platform",
+        dest="platform",
+        default=None,
+        help="目标平台：darwin/linux/win32；用于输出中的 sys 路径拼接展示",
     )
     parser.add_argument(
         "--selected-deployUnit",
@@ -573,7 +605,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             "agentmdLoadStatus": [],
         }
     else:
-        result = render(selected, session_workspace_path=args.session_workspace_path)
+        result = render(
+            selected,
+            session_workspace_path=args.session_workspace_path,
+            platform=args.platform,
+        )
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     print()

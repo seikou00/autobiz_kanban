@@ -54,6 +54,7 @@ from hooks.agents_repo import (  # noqa: E402
     AgentsManifestError,
     build_sync_payload,
     get_agents_root,
+    platform_key,
 )
 from board_core.contracts import BoardConfigError, load_board_config  # noqa: E402
 
@@ -208,12 +209,7 @@ def merge_supported_units_into_board_config(
 
 def _platform_key(platform: Optional[str] = None) -> str:
     """把 ``sys.platform`` 归一到 board_config.json inspectCommands 的三平台键。"""
-    p = (platform or sys.platform).lower()
-    if p.startswith("win"):
-        return "win32"
-    if p == "darwin":
-        return "darwin"
-    return "linux"
+    return platform_key(platform)
 
 
 def merge_knowledge_path_into_board_config(

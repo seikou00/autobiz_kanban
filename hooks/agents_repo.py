@@ -96,6 +96,38 @@ def get_manifest_path(plugin_root: Optional[Path] = None) -> Path:
     return get_agents_root(plugin_root) / MANIFEST_NAME
 
 
+def platform_key(platform: Optional[str] = None) -> str:
+    """把平台名归一到 board_config.json inspectCommands 的三平台键。"""
+    p = (platform or sys.platform).strip().lower()
+    if p.startswith("win"):
+        return "win32"
+    if p == "darwin":
+        return "darwin"
+    return "linux"
+
+
+def display_path_join(base: object, *parts: object, platform: Optional[str] = None) -> str:
+    """按目标平台分隔符拼接仅用于展示/注入的路径。
+
+    真实文件读写仍走 ``Path``；这里专门处理宿主传入目标平台时的文本路径，避免
+    ``C:\\plugin\\sys`` 再拼 manifest 相对路径后变成 ``C:\\plugin\\sys/LF39``。
+    """
+    key = platform_key(platform)
+    sep = "\\" if key == "win32" else "/"
+
+    def _normalize(text: str) -> str:
+        return text.replace("/", "\\") if sep == "\\" else text.replace("\\", "/")
+
+    base_text = _normalize(str(base))
+    clean_parts = [_normalize(str(part)).strip("\\/") for part in parts if str(part)]
+    if not clean_parts:
+        return base_text
+    suffix = sep.join(part for part in clean_parts if part)
+    if not base_text:
+        return suffix
+    return base_text.rstrip("\\/") + sep + suffix
+
+
 def _safe_join(root: Path, rel: str) -> Path:
     """把 ``rel`` 拼到 ``root`` 下并防目录穿越（绝对路径 / ``..`` 越界）。"""
     if not rel or not isinstance(rel, str):
@@ -256,14 +288,16 @@ def sys_abspath(rel: str, plugin_root: Optional[Path] = None) -> Path:
     return _safe_join(get_agents_root(plugin_root), rel)
 
 
-def sys_abs_display(rel: str, plugin_root: Optional[Path] = None) -> str:
+def sys_abs_display(
+    rel: str, plugin_root: Optional[Path] = None, platform: Optional[str] = None
+) -> str:
     """sys/ 下文件的绝对展示路径（原生分隔符，与 local 条目一致）。
 
     直接 Path 拼接、不对整条路径 resolve —— get_agents_root 已在 import 期一次性
     resolve（plugin_root=None 时），拼接不再触发 resolve，避免 macOS /var→/private/var
     symlink 漂移。
     """
-    return str(get_agents_root(plugin_root) / rel)
+    return display_path_join(get_agents_root(plugin_root), rel, platform=platform)
 
 
 # ---- sync 输出整形（与 git 解耦，便于单测）-------------------------------
