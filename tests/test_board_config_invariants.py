@@ -349,15 +349,21 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             for field in ("uiRequired", "apiIds", "dataIds"):
                 if field not in task:
                     missing_base_fields.append(f"{task_id}: {field}")
-            if task.get("apiIds") == []:
-                missing_base_fields.append(f"{task_id}: apiIds_non_empty_example")
-            if task.get("dataIds") == []:
-                missing_base_fields.append(f"{task_id}: dataIds_non_empty_example")
         self.assertEqual(
             missing_base_fields,
             [],
             "plan template tasks must show UI and API/DATA fields so first generation matches validators: "
             + ", ".join(missing_base_fields),
+        )
+        empty_api_data_examples = [
+            str(task.get("id", "?"))
+            for task in tasks
+            if isinstance(task, dict) and task.get("apiIds") == [] and task.get("dataIds") == []
+        ]
+        self.assertTrue(
+            empty_api_data_examples,
+            "plan template must include a task example with apiIds/dataIds as empty arrays "
+            "for work that does not touch API or data",
         )
 
         ui_tasks = [task for task in tasks if isinstance(task, dict) and task.get("uiRequired") is True]
@@ -399,6 +405,8 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "UI_CONTEXT.uiRequired=true",
             "至少一个 `uiRequired:true`",
             "模板中的 API/Data/Decision ID 都是占位示例",
+            "不要为了过校验强行编造",
+            "空数组 `[]`",
             "x-auto-no-http-api: true",
             "x-auto-no-sql: true",
             "`uiRequired` 是 task 顶层字段",

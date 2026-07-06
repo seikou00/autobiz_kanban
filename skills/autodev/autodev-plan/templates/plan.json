@@ -48,16 +48,10 @@
         "specs/[capability]/spec.md#SCN-002"
       ],
       "designRefs": [
-        "design.md#API-002",
-        "design.md#DATA-002",
         "design.md#D-002"
       ],
-      "apiIds": [
-        "API-002"
-      ],
-      "dataIds": [
-        "DATA-002"
-      ],
+      "apiIds": [],
+      "dataIds": [],
       "decisionIds": [
         "D-002"
       ],

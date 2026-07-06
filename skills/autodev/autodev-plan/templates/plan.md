@@ -5,10 +5,11 @@
 ## 稳定 ID 规范
 
 - Task ID 统一使用 `T001`、`T002` ...，并写在任务标题和任务表格中。
-- Task 必须引用 `specRefs`、`api_id`、`data_id`、`decision_id`、`evidenceIds`；对应的 `plan.json` 需同步保存 `deps`、`status`、`validationCommands`。
+- Task 必须列出 `specRefs`、`api_id`、`data_id`、`decision_id`、`evidenceIds`；对应的 `plan.json` 需同步保存 `deps`、`status`、`validationCommands`。
 - `specRefs` 使用 `specs/<capability>/spec.md#REQ-001` / `#SCN-001`。
 - `api_id`、`data_id`、`decision_id` 分别写成独立字段；每个字段都可以写多个 ID，多个值用 `/` 或 `,` 分隔。
-- 若 `x-auto-no-http-api: true` / `x-auto-no-sql: true`，对应字段写 `无`，不要为对应类型伪造 `API-*` / `DATA-*`。
+- 单个任务不涉及接口或数据变更时，对应字段写 `无` 或 `-`，不要为对应类型伪造 `API-*` / `DATA-*`；对应 `plan.json.apiIds` / `dataIds` 写空数组 `[]`，不要写字符串 `"-"`。
+- 若整轮 `x-auto-no-http-api: true` / `x-auto-no-sql: true`，对应覆盖矩阵字段也写 `无` 或 `-`。
 - `设计依据` 可作为人类可读摘要保留，但机器校验只看单独字段；它不需要和字段一一对账。模板里仍保留 `design.md#API-001 / #DATA-001 / #D-001` 这种可追溯写法。
 - 覆盖矩阵中的 Requirement / Scenario 也必须带同样的本地 ID。
 - 新建任务继续递增，不允许重用已删除或已完成任务的 ID。

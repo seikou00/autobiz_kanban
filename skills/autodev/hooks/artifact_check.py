@@ -1722,6 +1722,8 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
     if not isinstance(raw_tasks, list):
         return failures
 
+    covered_api_refs: set[str] = set()
+    covered_data_refs: set[str] = set()
     for index, task in enumerate(raw_tasks):
         context = f"tasks[{index}]"
         if not isinstance(task, dict):
@@ -1747,11 +1749,9 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
         api_refs = set(_string_list_value(task.get("apiIds")) or []) | set(re.findall(r"\bAPI-\d{3}\b", design_ref_text))
         data_refs = set(_string_list_value(task.get("dataIds")) or []) | set(re.findall(r"\bDATA-\d{3}\b", design_ref_text))
         decision_refs = set(_string_list_value(task.get("decisionIds")) or []) | set(re.findall(r"\bD-\d{3}\b", design_ref_text))
+        covered_api_refs.update(api_refs)
+        covered_data_refs.update(data_refs)
 
-        if not no_http_api and not api_refs:
-            failures += fail_line(ctx, "missing_plan_json_api_ref", f" task={task_id}")
-        if not no_sql and not data_refs:
-            failures += fail_line(ctx, "missing_plan_json_data_ref", f" task={task_id}")
         if not decision_refs:
             failures += fail_line(ctx, "missing_plan_json_decision_ref", f" task={task_id}")
         for api_id in sorted(api_refs):
@@ -1763,6 +1763,18 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
         for decision_id in sorted(decision_refs):
             if decision_id not in design_ids["D"]:
                 failures += fail_line(ctx, "unknown_plan_json_decision_ref", f" task={task_id} id={decision_id}")
+    if not no_http_api:
+        if not design_ids["API"]:
+            failures += fail_line(ctx, "missing_design_api_id")
+        else:
+            for api_id in sorted(design_ids["API"] - covered_api_refs):
+                failures += fail_line(ctx, "missing_plan_json_api_coverage", f" id={api_id}")
+    if not no_sql:
+        if not design_ids["DATA"]:
+            failures += fail_line(ctx, "missing_design_data_id")
+        else:
+            for data_id in sorted(design_ids["DATA"] - covered_data_refs):
+                failures += fail_line(ctx, "missing_plan_json_data_coverage", f" id={data_id}")
     return failures
 
 

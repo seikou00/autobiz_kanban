@@ -914,6 +914,70 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
             self.assertGreater(validate_plan_finished_tasks(self._plan_ctx(feature_dir)), 0)
 
+    def test_plan_task_without_api_or_data_refs_is_allowed_when_other_task_covers_design(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir, no_http_api=False, no_sql=False)
+            spec_refs = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"]
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "cover api and data",
+                            "status": "todo",
+                            "deps": [],
+                            "specRefs": spec_refs,
+                            "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                            "apiIds": ["API-001"],
+                            "dataIds": ["DATA-001"],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        },
+                        {
+                            "id": "T002",
+                            "title": "no api or data work",
+                            "status": "todo",
+                            "deps": ["T001"],
+                            "specRefs": spec_refs,
+                            "designRefs": ["design.md#D-001"],
+                            "apiIds": [],
+                            "dataIds": [],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": [],
+                            "blockers": [],
+                        },
+                    ],
+                },
+            )
+
+            self.assertEqual(validate_plan_json_contract(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_requires_design_api_and_data_decisions_to_be_covered_somewhere(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir, no_http_api=False, no_sql=False)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                design_refs=["design.md#D-001"],
+                api_ids=[],
+                data_ids=[],
+                evidence_ids=[],
+            )
+
+            self.assertGreater(validate_plan_json_contract(self._plan_ctx(feature_dir)), 0)
+
     def test_plan_markdown_without_plan_json_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
