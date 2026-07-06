@@ -27,9 +27,9 @@ description: >
 
 ```bash
 # autodev-code 技能根目录执行
-python deps/frontend-html/with-absolute-html/scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir .frontend/html-analysis --output-name <task-stem>
+python references/frontend-html/with-absolute-html/scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir .frontend/html-analysis --output-name <task-stem>
 
-# deps/frontend-html/with-absolute-html/ 目录执行
+# references/frontend-html/with-absolute-html/ 目录执行
 python scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir .frontend/html-analysis --output-name <task-stem>
 ```
 
@@ -677,7 +677,7 @@ Footer（若有）：top __px
 
 ## 调用位置
 
-本规则由 `html-parser` 在执行 LLM 转换时调用，详细调用流程见 [html-parser.md](../../deps/html-parser.md)。
+本规则由 `html-parser` 在执行 LLM 转换时调用，详细调用流程见 [html-parser.md](../html-parser.md)。
 
 **调用时机：** 当 HTML 识别为原生 div HTML（不含框架组件标签）时，在 LLM Prompt 中包含本规则的转换要求。
 

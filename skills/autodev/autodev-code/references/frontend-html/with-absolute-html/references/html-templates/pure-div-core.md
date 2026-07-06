@@ -15,12 +15,12 @@
 1. 运行 `prepare_html_analysis.py`（必填参数 `--project-root` / `--task-stem` / `--html-file`，完整命令以 `SKILL.md §4` 为准）：
    - `autodev-code` 技能根目录：
      ```
-     python deps/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
+     python references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
        --project-root . \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>
      ```
-   - `deps/frontend-html/with-absolute-html/` 目录：
+   - `references/frontend-html/with-absolute-html/` 目录：
      ```
      python scripts/prepare_html_analysis.py \
        --project-root <CODE_WORKSPACE> \

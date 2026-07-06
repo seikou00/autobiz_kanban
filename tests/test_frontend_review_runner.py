@@ -12,7 +12,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REVIEW_SCRIPTS = ROOT / "skills" / "autodev" / "autodev-code" / "deps" / "frontend-html" / "scripts"
+REVIEW_SCRIPTS = ROOT / "skills" / "autodev" / "autodev-code" / "references" / "frontend-html" / "scripts"
 RUNNER = REVIEW_SCRIPTS / "review_runner.py"
 HTML_CHECKER = REVIEW_SCRIPTS / "html_static_checker.py"
 

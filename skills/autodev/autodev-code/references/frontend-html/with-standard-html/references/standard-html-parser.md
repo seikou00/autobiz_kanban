@@ -1,17 +1,17 @@
 ---
 name: standard-html-parser
-description: 处理 `/autodev-code` 内部标准 DOM / 语义明确 HTML 的依赖。该依赖以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；同时遵循 code 根 SKILL.md 的组件优先级、图标/图表规则、技术栈兜底和 code_done 收尾契约。
+description: 处理 `/autodev-code` 内部标准 DOM / 语义明确 HTML 的参考。该参考以 `standard-html-parser` 名义承载标准 HTML 转 React 工程代码能力，用于把 HTML、静态页面或复制 markup 转为现有工程中的可维护 React 代码或组件；同时遵循 code 根 SKILL.md 的组件优先级、图标/图表规则、技术栈兜底和 code_done 收尾契约。
 ---
 
 # 标准 HTML 解析器
 
-本依赖只在上层路线技能 `../SKILL.md` 已经把当前输入明确判定为“标准 DOM / 语义明确 HTML”后进入。它替代原有薄版 `standard-html-parser`，作为 `with-standard-html` 路线的 HTML 转工程代码主执行技能。
+本参考只在上层路线技能 `../SKILL.md` 已经把当前输入明确判定为“标准 DOM / 语义明确 HTML”后进入。它替代原有薄版 `standard-html-parser`，作为 `with-standard-html` 路线的 HTML 转工程代码主执行技能。
 
 本文中提到的 `SKILL.md` 均指 code 根技能 `../../../../SKILL.md`。若本文和根技能冲突，以 code 根技能的 Source/Method Bundle 优先级、HTML 分支总控契约、图标/图表规则、依赖安装确认规则和 code_done 收尾规则为准。
 
 ## 1. 入口契约
 
-进入本依赖前，必须已经完成：
+进入本参考前，必须已经完成：
 
 1. 明确把输入判定为 `standard-html`，即标准 DOM、语义结构、表单 / 表格 / flex / grid / class 规则较清晰。
 2. 确认未命中 `../../with-absolute-html/SKILL.md` 定义的强制绝对定位 / 设计导出稿信号。
@@ -34,7 +34,7 @@ auditRequired=<true|false>
 
 ## 2. 核心定位
 
-本依赖的目标不是把 `class` 简单替换成 `className`，而是把原始 HTML 转成真实工程中可维护、可运行、可复用的 React 代码。
+本参考的目标不是把 `class` 简单替换成 `className`，而是把原始 HTML 转成真实工程中可维护、可运行、可复用的 React 代码。
 
 必须同时做到：
 
@@ -250,9 +250,9 @@ auditRequired=<true|false>
 从插件根目录或 code 技能根目录运行：
 
 ```bash
-python skills/autodev/autodev-code/deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+python skills/autodev/autodev-code/references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
 # 或在 autodev-code 技能根目录运行：
-python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+python references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
 ```
 
 脚本只扫描 `.tsx` / `.jsx` 源码。退出码 `0` 表示未发现候选项；退出码 `1` 表示发现可能遗漏的 Ant Design 转换候选项，应把输出作为待处理清单继续转换或说明，不视为脚本故障。
@@ -334,7 +334,7 @@ python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <tar
 - 前端任务要启动 dev server，并用浏览器确认页面非空白、资源加载、布局无明显错位。
 - 检查桌面和移动视口：溢出、裁切、文本重叠、按钮挤压、表格横向滚动。
 - 桌面 Ant Design 场景检查：样式是否加载、版本 API 是否正确、Form 默认值与校验、Radio/Checkbox/Select/Tabs 状态、Table `rowKey`、Modal/Drawer open/close、feedback API provider context。
-- 当 `uiLibraryTarget=antd` 且 `antdMode=required|selected` 时，运行 `python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
+- 当 `uiLibraryTarget=antd` 且 `antdMode=required|selected` 时，运行 `python references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
 - 当 `uiLibraryTarget=antd-mobile` 时，不运行桌面 Ant Design 覆盖审计；只按项目移动端组件规则和可用校验命令确认交互、样式与状态。
 - 检查图标 / 图表来源层级和可访问性。
 - 回查页面主区域、字段、标题、按钮、表格列、tab、展开收起区、图标、图表和明显交互是否有增减或丢失。
@@ -362,7 +362,7 @@ python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <tar
 ## 13. 禁止事项
 
 - 不要停留在 JSX 语法转换，必须交付工程化 React 代码。
-- 不要把绝对定位 / Figma 导出稿误走本依赖；命中强信号时返回 `../../with-absolute-html/SKILL.md`。
+- 不要把绝对定位 / Figma 导出稿误走本参考；命中强信号时返回 `../../with-absolute-html/SKILL.md`。
 - 不要静默新增依赖；缺少组件库、图标库或图表库时按根技能确认规则执行。
 - 不要保留明显可转为项目组件 / AntD / Ant Design Mobile 的后台或移动端产品控件为裸 HTML，除非保真或项目规则要求。
 - 不要在桌面 AntD 转换后留下未审计 / 未说明的原生产品控件、表单、表格、弹窗、反馈、分页、上传、导航或数据面。

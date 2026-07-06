@@ -8,7 +8,6 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
 这是 `/autodev-code` 内部的标准 HTML 实现路线目录。
 
 - 当前路线入口：`SKILL.md`
-- 当前路线依赖：`deps/`
 - 当前路线参考：`references/`
 - 当前路线脚本：`scripts/`
 
@@ -42,7 +41,7 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
 
 ## 2. 默认读取顺序 / 主流程 write_todos
 
-进入本路线后，先把下面这组 `write_todos` 视为主流程骨架；**未完成前不得提前转交 `deps/standard-html-parser.md`**。这里的 `write_todos` 是路线执行时必须显式维护的可见清单，不是项目业务 API，也不是新增脚本要求。
+进入本路线后，先把下面这组 `write_todos` 视为主流程骨架；**未完成前不得提前转交 `references/standard-html-parser.md`**。这里的 `write_todos` 是路线执行时必须显式维护的可见清单，不是项目业务 API，也不是新增脚本要求。
 
 本路线不新增标准 HTML 前置分析脚本，不复用 `../with-absolute-html/` 下的 absolute 分析脚本，也不要求生成 `.frontend/html-analysis` 前置产物。原始 HTML 始终是视觉、内容和语义事实源。
 
@@ -78,9 +77,9 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
   - [ ] 当 `auditRequired=true` 时，实现后运行 `scripts/audit_antd_coverage.py` 做源码覆盖审计。
   - [ ] 审计脚本只扫描 JSX / TSX 源码，是启发式候选扫描，不是 AST 级完整审计；退出码 `1` 表示发现待处理候选项，不表示脚本故障。
   - [ ] 对每个审计候选项执行转换，或保留原生实现并添加 `antd-audit-ignore` 注释说明原因。
-- [ ] 转交 `deps/standard-html-parser.md`。
+- [ ] 转交 `references/standard-html-parser.md`。
   - [ ] 交接状态必须包含：`routeType=standard-html`、`absoluteSignalsCleared=true`、`moduleTodosReady=true`、`conversionTodosReady=true`、`uiLibraryTarget=<project|antd|antd-mobile|native>`、`antdMode=<required|candidate|selected|notApplicable>`、`auditRequired=<true|false>`。
-  - [ ] 该依赖已作为 `standard-html-parser` 承载标准 HTML 转 React 工程代码能力，是本路线主执行入口。
+  - [ ] 该参考文件已作为 `standard-html-parser` 承载标准 HTML 转 React 工程代码能力，是本路线主执行入口。
 - [ ] 主线完成后返回 `/autodev-code` 主流程。
   - [ ] `standard-html-parser` 主线完成后先输出交付总结，并带回统一前端回检输入：目标源码路径、原始 HTML 路径、analysis JSON 路径（标准 HTML 路线通常为 none）、PLAN 路径、`uiLibraryTarget`、`antdMode`、`auditRequired`。
   - [ ] 随后控制权必须返回 `/autodev-code`，由 code 根技能执行项目级验证、统一前端回检、模块编译清单校验和 `code_done` 推进。
@@ -88,7 +87,7 @@ description: 处理 /autodev-code 内部标准 DOM / 语义明确 HTML 的路线
 
 ## 3. 交接状态
 
-完成第 2 节的 `write_todos` 后，默认直接转交 `deps/standard-html-parser.md`，并带上以下状态：
+完成第 2 节的 `write_todos` 后，默认直接转交 `references/standard-html-parser.md`，并带上以下状态：
 
 ```text
 routeType=standard-html

@@ -295,6 +295,43 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         ]
         self.assertEqual(missing, [], "Biz skill docs must show the unified biz_validate.py command path")
 
+    def test_autodev_code_frontend_routes_use_references_directory(self) -> None:
+        references_root = ROOT / "skills/autodev/autodev-code/references/frontend-html"
+        legacy_root = ROOT / "skills/autodev/autodev-code/deps"
+        self.assertTrue(references_root.is_dir(), "autodev-code frontend route assets must live under references/")
+        self.assertFalse(legacy_root.exists(), "autodev-code must not keep the legacy deps/ route directory")
+
+        banned_patterns = {
+            "autodev-code/deps",
+            "deps/frontend-html",
+            "with-absolute-html/deps",
+            "with-standard-html/deps",
+            "deps/html-parser",
+            "deps/standard-html-parser",
+            "route SKILL/deps",
+            "当前路线依赖",
+        }
+        scan_roots = [
+            ROOT / "hooks",
+            ROOT / "skills/autodev",
+            ROOT / "tests",
+            ROOT / "docs/ui-json-convergence-adaptation.md",
+        ]
+        offenders: list[str] = []
+        self_path = Path(__file__).resolve()
+        for scan_root in scan_roots:
+            paths = [scan_root] if scan_root.is_file() else scan_root.rglob("*")
+            for path in paths:
+                if path.resolve() == self_path:
+                    continue
+                if not path.is_file() or path.suffix not in {".py", ".md", ".json", ".txt"}:
+                    continue
+                content = path.read_text(encoding="utf-8", errors="ignore")
+                for pattern in banned_patterns:
+                    if pattern in content:
+                        offenders.append(f"{path.relative_to(ROOT)}: {pattern}")
+        self.assertEqual(offenders, [], "autodev-code route docs/tools must use references/ paths")
+
     def test_plan_template_keeps_ui_projection_examples(self) -> None:
         template = json.loads(
             (ROOT / "skills/autodev/autodev-plan/templates/plan.json").read_text(encoding="utf-8")

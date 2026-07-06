@@ -1,6 +1,6 @@
 # Ant Design 转换参考
 
-本参考供 `../deps/standard-html-parser.md` 在决定生成 Ant Design 代码时读取。只支持 Ant Design v4 和 v5。转换时按语义意图判断，不按标签名机械替换；先保留源行为，再选择能表达该行为的最小 Ant Design 组件。
+本参考供 `standard-html-parser.md` 在决定生成 Ant Design 代码时读取。只支持 Ant Design v4 和 v5。转换时按语义意图判断，不按标签名机械替换；先保留源行为，再选择能表达该行为的最小 Ant Design 组件。
 
 ## 内容目录
 
@@ -157,7 +157,7 @@
 从 `autodev-code` 技能根目录运行：
 
 ```bash
-python deps/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+python references/frontend-html/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
 ```
 
 退出码 `0` 表示未发现候选项；退出码 `1` 表示发现可能遗漏的转换候选项，应把输出作为待处理清单继续处理，不视为脚本故障。

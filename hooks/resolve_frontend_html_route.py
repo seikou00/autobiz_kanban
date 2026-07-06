@@ -28,14 +28,14 @@ ROUTE_NONE = "none"
 VALID_ROUTES = {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_SPEC_DRIVEN, ROUTE_MISSING, ROUTE_NONE}
 VALID_REVIEW_STATUSES = {"passed", "has-suggestions", "skipped-by-user", "failed"}
 
-FRONTEND_ROOT = ROOT / "skills" / "autodev" / "autodev-code" / "deps" / "frontend-html"
+FRONTEND_ROOT = ROOT / "skills" / "autodev" / "autodev-code" / "references" / "frontend-html"
 ROUTE_SKILLS = {
     ROUTE_ABSOLUTE: FRONTEND_ROOT / "with-absolute-html" / "SKILL.md",
     ROUTE_STANDARD: FRONTEND_ROOT / "with-standard-html" / "SKILL.md",
 }
 PARSERS = {
-    ROUTE_ABSOLUTE: FRONTEND_ROOT / "with-absolute-html" / "deps" / "html-parser.md",
-    ROUTE_STANDARD: FRONTEND_ROOT / "with-standard-html" / "deps" / "standard-html-parser.md",
+    ROUTE_ABSOLUTE: FRONTEND_ROOT / "with-absolute-html" / "references" / "html-parser.md",
+    ROUTE_STANDARD: FRONTEND_ROOT / "with-standard-html" / "references" / "standard-html-parser.md",
 }
 
 DOC_NAMES = ("PLAN.md", "DETAIL_DESIGN.md", "design.md", "proposal.md", "PRD.md")

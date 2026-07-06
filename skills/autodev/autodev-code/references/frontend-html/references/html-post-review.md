@@ -18,10 +18,10 @@ description: HTML 路线生成框架代码之后的回检依赖。用于对已�
 
 ## 脚本化前置证据
 
-进入本依赖前，优先复用 code 根技能自动回检已经生成的统一报告；若尚未生成报告，再运行 `deps/frontend-html/scripts/review_runner.py` 收集确定性静态证据：
+进入本参考前，优先复用 code 根技能自动回检已经生成的统一报告；若尚未生成报告，再运行 `references/frontend-html/scripts/review_runner.py` 收集确定性静态证据：
 
 ```bash
-python deps/frontend-html/scripts/review_runner.py --target <file-or-dir> --source-html <html> --analysis <json> --plan <PLAN.md> --format markdown
+python references/frontend-html/scripts/review_runner.py --target <file-or-dir> --source-html <html> --analysis <json> --plan <PLAN.md> --format markdown
 ```
 
 脚本职责：
@@ -62,7 +62,7 @@ python deps/frontend-html/scripts/review_runner.py --target <file-or-dir> --sour
 ## 检查顺序
 
 1. 先确认输入是否齐全：原始 HTML、handoff、当前代码、必要的项目上下文
-2. 优先读取自动回检的统一报告；若尚未执行，则运行 `deps/frontend-html/scripts/review_runner.py` 并读取其中的确定性问题和线索
+2. 优先读取自动回检的统一报告；若尚未执行，则运行 `references/frontend-html/scripts/review_runner.py` 并读取其中的确定性问题和线索
 3. 先做可交付性检查：语法、类型、导入、运行期高风险错误
 4. 再做高保真还原检查：结构、文案、组件槽位、图标、图表、关键交互
 5. 再做可维护性检查：页面拆分、函数 / 常量 / helper / 局部组件 / 类型 / 配置抽取

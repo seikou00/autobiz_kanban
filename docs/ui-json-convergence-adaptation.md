@@ -222,8 +222,8 @@
   "htmlSourcePaths": [
     ".autobizdevops/features/order-create/frontend-html/order.html"
   ],
-  "routeSkillPath": "skills/autodev/autodev-code/deps/frontend-html/with-absolute-html/SKILL.md",
-  "parserPath": "skills/autodev/autodev-code/deps/frontend-html/with-absolute-html/deps/html-parser.md",
+  "routeSkillPath": "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md",
+  "parserPath": "skills/autodev/autodev-code/references/frontend-html/with-absolute-html/references/html-parser.md",
   "routeSkillRead": true,
   "routeSkillReadComplete": true,
   "routeTodosCreated": true,

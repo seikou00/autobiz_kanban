@@ -8,14 +8,13 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 这是 `/autodev-code` 内部的绝对定位高保真 HTML 实现路线目录。
 
 - 当前路线入口：`SKILL.md`
-- 当前路线依赖：`deps/`
 - 当前路线参考：`references/`
 - 当前路线脚本：`scripts/`
 
 本文中提到的 `SKILL.md` 均指 code 根技能 `../../../SKILL.md`。若本文和 code 根技能冲突，以 code 根技能的 Source/Method Bundle 优先级、HTML 分支总控契约和 code_done 收尾规则为准。
 命令示例兼容两种工作目录：
-- 如果当前目录是 `autodev-code` 技能根目录，使用 `deps/frontend-html/with-absolute-html/scripts/...`
-- 如果当前目录已经是 `deps/frontend-html/with-absolute-html/`，使用 `scripts/...`
+- 如果当前目录是 `autodev-code` 技能根目录，使用 `references/frontend-html/with-absolute-html/scripts/...`
+- 如果当前目录已经是 `references/frontend-html/with-absolute-html/`，使用 `scripts/...`
 
 ## 1. 这条路线什么时候使用
 
@@ -51,8 +50,8 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 
 本文件只负责：总原则、主流程 write_todos、交接边界与失败兜底。
 
-它不展开实现细则，不替代 code 根技能 `../../../SKILL.md` 的全局优先级，也不重复 `deps/html-parser.md` 的执行规则。
-本路线的真实执行顺序见第 3 节；未完成第 3 节前，不得提前转交 `deps/html-parser.md`。
+它不展开实现细则，不替代 code 根技能 `../../../SKILL.md` 的全局优先级，也不重复 `references/html-parser.md` 的执行规则。
+本路线的真实执行顺序见第 3 节；未完成第 3 节前，不得提前转交 `references/html-parser.md`。
 
 ## 3. 路线总原则
 
@@ -115,7 +114,7 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 
 ## 4. 默认读取顺序
 
-进入本 route 后，先把下面这组 write_todos 视为主流程骨架；**未完成前不得提前转交 `deps/html-parser.md`**。脚本仍然默认必跑，任何异常都按 §7 降级处理，不阻塞后续步骤。
+进入本 route 后，先把下面这组 write_todos 视为主流程骨架；**未完成前不得提前转交 `references/html-parser.md`**。脚本仍然默认必跑，任何异常都按 §7 降级处理，不阻塞后续步骤。
 
 - [ ] 读取 HTML 来源。
 - [ ] 写出页面模块清单（write_todos）。
@@ -140,12 +139,12 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
   - [ ] 使用完整命令模板，参数齐全后再执行：
     - `autodev-code` 技能根目录：
       ```
-      python deps/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
+      python references/frontend-html/with-absolute-html/scripts/prepare_html_analysis.py \
         --project-root . \
         --task-stem <task-stem> \
         --html-file <HTML_PATH>
       ```
-    - `deps/frontend-html/with-absolute-html/` 目录：
+    - `references/frontend-html/with-absolute-html/` 目录：
       ```
       python scripts/prepare_html_analysis.py \
         --project-root <CODE_WORKSPACE> \
@@ -160,7 +159,7 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
   - [ ] 若脚本产物齐全：先读取 `<task-stem>-checklist.md`，再读取 `<task-stem>.md`（完整版 handoff），最后回到原始高保真 HTML 做主判断。
   - [ ] 若走降级路径：直接以原始高保真 HTML 为主。
   - [ ] 若 checklist / handoff 标记 `componentizationMode=conservative` 或 `analysisConfidence.level != high`：先锁定原始 HTML 的宏观布局、模块边界、表格/图表/时间线/上传等所有权，再把脚本产物仅用于缺项点查与 whole-section 保留，不要让 `replacementSlots` 主导大块组件化。
-- [ ] 转交 `deps/html-parser.md`。
+- [ ] 转交 `references/html-parser.md`。
   - [ ] `hasManifest=true`：表示脚本产物可用，但它们只是辅助。
   - [ ] `hasManifest=false`：表示脚本失败，后续完全以原始 HTML 为主。
 - [ ] 完成主线代码生成、页面拆分 / 抽取与最低校验。
@@ -168,11 +167,11 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 
 ## 5. 转交规则
 
-完成第 4 节的 write_todos 和上下文检查后，默认直接转交 `deps/html-parser.md`。
+完成第 4 节的 write_todos 和上下文检查后，默认直接转交 `references/html-parser.md`。
 
 - 默认入口：从 `§3 分类 HTML` 开始
 - 转交时附带状态：`hasManifest=true`（脚本产物齐全，仅作辅助）或 `hasManifest=false`（已走 §7 降级）
-- `hasManifest=false` 时 `deps/html-parser.md` 直接以原始 HTML 为唯一视觉源继续，不要再要求脚本
+- `hasManifest=false` 时 `references/html-parser.md` 直接以原始 HTML 为唯一视觉源继续，不要再要求脚本
 
 ## 6. 增量修改
 
@@ -199,8 +198,8 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
   - 任何未在上面列举的异常
 - 降级路径动作：
   1. 不再重试脚本，也不要原地等待用户补救
-  2. 直接进入 §4 第 4 步，转交 `deps/html-parser.md`，并带 `hasManifest=false` 状态
-  3. 由 `deps/html-parser.md` 以原始 HTML 为唯一视觉源继续整页恢复与组件化
+  2. 直接进入 §4 第 4 步，转交 `references/html-parser.md`，并带 `hasManifest=false` 状态
+  3. 由 `references/html-parser.md` 以原始 HTML 为唯一视觉源继续整页恢复与组件化
   4. 在最终交付总结里显式列出"已跳过 Stage 1 脚本"和具体原因（如"argparse 缺参数"、"语法错误 line N"、"FileNotFoundError"）
 - 唯一例外（不走降级、必须先修复）：模型自己虚构了"已跳过原因"而实际并未执行脚本。脚本必须至少被真实尝试执行一次，并捕获真实异常信息
 
@@ -210,5 +209,5 @@ description: /autodev-code 内部绝对定位高保真 HTML 路线。它负责�
 | --- | --- |
 | `../../../SKILL.md` | `/autodev-code` 总入口 + 全局优先级与执行清单 |
 | `SKILL.md` | 绝对定位高保真 HTML 路线入口、读取顺序与转交规则 |
-| `deps/html-parser.md` | 真正把路走完（分类、整页恢复、组件替换、写代码） |
+| `references/html-parser.md` | 真正把路走完（分类、整页恢复、组件替换、写代码） |
 | `/autodev-code` 主流程 | HTML 上下文完成后执行项目级验证、统一前端回检、模块编译清单校验与 `code_done` 推进 |

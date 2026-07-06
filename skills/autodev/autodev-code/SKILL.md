@@ -17,8 +17,8 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
 如用户本轮直供了不在 `{FEATURE_DIR}/frontend-html/` 或流程文档中的 HTML 文件，追加 `--html-file "<HTML_PATH>"`，可重复。
 
 2. 按输出的 `route` 读取 route SKILL 到 EOF：
-   - `route=absolute-html`：完整读取 `skills/autodev/autodev-code/deps/frontend-html/with-absolute-html/SKILL.md`
-   - `route=standard-html`：完整读取 `skills/autodev/autodev-code/deps/frontend-html/with-standard-html/SKILL.md`
+   - `route=absolute-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md`
+   - `route=standard-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-standard-html/SKILL.md`
    - `route=spec-driven-ui`：有 UI 任务但没有可读取的 HTML/设计稿输入，按 specs/design/plan 实现前端；不读取 HTML parser，不要求 route SKILL。如果输出含 `htmlSourceMissing=true` / `htmlRequestMessage`，先按提示引导用户提供 HTML；用户不提供时，不阻断本阶段，继续按无高保真流程实现。
    - `route=none`：`UI_CONTEXT.json` 标记 `uiRequired=false`，不得写前端业务代码。
    - 如果读取工具返回截断内容，继续续读直到 EOF；未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码。
@@ -30,8 +30,8 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
 ```
 
 4. 只有 route SKILL 的清单推进到“转交 parser”步骤时，才能读取 parser：
-   - `absolute-html` 只能由 `with-absolute-html/SKILL.md` 转交 `deps/html-parser.md`
-   - `standard-html` 只能由 `with-standard-html/SKILL.md` 转交 `deps/standard-html-parser.md`
+   - `absolute-html` 只能由 `with-absolute-html/SKILL.md` 转交 `references/html-parser.md`
+   - `standard-html` 只能由 `with-standard-html/SKILL.md` 转交 `references/standard-html-parser.md`
    - `/autodev-code` 根技能不得直接跳入 parser 文档。
 
 5. route SKILL 的全部主流程清单完成后记录：
@@ -63,7 +63,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 
 把上游确认的契约落成代码。输入/输出/读取方式以「流程契约」一节取到的契约为唯一事实源。
 
-**核心：** 你的 input 就是执行清单 `## 输入产物` 里列出的那几个，逐个**按其 `读取方式`**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的读取方式里。清单没列的 id 不属于本工作流——不读、不等、不索要，也不要设想"如果有 X"。用户本轮直接提供的 HTML/DOM/设计导出稿、`{FEATURE_DIR}/frontend-html/` 素材、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 不受这条排除规则限制。**每个 input 的读取方式优先于本文通用默认。** 若清单含 `plan.json`，任务 DAG、依赖、状态与 evidenceIds 一律以 `plan.json` 为事实源；`PLAN.md` 若存在只作为人类可读视图按需同步维护，不参与机器判断。
+**核心：** 你的 input 就是执行清单 `## 输入产物` 里列出的那几个，逐个**按其 `读取方式`**执行；各 input 的角色、优先级、冲突回流去向都写在它自己的读取方式里。清单没列的 id 不属于本工作流——不读、不等、不索要，也不要设想"如果有 X"。用户本轮直接提供的 HTML/DOM/设计导出稿、`{FEATURE_DIR}/frontend-html/` 素材、代码工作区上下文、AGENTS.md、内部 route SKILL/references 不受这条排除规则限制。**每个 input 的读取方式优先于本文通用默认。** 若清单含 `plan.json`，任务 DAG、依赖、状态与 evidenceIds 一律以 `plan.json` 为事实源；`PLAN.md` 若存在只作为人类可读视图按需同步维护，不参与机器判断。
 
 输出：业务代码 / 测试 / 配置的最小必要修改；刷新后的 `CHECKPOINT` 推进到 `code_done`。
 
@@ -72,7 +72,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 ## 前端 HTML 实现分支
 
 HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不再产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能统一收尾推进到 `code_done`。本分支只处理 HTML/DOM/设计导出稿到真实工程代码的实现方式，正式流程输入、行为边界与回流规则仍以本 Feature 的 Source Bundle + Method Bundle 为准。
-本分支不要求 Source Bundle 中存在 `frontend_html`；用户本轮直接提供的 HTML/DOM 素材、`{FEATURE_DIR}/frontend-html/` 素材和内部 route SKILL/deps 由本文的前端 Route 强制闸门管理。
+本分支不要求 Source Bundle 中存在 `frontend_html`；用户本轮直接提供的 HTML/DOM 素材、`{FEATURE_DIR}/frontend-html/` 素材和内部 route SKILL/references 由本文的前端 Route 强制闸门管理。
 
 触发条件（任一满足即进入本分支）：
 
@@ -95,10 +95,10 @@ HTML 分流规则：
 
 | 输入形态 | 路线 |
 | --- | --- |
-| 标准 DOM、语义结构清晰、`form` / `table` / `button` / `label` / flex / grid / class 规则明显 | `deps/frontend-html/with-standard-html/SKILL.md` |
-| 普通静态 HTML、复制 DOM、小型静态站点、HTML 转 React，且页面主体不是绝对定位碎片结构 | `deps/frontend-html/with-standard-html/SKILL.md` |
-| 高保真 HTML、Figma/MasterGo/低代码导出稿、坐标稿、碎片 div、页面主体或关键分区由 `position:absolute` / `left/top` / 固定像素尺寸主导 | `deps/frontend-html/with-absolute-html/SKILL.md` |
-| 高保真但绝对定位仅局部、稀疏、装饰性存在，整体仍以标准 DOM / flex / grid 为主 | `deps/frontend-html/with-standard-html/SKILL.md` |
+| 标准 DOM、语义结构清晰、`form` / `table` / `button` / `label` / flex / grid / class 规则明显 | `references/frontend-html/with-standard-html/SKILL.md` |
+| 普通静态 HTML、复制 DOM、小型静态站点、HTML 转 React，且页面主体不是绝对定位碎片结构 | `references/frontend-html/with-standard-html/SKILL.md` |
+| 高保真 HTML、Figma/MasterGo/低代码导出稿、坐标稿、碎片 div、页面主体或关键分区由 `position:absolute` / `left/top` / 固定像素尺寸主导 | `references/frontend-html/with-absolute-html/SKILL.md` |
+| 高保真但绝对定位仅局部、稀疏、装饰性存在，整体仍以标准 DOM / flex / grid 为主 | `references/frontend-html/with-standard-html/SKILL.md` |
 | 有 UI 任务但没有 HTML/设计稿输入 | `spec-driven-ui`，按 specs/design/plan 直接实现 |
 
 高保真 / 绝对定位强信号（命中且主导页面主体、关键分区或多个视觉块时，必须走 absolute 路线）：
@@ -119,8 +119,8 @@ HTML 分流规则：
 
 1. 先执行本文开头的「前端 Route 强制闸门」：运行 `resolve_frontend_html_route.py`，完整读取对应 route SKILL.md 到 EOF，再把该 route SKILL 中定义的 `write_todos` 主流程转成可见清单；未完成这一步，不得读取 parser、读取 HTML 或改前端代码。
 2. 判断 HTML 路线并读取对应 SKILL：按上方内部分流规则选择 `with-standard-html/SKILL.md` 或 `with-absolute-html/SKILL.md`；最终 route 以 `{FEATURE_DIR}/FRONTEND_ROUTE.json` 为机器事实。
-3. 标准 HTML 路线进入 `with-standard-html/SKILL.md` 后，必须按其 `write_todos` 完成路线判定、页面模块、转换、Ant Design 审计四类清单，并带 `routeType`、`absoluteSignalsCleared`、`moduleTodosReady`、`conversionTodosReady`、`uiLibraryTarget`、`antdMode`、`auditRequired` 交接状态转给 `deps/standard-html-parser.md`。
-4. 绝对定位高保真路线进入 `with-absolute-html/SKILL.md` 后，必须按其 `write_todos` 完成页面模块清单、独立脚本清单、上下文读取与 `deps/html-parser.md` 转交；脚本清单至少覆盖参数确认、执行脚本、检查 `.frontend/html-analysis/<task-stem>.*` 产物、失败降级。脚本异常不阻塞主流程，降级后以原始 HTML 为唯一视觉源继续。
+3. 标准 HTML 路线进入 `with-standard-html/SKILL.md` 后，必须按其 `write_todos` 完成路线判定、页面模块、转换、Ant Design 审计四类清单，并带 `routeType`、`absoluteSignalsCleared`、`moduleTodosReady`、`conversionTodosReady`、`uiLibraryTarget`、`antdMode`、`auditRequired` 交接状态转给 `references/standard-html-parser.md`。
+4. 绝对定位高保真路线进入 `with-absolute-html/SKILL.md` 后，必须按其 `write_todos` 完成页面模块清单、独立脚本清单、上下文读取与 `references/html-parser.md` 转交；脚本清单至少覆盖参数确认、执行脚本、检查 `.frontend/html-analysis/<task-stem>.*` 产物、失败降级。脚本异常不阻塞主流程，降级后以原始 HTML 为唯一视觉源继续。
 5. 主线结束前必须做样式细节收尾，补齐 padding、边框、圆角、阴影、字色、字号、字重、行高、内外边距、对齐、状态色、文本内容、hover / active / selected 等用户一眼能看出的差异。
 6. 主线里完成页面拆分，以及函数、常量、类型、helper / hook、图表配置与同页公共内容抽取；不要把明显的可维护性工作留给后续 `/autodev-reviewer`。
 7. 执行本分支验证，确认已回到 `/autodev-code` 主流程后，再按本文件的「执行协议」与「完成条件」收尾；在显式完成“回到 `/autodev-code` 主流程并按 code 节点收尾”前，不得把本分支视为完成。
@@ -207,7 +207,7 @@ python "${pluginPath}/hooks/run_advisory_smoke.py" --feature "${feature}"
 如本轮触发 HTML 分支，或变更了前端源码（`.tsx` / `.jsx` / `.ts` / `.js` / `.vue` 及相关样式文件），项目级验证通过后必须运行统一前端回检；只有用户明确要求“跳过回检 / 先不回检 / 不要跑回检 / 先不验证”时才跳过，并在最终摘要写 `reviewStatus=skipped-by-user`。默认命令：
 
 ```bash
-python "{PLUGIN_ROOT}/skills/autodev/autodev-code/deps/frontend-html/scripts/review_runner.py" --target "<file-or-dir>" --antd-audit auto --format markdown
+python "{PLUGIN_ROOT}/skills/autodev/autodev-code/references/frontend-html/scripts/review_runner.py" --target "<file-or-dir>" --antd-audit auto --format markdown
 ```
 
 - `--target` 指向本轮生成/修改的前端页面、组件文件或包含它们的目录；`--source-html`、`--analysis`、`--plan` 只在对应文件真实存在时追加，标准 HTML 路线没有 analysis JSON 时不要传 `--analysis`。
