@@ -192,8 +192,9 @@ class RenderRemoteTest(unittest.TestCase):
         self.assertEqual(len(status), 1)  # 仅 LF39.18 单元级
         self.assertEqual(status[0]["deployUnitId"], "LF39.18_Outservice")
 
-    def test_plugin_root_placeholder_replaced_system_only(self):
-        # 系统级（②）正文里的 {plugin_root} → <pluginPath>/sys/<systemId>；单元级（③）不替换。
+    def test_plugin_root_placeholder_replaced_system_and_unit(self):
+        # 系统级（②）与命中清单的单元级（③）正文里的 {plugin_root}
+        # → <pluginPath>/sys。
         tmp = Path(tempfile.mkdtemp())
         sysd = tmp / "sys"
         (sysd / "LF3905").mkdir(parents=True)
@@ -211,14 +212,14 @@ class RenderRemoteTest(unittest.TestCase):
             [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
             plugin_root=tmp,
         )
-        expected = str(sysd / "LF39")  # systemId 是 LF39（不是路径段 LF3905）
+        expected = str(sysd)
         prompt = res["sessionContext"]
         # 系统级已替换
         self.assertIn(f"后端入口: {expected}/src/", prompt)
         # 旧占位符不再替换
         self.assertIn("旧占位: {project_root}/legacy/", prompt)
-        # 单元级占位符原样保留
-        self.assertIn("配置: {plugin_root}/conf", prompt)
+        # 单元级也替换
+        self.assertIn(f"配置: {expected}/conf", prompt)
 
     def test_multiple_systems_both_injected(self):
         res = render(
@@ -277,9 +278,13 @@ class RenderPlatformPathTest(unittest.TestCase):
             json.dumps(MANIFEST, ensure_ascii=False), encoding="utf-8"
         )
         (sysd / "LF3905" / "AGENTS.md").write_text(
-            "# 系统级\n后端入口: {plugin_root}\n", encoding="utf-8"
+            "# 系统级\n后端入口: {plugin_root}/LF39_complycockpit/\n普通路径: docs/module-map.md\n",
+            encoding="utf-8",
         )
-        (sysd / "LF3918" / "descition.md").write_text("# 单元\n", encoding="utf-8")
+        (sysd / "LF3918" / "descition.md").write_text(
+            "# 单元\n单元文档: {plugin_root}/LF39/Backend/services/demo/\n普通路径: docs/unit.md\n",
+            encoding="utf-8",
+        )
 
         res = render(
             [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "C:\\repo\\out"}],
@@ -287,8 +292,17 @@ class RenderPlatformPathTest(unittest.TestCase):
             platform="win32",
         )
 
-        expected_root = display_path_join(sysd, "LF39", platform="win32")
-        self.assertIn(f"后端入口: {expected_root}", res["sessionContext"])
+        expected_root = display_path_join(sysd, platform="win32")
+        expected_backend = display_path_join(expected_root, "LF39_complycockpit", platform="win32") + "\\"
+        expected_unit_doc = (
+            display_path_join(expected_root, "LF39/Backend/services/demo", platform="win32") + "\\"
+        )
+        self.assertIn(f"后端入口: {expected_backend}", res["sessionContext"])
+        self.assertIn(f"单元文档: {expected_unit_doc}", res["sessionContext"])
+        self.assertNotIn("/LF39_complycockpit", res["sessionContext"])
+        self.assertNotIn("/LF39/Backend", res["sessionContext"])
+        self.assertIn("普通路径: docs/module-map.md", res["sessionContext"])
+        self.assertIn("普通路径: docs/unit.md", res["sessionContext"])
         self.assertIn("\\sys\\LF3918\\descition.md", res["agentmdLoadStatus"][0]["path"])
         self.assertNotIn("/LF3918", res["agentmdLoadStatus"][0]["path"])
 

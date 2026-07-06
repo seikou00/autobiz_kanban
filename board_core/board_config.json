@@ -40,7 +40,7 @@
       "feature_status": "python ${pluginPath}\\inspect_state.py --mode run --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature}",
       "create_project": "python ${pluginPath}\\hooks\\init_workspace.py --mode createProject --workspace ${pluginWorkspace} --project ${projectDir}",
       "create_feature": "python ${pluginPath}\\hooks\\init_workspace.py --mode createFeature --workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --workflow-template ${workflowTemplate} --workflow-nodes ${workflowNodes} --selected-deployUnit ${selectedDeployUnits}",
-      "system_prompt_inject": "\n- FEATURE_DIR：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`，这是当前 Feature 产物目录，不得自行定义特性/feature/slug 名称",
+      "system_prompt_inject": "\n- FEATURE_DIR：`${pluginWorkspace}\\${projectDir}\\.autobizdevops\\features\\${feature}`，这是当前 Feature 产物目录，不得自行定义特性/feature/slug 名称",
       "plugin_dir_hook": "${pluginWorkspace}\\${projectDir}",
       "dialog_tips": "**您正在开发${projectCode} 项目**\n请描述要新增或修改的特性，并说明验收标准。当前产物目录：`${pluginWorkspace}/${projectDir}`",
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
