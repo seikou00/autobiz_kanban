@@ -45,72 +45,9 @@ plan_done → detail_design_before_code choice
 
 ---
 
-## 1. 准入检查
-
-### 1.1 解析参数
-
-扫描 `/ARGUMENTS`：
-
-| 标志 | 含义 |
-|------|------|
-| `--feature {slug}` | 指定 Feature |
-
-### 1.2 确定 Feature
-
-- `--feature {slug}` 优先
-- 否则先读取全部 State 快照，再从 `STATE.records` 列出候选让用户选择：
-
-```bash
-python "{PLUGIN_ROOT}/read_state_json.py"
-```
-
-- 需要用户从候选 Feature 中选择时，若当前运行模式支持 `request_user_input`，必须优先用它把 `STATE.records` 中的候选列成结构化选项供用户单选；若不支持，必须列出候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
-
-确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
-
-```bash
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
-```
-
-后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。
-
-随后调用动态路由脚本读取 board_config 派生出的下一步：
-
-```bash
-python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
-```
-
-若脚本返回 `requiresProfileChoice: true`，当前默认不再把“需要 HTML 转前端”解释为旧 frontend workflow profile：
-
-- 用户说需要先转 HTML、先把设计稿转工程文件、HTML 转 React、静态 HTML 转前端代码、按 PRD 先做前端页面等，视为本轮 code 阶段需要使用 HTML 实现素材；仍推进到 `specs_in_progress`，先沉淀行为规格，后续由 `/autodev-code` 在 code 阶段按内部 HTML route 分流处理。
-- 用户说不需要、直接进规格、先走 `autodev-specs` 等，同样推进到 `specs_in_progress`。
-- 旧 `/autodev-frontend` / `frontend_before_specs` 路线已移除；即使用户明确要求旧路线，也只能说明该路线当前不可执行，并转为 `/autodev-code` 内部 `FRONTEND_ROUTE.json` 分流，不得新增 wrapper 或改写 board_config。
-- 如果用户只触发 `/autodev`，且没有表达需要或不需要：直接推进到 `specs_in_progress`；不要为了 HTML 转前端发起 profile 选择，也不要写入 `frontend_in_progress`。
-
-若脚本返回 `requiresWorkflowChoice: true`，读取 `workflowChoices` 中的 `stageId`、`decision` 和 `targetCheckpoint`，按用户表达选择 dynamic stage：
-
-- 对 `detail_design_before_code`，用户说需要详细设计、先出详细设计、code 前设计等，视为启用：推进到 `detail_design_in_progress`，并传入 `--workflow-decision detail_design_before_code=enabled`。
-- 用户说不需要、直接编码、跳过详细设计等，视为跳过：推进到 `code_in_progress`，并传入 `--workflow-decision detail_design_before_code=skipped`。
-- 如果用户只触发 `/autodev`，且没有表达需要或不需要：若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `先做详细设计` / `直接进入编码 (Recommended)`；若不支持，必须显式追问：`是否需要在代码实现前生成 DETAIL_DESIGN.md？需要则进入 autodev-detail-design，不需要则直接进入 autodev-code。请回复"先做详细设计"或"直接进入编码"。` 未拿到明确答复前，不得写入 workflow-decision，也不得推进 checkpoint。
-
-### 1.3 产出物校验
-
-根路由器只确认当前 Feature 能唯一定位；具体输入产物由即将路由到的子技能按本 Feature 的执行清单（`inspect_skill_contract.py --feature ... --plain` 输出）校验。
-
-- 标准链下，`prd_done` / `specs_in_progress` 进入 `/autodev-specs` 时必须存在 `PRD.md`；精简链（lean）等无 Biz 阶段的工作流中，契约不含 `PRD.md`，`/autodev-specs` 基于用户描述直接澄清，不得因缺 PRD 阻断。
-- `specs_done` 之后的 Dev 阶段不再把 `PRD.md` 作为硬输入，统一以 `proposal.md` 与 `specs/**/*.md` 作为行为契约源。
-
-**提示（仅标准链缺 PRD 时）：** `请先使用 /autobiz 系列技能补齐 Biz 阶段产出物 PRD.md，然后重新触发 /autodev。proposal.md 与 specs/**/*.md 将由 /autodev-specs 生成，design.md 与 PLAN.md 将由 /autodev-plan 生成。`
 
 
-### 禁止事项
-
-1. **禁止在 Dev 阶段凭空生成 PRD；只有 `/autodev-specs` 可以生成或更新 proposal.md 与 specs/**/*.md，只有 `/autodev-plan` 可以生成或更新 design.md 与 PLAN.md。**
-2. **禁止跳跃 checkpoint。**
----
-
-
-## 2. Checkpoint 路由
+##  Checkpoint 路由
 
 使用 `resolve_next_skill.py --json` 的返回结果路由：
 
@@ -123,7 +60,7 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_
 
 ---
 
-## 3. 执行后校验
+## 执行后校验
 
 子技能返回后，根路由器必须：
 
@@ -141,7 +78,7 @@ python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan --feature "{
 
 ---
 
-## 4. 前端 HTML 实现归属
+##  前端 HTML 实现归属
 
 HTML 转前端现在归属 `/autodev-code`，作为 code 阶段的内部实现分支：
 
@@ -159,7 +96,7 @@ HTML 转前端现在归属 `/autodev-code`，作为 code 阶段的内部实现�
 
 ---
 
-## 5. 动态 Dev 阶段
+## 动态 Dev 阶段
 
 Dev 阶段的可选步骤由 `{PLUGIN_ROOT}/board_core/board_config.json` 的 `workflow.dynamicStages` 声明，运行态选择写入 `.autobizdevops/state.json` 的 `workflowDecisions`。根路由器不得硬编码某个可选节点的流程结构，应以 `resolve_next_skill.py --json` 的 `workflowChoices` 为准。
 

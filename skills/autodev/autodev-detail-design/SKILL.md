@@ -144,8 +144,4 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 - 仍不确定的路径、字段、接口、权限、数据或状态流已标为待确认。
 - 已调用 `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
 
-**Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-
-```bash
-python "${pluginPath}/hooks/resolve_next_skill.py"
-```
+**Skill 完成。**

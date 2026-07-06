@@ -344,4 +344,4 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] `UNIT_TEST_RESULT.json` 已写入，JSON 是下游机器主入口。
 - [ ] 成功时已推进 `unit_test_done`。
 
-**Skill 完成。
+**Skill 完成。**

@@ -23,47 +23,29 @@ version: v1.1.1604
 
 ---
 
-## 1. 准入检查
+## 准入检查
 
-### 1.1 解析参数
+### 解析参数
 
 扫描 `$ARGUMENTS`：
 
 | 标志 | 含义 |
 |------|------|
-| `--feature {slug}` | 指定 Feature |
 | `pipeline_code` | 可选流水线编号，透传给 `/autoops-cicd` |
 
-### 1.2 确定 Feature
-
-- `--feature {slug}` 优先
-- 否则先读取全部 State 快照，再从 `STATE.records` 优先选择单一进行中的 Feature；无法唯一确定时列出候选并让用户选择：
-
-```bash
-python "${pluginPath}/read_state_json.py"
-```
-
-- 需要用户从候选 Feature 中选择时，若当前运行模式支持 `request_user_input`，必须优先用它把 `STATE.records` 中的候选列成结构化选项供用户单选；若不支持，必须列出候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
-
-确定 `{slug}` 后，立即读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+###  确定 Feature状态
 
 ```bash
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`；只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用脚本刷新 `CHECKPOINT`。
-
-随后调用动态路由脚本读取 board_config 派生出的下一步：
-
-```bash
-python "${pluginPath}/hooks/resolve_next_skill.py" --json
-```
+后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`。
 
 ---
 
-## 2. Checkpoint 路由
+## Checkpoint 路由
 
-使用 Step 1.2 获取的 `CHECKPOINT` 和 `resolve_next_skill.py --json` 的返回结果路由。`recommendedNextSkill`、`allowedNextCheckpoints` 与 `nextAction` 均以 `${pluginPath}/board_core/board_config.json` 的有效 workflow 为准。
+使用`CHECKPOINT` 和 `resolve_next_skill.py --json` 的返回结果路由。`recommendedNextSkill`、`allowedNextCheckpoints` 与 `nextAction` 均以 `${pluginPath}/board_core/board_config.json` 的有效 workflow 为准。
 
 - `recommendedNextSkill` 为 `autoops-cicd` 或 `autoops-archive` 时，调用对应子技能。
 - `checkpoint` 为 `archived` 时，Ops 终态，提示已归档并输出归档位置（如可定位）。
@@ -74,7 +56,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 ---
 
-## 3. 执行后校验
+## 执行后校验
 
 子技能返回后，根路由器必须：
 

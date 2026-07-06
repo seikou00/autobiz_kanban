@@ -84,27 +84,13 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 ```
 FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
 ```
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
-
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
+## 缺失产物处理
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --plain
 ```
 
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本 workflow 的正式流程产物 input，不要把它当作上游阶段产物读取、等待或索要。
-- **适用边界**：上一条只约束正式流程产物 input；不限制用户本轮直接提供的材料、代码工作区上下文、AGENTS.md、内部 route SKILL/deps 或技能正文明确要求读取的辅助素材。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
-### Step 0: 缓存检测与清理
+### 缓存检测与清理
 
 在开始分析前，检测用户是否要求重新讨论：
 - 若用户明确提到"重新 DISCUSS"、"重新讨论"、"重新分析"、"重新梳理需求"等关键词
