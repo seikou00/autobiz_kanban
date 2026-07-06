@@ -11,21 +11,24 @@
 ## What Changes
 
 - [用户可见或系统外部可观察的变化]
-- [新增/修改/移除的能力]
+- [按 New / Modified / Removed 分类说明本轮能力变化]
 
 ## Capabilities
 
 ### New Capabilities
 
-- `[capability-name]`: [能力说明，对应 specs/<capability-name>/spec.md]
+[本类为空时只写“无”。本类非空时删除本说明，按下面格式逐项列出；条目说明不得为“无”。]
+- `[capability-name]`: [新增能力说明；对应 specs/<capability-name>/spec.md]
 
 ### Modified Capabilities
 
-- `[existing-capability]`: [修改原因与范围；无则写“无”]
+[本类为空时只写“无”。本类非空时删除本说明，按下面格式逐项列出；条目说明不得为“无”。]
+- `[existing-capability]`: [既有能力的修改原因与范围；对应 specs/<existing-capability>/spec.md]
 
 ### Removed Capabilities
 
-- `[removed-capability]`: [移除原因；无则写“无”]
+[本类为空时只写“无”。本类非空时删除本说明，按下面格式逐项列出；条目说明不得为“无”。]
+- `[removed-capability]`: [移除原因与迁移/兼容方式；对应 specs/<removed-capability>/spec.md]
 
 ## Impact
 

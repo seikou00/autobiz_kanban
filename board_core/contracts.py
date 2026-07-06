@@ -28,10 +28,8 @@ class BoardConfigError(Exception):
 
 @dataclass(frozen=True)
 class ExtractSpec:
-    """Method Bundle: how to read an input artifact (which parts, how, degrade path)."""
+    """How to handle a missing input artifact (the degrade path)."""
 
-    focus: tuple[str, ...] = ()
-    method: str = ""
     degrade: str = ""
 
 
@@ -134,16 +132,10 @@ def _read_extract_spec(value: object, *, context: str) -> ExtractSpec | None:
         return None
     if not isinstance(value, dict):
         raise BoardConfigError(f"{context}.extract must be an object")
-    focus = value.get("focus", [])
-    if not isinstance(focus, list) or any(not isinstance(item, str) or not item for item in focus):
-        raise BoardConfigError(f"{context}.extract.focus must be a list of non-empty strings")
-    method = value.get("method", "")
     degrade = value.get("degrade", "")
-    if not isinstance(method, str):
-        raise BoardConfigError(f"{context}.extract.method must be a string")
     if not isinstance(degrade, str):
         raise BoardConfigError(f"{context}.extract.degrade must be a string")
-    return ExtractSpec(focus=tuple(focus), method=method, degrade=degrade)
+    return ExtractSpec(degrade=degrade)
 
 
 def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, ...]:

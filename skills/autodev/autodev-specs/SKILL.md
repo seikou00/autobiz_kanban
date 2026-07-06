@@ -101,11 +101,27 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 按 `${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
 
+生成前先建立 capability 变更分类表，后续 `proposal.md` 与 `specs/**/*.md` 必须保持一致：
+
+| Capability | Operation | 判定依据 | 既有行为来源 | 本轮目标 |
+|------------|-----------|----------|--------------|----------|
+| `[name]` | `ADDED/MODIFIED/REMOVED` | [为什么归入该类] | [现有 spec/代码/API/UI/无] | [目标行为] |
+
+分类规则：
+
+- `ADDED`：当前系统没有对应的外部可观察能力、入口、流程或业务结果；本轮新增一个可独立验收的行为边界。复用已有组件、接口或表，不影响 `ADDED` 判定。
+- `MODIFIED`：已有能力仍然存在，但本轮改变或扩展其外部可观察行为，包括条件、输出、校验、权限、错误码、状态流、异步时机、数据口径、UI 状态或交互分支。给已有流程增加筛选项、字段、按钮、状态、限制条件或兼容逻辑，默认是 `MODIFIED`，不是 `ADDED`。
+- `REMOVED`：已有能力、入口、分支或业务结果在本轮后不再支持、不可访问或不再生效；必须说明移除原因、迁移/兼容方式，以及旧入口被触发时的期望行为。
+- 同一用户目标同时包含新增独立能力和修改既有能力时，拆成不同 capability 或同一 spec 内不同 Requirement，不得用一个分类吞掉全部变化。
+- 无法判断是否已有行为时，先搜索既有 specs、代码入口、接口、菜单、配置和测试；仍不确定则回到用户确认，不要猜测分类。
+- capability 分类小节为空时，该小节正文只写 `无`；不得保留 `[capability-name]` / `[existing-capability]` / `[removed-capability]` 占位项，也不得写 `- [capability]: 无`。
+- 一旦列出 capability，说明必须写实质原因、范围或迁移方式，并且必须对应真实 `specs/<capability>/spec.md`。
+
 必须包含：
 
 - **Why**：为什么要做。
 - **What Changes**：用户可见或系统外部可观察变化。
-- **Capabilities**：列出将生成或修改的能力，名称使用 kebab-case；每个 capability 必须对应一个 `specs/<capability>/spec.md`。
+- **Capabilities**：按 `New Capabilities` / `Modified Capabilities` / `Removed Capabilities` 填入分类表中的 capability；名称使用 kebab-case；每个非“无”的 capability 必须对应一个 `specs/<capability>/spec.md`。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
 
@@ -121,7 +137,11 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - Scenario 使用四级标题 `#### Scenario: <name>`。
 - 每个 Requirement 至少一个 Scenario。
 - 使用 SHALL/MUST 表达可验证行为。
-- 修改已有行为时，写完整的新行为，不要只写差异片段。
+- 每个 Requirement 只能放入一个操作段：`ADDED Requirements`、`MODIFIED Requirements` 或 `REMOVED Requirements`。
+- `ADDED Requirements` 只写新增行为；如果只是已有行为增加条件、字段、状态或分支，放入 `MODIFIED Requirements`。
+- `MODIFIED Requirements` 必须写修改后的完整行为，并在 Requirement 正文或 Scenario 中覆盖旧行为受影响的触发条件和新期望；不要只写“新增字段”“调整逻辑”这类差异片段。
+- `REMOVED Requirements` 必须写旧能力的移除原因、迁移/兼容方式，并用 Scenario 描述旧入口、旧条件或旧分支被触发时系统应该如何响应。
+- 某个操作段无内容时写“无”；不要保留模板占位 Requirement。
 - 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
 
 ## 完成条件

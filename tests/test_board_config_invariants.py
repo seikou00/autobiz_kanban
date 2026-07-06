@@ -1,9 +1,9 @@
-"""Guard the Source Bundle <-> Method Bundle mapping invariant.
+"""Guard the input missing-handling invariant.
 
-Every input declared anywhere in board_config.json must carry a full Method
-Bundle (extract with a non-empty degrade), so contract consumers can always
-pair "what to read" with "how to read it". The external flag was removed in
-favor of drop semantics; no artifact may declare it again.
+Every input declared anywhere in board_config.json must declare an extract with
+a non-empty degrade, so contract consumers always know how to handle the input
+when it is missing. The external flag was removed in favor of drop semantics;
+no artifact may declare it again.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             missing,
             [],
             "every input must declare extract with a non-empty degrade "
-            "(Method Bundle completeness): " + ", ".join(missing),
+            "(missing-handling completeness): " + ", ".join(missing),
         )
 
     def test_no_artifact_declares_external_flag(self) -> None:
