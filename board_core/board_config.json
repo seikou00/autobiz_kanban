@@ -235,7 +235,7 @@
               } },
             { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
-                "degrade": ""
+                "degrade": "无 UI_CONTEXT.json 时回到需求澄清或基于已确认 UI 决策补齐，不从 PRD 正文临时推导"
               } }
           ],
           "outputs": [
@@ -310,7 +310,7 @@
           ],
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": false },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
             { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true },
             { "id": "smoke_test_plan_json", "label": "冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": true }
           ]
