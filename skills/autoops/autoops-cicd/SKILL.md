@@ -32,7 +32,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 ## 输入事实源
 
-按「流程契约」一节取当前 Feature 的执行清单，对每个输入按其 `读取方式` 读取：
+读取（如有）：
 
 - `VERIFY_DECISION.json` 是 CI/CD 准入机器事实源；用 `verdict`、`nextCheckpoint`、`failedScenarioRefs`、`manualVerificationRefs`、`missingScenarioRefs` 和 `evidenceIds` 判断是否可进入流水线。
 - `VERIFY_REPORT.md` 只作为验收的人类叙述参考，用于补充交付说明和遗留风险文字，不从 Markdown 文本重新推导 verdict。

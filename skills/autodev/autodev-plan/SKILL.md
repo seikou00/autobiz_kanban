@@ -6,24 +6,18 @@ version: v1.2.1701
 
 ## 缺失产物处理
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单：
-
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "${feature}" --plain
 ```
 
-
 # /autodev-plan - Executable Task Plan
-**workflow** plan 阶段工作流: proposal/specs -> design.md -> plan.json + PLAN.md
-
 
 ## explore
-进入设计探索模式。先按「流程契约」一节取本 Feature 的执行清单，读取清单列出的上游产物原件，按各自 `读取方式` 抽取重点，把行为契约、现状、技术约束和未知点想清楚；清单里标『未生成』的可选上游产物按其 `缺失处理`（降级）处理（如基于用户直供需求建立上下文），不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+进入设计探索模式，严禁使用task工具。读取清单列出的上游产物原件，按各自 `读取方式` 抽取重点，把行为契约、现状、技术约束和未知点想清楚；清单里标『未生成』的可选上游产物按其 `缺失处理`（降级）处理（如基于用户直供需求建立上下文），不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
 > 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 plan.json` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
-**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取执行清单里已有的设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
+**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取已有的设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
 
 **这是一种工作姿态，不是固定流程。** 没有必须照搬的问题清单，也没有强制产物。你的任务是作为技术设计伙伴，把 specs 中的行为契约变成可实现、可验证的设计上下文：明确接口、数据、模块边界、风险、待确认项，以及后续 Plan 可以使用的结论。
 
@@ -53,7 +47,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 **调查代码库**
 
-- 读取 AGENTS.md 和项目约定
+- 读取项目约定
 - 查找相关模块、路由、接口、schema、数据库访问、测试和已有任务模板
 - 找到最可能的集成点和受影响文件
 - 识别现有命名、错误体、分页、鉴权、租户、审计、日志等风格
@@ -79,9 +73,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 ### autodev-plan 上下文感知
 
-探索开始时，优先确认当前 Feature 和输入来源：
-
-确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+探索开始时，优先确认当前 Feature：
 
 ```bash
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
@@ -89,7 +81,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
 
-- 按执行清单读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。清单里标『未生成』的可选上游产物按其 `缺失处理`（降级读法）处理。如历史 Feature 留有旧接口/数据设计产物，可只读参考并迁移其有效信息到 `design.md`，但不要继续要求这些旧产物存在。
+- 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。
 - 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
 
@@ -198,7 +190,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ---
 
 ### PLAN阶段
-基于执行清单输入的结论，先生成 `design.md`，再基于这些输入与 design 生成 `plan.json`，并同步生成 `PLAN.md` 作为人类视图。
+先生成 `design.md`，再基于这些输入与 design 生成 `plan.json`，并同步生成 `PLAN.md` 。
 
 #### 工作目录
 若 `CHECKPOINT` 为空、未知，重新通过脚本获取当前checkpoint；后必须刷新 `CHECKPOINT`。
@@ -243,7 +235,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 #### 生成 plan.json / PLAN.md
 
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。`PLAN.md` 是从 `plan.json` 投影的人类视图；`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
 
