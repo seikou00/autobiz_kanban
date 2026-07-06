@@ -132,7 +132,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ## 执行协议
 
-### 1. 建立执行上下文与任务队列
+### 建立执行上下文与任务队列
 
 对每个 input 按其 `读取方式` 抽取并记住关键信息。
 
@@ -140,11 +140,11 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 若当前运行模式支持 `write_todos`，把 `plan.json.tasks[]` 映射成可见任务清单，状态用 待做 / 进行中 / 完成 / 失败，并与 `plan.json` 保持同步；每次只置一个任务为"进行中"。`write_todos` 只反映任务进度，不替代 checkpoint 脚本与产物校验。
 （依"方法优先"：若某 input 的读取方式给了更具体读写要求，按其指示执行。）
 
-### 2. 选择下一个任务
+###  选择下一个任务
 
 跳过「完成」；优先恢复「进行中」；否则取第一个依赖已满足的「待做」；有「失败」先读原因，仅在用户要求修复时再处理。每次只做一个，完成后再进入下一个，并同步更新 `write_todos` 条目（如启用）。
 
-### 3. 执行单个任务
+###  执行单个任务
 
 1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。
 2. 读任务的 做什么 / 依据 / 验证方法。先依各 input 的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。
@@ -160,7 +160,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 > 一致性：任务的依据在对应 input 里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 
-### 4. 全部任务完成后的验证
+###  全部任务完成后的验证
 
 队列无「待做」「进行中」后，跑项目级验证（优先 AGENTS.md / 契约指定命令；Java/Maven 至少编译）。失败回到相关任务，不推进。通过后：
 
@@ -183,8 +183,4 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 必要验证通过；项目编译通过（code_done execute hook 另记模块编译结果，非阻断）。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
-**Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-
-```bash
-python "${pluginPath}/hooks/resolve_next_skill.py"
-```
+**Skill 完成。**

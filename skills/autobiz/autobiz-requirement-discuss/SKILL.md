@@ -60,6 +60,33 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ## 工作流程
 
+> **流程管控**：执行开始时，必须使用 `write_todos` 创建以下固定 todo 列表（逐项创建，不得自行修改变更），每完成一步立即标记完成，确保不跳过任何环节：
+>
+> 1. 建立需求上下文（读取原始材料）
+> 2. 创建 prd_original 文件夹并保存原始需求文档
+> 3. 按 prd-formatter.md 模板改造需求文档并写入 PRD_DISCUSS.md
+> 4. 需求分析 — 角色选择与通用基础检查
+> 5. 需求分析 — 角色专项检查
+> 6. 询问用户提供 HTML 文件位置并逐一分析
+> 7. 需求分析 — 输出规范检查
+> 8. 问题清单展示与用户确认
+> 9. 对话式引导与 PRD_DISCUSS.md 调整
+> 10. 迭代检查（对照 analysis-guide 回检）
+> 11. 更新状态与校验
+
+
+
+**确定 FEATURE_DIR：**
+
+```
+FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
+```
+## 缺失产物处理
+
+```bash
+python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --plain
+```
+
 ### 缓存检测与清理
 
 在开始分析前，检测用户是否要求重新讨论：

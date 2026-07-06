@@ -333,4 +333,4 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] `UNIT_TEST_REPORT.md` 包含必需章节和 verdict。
 - [ ] 成功时已推进 `unit_test_done`。
 
-**Skill 完成。
+**Skill 完成。**

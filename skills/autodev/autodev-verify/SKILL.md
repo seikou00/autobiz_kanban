@@ -5,8 +5,6 @@ version: v1.2.1701
 ---
 
 ## 缺失产物处理
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `${pluginPath}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，取当前 Feature 的执行清单：
 
 ```bash
 python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-verify --feature "{FEATURE_ID}" --json
@@ -228,11 +226,7 @@ checkpoint=verify_done → Dev 阶段结束
 
 > ⚠️ **归档不在本 skill 执行**。归档由 Ops 阶段处理。
 
-**Skill 完成。** 下一步以 `resolve_next_skill.py` 为准（不假设固定下一技能）：
-
-```bash
-python "${pluginPath}/hooks/resolve_next_skill.py"
-```
+**Skill 完成。**
 
 ---
 
