@@ -281,7 +281,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertIn("position:absolute count=4", payload["reasons"])
         self.assertIn("plan.json route overridden by HTML/UI_CONTEXT evidence", payload["reasons"])
 
-    def test_plan_html_route_without_readable_html_resolves_missing(self) -> None:
+    def test_plan_html_route_without_readable_html_falls_back_to_spec_driven(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             write_ui_context(workspace, base_ui_context(ui_required=True))
@@ -289,8 +289,11 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
             payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
 
-        self.assertEqual(payload["route"], ROUTE_MISSING)
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertTrue(payload["htmlSourceMissing"])
+        self.assertEqual(payload["htmlFallbackRoute"], ROUTE_SPEC_DRIVEN)
         self.assertIn("plan.json HTML route has no readable HTML source", payload["reasons"])
+        self.assertIn("declared HTML visual source is missing; falling back to spec-driven-ui", payload["reasons"])
 
     def test_explicit_html_route_without_readable_html_resolves_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -75,7 +75,7 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 触发条件（任一满足即进入本分支）：
 
 - `UI_CONTEXT.json` 中 `uiRequired=true`，或当前 plan task 中 `uiRequired=true`。
-- `PLAN.md` / specs / 用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
+- `plan.json.tasks[].uiRequired/uiRefs`、specs 或用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面；`PLAN.md` 仅是 `plan.json` 的人类视图，不作为前端分流机器依据。
 - 用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段、设计导出稿或静态页面素材。
 
 总优先级：
