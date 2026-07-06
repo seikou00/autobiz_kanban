@@ -45,8 +45,8 @@ board_config.json 注册（样例，附件约定）::
   · 单元级（③）remote 优先 → local 兜底（``<localRepoPath>/AGENTS.md``）→ 都无则 ``loaded:false``，
     每个选中单元产出一条 agentmdLoadStatus。
 
-系统级（②）正文里的 ``{plugin_root}`` 占位符在拼接前替换为该系统在 sys/ 下的目录绝对路径
-（``<pluginPath>/sys/<systemId>``）；单元级（③）不做替换，占位符原样保留。
+系统级（②）与命中清单的单元级（③）正文里的 ``{plugin_root}`` 占位符在拼接前替换为
+知识库根目录绝对路径（``<pluginPath>/sys``）。
 
 设计原则：除入参 JSON 非法外，任何情况都返回 ok:true，绝不抛异常中断会话；
 缺清单 / 未匹配单元 / 缺 AGENTS.md 都降级为「少注入一点」并在 message 说明。
@@ -76,7 +76,10 @@ from hooks.agents_repo import (  # noqa: E402
     sys_abs_display,
 )
 
-PLUGIN_ROOT_PLACEHOLDER = "{plugin_root}"  # md 正文里的占位符，替换为该系统 sys/<systemId> 绝对路径
+PLUGIN_ROOT_PLACEHOLDER = "{plugin_root}"  # md 正文里的占位符，替换为知识库根目录 <pluginPath>/sys
+PLUGIN_ROOT_WIN32_PATH_RE = re.compile(
+    re.escape(PLUGIN_ROOT_PLACEHOLDER) + r"((?:[/\\][^\s`\"'<>|\]\)）》，，。；;：:]*)?)"
+)
 
 LOCAL_AGENTS_MD = "AGENTS.md"  # local 兜底文件名（§8 #1：直接读用户仓库既有 AGENTS.md）
 
@@ -135,21 +138,33 @@ def _norm_path(path: Path) -> Path:
 
 def _fill_plugin_root(
     content: str,
-    system_id: str,
     *,
     plugin_root: Optional[Path],
     platform: Optional[str] = None,
 ) -> str:
-    """把系统级正文里的 ``{plugin_root}`` 占位符替换为该系统在 sys/ 下的目录绝对路径
-    （``<pluginPath>/sys/<systemId>``，即 sys 绝对路径 + systemId）。仅系统级（②）调用，
-    单元级不替换。
+    """把正文里的 ``{plugin_root}`` 占位符替换为知识库根目录绝对路径。
 
-    无占位符 / 无 systemId 时原样返回。
+    无占位符时原样返回。
     """
-    if not system_id or PLUGIN_ROOT_PLACEHOLDER not in content:
+    if PLUGIN_ROOT_PLACEHOLDER not in content:
         return content
-    root_dir = display_path_join(get_agents_root(plugin_root), system_id, platform=platform)
-    return content.replace(PLUGIN_ROOT_PLACEHOLDER, root_dir)
+    root_dir = display_path_join(get_agents_root(plugin_root), platform=platform)
+    platform_text = (platform or sys.platform).strip().lower()
+    if not platform_text.startswith("win"):
+        return content.replace(PLUGIN_ROOT_PLACEHOLDER, root_dir)
+
+    def _replace_win32(match: re.Match[str]) -> str:
+        suffix = match.group(1) or ""
+        if not suffix:
+            return root_dir
+        trailing_sep = suffix.endswith(("/", "\\"))
+        suffix_parts = [part for part in re.split(r"[/\\]+", suffix.strip("/\\")) if part]
+        expanded = display_path_join(root_dir, *suffix_parts, platform="win32")
+        if trailing_sep and not expanded.endswith("\\"):
+            expanded += "\\"
+        return expanded
+
+    return PLUGIN_ROOT_WIN32_PATH_RE.sub(_replace_win32, content)
 
 
 def _resolve_one(
@@ -476,7 +491,6 @@ def render(
                 if content is not None:
                     content = _fill_plugin_root(
                         content,
-                        system.system_id,
                         plugin_root=plugin_root,
                         platform=platform,
                     )
@@ -498,12 +512,18 @@ def render(
                     platform=platform,
                 )
                 load_status.append(status)
-                # 单元级不做 {plugin_root} 替换（占位符原样保留）。
-                if content is not None and _append_body(
-                    abs_path, unit_sections,
-                    {"deployUnitId": uid, "ref": _ref_for(pair, sel), "content": content},
-                ):
-                    unit_has_section.add(uid)
+                if content is not None:
+                    content = _fill_plugin_root(
+                        content,
+                        plugin_root=plugin_root,
+                        platform=platform,
+                    )
+                    if _append_body(
+                        abs_path,
+                        unit_sections,
+                        {"deployUnitId": uid, "ref": _ref_for(pair, sel), "content": content},
+                    ):
+                        unit_has_section.add(uid)
         else:
             # 未命中清单：只走 local 兜底（rel 为空）；引用范围用 UI 传入的 description。
             status, abs_path, content = _resolve_one(
