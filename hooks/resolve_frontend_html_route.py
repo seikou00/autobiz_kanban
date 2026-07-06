@@ -8,6 +8,7 @@ import argparse
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -27,6 +28,19 @@ ROUTE_MISSING = "missing-html"
 ROUTE_NONE = "none"
 VALID_ROUTES = {ROUTE_ABSOLUTE, ROUTE_STANDARD, ROUTE_SPEC_DRIVEN, ROUTE_MISSING, ROUTE_NONE}
 VALID_REVIEW_STATUSES = {"passed", "has-suggestions", "skipped-by-user", "failed"}
+ROUTE_PROTOCOL_FLAGS = (
+    "routeSkillRead",
+    "routeSkillReadComplete",
+    "routeTodosCreated",
+    "routeTodosCompleted",
+    "parserRead",
+)
+ROUTE_RUN_TRANSIENT_KEYS = (
+    *ROUTE_PROTOCOL_FLAGS,
+    "routeSkillReadRanges",
+    "reviewStatus",
+    "reviewRouteRunId",
+)
 
 FRONTEND_ROOT = ROOT / "skills" / "autodev" / "autodev-code" / "deps" / "frontend-html"
 ROUTE_SKILLS = {
@@ -88,6 +102,31 @@ def read_json(path: Path) -> dict[str, Any]:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def new_route_run_id() -> str:
+    return "rr_" + uuid.uuid4().hex[:12]
+
+
+def ensure_route_run_id(payload: dict[str, Any]) -> str:
+    route_run_id = payload.get("routeRunId")
+    if not isinstance(route_run_id, str) or not route_run_id.strip():
+        route_run_id = new_route_run_id()
+        payload["routeRunId"] = route_run_id
+    return route_run_id
+
+
+def reset_route_run_state(payload: dict[str, Any]) -> dict[str, Any]:
+    for key in ROUTE_RUN_TRANSIENT_KEYS:
+        payload.pop(key, None)
+    if payload.get("route") in ROUTE_SKILLS:
+        payload["routeSkillRead"] = False
+        payload["routeSkillReadComplete"] = False
+        payload["routeTodosCreated"] = False
+        payload["routeTodosCompleted"] = False
+        payload["parserRead"] = False
+    payload["routeRunId"] = new_route_run_id()
+    return payload
 
 
 def normalize_path(raw: str, cwd: Path | None = None) -> Path:
@@ -433,6 +472,8 @@ def route_payload(
 
 def merge_existing_flags(payload: dict[str, Any], existing: dict[str, Any]) -> dict[str, Any]:
     if existing.get("route") != payload.get("route"):
+        if payload.get("route") in ROUTE_SKILLS:
+            ensure_route_run_id(payload)
         return payload
     for key in (
         "routeSkillRead",
@@ -441,10 +482,14 @@ def merge_existing_flags(payload: dict[str, Any], existing: dict[str, Any]) -> d
         "routeTodosCompleted",
         "parserRead",
         "reviewStatus",
+        "routeRunId",
+        "reviewRouteRunId",
         "routeSkillReadRanges",
     ):
         if key in existing:
             payload[key] = existing[key]
+    if payload.get("route") in ROUTE_SKILLS:
+        ensure_route_run_id(payload)
     return payload
 
 
@@ -454,11 +499,15 @@ def resolve_frontend_route(
     *,
     html_files: Iterable[str] = (),
     write_evidence: bool = False,
+    start_route_run: bool = False,
 ) -> dict[str, Any]:
     payload = route_payload(workspace, feature, html_files=html_files)
     if write_evidence:
         path = evidence_path(workspace, feature)
-        payload = merge_existing_flags(payload, read_json(path))
+        if start_route_run:
+            payload = reset_route_run_state(payload)
+        else:
+            payload = merge_existing_flags(payload, read_json(path))
         write_json(path, payload)
     return payload
 
@@ -477,10 +526,32 @@ def mark_evidence(
     if payload.get("route") not in VALID_ROUTES:
         raise ValueError(f"invalid frontend route evidence: {payload.get('route')}")
 
-    if mark == "route-todos-created":
+    if mark == "route-skill-read-complete":
+        if payload.get("route") not in ROUTE_SKILLS:
+            raise ValueError(f"route-skill-read-complete requires an HTML route, got: {payload.get('route')}")
+        ensure_route_run_id(payload)
+        payload["routeSkillRead"] = True
+        payload["routeSkillReadComplete"] = True
+        payload.pop("routeSkillReadRanges", None)
+    elif mark == "route-todos-created":
+        if payload.get("route") not in ROUTE_SKILLS:
+            raise ValueError(f"route-todos-created requires an HTML route, got: {payload.get('route')}")
+        ensure_route_run_id(payload)
         payload["routeTodosCreated"] = True
     elif mark == "route-todos-completed":
+        if payload.get("route") not in ROUTE_SKILLS:
+            raise ValueError(f"route-todos-completed requires an HTML route, got: {payload.get('route')}")
+        ensure_route_run_id(payload)
         payload["routeTodosCompleted"] = True
+    elif mark == "parser-read":
+        if payload.get("route") not in ROUTE_SKILLS:
+            raise ValueError(f"parser-read requires an HTML route, got: {payload.get('route')}")
+        if payload.get("routeSkillReadComplete") is not True:
+            raise ValueError("parser-read requires routeSkillReadComplete=true")
+        if payload.get("routeTodosCreated") is not True:
+            raise ValueError("parser-read requires routeTodosCreated=true")
+        ensure_route_run_id(payload)
+        payload["parserRead"] = True
     elif mark is not None:
         raise ValueError(f"unknown mark: {mark}")
 
@@ -488,7 +559,9 @@ def mark_evidence(
         if review_status not in VALID_REVIEW_STATUSES:
             allowed = ", ".join(sorted(VALID_REVIEW_STATUSES))
             raise ValueError(f"reviewStatus must be one of: {allowed}")
+        ensure_route_run_id(payload)
         payload["reviewStatus"] = review_status
+        payload["reviewRouteRunId"] = payload["routeRunId"]
 
     write_json(path, payload)
     return payload
@@ -506,7 +579,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--feature", "-f", help="feature slug; defaults to FEATURE_ID")
     parser.add_argument("--html-file", action="append", default=[], help="HTML source path; may be repeated")
     parser.add_argument("--write-evidence", action="store_true")
-    parser.add_argument("--mark", choices=("route-todos-created", "route-todos-completed"))
+    parser.add_argument("--start-route-run", action="store_true", help="start a fresh frontend route run")
+    parser.add_argument(
+        "--mark",
+        choices=(
+            "route-skill-read-complete",
+            "route-todos-created",
+            "route-todos-completed",
+            "parser-read",
+        ),
+    )
     parser.add_argument("--review-status", choices=tuple(sorted(VALID_REVIEW_STATUSES)))
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -528,7 +610,8 @@ def main(argv: list[str] | None = None) -> int:
                 workspace,
                 feature,
                 html_files=args.html_file,
-                write_evidence=args.write_evidence,
+                write_evidence=args.write_evidence or args.start_route_run,
+                start_route_run=args.start_route_run,
             )
     except (FrontendRouteError, ValueError) as exc:
         print(f"frontend route resolve failed: {exc}", file=sys.stderr)

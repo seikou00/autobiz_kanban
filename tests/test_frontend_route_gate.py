@@ -33,6 +33,7 @@ from hooks.resolve_frontend_html_route import (  # noqa: E402
     ROUTE_SPEC_DRIVEN,
     ROUTE_STANDARD,
     evidence_path,
+    mark_evidence,
     read_json,
     resolve_frontend_route,
     write_json,
@@ -354,6 +355,112 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertEqual(payload["route"], ROUTE_STANDARD)
 
 
+    def test_write_evidence_preserves_route_run_flags_for_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_feature_file(workspace, "PLAN.md", "need HTML frontend\n")
+            write_feature_file(workspace, "frontend-html/page.html", "<form><button>OK</button></form>\n")
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+            payload["routeSkillRead"] = True
+            payload["routeSkillReadComplete"] = True
+            payload["routeTodosCreated"] = True
+            payload["routeTodosCompleted"] = True
+            payload["parserRead"] = True
+            payload["reviewStatus"] = "passed"
+            payload["reviewRouteRunId"] = payload["routeRunId"]
+            write_json(evidence_path(workspace, "alpha"), payload)
+
+            recovered = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(recovered["routeRunId"], payload["routeRunId"])
+        self.assertTrue(recovered["routeSkillReadComplete"])
+        self.assertTrue(recovered["parserRead"])
+        self.assertEqual(recovered["reviewStatus"], "passed")
+
+    def test_start_route_run_resets_flags_and_review_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_feature_file(workspace, "PLAN.md", "need HTML frontend\n")
+            write_feature_file(workspace, "frontend-html/page.html", "<form><button>OK</button></form>\n")
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+            payload["routeSkillRead"] = True
+            payload["routeSkillReadComplete"] = True
+            payload["routeTodosCreated"] = True
+            payload["routeTodosCompleted"] = True
+            payload["parserRead"] = True
+            payload["reviewStatus"] = "passed"
+            payload["reviewRouteRunId"] = payload["routeRunId"]
+            write_json(evidence_path(workspace, "alpha"), payload)
+
+            fresh = resolve_frontend_route(workspace, "alpha", write_evidence=True, start_route_run=True)
+
+        self.assertNotEqual(fresh["routeRunId"], payload["routeRunId"])
+        self.assertFalse(fresh["routeSkillRead"])
+        self.assertFalse(fresh["routeSkillReadComplete"])
+        self.assertFalse(fresh["routeTodosCreated"])
+        self.assertFalse(fresh["routeTodosCompleted"])
+        self.assertFalse(fresh["parserRead"])
+        self.assertNotIn("reviewStatus", fresh)
+        self.assertNotIn("reviewRouteRunId", fresh)
+
+    def test_route_change_resets_route_run_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            html_path = write_feature_file(
+                workspace,
+                "frontend-html/page.html",
+                """
+                <div style="position:absolute; left:10px; top:10px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:20px; top:60px; width:120px; height:40px"></div>
+                <div style="position:absolute; left:30px; top:110px; width:120px; height:40px"></div>
+                """,
+            )
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [
+                {
+                    "sourceId": "VIS-001",
+                    "type": "high_fidelity_html",
+                    "path": str(html_path),
+                    "route": ROUTE_ABSOLUTE,
+                    "required": True,
+                }
+            ]
+            write_ui_context(workspace, context)
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    **complete_evidence(ROUTE_STANDARD),
+                    "routeRunId": "rr_old",
+                    "reviewRouteRunId": "rr_old",
+                },
+            )
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
+        self.assertNotEqual(payload["routeRunId"], "rr_old")
+        self.assertFalse(payload["routeSkillReadComplete"])
+        self.assertFalse(payload["parserRead"])
+        self.assertNotIn("reviewStatus", payload)
+
+    def test_parser_read_mark_requires_skill_and_todos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_feature_file(workspace, "PLAN.md", "need HTML frontend\n")
+            write_feature_file(workspace, "frontend-html/page.html", "<form><button>OK</button></form>\n")
+            resolve_frontend_route(workspace, "alpha", write_evidence=True, start_route_run=True)
+
+            with self.assertRaisesRegex(ValueError, "routeSkillReadComplete"):
+                mark_evidence(workspace, "alpha", mark="parser-read")
+            mark_evidence(workspace, "alpha", mark="route-skill-read-complete")
+            with self.assertRaisesRegex(ValueError, "routeTodosCreated"):
+                mark_evidence(workspace, "alpha", mark="parser-read")
+            mark_evidence(workspace, "alpha", mark="route-todos-created")
+            payload = mark_evidence(workspace, "alpha", mark="parser-read")
+
+        self.assertTrue(payload["parserRead"])
+
+
 class FrontendRouteGateValidatorTests(unittest.TestCase):
     def test_spec_driven_ui_allows_code_done_without_html_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -420,6 +527,27 @@ class FrontendRouteGateValidatorTests(unittest.TestCase):
             failures = validate_frontend_route_gate(gate_context(workspace))
 
         self.assertEqual(failures, 0)
+
+
+    def test_review_status_must_match_current_route_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_json(
+                evidence_path(workspace, "alpha"),
+                {
+                    **complete_evidence(ROUTE_STANDARD),
+                    "routeRunId": "rr_new",
+                    "reviewStatus": "passed",
+                    "reviewRouteRunId": "rr_old",
+                },
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                failures = validate_frontend_route_gate(gate_context(workspace))
+
+        self.assertGreater(failures, 0)
+        self.assertIn("frontend_review_route_run_mismatch", output.getvalue())
 
 
 class FrontendRouteReadHookTests(unittest.TestCase):
@@ -600,6 +728,20 @@ class FrontendRouteWriteGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             write_json(evidence_path(workspace, "alpha"), complete_evidence(ROUTE_STANDARD))
+
+            result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
+
+        self.assertEqual(result, 0)
+
+    def test_frontend_write_allows_after_explicit_route_marks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_feature_file(workspace, "PLAN.md", "need HTML frontend\n")
+            write_feature_file(workspace, "frontend-html/page.html", "<form><button>OK</button></form>\n")
+            resolve_frontend_route(workspace, "alpha", write_evidence=True, start_route_run=True)
+            mark_evidence(workspace, "alpha", mark="route-skill-read-complete")
+            mark_evidence(workspace, "alpha", mark="route-todos-created")
+            mark_evidence(workspace, "alpha", mark="parser-read")
 
             result = frontend_route_write_guard.validate_frontend_write(workspace, "alpha")
 

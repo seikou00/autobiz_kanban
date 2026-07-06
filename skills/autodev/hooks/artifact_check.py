@@ -1589,6 +1589,14 @@ def validate_frontend_route_gate(ctx: HookContext) -> int:
             "frontend_review_not_passed_or_skipped",
             f" reviewStatus={review_status!r} evidence={evidence_file}",
         )
+    route_run_id = evidence.get("routeRunId")
+    review_route_run_id = evidence.get("reviewRouteRunId")
+    if isinstance(route_run_id, str) and route_run_id.strip() and review_route_run_id != route_run_id:
+        failures += fail_line(
+            ctx,
+            "frontend_review_route_run_mismatch",
+            f" routeRunId={route_run_id!r} reviewRouteRunId={review_route_run_id!r} evidence={evidence_file}",
+        )
     return failures
 
 
