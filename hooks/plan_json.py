@@ -29,7 +29,6 @@ EVIDENCE_ID_RE = re.compile(r"^ev_\d{4}$")
 PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
 VISUAL_SOURCE_ID_RE = re.compile(r"^VIS-\d{3}$")
-FRONTEND_ROUTES = {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"}
 
 TODO_STATUSES = {"todo", "pending", "not_started", "not-started", "待做", "未开始"}
 IN_PROGRESS_STATUSES = {"in_progress", "in-progress", "doing", "进行中"}
@@ -208,11 +207,6 @@ def validate_plan_data(
                 _validate_string_list(errors, ui_refs, task_id, "pageRefs", required=False, item_re=PAGE_ID_RE)
                 _validate_string_list(errors, ui_refs, task_id, "interactionRefs", required=False, item_re=INTERACTION_ID_RE)
                 _validate_string_list(errors, ui_refs, task_id, "visualSourceRefs", required=False, item_re=VISUAL_SOURCE_ID_RE)
-                frontend_route = ui_refs.get("frontendRoute")
-                if frontend_route is not None and (
-                    not isinstance(frontend_route, str) or frontend_route not in FRONTEND_ROUTES
-                ):
-                    errors.append(f"{task_id}.uiRefs.frontendRoute_invalid")
 
         commands = raw_task.get("validationCommands")
         if not isinstance(commands, list):

@@ -30,8 +30,6 @@ prd_done → resolve_next_skill.py --json
 plan_done → detail_design_before_code choice
             ├── enabled → /autodev-detail-design
             └── skipped → /autodev-code
-                         ├── 可选前端 HTML → references/frontend-html/with-absolute-html
-                         └── 可选前端 HTML → references/frontend-html/with-standard-html
             ↓
           /autodev-reviewer
             ↓
@@ -75,24 +73,6 @@ plan_done → detail_design_before_code choice
 python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan --feature "{FEATURE_ID}" --plain
 python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan --feature "{FEATURE_ID}" --json
 ```
-
----
-
-##  前端 HTML 实现归属
-
-HTML 转前端现在归属 `/autodev-code`，作为 code 阶段的内部实现分支：
-
-1. `/autodev` 不再路由到 `/autodev-frontend`，也不再写入 `frontend_in_progress` / `frontend_done`。
-2. `prd_done` 后统一进入 `/autodev-specs`，先沉淀行为契约。
-3.  PLAN/specs/用户任务要求根据 HTML 实现前端，`/autodev-code` 把这些 HTML/DOM/设计导出稿作为 code 阶段实现素材处理。
-4. code 阶段内部按 HTML 形态分流：高保真/绝对定位/Figma 导出的 HTML 走 `autodev-code/references/frontend-html/with-absolute-html/SKILL.md`；普通静态 HTML、复制 DOM、小型静态站点或 HTML 转 React 走 `autodev-code/references/frontend-html/with-standard-html/SKILL.md`。
-5. 任一分支完成后都回到 `/autodev-code` 主流程，按 code 节点完成条件推进 `code_done`。
-
-### 约束
-
-- HTML 只是 code 阶段的视觉与结构输入，不得覆盖 specs/design/PLAN。
-- 缺少 HTML 但任务明确要求高保真转换时，由 `/autodev-code` 停止并要求补充；可由 specs/design/PLAN 直接实现时跳过 HTML 分支。
-- 不得直接调用 `/autodev-frontend` 或写入旧 frontend checkpoint；旧 `frontend_before_specs -> autodev-frontend` 编排已移除，不再作为可启用配置。
 
 ---
 

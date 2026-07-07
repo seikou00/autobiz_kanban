@@ -179,7 +179,7 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 - 若用户确认本 feature 纯后端/纯规则/纯数据能力，写 `uiRequired=false`，并填写 `notApplicableReason`。
 - discuss/PRD 阶段不要编造 `capabilities[].specRefs`；REQ/SCN 由 specs 阶段定义并在 `decisionStatus=locked` 时回填。
 - 高保真 HTML、标准 HTML、设计稿、原型链接是独立设计输入，只写入 `visualSources[]`，不要混入需求正文作为行为契约。
-- 若用户确认存在高保真但暂未提供文件或链接，在 `PRD_DISCUSS.md` 的待确认事项中写明，并在 `visualSources[]` 中保留可追踪占位引用，例如 `path="frontend-html/<待提供>.html"`、`type="high_fidelity_html"`、`route="absolute-html"`、`required=true`；code 阶段会先引导用户提供，用户不提供时按无高保真流程继续。
+- 若用户确认存在高保真但暂未提供文件或链接，在 `PRD_DISCUSS.md` 的待确认事项中写明，并在 `visualSources[]` 中保留可追踪占位引用，例如 `path="frontend-html/<待提供>.html"`、`type="high_fidelity_html"`、`route="absolute-html"`、`required=true`。
 - 页面信息优先投到 `pages[]`：`name` 写页面名，`goal` 写页面目标，`states` 写 `loading` / `empty` / `error` / `success` 等可观察状态；交互信息投到 `interactions[]`，不要只写在 Markdown 段落里。
 - `UI_CONTEXT.json` 模板、枚举和 ID 格式只以 `ui-context.md` 为准，本技能正文不维护第二份 JSON 模板。
 

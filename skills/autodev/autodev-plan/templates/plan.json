@@ -124,8 +124,7 @@
         "interactionRefs": [
           "UIX-001"
         ],
-        "visualSourceRefs": [],
-        "frontendRoute": "spec-driven-ui"
+        "visualSourceRefs": []
       },
       "scope": {
         "modules": [
