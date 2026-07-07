@@ -34,15 +34,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 后续需要当前 checkpoint 时直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，本技能允许通过下面的 `update_checkpoint.py --allow-create` 创建；创建或推进 checkpoint 后，必须再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
 
-### 加载参考文档
-
-在开始工作流程前，必须加载以下参考文档：
-
- `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md`
-   - 需求内容评估准则，包含检查项和优化建议
-
-执行流程时，必须以评估准则作为判断依据，确保分析有据可依。
-
 ###  更新状态
 
 开始需求澄清时必须用脚本写入开始态：
@@ -101,43 +92,24 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 ### 建立需求上下文
 
 1. 读取产品经理上传的需求材料
-   - 优先读取 Word 文档（`.docx` / `.doc`）
-   - 若用户提供 Markdown、需求说明、会议纪要、飞书导出内容，也可作为输入
-2. 提取以下信息
-   - 特性概述 / 背景 / 目标
-   - 功能任务描述
-   - 验收标准
-   - 角色、流程、边界、外部依赖
-3. 记录原始文档的结构、编号规范、术语和文风特点
+    - 优先读取 Word 文档（`.docx` / `.doc`）
+    - 若用户提供 Markdown、需求说明、会议纪要、飞书导出内容，也可作为输入
+2. **动态提取原始文档的所有章节内容**：按原始文档的实际目录结构逐章逐节提取，不预设固定的信息类别
+    - 识别并记录原始文档的完整章节树（章节编号、标题层级、子章节关系）
+    - 提取每个章节下的具体内容，完整详细
+3. 记录原始文档的目录结构、编号规范、术语和文风特点
+4. **创建 prd_original 文件夹并保存原始需求文档**：
+    - 在 `{FEATURE_DIR}` 下创建 `prd_original` 文件夹（如已存在则跳过）
+    - 将读取到的原始需求文档文件直接复制到 `{FEATURE_DIR}/prd_original/` 中
+    - 此操作用于保留原始需求快照，供后续验证使用
 
-**确定 FEATURE_DIR：**
+Expected output: 已完成原始需求材料读取和复制保存，形成文档结构记录，为后续格式化与分析提供上下文。
 
-```
-FEATURE_DIR = {PROJECT_PLUGIN_DIR}/.autobizdevops/features/{FEATURE_ID}
-```
+### 需求内容格式改造
 
-<!-- AUTODEV_RUNTIME_CONTRACT:BEGIN -->
-## 流程契约（Source Bundle + Method Bundle）
+读取原始需求文档，按照 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 模板格式重写需求文档，将改造后的内容写入 `{FEATURE_DIR}/PRD_DISCUSS.md`。
 
-当前 skill 的 checkpoint、输入/输出产物、读取方式和 validators 以 `{PLUGIN_ROOT}/board_core/board_config.json` 的编译结果为唯一事实来源；本文档不维护产物清单，不要依赖文中写死的文件名。
-进入执行前，先取当前 Feature 的契约（一次返回两个 bundle）：
-
-```bash
-python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "{FEATURE_ID}" --json
-```
-
-- **Source Bundle（读什么）**：`sourceBundle`/`required_inputs` 列出本 Feature 当前工作流下要读取的真实产物文件；按清单读原件。
-- **Method Bundle（怎么读）**：每个 input 的 `extract` 给出读取重点（focus）、读取方式（method）和缺失降级（degrade）。
-- **方法优先**：每个 input 的 `extract.method` 是它在场时的专属指令，优先于技能正文的通用默认。
-- **停止条件**：仅当 `required_inputs` 中的产物缺失时停止。
-- **不列即不存在**：bundle 未列出的 id 不属于本工作流，一律不予考虑——不读、不等、不索要，也不要为其设想任何分支。
-- **降级语义**：`required: false` 的输入缺失时按其 `extract.degrade` 继续，不要因缺失而停止。
-
-无 `FEATURE_ID` 时可省略 `--feature` 查看基线契约。
-<!-- AUTODEV_RUNTIME_CONTRACT:END -->
-
-
-Expected output: 已完成原始需求材料读取，并形成后续分析所需上下文。
+详细格式化流程请参考 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd-formatter.md` 执行。
 
 ### 需求分析
 
@@ -229,50 +201,16 @@ Expected output: 已完成原始需求材料读取，并形成后续分析所需
 - 确认结论：[记录最终决策]
 ```
 
-#### 需求摘要总结策略
-
-**核心原则**：PRD_DISCUSS.md 的需求摘要必须包含需求的完整开发内容，而非仅记录讨论的问题。
-
-**【关键】格式还原优先**：
-- **动态识别并完整保留原始需求文档的实际目录结构**：包括章节编号、标题层级、编号规范、术语体系、文风特点
-- 若原始文档结构松散/缺失必要章节（如缺少痛点），可参考 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/doc_module.md` 补充基础结构
-
-**需求摘要必须包含**：
-1. **原始文档的完整目录结构**（按原始文档的实际章节组织，而非自定义简化结构）
-   - 逐章逐节保留原始文档的所有章节，包括：需求概述、需求解析、用户现状、方案设计、功能清单、非功能需求、验收标准、附件等
-   - 章节顺序与原始文档完全保持一致，必须保留原始文档的章节划分
-2. **每个任务(功能）的完整描述**：包含业务逻辑、字段定义、筛选条件、状态流转、验收标准、第三方依赖等关键信息，**禁止遗漏原文档任何细节**
-
-**【强制完整性校验 — 生成后立即执行】**
-生成需求摘要后，**必须**执行以下校验，不得跳过：
-
-| # | 检查项 | 内容                         |
-|---|--------|----------------------------|
-| 1 | 目录结构一致性 | 需求摘要的章节结构与原始文档完全一致，未丢失任何章节 |
-| 2 | 逐任务(功能）对照 | 每个任务(功能）与原始文档逐字逐句比对        |
-| 3 | 字段完整性 | 字段名称、类型、长度、枚举值、默认值、校验规则    |
-| 4 | 筛选条件完整性 | 筛选字段、方式、数据来源、默认值           |
-| 5 | 验收标准完整性 | 所有验收标准                     |
-| 6 | 状态流转完整性 | 状态定义、流转规则、操作权限             |
-| 7 | 第三方依赖完整性 | 接口、对接系统、外部数据源              |
-| 8 | 删除线/不做标记 | "不做""二期""已废弃"内容已在任务内容标注    |
-
-
 #### 调整需求摘要
-	- **【关键】根据用户回答直接修改需求摘要**：每个问题确认后，必须将确认结果**直接写入需求摘要**的对应位置，而非仅记录在讨论记录中
-	  - 用户补充字段定义 → 直接在需求摘要正文中补充该字段定义
-	  - 用户修改业务逻辑 → 直接在需求摘要正文中修改对应逻辑描述
-	  - 用户补充验收标准 → 直接在需求摘要正文中补充验收标准
-	- 不做的任务功能在任务上明确标注"本期不做"
+- 根据用户回答调整需求摘要，确保需求摘要内容的准确性
+- 不做的任务在任务标题上明确标注"（二期）"或"本期不做"
 - 对于需求摘要内容中描述不明确的内容，应在对应位置标注"【待确认】"并在"待确认事项"中记录
-	- **最终校验**：所有问题处理完毕后，需求摘要正文应已完整反映所有已确认的修改，读者无需翻阅讨论记录即可获取完整准确的需求内容
-
 
 #### 讨论沉淀生成
 
 `PRD_DISCUSS.md` 是固定文件名，每轮增量更新。必须包含：
 
-1. **需求摘要【核心】**：即『需求摘要总结策略』生成的完整需求内容
+1. **需求摘要【核心】**：即完整需求内容
 2. **当前已确认结论**：本轮讨论后已确认的功能范围、审批流等结论
 3. **问题清单与处理状态**：P0/P1/P2 问题及处理状态
 4. **待确认事项**：待开发确认的高保真链接、接口文档、数据同步机制等
