@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:  # Works both as ``python hooks/evidence_store.py`` and as ``hooks.evidence_store``.
+    from hooks.paths import get_plugin_output_workspace, resolve_env_feature
+except ImportError:  # pragma: no cover - direct script execution path
+    from paths import get_plugin_output_workspace, resolve_env_feature
+
 
 EVIDENCE_VERSION = 1
 INDEX_VERSION = 1
@@ -54,6 +59,19 @@ def stream_path(target_feature_dir: Path) -> Path:
 
 def index_path(target_feature_dir: Path) -> Path:
     return target_feature_dir / DEFAULT_INDEX_RELATIVE_PATH
+
+
+def resolve_workspace_arg(workspace: str | None) -> Path:
+    if workspace:
+        return Path(workspace).expanduser().resolve()
+    try:
+        return get_plugin_output_workspace()
+    except ValueError:
+        return Path.cwd().resolve()
+
+
+def resolve_feature_arg(feature: str) -> str:
+    return resolve_env_feature(feature, required=False) or feature
 
 
 def compute_sha256(path: Path) -> str:
@@ -305,7 +323,12 @@ def append_evidence(
 
 
 def _cmd_append(args: argparse.Namespace) -> int:
-    target = feature_dir(Path(args.workspace).resolve(), args.feature)
+    try:
+        feature = resolve_feature_arg(args.feature)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    target = feature_dir(resolve_workspace_arg(args.workspace), feature)
     try:
         record = json.loads(Path(args.record).read_text(encoding="utf-8")) if args.record else {}
     except json.JSONDecodeError as exc:
@@ -347,10 +370,15 @@ def _cmd_append(args: argparse.Namespace) -> int:
 
 
 def _cmd_append_smoke(args: argparse.Namespace) -> int:
-    target = feature_dir(Path(args.workspace).resolve(), args.feature)
+    try:
+        feature = resolve_feature_arg(args.feature)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    target = feature_dir(resolve_workspace_arg(args.workspace), feature)
     result = args.result or ("pass" if args.exit_code == 0 else "fail")
     record = {
-        "featureId": args.feature,
+        "featureId": feature,
         "checkpoint": args.checkpoint,
         "nodeId": args.node_id,
         "skill": args.skill,
@@ -377,9 +405,14 @@ def _cmd_append_smoke(args: argparse.Namespace) -> int:
 
 
 def _cmd_index(args: argparse.Namespace) -> int:
-    target = feature_dir(Path(args.workspace).resolve(), args.feature)
     try:
-        write_index(target, feature_id=args.feature, verify_existing=True)
+        feature = resolve_feature_arg(args.feature)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    target = feature_dir(resolve_workspace_arg(args.workspace), feature)
+    try:
+        write_index(target, feature_id=feature, verify_existing=True)
     except EvidenceStoreError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -392,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     append = subparsers.add_parser("append")
-    append.add_argument("--workspace", default=str(Path.cwd().resolve()))
+    append.add_argument("--workspace", help="project plugin workspace; defaults to PLUGIN_WORKSPACE/PROJECT_DIR")
     append.add_argument("--feature", required=True)
     append.add_argument("--record", help="JSON object file to append")
     append.add_argument("--action")
@@ -406,7 +439,7 @@ def main(argv: list[str] | None = None) -> int:
     append.set_defaults(func=_cmd_append)
 
     append_smoke = subparsers.add_parser("append-smoke")
-    append_smoke.add_argument("--workspace", default=str(Path.cwd().resolve()))
+    append_smoke.add_argument("--workspace", help="project plugin workspace; defaults to PLUGIN_WORKSPACE/PROJECT_DIR")
     append_smoke.add_argument("--feature", required=True)
     append_smoke.add_argument("--test-id", required=True)
     append_smoke.add_argument("--checkpoint", required=True)
@@ -423,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
     append_smoke.set_defaults(func=_cmd_append_smoke)
 
     index = subparsers.add_parser("index")
-    index.add_argument("--workspace", default=str(Path.cwd().resolve()))
+    index.add_argument("--workspace", help="project plugin workspace; defaults to PLUGIN_WORKSPACE/PROJECT_DIR")
     index.add_argument("--feature", required=True)
     index.set_defaults(func=_cmd_index)
 

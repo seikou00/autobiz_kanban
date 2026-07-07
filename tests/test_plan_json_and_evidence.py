@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -326,6 +328,60 @@ class EvidenceStoreTest(unittest.TestCase):
             self.assertEqual(records[0]["action"], "smoke")
             self.assertIn("smoke", records[0])
             self.assertNotIn("validation", records[0])
+
+    def test_evidence_cli_defaults_to_plugin_feature_artifact_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_workspace = root / "plugin-workspace"
+            project_dir = "project-alpha"
+            workspace = plugin_workspace / project_dir
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            cwd = root / "business-repo"
+            feature_dir.mkdir(parents=True)
+            cwd.mkdir()
+            (workspace / ".autobizdevops" / "state.json").write_text(
+                json.dumps({"schemaVersion": "autobizdevops.state.v3", "features": {}}),
+                encoding="utf-8",
+            )
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(cwd)
+                with patch.dict(
+                    os.environ,
+                    {
+                        "PLUGIN_WORKSPACE": str(plugin_workspace),
+                        "PROJECT_DIR": project_dir,
+                        "FEATURE_ID": "alpha",
+                    },
+                    clear=False,
+                ):
+                    exit_code = evidence_store_main(
+                        [
+                            "append-smoke",
+                            "--feature",
+                            "alpha",
+                            "--test-id",
+                            "SMK-001",
+                            "--checkpoint",
+                            "code_in_progress",
+                            "--node-id",
+                            "dev.code",
+                            "--skill",
+                            "autodev-code",
+                            "--task-id",
+                            "T001",
+                            "--command",
+                            "echo ok",
+                            "--exit-code",
+                            "0",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(stream_path(feature_dir).is_file())
+            self.assertFalse((cwd / ".autobizdevops" / "features" / "alpha" / "evidence" / "EVIDENCE.jsonl").exists())
 
 
 class EvidenceGateTest(unittest.TestCase):
