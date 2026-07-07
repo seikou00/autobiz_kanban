@@ -5,6 +5,7 @@
     "ref": "main"
   },
   "supported_deploy_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
+  "enable_task_tool": false,
   "inspectCommands": {
     "darwin": {
       "knowledge_path": "${pluginPath}/sys",
