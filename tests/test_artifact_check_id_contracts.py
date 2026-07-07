@@ -28,7 +28,10 @@ from artifact_check import (  # noqa: E402
     validate_plan_json_contract,
     validate_plan_json_initial_tasks,
     validate_plan_finished_tasks,
+    validate_plan_scenario_coverage,
+    validate_plan_task_detail_schema,
     validate_plan_ui_projection,
+    validate_plan_task_granularity,
     validate_review_findings_json,
     validate_smoke_result_json,
     validate_smoke_test_plan_json,
@@ -111,13 +114,24 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             feature_dir / "plan.json",
             {
                 "version": 1,
+                "taskDetailVersion": 1,
                 "featureId": "alpha",
                 "tasks": [
                     {
                         "id": "T001",
                         "title": "do",
+                        "goal": "deliver observable behavior",
                         "status": "done",
                         "deps": [],
+                        "scope": {
+                            "modules": ["src"],
+                            "entrypoints": ["POST /api/alpha"],
+                            "pages": ["PAGE-001"] if ui_task else [],
+                            "dataObjects": ["DATA-001"],
+                        },
+                        "implementationPoints": ["update the behavior", "cover the boundary"],
+                        "acceptanceCriteria": ["the behavior is observable"],
+                        "nonGoals": ["do not change unrelated behavior"],
                         **(
                             {
                                 "uiRequired": True,
@@ -175,29 +189,42 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         decision_ids: list[str] | None = None,
         evidence_ids: list[str] | None = None,
         blockers: list[str] | None = None,
+        extra_task_fields: dict | None = None,
     ) -> None:
+        task = {
+            "id": "T001",
+            "title": "do",
+            "goal": "deliver observable behavior",
+            "status": status,
+            "deps": [],
+            "scope": {
+                "modules": ["src"],
+                "entrypoints": ["POST /api/alpha"] if api_ids else [],
+                "pages": [],
+                "dataObjects": ["DATA-001"] if data_ids else [],
+            },
+            "implementationPoints": ["update the behavior", "cover the boundary"],
+            "acceptanceCriteria": ["the behavior is observable"],
+            "nonGoals": ["do not change unrelated behavior"] if api_ids else [],
+            "specRefs": spec_refs or ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+            "designRefs": design_refs or ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+            "apiIds": [] if api_ids is None else api_ids,
+            "dataIds": [] if data_ids is None else data_ids,
+            "decisionIds": ["D-001"] if decision_ids is None else decision_ids,
+            "validationCommands": [{"command": "echo ok"}],
+            "expectedFiles": [],
+            "evidenceIds": ["ev_0001"] if evidence_ids is None else evidence_ids,
+            "blockers": [] if blockers is None else blockers,
+        }
+        if extra_task_fields:
+            task.update(extra_task_fields)
         write_plan_json(
             feature_dir / "plan.json",
             {
                 "version": 1,
+                "taskDetailVersion": 1,
                 "featureId": "alpha",
-                "tasks": [
-                    {
-                        "id": "T001",
-                        "title": "do",
-                        "status": status,
-                        "deps": [],
-                        "specRefs": spec_refs or ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
-                        "designRefs": design_refs or ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
-                        "apiIds": [] if api_ids is None else api_ids,
-                        "dataIds": [] if data_ids is None else data_ids,
-                        "decisionIds": ["D-001"] if decision_ids is None else decision_ids,
-                        "validationCommands": [{"command": "echo ok"}],
-                        "expectedFiles": [],
-                        "evidenceIds": ["ev_0001"] if evidence_ids is None else evidence_ids,
-                        "blockers": [] if blockers is None else blockers,
-                    }
-                ],
+                "tasks": [task],
             },
         )
 
@@ -2074,6 +2101,264 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             self._write_plan_json(feature_dir, status="done")
 
             self.assertGreater(validate_plan_json_initial_tasks(self._ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_accepts_small_task_without_split_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(feature_dir, status="todo")
+
+            self.assertEqual(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_giant_task_without_split_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap/spec.md#REQ-001"] + [
+                f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 8)
+            ]
+            self._write_plan_json(feature_dir, status="todo", spec_refs=spec_refs)
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_accepts_specific_split_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap/spec.md#REQ-001"] + [
+                f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 8)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={
+                    "splitRationale": "SCN-001、SCN-004、SCN-007 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
+                },
+            )
+
+            self.assertEqual(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_sparse_split_rationale_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap/spec.md#REQ-001"] + [
+                f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 8)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={
+                    "splitRationale": "SCN-001 代表本任务主提交链路，其余场景也会在同一个验证闭环里一起覆盖。"
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_vague_split_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap/spec.md#REQ-001"] + [
+                f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 8)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={"splitRationale": "同一模块一起实现比较方便"},
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_multi_page_ui_without_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                api_ids=["API-001"],
+                extra_task_fields={
+                    "uiRequired": True,
+                    "uiRefs": {
+                        "pageRefs": ["PAGE-001", "PAGE-002"],
+                        "interactionRefs": ["UIX-001"],
+                        "visualSourceRefs": [],
+                        "frontendRoute": "spec-driven-ui",
+                    },
+                    "scope": {
+                        "modules": ["src"],
+                        "entrypoints": ["POST /api/alpha"],
+                        "pages": ["PAGE-001", "PAGE-002"],
+                        "dataObjects": [],
+                    },
+                    "nonGoals": ["do not implement unrelated pages"],
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_many_apis_without_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                api_ids=["API-001", "API-002", "API-003"],
+                extra_task_fields={
+                    "scope": {
+                        "modules": ["src"],
+                        "entrypoints": ["POST /api/one", "POST /api/two", "POST /api/three"],
+                        "pages": [],
+                        "dataObjects": [],
+                    },
+                    "nonGoals": ["do not implement unrelated APIs"],
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_sparse_api_split_rationale_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                api_ids=["API-001", "API-002", "API-003"],
+                extra_task_fields={
+                    "scope": {
+                        "modules": ["src"],
+                        "entrypoints": ["POST /api/one", "POST /api/two", "POST /api/three"],
+                        "pages": [],
+                        "dataObjects": [],
+                    },
+                    "nonGoals": ["do not implement unrelated APIs"],
+                    "splitRationale": "API-001 是本任务的主入口，另外两个接口只作为同一提交结果的辅助入口一起验证。",
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_many_interactions_without_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                api_ids=["API-001"],
+                extra_task_fields={
+                    "uiRequired": True,
+                    "uiRefs": {
+                        "pageRefs": ["PAGE-001"],
+                        "interactionRefs": ["UIX-001", "UIX-002", "UIX-003", "UIX-004"],
+                        "visualSourceRefs": [],
+                        "frontendRoute": "spec-driven-ui",
+                    },
+                    "scope": {
+                        "modules": ["src"],
+                        "entrypoints": ["POST /api/alpha"],
+                        "pages": ["PAGE-001"],
+                        "dataObjects": [],
+                    },
+                    "nonGoals": ["do not implement unrelated UI interactions"],
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_scenario_coverage_accepts_all_defined_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=[
+                    "specs/cap/spec.md#REQ-001",
+                    "specs/cap/spec.md#SCN-001",
+                ],
+            )
+
+            self.assertEqual(validate_plan_scenario_coverage(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_scenario_coverage_rejects_missing_defined_scenario(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            (feature_dir / "specs" / "cap").mkdir(parents=True, exist_ok=True)
+            (feature_dir / "specs" / "cap" / "spec.md").write_text(
+                "\n".join(
+                    [
+                        "## ADDED Requirements",
+                        "### Requirement [REQ-001]: capability",
+                        "#### Scenario [SCN-001]: happy path",
+                        "#### Scenario [SCN-002]: edge path",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=[
+                    "specs/cap/spec.md#REQ-001",
+                    "specs/cap/spec.md#SCN-001",
+                ],
+            )
+
+            self.assertGreater(validate_plan_scenario_coverage(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_scenario_coverage_is_path_aware_for_repeated_local_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            for cap in ("one", "two"):
+                (feature_dir / "specs" / cap).mkdir(parents=True, exist_ok=True)
+                (feature_dir / "specs" / cap / "spec.md").write_text(
+                    "\n".join(
+                        [
+                            "## ADDED Requirements",
+                            "### Requirement [REQ-001]: capability",
+                            "#### Scenario [SCN-001]: happy path",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=[
+                    "specs/one/spec.md#REQ-001",
+                    "specs/one/spec.md#SCN-001",
+                ],
+            )
+
+            self.assertGreater(validate_plan_scenario_coverage(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_detail_schema_rejects_legacy_plan_in_code_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            write_plan_json(
+                feature_dir / "plan.json",
+                {
+                    "version": 1,
+                    "featureId": "alpha",
+                    "tasks": [
+                        {
+                            "id": "T001",
+                            "title": "legacy",
+                            "status": "done",
+                            "deps": [],
+                            "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                            "designRefs": ["design.md#D-001"],
+                            "apiIds": [],
+                            "dataIds": [],
+                            "decisionIds": ["D-001"],
+                            "validationCommands": [{"command": "echo ok"}],
+                            "expectedFiles": [],
+                            "evidenceIds": ["ev_0001"],
+                            "blockers": [],
+                        }
+                    ],
+                },
+            )
+
+            self.assertGreater(validate_plan_task_detail_schema(self._plan_ctx(feature_dir)), 0)
 
     def test_plan_json_success_skips_stale_plan_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

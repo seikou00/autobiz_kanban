@@ -691,7 +691,7 @@ def validate_plan_json_for_checkpoint(
     feature_dir = workspace / ".autobizdevops" / "features" / feature
     plan_json = feature_dir / "plan.json"
     if plan_json.is_file() and plan_json.stat().st_size > 0:
-        _, validate_errors = load_and_validate_plan(plan_json)
+        _, validate_errors = load_and_validate_plan(plan_json, require_initial_status=True)
         if validate_errors:
             return False, "plan_done 校验 plan.json 失败: " + "; ".join(validate_errors)
         return True, ""

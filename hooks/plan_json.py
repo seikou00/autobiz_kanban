@@ -18,6 +18,7 @@ from typing import Any
 
 
 PLAN_VERSION = 1
+TASK_DETAIL_VERSION = 1
 TASK_ID_RE = re.compile(r"^T\d{3}$")
 REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
@@ -112,6 +113,7 @@ def validate_plan_data(
     *,
     require_initial_status: bool = False,
     require_all_done: bool = False,
+    require_task_details: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
@@ -119,6 +121,14 @@ def validate_plan_data(
 
     if data.get("version") != PLAN_VERSION:
         errors.append("plan_json_invalid_version")
+    task_detail_value = data.get("taskDetailVersion")
+    task_detail_enabled = task_detail_value == TASK_DETAIL_VERSION
+    if task_detail_value is not None and task_detail_value != TASK_DETAIL_VERSION:
+        errors.append("plan_json_invalid_task_detail_version")
+    if require_initial_status or require_task_details:
+        if task_detail_value is None:
+            errors.append("plan_json_invalid_task_detail_version")
+        task_detail_enabled = True
     feature_id = data.get("featureId")
     if not isinstance(feature_id, str) or not feature_id.strip():
         errors.append("plan_json_missing_feature_id")
@@ -145,6 +155,9 @@ def validate_plan_data(
         title = raw_task.get("title")
         if not isinstance(title, str) or not title.strip():
             errors.append(f"{task_id}.title_missing")
+
+        if task_detail_enabled:
+            _validate_task_details(errors, raw_task, task_id)
 
         status = normalize_status(raw_task.get("status"))
         if not status:
@@ -222,6 +235,59 @@ def validate_plan_data(
                 errors.append(f"{task_id}.dependency_unknown:{dep}")
     errors.extend(_dag_errors(deps_by_task))
     return errors
+
+
+def _validate_task_details(errors: list[str], task: dict[str, Any], task_id: str) -> None:
+    goal = task.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        errors.append(f"{task_id}.goal_missing")
+
+    scope = task.get("scope")
+    scope_pages: list[str] = []
+    if not isinstance(scope, dict):
+        errors.append(f"{task_id}.scope_must_be_object")
+    else:
+        for field in ("modules", "entrypoints", "pages", "dataObjects"):
+            values = _string_list(scope.get(field))
+            if values is None:
+                errors.append(f"{task_id}.scope.{field}_must_be_string_array")
+                continue
+            if field == "pages":
+                scope_pages = values
+                for value in values:
+                    if not PAGE_ID_RE.fullmatch(value):
+                        errors.append(f"{task_id}.scope.pages_invalid:{value}")
+
+    implementation_points = _string_list(task.get("implementationPoints"))
+    if implementation_points is None:
+        errors.append(f"{task_id}.implementationPoints_must_be_string_array")
+    elif len(implementation_points) < 2:
+        errors.append(f"{task_id}.implementationPoints_too_few")
+    elif len(implementation_points) > 6:
+        errors.append(f"{task_id}.implementationPoints_too_many")
+
+    acceptance_criteria = _string_list(task.get("acceptanceCriteria"))
+    if acceptance_criteria is None:
+        errors.append(f"{task_id}.acceptanceCriteria_must_be_string_array")
+    elif not acceptance_criteria:
+        errors.append(f"{task_id}.acceptanceCriteria_missing")
+
+    non_goals = _string_list(task.get("nonGoals"))
+    if non_goals is None:
+        errors.append(f"{task_id}.nonGoals_must_be_string_array")
+        non_goals = []
+
+    api_ids = _string_list(task.get("apiIds")) or []
+    ui_required = task.get("uiRequired") is True
+    if (ui_required or api_ids) and not non_goals:
+        errors.append(f"{task_id}.nonGoals_missing")
+
+    ui_refs = task.get("uiRefs")
+    page_refs: list[str] = []
+    if isinstance(ui_refs, dict):
+        page_refs = _string_list(ui_refs.get("pageRefs")) or []
+    if ui_required and sorted(scope_pages) != sorted(page_refs):
+        errors.append(f"{task_id}.scope.pages_mismatch_uiRefs")
 
 
 def _dag_errors(deps_by_task: dict[str, list[str]]) -> list[str]:

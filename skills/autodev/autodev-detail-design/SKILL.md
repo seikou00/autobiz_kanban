@@ -46,7 +46,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 读取输入（消费执行清单，进入本节点后可用 `--feature "${feature}" --plain` 取状态感知清单）：
 
 - 按执行清单 `## 输入产物` 读取上游产物原件，按各自 `读取方式`读取
-- 从 `plan.json.tasks[]` 读取任务 DAG、taskId、deps、status、specRefs、designRefs、validationCommands、expectedFiles
+- 从 `plan.json.tasks[]` 读取任务 DAG、taskId、deps、status、goal、scope、implementationPoints、acceptanceCriteria、nonGoals、splitRationale（若存在）、specRefs、designRefs、validationCommands、expectedFiles；不得只按 title 或 PLAN.md 人类摘要展开详细设计
 - 与本 Feature 相关的现有业务代码、测试、配置和接口定义
 
 清单中任一标『未生成』的必需 input 出现时停止并提示先完成对应上游阶段；本 skill 不补写上游设计契约。

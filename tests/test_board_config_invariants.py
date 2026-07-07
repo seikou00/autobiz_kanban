@@ -127,6 +127,38 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
 
+    def test_plan_stage_keeps_granularity_and_json_validators(self) -> None:
+        required_validators = {
+            "ui_context_json",
+            "plan_json_contract",
+            "plan_json_initial_tasks",
+            "plan_task_granularity",
+            "plan_scenario_coverage",
+            "smoke_test_plan_json",
+        }
+        offenders: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict) or node.get("id") != "dev.plan":
+                continue
+            validators = node.get("validators", [])
+            if not isinstance(validators, list):
+                offenders.append(f"{context}[dev.plan]: validators_not_list")
+                continue
+            missing = sorted(required_validators - set(validators))
+            if missing:
+                offenders.append(f"{context}[dev.plan]: {','.join(missing)}")
+        self.assertEqual(offenders, [], "dev.plan validators drifted: " + ", ".join(offenders))
+
+    def test_code_stage_rejects_legacy_plan_task_schema(self) -> None:
+        offenders: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict) or node.get("id") != "dev.code":
+                continue
+            validators = node.get("validators", [])
+            if not isinstance(validators, list) or "plan_task_detail_schema" not in validators:
+                offenders.append(f"{context}[dev.code]")
+        self.assertEqual(offenders, [], "dev.code must keep plan_task_detail_schema gate")
+
     def test_plan_stage_requires_human_plan_view_output(self) -> None:
         offenders: list[str] = []
         for context, node in _iter_nodes(_board_config()):
@@ -339,6 +371,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         tasks = template.get("tasks")
         self.assertIsInstance(tasks, list)
         self.assertTrue(tasks, "plan template must include task examples")
+        self.assertEqual(template.get("taskDetailVersion"), 1)
 
         missing_base_fields: list[str] = []
         for task in tasks:
@@ -346,7 +379,16 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             if not isinstance(task, dict):
                 missing_base_fields.append(f"{task_id}: not_object")
                 continue
-            for field in ("uiRequired", "apiIds", "dataIds"):
+            for field in (
+                "goal",
+                "scope",
+                "implementationPoints",
+                "acceptanceCriteria",
+                "nonGoals",
+                "uiRequired",
+                "apiIds",
+                "dataIds",
+            ):
                 if field not in task:
                     missing_base_fields.append(f"{task_id}: {field}")
         self.assertEqual(

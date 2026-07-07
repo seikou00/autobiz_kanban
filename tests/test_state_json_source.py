@@ -115,13 +115,24 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
         json.dumps(
             {
                 "version": 1,
+                "taskDetailVersion": 1,
                 "featureId": feature,
                 "tasks": [
                     {
                         "id": "T001",
                         "title": "Implement",
+                        "goal": "deliver implementation behavior",
                         "status": "done",
                         "deps": [],
+                        "scope": {
+                            "modules": ["src"],
+                            "entrypoints": ["API-001"],
+                            "pages": [],
+                            "dataObjects": ["DATA-001"],
+                        },
+                        "implementationPoints": ["update implementation", "cover validation path"],
+                        "acceptanceCriteria": ["validation command passes"],
+                        "nonGoals": ["do not change unrelated behavior"],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                         "designRefs": ["design.md#API-001", "#DATA-001", "#D-001"],
                         "apiIds": ["API-001"],
@@ -481,13 +492,19 @@ class StateIntegrationTests(unittest.TestCase):
             )
             rich_plan = {
                 "version": 1,
+                "taskDetailVersion": 1,
                 "featureId": "alpha",
                 "tasks": [
                     {
                         "id": "T001",
                         "title": "one",
+                        "goal": "deliver one observable behavior",
                         "status": "todo",
                         "deps": [],
+                        "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                        "implementationPoints": ["update one behavior", "cover one boundary"],
+                        "acceptanceCriteria": ["one behavior is observable"],
+                        "nonGoals": [],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                         "designRefs": ["design.md#D-001"],
                         "apiIds": [],
@@ -501,8 +518,13 @@ class StateIntegrationTests(unittest.TestCase):
                     {
                         "id": "T002",
                         "title": "two",
+                        "goal": "deliver two observable behavior",
                         "status": "todo",
                         "deps": ["T001"],
+                        "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                        "implementationPoints": ["update two behavior", "cover two boundary"],
+                        "acceptanceCriteria": ["two behavior is observable"],
+                        "nonGoals": [],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                         "designRefs": ["design.md#D-001"],
                         "apiIds": [],
@@ -523,6 +545,39 @@ class StateIntegrationTests(unittest.TestCase):
             preserved = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(preserved["tasks"][1]["deps"], ["T001"])
             self.assertEqual(preserved["tasks"][1]["expectedFiles"], ["src/b.py"])
+
+    def test_plan_done_validation_rejects_legacy_plan_without_task_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            legacy_plan = {
+                "version": 1,
+                "featureId": "alpha",
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "title": "one",
+                        "status": "todo",
+                        "deps": [],
+                        "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+                        "designRefs": ["design.md#D-001"],
+                        "apiIds": [],
+                        "dataIds": [],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo one"}],
+                        "expectedFiles": [],
+                        "evidenceIds": [],
+                        "blockers": [],
+                    }
+                ],
+            }
+            (feature_dir / "plan.json").write_text(json.dumps(legacy_plan, ensure_ascii=False), encoding="utf-8")
+
+            synced, error = validate_plan_json_for_checkpoint(workspace=workspace, feature="alpha", checkpoint="plan_done")
+
+            self.assertFalse(synced)
+            self.assertIn("plan_json_invalid_task_detail_version", error)
 
     def test_plan_done_validation_rejects_missing_plan_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

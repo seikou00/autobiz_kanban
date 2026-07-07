@@ -316,7 +316,7 @@
             { "id": "smoke_test_plan_json", "label": "冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": true }
           ]
         },
-        "validators": ["design_contract", "ui_context_json", "plan_json_contract", "plan_json_initial_tasks", "smoke_test_plan_json"]
+        "validators": ["design_contract", "ui_context_json", "plan_json_contract", "plan_json_initial_tasks", "plan_task_granularity", "plan_scenario_coverage", "smoke_test_plan_json"]
       },
       {
         "id": "dev.code",
@@ -370,7 +370,7 @@
             { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false }
           ]
         },
-        "validators": ["ui_context_json", "plan_json_contract", "plan_finished_tasks", "smoke_result_json", "frontend_route_gate", "code_done_gate", "evidence_integrity"],
+        "validators": ["ui_context_json", "plan_json_contract", "plan_task_detail_schema", "plan_finished_tasks", "smoke_result_json", "frontend_route_gate", "code_done_gate", "evidence_integrity"],
         "guards": ["code_compile"]
       },
       {

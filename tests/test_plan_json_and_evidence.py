@@ -34,13 +34,19 @@ def valid_plan(
 ) -> dict:
     return {
         "version": 1,
+        "taskDetailVersion": 1,
         "featureId": feature,
         "tasks": [
             {
                 "id": "T001",
                 "title": "one",
+                "goal": "deliver one observable behavior",
                 "status": status,
                 "deps": [],
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update the behavior", "cover the boundary"],
+                "acceptanceCriteria": ["the behavior is observable"],
+                "nonGoals": [],
                 "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                 "designRefs": ["design.md#D-001"],
                 "apiIds": [],
@@ -92,8 +98,13 @@ class PlanJsonTest(unittest.TestCase):
             {
                 "id": "T002",
                 "title": "two",
+                "goal": "deliver two observable behavior",
                 "status": "done",
                 "deps": ["T003"],
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update the behavior", "cover the boundary"],
+                "acceptanceCriteria": ["the behavior is observable"],
+                "nonGoals": [],
                 "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                 "designRefs": ["design.md#D-001"],
                 "apiIds": [],
@@ -115,6 +126,41 @@ class PlanJsonTest(unittest.TestCase):
         errors = validate_plan_data(plan)
 
         self.assertTrue(any(error.startswith("task_dependency_cycle:") for error in errors))
+
+    def test_initial_plan_requires_task_details(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        del plan["tasks"][0]["goal"]
+
+        errors = validate_plan_data(plan, require_initial_status=True)
+
+        self.assertIn("T001.goal_missing", errors)
+
+    def test_ui_task_scope_pages_must_match_ui_refs(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["uiRequired"] = True
+        task["uiRefs"] = {
+            "pageRefs": ["PAGE-001"],
+            "interactionRefs": ["UIX-001"],
+            "visualSourceRefs": [],
+            "frontendRoute": "spec-driven-ui",
+        }
+        task["scope"]["pages"] = ["PAGE-002"]
+        task["nonGoals"] = ["do not implement unrelated pages"]
+
+        errors = validate_plan_data(plan, require_initial_status=True)
+
+        self.assertIn("T001.scope.pages_mismatch_uiRefs", errors)
+
+    def test_api_task_requires_non_goals_in_detail_schema(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["apiIds"] = ["API-001"]
+        task["nonGoals"] = []
+
+        errors = validate_plan_data(plan, require_initial_status=True)
+
+        self.assertIn("T001.nonGoals_missing", errors)
 
 class EvidenceStoreTest(unittest.TestCase):
     def test_validation_evidence_requires_structured_result(self) -> None:

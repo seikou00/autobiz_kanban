@@ -85,6 +85,28 @@ SMOKE_SOURCE_PREFIXES = (
     "cypress/e2e/smoke/",
     "playwright/smoke/",
 )
+PLAN_TASK_MAX_SCENARIOS = 5
+PLAN_TASK_MAX_APIS = 2
+PLAN_TASK_MAX_UI_PAGES = 1
+PLAN_TASK_MAX_UI_INTERACTIONS = 3
+PLAN_TASK_SPLIT_RATIONALE_MIN_LENGTH = 30
+PLAN_TASK_SPLIT_RATIONALE_BANNED = (
+    "同一模块",
+    "同一个模块",
+    "同一capability",
+    "同一 capability",
+    "同一个capability",
+    "同一个 capability",
+    "实现方便",
+    "一起实现",
+    "顺手一起",
+)
+PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX = {
+    "SCN": 3,
+    "API": 2,
+    "PAGE": 2,
+    "UIX": 3,
+}
 
 
 def _spec_definition_index(text: str) -> tuple[dict[str, set[str]], list[str]]:
@@ -1778,6 +1800,160 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
     return failures
 
 
+def _plan_task_string_list(task: dict, field: str) -> list[str]:
+    return _string_list_value(task.get(field)) or []
+
+
+def _plan_task_ui_refs(task: dict, field: str) -> list[str]:
+    ui_refs = task.get("uiRefs")
+    if not isinstance(ui_refs, dict):
+        return []
+    return _string_list_value(ui_refs.get(field)) or []
+
+
+def _spec_scenario_refs_by_path(ctx: HookContext) -> dict[str, set[str]]:
+    refs_by_id: dict[str, set[str]] = {}
+    for spec in spec_files(ctx):
+        rel = spec.relative_to(ctx.feature_dir).as_posix()
+        for scn_id in SPEC_SCENARIO_DEF_RE.findall(read_text(spec)):
+            refs_by_id.setdefault(scn_id, set()).add(f"{rel}#{scn_id}")
+    return refs_by_id
+
+
+def _covered_spec_scenario_refs(spec_refs: list[str], refs_by_id: dict[str, set[str]]) -> set[str]:
+    covered: set[str] = set()
+    for raw_ref in spec_refs:
+        if not isinstance(raw_ref, str):
+            continue
+        path_part, _, anchor = raw_ref.partition("#")
+        scenario_ids = SCN_ID.findall(anchor or raw_ref)
+        if not scenario_ids:
+            continue
+        normalized_path = path_part.strip().replace("\\", "/")
+        for scn_id in scenario_ids:
+            if normalized_path:
+                covered.add(f"{normalized_path}#{scn_id}")
+            elif len(refs_by_id.get(scn_id, set())) == 1:
+                covered.update(refs_by_id[scn_id])
+    return covered
+
+
+def _split_rationale_is_invalid(rationale: str, related_ids_by_prefix: dict[str, set[str]]) -> bool:
+    stripped = rationale.strip()
+    if len(stripped) < PLAN_TASK_SPLIT_RATIONALE_MIN_LENGTH:
+        return True
+    lowered = stripped.lower()
+    if any(pattern.lower() in lowered for pattern in PLAN_TASK_SPLIT_RATIONALE_BANNED):
+        return True
+    mentioned_by_prefix: dict[str, set[str]] = {}
+    for match in re.finditer(r"\b(SCN|API|PAGE|UIX)-\d{3}\b", stripped):
+        mentioned_by_prefix.setdefault(match.group(1), set()).add(match.group(0))
+    for prefix, related_ids in related_ids_by_prefix.items():
+        if not related_ids:
+            continue
+        required_count = min(PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX[prefix], len(related_ids))
+        mentioned_related_ids = mentioned_by_prefix.get(prefix, set()) & related_ids
+        if len(mentioned_related_ids) < required_count:
+            return True
+    return False
+
+
+def validate_plan_task_granularity(ctx: HookContext) -> int:
+    plan_json = ctx.file("plan.json")
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        info(ctx, "plan_task_granularity_not_in_contract_degrade")
+        return 0
+
+    data, errors = load_and_validate_plan(plan_json)
+    failures = 0
+    if errors:
+        for error in errors:
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+        return failures
+    if data is None:
+        return fail_line(ctx, "missing_plan_json")
+
+    raw_tasks = data.get("tasks")
+    if not isinstance(raw_tasks, list):
+        return failures
+    for index, task in enumerate(raw_tasks):
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id") if isinstance(task.get("id"), str) else f"tasks[{index}]"
+        spec_refs = _plan_task_string_list(task, "specRefs")
+        scenario_refs = _scenario_refs_from_spec_refs(spec_refs)
+        api_ids = set(_plan_task_string_list(task, "apiIds"))
+        page_refs = set(_plan_task_ui_refs(task, "pageRefs"))
+        interaction_refs = set(_plan_task_ui_refs(task, "interactionRefs"))
+
+        threshold_reasons: list[str] = []
+        related_ids_by_prefix: dict[str, set[str]] = {}
+        if len(scenario_refs) > PLAN_TASK_MAX_SCENARIOS:
+            threshold_reasons.append(f"scenarios={len(scenario_refs)}")
+            related_ids_by_prefix["SCN"] = set(scenario_refs)
+        if len(api_ids) > PLAN_TASK_MAX_APIS:
+            threshold_reasons.append(f"apis={len(api_ids)}")
+            related_ids_by_prefix["API"] = set(api_ids)
+        if len(page_refs) > PLAN_TASK_MAX_UI_PAGES:
+            threshold_reasons.append(f"pages={len(page_refs)}")
+            related_ids_by_prefix["PAGE"] = set(page_refs)
+        if len(interaction_refs) > PLAN_TASK_MAX_UI_INTERACTIONS:
+            threshold_reasons.append(f"interactions={len(interaction_refs)}")
+            related_ids_by_prefix["UIX"] = set(interaction_refs)
+
+        if not threshold_reasons:
+            continue
+        rationale = task.get("splitRationale")
+        if not isinstance(rationale, str) or not rationale.strip():
+            failures += fail_line(
+                ctx,
+                "missing_plan_task_split_rationale",
+                f" task={task_id} detail={','.join(threshold_reasons)}",
+            )
+        elif _split_rationale_is_invalid(rationale, related_ids_by_prefix):
+            failures += fail_line(
+                ctx,
+                "invalid_plan_task_split_rationale",
+                f" task={task_id} detail={','.join(threshold_reasons)}",
+            )
+    return failures
+
+
+def validate_plan_scenario_coverage(ctx: HookContext) -> int:
+    plan_json = ctx.file("plan.json")
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        info(ctx, "plan_scenario_coverage_not_in_contract_degrade")
+        return 0
+
+    refs_by_id = _spec_scenario_refs_by_path(ctx)
+    expected_refs = set().union(*refs_by_id.values()) if refs_by_id else set()
+    if not expected_refs:
+        info(ctx, "plan_scenario_coverage_no_specs_degrade")
+        return 0
+
+    data, errors = load_and_validate_plan(plan_json)
+    failures = 0
+    if errors:
+        for error in errors:
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+        return failures
+    if data is None:
+        return fail_line(ctx, "missing_plan_json")
+
+    covered_refs: set[str] = set()
+    raw_tasks = data.get("tasks")
+    if isinstance(raw_tasks, list):
+        for task in raw_tasks:
+            if not isinstance(task, dict):
+                continue
+            covered_refs.update(_covered_spec_scenario_refs(_plan_task_string_list(task, "specRefs"), refs_by_id))
+
+    missing_refs = expected_refs - covered_refs
+    if missing_refs:
+        failures += fail_line(ctx, "missing_plan_scenario_coverage", f" ids={','.join(sorted(missing_refs))}")
+    return failures
+
+
 def spec_files(ctx: HookContext) -> list[Path]:
     return sorted(
         path
@@ -1903,6 +2079,21 @@ def validate_plan_json_contract(ctx: HookContext) -> int:
         return fail_line(ctx, "missing_plan_json")
     failures += _validate_plan_json_traceability(ctx, data)
     failures += validate_plan_ui_projection(ctx)
+    return failures
+
+
+def validate_plan_task_detail_schema(ctx: HookContext) -> int:
+    plan_json = ctx.file("plan.json")
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        info(ctx, "plan_task_detail_schema_not_in_contract_degrade")
+        return 0
+
+    data, errors = load_and_validate_plan(plan_json, require_task_details=True)
+    failures = 0
+    for error in errors:
+        failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+    if data is None:
+        return failures or fail_line(ctx, "missing_plan_json")
     return failures
 
 
@@ -2092,6 +2283,9 @@ VALIDATORS = {
     "design_contract": validate_design_contract,
     "plan_json_contract": validate_plan_json_contract,
     "plan_json_initial_tasks": validate_plan_json_initial_tasks,
+    "plan_task_granularity": validate_plan_task_granularity,
+    "plan_scenario_coverage": validate_plan_scenario_coverage,
+    "plan_task_detail_schema": validate_plan_task_detail_schema,
     "plan_ui_projection": validate_plan_ui_projection,
     "plan_finished_tasks": validate_plan_finished_tasks,
     "frontend_route_gate": validate_frontend_route_gate,
