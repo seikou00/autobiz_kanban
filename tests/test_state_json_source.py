@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -62,17 +61,6 @@ def sample_record(checkpoint: str = "discuss_in_progress") -> dict[str, str]:
         "iteration": "1",
         "updated_at": "2026-05-25 12:00:00",
     }
-
-
-def py_command(source: str) -> str:
-    return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
-
-
-def write_modules_compile(workspace: Path, modules: list[dict]) -> None:
-    (workspace / ".autobizdevops" / "modules_compile.json").write_text(
-        json.dumps({"version": 1, "modules": modules}, ensure_ascii=False),
-        encoding="utf-8",
-    )
 
 
 def write_minimal_trace_sources(feature_dir: Path) -> None:
@@ -631,7 +619,7 @@ class StateIntegrationTests(unittest.TestCase):
             state_json = json.loads((workspace / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "discuss_done")
 
-    def test_update_checkpoint_cli_allows_code_done_compile_failure(self) -> None:
+    def test_update_checkpoint_cli_allows_code_done_after_validation_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace = make_workspace(root)
@@ -656,18 +644,6 @@ class StateIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             write_done_plan_json_and_evidence(feature_dir)
-            module_dir = root / "service"
-            module_dir.mkdir()
-            write_modules_compile(
-                workspace,
-                [
-                    {
-                        "module": "service",
-                        "path": str(module_dir),
-                        "compile_command": py_command("import sys; print('compile boom'); sys.exit(9)"),
-                    }
-                ],
-            )
 
             result = subprocess.run(
                 [
@@ -683,7 +659,6 @@ class StateIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertNotIn("compile boom", result.stderr)
             state_json = json.loads((workspace / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "code_done")
 
@@ -1178,18 +1153,6 @@ class StateIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             write_done_plan_json_and_evidence(feature_dir)
-            module_dir = root / "service"
-            module_dir.mkdir()
-            write_modules_compile(
-                workspace,
-                [
-                    {
-                        "module": "service",
-                        "path": str(module_dir),
-                        "compile_command": py_command("print('compile ok')"),
-                    }
-                ],
-            )
             write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
 
             result = prepare_checkpoint_update(

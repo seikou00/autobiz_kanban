@@ -445,7 +445,6 @@ cicd_done -> archived
    注意：
 - 代码阶段不能偷偷修改 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`。
 - 如果发现规格或设计冲突，应停止并回流到 Specs 或 Plan。
-- 开始改业务代码前，必须生成 `.autobizdevops/modules_compile.json`，记录模块目录和编译命令。
 - 每次只处理一个任务，完成后验证，再进入下一个任务。
 - 不要为了通过验证削弱校验、安全检查、日志或错误处理。
 ### 9.8 Dev: 独立需求评审
@@ -524,7 +523,7 @@ cicd_done -> archived
 | 行为规格 | `proposal.md`、`specs/**/*.md` |
 | 技术设计与计划 | `design.md`、`PLAN.md` |
 | 可选详细设计 | `DETAIL_DESIGN.md` |
-| 代码实现 | 业务代码、测试、配置修改；`PLAN.md` 状态更新；`modules_compile.json` |
+| 代码实现 | 业务代码、测试、配置修改；`PLAN.md` 状态更新 |
 | 独立评审 | `completion-proposal.json`、`REQUIREMENTS_EVAL.md` |
 | 单测 | `UNIT_TEST_REPORT.md`、`test-output.log` |
 | E2E | `E2E_TEST_CASES.yaml`、`E2E_REPORT.md`、`e2e-run.log` |

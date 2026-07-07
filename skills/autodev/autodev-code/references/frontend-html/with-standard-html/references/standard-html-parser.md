@@ -357,7 +357,7 @@ python references/frontend-html/with-standard-html/scripts/audit_antd_coverage.p
 - 剩余风险。
 - 统一前端回检输入：`target=<生成/修改的源码文件或目录>`、`sourceHtml=<原始 HTML 路径>`、`analysis=none`、`plan=<PLAN.md 或 none>`、`uiLibraryTarget=<...>`、`antdMode=<...>`、`auditRequired=<true|false>`。
 
-随后必须返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检、模块编译清单校验和 `code_done` 推进。不要发起独立回检选择，不要调用或引用已移除的内部回检路线。
+随后必须返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检和 `code_done` 推进。不要发起独立回检选择，不要调用或引用已移除的内部回检路线。
 
 ## 13. 禁止事项
 
