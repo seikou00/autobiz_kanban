@@ -72,11 +72,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 ```
 FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
 ```
-## 缺失产物处理
-
-```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --plain
-```
 
 ### 缓存检测与清理
 
