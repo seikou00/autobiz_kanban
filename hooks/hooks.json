@@ -33,22 +33,6 @@
           "persistAfterInterrupt": true
         }
       ]
-    },
-    {
-      "matcher": "execute",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "python hooks/code_done_compile_guard.py",
-          "timeout": 7200,
-          "onBlock": {
-            "reason": "状态脚本参数不合法",
-            "systemMessage": "停止执行状态脚本。请删除 --workspace/-w，由插件环境决定状态路径。",
-            "additionalContext": "code_done 转移前由 execute hook 编译 PLUGIN_WORKSPACE/PROJECT_DIR/.autobizdevops/modules_compile.json 中的模块，编译失败会阻塞转移。"
-          },
-          "persistAfterInterrupt": true
-        }
-      ]
     }
   ]
 }

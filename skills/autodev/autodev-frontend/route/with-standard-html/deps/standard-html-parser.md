@@ -308,7 +308,7 @@ python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-pro
 - 新增依赖。
 - 剩余风险。
 
-随后必须返回顶层，由顶层立即发起“是否进入回检”的真实决策动作。未拿到用户确认前，不得自动进入 `../../review/SKILL.md`。
+随后必须返回 `/autodev-code` 主流程，由 code 根技能执行项目级验证、统一前端回检和 `code_done` 推进。不要发起独立回检选择，不要调用或引用已移除的内部回检路线。
 
 ## 13. 禁止事项
 

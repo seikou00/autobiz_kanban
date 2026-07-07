@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -62,13 +61,124 @@ def sample_record(checkpoint: str = "discuss_in_progress") -> dict[str, str]:
     }
 
 
-def py_command(source: str) -> str:
-    return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+def write_minimal_trace_sources(feature_dir: Path) -> None:
+    (feature_dir / "specs" / "capability").mkdir(parents=True, exist_ok=True)
+    (feature_dir / "specs" / "capability" / "spec.md").write_text(
+        "\n".join(
+            [
+                "## ADDED Requirements",
+                "### Requirement [REQ-001]: capability",
+                "#### Scenario [SCN-001]: happy path",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (feature_dir / "design.md").write_text(
+        "\n".join(
+            [
+                "# 技术设计: capability",
+                "## 1. Context / 输入上下文",
+                "## 2. Spec Traceability / 规格追踪",
+                "| Spec | Requirement / Scenario | Design Coverage |",
+                "|------|------------------------|-----------------|",
+                "| specs/capability/spec.md | Requirement [REQ-001] / Scenario [SCN-001] | API-001 / DATA-001 / D-001 |",
+                "## 3. API Decisions / 接口决策",
+                "- x-auto-no-http-api: true",
+                "| ID | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |",
+                "|----|--------|--------------|---------|----------|--------|-------------------|--------|",
+                "| API-001 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                "## 4. Data Decisions / 数据决策",
+                "- x-auto-no-sql: true",
+                "| ID | Table/Model | Change | Fields | Index/Migration | Rollback | Status |",
+                "|----|-------------|--------|--------|-----------------|----------|--------|",
+                "| DATA-001 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
+                "## 5. Technical Design / 技术设计",
+                "### Decisions",
+                "| ID | Decision | Rationale | Alternatives | Status |",
+                "|----|----------|-----------|--------------|--------|",
+                "| D-001 | no-op | no-op | none | 已确认 |",
+                "## 6. Risks / Open Questions",
+                "| ID | Type | Description | Impact | Owner/Next Step |",
+                "|----|------|-------------|--------|-----------------|",
+                "| R-001 | 风险 | none | low | none |",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
-def write_modules_compile(workspace: Path, modules: list[dict]) -> None:
-    (workspace / ".autobizdevops" / "modules_compile.json").write_text(
-        json.dumps({"version": 1, "modules": modules}, ensure_ascii=False),
+def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alpha") -> None:
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    (feature_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "featureId": feature,
+                "tasks": [
+                    {
+                        "id": "T001",
+                        "title": "Implement",
+                        "status": "done",
+                        "deps": [],
+                        "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+                        "designRefs": ["design.md#API-001", "#DATA-001", "#D-001"],
+                        "apiIds": ["API-001"],
+                        "dataIds": ["DATA-001"],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo ok"}],
+                        "expectedFiles": [],
+                        "evidenceIds": ["ev_0001"],
+                        "blockers": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    append_evidence(
+        feature_dir,
+        {
+            "featureId": feature,
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
+            "designRefs": ["design.md#API-001", "#DATA-001", "#D-001"],
+            "changedFiles": ["src/example.py"],
+            "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+        },
+    )
+
+
+def write_non_ui_context(feature_dir: Path, *, feature: str = "alpha", locked: bool = True) -> None:
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "featureId": feature,
+        "uiRequired": False,
+        "decisionStatus": "locked" if locked else "confirmed",
+        "decisionSource": "default_false",
+        "confirmedAtCheckpoint": "prd_done",
+        "notApplicableReason": "纯后端能力",
+        "pages": [],
+        "interactions": [],
+        "visualSources": [],
+        "capabilities": [],
+    }
+    if locked:
+        payload["lockedAtCheckpoint"] = "specs_done"
+    (feature_dir / "UI_CONTEXT.json").write_text(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -386,7 +496,7 @@ class StateIntegrationTests(unittest.TestCase):
             state_json = json.loads((workspace / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "discuss_done")
 
-    def test_update_checkpoint_cli_allows_code_done_compile_failure(self) -> None:
+    def test_update_checkpoint_cli_allows_code_done_after_validation_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace = make_workspace(root)
@@ -397,18 +507,7 @@ class StateIntegrationTests(unittest.TestCase):
                 "\n".join(["### 1. Implement", "- **状态:** 完成", ""]),
                 encoding="utf-8",
             )
-            module_dir = root / "service"
-            module_dir.mkdir()
-            write_modules_compile(
-                workspace,
-                [
-                    {
-                        "module": "service",
-                        "path": str(module_dir),
-                        "compile_command": py_command("import sys; print('compile boom'); sys.exit(9)"),
-                    }
-                ],
-            )
+            write_done_plan_json_and_evidence(feature_dir)
 
             result = subprocess.run(
                 [
@@ -424,7 +523,6 @@ class StateIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertNotIn("compile boom", result.stderr)
             state_json = json.loads((workspace / ".autobizdevops" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state_json["features"]["alpha"]["checkpoint"], "code_done")
 
@@ -905,18 +1003,7 @@ class StateIntegrationTests(unittest.TestCase):
                 "\n".join(["### 1. Implement", "- **状态:** 完成", ""]),
                 encoding="utf-8",
             )
-            module_dir = root / "service"
-            module_dir.mkdir()
-            write_modules_compile(
-                workspace,
-                [
-                    {
-                        "module": "service",
-                        "path": str(module_dir),
-                        "compile_command": py_command("print('compile ok')"),
-                    }
-                ],
-            )
+            write_done_plan_json_and_evidence(feature_dir)
             write_state_records(workspace, {"alpha": sample_record("code_in_progress")})
 
             result = prepare_checkpoint_update(
