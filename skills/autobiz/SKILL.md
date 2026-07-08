@@ -35,19 +35,13 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 | 用户意图 | 当前状态要求 | 路由目标 |
 |---------|------------|---------|
 | 需求澄清、讨论需求、完善需求文档 | 无硬性前置 | `/autobiz-requirement-discuss` |
-| 生成正式 PRD、整理 PRD、PRD 定稿 | 契约含 `PRD_DISCUSS.md` 时必须先有收敛的讨论稿；契约不含时无此前置 | `/autobiz-prd-generate` |
+| 生成正式 PRD、整理 PRD、PRD 定稿 | 如有 `PRD_DISCUSS.md` 时必须先有收敛的讨论稿|
 
-**执行顺序约束**：
-
-```
-/autobiz-requirement-discuss → /autobiz-prd-generate
-```
 
 下游子技能执行前，必须通过脚本校验上游产出物
 ## 关键产出物校验（强制脚本）
 
-所有产出物校验必须通过脚本执行，不得仅做 Markdown 勾选。`biz_validate.py` 在各 stage 的校验中已包含 `.autobizdevops/state.json` 的 checkpoint 同步检查。
-
+所有产出物校验必须通过脚本执行，不得仅做 Markdown 勾选。
 ### 各阶段校验命令
 
 ```bash
@@ -75,4 +69,4 @@ set PYTHONIOENCODING=utf-8 && python ${pluginPath}/autobiz/hooks/biz_validate.py
 
 1. 不允许跳过前置准入直接调用子技能
 2. 不允许仅通过 Markdown 勾选替代脚本校验
-3. 契约含 `PRD_DISCUSS.md` 时，不允许在讨论稿缺失时进入 `/autobiz-prd-generate`；契约不含讨论稿时（custom 链未选需求澄清节点），按 bundle 直接生成，不读取也不向用户索要讨论稿
+3. 契约含 `PRD_DISCUSS.md` 时，不允许在讨论稿缺失时进入下一阶段。

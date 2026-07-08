@@ -7,7 +7,7 @@ version: v1.2.1701
 ## 缺失产物处理
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan --feature "{FEATURE_ID}" --json
+python "{PLUGIN_ROOT}/hooks/inspect_skill_contract.py" autodev-plan --feature "{FEATURE_ID}" --plain
 ```
 
 # /autodev-plan - Executable Task Plan
@@ -80,7 +80,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
 
-- 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。
+- 读取上游产物原件、用户补充说明、已有 `design.md`。
 - 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
 
@@ -236,24 +236,15 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
-生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
-
-`plan.json` 的字段结构、类型与初始值以 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json` 为准；`version` / `featureId` / `id` 编号、`status` 初始 `todo`、`specRefs` 必含 `REQ-xxx`+`SCN-xxx`、`deps` 构成无环 DAG、`evidenceIds` 初始为空等结构规则由 `plan_json.py validate` 强制，不在此重复。
-
-模板与 validator 不覆盖、写入前须自行遵守的语义约束：
-
-- `designRefs` / `apiIds` / `dataIds` 跟随 `design.md` 决策：`x-auto-no-http-api: true` 或 `x-auto-no-sql: true` 时对应数组写 `[]`，不要伪造引用。
-- `expectedFiles`：拿不准真实路径写 `[]`，不要凭空造路径。
-- `blockers`：待确认且影响执行的事项写成阻断说明。
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
-- 必须在 `plan.json` 对应任务或风险字段中记录用户补充说明 / 技术细节； `PLAN.md`同步新增或更新「用户补充说明 / 技术细节」章节。
+- `PLAN.md`同步新增或更新「用户补充说明 / 技术细节」章节。
 - 若生成 `PLAN.md`，它必须从 `plan.json` 投影，任务 id / deps / status / specRefs / designRefs / validationCommands / evidenceIds 不能漂移。
 - 用户明确确认的内容，标记为「已确认」。
 - 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
-- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 与 plan.json 的风险/阻断字段中记录，并回到用户确认，不得擅自覆盖 specs； `PLAN.md`同步更新。
+- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 的风险/阻断字段中记录，并回到用户确认，不得擅自覆盖 specs； `PLAN.md`同步更新。
 - 用户补充的实现细节只能作为计划依据，不得在 Plan 阶段创建或修改业务代码文件。
 
 任务拆分粒度：
