@@ -24,17 +24,20 @@ from hooks.json_writer_common import (  # noqa: E402
     next_numbered_id,
     parse_json_value,
     read_object_file,
+    read_object_stdin,
     render_result,
     resolve_feature,
     resolve_workspace,
     string_list,
     with_result_data,
     write_text,
+    WriterError,
 )
 from hooks.plan_json import (  # noqa: E402
     TASK_DETAIL_VERSION,
     validate_plan_data,
 )
+from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
 
 
 PLAN_FILE = "plan.json"
@@ -53,6 +56,13 @@ TASK_DETAIL_FORBIDDEN_FIELDS = {
     "uiRefs",
     "uiRequired",
 }
+
+
+class PlanWriterInputError(ValueError):
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(detail or reason)
+        self.reason = reason
+        self.detail = detail
 
 
 def _path(workspace: Path, feature: str) -> Path:
@@ -218,15 +228,35 @@ def _validate_task_body_minimum(task: dict[str, Any]) -> list[str]:
 
 
 def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str, Any] | None:
-    body_sources = [source for source in (args.body_file, args.task_json) if source]
+    body_sources = [
+        source
+        for source in (
+            args.body_file,
+            args.task_json,
+            "__stdin__" if args.body_stdin else None,
+        )
+        if source
+    ]
     if len(body_sources) > 1:
-        raise ValueError("--body-file 与 --task-json 只能二选一")
+        raise PlanWriterInputError("conflicting_task_body_sources", "--body-file / --task-json / --body-stdin 只能三选一")
     if args.body_file:
         task = read_object_file(args.body_file)
     elif args.task_json:
         task = parse_json_value(args.task_json)
         if not isinstance(task, dict):
             raise ValueError("--task-json 顶层必须是 object")
+    elif args.body_stdin:
+        try:
+            task = read_object_stdin()
+        except WriterError as exc:
+            message = str(exc)
+            if "stdin 为空" in message:
+                raise PlanWriterInputError("empty_body_stdin", message) from exc
+            if "stdin 不是合法 JSON" in message:
+                raise PlanWriterInputError("invalid_body_stdin_json", message) from exc
+            if "stdin JSON 顶层必须是 object" in message:
+                raise PlanWriterInputError("invalid_body_stdin_object", message) from exc
+            raise
     else:
         return None
 
@@ -239,7 +269,7 @@ def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str,
         task["id"] = args.task_id or next_numbered_id(_ids(data), "T")
     missing = _validate_task_body_minimum(task)
     if missing:
-        raise ValueError(f"invalid_plan_task_body: missing={','.join(missing)}")
+        raise PlanWriterInputError("invalid_plan_task_body", f"missing={','.join(missing)}")
     task["status"] = "todo"
     task.setdefault("deps", [])
     task.setdefault("uiRequired", False)
@@ -265,7 +295,7 @@ def _cmd_add_task(args: argparse.Namespace) -> int:
     body_task = _task_from_body(args, data)
     if body_task is None:
         if not args.title or not args.goal:
-            return render_result(fail("missing_plan_task_args", "--title/--goal 或 --body-file/--task-json 必填", path=_path(workspace, feature)))
+            return render_result(fail("missing_plan_task_args", "--title/--goal 或 --body-file/--task-json/--body-stdin 必填", path=_path(workspace, feature)))
         task_id = args.task_id or next_numbered_id(_ids(data), "T")
         task = _default_task(task_id, args)
     else:
@@ -274,6 +304,12 @@ def _cmd_add_task(args: argparse.Namespace) -> int:
     if task_id in _ids(data):
         return render_result(fail("duplicate_task_id", task_id, path=_path(workspace, feature)))
     _tasks(data).append(task)
+    structure_errors = _structure_errors(data)
+    if structure_errors:
+        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=[{"reason": error} for error in structure_errors]))
+    granularity_errors = validate_plan_task_granularity_item(task, task_id=task_id)
+    if granularity_errors:
+        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=granularity_errors))
     return render_result(_write(workspace, feature, data))
 
 
@@ -595,6 +631,7 @@ def main(argv: list[str] | None = None) -> int:
     add_task.add_argument("--task-id")
     add_task.add_argument("--body-file")
     add_task.add_argument("--task-json")
+    add_task.add_argument("--body-stdin", action="store_true")
     _add_task_fields(add_task, require_title=False)
     add_task.set_defaults(func=_cmd_add_task)
 
@@ -703,6 +740,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except PlanWriterInputError as exc:
+        return render_result(fail(exc.reason, exc.detail))
     except Exception as exc:
         return render_result(fail("plan_writer_failed", str(exc)))
 

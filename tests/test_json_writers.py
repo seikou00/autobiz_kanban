@@ -204,11 +204,17 @@ def _write_smoke_na(feature_dir: Path) -> None:
     )
 
 
-def _run(script: str, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    script: str,
+    *args: str,
+    env: dict[str, str] | None = None,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(ROOT / "hooks" / script), *args],
         cwd=ROOT,
         text=True,
+        input=input_text,
         capture_output=True,
         env=env,
         check=False,
@@ -429,6 +435,187 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(body.returncode, 0)
             self.assertIn("invalid_plan_task_body", body.stdout)
             self.assertIn("title", body.stdout)
+
+    def test_plan_writer_add_task_body_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            payload = {
+                "id": "T001",
+                "title": "stdin task",
+                "goal": "deliver stdin task",
+                "status": "done",
+                "deps": [],
+                "uiRequired": False,
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update behavior", "cover boundary"],
+                "acceptanceCriteria": ["behavior is observable"],
+                "nonGoals": [],
+                "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                "designRefs": ["design.md#D-001"],
+                "apiIds": [],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [{"command": "echo ok"}],
+                "expectedFiles": [],
+                "evidenceIds": ["ev_0001"],
+                "blockers": [],
+            }
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-stdin",
+                input_text=json.dumps(payload, ensure_ascii=False),
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
+            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["tasks"][0]["id"], "T001")
+            self.assertEqual(plan["tasks"][0]["status"], "todo")
+            self.assertEqual(plan["tasks"][0]["evidenceIds"], [])
+
+    def test_plan_writer_body_stdin_rejects_conflicting_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, _ = _workspace(root)
+            body_file = root / "task.json"
+            payload = {
+                "id": "T001",
+                "title": "stdin task",
+                "goal": "deliver stdin task",
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update behavior", "cover boundary"],
+                "acceptanceCriteria": ["behavior is observable"],
+                "nonGoals": [],
+                "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                "designRefs": ["design.md#D-001"],
+                "validationCommands": [{"command": "echo ok"}],
+            }
+            body_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-file",
+                str(body_file),
+                "--body-stdin",
+                input_text=json.dumps(payload, ensure_ascii=False),
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertNotEqual(body.returncode, 0)
+            self.assertIn("conflicting_task_body_sources", body.stdout)
+
+    def test_plan_writer_body_stdin_rejects_empty_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _ = _workspace(Path(tmp))
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-stdin",
+                input_text="",
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertNotEqual(body.returncode, 0)
+            self.assertIn("empty_body_stdin", body.stdout)
+
+    def test_plan_writer_rejects_oversized_task_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            payload = {
+                "id": "T001",
+                "title": "oversized task",
+                "goal": "deliver too much behavior",
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update behavior", "cover boundary"],
+                "acceptanceCriteria": ["behavior is observable"],
+                "nonGoals": [],
+                "specRefs": [
+                    "specs/cap/spec.md#REQ-001",
+                    *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 10)],
+                ],
+                "designRefs": ["design.md#D-001"],
+                "apiIds": [],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [{"command": "echo ok"}],
+            }
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-stdin",
+                input_text=json.dumps(payload, ensure_ascii=False),
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertNotEqual(body.returncode, 0)
+            self.assertIn("oversized_plan_task_must_split", body.stdout)
+            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["tasks"], [])
+
+    def test_plan_writer_rejects_large_task_without_split_rationale_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            payload = {
+                "id": "T001",
+                "title": "large task",
+                "goal": "deliver many related scenarios",
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update behavior", "cover boundary"],
+                "acceptanceCriteria": ["behavior is observable"],
+                "nonGoals": [],
+                "specRefs": [
+                    "specs/cap/spec.md#REQ-001",
+                    *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 7)],
+                ],
+                "designRefs": ["design.md#D-001"],
+                "apiIds": [],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [{"command": "echo ok"}],
+            }
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-stdin",
+                input_text=json.dumps(payload, ensure_ascii=False),
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertNotEqual(body.returncode, 0)
+            self.assertIn("missing_plan_task_split_rationale", body.stdout)
+            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["tasks"], [])
 
     def test_ui_context_writer_false_clears_ui_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

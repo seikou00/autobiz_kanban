@@ -241,7 +241,15 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。复杂任务优先用 `plan_writer.py add-task --body-file <单个 task JSON 文件>` 写入，避免把大量字段塞进一条超长命令；简单任务才使用逐项 CLI 参数。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
+生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。复杂任务优先用 `plan_writer.py add-task --body-stdin` 通过 stdin 传入单个 task JSON object，避免把大量字段塞进一条超长命令，也避免为每个 task 落盘临时 JSON 文件；简单任务才使用逐项 CLI 参数。只有运行环境无法传 stdin 时，才允许用 `--body-file` 作为降级方式，且 task 片段只能写入 feature 目录下的 `.tmp/plan_writer/tasks/`，成功写入 `plan.json` 后必须清理，不得放在 feature 根目录或作为正式产物保留。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
+
+`--body-stdin` 必须通过 pipe/stdin 传入完整 task JSON object，不要裸运行后等待交互式输入。示例：
+
+```bash
+printf '%s\n' '{"id":"T001","title":"实现单一后端闭环","goal":"用户可观察结果明确","scope":{"modules":["backend"],"entrypoints":["POST /api/example"],"pages":[],"dataObjects":[]},"implementationPoints":["接入请求校验与服务调用","补齐边界验证"],"acceptanceCriteria":["SCN-001 的行为可验证"],"nonGoals":["不修改无关页面"],"specRefs":["specs/capability/spec.md#REQ-001","specs/capability/spec.md#SCN-001"],"designRefs":["design.md#API-001","design.md#D-001"],"apiIds":["API-001"],"dataIds":[],"decisionIds":["D-001"],"validationCommands":[{"command":"mvn -q -Dtest=ExampleTest test"}]}' | python "${pluginPath}/hooks/plan_writer.py" add-task --feature "${feature}" --body-stdin
+```
+
+每次 `add-task` 成功前都会执行单任务结构与粒度校验；如果 writer 返回 `oversized_plan_task_must_split`，必须立即把该 task 拆成更小的 vertical slice 后重新写入，不得先继续生成后续任务；如果返回 `missing_plan_task_split_rationale` / `invalid_plan_task_split_rationale`，优先拆分，只有确实属于同一验证闭环且无法独立验证时才补充具体 `splitRationale` 后重试。
 
 `plan.json` 语义规则：
 

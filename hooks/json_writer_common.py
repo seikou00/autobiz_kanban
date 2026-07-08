@@ -198,6 +198,19 @@ def read_object_file(path: str | Path) -> dict[str, Any]:
     return data
 
 
+def read_object_stdin() -> dict[str, Any]:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        raise WriterError("stdin 为空；请通过 stdin 传入单个 JSON object")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise WriterError(f"stdin 不是合法 JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise WriterError("stdin JSON 顶层必须是 object")
+    return data
+
+
 def parse_postcheck_output(output: str, *, fallback_message: str = "") -> list[dict[str, str]]:
     errors: list[dict[str, str]] = []
     for raw_line in output.splitlines():

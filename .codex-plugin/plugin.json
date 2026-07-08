@@ -1,0 +1,35 @@
+{
+  "name": "autobizdevops-plugin-kanban",
+  "version": "1.1.1+v0604",
+  "description": "Kanban-driven AutobizDevOps workflow plugin for requirement discussion, development, testing, CI/CD, and archive flows.",
+  "author": {
+    "name": "CmbCowork Team",
+    "email": "cowork@example.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "autobizdevops",
+    "kanban",
+    "workflow"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "AutobizDevOps Kanban",
+    "shortDescription": "Run AutobizDevOps feature workflows from a kanban state machine.",
+    "longDescription": "AutobizDevOps Kanban provides local skills, workflow state scripts, hooks, and MCP configuration for progressing a feature through requirement discussion, PRD generation, specs, planning, coding, review, tests, verification, CI/CD, and archive stages.",
+    "developerName": "CmbCowork Team",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Start a new AutobizDevOps feature workflow.",
+      "Show the current kanban checkpoint and next skill.",
+      "Continue this feature through the next AutobizDevOps stage."
+    ],
+    "brandColor": "#2563EB"
+  }
+}
