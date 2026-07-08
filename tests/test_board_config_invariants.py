@@ -132,6 +132,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "ui_context_json",
             "plan_json_contract",
             "plan_json_initial_tasks",
+            "plan_ref_resolution",
             "plan_task_granularity",
             "plan_scenario_coverage",
             "smoke_test_plan_json",
@@ -155,9 +156,13 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             if not isinstance(node, dict) or node.get("id") != "dev.code":
                 continue
             validators = node.get("validators", [])
-            if not isinstance(validators, list) or "plan_task_detail_schema" not in validators:
+            if (
+                not isinstance(validators, list)
+                or "plan_task_detail_schema" not in validators
+                or "plan_ref_resolution" not in validators
+            ):
                 offenders.append(f"{context}[dev.code]")
-        self.assertEqual(offenders, [], "dev.code must keep plan_task_detail_schema gate")
+        self.assertEqual(offenders, [], "dev.code must keep plan_task_detail_schema and plan_ref_resolution gates")
 
     def test_plan_stage_requires_human_plan_view_output(self) -> None:
         offenders: list[str] = []

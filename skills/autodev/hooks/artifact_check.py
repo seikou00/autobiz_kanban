@@ -36,6 +36,7 @@ from hooks.plan_json import (  # noqa: E402
     plan_json_path,
     unfinished_tasks,
 )
+from hooks.code_task_context import resolve_task_refs  # noqa: E402
 from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
 from hooks.resolve_frontend_html_route import (  # noqa: E402
     FrontendRouteError,
@@ -1882,6 +1883,36 @@ def validate_plan_scenario_coverage(ctx: HookContext) -> int:
     return failures
 
 
+def validate_plan_ref_resolution(ctx: HookContext) -> int:
+    plan_json = ctx.file("plan.json")
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        info(ctx, "plan_ref_resolution_not_in_contract_degrade")
+        return 0
+
+    data, errors = load_and_validate_plan(plan_json, require_task_details=True)
+    failures = 0
+    if errors:
+        for error in errors:
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+        return failures
+    if data is None:
+        return fail_line(ctx, "missing_plan_json")
+
+    tasks = data.get("tasks")
+    if not isinstance(tasks, list):
+        return failures
+    for index, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id") if isinstance(task.get("id"), str) else f"tasks[{index}]"
+        _, _, ref_errors = resolve_task_refs(ctx.feature_dir, task)
+        for error in ref_errors:
+            detail = error.get("detail", "")
+            suffix = f" task={task_id} detail={detail}" if detail else f" task={task_id}"
+            failures += fail_line(ctx, error.get("reason", "invalid_artifact_ref"), suffix)
+    return failures
+
+
 def spec_files(ctx: HookContext) -> list[Path]:
     return sorted(
         path
@@ -2213,6 +2244,7 @@ VALIDATORS = {
     "plan_json_initial_tasks": validate_plan_json_initial_tasks,
     "plan_task_granularity": validate_plan_task_granularity,
     "plan_scenario_coverage": validate_plan_scenario_coverage,
+    "plan_ref_resolution": validate_plan_ref_resolution,
     "plan_task_detail_schema": validate_plan_task_detail_schema,
     "plan_ui_projection": validate_plan_ui_projection,
     "plan_finished_tasks": validate_plan_finished_tasks,

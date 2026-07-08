@@ -258,6 +258,7 @@ printf '%s\n' '{"id":"T001","title":"实现单一后端闭环","goal":"用户可
 - `goal` 写本任务交付的用户可观察结果；`scope.modules/entrypoints/pages/dataObjects` 写执行范围；`implementationPoints` 写 2-6 条可执行要点；`acceptanceCriteria` 写本任务可观察验收口径；`nonGoals` 写本任务明确不做的范围。`uiRequired=true` 或 `apiIds` 非空时，`nonGoals` 至少 1 条；纯后端小任务可写空数组。
 - Plan 阶段所有任务初始状态为 `todo`，初始 `evidenceIds` 为空；无阻断时 `blockers` 为空，有影响执行的待确认事项才写 blocker。
 - 每个任务必须追溯到真实 specs 与 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的决策。模板中的 API/Data/Decision ID 都是占位示例，必须替换成真实 ID。任务不涉及接口或数据变更时，不要为了过校验强行编造 `API-*` / `DATA-*`：`plan.json.apiIds` / `dataIds` 写空数组 `[]`，`PLAN.md` 的 `api_id` / `data_id` 写 `无` 或 `-`。如果 `design.md` 中存在 API/Data 决策，则这些决策必须被至少一个真正相关的任务覆盖；只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
+- `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
 - `validationCommands` 是强门禁验证命令，必须可直接运行并由命令退出码/断言自行判读；不能确定真实文件时不要凭空填写 `expectedFiles`。
 
 用户补充信息沉淀规则：

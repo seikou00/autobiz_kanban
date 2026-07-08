@@ -85,6 +85,8 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 3. 技术边界以 `design.md` 与 `plan.json` 为实现依据。
 4. HTML/DOM/设计导出稿只提供页面结构、视觉布局、组件槽位、文案内容和交互线索，不得覆盖 UI_CONTEXT/specs/design/plan.json。
 5. PRD / specs / plan.json 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
+
+路径边界：上述 `specs/**/*.md`、`design.md`、`plan.json` 均指 feature 产物目录中的文件，不是业务代码仓库 cwd 下的同名路径；执行具体 task 时必须通过 `hooks/code_task_context.py` 解析并读取对应片段。
 6. 如果前面阶段声明了高保真/HTML 但 resolver 输出 `htmlSourceMissing=true`，先向用户说明缺失路径并请求提供 HTML；若用户本轮不提供，则按 `spec-driven-ui` 的无高保真流程继续，不等待、不阻断，也不得假装读取 HTML。
 
 内部分流：
@@ -156,7 +158,15 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ###  执行单个任务
 
 1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。
-2. 读任务的结构化执行契约。存在 `plan.json` 时，必须读取当前 task 的 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `goal` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
+2. 读任务的结构化执行契约。存在 `plan.json` 时，必须先运行任务上下文解析脚本：
+
+```bash
+python "{PLUGIN_ROOT}/hooks/code_task_context.py" --feature "{FEATURE_ID}" --task-id "<TASK_ID>"
+```
+
+该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
+
+存在 `plan.json` 时，必须读取当前 task 的 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `goal` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
 3. 改代码前做有界探索定位真实文件与既有模式：只读上游产物或 `rg` 命中的相关文件；先识别项目分层、命名、错误处理、校验、日志、测试风格；形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
 4. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。

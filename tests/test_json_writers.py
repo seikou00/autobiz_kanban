@@ -617,6 +617,122 @@ class JsonWriterTests(unittest.TestCase):
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(plan["tasks"], [])
 
+    def test_code_task_context_resolves_refs_from_artifact_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            _write_plan(feature_dir)
+
+            result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(Path(payload["artifactFeatureDir"]).resolve(), feature_dir.resolve())
+            self.assertEqual(payload["refResolution"]["specRefs"], "relative-to-artifactFeatureDir")
+            self.assertTrue(all(item["found"] for item in payload["resolvedSpecRefs"]))
+            self.assertTrue(all(item["found"] for item in payload["resolvedDesignRefs"]))
+            self.assertIn("Scenario [SCN-001]", payload["resolvedSpecRefs"][1]["text"])
+            self.assertIn("| API-001 |", payload["resolvedDesignRefs"][0]["text"])
+
+    def test_code_task_context_fails_on_missing_ref_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            _write_plan(feature_dir)
+            plan_path = feature_dir / "plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["tasks"][0]["specRefs"].append("specs/cap/spec.md#SCN-999")
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
+
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertFalse(payload["ok"])
+            self.assertIn("missing_ref_anchor", {error["reason"] for error in payload["errors"]})
+            self.assertIn("specs/cap/spec.md#SCN-999", result.stdout)
+
+    def test_code_task_context_fails_on_missing_ref_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            _write_plan(feature_dir)
+            plan_path = feature_dir / "plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["tasks"][0]["specRefs"].append("specs/missing/spec.md#SCN-001")
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing_ref_file", result.stdout)
+
+    def test_code_task_context_rejects_absolute_and_traversal_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            _write_plan(feature_dir)
+            plan_path = feature_dir / "plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["tasks"][0]["specRefs"].extend(
+                [
+                    f"{Path(tmp).resolve() / 'outside.md'}#SCN-001",
+                    "../outside.md#SCN-001",
+                ]
+            )
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid_artifact_ref", result.stdout)
+            self.assertIn("不允许绝对路径", result.stdout)
+            self.assertIn("引用路径越界", result.stdout)
+
+    def test_code_task_context_rejects_ambiguous_short_scenario_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            (feature_dir / "specs" / "other").mkdir(parents=True)
+            (feature_dir / "specs" / "other" / "spec.md").write_text(
+                "\n".join(
+                    [
+                        "## ADDED Requirements",
+                        "### Requirement [REQ-001]: other",
+                        "#### Scenario [SCN-001]: same local id",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            _write_design(feature_dir)
+            _write_plan(feature_dir)
+            plan_path = feature_dir / "plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["tasks"][0]["specRefs"] = ["specs/cap/spec.md#REQ-001", "#SCN-001"]
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("短引用 anchor 不唯一", result.stdout)
+
+    def test_code_task_context_reports_task_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            _write_plan(feature_dir)
+
+            result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T999")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("task_not_found", result.stdout)
+
     def test_ui_context_writer_false_clears_ui_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, _ = _workspace(Path(tmp))

@@ -28,6 +28,7 @@ from artifact_check import (  # noqa: E402
     validate_plan_json_contract,
     validate_plan_json_initial_tasks,
     validate_plan_finished_tasks,
+    validate_plan_ref_resolution,
     validate_plan_scenario_coverage,
     validate_plan_task_detail_schema,
     validate_plan_ui_projection,
@@ -2457,6 +2458,38 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertGreater(validate_plan_scenario_coverage(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_ref_resolution_accepts_resolvable_artifact_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                design_refs=["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                api_ids=["API-001"],
+                data_ids=["DATA-001"],
+            )
+
+            self.assertEqual(validate_plan_ref_resolution(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_ref_resolution_rejects_missing_ref_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_specs(feature_dir)
+            self._write_design(feature_dir)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=["specs/cap/spec.md#REQ-001", "specs/missing/spec.md#SCN-001"],
+                design_refs=["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                api_ids=["API-001"],
+                data_ids=["DATA-001"],
+            )
+
+            self.assertGreater(validate_plan_ref_resolution(self._plan_ctx(feature_dir)), 0)
 
     def test_plan_task_detail_schema_rejects_legacy_plan_in_code_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
