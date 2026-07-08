@@ -19,13 +19,16 @@ from hooks.json_writer_common import (  # noqa: E402
     artifact_path,
     atomic_write_json,
     fail,
+    fail_if_artifact_exists,
     load_json,
     next_numbered_id,
+    parse_json_value,
     read_object_file,
     render_result,
     resolve_feature,
     resolve_workspace,
     string_list,
+    with_result_data,
     write_text,
 )
 from hooks.plan_json import (  # noqa: E402
@@ -183,16 +186,94 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
 
 def _cmd_init(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
-    return render_result(_write(workspace, feature, _initial(feature), allow_empty=True))
+    existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
+    if existing:
+        return render_result(existing)
+    return render_result(with_result_data(_write(workspace, feature, _initial(feature), allow_empty=True), reset=bool(args.force)))
+
+
+def _list_field_is_populated(task: dict[str, Any], field: str) -> bool:
+    value = task.get(field)
+    if not isinstance(value, list):
+        return False
+    if field == "validationCommands":
+        return any(
+            (isinstance(item, dict) and isinstance(item.get("command"), str) and item.get("command", "").strip())
+            or (isinstance(item, str) and item.strip())
+            for item in value
+        )
+    return any(isinstance(item, str) and item.strip() for item in value)
+
+
+def _validate_task_body_minimum(task: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for field in ("title", "goal"):
+        value = task.get(field)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(field)
+    for field in ("specRefs", "implementationPoints", "acceptanceCriteria", "validationCommands"):
+        if not _list_field_is_populated(task, field):
+            missing.append(field)
+    return missing
+
+
+def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str, Any] | None:
+    body_sources = [source for source in (args.body_file, args.task_json) if source]
+    if len(body_sources) > 1:
+        raise ValueError("--body-file 与 --task-json 只能二选一")
+    if args.body_file:
+        task = read_object_file(args.body_file)
+    elif args.task_json:
+        task = parse_json_value(args.task_json)
+        if not isinstance(task, dict):
+            raise ValueError("--task-json 顶层必须是 object")
+    else:
+        return None
+
+    body_id = task.get("id")
+    if body_id is not None and not isinstance(body_id, str):
+        raise ValueError("task body 的 id 必须是字符串")
+    if args.task_id and body_id and args.task_id != body_id:
+        raise ValueError(f"--task-id 与 task body id 不一致: {args.task_id} != {body_id}")
+    if not body_id:
+        task["id"] = args.task_id or next_numbered_id(_ids(data), "T")
+    missing = _validate_task_body_minimum(task)
+    if missing:
+        raise ValueError(f"invalid_plan_task_body: missing={','.join(missing)}")
+    task["status"] = "todo"
+    task.setdefault("deps", [])
+    task.setdefault("uiRequired", False)
+    task.setdefault("scope", {"modules": [], "entrypoints": [], "pages": [], "dataObjects": []})
+    task.setdefault("implementationPoints", [])
+    task.setdefault("acceptanceCriteria", [])
+    task.setdefault("nonGoals", [])
+    task.setdefault("specRefs", [])
+    task.setdefault("designRefs", [])
+    task.setdefault("apiIds", [])
+    task.setdefault("dataIds", [])
+    task.setdefault("decisionIds", [])
+    task.setdefault("validationCommands", [])
+    task.setdefault("expectedFiles", [])
+    task["evidenceIds"] = []
+    task.setdefault("blockers", [])
+    return task
 
 
 def _cmd_add_task(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     data = _load(workspace, feature)
-    task_id = args.task_id or next_numbered_id(_ids(data), "T")
+    body_task = _task_from_body(args, data)
+    if body_task is None:
+        if not args.title or not args.goal:
+            return render_result(fail("missing_plan_task_args", "--title/--goal 或 --body-file/--task-json 必填", path=_path(workspace, feature)))
+        task_id = args.task_id or next_numbered_id(_ids(data), "T")
+        task = _default_task(task_id, args)
+    else:
+        task = body_task
+        task_id = str(task["id"])
     if task_id in _ids(data):
         return render_result(fail("duplicate_task_id", task_id, path=_path(workspace, feature)))
-    _tasks(data).append(_default_task(task_id, args))
+    _tasks(data).append(task)
     return render_result(_write(workspace, feature, data))
 
 
@@ -471,7 +552,7 @@ def _add_task_fields(parser: argparse.ArgumentParser, *, require_title: bool = T
     parser.add_argument("--title", required=require_title)
     parser.add_argument("--goal", required=require_title)
     parser.add_argument("--status", default="todo")
-    parser.add_argument("--dep", action="append")
+    parser.add_argument("--dep", "--deps", dest="dep", action="append")
     parser.add_argument("--ui-required", action="store_true")
     parser.add_argument("--page-ref", action="append")
     parser.add_argument("--interaction-ref", action="append")
@@ -506,12 +587,15 @@ def main(argv: list[str] | None = None) -> int:
 
     init = sub.add_parser("init")
     _common(init)
+    init.add_argument("--force", action="store_true")
     init.set_defaults(func=_cmd_init)
 
     add_task = sub.add_parser("add-task")
     _common(add_task)
     add_task.add_argument("--task-id")
-    _add_task_fields(add_task)
+    add_task.add_argument("--body-file")
+    add_task.add_argument("--task-json")
+    _add_task_fields(add_task, require_title=False)
     add_task.set_defaults(func=_cmd_add_task)
 
     update_task = sub.add_parser("update-task")
@@ -572,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
 
     deps = sub.add_parser("set-deps")
     _task_selector(deps)
-    deps.add_argument("--dep", action="append")
+    deps.add_argument("--dep", "--deps", dest="dep", action="append")
     deps.set_defaults(func=_cmd_set_deps)
 
     validation_command = sub.add_parser("add-validation-command")

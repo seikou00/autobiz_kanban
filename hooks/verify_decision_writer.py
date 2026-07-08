@@ -21,10 +21,12 @@ from hooks.json_writer_common import (  # noqa: E402
     artifact_path,
     atomic_write_json,
     fail,
+    fail_if_artifact_exists,
     load_json,
     render_result,
     resolve_feature,
     resolve_workspace,
+    with_result_data,
 )
 from hooks.result_writer_common import (  # noqa: E402
     coverage_decision_sets,
@@ -171,11 +173,14 @@ def _write(workspace: Path, feature: str, data: dict[str, Any]) -> WriterResult:
 
 def _cmd_init(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
+    if existing:
+        return render_result(existing)
     data = _initial(_feature_dir(workspace, feature))
     if args.from_evidence:
         data["scenarioCoverage"] = derive_coverage_from_evidence(_feature_dir(workspace, feature), action="validation")
         data["verdict"] = _derive_verdict(data["scenarioCoverage"])
-    return render_result(_write(workspace, feature, data))
+    return render_result(with_result_data(_write(workspace, feature, data), reset=bool(args.force)))
 
 
 def _cmd_derive_coverage(args: argparse.Namespace) -> int:
@@ -263,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
 
     init = sub.add_parser("init")
     _common(init)
+    init.add_argument("--force", action="store_true")
     init.add_argument("--from-specs", action="store_true")
     init.add_argument("--from-evidence", action="store_true")
     init.set_defaults(func=_cmd_init)

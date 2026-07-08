@@ -19,11 +19,13 @@ from hooks.json_writer_common import (  # noqa: E402
     artifact_path,
     atomic_write_json,
     fail,
+    fail_if_artifact_exists,
     load_json,
     parse_json_value,
     render_result,
     resolve_feature,
     resolve_workspace,
+    with_result_data,
 )
 from hooks.result_writer_common import derive_coverage_from_evidence, empty_coverage  # noqa: E402
 
@@ -89,9 +91,12 @@ def _write(workspace: Path, feature: str, data: dict[str, Any]) -> WriterResult:
 
 def _cmd_init(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
+    if existing:
+        return render_result(existing)
     data = _initial(feature)
     data["scenarioCoverage"] = empty_coverage(_feature_dir(workspace, feature))
-    return render_result(_write(workspace, feature, data))
+    return render_result(with_result_data(_write(workspace, feature, data), reset=bool(args.force)))
 
 
 def _cmd_add_case(args: argparse.Namespace) -> int:
@@ -239,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
 
     init = sub.add_parser("init")
     _common(init)
+    init.add_argument("--force", action="store_true")
     init.set_defaults(func=_cmd_init)
 
     add = sub.add_parser("add-case")

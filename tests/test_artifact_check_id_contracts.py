@@ -2136,6 +2136,57 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
 
             self.assertEqual(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
 
+    def test_plan_task_granularity_accepts_english_validation_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap/spec.md#REQ-001"] + [
+                f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 8)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={
+                    "splitRationale": "SCN-001, SCN-004, and SCN-007 cannot be validated independently because they share the same validation loop and same response assertion."
+                },
+            )
+
+            self.assertEqual(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_hard_scenario_cap_even_with_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap/spec.md#REQ-001"] + [
+                f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 10)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={
+                    "splitRationale": "SCN-001、SCN-004、SCN-007 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_page_only_split_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap/spec.md#REQ-001"] + [
+                f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 8)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={
+                    "splitRationale": "覆盖 SCN-001、SCN-004、SCN-007，但它们都是同一页面的不同交互元素和不同组成部分，属于同一页面闭环，不可独立拆分。"
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
     def test_plan_task_granularity_rejects_sparse_split_rationale_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
@@ -2195,6 +2246,34 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
 
             self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
 
+    def test_plan_task_granularity_rejects_hard_page_cap_even_with_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                api_ids=["API-001"],
+                extra_task_fields={
+                    "uiRequired": True,
+                    "uiRefs": {
+                        "pageRefs": ["PAGE-001", "PAGE-002", "PAGE-003"],
+                        "interactionRefs": ["UIX-001"],
+                        "visualSourceRefs": [],
+                        "frontendRoute": "spec-driven-ui",
+                    },
+                    "scope": {
+                        "modules": ["src"],
+                        "entrypoints": ["POST /api/alpha"],
+                        "pages": ["PAGE-001", "PAGE-002", "PAGE-003"],
+                        "dataObjects": [],
+                    },
+                    "nonGoals": ["do not implement unrelated UI pages"],
+                    "splitRationale": "PAGE-001 与 PAGE-002 由同一次提交动作触发，PAGE-003 共享同一验证闭环。",
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
     def test_plan_task_granularity_rejects_many_apis_without_rationale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
@@ -2210,6 +2289,27 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                         "dataObjects": [],
                     },
                     "nonGoals": ["do not implement unrelated APIs"],
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_hard_api_cap_even_with_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                api_ids=["API-001", "API-002", "API-003", "API-004"],
+                extra_task_fields={
+                    "scope": {
+                        "modules": ["src"],
+                        "entrypoints": ["POST /api/one", "POST /api/two", "POST /api/three", "POST /api/four"],
+                        "pages": [],
+                        "dataObjects": [],
+                    },
+                    "nonGoals": ["do not implement unrelated APIs"],
+                    "splitRationale": "API-001 与 API-002 由同一次提交动作触发，API-003 与 API-004 共享同一验证闭环。"
                 },
             )
 
@@ -2258,6 +2358,34 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                         "dataObjects": [],
                     },
                     "nonGoals": ["do not implement unrelated UI interactions"],
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_hard_interaction_cap_even_with_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                api_ids=["API-001"],
+                extra_task_fields={
+                    "uiRequired": True,
+                    "uiRefs": {
+                        "pageRefs": ["PAGE-001"],
+                        "interactionRefs": ["UIX-001", "UIX-002", "UIX-003", "UIX-004", "UIX-005"],
+                        "visualSourceRefs": [],
+                        "frontendRoute": "spec-driven-ui",
+                    },
+                    "scope": {
+                        "modules": ["src"],
+                        "entrypoints": ["POST /api/alpha"],
+                        "pages": ["PAGE-001"],
+                        "dataObjects": [],
+                    },
+                    "nonGoals": ["do not implement unrelated UI interactions"],
+                    "splitRationale": "UIX-001、UIX-003、UIX-005 由同一次提交动作触发，并共享同一验证闭环。"
                 },
             )
 

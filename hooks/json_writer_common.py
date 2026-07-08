@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
+
 ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = ROOT / "hooks"
 AUTODEV_HOOKS_DIR = ROOT / "skills" / "autodev" / "hooks"
@@ -65,6 +72,20 @@ def render_result(result: WriterResult) -> int:
 
 def fail(reason: str, detail: str = "", *, path: Path | None = None) -> WriterResult:
     return WriterResult(ok=False, path=path, errors=[_error(reason, detail)])
+
+
+def with_result_data(result: WriterResult, **data: Any) -> WriterResult:
+    merged = dict(result.data or {})
+    merged.update(data)
+    return WriterResult(ok=result.ok, path=result.path, changed=result.changed, errors=result.errors, data=merged)
+
+
+def fail_if_artifact_exists(path: Path, *, force: bool) -> WriterResult | None:
+    if force:
+        return None
+    if path.is_file() and path.stat().st_size > 0:
+        return fail("artifact_already_exists", "如需覆盖现有产物，请显式传 --force", path=path)
+    return None
 
 
 def resolve_workspace(explicit: str | Path | None = None) -> Path:
@@ -205,4 +226,3 @@ def capture_stdout(func: Callable[[], tuple[int, str]]) -> tuple[int, str, str]:
     with contextlib.redirect_stdout(output):
         code, message = func()
     return code, message, output.getvalue()
-

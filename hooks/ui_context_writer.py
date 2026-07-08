@@ -19,12 +19,14 @@ from hooks.json_writer_common import (  # noqa: E402
     artifact_path,
     atomic_write_json,
     fail,
+    fail_if_artifact_exists,
     load_json,
     next_numbered_id,
     parse_json_value,
     render_result,
     resolve_feature,
     resolve_workspace,
+    with_result_data,
 )
 from hooks.ui_context import (  # noqa: E402
     DECISION_SOURCES,
@@ -121,12 +123,15 @@ def _string_array(values: list[str] | None) -> list[str]:
 
 def _cmd_init(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
+    if existing:
+        return render_result(existing)
     data = _initial(feature)
     if args.ui_required:
         data["uiRequired"] = True
         data["decisionSource"] = args.decision_source
         data["notApplicableReason"] = ""
-    return render_result(_write(workspace, feature, data))
+    return render_result(with_result_data(_write(workspace, feature, data), reset=bool(args.force)))
 
 
 def _cmd_set_ui_required(args: argparse.Namespace) -> int:
@@ -319,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
 
     init = sub.add_parser("init")
     _add_common(init)
+    init.add_argument("--force", action="store_true")
     init.add_argument("--ui-required", action="store_true")
     init.add_argument("--decision-source", default="default_false", choices=sorted(DECISION_SOURCES))
     init.set_defaults(func=_cmd_init)

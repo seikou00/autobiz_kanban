@@ -19,11 +19,13 @@ from hooks.json_writer_common import (  # noqa: E402
     artifact_path,
     atomic_write_json,
     fail,
+    fail_if_artifact_exists,
     load_json,
     next_numbered_id,
     render_result,
     resolve_feature,
     resolve_workspace,
+    with_result_data,
 )
 
 
@@ -71,9 +73,12 @@ def _write(workspace: Path, feature: str, data: dict[str, Any]) -> WriterResult:
 
 def _cmd_init(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
+    if existing:
+        return render_result(existing)
     data = _initial()
     data["verdict"] = args.verdict
-    return render_result(_write(workspace, feature, data))
+    return render_result(with_result_data(_write(workspace, feature, data), reset=bool(args.force)))
 
 
 def _cmd_add_finding(args: argparse.Namespace) -> int:
@@ -197,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
 
     init = sub.add_parser("init")
     _common(init)
+    init.add_argument("--force", action="store_true")
     init.add_argument("--verdict", default="PASS", choices=sorted(VERDICTS))
     init.set_defaults(func=_cmd_init)
 

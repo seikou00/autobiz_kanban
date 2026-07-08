@@ -271,6 +271,165 @@ class JsonWriterTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("path_resolution_failed", result.stdout)
 
+    def test_init_commands_refuse_existing_artifacts_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _ = _workspace(Path(tmp))
+
+            first_plan = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            second_plan = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            forced_plan = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha", "--force")
+
+            first_smoke = _run("smoke_plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            second_smoke = _run("smoke_plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            forced_smoke = _run("smoke_plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha", "--force")
+
+            self.assertEqual(first_plan.returncode, 0, first_plan.stdout + first_plan.stderr)
+            self.assertNotEqual(second_plan.returncode, 0)
+            self.assertIn("artifact_already_exists", second_plan.stdout)
+            self.assertEqual(forced_plan.returncode, 0, forced_plan.stdout + forced_plan.stderr)
+            self.assertTrue(json.loads(forced_plan.stdout)["reset"])
+            self.assertEqual(first_smoke.returncode, 0, first_smoke.stdout + first_smoke.stderr)
+            self.assertNotEqual(second_smoke.returncode, 0)
+            self.assertIn("artifact_already_exists", second_smoke.stdout)
+            self.assertEqual(forced_smoke.returncode, 0, forced_smoke.stdout + forced_smoke.stderr)
+            self.assertTrue(json.loads(forced_smoke.stdout)["reset"])
+
+    def test_plan_writer_add_task_body_file_and_deps_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            body_file = root / "task.json"
+            body_file.write_text(
+                json.dumps(
+                    {
+                        "id": "T001",
+                        "title": "body task",
+                        "goal": "deliver body task",
+                        "status": "done",
+                        "deps": [],
+                        "uiRequired": False,
+                        "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                        "implementationPoints": ["update behavior", "cover boundary"],
+                        "acceptanceCriteria": ["behavior is observable"],
+                        "nonGoals": [],
+                        "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                        "designRefs": ["design.md#D-001"],
+                        "apiIds": [],
+                        "dataIds": [],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo ok"}],
+                        "expectedFiles": [],
+                        "evidenceIds": ["ev_0001"],
+                        "blockers": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-file",
+                str(body_file),
+            )
+            alias = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--task-id",
+                "T002",
+                "--title",
+                "alias task",
+                "--goal",
+                "deliver alias task",
+                "--deps",
+                "T001",
+                "--module",
+                "src",
+                "--implementation-point",
+                "update behavior",
+                "--implementation-point",
+                "cover boundary",
+                "--acceptance-criterion",
+                "behavior is observable",
+                "--spec-ref",
+                "specs/cap/spec.md#REQ-001",
+                "--spec-ref",
+                "specs/cap/spec.md#SCN-001",
+                "--design-ref",
+                "design.md#D-001",
+                "--decision-id",
+                "D-001",
+                "--validation-command",
+                "echo ok",
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
+            self.assertEqual(alias.returncode, 0, alias.stdout + alias.stderr)
+            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["tasks"][0]["id"], "T001")
+            self.assertEqual(plan["tasks"][0]["status"], "todo")
+            self.assertEqual(plan["tasks"][0]["evidenceIds"], [])
+            self.assertEqual(plan["tasks"][1]["deps"], ["T001"])
+
+    def test_plan_writer_body_file_reports_missing_required_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, _ = _workspace(root)
+            body_file = root / "bad_task.json"
+            body_file.write_text(
+                json.dumps(
+                    {
+                        "id": "T001",
+                        "goal": "missing title",
+                        "status": "todo",
+                        "deps": [],
+                        "uiRequired": False,
+                        "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                        "implementationPoints": ["update behavior", "cover boundary"],
+                        "acceptanceCriteria": ["behavior is observable"],
+                        "nonGoals": [],
+                        "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                        "designRefs": ["design.md#D-001"],
+                        "apiIds": [],
+                        "dataIds": [],
+                        "decisionIds": ["D-001"],
+                        "validationCommands": [{"command": "echo ok"}],
+                        "expectedFiles": [],
+                        "evidenceIds": [],
+                        "blockers": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-file",
+                str(body_file),
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertNotEqual(body.returncode, 0)
+            self.assertIn("invalid_plan_task_body", body.stdout)
+            self.assertIn("title", body.stdout)
+
     def test_ui_context_writer_false_clears_ui_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, _ = _workspace(Path(tmp))
