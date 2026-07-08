@@ -131,6 +131,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 每个 capability 一个 spec 文件：`specs/<capability>/spec.md`。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
 - 必须读取或生成 `UI_CONTEXT.json`，它是 UI 范围机器事实源；不要从 PRD/specs Markdown 关键词反推 UI 范围。
+- 生成或修改 `UI_CONTEXT.json` 必须使用 `${pluginPath}/hooks/ui_context_writer.py`，不得直接整份写入或编辑该 JSON。调试只使用 `validate` / `show --summary`。
 - `uiRequired=true` 时，UI 行为应形成独立 capability，例如 `order-create-ui`、`dashboard-filter-ui`，并在 `UI_CONTEXT.json.capabilities[]` 回链对应 `REQ/SCN`。
 - specs 完成并锁定 UI_CONTEXT 时，`uiRequired=true` 必须至少有一个 UI capability，且该 capability 必须带真实 `REQ-xxx` 与 `SCN-xxx` 的 `specRefs`；不能只写 pages/interactions 而没有 UI 场景分母。
 - `uiRequired=false` 时，不生成 UI capability，并在 `UI_CONTEXT.json.notApplicableReason` 说明原因。
@@ -152,6 +153,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md` 已生成。
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/` 下至少存在一个 `spec.md`。
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` 已生成或更新，且 `decisionStatus=locked`。
+- 推进 `specs_done` 前必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.specs --feature "${feature}"`；该检查才是本阶段完整 artifact 门禁。
 - proposal 的每个 capability 都有对应 spec 文件。
 - 每个 spec 至少包含一个 Requirement 和一个 Scenario。
 - specs 只描述行为契约，不包含实现任务。

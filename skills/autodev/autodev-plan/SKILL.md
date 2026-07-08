@@ -237,7 +237,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。`PLAN.md` 是从 `plan.json` 投影的人类视图；`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
-生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
+生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。
+
+生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
 
 `plan.json` 语义规则：
 
@@ -294,13 +296,13 @@ UI 任务投影规则：
 
 每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
-写入 `plan.json` 后，必须立即运行：
+写入 `plan.json` 后，必须立即运行本产物结构校验：
 
 ```bash
-python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json" --initial
+python "${pluginPath}/hooks/plan_writer.py" validate --feature "${feature}" --structure
 ```
 
-校验通过后，再生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json`。必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json`，按模板结构输出，不得先自由生成再依赖 validator 反复修字段。
+结构校验通过后，再生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json`。必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json`，再通过 `smoke_plan_writer.py init/add-test/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。
 
 `SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 与 TDD 的克制粒度：每个案例只描述一个站在公开 seam 上的 vertical slice，必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码，不批量设计覆盖想象行为的测试矩阵。
 
@@ -317,7 +319,7 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 - 冒烟案例可覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号，但必须按场景拆成多条 SMK，每条只覆盖一个 vertical slice；不要用它替代单测/E2E。
 - 不得把冒烟命令复制进 `plan.json.tasks[].validationCommands`。`validationCommands` 是强门禁，必须快、稳、可重复；`SMOKE_TEST_PLAN.json` 是旁路风险信号，失败不阻断 `code_done`。
 
-写入 `SMOKE_TEST_PLAN.json` 后，必须通过本阶段 artifact validator；按 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.md` 的结构从 `plan.json` 投影输出 `PLAN.md`，冒烟计划可另行投影为人类摘要但不作为机器事实源。
+写入 `SMOKE_TEST_PLAN.json` 后，运行 `python "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`，冒烟计划可另行投影为人类摘要但不作为机器事实源。推进 checkpoint 前必须运行 `python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"`；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代阶段门禁。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘
@@ -338,6 +340,7 @@ python "${pluginPath}/hooks/plan_json.py" validate "${pluginWorkspace}/${project
 ## 整体完成条件
 - `design.md`、`plan.json`、`PLAN.md`、`SMOKE_TEST_PLAN.json` 已完成
 ```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```

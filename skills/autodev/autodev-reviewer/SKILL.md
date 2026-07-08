@@ -33,6 +33,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 最终 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS` 后，使用统一脚本写入 `requirements_eval_done`：
 
 ```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.review --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
@@ -43,7 +44,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 1. **主 agent 写 completion proposal。**按 references/schemas.md 创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/completion-proposal.json`。proposal 应描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。跨仓库任务必须写 `affected_repositories`；单仓库任务可以省略该字段。
 2. **主 agent 启动独立 reviewer agent。**使用 subagent 机制启动独立 reviewer。启动子代理，并把 references/reviewer-agent.md 中的 reviewer 指令作为 prompt。启动子agent附带用户提供的原始 PRD 路径列表；没有则写 none，供 reviewer 与 proposal.prd_references 交叉核对。如果流程希望 reviewer 核对用户主动输入的仓库是否被遗漏，启动 prompt 还必须附带 `User repository references`；否则 reviewer 只以 completion proposal、执行清单输入、可选 PRD 和真实仓库状态为依据。
 3. **reviewer 自己获取真实状态。**reviewer 必须自行通过工具获取仓库状态，并读取执行清单列出的 proposal.md、specs/**/*.md、design.md、plan.json、evidence/EVIDENCE.jsonl；PRD 只在用户或 completion proposal 显式引用时读取。若 completion proposal 有 `affected_repositories`，reviewer 必须对每个仓库逐个执行 git status/diff/log 等只读检查；若没有，则按旧流程把当前 cwd 当作唯一仓库。不要依赖主 agent 预先生成的 diff snapshot 或规格摘要。
-4. **reviewer 直接写结构化评审事实源。**reviewer 必须直接写入机器事实源 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json`，可同步写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md` 作为人类报告。
+4. **reviewer 通过 writer 写结构化评审事实源。**reviewer 必须使用 `${pluginPath}/hooks/review_findings_writer.py` 写入机器事实源 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REVIEW_FINDINGS.json`，禁止直接整份写入或编辑该 JSON；可同步写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md` 作为人类报告。
 5. **主 agent 读取 verdict 并分支。**如果 `REVIEW_FINDINGS.json.verdict` 是 `PASS` 或 `PASS_WITH_WARNINGS`，报告 verdict 与 `REVIEW_FINDINGS.json` 路径后结束本阶段。如果 verdict 是 `FAIL`，主 agent 必须按 `REVIEW_FINDINGS.json.findings` 中的 blockers/high severity 项做最小修复，更新 `completion-proposal.json`，重新启动独立 reviewer，直到 verdict 变为 `PASS` 或 `PASS_WITH_WARNINGS`。如果 verdict 是 `DEGRADED`，停止并报告独立审查未成立。
 
 ## 严格职责边界
@@ -169,6 +170,8 @@ FAIL 修复规则：
 - 如果修复需要超出当前任务范围、缺少信息、工具不可用或存在人工决策点，停止并报告 blocker，不要伪造 PASS。
 
 `REVIEW_FINDINGS.json` 是下游机器主入口，只放结构化评审 verdict 与发现项，不和 Markdown 做文本对账。顶层 `verdict` 必须是 `PASS` / `PASS_WITH_WARNINGS` / `FAIL` / `DEGRADED`；每条 finding 必须包含 `taskId`、`specRefs`、`evidenceIds`、`severity`、`message`，可带 `suggestedCheckpoint`。若 finding 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须同时投影 `uiRequired=true`、`pageRefs`、`interactionRefs`、`visualSourceRefs`；非 UI finding 不要伪造 UI refs：
+
+写完 `REVIEW_FINDINGS.json` 后必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.review --feature "${feature}"`。writer 的本地 `validate` 只做结构检查，不能替代 stage gate。
 
 ```json
 {

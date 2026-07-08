@@ -144,11 +144,13 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ## 生成 VERIFY_DECISION.json 与可选 VERIFY_REPORT.md
 
-必须先将裁定结果写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_DECISION.json`。可同步写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 作为人类汇总。**不得**在 VERIFY_REPORT.md 中夹带新的命令输出、新的测试代码、新的 HTTP 响应证据；结构化裁决来自 `UNIT_TEST_RESULT.json`、`E2E_RESULT.json` 与 `evidence/EVIDENCE.jsonl`，Markdown/log 只提供人类叙述与定位补充。
+必须先使用 `${pluginPath}/hooks/verify_decision_writer.py` 将裁定结果写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_DECISION.json`，禁止直接整份写入或编辑该 JSON。可同步写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 作为人类汇总。**不得**在 VERIFY_REPORT.md 中夹带新的命令输出、新的测试代码、新的 HTTP 响应证据；结构化裁决来自 `UNIT_TEST_RESULT.json`、`E2E_RESULT.json` 与 `evidence/EVIDENCE.jsonl`，Markdown/log 只提供人类叙述与定位补充。
 
 写入 `VERIFY_DECISION.json` 后，必须使用 `hooks/evidence_store.py append` 向 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` 追加一条 verify 汇总 evidence；这是 feature 产物目录下的证据流，不得写到业务代码仓库根目录或当前 cwd 下的临时 `.autobizdevops`。append 工具会默认从 `PLUGIN_WORKSPACE/PROJECT_DIR` 定位产物根；手写命令时可显式加 `--workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"`。记录本阶段 verdict、引用的 evidenceIds、覆盖的 specRefs/designRefs。verify 阶段仍不得运行测试命令；这里追加的是汇总结论证据，不是新的测试执行证据。
 
-`VERIFY_DECISION.json` 是机器事实源。JSON 只保留裁决字段，Markdown 只给人读；不要做 Markdown ↔ JSON 文本对账。`scenarioCoverage` 的行必须来自 specs 中定义的全部 `SCN-xxx` 分母，未覆盖的场景显式写 `missing` 或 `manual`，不能只列命中项。`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence；顶层 `passedScenarioRefs` / `failedScenarioRefs` / `manualVerificationRefs` / `missingScenarioRefs` 必须和 `scenarioCoverage` 的行级 verdict 保持一致，且 `verdict` 与 `nextCheckpoint` 必须匹配。每行还必须写 `uiApplicability`：UI scenario 的自动验证结论为 `required`，需人工验证/缺失时分别为 `manual` / `missing`；非 UI scenario 为 `not_applicable`。顶层 `uiSummary` 必须从 `UI_CONTEXT.json` 和行级裁决投影，不手写漂移。
+`VERIFY_DECISION.json` 是机器事实源。JSON 只保留裁决字段，Markdown 只给人读；不要做 Markdown ↔ JSON 文本对账。优先使用 `verify_decision_writer.py init --from-specs`、`derive-scenario-coverage`、`update-scenario` 与 `set-verdict`。`scenarioCoverage` 的行必须来自 specs 中定义的全部 `SCN-xxx` 分母，未覆盖的场景显式写 `missing` 或 `manual`，不能只列命中项。`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence；顶层 `passedScenarioRefs` / `failedScenarioRefs` / `manualVerificationRefs` / `missingScenarioRefs` 必须和 `scenarioCoverage` 的行级 verdict 保持一致，且 `verdict` 与 `nextCheckpoint` 必须匹配。每行还必须写 `uiApplicability`：UI scenario 的自动验证结论为 `required`，需人工验证/缺失时分别为 `manual` / `missing`；非 UI scenario 为 `not_applicable`。顶层 `uiSummary` 必须由 writer 从 `UI_CONTEXT.json` 和行级裁决投影，不手写漂移。
+
+推进 `verify_done` 或 `needs_fix` 前必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.verify --feature "${feature}"`。writer 的本地 `validate` 只做结构检查，不能替代 stage gate。
 
 ```json
 {
@@ -268,8 +270,9 @@ specs/[capability]/spec.md / Requirement / Scenario
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `verify_done`。本轮验收裁决与历史证据写入 `VERIFY_DECISION.json`；`VERIFY_REPORT.md` 若存在只作人类摘要。
 
 ```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.verify --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint verify_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature ${feature})
+CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 **输出提示：**
@@ -311,6 +314,7 @@ checkpoint=verify_done → Dev 阶段结束
 ```
 
 ```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.verify --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```

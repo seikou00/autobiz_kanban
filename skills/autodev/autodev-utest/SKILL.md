@@ -276,7 +276,9 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - 仍需人工确认的项。
 - 若失败，返回用户确认。
 
-同时必须写入 `UNIT_TEST_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。若 target 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`；非 UI target 不要伪造 UI 标记。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。
+同时必须通过 `${pluginPath}/hooks/unit_test_result_writer.py` 写入 `UNIT_TEST_RESULT.json` 作为机器事实源，禁止直接整份写入或编辑该 JSON。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。若 target 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`；非 UI target 不要伪造 UI 标记。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。优先使用 `unit_test_result_writer.py init --from-plan`、`add-target/update-target`、`derive-scenario-coverage` 与 `set-verdict`。
+
+推进 `unit_test_done` 前必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.utest --feature "${feature}"`。writer 的本地 `validate` 只做结构检查，不能替代 stage gate。
 
 ```json
 {
@@ -315,6 +317,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 推进命令：
 
 ```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.utest --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```

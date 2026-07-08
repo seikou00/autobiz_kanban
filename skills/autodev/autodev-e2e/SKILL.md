@@ -45,7 +45,9 @@ E2E 用例的稳定 ID 规则：
 
 每次 E2E 命令或人工驱动执行结束后，必须把运行结果追加到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` 末尾；这是 feature 产物目录下的证据流，不得写到业务代码仓库根目录或当前 cwd 下的临时 `.autobizdevops`。使用 `hooks/evidence_store.py append` 写入 taskId（优先来自 `plan.json`）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并把运行日志尾部作为 evidence tail 保存；append 工具会默认从 `PLUGIN_WORKSPACE/PROJECT_DIR` 定位产物根，手写命令时可显式加 `--workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"`。`ev_XXXX` 按全流顺序自动递增，不按阶段重排；`E2E_RESULT.json` 的每个用例结论都必须引用对应 `ev_XXXX`。不得插入旧记录前、重编号、截断、重写、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`。若 append 或 checkpoint 报 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，必须恢复被改写前的 `EVIDENCE.jsonl` / `EVIDENCE.index.json`，无法恢复时停止并向用户报告。
 
-同时必须写入 `E2E_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 case 必须用 `specRefs` 回链 Requirement / Scenario，并引用对应 `evidenceIds`。若 case 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`、`pageRefs`、`interactionRefs`、`visualSourceRefs`；非 UI case 不要伪造 UI refs。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。
+同时必须通过 `${pluginPath}/hooks/e2e_result_writer.py` 写入 `E2E_RESULT.json` 作为机器事实源，禁止直接整份写入或编辑该 JSON。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 case 必须用 `specRefs` 回链 Requirement / Scenario，并引用对应 `evidenceIds`。若 case 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`、`pageRefs`、`interactionRefs`、`visualSourceRefs`；非 UI case 不要伪造 UI refs。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。优先使用 `e2e_result_writer.py init`、`add-case/update-case`、`derive-scenario-coverage` 与 `set-verdict`；caseId 由 writer 生成 `E2E-{feature}-001` 形式。
+
+推进 `e2e_done` 或 `needs_fix` 前必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.e2e --feature "${feature}"`。writer 的本地 `validate` 只做结构检查，不能替代 stage gate。
 
 ```json
 {
@@ -108,11 +110,13 @@ E2E 通过后推进到 `e2e_done`；若存在明确失败并需要回流，必�
 若失败用例不是 UI 用例，`failedUiRefs` 可省略；若失败指向 UI 页面、交互或视觉输入，必须引用 `UI_CONTEXT.json` 中真实存在的 ID。
 
 ```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.e2e --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.e2e --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
