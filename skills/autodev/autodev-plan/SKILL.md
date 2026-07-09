@@ -241,15 +241,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。复杂任务优先用 `plan_writer.py add-task --body-stdin` 通过 stdin 传入单个 task JSON object，避免把大量字段塞进一条超长命令，也避免为每个 task 落盘临时 JSON 文件；简单任务才使用逐项 CLI 参数。只有运行环境无法传 stdin 时，才允许用 `--body-file` 作为降级方式，且 task 片段只能写入 feature 目录下的 `.tmp/plan_writer/tasks/`，成功写入 `plan.json` 后必须清理，不得放在 feature 根目录或作为正式产物保留。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
+生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。复杂任务优先用 `plan_writer.py add-task --body-stdin` 通过 pipe/stdin 传入单个完整 task JSON object，不要裸运行后等待交互式输入，避免把大量字段塞进一条超长命令，也避免为每个 task 落盘临时 JSON 文件；简单任务才使用逐项 CLI 参数。只有运行环境无法传 stdin 时，才允许用 `--body-file` 作为降级方式，且 task 片段只能写入 feature 目录下的 `.tmp/plan_writer/tasks/`，成功写入 `plan.json` 后必须清理，不得放在 feature 根目录或作为正式产物保留。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
 
-`--body-stdin` 必须通过 pipe/stdin 传入完整 task JSON object，不要裸运行后等待交互式输入。示例：
-
-```bash
-printf '%s\n' '{"id":"T001","title":"实现单一后端闭环","goal":"用户可观察结果明确","scope":{"modules":["backend"],"entrypoints":["POST /api/example"],"pages":[],"dataObjects":[]},"implementationPoints":["接入请求校验与服务调用","补齐边界验证"],"acceptanceCriteria":["SCN-001 的行为可验证"],"nonGoals":["不修改无关页面"],"specRefs":["specs/capability/spec.md#REQ-001","specs/capability/spec.md#SCN-001"],"designRefs":["design.md#API-001","design.md#D-001"],"apiIds":["API-001"],"dataIds":[],"decisionIds":["D-001"],"validationCommands":[{"command":"mvn -q -Dtest=ExampleTest test"}]}' | python "${pluginPath}/hooks/plan_writer.py" add-task --feature "${feature}" --body-stdin
-```
-
-每次 `add-task` 成功前都会执行单任务结构与粒度校验；如果 writer 返回 `oversized_plan_task_must_split`，必须立即把该 task 拆成更小的 vertical slice 后重新写入，不得先继续生成后续任务；如果返回 `missing_plan_task_split_rationale` / `invalid_plan_task_split_rationale`，优先拆分，只有确实属于同一验证闭环且无法独立验证时才补充具体 `splitRationale` 后重试。
+`add-task` 会在写入前执行单任务结构与粒度校验；粒度错误处理见下方「与 writer 的衔接」。
 
 `plan.json` 语义规则：
 
@@ -285,27 +279,53 @@ UI 任务投影规则：
 - 若任务引用的 visual source 未显式写 `route`，但 `type=high_fidelity_html` 且存在 HTML 输入，必须写 `absolute-html`；若 `type=standard_html` 且存在 HTML 输入，写 `standard-html`。
 - 仅当 `UI_CONTEXT.uiRequired=true` 且没有可用 HTML/设计稿 visual source 时，才使用 `spec-driven-ui`；若 visual source 标记需要 HTML 但文件不可读，写 `missing-html`。
 
-任务拆分粒度：
+### Plan Task 拆分算法（生成 plan.json 前必走）
 
-- 默认按 specs 中的 Requirement / Scenario、用户主流程或验收闭环拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件、测试文件等代码层步骤拆任务；禁止按文件/分层机械拆，但必须按用户可观察的 vertical slice 拆。
-- 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
-- 只有在满足以下条件之一时才继续拆分：可独立验证；风险或决策明显不同；存在明确依赖顺序；可被多个需求复用的基础能力；任务过大导致执行者无法在一次编码闭环中完成。
-- 任务数不是首要目标：8-15 个清晰 vertical slice 优于 5 个巨型 capability task。超过 15 个任务时才检查是否把代码步骤误拆成任务；禁止为了压低任务数合并独立场景。
-- 任务过大必须拆，除非写出合格 `splitRationale`：单个 task 覆盖 SCN 数 `>5`、`apiIds` 数 `>2`、`uiRefs.pageRefs` 数 `>1`、`uiRefs.interactionRefs` 数 `>3` 时，必须在 `splitRationale` 点名相关 SCN/API/PAGE/UIX ID，并说明为什么这些场景/API/页面/交互无法独立验证、只能共享同一验证闭环。不得用“同一模块”“同一 capability”“同一页面”“同一列表”“不同组成部分”“实现方便”“一起实现”等空泛理由。硬上限不可豁免：SCN 数 `>8`、apiIds 数 `>3`、uiRefs.pageRefs 数 `>2`、uiRefs.interactionRefs 数 `>4` 时必须继续拆分，不能用 `splitRationale` 放行。
-- 不要生成“新增 DTO”“修改 Controller”“补 Mapper”“写单测”这类单纯代码操作任务。
-- 不要生成只有“实现某能力”“补充验证”“更新相关代码”这类泛泛描述的任务；任务内部必须写到执行者能直接开工的中等粒度。
-- 每个任务必须包含「涉及范围」「执行要点」「验证命令」「预期结果」：
-  - 「涉及范围」写模块、入口、服务、模型、配置、测试等方向；能确定真实路径时写路径，不能确定时写现有代码中要定位的范围，不要凭空发明文件。
-  - 「执行要点」写入 `implementationPoints`，必须 2-6 条，每条是一个可执行动作或关键约束，覆盖实现切入点、关键改动、复用现有能力、边界/失败路径和测试补充。
-  - 「验证命令」必须是执行者（大模型）能直接在命令行运行、并自行判读结果的命令：自动化测试（如 `mvn test -Dtest=XxxTest`）、构建、lint，或接口级的 `curl`/HTTP 脚本断言。每个 task 的 `validationCommands` 必须窄、快、可单独运行，禁止每个 task 都绑定全量 `mvn test` / `npm test`。**禁止任何需要人参与的验证**——不写"手工""人工验证""用 Postman 调一下""在浏览器里点一下"这类步骤。HTTP 接口用 `curl ... | 断言`（或等价脚本/集成测试）覆盖，而不是描述人去点 Postman。若当前确实缺少可自动执行的验证手段，则在本任务里补一个最小可运行的测试/脚本，并把该测试/脚本的运行命令写进「验证命令」。
-  - 「预期结果」写可观察结果，不要只写“通过”。
-- 执行要点要写到可直接开工的可执行程度：钉住真实文件/符号/入口、真实命令与预期结果；但不要拆成 2-5 分钟步骤、完整代码块、逐文件微任务或频繁 commit，PLAN 仍保持需求闭环任务粒度。
-- 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
-- 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
-- 任务拆分变化后必须重新检查 `SMOKE_TEST_PLAN.json`：冒烟案例的 `taskId` 不得继续绑定旧的巨型任务；优先一 task 一 SMK 或一关键 SCN 一 SMK。
-- specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖。不同 spec 文件里的 `SCN-001` 是不同场景，必须写完整 `specs/<capability>/spec.md#SCN-001` 路径，不能只写 `#SCN-001` 造成路径级覆盖缺失。
+核心：一个 task = 一个公开入口 + 一个用户可观察结果 + 一个可运行验证命令。默认先按 vertical slice 拆开，再按严格条件合并；不要先按 capability、模块或文件层合成巨型任务。
 
-每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
+1. 确认本轮实现范围
+   - 先按 Source Bundle 与当前 `implementationScope`（如存在）确认本轮 specs 分母；`backend_only` 时不要把已剥离的 UI 场景、页面或交互放进 task 覆盖矩阵，`frontend_only` 时不要把已剥离的后端 API/数据实现放进当前 task。
+   - 只从当前实现范围内的 `specs/**/*.md`、`design.md`、`UI_CONTEXT.json` 提取任务依据；不要从被剥离范围、PRD 余量或 Markdown 关键词反推额外任务。
+
+2. 建立 Scenario 覆盖矩阵
+   - 写 task 前，先在脑内或对话摘要中建立矩阵：`SCN / REQ / 用户动作或系统触发 / 可观察结果 / API / Data / Page / UIX / 验证命令或公开 seam / 风险或依赖`。
+   - 没有进入矩阵的 Scenario 不允许直接生成 task；矩阵中的每个 `SCN-xxx` 最终必须映射到某个 task 的 `specRefs`。
+
+3. 按验证闭环生成初始 task
+   - 默认按 specs 中的 Requirement / Scenario、用户主流程或验收闭环拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件、测试文件等代码层步骤拆任务；禁止按文件/分层机械拆，但必须按用户可观察的 vertical slice 拆。
+   - 不同用户动作、不同公开入口/API/页面/job/CLI、不同可观察结果、不同页面、不同数据模型/状态流/迁移风险、不同验证命令，默认拆成不同 task。
+   - 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
+   - 基础能力可以单独成 task，但必须服务于后续业务 vertical slice，并且 `validationCommands` 必须验证下游公开 seam。若只能验证工具类、DTO、Mapper 或内部函数，则并入第一个消费它的业务 task。
+
+4. 只有共享同一验证闭环时才允许合并
+   - 多个 SCN/API/PAGE/UIX 合并到一个 task，必须同时满足：同一触发动作、同一公开 seam、同一验证命令或同一组响应/页面断言、拆开会复制同一验证闭环、没有超过硬上限。
+   - 任务过大必须拆，除非写出合格 `splitRationale`：单个 task 覆盖 SCN 数 `>5`、`apiIds` 数 `>2`、`uiRefs.pageRefs` 数 `>1`、`uiRefs.interactionRefs` 数 `>3` 时，必须在 `splitRationale` 点名相关 SCN/API/PAGE/UIX ID，并说明为什么这些场景/API/页面/交互无法独立验证、只能共享同一验证闭环。
+   - 合格示例：`SCN-001、SCN-004、SCN-007 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。`
+   - 不得用“同一模块”“同一 capability”“同一页面”“同一列表”“不同组成部分”“实现方便”“一起实现”“顺手一起”等空泛理由。
+   - 硬上限不可豁免：SCN 数 `>8`、apiIds 数 `>3`、uiRefs.pageRefs 数 `>2`、uiRefs.interactionRefs 数 `>4` 时必须继续拆分，不能用 `splitRationale` 放行。
+
+5. 写入前预检每个 task
+   - `specRefs` 至少包含一个真实 `REQ-xxx` 和一个真实 `SCN-xxx`；不同 spec 文件里的 `SCN-001` 是不同场景，必须写完整 `specs/<capability>/spec.md#SCN-001` 路径，不能只写 `#SCN-001` 造成路径级覆盖缺失。
+   - 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
+   - 不要生成“新增 DTO”“修改 Controller”“补 Mapper”“写单测”这类单纯代码操作任务；不要生成只有“实现某能力”“补充验证”“更新相关代码”这类泛泛描述的任务。
+   - 每个任务必须包含「涉及范围」「执行要点」「验证命令」「预期结果」：
+     - 「涉及范围」写模块、入口、服务、模型、配置、测试等方向；能确定真实路径时写路径，不能确定时写现有代码中要定位的范围，不要凭空发明文件。
+     - 「执行要点」写入 `implementationPoints`，必须 2-6 条，每条是一个可执行动作或关键约束，覆盖实现切入点、关键改动、复用现有能力、边界/失败路径和测试补充。
+     - 「验证命令」必须是执行者（大模型）能直接在命令行运行、并自行判读结果的命令：自动化测试（如 `mvn test -Dtest=XxxTest`）、构建、lint，或接口级的 `curl`/HTTP 脚本断言。每个 task 的 `validationCommands` 必须窄、快、可单独运行，禁止每个 task 都绑定全量 `mvn test` / `npm test`。**禁止任何需要人参与的验证**——不写"手工""人工验证""用 Postman 调一下""在浏览器里点一下"这类步骤。HTTP 接口用 `curl ... | 断言`（或等价脚本/集成测试）覆盖，而不是描述人去点 Postman。若当前确实缺少可自动执行的验证手段，则在本任务里补一个最小可运行的测试/脚本，并把该测试/脚本的运行命令写进「验证命令」。
+     - 「预期结果」写可观察结果，不要只写“通过”。
+   - 执行要点要写到可直接开工的可执行程度：钉住真实文件/符号/入口、真实命令与预期结果；但不要拆成 2-5 分钟步骤、完整代码块、逐文件微任务或频繁 commit，PLAN 仍保持需求闭环任务粒度。
+   - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
+
+6. 生成 DAG 与覆盖检查
+   - 依赖只表达真实执行顺序：基础能力 task 可以被业务闭环 task 依赖，页面 task 可以依赖 API/data task；不要为了排列顺序把所有 task 串成链，能并行的 task 保持无依赖。
+   - 任务数不是首要目标：8-15 个清晰 vertical slice 优于 5 个巨型 capability task。超过 15 个任务时才检查是否把代码步骤误拆成任务；禁止为了压低任务数合并独立场景。
+   - specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
+   - 任务拆分变化后必须重新检查 `SMOKE_TEST_PLAN.json`：冒烟案例的 `taskId` 不得继续绑定旧的巨型任务；优先一 task 一 SMK 或一关键 SCN 一 SMK。
+
+与 writer 的衔接：
+
+- 先建立覆盖矩阵，再逐个 `add-task`；每确定一个 task 就立即调用 `plan_writer.py add-task`，不要批量写完后再等 `stage_gate` 兜底。
+- 每次 `add-task` 返回粒度错误时必须当场处理：`oversized_plan_task_must_split` 直接拆分；`missing_plan_task_split_rationale` / `invalid_plan_task_split_rationale` 优先拆分，只有确实属于同一验证闭环且无法独立验证时才补充具体 `splitRationale` 后重试。
 
 写入 `plan.json` 后，必须立即运行本产物结构校验：
 

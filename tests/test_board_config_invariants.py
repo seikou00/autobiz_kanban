@@ -493,6 +493,30 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         offenders = [phrase for phrase in stale_phrases if phrase in content]
         self.assertEqual(offenders, [], "autodev-plan skill must not treat PLAN.md as optional")
 
+    def test_plan_skill_requires_prewrite_task_splitting_algorithm(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "Plan Task 拆分算法（生成 plan.json 前必走）",
+            "一个 task = 一个公开入口 + 一个用户可观察结果 + 一个可运行验证命令",
+            "默认先按 vertical slice 拆开",
+            "implementationScope",
+            "建立 Scenario 覆盖矩阵",
+            "SCN / REQ / 用户动作或系统触发 / 可观察结果 / API / Data / Page / UIX / 验证命令或公开 seam",
+            "基础能力可以单独成 task",
+            "validationCommands` 必须验证下游公开 seam",
+            "只有共享同一验证闭环时才允许合并",
+            "oversized_plan_task_must_split",
+            "missing_plan_task_split_rationale",
+            "invalid_plan_task_split_rationale",
+            "不要批量写完后再等 `stage_gate` 兜底",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-plan skill must keep the pre-write task splitting algorithm: " + ", ".join(missing),
+        )
+
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:
         offenders: list[str] = []
         for context, node in _iter_nodes(_board_config()):
