@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from board_core.artifact_paths import has_glob, resolve_exact_relative_path
 
-GLOB_CHARS = frozenset("*?[")
 SPECS_GLOB_PATH = "specs/**/*.md"
 ARTIFACT_STATUS_LABELS = {
     "generated": "已生成",
@@ -14,7 +14,7 @@ ARTIFACT_STATUS_LABELS = {
 
 
 def _has_glob(path: str) -> bool:
-    return any(char in path for char in GLOB_CHARS)
+    return has_glob(path)
 
 
 def _relative_path(path: Path, workspace: Path) -> str:
@@ -47,7 +47,11 @@ def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
     matches = sorted(
         _relative_path(match, workspace)
         for match in feature_dir.glob(path)
-        if match.is_file() and match.suffix == ".md"
+        if (
+            match.is_file()
+            and match.suffix == ".md"
+            and resolve_exact_relative_path(feature_dir, match.relative_to(feature_dir)) is not None
+        )
     )
     entry: dict = {
         "id": artifact["id"],
@@ -70,7 +74,8 @@ def _scan_file_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
         "artifactLabel": _artifact_label(artifact),
         "path": _relative_path(artifact_path, workspace),
     }
-    if artifact_path.is_file():
+    exact_path = resolve_exact_relative_path(feature_dir, artifact["path"])
+    if exact_path is not None and exact_path.is_file():
         _set_artifact_status(entry, "generated")
     else:
         _set_artifact_status(entry, "missing")

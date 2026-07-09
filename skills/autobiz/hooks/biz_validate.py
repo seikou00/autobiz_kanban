@@ -23,6 +23,7 @@ from hooks.paths import (
     get_features_active_dir,
     get_plugin_output_workspace,
 )
+from board_core.artifact_paths import resolve_exact_relative_path
 from board_core.contracts import BoardConfigError, SkillContract, load_record_workflow_contracts
 from board_core.state_store import check_or_fix_state_sync
 
@@ -87,14 +88,19 @@ def _check_done_checkpoint(record: Dict[str, Any], contract: SkillContract, erro
 def _get_feature_dir(feature: Optional[str], workspace: Path) -> Optional[Path]:
     features_dir = get_features_active_dir(workspace)
     if feature:
-        d = features_dir / feature
-        return d if d.exists() else None
+        d = resolve_exact_relative_path(features_dir, feature)
+        return d if d is not None and d.is_dir() else None
     # 自动检测：若只有一个子目录，则使用该目录
     if features_dir.exists():
         subs = [d for d in features_dir.iterdir() if d.is_dir()]
         if len(subs) == 1:
             return subs[0]
     return None
+
+
+def _exact_file(feature_dir: Path, name: str) -> Optional[Path]:
+    path = resolve_exact_relative_path(feature_dir, name)
+    return path if path is not None and path.is_file() else None
 
 
 def _fail(message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -128,10 +134,10 @@ def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
             {"feature": slug, "skipped": True},
         )
 
-    discuss_md = feature_dir / "PRD_DISCUSS.md"
+    discuss_md = _exact_file(feature_dir, "PRD_DISCUSS.md")
     if "PRD_DISCUSS.md" in contract.required_outputs:
-        if not discuss_md.exists():
-            errors.append(f"PRD_DISCUSS.md 不存在: {discuss_md}")
+        if discuss_md is None:
+            errors.append(f"PRD_DISCUSS.md 不存在: {feature_dir / 'PRD_DISCUSS.md'}")
         else:
             content = discuss_md.read_text(encoding="utf-8")
             required_sections = ["需求摘要", "已确认结论", "问题清单", "待确认事项", "假设与风险"]
@@ -167,15 +173,15 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
             {"feature": slug, "skipped": True},
         )
 
-    discuss_md = feature_dir / "PRD_DISCUSS.md"
-    prd_md = feature_dir / "PRD.md"
+    discuss_md = _exact_file(feature_dir, "PRD_DISCUSS.md")
+    prd_md = _exact_file(feature_dir, "PRD.md")
     # 讨论稿存在性只在它仍属于本 Feature 契约的必需输入时检查；
     # custom 链未选 biz.discuss 时该输入已从 bundle 中移除。
-    if "PRD_DISCUSS.md" in contract.required_inputs and not discuss_md.exists():
-        errors.append(f"PRD_DISCUSS.md 不存在: {discuss_md}")
+    if "PRD_DISCUSS.md" in contract.required_inputs and discuss_md is None:
+        errors.append(f"PRD_DISCUSS.md 不存在: {feature_dir / 'PRD_DISCUSS.md'}")
 
-    if not prd_md.exists():
-        errors.append(f"PRD.md 不存在: {prd_md}")
+    if prd_md is None:
+        errors.append(f"PRD.md 不存在: {feature_dir / 'PRD.md'}")
     else:
         content = prd_md.read_text(encoding="utf-8")
         first_line = content.splitlines()[0].strip() if content.splitlines() else ""

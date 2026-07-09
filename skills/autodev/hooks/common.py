@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from board_core.artifact_paths import artifact_exists_exact, resolve_exact_relative_path  # noqa: E402
 from board_core.contracts import BoardConfigError, load_record_workflow_contracts, load_repo_workflow_contracts  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
 
@@ -56,17 +57,12 @@ class HookContext:
 
 
 def is_nonempty(path: Path) -> bool:
-    return path.is_file() and path.stat().st_size > 0
+    resolved = resolve_exact_relative_path(path.parent, path.name)
+    return resolved is not None and resolved.is_file() and resolved.stat().st_size > 0
 
 
 def artifact_exists(feature_dir: Path, name: str) -> bool:
-    if any(char in name for char in "*?["):
-        return any(path.is_file() and path.stat().st_size > 0 for path in feature_dir.glob(name))
-
-    path = feature_dir / name
-    if path.is_dir():
-        return any(child.is_file() and child.stat().st_size > 0 for child in path.rglob("*"))
-    return is_nonempty(path)
+    return artifact_exists_exact(feature_dir, name)
 
 
 def read_text(path: Path) -> str:
