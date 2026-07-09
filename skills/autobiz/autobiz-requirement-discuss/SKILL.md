@@ -24,7 +24,8 @@ version: v1.2.1701
 - 问题清单生成：将问题按优先级整理成结构化清单
 - 对话式引导：通过逐轮问答收集补充信息并确认关键决策
 - 详细需求提取：从原始需求文档提取每个任务的**业务逻辑、字段定义、筛选条件、状态流转、验收标准等信息**，形成可开发的完整描述
-- 讨论稿沉淀：结合需求描述和用户讨论，并回检优化，把循环过程稳定写入
+- 讨论稿沉淀：结合需求描述和用户讨论，并回检优化，把循环过程稳定写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
+
 ## 准备工作
 
 ### 获取feature状态
@@ -41,9 +42,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
  `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md`
    - 需求内容评估准则，包含检查项和优化建议
 
- `{pluginPath}/skills/autobiz/references/ui-context.md`
-   - `UI_CONTEXT.json` 字段格式、ID 规则、UI/非 UI 模板和高保真输入记录方式
-
 执行流程时，必须以评估准则作为判断依据，确保分析有据可依。
 
 ###  更新状态
@@ -55,11 +53,6 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_in_progre
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-## 缺失产物处理
-
-```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --plain
-```
 
 ## 工作流程
 
@@ -167,21 +160,8 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 
 【关键约束 - 必须先展示问题清单后并等待确认】
 
-**禁止假设用户确认需求没有问题**：需求已经很清楚所以跳过问题确认是**错误推理**。即使没有问题清单，也必须告知用户"需求检查完毕，未发现问题，是否确认进入下一阶段？"
+**禁止假设用户确认需求没有问题**： 需求已经很清楚所以跳过问题确认是**错误推理**。即使没有问题清单，也必须告知用户"需求检查完毕，未发现问题，是否确认进入下一阶段？"
 
-#### UI 范围收口
-
-- 写入或更新 `UI_CONTEXT.json` 前，必须先读取 `{pluginPath}/skills/autobiz/references/ui-context.md`，按其中模板和枚举生成，不要等校验失败后再读取 Python validator 反推格式。
-- 必须生成或更新 `UI_CONTEXT.json`，不要只在 `PRD_DISCUSS.md` 中用自然语言描述是否有页面。
-- `uiRequired` 默认可为 `false`，但必须通过 `decisionStatus` 区分 `defaulted` 与用户已确认。
-- 进入下一阶段前，必须向用户确认并记录：是否有页面、页面数或页面列表、核心交互、加载态、空态、错误态、成功态，以及是否存在高保真 HTML、标准 HTML、设计稿、Figma/MasterGo 或原型链接。
-- 若用户确认有页面、前端交互、设计稿、HTML、Figma/MasterGo 或原型链接，写 `uiRequired=true`，并尽量补 `pages[]`、`interactions[]`、`visualSources[]`。
-- 若用户确认本 feature 纯后端/纯规则/纯数据能力，写 `uiRequired=false`，并填写 `notApplicableReason`。
-- discuss/PRD 阶段不要编造 `capabilities[].specRefs`；REQ/SCN 由 specs 阶段定义并在 `decisionStatus=locked` 时回填。
-- 高保真 HTML、标准 HTML、设计稿、原型链接是独立设计输入，只写入 `visualSources[]`，不要混入需求正文作为行为契约。
-- 若用户确认存在高保真但暂未提供文件或链接，在 `PRD_DISCUSS.md` 的待确认事项中写明，并在 `visualSources[]` 中保留可追踪占位引用，例如 `path="frontend-html/<待提供>.html"`、`type="high_fidelity_html"`、`route="absolute-html"`、`required=true`；code 阶段会先引导用户提供，用户不提供时按无高保真流程继续。
-- 页面信息优先投到 `pages[]`：`name` 写页面名，`goal` 写页面目标，`states` 写 `loading` / `empty` / `error` / `success` 等可观察状态；交互信息投到 `interactions[]`，不要只写在 Markdown 段落里。
-- `UI_CONTEXT.json` 模板、枚举和 ID 格式只以 `ui-context.md` 为准，本技能正文不维护第二份 JSON 模板。
 
 ### 对话式引导并调整 `PRD_DISCUSS.md`
 
@@ -292,7 +272,6 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "$
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` — 已存在，格式符合 `ui-context.md`，且 UI 范围决策已结构化沉淀
 - `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 

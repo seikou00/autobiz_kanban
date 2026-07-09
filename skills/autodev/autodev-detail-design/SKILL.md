@@ -17,7 +17,7 @@ version: v1.2.1702
 
 - 不修改 board_core/board_config.json。
 - 不修改业务代码、测试代码、配置、迁移脚本或已有阶段产物。
-- 不重写 `proposal.md`、`specs/**/*.md`、`design.md` 或 `plan.json`；`PLAN.md` 若存在也只作人类视图，不得作为事实源。
+- 不重写 `proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md`。
 
 输出产物：
 
@@ -43,20 +43,20 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --plain
 ```
 
-读取输入（消费执行清单，进入本节点后可用 `--feature "${feature}" --plain` 取状态感知清单）：
+读取输入：
 
-- 按执行清单 `## 输入产物` 读取上游产物原件，按各自 `读取方式`读取
-- 从 `plan.json.tasks[]` 读取任务 DAG、taskId、deps、status、goal、scope、implementationPoints、acceptanceCriteria、nonGoals、splitRationale（若存在）、specRefs、designRefs、validationCommands、expectedFiles；不得只按 title 或 PLAN.md 人类摘要展开详细设计
+- 按读取proposal.md、specs/**/*.md、design.md、PLAN.md。
 - 与本 Feature 相关的现有业务代码、测试、配置和接口定义
 
-清单中任一标『未生成』的必需 input 出现时停止并提示先完成对应上游阶段；本 skill 不补写上游设计契约。
+`required_inputs` 中任一产物缺失时停止并提示先完成对应上游阶段（本节点仅在标准链启用 detail_design 决策后插入，design.md/PLAN.md 均为必需）；本 skill 不补写上游产物。
 
 ## 工作原则
 
-- **扎根代码现实。** 文件清单必须来自实际代码探索、plan.json 任务、design.md 决策和现有项目结构，不要凭空发明路径。
+- **扎根代码现实。** 文件清单必须来自实际代码探索、PLAN.md 任务、design.md 决策和现有项目结构，不要凭空发明路径。
 - **比 PLAN 更具体，但仍不编码。** 可以写文件级改动说明、伪代码、流程图和调用链；不得直接改实现文件。
 - **保留不确定性。** 无法确认的文件路径、接口字段、权限、数据模型、状态流必须标为待确认，不要写成硬结论。
 - **面向读者。**DETAIL_DESIGN.md 是给用户和后续编码者读的，应清楚说明“为什么改这里、怎么改、怎么流转、怎么验证”。
+- **按动态节点推进流程。** 完成后必须调用 update_checkpoint.py 推进到 `detail_design_done`；若用户不需要详细设计，应在 `plan_done` 选择 skip 并直接进入 code，而不是进入本 skill。
 
 ## 生成 DETAIL_DESIGN.md
 
@@ -65,7 +65,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 ````
 # 详细设计: [Feature 名称]
 
-来源: proposal.md + specs/**/*.md + design.md + plan.json + 现有代码探索
+来源: proposal.md + specs/**/*.md + design.md + PLAN.md + 现有代码探索
 状态: 可选设计产物
 创建时间: [ISO 日期时间]
 
@@ -74,7 +74,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 - **Feature:** ${feature}
 - **目标:** [本次改动要达成的结果]
 - **规格依据:** [列出 specs 中的 Requirement / Scenario]
-- **计划依据:** [列出 plan.json 中相关 taskId；可补充 PLAN.md 中的人类说明（若存在）]
+- **计划依据:** [列出 PLAN.md 中相关任务]
 
 ## 2. 整体实现流程
 

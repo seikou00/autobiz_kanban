@@ -1,7 +1,7 @@
 ---
 name: autobiz
 description: Biz 阶段统一入口。负责前置准入校验、流程编排、子技能路由与关键产出物脚本校验。所有 Biz 阶段工作应通过本入口进入。
-version: v1.1.1604
+version: v1.1.2609
 ---
 
 
@@ -35,7 +35,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 | 用户意图 | 当前状态要求 | 路由目标 |
 |---------|------------|---------|
 | 需求澄清、讨论需求、完善需求文档 | 无硬性前置 | `/autobiz-requirement-discuss` |
-| 生成正式 PRD、整理 PRD、PRD 定稿 | 契约含 `PRD_DISCUSS.md` 时必须先有收敛的讨论稿；契约不含时无此前置 | `/autobiz-prd-generate` |
+| 生成正式 PRD、整理 PRD、PRD 定稿 | `/autobiz-prd-generate` |
 
 **执行顺序约束**：
 
@@ -75,4 +75,3 @@ set PYTHONIOENCODING=utf-8 && python "${pluginPath}/skills/autobiz/hooks/biz_val
 
 1. 不允许跳过前置准入直接调用子技能
 2. 不允许仅通过 Markdown 勾选替代脚本校验
-3. 契约含 `PRD_DISCUSS.md` 时，不允许在讨论稿缺失时进入 `/autobiz-prd-generate`；契约不含讨论稿时（custom 链未选需求澄清节点），按 bundle 直接生成，不读取也不向用户索要讨论稿

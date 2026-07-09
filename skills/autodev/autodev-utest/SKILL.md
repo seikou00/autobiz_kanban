@@ -19,19 +19,12 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "
 
 核心目标：
 
-- 从执行清单列出的内容提取需要单测覆盖的行为，其中 JSON 为机器事实源。
+- 从 `proposal.md`、`specs/**/*.md`、`design.md`、`PLAN.md`、`REQUIREMENTS_EVAL.md` 提取需要单测覆盖的行为，其中 specs 是主要行为契约。
 - 为当前 feature 生成或补齐单元测试。
 - 逐个运行测试，保留原始测试日志。
 - 对失败进行根因归类。
 - 在边界内做最小修复：测试代码问题修测试，当前 feature 的业务实现问题可修生产代码。
-- 生成 `UNIT_TEST_RESULT.json`，为 E2E 与 Verify 阶段提供机器事实源；`UNIT_TEST_REPORT.md` 只是可选人类报告。
-
-## 稳定 ID 规范
-
-- Test Plan 中的测试目标使用 `UT-001`、`UT-002` ...
-- Coverage Matrix 中的 Source / Requirement / Scenario 必须使用稳定引用：`specs/<capability>/spec.md#REQ-001`、`#SCN-001`、`design.md#API-001`。
-- `UNIT_TEST_RESULT.json` 中的 targets、scenarioCoverage 与 evidenceIds 必须保持同一组 ID；`UNIT_TEST_REPORT.md` 若生成，也应投影同一组 ID。
-- 新建测试目标继续递增，不允许重用已删除或已完成的 ID。
+- 生成 `UNIT_TEST_REPORT.md`，为 E2E 与 Verify 阶段提供证据。
 
 ## 执行主体
 
@@ -66,23 +59,18 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
 ```
 
-读取输入（消费执行清单）：
-
-- 按「流程契约」一节取本 Feature 的执行清单，读取 `## 输入产物` 列出的上游产物原件，按各自 `读取方式` 抽取重点。
-- 标『未生成』的可选 input 按其 `缺失处理`（降级）继续，不要硬等；清单未列出的产物不读不等。
+读取输入：
+- 项目相关约束
 - 与当前 feature 相关的源码、已有测试、构建配置
 
 输出产物：
 
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json`
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`（append-only 证据流）
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
 - `.autobizdevops/state.json` 与自动生成视图 `.autobizdevops/STATE.md`
 
 禁止修改：
 
-- 执行清单列出的任何 input
 - 本节点 outputs 之外的其他阶段产物
 - 与当前 feature 无关的业务代码
 - 生产代码中的测试专用入口、测试专用分支、伪造实现
@@ -98,7 +86,7 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 1. 已有或新生成的单元测试能稳定复现失败。
 2. 已确认失败不是测试代码、mock、fixture、命令或环境问题。
-3. 失败行为能映射到 `specs/**/*.md`、`design.md` 或 `REVIEW_FINDINGS.json` 中的当前 feature 契约。
+3. 失败行为能映射到 `specs/**/*.md`、`design.md` 或 `REQUIREMENTS_EVAL.md` 中的当前 feature。
 4. 已定位到当前 feature 直接相关的最小代码区域。
 5. 修复不需要改变需求、接口契约、数据模型或跨模块设计。
 6. 修复后必须重跑精确失败测试，并重跑受影响测试类或模块。
@@ -124,11 +112,10 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 ### 前置检查
 
-- 确认执行清单中的产物存在。
+- 确认上游产物存在。
 - 读取项目测试约定。
 - 识别构建工具：Maven、Gradle、npm、pnpm、yarn、pytest、go test 等。不要假设一定是 Java/Maven。
 
-执行清单中任一产物缺失时，保持 checkpoint 不变，向用户列出缺失文件后结束。
 
 ### 写入开始 checkpoint
 
@@ -139,12 +126,14 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ### 建立单测计划
 
-生成测试矩阵，优先沉淀到 `UNIT_TEST_RESULT.json.targets[]`；若生成 `UNIT_TEST_REPORT.md`，可同步写入其 `## Test Plan`：
+从输入产物中提取测试所需的行为契约、覆盖重点、风险与受影响范围。
+
+生成测试矩阵，写入 `UNIT_TEST_REPORT.md` 的 `## Test Plan`：
 
 ```markdown
 | ID | Source | Behavior | Test Target | Priority | Status |
 |----|--------|----------|-------------|----------|--------|
-| UT-001 | specs/foo/spec.md#REQ-001 / #SCN-001 | ... | FooServiceTest#should... | P0 | planned |
+| UT-001 | specs/foo/spec.md / Scenario | ... | FooServiceTest#should... | P0 | planned |
 ```
 
 优先级：
@@ -163,7 +152,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 2. 选择最小测试入口，优先测试真实行为。
 3. Mock 只在系统边界用（外部 API / DB / 时间 / 随机 / 文件系统）；绝不 mock 自己的类或内部协作者，也不得只测试 mock 行为。边界规则与可测性设计（DI / SDK 式接口）见 `${pluginPath}/skills/references/test-quality.md`。
 4. 写入一个测试方法或一个最小测试文件。
-5. 在 `UNIT_TEST_RESULT.json.targets[]` 立刻追加或更新该测试目标的状态；`UNIT_TEST_REPORT.md` 若生成，再同步人类视图。
+5. 在 `UNIT_TEST_REPORT.md` 立刻追加该测试目标的状态。
 
 若当前行为是新需求或缺陷修复，优先走 red-green：
 
@@ -172,9 +161,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 3. 确认测试因预期原因失败。
 4. 再进入最小修复。
 
-若当前行为已经由实现支持，测试可能首次运行即通过。此时必须在报告中标记为 `characterization_pass`，不能伪造 red 阶段。**此路径是同义反复（tautological）高发区**：不要对着实现把断言写成它的镜像；期望值必须来自独立事实源（spec 的验收结果 / 已知常量 / 手算样例），绝不按代码的算法重算——否则测试构造上恒过、永不与代码分歧。
+若当前行为已经由实现支持，测试可能首次运行即通过。此时必须在报告中标记为 `characterization_pass`，不能伪造 red 阶段。
 
-### 执行精确测试
+### Step 5: 执行精确测试
 
 必须优先运行精确到测试方法或最小测试文件的命令，例如：
 
@@ -190,8 +179,6 @@ pytest tests/test_foo.py::test_rejects_empty_name
 ```text
 ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log
 ```
-
-每次测试命令结束后，还必须用 `hooks/evidence_store.py append` 向 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` 末尾追加 validation evidence；这是 feature 产物目录下的证据流，不得写到业务代码仓库根目录或当前 cwd 下的临时 `.autobizdevops`。append 工具会默认从 `PLUGIN_WORKSPACE/PROJECT_DIR` 定位产物根；手写命令时可显式加 `--workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"`。记录 taskId（必须来自 `plan.json.tasks[].id`，无 `plan.json` 契约时来自本阶段建立的轻量任务 ID）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并将输出尾部写入 evidence tail 文件。`ev_XXXX` 由 append 工具按当前流末尾自动递增；如果 code 阶段已写到 `ev_0014`，单测阶段追加 `ev_0015` 是正确顺序，不得为了按阶段分组而插入到旧记录前、重排、重编号、删除旧记录、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`。不得截断或重写 `EVIDENCE.jsonl`；报告中的 Evidence 列优先引用新增的 `ev_XXXX`。若 append 或 checkpoint 报 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，说明证据流已被改写或 index 与流不一致；不得运行 `evidence_store.py index` 或手改 `EVIDENCE.index.json` 绕过，必须先恢复被改写前的 `EVIDENCE.jsonl` / `EVIDENCE.index.json`，无法恢复时停止并向用户报告。
 
 日志中至少保留：
 
@@ -230,7 +217,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 
 ### 生成最终报告
 
-可同步生成 `UNIT_TEST_REPORT.md` 作为人类报告；若生成，建议包含以下章节：
+`UNIT_TEST_REPORT.md` 必须包含以下章节：
 
 ```markdown
 # Unit Test Report
@@ -256,11 +243,11 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 ## Handoff
 ```
 
-`Coverage Matrix` 至少要映射 specs Requirement / Scenario 或 design 契约到测试方法，并使用稳定 ID：
+`Coverage Matrix` 至少要映射 specs Requirement / Scenario 或 design 契约到测试方法：
 
 ```markdown
-| Source | Requirement / Scenario | Test | Result | Evidence |
-|--------|------------------------|------|--------|----------|
+| Source | Requirement | Test | Result | Evidence |
+|--------|-------------|------|--------|----------|
 ```
 
 `Fix Attempts` 必须列出每一次修复：
@@ -275,42 +262,16 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - E2E 阶段应重点覆盖的链路。
 - 仍需人工确认的项。
 - 若失败，返回用户确认。
-
-同时必须写入 `UNIT_TEST_RESULT.json` 作为机器事实源。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。若 target 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`；非 UI target 不要伪造 UI 标记。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。
-
-```json
-{
-  "version": 1,
-  "verdict": "PASS",
-  "scenarioCoverage": [
-    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
-  ],
-  "targets": [
-    {
-      "targetId": "UT-001",
-      "taskId": "T001",
-      "uiRequired": true,
-      "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
-      "evidenceIds": ["ev_0001"],
-      "result": "PASS",
-      "command": "pytest tests/test_cap.py::test_happy_path",
-      "coverage": {"lines": 12}
-    }
-  ]
-}
-```
-
-### 分支决策
+### Step 9: 分支决策
 
 可以推进 `unit_test_done` 的条件：
 
 - P0 单测目标全部 PASS。
 - P1 单测目标 PASS，或有明确可接受原因并标记 `PASS_WITH_WARNINGS`。
-- `UNIT_TEST_RESULT.json` 与 `test-output.log` 均已写入。
-- `evidence/EVIDENCE.jsonl` 已追加本阶段 validation evidence，完整性校验通过。
+- `UNIT_TEST_REPORT.md` 与 `test-output.log` 均已写入。
 - 所有业务代码修复都有对应失败测试锚点和重跑通过证据。
 - 扩大验证命令已运行，并在报告中记录结果。
-- `UNIT_TEST_RESULT.json.verdict` 为 `PASS` 或 `PASS_WITH_WARNINGS`，且每个 target 带 `taskId`、`specRefs`、`evidenceIds`、`result`、`command`。
+- 报告 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS`。
 
 推进命令：
 
@@ -338,10 +299,10 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] 已建立 Test Plan。
 - [ ] 已生成或补齐单测。
 - [ ] 已运行精确测试并记录到 `test-output.log`。
-- [ ] 已将单测运行结果 append 到 `evidence/EVIDENCE.jsonl`，并在报告中引用 evidenceId。
+- [ ] 失败均已归因。
 - [ ] 允许范围内的最小修复均已验证。
 - [ ] 已执行扩大验证。
-- [ ] `UNIT_TEST_RESULT.json` 已写入，JSON 是下游机器主入口。
+- [ ] `UNIT_TEST_REPORT.md` 包含必需章节和 verdict。
 - [ ] 成功时已推进 `unit_test_done`。
 
 **Skill 完成。**

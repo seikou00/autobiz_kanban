@@ -1,15 +1,17 @@
 {
-  "name": "AutobizDevOps_Plugin_Kanban",
-  "version": "1.1.1_v0604",
+  "name": "AutobizDevOps_Plugin_Kanban_latest",
+  "version": "1.0.79",
   "description": "不再是自动进度流程，增强了与用户交互的过程，需要用户进行交互进行开发",
   "author": {
     "name": "CmbCowork Team",
     "email": "cowork@example.com"
   },
   "license": "MIT",
-  "keywords": ["AUTOBIZDEVOPS","kanban"],
+  "keywords": [
+    "AUTOBIZDEVOPS",
+    "kanban"
+  ],
   "skills": "skills",
   "mcpServers": ".mcp.json",
-  "hooks": "hooks/hooks.json",
-  "useScenario": "应用开发"
+  "hooks": "hooks/hooks.json"
 }

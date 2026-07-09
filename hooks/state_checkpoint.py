@@ -7,6 +7,8 @@ import contextlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -40,6 +42,8 @@ from paths import ensure_dir, get_feature_hook_log_path  # noqa: E402
 STATE_PATH_SUFFIX = (".autobizdevops", "STATE.md")
 STATE_JSON_PATH_SUFFIX = (".autobizdevops", "state.json")
 BLOCK_EXIT_CODE = 2
+MAVEN_COMPILE_TIMEOUT_SECONDS = 290
+MAVEN_OUTPUT_LIMIT = 4000
 LOG_PATH = Path(tempfile.gettempdir()) / "check_state_done_hook.log"
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 PLUGIN_ID = "AUTOBIZDEVOPS-PLUGIN"
@@ -527,6 +531,63 @@ def validate_lifecycle(
     return errors
 
 
+def features_entering_code_done(old_map: dict[str, str], new_map: dict[str, str]) -> list[str]:
+    return [
+        feature
+        for feature in sorted(set(old_map) & set(new_map))
+        if old_map.get(feature) == "code_in_progress" and new_map.get(feature) == "code_done"
+    ]
+
+
+def tail_output(stdout: str, stderr: str) -> str:
+    combined = "\n".join(part for part in [stdout.strip(), stderr.strip()] if part)
+    if len(combined) <= MAVEN_OUTPUT_LIMIT:
+        return combined
+    return combined[-MAVEN_OUTPUT_LIMIT:]
+
+
+def validate_maven_compile(cwd: Path, features: list[str]) -> list[str]:
+    if not features:
+        return []
+
+    feature_list = ", ".join(features)
+    if not (cwd / "pom.xml").is_file():
+        return [f"Feature '{feature_list}' 进入 code_done 前编译校验失败: workspace 根目录缺少 pom.xml"]
+
+    mvn = shutil.which("mvn")
+    if not mvn:
+        return [f"Feature '{feature_list}' 进入 code_done 前编译校验失败: 未找到 mvn 命令"]
+
+    try:
+        result = subprocess.run(
+            [mvn, "compile"],
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=MAVEN_COMPILE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = tail_output(error.stdout or "", error.stderr or "")
+        detail = f"\nMaven 输出尾部:\n{output}" if output else ""
+        return [
+            f"Feature '{feature_list}' 进入 code_done 前编译校验超时: mvn compile 超过 "
+            f"{MAVEN_COMPILE_TIMEOUT_SECONDS} 秒{detail}"
+        ]
+    except OSError as error:
+        return [f"Feature '{feature_list}' 进入 code_done 前编译校验失败: 无法执行 mvn compile: {error}"]
+
+    if result.returncode != 0:
+        output = tail_output(result.stdout, result.stderr)
+        detail = f"\nMaven 输出尾部:\n{output}" if output else ""
+        return [
+            f"Feature '{feature_list}' 进入 code_done 前编译校验失败: mvn compile 退出码 "
+            f"{result.returncode}{detail}"
+        ]
+
+    return []
+
+
 def payload_state_path(payload: dict) -> Path | None:
     tool_input = payload.get("tool_input", {})
     file_path = tool_input.get("filePath") or tool_input.get("file_path") or tool_input.get("path", "")
@@ -619,9 +680,53 @@ def run_autodev_lifecycle(payload: dict) -> int:
     return 0
 
 
+def run_code_compile(payload: dict) -> int:
+    state_path = payload_state_path(payload)
+    if state_path is None:
+        return 0
+
+    workspace_root = state_path.parent.parent
+    old_map = parse_state_rows(get_current_content(state_path))
+    new_content, edit_errors = build_new_content(
+        payload,
+        state_path,
+        error_subject="code_done 前编译条件",
+        include_state_in_missing_error=False,
+    )
+    new_map = parse_state_rows(new_content)
+    compile_features = features_entering_code_done(old_map, new_map)
+    changes = [(feature, old_map.get(feature), new_map.get(feature)) for feature in compile_features]
+    errors = [
+        *edit_errors,
+        *validate_maven_compile(workspace_root, compile_features),
+    ]
+    if errors:
+        append_checkpoint_hook_logs(
+            workspace_root,
+            changes,
+            hook_id="code-compile",
+            label="code_done 编译校验",
+            errors=errors,
+            event_status="warning",
+            exit_code=0,
+            message="code_done 编译校验失败但不阻止 checkpoint 更新:\n" + "\n".join(errors),
+        )
+        return 0
+    append_checkpoint_hook_logs(
+        workspace_root,
+        changes,
+        hook_id="code-compile",
+        label="code_done 编译校验",
+        errors=[],
+        exit_code=0,
+    )
+    return 0
+
+
 HOOK_COMMANDS = {
     "state-done": run_state_done,
     "autodev-lifecycle": run_autodev_lifecycle,
+    "code-compile": run_code_compile,
 }
 
 
