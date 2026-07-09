@@ -183,6 +183,8 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
         "evidenceIds": [],
         "blockers": [],
     }
+    if args.split_rationale and args.split_rationale.strip():
+        task["splitRationale"] = args.split_rationale.strip()
     if ui_required:
         task["uiRefs"] = {
             "pageRefs": _split_values(args.page_ref) or _split_values(args.page),
@@ -608,6 +610,7 @@ def _add_task_fields(parser: argparse.ArgumentParser, *, require_title: bool = T
     parser.add_argument("--decision-id", action="append")
     parser.add_argument("--validation-command", action="append")
     parser.add_argument("--expected-file", action="append")
+    parser.add_argument("--split-rationale")
 
 
 def _list_command(sub: argparse._SubParsersAction, name: str, field: str, *, remove: bool = False) -> None:

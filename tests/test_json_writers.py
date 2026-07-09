@@ -617,6 +617,56 @@ class JsonWriterTests(unittest.TestCase):
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(plan["tasks"], [])
 
+    def test_plan_writer_add_task_cli_accepts_split_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            rationale = "SCN-001、SCN-003、SCN-006 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--task-id",
+                "T001",
+                "--title",
+                "large grouped task",
+                "--goal",
+                "deliver many related scenarios",
+                "--implementation-point",
+                "update behavior",
+                "--implementation-point",
+                "cover boundary",
+                "--acceptance-criterion",
+                "behavior is observable",
+                "--non-goal",
+                "do not change unrelated behavior",
+                "--spec-ref",
+                "specs/cap/spec.md#REQ-001",
+                *[
+                    item
+                    for index in range(1, 7)
+                    for item in ("--spec-ref", f"specs/cap/spec.md#SCN-{index:03d}")
+                ],
+                "--design-ref",
+                "design.md#D-001",
+                "--decision-id",
+                "D-001",
+                "--validation-command",
+                "echo ok",
+                "--split-rationale",
+                rationale,
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
+            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["tasks"][0]["id"], "T001")
+            self.assertEqual(plan["tasks"][0]["splitRationale"], rationale)
+
     def test_plan_writer_counts_same_scenario_id_by_spec_path_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
