@@ -11,6 +11,8 @@ from typing import Iterable
 BASE_WORKFLOW_PROFILE = "standard"
 LEGACY_BASE_WORKFLOW_PROFILE = "base"
 BASE_WORKFLOW_TEMPLATE = "standard"
+LEGACY_CUSTOM_WORKFLOW_TEMPLATE = "custom"
+LEGACY_CUSTOM_REQUIRED_NODES = ("dev.code", "ops.archive")
 ALLOWED_TEMPLATE_KINDS = frozenset({"profile", "nodeSubset", "custom"})
 # 对外展示的模板类型名（内部 kind 保留编译语义，profile 对外呈现为 classical）。
 TEMPLATE_TYPE_BY_KIND = {"profile": "classical"}
@@ -147,6 +149,32 @@ def normalize_workflow_template(template: str | None) -> str:
     return cleaned or BASE_WORKFLOW_TEMPLATE
 
 
+def _legacy_custom_template_spec(template: str) -> dict | None:
+    if template != LEGACY_CUSTOM_WORKFLOW_TEMPLATE:
+        return None
+    return {
+        "id": LEGACY_CUSTOM_WORKFLOW_TEMPLATE,
+        "kind": "custom",
+        "label": "自定义（旧版）",
+        "description": "兼容旧 state.json 中已创建的 custom 流程；不再作为新建模板展示。",
+        "nodes": [],
+        "requiredNodes": list(LEGACY_CUSTOM_REQUIRED_NODES),
+    }
+
+
+def workflow_template_uses_nodes(base_config: dict, template: str | None) -> bool:
+    """Whether this template stores a per-record workflowNodes list.
+
+    The configured template registry intentionally does not expose the retired
+    custom template, but existing state records with workflowTemplate=custom
+    still need to retain their workflowNodes field.
+    """
+    template = normalize_workflow_template(template)
+    if _legacy_custom_template_spec(template) is not None:
+        return True
+    return configured_workflow_templates(base_config).get(template, {}).get("kind") == "custom"
+
+
 def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
     """Validated workflow.templates registry; standard is always present."""
     workflow = base_config.get("workflow")
@@ -258,6 +286,8 @@ def resolve_template_subset(
     template = normalize_workflow_template(template)
     registry = configured_workflow_templates(base_config)
     spec = registry.get(template)
+    if spec is None:
+        spec = _legacy_custom_template_spec(template)
     if spec is None:
         known = ", ".join(sorted(registry))
         raise WorkflowCompileError(f"unknown workflow template: {template}; known: {known}")

@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -37,9 +37,9 @@ from board_core.state_store import (  # noqa: E402
     StateRecords,
     check_or_fix_state_sync,
     render_state_md,
-    state_json_content_from_records,
+    state_json_content_from_records_preserving_raw,
     state_rows_from_records,
-    write_state_records,
+    write_state_records_preserving_raw,
 )
 from board_core.workflow import (  # noqa: E402
     landing_checkpoint_after_skip,
@@ -79,6 +79,7 @@ class CheckpointUpdate:
     new_checkpoint: str | None
     workflow_profile: str = BASE_WORKFLOW_PROFILE
     workflow_decisions: dict[str, str] | None = None
+    raw_records: dict[str, object] = field(default_factory=dict)
 
     @property
     def errors(self) -> tuple[str, ...]:
@@ -251,6 +252,23 @@ def prepare_checkpoint_update(
             new_checkpoint=None,
             workflow_profile=workflow_profile or BASE_WORKFLOW_PROFILE,
             workflow_decisions=workflow_decision_updates or {},
+            raw_records=sync_result.raw_records,
+        )
+    if sync_result.record_errors.get(feature):
+        return CheckpointUpdate(
+            ok=False,
+            state_path=state_path,
+            state_json_path=state_json_path,
+            content="",
+            state_json_content="",
+            transition_errors=tuple(sync_result.record_errors[feature]),
+            lifecycle_errors=(),
+            records=sync_result.records,
+            old_checkpoint=None,
+            new_checkpoint=None,
+            workflow_profile=workflow_profile or BASE_WORKFLOW_PROFILE,
+            workflow_decisions=workflow_decision_updates or {},
+            raw_records=sync_result.raw_records,
         )
 
     old_records = sync_result.records
@@ -361,7 +379,11 @@ def prepare_checkpoint_update(
     if not update_errors:
         try:
             content = render_state_md(new_records, workspace=workspace)
-            state_json_content = state_json_content_from_records(new_records, workspace=workspace)
+            state_json_content = state_json_content_from_records_preserving_raw(
+                new_records,
+                raw_records=sync_result.raw_records,
+                workspace=workspace,
+            )
         except ValueError as exc:
             render_errors.extend(str(exc).splitlines())
 
@@ -403,6 +425,7 @@ def prepare_checkpoint_update(
         new_checkpoint=new_map.get(feature),
         workflow_profile=resolved_profile,
         workflow_decisions=resolved_decisions,
+        raw_records=sync_result.raw_records,
     )
 
 
@@ -424,6 +447,8 @@ def prepare_skip_update(
     state_path = workspace / STATE_RELATIVE_PATH
     state_json_path = workspace / STATE_JSON_RELATIVE_PATH
 
+    raw_records: dict[str, object] = {}
+
     def failed(
         *transition_errors: str,
         old_checkpoint: str | None = None,
@@ -444,6 +469,7 @@ def prepare_skip_update(
             new_checkpoint=new_checkpoint,
             workflow_profile=profile,
             workflow_decisions=decisions or {},
+            raw_records=raw_records,
         )
 
     if not feature.strip():
@@ -456,10 +482,13 @@ def prepare_skip_update(
         return failed("--skip-node 不能为空")
 
     sync_result = check_or_fix_state_sync(workspace, fix=True)
+    raw_records = sync_result.raw_records
     if not sync_result.state_exists:
         return failed(f"state.json 不存在且无法从 STATE.md 迁移: {state_json_path}")
     if sync_result.errors:
         return failed(*sync_result.errors)
+    if sync_result.record_errors.get(feature):
+        return failed(*sync_result.record_errors[feature])
 
     old_records = sync_result.records
     old_record = old_records.get(feature)
@@ -529,7 +558,11 @@ def prepare_skip_update(
     render_errors: list[str] = []
     try:
         content = render_state_md(new_records, workspace=workspace)
-        state_json_content = state_json_content_from_records(new_records, workspace=workspace)
+        state_json_content = state_json_content_from_records_preserving_raw(
+            new_records,
+            raw_records=sync_result.raw_records,
+            workspace=workspace,
+        )
     except ValueError as exc:
         render_errors.extend(str(exc).splitlines())
 
@@ -563,6 +596,7 @@ def prepare_skip_update(
         new_checkpoint=new_checkpoint,
         workflow_profile=profile,
         workflow_decisions=decisions,
+        raw_records=sync_result.raw_records,
     )
 
 
@@ -803,7 +837,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_logs()
         return 1
     if not args.dry_run:
-        write_state_records(workspace, result.records)
+        write_state_records_preserving_raw(workspace, result.records, raw_records=result.raw_records)
         _write_logs()
     return 0
 

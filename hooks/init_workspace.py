@@ -64,7 +64,7 @@ from board_core.state_store import (  # noqa: E402
     parse_state_md_records,
     render_state_md,
     state_json_content_from_records,
-    write_state_records,
+    write_state_records_preserving_raw,
 )
 from board_core.workflow_closure import solve_node_closure  # noqa: E402
 from board_core.workflow_compiler import (  # noqa: E402
@@ -273,7 +273,12 @@ def create_feature(
         sys.exit(1)
     try:
         base_config = load_board_config(BOARD_CONFIG_PATH)
-        template_spec = configured_workflow_templates(base_config).get(workflow_template, {})
+        template_registry = configured_workflow_templates(base_config)
+        template_spec = template_registry.get(workflow_template)
+        if template_spec is None:
+            known = " / ".join(sorted(template_registry))
+            print(f"ERROR: workflow template 已不可用于新建 Feature: {workflow_template}; 可用模板: {known}", file=sys.stderr)
+            sys.exit(1)
         effective_nodes = list(workflow_nodes or [])
         for required_id in template_spec.get("requiredNodes", []):
             if required_id not in effective_nodes:
@@ -310,7 +315,7 @@ def create_feature(
         for error in sync_result.errors:
             print(f"  - {error}", file=sys.stderr)
         sys.exit(1)
-    if feature in sync_result.records:
+    if feature in sync_result.records or feature in sync_result.raw_records:
         print(f"ERROR: Feature 已存在于 state.json: {feature}", file=sys.stderr)
         sys.exit(1)
 
@@ -319,7 +324,7 @@ def create_feature(
     record["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     records = {slug: dict(existing) for slug, existing in sync_result.records.items()}
     records[feature] = record
-    write_state_records(workspace, records)
+    write_state_records_preserving_raw(workspace, records, raw_records=sync_result.raw_records)
 
     return {
         "initialized": feature_dir.is_dir(),
@@ -339,7 +344,7 @@ def main() -> None:
     parser.add_argument(
         "--workflow-template",
         default=BASE_WORKFLOW_TEMPLATE,
-        help="Workflow template for createFeature: standard | lean | custom",
+        help="Workflow template for createFeature: standard | lean",
     )
     parser.add_argument(
         "--workflow-nodes",

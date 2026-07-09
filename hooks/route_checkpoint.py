@@ -189,10 +189,12 @@ def _workflow_choice_payload(
 def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
     workspace = workspace.resolve()
     result = load_state_json_records_result(workspace)
-    errors = list(result.errors)
+    errors = list(result.fatal_errors)
     if not result.exists:
         errors.append(f"state.json 未找到: {get_state_json_path(workspace)}")
     record = result.records.get(feature)
+    if record is None:
+        errors.extend(result.record_errors.get(feature, []))
     if record is None and not errors:
         errors.append(f"feature '{feature}' 未在 state.json 中找到")
     if errors or record is None:

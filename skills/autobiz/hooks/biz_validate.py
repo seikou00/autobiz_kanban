@@ -50,6 +50,9 @@ def _resolve_feature_context(feature: str, workspace: Path):
         errors.extend(sync_result.errors)
         return None, None, errors
     record = sync_result.records.get(feature)
+    if record is None and sync_result.record_errors.get(feature):
+        errors.extend(sync_result.record_errors[feature])
+        return None, None, errors
     if record is None:
         errors.append(f"state.json 中 Feature '{feature}' 不存在")
         return None, None, errors

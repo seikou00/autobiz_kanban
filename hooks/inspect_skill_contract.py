@@ -226,9 +226,11 @@ def _find_feature_contract(
     result = load_state_json_records_result(workspace)
     if not result.exists:
         raise BoardConfigError(f"state.json 未找到: {workspace}")
-    if result.errors:
-        raise BoardConfigError("; ".join(result.errors))
+    if result.fatal_errors:
+        raise BoardConfigError("; ".join(result.fatal_errors))
     record = result.records.get(feature)
+    if record is None and result.record_errors.get(feature):
+        raise BoardConfigError("; ".join(result.record_errors[feature]))
     if record is None:
         raise BoardConfigError(f"feature '{feature}' 未在 state.json 中找到")
     contracts = load_record_workflow_contracts(repo_root, record, workspace=workspace)

@@ -24,6 +24,7 @@ if str(HOOKS_DIR) not in sys.path:
 
 from board_core.artifacts import scan_artifacts  # type: ignore[import-untyped]
 from board_core.contracts import artifact_dicts  # type: ignore[import-untyped]
+from board_core.state_store import check_or_fix_state_sync, state_rows_from_records  # type: ignore[import-untyped]
 from board_core.workflow_compiler import (  # type: ignore[import-untyped]
     BASE_WORKFLOW_PROFILE,
     BASE_WORKFLOW_TEMPLATE,
@@ -36,8 +37,6 @@ from board_core.workflow_compiler import (  # type: ignore[import-untyped]
 )
 from board_core.state import (  # type: ignore[import-untyped]
     find_feature_dir,
-    load_state_md,
-    load_state_records,
 )
 from board_core.workflow import (  # type: ignore[import-untyped]
     derive_current_node_status,
@@ -153,7 +152,9 @@ def _hook_log_refs(workspace: Path, feature: str, feature_dir: Path | None = Non
 
 def run_mode(workspace: Path, feature: str, config: dict) -> int:
     """Handle --mode run."""
-    state_records, state_record_errors, _state_record_exists = load_state_records(workspace)
+    sync_result = check_or_fix_state_sync(workspace, fix=True)
+    state_records = sync_result.records
+    state_record_errors: list[str] = []
     record = state_records.get(feature, {})
     workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
     workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
@@ -170,7 +171,12 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     suffix_states = config["checkpointSuffixState"]
 
     # Read state.json; STATE.md is repaired as a generated view when needed.
-    state_rows, state_errors, state_exists = load_state_md(workspace)
+    state_rows = state_rows_from_records(state_records)
+    state_errors = [
+        *sync_result.errors,
+        *sync_result.record_errors.get(feature, []),
+    ]
+    state_exists = sync_result.state_exists
     checkpoint = state_rows.get(feature)
     feature_dir = find_feature_dir(workspace, feature)
     has_feature_dir = feature_dir is not None
@@ -266,7 +272,8 @@ def _collect_project_runs(
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
-    state_records, _state_errors, _state_exists = load_state_records(project_workspace)
+    sync_result = check_or_fix_state_sync(project_workspace, fix=True)
+    state_records = sync_result.records
     feature_names = sorted(state_records.keys())
 
     runs: list[dict] = []
