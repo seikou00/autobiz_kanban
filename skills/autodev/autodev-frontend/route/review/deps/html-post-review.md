@@ -129,7 +129,7 @@ description: HTML 路线生成框架代码之后的回检依赖。用于对已�
 
 检查是否遗漏了更合适的实现来源，但前提是**项目中必须有真实证据**：
 
-- 项目 `AGENTS.md` 指定的公共组件库路径 / `architecture/components/`
+- 系统约束指定的公共组件库路径 / `architecture/components/`
 - 本地 `components` / `src/components`
 - 当前工程已安装且在真实源码中已使用过的组件库或图表库
 - 项目已有图表封装、统计卡片、图标包装层

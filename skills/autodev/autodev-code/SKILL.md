@@ -16,7 +16,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 ```
 
 
-开始任何业务代码修改前，根据 AGENTS.md 与项目 manifest 生成模块编译清单 `.autobizdevops/modules_compile.json`：
+开始任何业务代码修改前，根据 系统约束（如有） 与项目 manifest 生成模块编译清单 `.autobizdevops/modules_compile.json`：
 
 ```json
 {
@@ -27,7 +27,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 }
 ```
 
-识别规则：优先遵守 AGENTS.md 声明的构建方式；否则按项目 manifest 的单/多模块入口生成；`path` 用模块目录绝对路径，`compile_command` 以该目录为 cwd 执行（命令本身不要再写 `cd`）；无法确定时停止并询问用户，不得开始编码。
+识别规则：优先遵守 系统约束声明的构建方式；否则按项目 manifest 的单/多模块入口生成；`path` 用模块目录绝对路径，`compile_command` 以该目录为 cwd 执行（命令本身不要再写 `cd`）；无法确定时停止并询问用户，不得开始编码。
 
 ## 缺失产物处理
 ```bash
@@ -66,13 +66,13 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
-6. 执行任务「验证方法」（缺失则基于 AGENTS.md / 项目脚本选最小可行验证并记回任务）。通过 → 状态「完成」+ 记录验证；失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
+6. 执行任务「验证方法」（缺失则基于 系统约束 / 项目脚本选最小可行验证并记回任务）。通过 → 状态「完成」+ 记录验证；失败 → 代码问题就继续最小修复重跑，环境/依赖/需求不清/契约冲突则停止、状态「失败」、记原因与建议回流阶段。
 
 > 一致性：任务的依据在对应 input 里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 
 ### 4. 全部任务完成后的验证
 
-队列无「待做」「进行中」后，跑项目级验证（优先 AGENTS.md / Java/Maven 至少编译）。失败回到相关任务，不推进。通过后：
+队列无「待做」「进行中」后，跑项目级验证（优先 系统约束 / Java/Maven 至少编译）。失败回到相关任务，不推进。通过后：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done

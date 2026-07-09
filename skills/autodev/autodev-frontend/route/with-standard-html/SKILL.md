@@ -43,7 +43,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 技能。适�
 ## 2. 读取顺序
 
 1. 读取原始 HTML
-2. 读取项目 `AGENTS.md`、`architecture/`、组件说明、相似页面和真实源码证据
+2. 读取项目约束、`architecture/`、组件说明、相似页面和真实源码证据
 3. 转交给 `deps/standard-html-parser.md`
    - 该依赖已作为 `standard-html-parser` 承载标准 HTML 转 React 工程代码能力，是本路线主执行入口
    - 如决定使用或可能使用 Ant Design，按需读取 `references/ant-design-conversion.md`，并由 `standard-html-parser` 在编码前完成映射矩阵、实现后完成覆盖审计

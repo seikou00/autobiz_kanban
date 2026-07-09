@@ -33,7 +33,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 ## 3. 读取顺序
 
 1. 读取原始 HTML 文件或用户提供的 HTML 内容。
-2. 从 HTML 来源目录和目标工程目录向上查找并读取 `AGENT.md` / `AGENTS.md`，更近的规则优先。
+2. 从 HTML 来源目录和目标工程目录向上查找并读取 系统约束，更近的规则优先。
 3. 读取项目 `architecture/`、组件说明、API 说明和相似页面。
 4. 扫描真实源码确认导入路径、组件导出、组件用法、样式方案、路由结构、包管理器和已安装依赖。
 5. 如决定使用 Ant Design，读取 `../references/ant-design-conversion.md`；若该文件不存在，则按本文 `§7 Ant Design 转换规则` 执行。
@@ -95,7 +95,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 
 组件来源严格遵循根 `SKILL.md`：
 
-1. 项目 `AGENTS.md` 指定的公共组件库。
+1. 系统约束指定的公共组件库。
 2. 项目 `architecture/components/`。
 3. 项目本地 `components` / `src/components`。
 4. 当前工程已安装并在源码中真实使用的组件库。
@@ -137,7 +137,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 
 按以下顺序判断：
 
-1. 项目 `AGENTS.md` 或组件说明已有组件库规则时，先遵守项目规则。
+1. 系统约束或组件说明已有组件库规则时，先遵守项目规则。
 2. 用户明确要求 Ant Design，或 HTML 明显是后台 / 产品 / 管理端 UI 时，使用 Ant Design 映射标准控件。
 3. 新 React 项目中，如果 HTML 包含表单、表格、导航、反馈、仪表盘控件，默认可使用 Ant Design。
 4. 现有项目未安装 Ant Design 且用户未明确要求时，新增依赖前必须按根技能规则向用户确认。

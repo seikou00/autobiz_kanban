@@ -87,7 +87,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 | 优先级 | 来源 |
 | --- | --- |
-| 1 | 项目 `AGENTS.md` |
+| 1 | 系统约束 |
 | 2 | 其它项目说明文档 |
 | 3 | 项目真实源码结构（必要时生成 `output/scan-result.json`） |
 | 4 | 技能内参考文档 |
@@ -95,14 +95,14 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 规则：
 
 - 应用结构、API、技术栈、路由/菜单/权限、状态管理、样式体系都先看项目说明文档。
-- `AGENTS.md` 中的项目约束优先于本技能规则；如冲突，以 `AGENTS.md` 为准，除非系统级指令另有要求。
+- 系统约束中的项目约束优先于本技能规则；如冲突，以 系统约束为准，除非系统级指令另有要求。
 - 没有项目说明时再扫源码，不要凭技能默认值覆盖真实工程模式。
 
 ### 组件来源优先级
 
 | 优先级 | 来源 |
 | --- | --- |
-| 1 | 项目 `AGENTS.md` 中给出的公共组件库路径与使用规则 |
+| 1 | 系统约束中给出的公共组件库路径与使用规则 |
 | 2 | 项目 `architecture/components/` |
 | 3 | 项目本地 `components` / `src/components` |
 | 4 | 当前工程已安装并实际在用的组件库 |
@@ -112,9 +112,9 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 规则：
 
-- `AGENTS.md` 是项目总说明与组件策略的第一入口。
-- 如果 `AGENTS.md` 已经明确约定组件、页面目录、布局骨架或实现方式，优先遵守。
-- 如果 `AGENTS.md` 给出公共组件库路径，先按该路径扫描真实组件源码与使用方式；通常是当前工程上一级目录的 `components/`。
+- 系统约束 是项目总说明与组件策略的第一入口。
+- 如果 系统约束 已经明确约定组件、页面目录、布局骨架或实现方式，优先遵守。
+- 如果 系统约束 给出公共组件库路径，先按该路径扫描真实组件源码与使用方式；通常是当前工程上一级目录的 `components/`。
 - 文档层命中时，先按说明理解用途、props、导入方式与示例，再用真实源码确认导出与路径。
 - 没有源码、导出或真实使用示例时，不能因为规则命中就强行使用。
 - 如果当前工程缺少所需组件库，按 §依赖安装确认规则 执行。
@@ -132,7 +132,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 | 顺序 | 证据 |
 | --- | --- |
-| 1 | 项目 `AGENTS.md` |
+| 1 | 系统约束 |
 | 2 | 其它项目说明文档 |
 | 3 | `output/scan-result.json` |
 | 4 | 真实源码扫描结果 |
@@ -150,7 +150,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 | 优先级 | 来源 |
 | --- | --- |
-| 1 | `AGENTS.md` 或其它项目说明中定义的图标组件 / 图标规则 |
+| 1 | 系统约束 或其它项目说明中定义的图标组件 / 图标规则 |
 | 2 | 项目本地 icon 组件、svg 资产、iconfont、统一包装层 |
 | 3 | 已安装且在真实源码中实际使用过的图标库 |
 | 4 | React + AntD 的 `@ant-design/icons` |
@@ -169,7 +169,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 | 优先级 | 来源 |
 | --- | --- |
-| 1 | `AGENTS.md` 或其它项目说明中定义的图表组件 / 图表规则 |
+| 1 | 系统约束 或其它项目说明中定义的图表组件 / 图表规则 |
 | 2 | 项目本地 chart 组件、可视化包装层、统计卡片与图表容器 |
 | 3 | 当前工程已安装并且在真实源码中实际使用过的图表库 |
 | 4 | 用户明确指定的图表库 |
@@ -211,7 +211,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 1. 确认 Feature、workflow profile、checkpoint 和 `CODE_WORKSPACE`。
 2. 读取 `inspect_skill_contract.py` 输出的 Source Bundle / Method Bundle。
-3. 优先读取 `{CODE_WORKSPACE}/AGENTS.md`，再读取项目说明、组件文档和目标代码。
+3. 优先读取 系统约束，再读取项目说明、组件文档和目标代码。
 4. 确认用户提供了 HTML 文件、HTML 片段或可读取 HTML 内容；否则停止要求补充 HTML。
 5. 按路由规则进入 `route/with-absolute-html/SKILL.md` 或 `route/with-standard-html/SKILL.md`。
 6. 生成或修改与项目结构匹配的前端代码。
