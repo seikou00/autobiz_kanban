@@ -288,23 +288,35 @@ UI 任务投影规则：
    - 只从当前实现范围内的 `specs/**/*.md`、`design.md`、`UI_CONTEXT.json` 提取任务依据；不要从被剥离范围、PRD 余量或 Markdown 关键词反推额外任务。
 
 2. 建立 Scenario 覆盖矩阵
-   - 写 task 前，先在脑内或对话摘要中建立矩阵：`SCN / REQ / 用户动作或系统触发 / 可观察结果 / API / Data / Page / UIX / 验证命令或公开 seam / 风险或依赖`。
+   - 写 task 前，必须在对话中输出覆盖矩阵，不得只在脑内跳过。矩阵列：`SCN / REQ / 用户动作或系统触发 / 可观察结果 / API / Data / Page / UIX / 验证命令或公开 seam / 风险或依赖`。
    - 没有进入矩阵的 Scenario 不允许直接生成 task；矩阵中的每个 `SCN-xxx` 最终必须映射到某个 task 的 `specRefs`。
 
-3. 按验证闭环生成初始 task
+3. 按验证闭环生成候选任务分组表
    - 默认按 specs 中的 Requirement / Scenario、用户主流程或验收闭环拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件、测试文件等代码层步骤拆任务；禁止按文件/分层机械拆，但必须按用户可观察的 vertical slice 拆。
    - 不同用户动作、不同公开入口/API/页面/job/CLI、不同可观察结果、不同页面、不同数据模型/状态流/迁移风险、不同验证命令，默认拆成不同 task。
    - 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
    - 基础能力可以单独成 task，但必须服务于后续业务 vertical slice，并且 `validationCommands` 必须验证下游公开 seam。若只能验证工具类、DTO、Mapper 或内部函数，则并入第一个消费它的业务 task。
+   - 调用 `add-task` 前，必须先输出候选任务分组表，不得边想边 `add-task`。分组表列：`候选 Task / SCN 数 / API 数 / Page 数 / UIX 数 / implementationPoints 数 / validationCommands / 拆分结论 / splitRationale 草稿`。
+   - `拆分结论` 只能写 `通过`、`需拆分`、`可合并(附 splitRationale)`。`需拆分` 行不允许进入 `add-task`；`可合并(附 splitRationale)` 行必须在分组表中写出完整 `splitRationale` 草稿，后续首次 `add-task` 时原样带入 task JSON，不得临场改写。
 
 4. 只有共享同一验证闭环时才允许合并
    - 多个 SCN/API/PAGE/UIX 合并到一个 task，必须同时满足：同一触发动作、同一公开 seam、同一验证命令或同一组响应/页面断言、拆开会复制同一验证闭环、没有超过硬上限。
-   - 任务过大必须拆，除非写出合格 `splitRationale`：单个 task 覆盖 SCN 数 `>5`、`apiIds` 数 `>2`、`uiRefs.pageRefs` 数 `>1`、`uiRefs.interactionRefs` 数 `>3` 时，必须在 `splitRationale` 点名相关 SCN/API/PAGE/UIX ID，并说明为什么这些场景/API/页面/交互无法独立验证、只能共享同一验证闭环。
+   - 任务超过软阈值时默认必须继续拆分；`splitRationale` 只允许用于已经按公开入口、用户动作、可观察结果和验证命令拆到最小闭环后，仍因同一请求、同一权限/状态矩阵或同一响应断言无法独立验证的少数例外。
+   - 上述例外同样适用于 API/PAGE/UIX 超软阈值但未超硬上限的情况。单个 task 覆盖 SCN 数 `>5`、`apiIds` 数 `>2`、`uiRefs.pageRefs` 数 `>1`、`uiRefs.interactionRefs` 数 `>3` 时，必须在 `splitRationale` 点名相关 SCN/API/PAGE/UIX ID，并说明为什么这些场景/API/页面/交互无法独立验证、只能共享同一验证闭环。
+   - 标记 `可合并(附 splitRationale)` 前必须逐项确认：不同触发动作已拆开；不同公开 seam 已拆开；不同可观察结果已拆开；不同 validation command 已拆开。任一项未满足时不得标记可合并。
    - 合格示例：`SCN-001、SCN-004、SCN-007 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。`
+   - 状态/操作矩阵例外示例：`SCN-006、SCN-007、SCN-008、SCN-009、SCN-010、SCN-011、SCN-012 均由同一个操作权限计算入口返回操作集合，并由同一组状态-操作矩阵断言验证；拆开会复制同一验证闭环。`
+   - 不合格示例：`这些都是同一个操作权限判断逻辑。`
    - 不得用“同一模块”“同一 capability”“同一页面”“同一列表”“不同组成部分”“实现方便”“一起实现”“顺手一起”等空泛理由。
    - 硬上限不可豁免：SCN 数 `>8`、apiIds 数 `>3`、uiRefs.pageRefs 数 `>2`、uiRefs.interactionRefs 数 `>4` 时必须继续拆分，不能用 `splitRationale` 放行。
 
-5. 写入前预检每个 task
+5. 写入前两档计数预检
+   - `拆分结论=通过` 的候选 task 必须满足：SCN `<=5`、apiIds `<=2`、pageRefs `<=1`、interactionRefs `<=3`、`implementationPoints` 为 2-6 条、至少 1 条可独立运行的 `validationCommands`。
+   - `拆分结论=可合并(附 splitRationale)` 的候选 task 必须满足：未超过硬上限（SCN `<=8`、apiIds `<=3`、pageRefs `<=2`、interactionRefs `<=4`）；至少一个维度超过软阈值；分组表已有完整 `splitRationale` 草稿；首次 `add-task` 的 task JSON 原样带上 `splitRationale`。
+   - `拆分结论=需拆分`、超过任何硬上限、缺少 `splitRationale` 草稿或未完成最小闭环确认的候选 task，不得调用 `add-task`。
+   - 分组表预检通过仅表示粒度计数合规；`add-task` 仍可能因结构校验失败（占位 ID、缺字段、UI_CONTEXT 不一致等）被拒绝。结构失败时修字段，不要靠加减 SCN 碰运气。
+
+6. 写入前预检每个 task 内容
    - `specRefs` 至少包含一个真实 `REQ-xxx` 和一个真实 `SCN-xxx`；不同 spec 文件里的 `SCN-001` 是不同场景，必须写完整 `specs/<capability>/spec.md#SCN-001` 路径，不能只写 `#SCN-001` 造成路径级覆盖缺失。
    - 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
    - 不要生成“新增 DTO”“修改 Controller”“补 Mapper”“写单测”这类单纯代码操作任务；不要生成只有“实现某能力”“补充验证”“更新相关代码”这类泛泛描述的任务。
@@ -316,7 +328,7 @@ UI 任务投影规则：
    - 执行要点要写到可直接开工的可执行程度：钉住真实文件/符号/入口、真实命令与预期结果；但不要拆成 2-5 分钟步骤、完整代码块、逐文件微任务或频繁 commit，PLAN 仍保持需求闭环任务粒度。
    - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
 
-6. 生成 DAG 与覆盖检查
+7. 生成 DAG 与覆盖检查
    - 依赖只表达真实执行顺序：基础能力 task 可以被业务闭环 task 依赖，页面 task 可以依赖 API/data task；不要为了排列顺序把所有 task 串成链，能并行的 task 保持无依赖。
    - 任务数不是首要目标：8-15 个清晰 vertical slice 优于 5 个巨型 capability task。超过 15 个任务时才检查是否把代码步骤误拆成任务；禁止为了压低任务数合并独立场景。
    - specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
@@ -324,8 +336,10 @@ UI 任务投影规则：
 
 与 writer 的衔接：
 
-- 先建立覆盖矩阵，再逐个 `add-task`；每确定一个 task 就立即调用 `plan_writer.py add-task`，不要批量写完后再等 `stage_gate` 兜底。
-- 每次 `add-task` 返回粒度错误时必须当场处理：`oversized_plan_task_must_split` 直接拆分；`missing_plan_task_split_rationale` / `invalid_plan_task_split_rationale` 优先拆分，只有确实属于同一验证闭环且无法独立验证时才补充具体 `splitRationale` 后重试。
+- 调用 `add-task` 前必须完成候选任务分组表计数预检；不得通过 writer 失败来探索如何拆分。每确定一个预检通过的 task，才调用 `plan_writer.py add-task`，不要批量写完后再等 `stage_gate` 兜底。
+- 如果 `add-task` 返回 `oversized_plan_task_must_split`，回分组表把该候选标为 `需拆分` 并重新切分；如果返回 `missing_plan_task_split_rationale`，回分组表核对计数、拆分结论和是否遗漏 `splitRationale` 草稿；如果返回 `invalid_plan_task_split_rationale`，回分组表修正草稿，不要反复重试同一个 task JSON。
+- `add-task` 粒度失败时该 task 未写入 `plan.json`，可以复用同一 taskId 重新 `add-task`；不得尝试 `set-split-rationale` 修复失败 task。只有已成功写入的 task 后续确需补充合并说明时，才使用 `set-split-rationale`。
+- 若已有 task 成功写入后后续 `add-task` 失败，只重新分组未写入的候选 task，不得修改已落盘 task 的 ID 与 `specRefs`。
 
 写入 `plan.json` 后，必须立即运行本产物结构校验：
 
