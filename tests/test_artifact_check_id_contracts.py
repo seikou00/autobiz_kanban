@@ -24,6 +24,7 @@ from artifact_check import (  # noqa: E402
     validate_e2e_result_json,
     validate_design_contract,
     validate_e2e_report_contract,
+    validate_evidence_detail_quality,
     validate_fix_request_json,
     validate_plan_json_contract,
     validate_plan_json_initial_tasks,
@@ -2665,6 +2666,121 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             )
 
             self.assertEqual(validate_code_done_gate(ctx), 0)
+
+    def test_evidence_detail_quality_ignores_legacy_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "validation",
+                    "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": ["src/foo.py"],
+                    "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+                },
+            )
+
+            self.assertEqual(validate_evidence_detail_quality(self._ctx(feature_dir)), 0)
+
+    def test_evidence_detail_quality_accepts_valid_detailed_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "validation",
+                    "detailVersion": 1,
+                    "summary": "实现申请报表查询过滤逻辑",
+                    "implementation": {
+                        "whatChanged": ["新增报表查询服务"],
+                        "why": "满足申请报表按岗位查询的行为契约",
+                    },
+                    "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": ["src/foo.py"],
+                    "fileChanges": [
+                        {
+                            "path": "src/foo.py",
+                            "operation": "modified",
+                            "kind": "source",
+                            "summary": "增加岗位数据范围过滤",
+                        }
+                    ],
+                    "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+                },
+            )
+
+            self.assertEqual(validate_evidence_detail_quality(self._ctx(feature_dir)), 0)
+
+    def test_evidence_detail_quality_rejects_invalid_detailed_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            evidence_dir = feature_dir / "evidence"
+            evidence_dir.mkdir(parents=True)
+            (evidence_dir / "EVIDENCE.jsonl").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "detailVersion": 1,
+                        "evidenceId": "ev_0001",
+                        "featureId": "alpha",
+                        "checkpoint": "code_in_progress",
+                        "nodeId": "dev.code",
+                        "skill": "autodev-code",
+                        "taskId": "T001",
+                        "action": "validation",
+                        "createdAt": "2026-06-24T00:00:00Z",
+                        "changedFiles": ["src/foo.py"],
+                        "fileChanges": [],
+                        "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertGreater(validate_evidence_detail_quality(self._ctx(feature_dir)), 0)
+
+    def test_evidence_detail_quality_rejects_null_detail_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            evidence_dir = feature_dir / "evidence"
+            evidence_dir.mkdir(parents=True)
+            (evidence_dir / "EVIDENCE.jsonl").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "detailVersion": None,
+                        "evidenceId": "ev_0001",
+                        "featureId": "alpha",
+                        "checkpoint": "code_in_progress",
+                        "nodeId": "dev.code",
+                        "skill": "autodev-code",
+                        "taskId": "T001",
+                        "action": "validation",
+                        "createdAt": "2026-06-24T00:00:00Z",
+                        "changedFiles": ["src/foo.py"],
+                        "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertGreater(validate_evidence_detail_quality(self._ctx(feature_dir)), 0)
 
     def test_smoke_test_plan_accepts_missing_source_path_during_plan_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

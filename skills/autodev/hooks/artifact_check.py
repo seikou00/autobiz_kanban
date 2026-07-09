@@ -29,7 +29,7 @@ from board_core.contracts import (  # noqa: E402
 from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done, check_integrity, check_plan_evidence_refs  # noqa: E402
-from hooks.evidence_store import EvidenceStoreError, read_records, stream_path  # noqa: E402
+from hooks.evidence_store import EvidenceStoreError, read_records, stream_path, validate_detail_fields  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
     load_and_validate_plan,
@@ -2180,6 +2180,32 @@ def validate_evidence_integrity(ctx: HookContext) -> int:
     return failures
 
 
+def validate_evidence_detail_quality(ctx: HookContext) -> int:
+    evidence_stream = stream_path(ctx.feature_dir)
+    if not is_nonempty(evidence_stream):
+        info(ctx, "evidence_detail_quality_no_stream_degrade")
+        return 0
+
+    try:
+        records = read_records(evidence_stream)
+    except EvidenceStoreError as exc:
+        return fail_line(ctx, "invalid_evidence_stream", f" detail={exc}")
+
+    failures = 0
+    for index, record in enumerate(records, start=1):
+        if "detailVersion" not in record:
+            continue
+        evidence_id = record.get("evidenceId")
+        evidence_label = evidence_id if isinstance(evidence_id, str) and evidence_id.strip() else f"line{index}"
+        for error in validate_detail_fields(record):
+            failures += fail_line(
+                ctx,
+                "invalid_evidence_detail",
+                f" evidence={evidence_label} detail={error}",
+            )
+    return failures
+
+
 def _ctx_requiring_json(ctx: HookContext, artifact: str) -> HookContext:
     if ctx.requires_artifact(artifact):
         return ctx
@@ -2249,6 +2275,7 @@ VALIDATORS = {
     "plan_ui_projection": validate_plan_ui_projection,
     "plan_finished_tasks": validate_plan_finished_tasks,
     "frontend_route_gate": validate_frontend_route_gate,
+    "evidence_detail_quality": validate_evidence_detail_quality,
     "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,
     "requirements_eval_verdict": validate_requirements_eval_verdict,

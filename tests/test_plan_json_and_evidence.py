@@ -21,6 +21,7 @@ from hooks.evidence_store import (  # noqa: E402
     main as evidence_store_main,
     read_records,
     stream_path,
+    validate_detail_fields,
     validate_record,
     write_index,
 )
@@ -190,6 +191,148 @@ class EvidenceStoreTest(unittest.TestCase):
 
         record["validation"] = {"command": "pytest", "exitCode": 1, "result": "pass"}
         self.assertIn("validation.result_exitCode_mismatch", validate_record(record))
+
+    def test_detail_version_validates_file_changes_projection(self) -> None:
+        record = {
+            "version": 1,
+            "detailVersion": 1,
+            "evidenceId": "ev_0001",
+            "featureId": "alpha",
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "createdAt": "2026-06-24T00:00:00Z",
+            "summary": "实现订单取消状态校验",
+            "implementation": {
+                "whatChanged": ["OrderService 增加状态判断"],
+                "why": "满足 SCN-001 的业务约束",
+            },
+            "changedFiles": ["src/new/OrderService.java", "src/old/OrderService.java"],
+            "fileChanges": [
+                {
+                    "path": "src/new/OrderService.java",
+                    "fromPath": "src/old/OrderService.java",
+                    "operation": "renamed",
+                    "kind": "source",
+                    "summary": "移动服务类到新模块",
+                    "symbols": ["OrderService"],
+                    "reason": "对齐模块结构",
+                }
+            ],
+            "validation": {"command": "pytest", "exitCode": 0, "result": "pass"},
+        }
+
+        self.assertEqual(validate_record(record), [])
+
+        record["changedFiles"] = ["src/new/OrderService.java"]
+        self.assertIn("invalid_evidence_detail_changedFiles_projection", validate_detail_fields(record))
+
+    def test_detail_version_supports_explicit_no_code_change(self) -> None:
+        record = {
+            "version": 1,
+            "detailVersion": 1,
+            "evidenceId": "ev_0001",
+            "featureId": "alpha",
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "createdAt": "2026-06-24T00:00:00Z",
+            "summary": "验证已有实现满足行为契约",
+            "implementation": {
+                "noCodeChange": True,
+                "whatChanged": [],
+                "why": "本条 evidence 只执行验证命令，没有修改代码",
+            },
+            "changedFiles": [],
+            "fileChanges": [],
+            "validation": {"command": "pytest", "exitCode": 0, "result": "pass"},
+        }
+
+        self.assertEqual(validate_record(record), [])
+
+        record["implementation"]["whatChanged"] = ["src/foo.py"]
+        self.assertIn("invalid_evidence_detail_noCodeChange_whatChanged", validate_detail_fields(record))
+
+    def test_legacy_evidence_without_detail_version_is_unchanged(self) -> None:
+        record = {
+            "version": 1,
+            "evidenceId": "ev_0001",
+            "featureId": "alpha",
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "createdAt": "2026-06-24T00:00:00Z",
+            "changedFiles": ["src/foo.py"],
+            "validation": {"command": "pytest", "exitCode": 0, "result": "pass"},
+        }
+
+        self.assertEqual(validate_detail_fields(record), [])
+
+    def test_detail_version_rejects_null_or_unknown_version(self) -> None:
+        record = {
+            "version": 1,
+            "evidenceId": "ev_0001",
+            "featureId": "alpha",
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "createdAt": "2026-06-24T00:00:00Z",
+            "changedFiles": ["src/foo.py"],
+            "validation": {"command": "pytest", "exitCode": 0, "result": "pass"},
+        }
+
+        record["detailVersion"] = None
+        self.assertIn("invalid_evidence_detail_version", validate_detail_fields(record))
+
+        record["detailVersion"] = 2
+        self.assertIn("invalid_evidence_detail_version", validate_detail_fields(record))
+
+    def test_detail_version_does_not_require_file_changes_for_non_validation(self) -> None:
+        record = {
+            "version": 1,
+            "detailVersion": 1,
+            "evidenceId": "ev_0001",
+            "featureId": "alpha",
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "review",
+            "createdAt": "2026-06-24T00:00:00Z",
+            "summary": "review evidence summary",
+        }
+
+        self.assertEqual(validate_detail_fields(record), [])
+
+    def test_append_evidence_rejects_invalid_detailed_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            with self.assertRaisesRegex(EvidenceStoreError, "missing_evidence_detail_summary"):
+                append_evidence(
+                    feature_dir,
+                    {
+                        "featureId": "alpha",
+                        "checkpoint": "code_in_progress",
+                        "nodeId": "dev.code",
+                        "skill": "autodev-code",
+                        "taskId": "T001",
+                        "action": "validation",
+                        "detailVersion": 1,
+                        "changedFiles": ["src/foo.py"],
+                        "fileChanges": [],
+                        "validation": {"command": "pytest", "exitCode": 0, "result": "pass"},
+                    },
+                )
+
+            self.assertFalse(stream_path(feature_dir).exists())
 
     def test_append_evidence_creates_sequential_stream_tail_and_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

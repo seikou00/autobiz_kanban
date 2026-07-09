@@ -21,12 +21,15 @@ except ImportError:  # pragma: no cover - direct script execution path
 
 
 EVIDENCE_VERSION = 1
+EVIDENCE_DETAIL_VERSION = 1
 INDEX_VERSION = 1
 EVIDENCE_ID_RE = re.compile(r"^ev_(\d{4})$")
 DEFAULT_STREAM_RELATIVE_PATH = Path("evidence") / "EVIDENCE.jsonl"
 DEFAULT_INDEX_RELATIVE_PATH = Path("evidence") / "EVIDENCE.index.json"
 VALIDATION_RESULTS = {"pass", "fail", "blocked", "skipped"}
 SMOKE_RESULTS = {"pass", "fail", "blocked", "skipped"}
+FILE_CHANGE_OPERATIONS = {"created", "modified", "deleted", "renamed"}
+FILE_CHANGE_KINDS = {"source", "test", "config", "docs", "generated", "smoke"}
 
 
 class EvidenceStoreError(ValueError):
@@ -236,11 +239,107 @@ def validate_record(record: dict[str, Any]) -> list[str]:
     design_refs = record.get("designRefs")
     if design_refs is not None and not _string_list(design_refs):
         errors.append("invalid_designRefs")
+    errors.extend(validate_detail_fields(record))
     return errors
 
 
 def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def validate_detail_fields(record: dict[str, Any]) -> list[str]:
+    """Validate opt-in detailed evidence fields.
+
+    Migration rule: records without ``detailVersion`` keep the existing schema.
+    Records with ``detailVersion: 1`` opt in to stricter implementation detail
+    checks so humans can audit what changed without weakening code_done.
+    """
+
+    if "detailVersion" not in record:
+        return []
+    detail_version = record.get("detailVersion")
+    if detail_version != EVIDENCE_DETAIL_VERSION:
+        return ["invalid_evidence_detail_version"]
+    if record.get("action") != "validation":
+        return []
+
+    errors: list[str] = []
+    if not _non_empty_string(record.get("summary")):
+        errors.append("missing_evidence_detail_summary")
+
+    implementation = record.get("implementation")
+    if not isinstance(implementation, dict):
+        errors.append("missing_evidence_detail_implementation")
+        implementation = {}
+
+    file_changes = record.get("fileChanges")
+    if not isinstance(file_changes, list):
+        errors.append("missing_evidence_detail_fileChanges")
+        file_changes = []
+
+    projected_changed_files: set[str] = set()
+    for index, change in enumerate(file_changes):
+        context = f"fileChanges[{index}]"
+        if not isinstance(change, dict):
+            errors.append(f"invalid_evidence_detail_fileChange:{context}")
+            continue
+
+        path = change.get("path")
+        operation = change.get("operation")
+        kind = change.get("kind")
+        summary = change.get("summary")
+        if not _non_empty_string(path):
+            errors.append(f"invalid_evidence_detail_fileChange_path:{context}")
+        if operation not in FILE_CHANGE_OPERATIONS:
+            errors.append(f"invalid_evidence_detail_fileChange_operation:{context}")
+        if kind not in FILE_CHANGE_KINDS:
+            errors.append(f"invalid_evidence_detail_fileChange_kind:{context}")
+        if not _non_empty_string(summary):
+            errors.append(f"invalid_evidence_detail_fileChange_summary:{context}")
+        symbols = change.get("symbols")
+        if symbols is not None and not _string_list(symbols):
+            errors.append(f"invalid_evidence_detail_fileChange_symbols:{context}")
+        reason = change.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            errors.append(f"invalid_evidence_detail_fileChange_reason:{context}")
+
+        if _non_empty_string(path):
+            projected_changed_files.add(str(path))
+        if operation == "renamed":
+            from_path = change.get("fromPath")
+            if not _non_empty_string(from_path):
+                errors.append(f"invalid_evidence_detail_fileChange_fromPath:{context}")
+            else:
+                projected_changed_files.add(str(from_path))
+
+    changed_files = record.get("changedFiles")
+    if not _string_list(changed_files):
+        errors.append("missing_evidence_detail_changedFiles")
+    else:
+        if set(changed_files) != projected_changed_files:
+            errors.append("invalid_evidence_detail_changedFiles_projection")
+
+    no_code_change = implementation.get("noCodeChange") is True
+    if not file_changes and not no_code_change:
+        errors.append("missing_evidence_detail_noCodeChange")
+    if no_code_change:
+        if isinstance(changed_files, list) and changed_files:
+            errors.append("invalid_evidence_detail_noCodeChange_changedFiles")
+        if file_changes:
+            errors.append("invalid_evidence_detail_noCodeChange_fileChanges")
+        what_changed = implementation.get("whatChanged")
+        if isinstance(what_changed, list) and what_changed:
+            errors.append("invalid_evidence_detail_noCodeChange_whatChanged")
+        elif what_changed is not None and not _string_list(what_changed):
+            errors.append("invalid_evidence_detail_whatChanged")
+        if not _non_empty_string(implementation.get("why")):
+            errors.append("missing_evidence_detail_noCodeChange_why")
+
+    return errors
 
 
 def _ensure_index_matches(target_feature_dir: Path, *, allow_missing_for_empty_stream: bool = False) -> None:
