@@ -2120,6 +2120,67 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
 
             self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
 
+    def test_plan_task_granularity_counts_same_scenario_id_by_spec_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap1/spec.md#REQ-001"] + [
+                f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)
+            ]
+            self._write_plan_json(feature_dir, status="todo", spec_refs=spec_refs)
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_accepts_cross_spec_rationale_with_path_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap1/spec.md#REQ-001"] + [
+                f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={
+                    "splitRationale": "specs/cap1/spec.md#SCN-001、specs/cap3/spec.md#SCN-001、specs/cap5/spec.md#SCN-001 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
+                },
+            )
+
+            self.assertEqual(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_cross_spec_rationale_with_ambiguous_bare_scn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap1/spec.md#REQ-001"] + [
+                f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={
+                    "splitRationale": "SCN-001、SCN-001、SCN-001 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
+    def test_plan_task_granularity_rejects_cross_spec_hard_cap_even_with_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            spec_refs = ["specs/cap1/spec.md#REQ-001"] + [
+                f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 10)
+            ]
+            self._write_plan_json(
+                feature_dir,
+                status="todo",
+                spec_refs=spec_refs,
+                extra_task_fields={
+                    "splitRationale": "specs/cap1/spec.md#SCN-001、specs/cap4/spec.md#SCN-001、specs/cap7/spec.md#SCN-001 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
+                },
+            )
+
+            self.assertGreater(validate_plan_task_granularity(self._plan_ctx(feature_dir)), 0)
+
     def test_plan_task_granularity_accepts_specific_split_rationale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)

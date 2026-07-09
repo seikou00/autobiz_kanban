@@ -67,7 +67,24 @@ PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX = {
 
 
 def scenario_refs_from_spec_refs(spec_refs: list[str]) -> set[str]:
-    return set(SCN_ID.findall(" ".join(spec_refs)))
+    refs: set[str] = set()
+    for raw_ref in spec_refs:
+        if not isinstance(raw_ref, str):
+            continue
+        stripped = raw_ref.strip()
+        if not stripped:
+            continue
+        if "#" in stripped:
+            path_part, _, anchor = stripped.partition("#")
+        else:
+            path_part, anchor = "", stripped
+        scenario_ids = SCN_ID.findall(anchor)
+        if not scenario_ids:
+            continue
+        normalized_path = path_part.strip().replace("\\", "/")
+        for scn_id in scenario_ids:
+            refs.add(f"{normalized_path}#{scn_id}" if normalized_path else scn_id)
+    return refs
 
 
 def _string_list_value(value: Any) -> list[str]:
@@ -83,6 +100,35 @@ def _task_ui_refs(task: dict[str, Any], field: str) -> list[str]:
     return _string_list_value(ui_refs.get(field))
 
 
+def _mentioned_related_scenario_refs(rationale: str, related_ids: set[str]) -> set[str]:
+    mentioned: set[str] = set()
+    normalized_rationale = rationale.replace("\\", "/")
+    by_scn_id: dict[str, set[str]] = {}
+    for related_id in related_ids:
+        scenario_ids = SCN_ID.findall(related_id)
+        if not scenario_ids:
+            continue
+        by_scn_id.setdefault(scenario_ids[-1], set()).add(related_id)
+        if "#" in related_id and related_id in normalized_rationale:
+            mentioned.add(related_id)
+
+    mentioned_scn_ids = {match.group(0) for match in SCN_ID.finditer(rationale)}
+    for scn_id in mentioned_scn_ids:
+        candidates = by_scn_id.get(scn_id, set())
+        if len(candidates) == 1:
+            mentioned.update(candidates)
+        elif not candidates and scn_id in related_ids:
+            mentioned.add(scn_id)
+    return mentioned
+
+
+def _mentioned_related_ids(prefix: str, rationale: str, related_ids: set[str]) -> set[str]:
+    if prefix == "SCN":
+        return _mentioned_related_scenario_refs(rationale, related_ids)
+    mentioned = {match.group(0) for match in re.finditer(rf"\b{prefix}-\d{{3}}\b", rationale)}
+    return mentioned & related_ids
+
+
 def _split_rationale_is_invalid(rationale: str, related_ids_by_prefix: dict[str, set[str]]) -> bool:
     stripped = rationale.strip()
     if len(stripped) < PLAN_TASK_SPLIT_RATIONALE_MIN_LENGTH:
@@ -96,14 +142,11 @@ def _split_rationale_is_invalid(rationale: str, related_ids_by_prefix: dict[str,
         term.lower() in lowered for term in PLAN_TASK_SPLIT_RATIONALE_VALIDATION_TERMS
     ):
         return True
-    mentioned_by_prefix: dict[str, set[str]] = {}
-    for match in re.finditer(r"\b(SCN|API|PAGE|UIX)-\d{3}\b", stripped):
-        mentioned_by_prefix.setdefault(match.group(1), set()).add(match.group(0))
     for prefix, related_ids in related_ids_by_prefix.items():
         if not related_ids:
             continue
         required_count = min(PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX[prefix], len(related_ids))
-        mentioned_related_ids = mentioned_by_prefix.get(prefix, set()) & related_ids
+        mentioned_related_ids = _mentioned_related_ids(prefix, stripped, related_ids)
         if len(mentioned_related_ids) < required_count:
             return True
     return False

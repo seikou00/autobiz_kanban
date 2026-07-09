@@ -617,6 +617,88 @@ class JsonWriterTests(unittest.TestCase):
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(plan["tasks"], [])
 
+    def test_plan_writer_counts_same_scenario_id_by_spec_path_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            payload = {
+                "id": "T001",
+                "title": "cross spec large task",
+                "goal": "deliver many same-numbered scenarios",
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update behavior", "cover boundary"],
+                "acceptanceCriteria": ["behavior is observable"],
+                "nonGoals": [],
+                "specRefs": [
+                    "specs/cap1/spec.md#REQ-001",
+                    *[f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)],
+                ],
+                "designRefs": ["design.md#D-001"],
+                "apiIds": [],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [{"command": "echo ok"}],
+            }
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-stdin",
+                input_text=json.dumps(payload, ensure_ascii=False),
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertNotEqual(body.returncode, 0)
+            self.assertIn("missing_plan_task_split_rationale", body.stdout)
+            self.assertIn("scenarios=6", body.stdout)
+            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["tasks"], [])
+
+    def test_plan_writer_accepts_cross_spec_path_split_rationale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            payload = {
+                "id": "T001",
+                "title": "cross spec grouped task",
+                "goal": "deliver same-numbered scenarios sharing one observable result",
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update behavior", "cover boundary"],
+                "acceptanceCriteria": ["behavior is observable"],
+                "nonGoals": [],
+                "specRefs": [
+                    "specs/cap1/spec.md#REQ-001",
+                    *[f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)],
+                ],
+                "designRefs": ["design.md#D-001"],
+                "apiIds": [],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [{"command": "echo ok"}],
+                "splitRationale": "specs/cap1/spec.md#SCN-001、specs/cap3/spec.md#SCN-001、specs/cap5/spec.md#SCN-001 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。",
+            }
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-stdin",
+                input_text=json.dumps(payload, ensure_ascii=False),
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
+            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["tasks"][0]["id"], "T001")
+            self.assertEqual(plan["tasks"][0]["splitRationale"], payload["splitRationale"])
+
     def test_code_task_context_resolves_refs_from_artifact_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))

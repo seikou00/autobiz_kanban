@@ -165,7 +165,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 **生成依据：**
 - specs/**/*.md: [行为契约和验收场景]
 - design.md: [API 决策/数据决策/技术设计需要覆盖什么]
-- plan.json: [建议任务边界和验证重点]
+- plan.json: [只说明进入 Plan 后将按覆盖矩阵与候选任务分组表拆分；未输出完整矩阵和最终分组表前，不得预估“3-4 个任务”这类固定任务数]
 
 ```
 ### 探索约束
@@ -296,7 +296,9 @@ UI 任务投影规则：
    - 不同用户动作、不同公开入口/API/页面/job/CLI、不同可观察结果、不同页面、不同数据模型/状态流/迁移风险、不同验证命令，默认拆成不同 task。
    - 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
    - 基础能力可以单独成 task，但必须服务于后续业务 vertical slice，并且 `validationCommands` 必须验证下游公开 seam。若只能验证工具类、DTO、Mapper 或内部函数，则并入第一个消费它的业务 task。
-   - 调用 `add-task` 前，必须先输出候选任务分组表，不得边想边 `add-task`。分组表列：`候选 Task / SCN 数 / API 数 / Page 数 / UIX 数 / implementationPoints 数 / validationCommands / 拆分结论 / splitRationale 草稿`。
+   - 调用 `add-task` 前，必须先输出最终候选任务分组表，不得边想边 `add-task`。草稿阶段可用标题或 `C001` 标识候选项；进入 writer 前的最终表必须把 taskId 一次性重排为连续 `T001`、`T002`、`T003`...，禁止 `T003a`、`T004b1` 这类临时编号。
+   - 最终分组表列：`候选 Task / 完整 specRefs 清单 / SCN 数 / API 数 / Page 数 / UIX 数 / implementationPoints 数 / validationCommands / deps / 拆分结论 / splitRationale 草稿`。
+   - `SCN 数` 必须从完整路径级 `specRefs` 展开后计数；不同 spec 文件里的同号 `SCN-001` 必须按不同场景分别计数。最终表不得用 `SCN-007~SCN-016`、`SCN-001SCN-003(menu)` 这类范围或拼接文本作为计数依据。
    - `拆分结论` 只能写 `通过`、`需拆分`、`可合并(附 splitRationale)`。`需拆分` 行不允许进入 `add-task`；`可合并(附 splitRationale)` 行必须在分组表中写出完整 `splitRationale` 草稿，后续首次 `add-task` 时原样带入 task JSON，不得临场改写。
 
 4. 只有共享同一验证闭环时才允许合并
@@ -305,6 +307,7 @@ UI 任务投影规则：
    - 上述例外同样适用于 API/PAGE/UIX 超软阈值但未超硬上限的情况。单个 task 覆盖 SCN 数 `>5`、`apiIds` 数 `>2`、`uiRefs.pageRefs` 数 `>1`、`uiRefs.interactionRefs` 数 `>3` 时，必须在 `splitRationale` 点名相关 SCN/API/PAGE/UIX ID，并说明为什么这些场景/API/页面/交互无法独立验证、只能共享同一验证闭环。
    - 标记 `可合并(附 splitRationale)` 前必须逐项确认：不同触发动作已拆开；不同公开 seam 已拆开；不同可观察结果已拆开；不同 validation command 已拆开。任一项未满足时不得标记可合并。
    - 合格示例：`SCN-001、SCN-004、SCN-007 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。`
+   - 跨 spec 同号场景必须点名完整路径，合格示例：`specs/menu/spec.md#SCN-001、specs/my-approval/spec.md#SCN-001、specs/apply-report/spec.md#SCN-001 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。`
    - 状态/操作矩阵例外示例：`SCN-006、SCN-007、SCN-008、SCN-009、SCN-010、SCN-011、SCN-012 均由同一个操作权限计算入口返回操作集合，并由同一组状态-操作矩阵断言验证；拆开会复制同一验证闭环。`
    - 不合格示例：`这些都是同一个操作权限判断逻辑。`
    - 不得用“同一模块”“同一 capability”“同一页面”“同一列表”“不同组成部分”“实现方便”“一起实现”“顺手一起”等空泛理由。
@@ -313,7 +316,7 @@ UI 任务投影规则：
 5. 写入前两档计数预检
    - `拆分结论=通过` 的候选 task 必须满足：SCN `<=5`、apiIds `<=2`、pageRefs `<=1`、interactionRefs `<=3`、`implementationPoints` 为 2-6 条、至少 1 条可独立运行的 `validationCommands`。
    - `拆分结论=可合并(附 splitRationale)` 的候选 task 必须满足：未超过硬上限（SCN `<=8`、apiIds `<=3`、pageRefs `<=2`、interactionRefs `<=4`）；至少一个维度超过软阈值；分组表已有完整 `splitRationale` 草稿；首次 `add-task` 的 task JSON 原样带上 `splitRationale`。
-   - `拆分结论=需拆分`、超过任何硬上限、缺少 `splitRationale` 草稿或未完成最小闭环确认的候选 task，不得调用 `add-task`。
+   - 最终候选任务分组表不得包含 `拆分结论=需拆分` 的行；`拆分结论=需拆分`、超过任何硬上限、缺少 `splitRationale` 草稿或未完成最小闭环确认的候选 task，不得调用 `add-task`。
    - 分组表预检通过仅表示粒度计数合规；`add-task` 仍可能因结构校验失败（占位 ID、缺字段、UI_CONTEXT 不一致等）被拒绝。结构失败时修字段，不要靠加减 SCN 碰运气。
 
 6. 写入前预检每个 task 内容
@@ -337,6 +340,9 @@ UI 任务投影规则：
 与 writer 的衔接：
 
 - 调用 `add-task` 前必须完成候选任务分组表计数预检；不得通过 writer 失败来探索如何拆分。每确定一个预检通过的 task，才调用 `plan_writer.py add-task`，不要批量写完后再等 `stage_gate` 兜底。
+- 禁止用脚本一次性循环写入多个 task 后再看失败列表；脚本只允许用于构造单个 task JSON 或解决 stdin/编码问题。每个 task 必须单独完成最终表预检、单独 `add-task`、单独处理返回结果。
+- 必须按 DAG 拓扑序写入：当前 task 的 `deps` 全部成功落盘后才允许写入当前 task。若失败原因是依赖未落盘，修写入顺序，不要改粒度或补 `splitRationale`。
+- 第一个 task 成功落盘后，禁止因为后续 task 失败重新 `init --force` 或全量重建 `plan.json`；只能修正未写入的候选 task。`init --force` 只允许在尚未成功写入任何 task，且明确需要重建空计划时使用。
 - 如果 `add-task` 返回 `oversized_plan_task_must_split`，回分组表把该候选标为 `需拆分` 并重新切分；如果返回 `missing_plan_task_split_rationale`，回分组表核对计数、拆分结论和是否遗漏 `splitRationale` 草稿；如果返回 `invalid_plan_task_split_rationale`，回分组表修正草稿，不要反复重试同一个 task JSON。
 - `add-task` 粒度失败时该 task 未写入 `plan.json`，可以复用同一 taskId 重新 `add-task`；不得尝试 `set-split-rationale` 修复失败 task。只有已成功写入的 task 后续确需补充合并说明时，才使用 `set-split-rationale`。
 - 若已有 task 成功写入后后续 `add-task` 失败，只重新分组未写入的候选 task，不得修改已落盘 task 的 ID 与 `specRefs`。
