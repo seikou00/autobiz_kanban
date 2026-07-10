@@ -17,7 +17,7 @@ from board_core.contracts import load_record_workflow_contracts, load_repo_workf
 from board_core.state_store import get_state_json_path, load_state_json_records_result  # noqa: E402
 from board_core.workflow import (  # noqa: E402
     derive_node_status,
-    find_current_node,
+    find_effective_current_node,
     skippable_node_ids,
 )
 from board_core.workflow_compiler import (  # noqa: E402
@@ -233,7 +233,13 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         }, 1
 
     nodes = config["workflow"]["nodes"]
-    current_idx, current_node_id = find_current_node(nodes, checkpoint)
+    current_idx, current_node_id = find_effective_current_node(
+        nodes,
+        checkpoint,
+        record.get("needsFixFromCheckpoint"),
+        stage=record.get("stage"),
+        stage_labels=config["workflow"]["checkpoints"]["stageLabels"],
+    )
     if current_idx < 0:
         return {
             "ok": False,
@@ -280,7 +286,10 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         "currentNodeStatus": node_status,
         "currentStateId": node_status,
         "allowedNextCheckpoints": allowed_next,
-        "recommendedNextSkill": _recommended_next_skill_for_record(workspace, record, allowed_next),
+        "recommendedNextSkill": (
+            "" if checkpoint == "needs_fix"
+            else _recommended_next_skill_for_record(workspace, record, allowed_next)
+        ),
         "requiresProfileChoice": checkpoint == PROFILE_CHOICE_CHECKPOINT and len(profile_choices) > 1,
         "profileChoices": profile_choices,
         "requiresWorkflowChoice": bool(workflow_choices),

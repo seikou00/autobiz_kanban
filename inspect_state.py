@@ -43,7 +43,7 @@ from board_core.workflow import (  # type: ignore[import-untyped]
     derive_current_node_status_label,
     build_workflow_shell,
     derive_node_status,
-    find_current_node,
+    find_effective_current_node,
     node_status_label,
 )
 
@@ -201,7 +201,13 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     # If there's no checkpoint, degrade gracefully: best-effort scan
     current_idx, current_node_id = -1, None
     if checkpoint:
-        current_idx, current_node_id = find_current_node(nodes_config, checkpoint)
+        current_idx, current_node_id = find_effective_current_node(
+            nodes_config,
+            checkpoint,
+            record.get("needsFixFromCheckpoint"),
+            stage=record.get("stage"),
+            stage_labels=config["workflow"]["checkpoints"]["stageLabels"],
+        )
 
     if current_idx < 0 and checkpoint:
         summary_parts.append(f"未知 checkpoint '{checkpoint}'，adapter 无法映射到流程节点")
@@ -314,7 +320,13 @@ def _collect_project_runs(
         checkpoint = record.get("checkpoint", "")
         current_idx, current_node_id = (-1, None)
         if checkpoint:
-            current_idx, current_node_id = find_current_node(nodes_config, checkpoint)
+            current_idx, current_node_id = find_effective_current_node(
+                nodes_config,
+                checkpoint,
+                record.get("needsFixFromCheckpoint"),
+                stage=record.get("stage"),
+                stage_labels=run_config["workflow"]["checkpoints"]["stageLabels"],
+            )
 
         current_node_status = derive_current_node_status(checkpoint, suffix_states, current_idx)
         current_node = nodes_config[current_idx] if 0 <= current_idx < len(nodes_config) else None

@@ -24,6 +24,7 @@ from board_core.workflow_compiler import (
     normalize_workflow_template,
     workflow_template_uses_nodes,
 )
+from board_core.workflow import find_current_node
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +173,17 @@ def _normalize_record(
         "workflowDecisions": workflow_decisions,
         "workflowTemplate": workflow_template,
     }
+    if checkpoint == "needs_fix":
+        needs_fix_from = _clean(raw_record.get("needsFixFromCheckpoint"))
+        if needs_fix_from:
+            source_idx, _ = find_current_node(list(contracts.nodes), needs_fix_from)
+            if source_idx < 0:
+                errors.append(
+                    f"{context}: Feature '{feature}' 的 needsFixFromCheckpoint "
+                    f"无法映射到节点: {needs_fix_from}"
+                )
+                return None
+            record["needsFixFromCheckpoint"] = needs_fix_from
     if workflow_template_uses_nodes(BOARD_CONFIG, workflow_template):
         record["workflowNodes"] = [str(item).strip() for item in raw_record.get("workflowNodes", [])]
         # Legacy workflowExternalized is intentionally not carried over: inputs

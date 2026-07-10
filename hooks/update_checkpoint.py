@@ -106,9 +106,9 @@ def replace_feature_record(
     new_records: StateRecords = {slug: dict(record) for slug, record in records.items()}
     if feature in new_records:
         record = dict(new_records[feature])
+        old_checkpoint = record.get("checkpoint", "")
         old_profile = normalize_workflow_profile(record.get("workflowProfile", BASE_WORKFLOW_PROFILE))
         if old_profile != workflow_profile:
-            old_checkpoint = record.get("checkpoint", "")
             if old_checkpoint != "prd_done":
                 return records, [
                     f"Feature '{feature}' 已绑定 workflowProfile={old_profile}，不能在 {old_checkpoint} 改为 {workflow_profile}"
@@ -118,6 +118,10 @@ def replace_feature_record(
         record["checkpoint"] = checkpoint
         record["stage"] = resolved_stage
         record["workflowDecisions"] = dict(workflow_decisions)
+        if checkpoint == "needs_fix" and old_checkpoint != "needs_fix":
+            record["needsFixFromCheckpoint"] = old_checkpoint
+        elif checkpoint != "needs_fix":
+            record.pop("needsFixFromCheckpoint", None)
         if owner is not None:
             record["owner"] = owner
         if iteration is not None:
@@ -202,6 +206,7 @@ def prepare_checkpoint_update(
     updated_at: str | None = None,
     workflow_profile: str | None = None,
     workflow_decision_updates: dict[str, str] | None = None,
+    needs_fix_from_checkpoint: str | None = None,
 ) -> CheckpointUpdate:
     workspace = workspace.resolve()
     state_path = workspace / STATE_RELATIVE_PATH
@@ -371,6 +376,22 @@ def prepare_checkpoint_update(
         stage_labels=contracts.stage_labels,
         initial_checkpoints=contracts.initial_checkpoints,
     )
+    if needs_fix_from_checkpoint is not None and not update_errors:
+        source_checkpoint = needs_fix_from_checkpoint.strip()
+        old_checkpoint = old_map.get(feature)
+        if checkpoint != "needs_fix":
+            update_errors.append("--needs-fix-from-checkpoint 只能与 --checkpoint needs_fix 一起使用")
+        elif not source_checkpoint:
+            update_errors.append("--needs-fix-from-checkpoint 不能为空")
+        elif old_checkpoint != "needs_fix" and source_checkpoint != old_checkpoint:
+            update_errors.append(
+                "--needs-fix-from-checkpoint 必须等于进入 needs_fix 前的当前 checkpoint: "
+                f"{old_checkpoint or 'empty'}"
+            )
+        else:
+            record_with_source = dict(new_records[feature])
+            record_with_source["needsFixFromCheckpoint"] = source_checkpoint
+            new_records[feature] = record_with_source
     new_map = state_rows_from_records(new_records)
 
     content = ""
@@ -729,6 +750,10 @@ def main(argv: list[str] | None = None) -> int:
         help="skip a workflow node mid-flight (node id, e.g. dev.utest); may be repeated",
     )
     parser.add_argument("--stage", help="stage column override")
+    parser.add_argument(
+        "--needs-fix-from-checkpoint",
+        help="backfill the source checkpoint for a feature already at needs_fix",
+    )
     parser.add_argument("--owner", help="owner column override")
     parser.add_argument("--iteration", help="iteration column override")
     parser.add_argument("--workflow-profile", help="workflow profile for a new feature row")
@@ -747,11 +772,26 @@ def main(argv: list[str] | None = None) -> int:
         print("checkpoint 更新失败: 必须且只能提供 --checkpoint 或 --skip-node 之一", file=sys.stderr)
         return 1
     if args.skip_node and any(
-        [args.stage, args.owner, args.iteration, args.workflow_profile, args.workflow_decision, args.allow_create]
+        [
+            args.stage,
+            args.owner,
+            args.iteration,
+            args.workflow_profile,
+            args.workflow_decision,
+            args.allow_create,
+            args.needs_fix_from_checkpoint,
+        ]
     ):
         print(
             "checkpoint 更新失败: --skip-node 不能与 --stage/--owner/--iteration/"
-            "--workflow-profile/--workflow-decision/--allow-create 同时使用",
+            "--workflow-profile/--workflow-decision/--allow-create/"
+            "--needs-fix-from-checkpoint 同时使用",
+            file=sys.stderr,
+        )
+        return 1
+    if args.needs_fix_from_checkpoint is not None and args.checkpoint != "needs_fix":
+        print(
+            "checkpoint 更新失败: --needs-fix-from-checkpoint 只能与 --checkpoint needs_fix 一起使用",
             file=sys.stderr,
         )
         return 1
@@ -797,6 +837,7 @@ def main(argv: list[str] | None = None) -> int:
                 allow_create=args.allow_create,
                 workflow_profile=args.workflow_profile,
                 workflow_decision_updates=workflow_decision_updates,
+                needs_fix_from_checkpoint=args.needs_fix_from_checkpoint,
             )
 
     requested_checkpoint = args.checkpoint or result.new_checkpoint or ""
