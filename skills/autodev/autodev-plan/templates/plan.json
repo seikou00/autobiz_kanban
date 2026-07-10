@@ -1,11 +1,33 @@
 {
   "featureId": "{feature}",
+  "status": "todo",
+  "activeBatchId": "B001",
+  "nextBatchId": null,
+  "batchPolicy": {
+    "maxTasks": 5,
+    "strategy": "spec_capability_topological"
+  },
+  "batches": [
+    {
+      "id": "B001",
+      "path": "plans/B001/plan.json",
+      "title": "[spec capability name]",
+      "specRoots": [
+        "specs/[capability]/spec.md"
+      ],
+      "deps": [],
+      "taskIds": [
+        "T001"
+      ],
+      "status": "todo"
+    }
+  ],
   "projectValidationCommands": [
     {
       "id": "PROJECT-VAL-001",
       "argv": [
-        "[项目构建/类型检查可执行程序]",
-        "[项目级检查参数]"
+        "[project build/typecheck executable]",
+        "[project check arguments]"
       ],
       "cwd": ".",
       "kind": "compile",
@@ -13,245 +35,5 @@
     }
   ],
   "projectCheckEvidenceIds": [],
-  "latestProjectCheckEvidenceId": null,
-  "tasks": [
-    {
-      "id": "T001",
-      "title": "[按钮/状态/路由等单一可观察行为]",
-      "goal": "[用户能观察到的结果，例如指定状态下按钮显示/隐藏规则正确]",
-      "status": "todo",
-      "deps": [],
-      "uiRequired": false,
-      "scope": {
-        "modules": [
-          "[现有模块或代码范围，例如 mobile visit list]"
-        ],
-        "entrypoints": [],
-        "pages": [],
-        "dataObjects": [],
-        "paths": []
-      },
-      "implementationPoints": [
-        "[定位现有入口或渲染条件，按 specs 的状态规则调整]",
-        "[补齐边界状态和自动化验证断言]"
-      ],
-      "acceptanceCriteria": [
-        {
-          "id": "AC-T001-01",
-          "text": "[SCN-001 对应的可观察验收结果]",
-          "scenarioRefs": [
-            "specs/[capability]/spec.md#SCN-001"
-          ]
-        }
-      ],
-      "nonGoals": [],
-      "specRefs": [
-        "specs/[capability]/spec.md#REQ-001",
-        "specs/[capability]/spec.md#SCN-001"
-      ],
-      "designRefs": [
-        "design.md#D-001"
-      ],
-      "apiIds": [],
-      "dataIds": [],
-      "decisionIds": [
-        "D-001"
-      ],
-      "completionPolicy": "all_required_validations_pass",
-      "validationCommands": [
-        {
-          "id": "VAL-T001-01",
-          "argv": [
-            "[可执行程序]",
-            "[只覆盖本任务行为的测试参数]"
-          ],
-          "cwd": ".",
-          "kind": "behavior_test",
-          "required": true,
-          "covers": [
-            "AC-T001-01"
-          ]
-        }
-      ],
-      "expectedFiles": [],
-      "evidenceIds": [],
-      "completionEvidenceIds": [],
-      "latestPassEvidenceId": null,
-      "blockers": []
-    },
-    {
-      "id": "T002",
-      "title": "[单个提交/查询闭环任务名]",
-      "goal": "[用户提交/查询后得到明确成功或失败反馈]",
-      "status": "todo",
-      "deps": [
-        "T001"
-      ],
-      "uiRequired": false,
-      "scope": {
-        "modules": [
-          "[服务/控制器/测试所在模块]"
-        ],
-        "entrypoints": [
-          "[API-001 对应的真实入口，如 POST /api/example]"
-        ],
-        "pages": [],
-        "dataObjects": [
-          "DATA-001"
-        ],
-        "paths": []
-      },
-      "implementationPoints": [
-        "[按 design.md#API-001 接入请求校验与服务调用]",
-        "[按 design.md#DATA-001 处理持久化/查询边界]",
-        "[补齐失败路径与最小自动化验证]"
-      ],
-      "acceptanceCriteria": [
-        {
-          "id": "AC-T002-01",
-          "text": "[SCN-002 对应的成功路径可观察结果]",
-          "scenarioRefs": [
-            "specs/[capability]/spec.md#SCN-002"
-          ]
-        },
-        {
-          "id": "AC-T002-02",
-          "text": "[SCN-003 对应的失败/边界路径可观察结果]",
-          "scenarioRefs": [
-            "specs/[capability]/spec.md#SCN-003"
-          ]
-        }
-      ],
-      "nonGoals": [
-        "[不实现与本 API 闭环无关的页面、导出或批量流程]"
-      ],
-      "specRefs": [
-        "specs/[capability]/spec.md#REQ-002",
-        "specs/[capability]/spec.md#SCN-002",
-        "specs/[capability]/spec.md#SCN-003"
-      ],
-      "designRefs": [
-        "design.md#API-001",
-        "design.md#DATA-001",
-        "design.md#D-002"
-      ],
-      "apiIds": [
-        "API-001"
-      ],
-      "dataIds": [
-        "DATA-001"
-      ],
-      "decisionIds": [
-        "D-002"
-      ],
-      "completionPolicy": "all_required_validations_pass",
-      "validationCommands": [
-        {
-          "id": "VAL-T002-01",
-          "argv": [
-            "[可执行程序]",
-            "[只运行本提交/查询闭环的测试参数]"
-          ],
-          "cwd": ".",
-          "kind": "behavior_test",
-          "required": true,
-          "covers": [
-            "AC-T002-01",
-            "AC-T002-02"
-          ]
-        }
-      ],
-      "expectedFiles": [],
-      "evidenceIds": [],
-      "completionEvidenceIds": [],
-      "latestPassEvidenceId": null,
-      "blockers": []
-    },
-    {
-      "id": "T003",
-      "title": "[UI capability 单页面 vertical slice 任务名，仅 UI_CONTEXT.uiRequired=true 时保留]",
-      "goal": "[一个页面上的一个用户动作完成后出现明确可观察结果]",
-      "status": "todo",
-      "deps": [
-        "T002"
-      ],
-      "uiRequired": true,
-      "uiRefs": {
-        "pageRefs": [
-          "PAGE-001"
-        ],
-        "interactionRefs": [
-          "UIX-001"
-        ],
-        "visualSourceRefs": [],
-        "frontendRoute": "spec-driven-ui"
-      },
-      "scope": {
-        "modules": [
-          "[前端页面/组件所在模块]"
-        ],
-        "entrypoints": [
-          "[页面路由或组件入口]"
-        ],
-        "pages": [
-          "PAGE-001"
-        ],
-        "dataObjects": [],
-        "paths": []
-      },
-      "implementationPoints": [
-        "[从 UI_CONTEXT.json 投影 PAGE-001 / UIX-001 的页面和交互边界]",
-        "[实现该页面单个 vertical slice 的加载/空态/错误态或成功态]",
-        "[补齐 UI 行为的自动化验证或可运行脚本]"
-      ],
-      "acceptanceCriteria": [
-        {
-          "id": "AC-T003-01",
-          "text": "[SCN-004 对应的页面行为可观察结果]",
-          "scenarioRefs": [
-            "specs/[ui-capability]/spec.md#SCN-004"
-          ]
-        }
-      ],
-      "nonGoals": [
-        "[不实现其他页面或未被 UI_CONTEXT.json 引用的交互]"
-      ],
-      "specRefs": [
-        "specs/[ui-capability]/spec.md#REQ-003",
-        "specs/[ui-capability]/spec.md#SCN-004"
-      ],
-      "designRefs": [
-        "design.md#API-002",
-        "design.md#D-003"
-      ],
-      "apiIds": [
-        "API-002"
-      ],
-      "dataIds": [],
-      "decisionIds": [
-        "D-003"
-      ],
-      "completionPolicy": "all_required_validations_pass",
-      "validationCommands": [
-        {
-          "id": "VAL-T003-01",
-          "argv": [
-            "[可执行程序]",
-            "[覆盖本 UI 行为的验证参数]"
-          ],
-          "cwd": ".",
-          "kind": "behavior_test",
-          "required": true,
-          "covers": [
-            "AC-T003-01"
-          ]
-        }
-      ],
-      "expectedFiles": [],
-      "evidenceIds": [],
-      "completionEvidenceIds": [],
-      "latestPassEvidenceId": null,
-      "blockers": []
-    }
-  ]
+  "latestProjectCheckEvidenceId": null
 }

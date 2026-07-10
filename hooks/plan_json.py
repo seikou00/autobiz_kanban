@@ -14,11 +14,13 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
 TASK_ID_RE = re.compile(r"^T\d{3}$")
+BATCH_ID_RE = re.compile(r"^B\d{3}$")
 REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 API_ID_RE = re.compile(r"^API-\d{3}$")
@@ -43,6 +45,10 @@ VALIDATION_KINDS = {
     "lint",
     "compile",
 }
+MAX_BATCH_TASKS = 5
+BATCH_STRATEGY = "spec_capability_topological"
+FEATURE_STATUSES = {"todo", "in_progress", "awaiting_next_conversation", "failed", "done"}
+BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
 
 TODO_STATUSES = {"todo", "pending", "not_started", "not-started", "待做", "未开始"}
 IN_PROGRESS_STATUSES = {"in_progress", "in-progress", "doing", "进行中"}
@@ -60,8 +66,22 @@ class PlanJsonError(ValueError):
     """Raised when a plan.json file cannot be loaded or validated."""
 
 
+@dataclass(frozen=True)
+class PlanBundle:
+    root: dict[str, Any]
+    batches: dict[str, dict[str, Any]]
+    tasks: list[dict[str, Any]]
+    task_batches: dict[str, str]
+
+
 def plan_json_path(target_feature_dir: Path) -> Path:
     return target_feature_dir / "plan.json"
+
+
+def batch_plan_path(target_feature_dir: Path, batch_id: str) -> Path:
+    if not BATCH_ID_RE.fullmatch(batch_id):
+        raise PlanJsonError(f"invalid_batch_id:{batch_id}")
+    return target_feature_dir / "plans" / batch_id / "plan.json"
 
 
 def normalize_status(status: Any) -> str:
@@ -133,24 +153,21 @@ def load_plan(path: Path) -> dict[str, Any]:
     return data
 
 
-def validate_plan_data(
+def _validate_tasks_container(
     data: Any,
     *,
     require_initial_status: bool = False,
     require_all_done: bool = False,
     require_task_details: bool = False,
+    known_task_ids: set[str] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
         return ["plan_json_root_must_be_object"]
 
-    if "version" in data or "taskDetailVersion" in data:
-        errors.append("legacy_plan_requires_rebuild")
     feature_id = data.get("featureId")
     if not isinstance(feature_id, str) or not feature_id.strip():
         errors.append("plan_json_missing_feature_id")
-
-    _validate_project_commands(errors, data, require_all_done=require_all_done)
 
     tasks = data.get("tasks")
     if not isinstance(tasks, list) or not tasks:
@@ -282,13 +299,179 @@ def validate_plan_data(
             for criterion_id in sorted(_acceptance_ids(raw_task) - required_coverage):
                 errors.append(f"{task_id}.acceptanceCriteria_uncovered:{criterion_id}")
 
-    known_ids = {task_id for task_id in task_ids if TASK_ID_RE.match(task_id)}
+    known_ids = known_task_ids or {task_id for task_id in task_ids if TASK_ID_RE.match(task_id)}
     for task_id, deps in deps_by_task.items():
         for dep in deps:
             if dep not in known_ids:
                 errors.append(f"{task_id}.dependency_unknown:{dep}")
     errors.extend(_dag_errors(deps_by_task))
     return errors
+
+
+def validate_plan_data(
+    data: Any,
+    *,
+    require_initial_status: bool = False,
+    require_all_done: bool = False,
+    require_task_details: bool = False,
+) -> list[str]:
+    """Validate the root batch index. Task contracts live in batch plans."""
+
+    del require_task_details
+    errors: list[str] = []
+    if not isinstance(data, dict):
+        return ["plan_json_root_must_be_object"]
+    if "tasks" in data:
+        errors.append("monolithic_plan_requires_rebuild")
+    if "version" in data or "taskDetailVersion" in data:
+        errors.append("legacy_plan_requires_rebuild")
+    feature_id = data.get("featureId")
+    if not isinstance(feature_id, str) or not feature_id.strip():
+        errors.append("plan_json_missing_feature_id")
+
+    status = data.get("status")
+    if status not in FEATURE_STATUSES:
+        errors.append("plan_json_status_invalid")
+    elif require_initial_status and status != "todo":
+        errors.append("plan_json_status_not_initial")
+    elif require_all_done and status != "done":
+        errors.append("plan_json_status_not_done")
+
+    policy = data.get("batchPolicy")
+    if not isinstance(policy, dict):
+        errors.append("plan_json_batchPolicy_missing")
+    else:
+        if policy.get("maxTasks") != MAX_BATCH_TASKS:
+            errors.append(f"plan_json_batchPolicy_maxTasks_must_be:{MAX_BATCH_TASKS}")
+        if policy.get("strategy") != BATCH_STRATEGY:
+            errors.append(f"plan_json_batchPolicy_strategy_must_be:{BATCH_STRATEGY}")
+
+    raw_batches = data.get("batches")
+    batch_ids: list[str] = []
+    if not isinstance(raw_batches, list) or not raw_batches:
+        errors.append("plan_json_missing_batches")
+    else:
+        for index, entry in enumerate(raw_batches):
+            context = f"batches[{index}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{context}_must_be_object")
+                continue
+            batch_id = entry.get("id")
+            if not isinstance(batch_id, str) or not BATCH_ID_RE.fullmatch(batch_id):
+                errors.append(f"{context}.id_invalid")
+                continue
+            if batch_id in batch_ids:
+                errors.append(f"duplicate_batch_id:{batch_id}")
+            batch_ids.append(batch_id)
+            expected_path = f"plans/{batch_id}/plan.json"
+            if entry.get("path") != expected_path:
+                errors.append(f"{batch_id}.path_invalid")
+            if not isinstance(entry.get("title"), str) or not str(entry.get("title")).strip():
+                errors.append(f"{batch_id}.title_missing")
+            _validate_string_list(errors, entry, batch_id, "specRoots", required=True)
+            _validate_string_list(errors, entry, batch_id, "deps", required=False, item_re=BATCH_ID_RE)
+            _validate_string_list(errors, entry, batch_id, "taskIds", required=True, item_re=TASK_ID_RE)
+            batch_status = entry.get("status")
+            if batch_status not in BATCH_STATUSES:
+                errors.append(f"{batch_id}.status_invalid")
+            elif require_initial_status and batch_status != "todo":
+                errors.append(f"{batch_id}.status_not_initial")
+            elif require_all_done and batch_status != "done":
+                errors.append(f"{batch_id}.status_not_done")
+
+    known_batches = set(batch_ids)
+    for field in ("activeBatchId", "nextBatchId"):
+        value = data.get(field)
+        if value is not None and (not isinstance(value, str) or value not in known_batches):
+            errors.append(f"plan_json_{field}_invalid")
+    if require_all_done and (data.get("activeBatchId") is not None or data.get("nextBatchId") is not None):
+        errors.append("plan_json_done_with_pending_batch_pointer")
+
+    _validate_project_commands(errors, data, require_all_done=require_all_done)
+    return errors
+
+
+def validate_batch_plan_data(
+    data: Any,
+    *,
+    expected_feature_id: str | None = None,
+    expected_batch_id: str | None = None,
+    known_task_ids: set[str] | None = None,
+    require_initial_status: bool = False,
+    require_all_done: bool = False,
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(data, dict):
+        return ["batch_plan_root_must_be_object"]
+    if "version" in data or "taskDetailVersion" in data:
+        errors.append("legacy_plan_requires_rebuild")
+    feature_id = data.get("featureId")
+    if not isinstance(feature_id, str) or not feature_id.strip():
+        errors.append("batch_plan_missing_feature_id")
+    elif expected_feature_id is not None and feature_id != expected_feature_id:
+        errors.append(f"batch_plan_feature_mismatch:{feature_id}")
+    batch_id = data.get("batchId")
+    if not isinstance(batch_id, str) or not BATCH_ID_RE.fullmatch(batch_id):
+        errors.append("batch_plan_id_invalid")
+        batch_id = "batch"
+    elif expected_batch_id is not None and batch_id != expected_batch_id:
+        errors.append(f"batch_plan_id_mismatch:{batch_id}")
+    if not isinstance(data.get("title"), str) or not str(data.get("title")).strip():
+        errors.append(f"{batch_id}.title_missing")
+    status = data.get("status")
+    if status not in BATCH_STATUSES:
+        errors.append(f"{batch_id}.status_invalid")
+    elif require_initial_status and status != "todo":
+        errors.append(f"{batch_id}.status_not_initial")
+    elif require_all_done and status != "done":
+        errors.append(f"{batch_id}.status_not_done")
+
+    batch_tasks = tasks(data)
+    if len(batch_tasks) > MAX_BATCH_TASKS:
+        errors.append(f"{batch_id}.batch_task_limit_exceeded:{len(batch_tasks)}>{MAX_BATCH_TASKS}")
+    if data.get("taskCount") != len(batch_tasks):
+        errors.append(f"{batch_id}.taskCount_mismatch")
+    completed_count = sum(normalize_status(item.get("status")) == "done" for item in batch_tasks)
+    if data.get("completedTaskCount") != completed_count:
+        errors.append(f"{batch_id}.completedTaskCount_mismatch")
+    _validate_string_list(errors, data, str(batch_id), "completionEvidenceIds", required=False, item_re=EVIDENCE_ID_RE)
+    for field in ("startedAt", "completedAt"):
+        value = data.get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            errors.append(f"{batch_id}.{field}_invalid")
+    errors.extend(
+        _validate_tasks_container(
+            data,
+            require_initial_status=require_initial_status,
+            require_all_done=require_all_done,
+            require_task_details=True,
+            known_task_ids=known_task_ids,
+        )
+    )
+    return errors
+
+
+def validate_task_collection(
+    feature_id: str,
+    task_items: list[dict[str, Any]],
+    *,
+    require_initial_status: bool = False,
+    require_all_done: bool = False,
+) -> list[str]:
+    """Validate task contracts before they are projected into batch files."""
+
+    known = {
+        str(item.get("id"))
+        for item in task_items
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    return _validate_tasks_container(
+        {"featureId": feature_id, "tasks": task_items},
+        require_initial_status=require_initial_status,
+        require_all_done=require_all_done,
+        require_task_details=True,
+        known_task_ids=known,
+    )
 
 
 def _acceptance_ids(task: dict[str, Any]) -> set[str]:
@@ -532,6 +715,9 @@ def _dag_errors(deps_by_task: dict[str, list[str]]) -> list[str]:
 
 
 def tasks(data: dict[str, Any]) -> list[dict[str, Any]]:
+    bundle_tasks = data.get("_bundleTasks")
+    if isinstance(bundle_tasks, list):
+        return [task for task in bundle_tasks if isinstance(task, dict)]
     raw_tasks = data.get("tasks")
     return [task for task in raw_tasks if isinstance(task, dict)] if isinstance(raw_tasks, list) else []
 
@@ -565,6 +751,209 @@ def blocked_tasks(data: dict[str, Any]) -> list[str]:
     return blocked
 
 
+def _bundle_consistency_errors(
+    root: dict[str, Any],
+    batch_data: dict[str, dict[str, Any]],
+    *,
+    require_initial_status: bool = False,
+    require_all_done: bool = False,
+) -> list[str]:
+    entries = [entry for entry in root.get("batches", []) if isinstance(entry, dict)]
+    all_tasks: list[dict[str, Any]] = []
+    task_batches: dict[str, str] = {}
+    errors: list[str] = []
+    for entry in entries:
+        batch_id = str(entry.get("id", ""))
+        data = batch_data.get(batch_id)
+        if not isinstance(data, dict):
+            errors.append(f"missing_batch_plan:{batch_id}")
+            continue
+        for item in tasks(data):
+            task_id = item.get("id")
+            if not isinstance(task_id, str):
+                continue
+            if task_id in task_batches:
+                errors.append(f"duplicate_task_id:{task_id}")
+            else:
+                task_batches[task_id] = batch_id
+                all_tasks.append(item)
+    if errors:
+        return errors
+
+    known_task_ids = set(task_batches)
+    batch_order = {str(entry.get("id")): index for index, entry in enumerate(entries)}
+    task_by_id = {str(item.get("id")): item for item in all_tasks}
+    deps_by_task: dict[str, list[str]] = {}
+    for entry in entries:
+        batch_id = str(entry.get("id"))
+        data = batch_data[batch_id]
+        errors.extend(
+            validate_batch_plan_data(
+                data,
+                expected_feature_id=str(root.get("featureId")),
+                expected_batch_id=batch_id,
+                known_task_ids=known_task_ids,
+                require_initial_status=require_initial_status,
+                require_all_done=require_all_done,
+            )
+        )
+        actual_ids = [str(item.get("id")) for item in tasks(data)]
+        if entry.get("taskIds") != actual_ids:
+            errors.append(f"{batch_id}.taskIds_mismatch")
+        if entry.get("status") != data.get("status"):
+            errors.append(f"{batch_id}.root_status_projection_mismatch")
+
+        declared_batch_deps = set(entry.get("deps") or [])
+        for dep_batch in declared_batch_deps:
+            if dep_batch not in batch_order:
+                errors.append(f"{batch_id}.dependency_unknown:{dep_batch}")
+            elif batch_order[dep_batch] >= batch_order[batch_id]:
+                errors.append(f"{batch_id}.dependency_not_earlier:{dep_batch}")
+        required_batch_deps: set[str] = set()
+        for item in tasks(data):
+            task_id = str(item.get("id"))
+            deps = [dep for dep in item.get("deps", []) if isinstance(dep, str)]
+            deps_by_task[task_id] = deps
+            for dep in deps:
+                dep_batch = task_batches.get(dep)
+                if dep_batch is None:
+                    continue
+                if batch_order[dep_batch] > batch_order[batch_id]:
+                    errors.append(f"{task_id}.dependency_not_in_earlier_batch:{dep}")
+                elif dep_batch != batch_id:
+                    required_batch_deps.add(dep_batch)
+        for dep_batch in sorted(required_batch_deps - declared_batch_deps):
+            errors.append(f"{batch_id}.missing_batch_dependency:{dep_batch}")
+
+    for task_id, item in task_by_id.items():
+        for dep in item.get("deps", []):
+            if isinstance(dep, str) and dep not in known_task_ids:
+                errors.append(f"{task_id}.dependency_unknown:{dep}")
+    errors.extend(_dag_errors(deps_by_task))
+
+    active = root.get("activeBatchId")
+    next_batch = root.get("nextBatchId")
+    status = root.get("status")
+    if status == "awaiting_next_conversation":
+        if active is not None:
+            errors.append("awaiting_next_conversation_has_active_batch")
+        if next_batch is None:
+            errors.append("awaiting_next_conversation_missing_next_batch")
+    if status == "done" and (active is not None or next_batch is not None):
+        errors.append("done_plan_has_pending_batch_pointer")
+    if isinstance(active, str):
+        active_entry = next((entry for entry in entries if entry.get("id") == active), None)
+        if isinstance(active_entry, dict) and active_entry.get("status") == "done":
+            errors.append(f"active_batch_already_done:{active}")
+    if isinstance(next_batch, str):
+        next_entry = next((entry for entry in entries if entry.get("id") == next_batch), None)
+        if isinstance(next_entry, dict) and next_entry.get("status") != "todo":
+            errors.append(f"next_batch_not_todo:{next_batch}")
+    return errors
+
+
+def validate_plan_bundle_data(
+    root: dict[str, Any],
+    batch_data: dict[str, dict[str, Any]],
+    *,
+    require_initial_status: bool = False,
+    require_all_done: bool = False,
+) -> list[str]:
+    errors = validate_plan_data(
+        root,
+        require_initial_status=require_initial_status,
+        require_all_done=require_all_done,
+    )
+    if errors:
+        return errors
+    return _bundle_consistency_errors(
+        root,
+        batch_data,
+        require_initial_status=require_initial_status,
+        require_all_done=require_all_done,
+    )
+
+
+def load_plan_bundle(
+    target_feature_dir: Path,
+    *,
+    require_initial_status: bool = False,
+    require_all_done: bool = False,
+    require_task_details: bool = False,
+) -> PlanBundle:
+    del require_task_details
+    root = load_plan(plan_json_path(target_feature_dir))
+    root_errors = validate_plan_data(
+        root,
+        require_initial_status=require_initial_status,
+        require_all_done=require_all_done,
+    )
+    if root_errors:
+        raise PlanJsonError(";".join(root_errors))
+
+    entries = [entry for entry in root.get("batches", []) if isinstance(entry, dict)]
+    batch_data: dict[str, dict[str, Any]] = {}
+    all_tasks: list[dict[str, Any]] = []
+    task_batches: dict[str, str] = {}
+    load_errors: list[str] = []
+    for entry in entries:
+        batch_id = str(entry.get("id", ""))
+        path = batch_plan_path(target_feature_dir, batch_id)
+        try:
+            data = load_plan(path)
+        except PlanJsonError as exc:
+            load_errors.append(str(exc))
+            continue
+        batch_data[batch_id] = data
+        for item in tasks(data):
+            task_id = item.get("id")
+            if not isinstance(task_id, str):
+                continue
+            if task_id in task_batches:
+                load_errors.append(f"duplicate_task_id:{task_id}")
+            else:
+                task_batches[task_id] = batch_id
+                all_tasks.append(item)
+    if load_errors:
+        raise PlanJsonError(";".join(load_errors))
+
+    errors = _bundle_consistency_errors(
+        root,
+        batch_data,
+        require_initial_status=require_initial_status,
+        require_all_done=require_all_done,
+    )
+    if errors:
+        raise PlanJsonError(";".join(errors))
+    return PlanBundle(root=root, batches=batch_data, tasks=all_tasks, task_batches=task_batches)
+
+
+def find_task(bundle: PlanBundle, task_id: str) -> tuple[str, dict[str, Any]]:
+    batch_id = bundle.task_batches.get(task_id)
+    if batch_id is None:
+        raise PlanJsonError(f"task_not_found:{task_id}")
+    for item in tasks(bundle.batches[batch_id]):
+        if item.get("id") == task_id:
+            return batch_id, item
+    raise PlanJsonError(f"task_not_found:{task_id}")
+
+
+def bundle_unfinished_tasks(bundle: PlanBundle) -> list[str]:
+    return [str(item.get("id")) for item in bundle.tasks if normalize_status(item.get("status")) != "done"]
+
+
+def bundle_failed_tasks(bundle: PlanBundle) -> list[str]:
+    return [str(item.get("id")) for item in bundle.tasks if normalize_status(item.get("status")) == "failed"]
+
+
+def bundle_blocked_tasks(bundle: PlanBundle) -> list[str]:
+    return [
+        str(item.get("id"))
+        for item in bundle.tasks
+        if isinstance(item.get("blockers"), list) and any(str(value).strip() for value in item["blockers"])
+    ]
+
+
 def write_plan_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -578,7 +967,18 @@ def load_and_validate_plan(path: Path, **kwargs: Any) -> tuple[dict[str, Any] | 
         data = load_plan(path)
     except PlanJsonError as exc:
         return None, [str(exc)]
-    return data, validate_plan_data(data, **kwargs)
+    errors = validate_plan_data(data, **kwargs)
+    if errors:
+        return data, errors
+    try:
+        bundle = load_plan_bundle(path.parent, **kwargs)
+    except PlanJsonError as exc:
+        return data, str(exc).split(";")
+    view = dict(data)
+    view["_bundleTasks"] = bundle.tasks
+    view["_bundleTaskBatches"] = bundle.task_batches
+    view["tasks"] = bundle.tasks
+    return view, []
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:

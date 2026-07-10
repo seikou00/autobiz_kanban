@@ -180,6 +180,57 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
         + "\n",
         encoding="utf-8",
     )
+    monolithic = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+    task_items = monolithic.pop("tasks")
+    (feature_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "featureId": feature,
+                "status": "done",
+                "activeBatchId": None,
+                "nextBatchId": None,
+                "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+                "batches": [
+                    {
+                        "id": "B001",
+                        "path": "plans/B001/plan.json",
+                        "title": "capability",
+                        "specRoots": ["specs/capability/spec.md"],
+                        "deps": [],
+                        "taskIds": ["T001"],
+                        "status": "done",
+                    }
+                ],
+                "projectValidationCommands": monolithic["projectValidationCommands"],
+                "projectCheckEvidenceIds": monolithic["projectCheckEvidenceIds"],
+                "latestProjectCheckEvidenceId": monolithic["latestProjectCheckEvidenceId"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    batch_path = feature_dir / "plans" / "B001" / "plan.json"
+    batch_path.parent.mkdir(parents=True, exist_ok=True)
+    batch_path.write_text(
+        json.dumps(
+            {
+                "featureId": feature,
+                "batchId": "B001",
+                "title": "capability",
+                "status": "done",
+                "taskCount": 1,
+                "completedTaskCount": 1,
+                "completionEvidenceIds": ["ev_0001"],
+                "startedAt": "2026-07-10T00:00:00Z",
+                "completedAt": "2026-07-10T00:01:00Z",
+                "tasks": task_items,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
     append_evidence(
         feature_dir,
         {
@@ -264,7 +315,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
     )
     run_dir = feature_dir / ".task-runs" / "T001"
     run_dir.mkdir(parents=True, exist_ok=True)
-    plan_task = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))["tasks"][0]
+    plan_task = json.loads(batch_path.read_text(encoding="utf-8"))["tasks"][0]
     (run_dir / f"{run_id}.json").write_text(
         json.dumps(
             {
@@ -717,12 +768,52 @@ class StateIntegrationTests(unittest.TestCase):
                     },
                 ],
             }
+            tasks = rich_plan.pop("tasks")
+            rich_plan.update(
+                {
+                    "status": "todo",
+                    "activeBatchId": "B001",
+                    "nextBatchId": None,
+                    "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+                    "batches": [
+                        {
+                            "id": "B001",
+                            "path": "plans/B001/plan.json",
+                            "title": "capability",
+                            "specRoots": ["specs/capability/spec.md"],
+                            "deps": [],
+                            "taskIds": ["T001", "T002"],
+                            "status": "todo",
+                        }
+                    ],
+                }
+            )
             (feature_dir / "plan.json").write_text(json.dumps(rich_plan, ensure_ascii=False), encoding="utf-8")
+            batch_path = feature_dir / "plans" / "B001" / "plan.json"
+            batch_path.parent.mkdir(parents=True)
+            batch_path.write_text(
+                json.dumps(
+                    {
+                        "featureId": "alpha",
+                        "batchId": "B001",
+                        "title": "capability",
+                        "status": "todo",
+                        "taskCount": 2,
+                        "completedTaskCount": 0,
+                        "completionEvidenceIds": [],
+                        "startedAt": None,
+                        "completedAt": None,
+                        "tasks": tasks,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
 
             synced, error = validate_plan_json_for_checkpoint(workspace=workspace, feature="alpha", checkpoint="plan_done")
 
             self.assertTrue(synced, error)
-            preserved = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            preserved = json.loads(batch_path.read_text(encoding="utf-8"))
             self.assertEqual(preserved["tasks"][1]["deps"], ["T001"])
             self.assertEqual(preserved["tasks"][1]["expectedFiles"], ["src/b.py"])
 

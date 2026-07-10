@@ -36,8 +36,21 @@ def collect_plan_tasks(feature_dir: Path) -> list[dict[str, Any]]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return []
-    tasks = data.get("tasks") if isinstance(data, dict) else None
-    return [task for task in tasks if isinstance(task, dict)] if isinstance(tasks, list) else []
+    if not isinstance(data, dict) or "tasks" in data:
+        return []
+    result: list[dict[str, Any]] = []
+    for entry in data.get("batches", []):
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            continue
+        batch_path = feature_dir / str(entry["path"])
+        try:
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        batch_tasks = batch.get("tasks") if isinstance(batch, dict) else None
+        if isinstance(batch_tasks, list):
+            result.extend(task for task in batch_tasks if isinstance(task, dict))
+    return result
 
 
 def task_by_id(feature_dir: Path) -> dict[str, dict[str, Any]]:
@@ -190,4 +203,3 @@ def ui_summary_from_coverage(feature_dir: Path, rows: list[dict[str, Any]]) -> d
         else:
             summary["missingUiScenarioRefs"].append(scenario)
     return summary
-

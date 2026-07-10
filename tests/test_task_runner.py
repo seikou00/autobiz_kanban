@@ -19,6 +19,26 @@ def _git(root: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
 
 
+def _batch_path(feature_dir: Path) -> Path:
+    return feature_dir / "plans" / "B001" / "plan.json"
+
+
+def _read_batch(feature_dir: Path) -> dict:
+    return json.loads(_batch_path(feature_dir).read_text(encoding="utf-8"))
+
+
+def _write_batch(feature_dir: Path, batch: dict) -> None:
+    _batch_path(feature_dir).write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _evidence(feature_dir: Path, evidence_id: str) -> dict:
+    for line in (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        if record.get("evidenceId") == evidence_id:
+            return record
+    raise AssertionError(f"missing evidence {evidence_id}")
+
+
 def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = None) -> tuple[Path, Path, Path]:
     workspace = root / "artifacts"
     feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -100,32 +120,56 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
                 ],
             },
         )
-    (feature_dir / "plan.json").write_text(
-        json.dumps(
+    root_plan = {
+        "featureId": "alpha",
+        "status": "todo",
+        "activeBatchId": "B001",
+        "nextBatchId": None,
+        "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+        "batches": [
             {
-                "featureId": "alpha",
-                "projectValidationCommands": [
-                    {
-                        "id": "PROJECT-VAL-001",
-                        "argv": [sys.executable, "-c", "print('project compile')"],
-                        "cwd": ".",
-                        "kind": "compile",
-                        "required": True,
-                    }
-                ],
-                "projectCheckEvidenceIds": [],
-                "latestProjectCheckEvidenceId": None,
-                "tasks": tasks,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
+                "id": "B001",
+                "path": "plans/B001/plan.json",
+                "title": "cap",
+                "specRoots": ["specs/cap/spec.md"],
+                "deps": [],
+                "taskIds": [item["id"] for item in tasks],
+                "status": "todo",
+            }
+        ],
+        "projectValidationCommands": [
+            {
+                "id": "PROJECT-VAL-001",
+                "argv": [sys.executable, "-c", "print('project compile')"],
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
+            }
+        ],
+        "projectCheckEvidenceIds": [],
+        "latestProjectCheckEvidenceId": None,
+    }
+    (feature_dir / "plan.json").write_text(
+        json.dumps(root_plan, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    _batch_path(feature_dir).parent.mkdir(parents=True)
+    _write_batch(
+        feature_dir,
+        {
+            "featureId": "alpha",
+            "batchId": "B001",
+            "title": "cap",
+            "status": "todo",
+            "taskCount": len(tasks),
+            "completedTaskCount": 0,
+            "completionEvidenceIds": [],
+            "startedAt": None,
+            "completedAt": None,
+            "tasks": tasks,
+        },
+    )
     return workspace, feature_dir, code
-
-
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(ROOT / "hooks" / "task_runner.py"), *args],
@@ -162,9 +206,11 @@ class TaskRunnerTest(unittest.TestCase):
 
             plan_path = feature_dir / "plan.json"
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            plan["tasks"][0]["validationCommands"][0]["repo"] = code.name
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["validationCommands"][0]["repo"] = code.name
             plan["projectValidationCommands"][0]["repo"] = code.name
-            plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, plan)
+            _write_batch(feature_dir, batch)
 
             started_result = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
@@ -182,7 +228,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            evidence = json.loads((feature_dir / "evidence" / "ev_0001.json").read_text(encoding="utf-8"))
+            evidence = _evidence(feature_dir, "ev_0001")
             self.assertEqual(evidence["changedFiles"], ["secondary:implemented.txt"])
             self.assertEqual(evidence["fileChanges"][0]["repository"], "secondary")
             self.assertFalse((code / ".autobizdevops").exists())
@@ -195,14 +241,18 @@ class TaskRunnerTest(unittest.TestCase):
             _start(workspace, code)
             plan_path = feature_dir / "plan.json"
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            second = json.loads(json.dumps(plan["tasks"][0]))
+            batch = _read_batch(feature_dir)
+            second = json.loads(json.dumps(batch["tasks"][0]))
             second["id"] = "T002"
             second["status"] = "todo"
             second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
             second["validationCommands"][0]["id"] = "VAL-T002-01"
             second["validationCommands"][0]["covers"] = ["AC-T002-01"]
-            plan["tasks"].append(second)
+            batch["tasks"].append(second)
+            batch["taskCount"] = 2
+            plan["batches"][0]["taskIds"].append("T002")
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, batch)
 
             started = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
@@ -216,10 +266,10 @@ class TaskRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             started = _start(workspace, code)
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan_path = _batch_path(feature_dir)
+            plan = _read_batch(feature_dir)
             plan["tasks"][0]["goal"] = "corrected contract"
-            plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, plan)
 
             aborted = _run(
                 "abort", "--workspace", str(workspace), "--feature", "alpha",
@@ -228,7 +278,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
-            updated = json.loads(plan_path.read_text(encoding="utf-8"))
+            updated = _read_batch(feature_dir)
             self.assertEqual(updated["tasks"][0]["status"], "todo")
             restarted = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
@@ -257,7 +307,7 @@ class TaskRunnerTest(unittest.TestCase):
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(plan["projectCheckEvidenceIds"], ["ev_0002"])
             self.assertEqual(plan["latestProjectCheckEvidenceId"], "ev_0002")
-            evidence = json.loads((feature_dir / "evidence" / "ev_0002.json").read_text(encoding="utf-8"))
+            evidence = _evidence(feature_dir, "ev_0002")
             self.assertEqual(evidence["action"], "project_check")
             self.assertEqual(evidence["taskId"], "__project__")
             self.assertEqual(evidence["validation"]["commandId"], "PROJECT-VAL-001")
@@ -319,7 +369,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            evidence = json.loads((feature_dir / "evidence" / "ev_0001.json").read_text(encoding="utf-8"))
+            evidence = _evidence(feature_dir, "ev_0001")
             self.assertEqual(evidence["changedFiles"], ["existing.txt", "renamed.txt"])
             self.assertEqual(evidence["fileChanges"][0]["operation"], "renamed")
             self.assertEqual(evidence["fileChanges"][0]["fromPath"], "existing.txt")
@@ -328,10 +378,10 @@ class TaskRunnerTest(unittest.TestCase):
     def test_complete_rejects_changes_outside_declared_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan_path = _batch_path(feature_dir)
+            plan = _read_batch(feature_dir)
             plan["tasks"][0]["scope"]["paths"] = ["src"]
-            plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, plan)
             started = _start(workspace, code)
             (code / "outside.txt").write_text("outside\n", encoding="utf-8")
 
@@ -348,8 +398,8 @@ class TaskRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             started = _start(workspace, code)
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan_path = _batch_path(feature_dir)
+            plan = _read_batch(feature_dir)
             plan["tasks"][0]["validationCommands"][0]["argv"] = ["echo", "changed"]
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
@@ -367,8 +417,8 @@ class TaskRunnerTest(unittest.TestCase):
     def test_complete_runs_all_required_validation_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan_path = _batch_path(feature_dir)
+            plan = _read_batch(feature_dir)
             plan["tasks"][0]["validationCommands"].append(
                 {
                     "id": "VAL-T001-02",
@@ -379,7 +429,7 @@ class TaskRunnerTest(unittest.TestCase):
                     "covers": ["AC-T001-01"],
                 }
             )
-            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, plan)
             started = _start(workspace, code)
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
 
@@ -390,7 +440,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan = _read_batch(feature_dir)
             task = plan["tasks"][0]
             self.assertEqual(task["evidenceIds"], ["ev_0001", "ev_0002"])
             self.assertEqual(task["completionEvidenceIds"], ["ev_0001", "ev_0002"])
@@ -455,10 +505,72 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
-            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            plan = _read_batch(feature_dir)
             self.assertEqual(plan["tasks"][0]["status"], "done")
             records = (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(records), 1)
+
+    def test_recover_accepts_legacy_run_state_without_batch_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            run_path = feature_dir / ".task-runs" / "T001" / f"{started['runId']}.json"
+            state = json.loads(run_path.read_text(encoding="utf-8"))
+            state.update(
+                {
+                    "status": "evidence_written",
+                    "success": True,
+                    "completionMode": "verified_existing",
+                    "changedFiles": [],
+                    "fileChanges": [],
+                    "evidenceIds": ["ev_0001"],
+                    "completionEvidenceIds": ["ev_0001"],
+                }
+            )
+            state.pop("batchId", None)
+            run_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+            append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "T001",
+                    "action": "validation",
+                    "detailVersion": 2,
+                    "runId": started["runId"],
+                    "completionMode": "verified_existing",
+                    "summary": "legacy recovered validation",
+                    "implementation": {"noCodeChange": True, "whatChanged": [], "why": "existing"},
+                    "specRefs": ["specs/cap/spec.md#REQ-001", "#SCN-001"],
+                    "designRefs": [],
+                    "changedFiles": [],
+                    "fileChanges": [],
+                    "supportingFiles": ["existing.txt"],
+                    "checkedCriteria": ["AC-T001-01"],
+                    "validation": {
+                        "commandId": "VAL-T001-01",
+                        "argv": [sys.executable, "-c", "print('validation')"],
+                        "command": "validation",
+                        "cwd": ".",
+                        "kind": "behavior_test",
+                        "required": True,
+                        "exitCode": 0,
+                        "result": "pass",
+                    },
+                },
+                output_tail="validation\n",
+            )
+
+            recovered = _run(
+                "recover", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+
+            self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+            self.assertEqual(json.loads(run_path.read_text(encoding="utf-8"))["status"], "done")
 
     def test_recover_rejects_missing_evidence_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -489,8 +601,8 @@ class TaskRunnerTest(unittest.TestCase):
     def test_recover_resumes_after_one_of_multiple_commands_was_evidenced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan_path = _batch_path(feature_dir)
+            plan = _read_batch(feature_dir)
             plan["tasks"][0]["validationCommands"].append(
                 {
                     "id": "VAL-T001-02",
@@ -501,7 +613,7 @@ class TaskRunnerTest(unittest.TestCase):
                     "covers": ["AC-T001-01"],
                 }
             )
-            plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, plan)
             started = _start(workspace, code)
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
             append_evidence(
@@ -607,7 +719,7 @@ class TaskRunnerTest(unittest.TestCase):
                 }
             )
             run_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-            command = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))["tasks"][0]["validationCommands"][0]
+            command = _read_batch(feature_dir)["tasks"][0]["validationCommands"][0]
             append_evidence(
                 feature_dir,
                 {
@@ -669,12 +781,12 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["completionMode"], "implemented")
-            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            plan = _read_batch(feature_dir)
             task = plan["tasks"][0]
             self.assertEqual(task["status"], "done")
             self.assertEqual(task["evidenceIds"], ["ev_0001"])
             self.assertEqual(task["completionEvidenceIds"], ["ev_0001"])
-            evidence = json.loads((feature_dir / "evidence" / "ev_0001.json").read_text(encoding="utf-8"))
+            evidence = _evidence(feature_dir, "ev_0001")
             self.assertEqual(evidence["changedFiles"], ["implemented.txt"])
             self.assertEqual(evidence["completionMode"], "implemented")
             self.assertIn("validation", (feature_dir / "evidence" / "ev_0001.log").read_text(encoding="utf-8"))
@@ -729,10 +841,10 @@ class TaskRunnerTest(unittest.TestCase):
                 "--code-workspace", str(code),
             )
             self.assertEqual(project_check.returncode, 0, project_check.stdout + project_check.stderr)
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan_path = _batch_path(feature_dir)
+            plan = _read_batch(feature_dir)
             plan["tasks"][0]["goal"] = "changed after completion"
-            plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, plan)
 
             self.assertIn(
                 f"T001.task_run_contract_mismatch:{started['runId']}",
@@ -791,6 +903,7 @@ class TaskRunnerTest(unittest.TestCase):
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             plan["projectCheckEvidenceIds"] = [project_evidence["evidenceId"]]
             plan["latestProjectCheckEvidenceId"] = project_evidence["evidenceId"]
+            plan["status"] = "done"
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
 
             self.assertIn(
@@ -812,7 +925,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            evidence = json.loads((feature_dir / "evidence" / "ev_0001.json").read_text(encoding="utf-8"))
+            evidence = _evidence(feature_dir, "ev_0001")
             self.assertEqual(evidence["completionMode"], "verified_existing")
             self.assertEqual(evidence["changedFiles"], [])
             self.assertTrue(evidence["implementation"]["noCodeChange"])
@@ -846,11 +959,11 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(completed.returncode, 0)
-            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            plan = _read_batch(feature_dir)
             self.assertEqual(plan["tasks"][0]["status"], "failed")
             self.assertEqual(plan["tasks"][0]["evidenceIds"], ["ev_0001"])
             self.assertEqual(plan["tasks"][0]["completionEvidenceIds"], [])
-            evidence = json.loads((feature_dir / "evidence" / "ev_0001.json").read_text(encoding="utf-8"))
+            evidence = _evidence(feature_dir, "ev_0001")
             self.assertEqual(evidence["validation"]["result"], "fail")
 
     def test_failed_task_can_retry_without_losing_evidence_history(self) -> None:
@@ -866,14 +979,14 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertNotEqual(failed.returncode, 0)
 
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan_path = _batch_path(feature_dir)
+            plan = _read_batch(feature_dir)
             plan["tasks"][0]["validationCommands"][0]["argv"] = [
                 sys.executable,
                 "-c",
                 "print('validation pass')",
             ]
-            plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, plan)
             second_run = _start(workspace, code)
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
             completed = _run(
@@ -883,7 +996,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan = _read_batch(feature_dir)
             task = plan["tasks"][0]
             self.assertEqual(task["status"], "done")
             self.assertEqual(task["evidenceIds"], ["ev_0001", "ev_0002"])
@@ -898,14 +1011,14 @@ class TaskRunnerTest(unittest.TestCase):
     def test_complete_rejects_validation_that_mutates_git_visible_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan_path = _batch_path(feature_dir)
+            plan = _read_batch(feature_dir)
             plan["tasks"][0]["validationCommands"][0]["argv"] = [
                 sys.executable,
                 "-c",
                 "from pathlib import Path; Path('generated.txt').write_text('generated')",
             ]
-            plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, plan)
             started = _start(workspace, code)
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
 

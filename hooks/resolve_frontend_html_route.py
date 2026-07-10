@@ -277,7 +277,15 @@ def _plan_ui_routes(fd: Path) -> list[str]:
         data = load_plan(path)
     except Exception:
         return []
-    tasks = data.get("tasks")
+    active_batch = data.get("activeBatchId")
+    if not isinstance(active_batch, str):
+        return []
+    batch_path = fd / "plans" / active_batch / "plan.json"
+    try:
+        batch = load_plan(batch_path)
+    except Exception:
+        return []
+    tasks = batch.get("tasks")
     if not isinstance(tasks, list):
         return []
     routes: list[str] = []

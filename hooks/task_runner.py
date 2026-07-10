@@ -23,13 +23,19 @@ from hooks.evidence_store import EvidenceStoreError, append_evidence, read_recor
 from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
-    load_plan,
+    PlanBundle,
+    bundle_unfinished_tasks,
+    find_task,
+    load_plan_bundle,
     normalize_status,
     task_contract_sha256,
-    unfinished_tasks,
-    validate_plan_data,
 )
-from hooks.plan_writer import record_project_check_attempt, record_task_attempt, set_task_execution_status  # noqa: E402
+from hooks.plan_writer import (  # noqa: E402
+    activate_batch as activate_plan_batch,
+    record_project_check_attempt,
+    record_task_attempt,
+    set_task_execution_status,
+)
 
 
 DEFAULT_TIMEOUT_SECONDS = 300
@@ -68,21 +74,29 @@ def _task_run_lock(feature_dir: Path) -> FileLock:
     return FileLock(feature_dir / ".task-runs" / ".lock")
 
 
-def _load_plan_and_task(feature_dir: Path, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    plan = load_plan(feature_dir / "plan.json")
-    errors = validate_plan_data(plan)
-    if errors:
-        raise TaskRunnerError("invalid_plan_json:" + ";".join(errors))
-    for task in plan.get("tasks", []):
-        if isinstance(task, dict) and task.get("id") == task_id:
-            return plan, task
-    raise TaskRunnerError(f"task_not_found:{task_id}")
+def _load_plan_and_task(
+    feature_dir: Path,
+    task_id: str,
+    *,
+    require_active_batch: bool = True,
+) -> tuple[PlanBundle, str, dict[str, Any]]:
+    try:
+        bundle = load_plan_bundle(feature_dir)
+        batch_id, task = find_task(bundle, task_id)
+    except ValueError as exc:
+        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    if require_active_batch and bundle.root.get("status") == "awaiting_next_conversation":
+        raise TaskRunnerError(f"batch_handoff_requires_new_conversation:{bundle.root.get('nextBatchId')}")
+    active_batch = bundle.root.get("activeBatchId")
+    if require_active_batch and active_batch != batch_id:
+        raise TaskRunnerError(f"task_not_in_active_batch:{task_id}:active={active_batch}:taskBatch={batch_id}")
+    return bundle, batch_id, task
 
 
-def _unfinished_dependencies(plan: dict[str, Any], task: dict[str, Any]) -> list[str]:
+def _unfinished_dependencies(plan: PlanBundle, task: dict[str, Any]) -> list[str]:
     by_id = {
         item.get("id"): item
-        for item in plan.get("tasks", [])
+        for item in plan.tasks
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
     return [
@@ -275,7 +289,7 @@ def _start_task_unlocked(
     code_workspace: Path | list[Path],
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
-    plan, task = _load_plan_and_task(feature_dir, task_id)
+    plan, batch_id, task = _load_plan_and_task(feature_dir, task_id)
     if task.get("blockers"):
         raise TaskRunnerError(f"task_has_blockers:{task_id}")
     if unfinished := _unfinished_dependencies(plan, task):
@@ -304,6 +318,7 @@ def _start_task_unlocked(
         "version": 1,
         "runId": run_id,
         "featureId": feature,
+        "batchId": batch_id,
         "taskId": task_id,
         "taskContractSha256": task_contract_sha256(task),
         "status": "started",
@@ -625,10 +640,13 @@ def _complete_task_unlocked(
     supporting_files: list[str],
 ) -> tuple[bool, dict[str, Any]]:
     feature_dir = _feature_dir(workspace, feature)
-    _, task = _load_plan_and_task(feature_dir, task_id)
+    _, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
     path, state = _load_run(feature_dir, task_id, run_id)
     if state.get("taskContractSha256") != task_contract_sha256(task):
         raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
+    stored_batch = state.get("batchId")
+    if stored_batch is not None and stored_batch != batch_id:
+        raise TaskRunnerError(f"task_batch_changed_after_start:{task_id}")
     repositories = _resolve_repositories(code_workspace)
     _assert_repositories_match(state, repositories)
     if state.get("status") in {"done", "failed"}:
@@ -648,6 +666,8 @@ def _complete_task_unlocked(
         )
         if not result.ok:
             raise TaskRunnerError("plan_binding_failed")
+        if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
+            state["batchHandoff"] = result.data["batchHandoff"]
         state["status"] = "done" if success else "failed"
         _save_run(path, state)
         return success, state
@@ -823,6 +843,8 @@ def _complete_task_unlocked(
     )
     if not result.ok:
         raise TaskRunnerError("plan_binding_failed")
+    if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
+        state["batchHandoff"] = result.data["batchHandoff"]
     state["status"] = "done" if success else "failed"
     _save_run(path, state)
     return success, state
@@ -863,18 +885,22 @@ def _run_project_checks_unlocked(
     code_workspace: Path | list[Path],
 ) -> tuple[bool, list[str]]:
     feature_dir = _feature_dir(workspace, feature)
-    plan = load_plan(feature_dir / "plan.json")
-    errors = validate_plan_data(plan)
-    if errors:
-        raise TaskRunnerError("invalid_plan_json:" + ";".join(errors))
-    if unfinished := unfinished_tasks(plan):
+    try:
+        bundle = load_plan_bundle(feature_dir)
+    except ValueError as exc:
+        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    if unfinished := bundle_unfinished_tasks(bundle):
         raise TaskRunnerError("project_check_requires_all_tasks_done:" + ",".join(unfinished))
+    if bundle.root.get("activeBatchId") is not None or bundle.root.get("nextBatchId") is not None:
+        raise TaskRunnerError("project_check_requires_all_batches_done")
+    if (feature_dir / "BATCH_HANDOFF.json").exists():
+        raise TaskRunnerError("project_check_blocked_by_batch_handoff")
     repositories = _resolve_repositories(code_workspace)
     project_snapshot = _repository_state(repositories)
     evidence_ids: list[str] = []
     required_failed = False
     run_id = _new_run_id()
-    for command in plan.get("projectValidationCommands", []):
+    for command in bundle.root.get("projectValidationCommands", []):
         if not isinstance(command, dict):
             continue
         repository_id, _ = _command_repository(command, repositories)
@@ -976,6 +1002,19 @@ def run_project_checks(
         return _run_project_checks_unlocked(workspace, feature, code_workspace)
 
 
+def activate_batch(workspace: Path, feature: str, batch_id: str) -> dict[str, Any]:
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        result = activate_plan_batch(workspace, feature, batch_id)
+        if not result.ok:
+            errors = result.errors or []
+            detail = ";".join(
+                f"{item.get('reason')}:{item.get('detail', '')}" for item in errors
+            )
+            raise TaskRunnerError(detail or "batch_activation_failed")
+        return dict(result.data or {})
+
+
 def _resolve(args: argparse.Namespace) -> tuple[Path, str, list[Path]]:
     workspace = resolve_workspace(args.workspace)
     feature = resolve_feature(args.feature)
@@ -1012,6 +1051,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             completionMode=state.get("completionMode"),
             evidenceIds=state.get("evidenceIds", []),
             completionEvidenceIds=state.get("completionEvidenceIds", []),
+            batchHandoff=state.get("batchHandoff"),
+            stopAfterBatch=bool(state.get("batchHandoff")),
         )
     except (TaskRunnerError, ValueError) as exc:
         return _emit(False, error=str(exc))
@@ -1051,6 +1092,15 @@ def _cmd_project_check(args: argparse.Namespace) -> int:
         success, evidence_ids = run_project_checks(workspace, feature, code_workspace)
         return _emit(success, error=None if success else "project_validation_failed", evidenceIds=evidence_ids)
     except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
+        return _emit(False, error=str(exc))
+
+
+def _cmd_activate_batch(args: argparse.Namespace) -> int:
+    try:
+        workspace = resolve_workspace(args.workspace)
+        feature = resolve_feature(args.feature)
+        return _emit(True, **activate_batch(workspace, feature, args.batch_id))
+    except (TaskRunnerError, ValueError) as exc:
         return _emit(False, error=str(exc))
 
 
@@ -1096,6 +1146,12 @@ def main(argv: list[str] | None = None) -> int:
     project_check.add_argument("--feature")
     project_check.add_argument("--code-workspace", required=True, action="append")
     project_check.set_defaults(func=_cmd_project_check)
+
+    activate = subparsers.add_parser("activate-batch")
+    activate.add_argument("--workspace")
+    activate.add_argument("--feature")
+    activate.add_argument("--batch-id", required=True)
+    activate.set_defaults(func=_cmd_activate_batch)
 
     args = parser.parse_args(argv)
     return args.func(args)

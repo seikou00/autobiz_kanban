@@ -73,11 +73,43 @@ def write_ui_context(workspace: Path, payload: dict) -> None:
 
 
 def write_plan_route(workspace: Path, route: str) -> None:
+    feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
     write_json(
-        workspace / ".autobizdevops" / "features" / "alpha" / "plan.json",
+        feature_dir / "plan.json",
         {
-            "version": 1,
             "featureId": "alpha",
+            "status": "todo",
+            "activeBatchId": "B001",
+            "nextBatchId": None,
+            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+            "batches": [
+                {
+                    "id": "B001",
+                    "path": "plans/B001/plan.json",
+                    "title": "ui",
+                    "specRoots": ["specs/cap/spec.md"],
+                    "deps": [],
+                    "taskIds": ["T001"],
+                    "status": "todo",
+                }
+            ],
+            "projectValidationCommands": [],
+            "projectCheckEvidenceIds": [],
+            "latestProjectCheckEvidenceId": None,
+        },
+    )
+    write_json(
+        feature_dir / "plans" / "B001" / "plan.json",
+        {
+            "featureId": "alpha",
+            "batchId": "B001",
+            "title": "ui",
+            "status": "todo",
+            "taskCount": 1,
+            "completedTaskCount": 0,
+            "completionEvidenceIds": [],
+            "startedAt": None,
+            "completedAt": None,
             "tasks": [
                 {
                     "id": "T001",

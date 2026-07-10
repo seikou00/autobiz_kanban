@@ -6,7 +6,7 @@ version: v1.2.0703
 
 ## 前端 Route 强制闸门（必须优先执行）
 
-当本轮任务是前端代码生成、HTML/DOM/设计导出稿转工程代码，或触发「前端 HTML 实现分支」时，`/autodev-code` 不得自行改写成普通前端编码任务。必须先解析内部 route。UI 范围以 `UI_CONTEXT.json` 和 `plan.json.tasks[].uiRequired/uiRefs` 为机器事实源，Markdown 只作迁移兜底。
+当本轮任务是前端代码生成、HTML/DOM/设计导出稿转工程代码，或触发「前端 HTML 实现分支」时，`/autodev-code` 不得自行改写成普通前端编码任务。必须先解析内部 route。UI 范围以 `UI_CONTEXT.json` 和 active batch task 的 `uiRequired/uiRefs` 为机器事实源，Markdown 只作迁移兜底。
 
 1. 推进到 `code_in_progress` 后，先解析并记录 route：
 
@@ -75,7 +75,7 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 触发条件（任一满足即进入本分支）：
 
 - `UI_CONTEXT.json` 中 `uiRequired=true`，或当前 plan task 中 `uiRequired=true`。
-- `plan.json.tasks[].uiRequired/uiRefs`、specs 或用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面；`PLAN.md` 仅是 `plan.json` 的人类视图，不作为前端分流机器依据。
+- active batch task 的 `uiRequired/uiRefs`、specs 或用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面；`PLAN.md` 仅是计划的人类视图，不作为前端分流机器依据。
 - 用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段、设计导出稿或静态页面素材。
 
 总优先级：
@@ -149,7 +149,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ### 建立执行上下文与任务队列
 
-- 使用`write_todos`，把唯一的 `plan.json` 映射成可见任务清单，状态用 待做 / 进行中 / 完成 / 失败；每次只置一个任务为"进行中"。缺少或结构过时则回流 `/autodev-plan` 重建，不建立旁路任务队列。`write_todos` 只反映任务进度。
+- 只读取根 `plan.json` 的批次摘要和 `activeBatchId` 对应的一个 `plans/Bxxx/plan.json`，不得把其他批次完整 task 契约加载进当前对话。使用 `write_todos` 映射当前批次任务，状态用待做 / 进行中 / 完成 / 失败；每次只置一个任务为进行中。根 plan 含 `tasks` 或缺少批次时回流 `/autodev-plan` 重建。
 
 ###  选择下一个任务
 
@@ -182,7 +182,7 @@ python "{PLUGIN_ROOT}/hooks/code_task_context.py" --feature "{FEATURE_ID}" --tas
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的范围；不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 任务需要写 / 改测试时，遵循 `${pluginPath}/skills/references/test-quality.md`：站在 seam 上验证、期望值来自独立事实源（勿同义反复）、mock 只在系统边界。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
-6. 任务完成必须只走 `task_runner complete`。runner 从 plan 读取并执行全部 `validationCommands`，采集真实 stdout/stderr 与退出码，依据 start 快照计算 changedFiles/fileChanges，依次写 `EVIDENCE.jsonl`、`ev_XXXX.json` sidecar、`ev_XXXX.log`、`EVIDENCE.index.json`，再绑定 plan 并更新任务状态；不得手工调用 `evidence_store.py append`、`plan_writer.py add-evidence-id` 或 `set-status done` 代替：
+6. 任务完成必须只走 `task_runner complete`。runner 从 active batch 读取并执行全部 `validationCommands`，采集真实 stdout/stderr 与退出码，依据 start 快照计算 changedFiles/fileChanges，写 `EVIDENCE.jsonl`、`ev_XXXX.log`、`EVIDENCE.index.json`，再绑定 batch task 并投影 batch/root 状态；不得手工调用 `evidence_store.py append`、`plan_writer.py add-evidence-id` 或 `set-status done` 代替：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -194,24 +194,32 @@ python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --ta
 python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
 ```
 
-验证失败仍会写 `result=fail` evidence 和真实 log，但任务状态为 `failed`，不得完成。写 evidence 后异常中断时使用同参数执行 `recover`，runner 会从 `.task-runs/<TASK_ID>/<RUN_ID>.json` 续跑或只补 plan 绑定，且不会重复已有命令 evidence。`ev_XXXX.json` 是结构化记录，`ev_XXXX.log` 只保存脱敏后的命令输出；即使命令无输出也必须存在零字节 log。两者内容相同、日志错绑到其他 ID、缺失或哈希不一致都会被拒绝。`ev_XXXX` 按全流自动递增，任何流/index/sidecar/log 被重写或重排都必须停止并恢复。旧结构 plan 不兼容，必须回到 `/autodev-plan` 清理并重建。
+验证失败仍会写 `result=fail` evidence 和真实 log，但任务状态为 `failed`，不得完成。写 evidence 后异常中断时使用同参数执行 `recover`，runner 会从 `.task-runs/<TASK_ID>/<RUN_ID>.json` 续跑或只补 plan 绑定，且不会重复已有命令 evidence。结构化记录只存在 `EVIDENCE.jsonl`；`ev_XXXX.log` 只保存脱敏后的真实命令输出，即使命令无输出也必须存在零字节 log。不得新建 `ev_XXXX.json` sidecar；查看单条记录使用 `evidence_store.py show --evidence-id ev_XXXX`。日志错绑、缺失或哈希不一致会被拒绝。`ev_XXXX` 按全流自动递增，任何流/index/log 被重写或重排都必须停止并恢复。
+
+若 `complete` 返回 `stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须立即停止本对话，不得继续读取或实现下一批；向用户明确提示打开新对话，并给出 `batchHandoff.activationCommand`。新对话首先执行：
+
+```bash
+python "${pluginPath}/hooks/task_runner.py" activate-batch --feature "${feature}" --batch-id "<NEXT_BATCH_ID>"
+```
+
+激活成功后才能加载下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，激活时消费并删除。
 7. 若 `SMOKE_TEST_PLAN.json`存在，按其中 `tests[]` 生成或补齐旁路冒烟测试源码/脚本。每条 smoke 必须按计划中的 `seam` 站在公开边界上验证，不测私有方法、不查内部实现细节；按 `verticalSlice` 一次只实现一个最小闭环，不把多个场景合成一条大烟测；按 `mockPolicy` 只 mock 系统边界，不 mock 自有模块或内部协作者。冒烟测试必须是 opt-in：Java/Spring 可用 `*SmokeIT` + `-Psmoke`，前端可用 `tests/smoke/` + 单独 smoke script，CLI/API 可用 `scripts/smoke/`；这些源码/脚本只用于本地验证，可以放在业务项目测试目录，但不得进入业务项目 Git 托管。生成后必须确保 `sourcePath` 被目标项目 Git 忽略，优先把精确路径或窄范围 AutoDev smoke 模式写入 `.git/info/exclude`，不要把 smoke 源码 `git add`，也不得让默认 `validationCommands` 无意中跑到慢/脆的冒烟。全部强 validation 通过后，运行：
 
 ```bash
 python "${pluginPath}/hooks/run_advisory_smoke.py" --feature "${feature}"
 ```
 
-`run_advisory_smoke.py` 会写入 `SMOKE_RESULT.json` 并向 `EVIDENCE.jsonl` 追加 `action=smoke` evidence。冒烟 PASS/FAIL/BLOCKED/SKIPPED 都只作为旁路风险信号：不得把 smoke evidence 写入 `plan.json.tasks[].evidenceIds`，不得把冒烟失败改成任务失败，不得因为 `SMOKE_RESULT.json.verdict` 非 PASS 而阻断 `code_done`。但如果 `SMOKE_TEST_PLAN.json.tests[]` 非空，必须产出覆盖每个 `SMK-xxx` 的 `SMOKE_RESULT.json`。
+`run_advisory_smoke.py` 会写入 `SMOKE_RESULT.json` 并向 `EVIDENCE.jsonl` 追加 `action=smoke` evidence。冒烟 PASS/FAIL/BLOCKED/SKIPPED 都只作为旁路风险信号：不得把 smoke evidence 写入 batch task 的 `evidenceIds`，不得把冒烟失败改成任务失败，不得因为 `SMOKE_RESULT.json.verdict` 非 PASS 而阻断 `code_done`。
 
 若 `run_advisory_smoke.py` 在执行前置检查阶段返回非 0（例如 `sourcePath` 对应测试源码不存在、测试条目非法、命令缺失、sourcePath 已被 Git 跟踪或未被 Git ignore 命中），这表示 Code 阶段尚未按 `SMOKE_TEST_PLAN.json` 补齐本地冒烟测试资产；必须先补齐测试源码/修正计划/更新 `.git/info/exclude` 后重跑。只有冒烟命令已经实际执行后的 PASS/FAIL/BLOCKED/SKIPPED 结果才属于不阻断流转的旁路风险信号。
 
-策略边界：`plan.json.tasks[].validationCommands`、`action=validation` evidence 与 `code_done_gate` 仍是强门禁；`SMOKE_TEST_PLAN.json` / `SMOKE_RESULT.json` 只表达旁路冒烟风险。不要把启动/主链路 smoke 命令同时放进强门禁和 advisory smoke；除非用户明确要求恢复阻断式 startup gate，否则不得让 `SMOKE_RESULT.json.verdict` 影响 `code_done` 流转。
+策略边界：batch task 的 `validationCommands`、`action=validation` evidence 与 `code_done_gate` 仍是强门禁；`SMOKE_TEST_PLAN.json` / `SMOKE_RESULT.json` 只表达旁路冒烟风险。
 
 > 一致性：任务的依据在对应上游产物里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 
 ###  全部任务完成后的验证
 
-队列所有任务均为「完成」后，通过 runner 跑 plan 顶层 `projectValidationCommands`（至少编译/类型检查之一）。提前执行会被拒绝；项目检查命令不得修改 Git 可见文件。项目检查单独写 `action=project_check` evidence，不参与任一 task 的验收覆盖；失败不推进，且最新项目检查必须晚于全部任务完成 evidence：
+只有最终批次全部任务完成、没有 `BATCH_HANDOFF.json` 后，才通过 runner 跑根 plan 的 `projectValidationCommands`。提前执行会被拒绝；项目检查单独写 `action=project_check` evidence，不参与任一 task 的验收覆盖：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" project-check --feature "${feature}" --code-workspace "<BUSINESS_REPO>"
@@ -247,7 +255,8 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 - 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
 - 所有任务由 task runner 完成；required validation 全部通过；`checkedCriteria` 并集覆盖全部 AC；完成 evidence 与命令、runId、快照 changedFiles 一致。旧结构 plan 必须重跑 Plan，不提供兼容完成路径。
-- `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json`、每条新 evidence 的 `ev_XXXX.json` 与 `ev_XXXX.log` 完整性和哈希校验通过，不存在遗漏、内容混写、截断、重写、重排或重编号。
+- `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 validation/project-check evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
+- 每个批次最多 5 个任务；非末批完成后已停止当前对话并生成 `BATCH_HANDOFF.json`，下一批只在新对话显式激活。
 - 若 `SMOKE_TEST_PLAN.json`存在：已按计划生成/补齐冒烟测试源码并确认其被目标项目 Git 忽略，已运行 `run_advisory_smoke.py`；`SMOKE_RESULT.json` 已写入。`SMOKE_RESULT.json.verdict` 为 `FAIL` / `BLOCKED` / `SKIPPED` 时，记录为风险但不阻断本阶段流转。
 - 必要验证通过；最新一次 `project-check` 晚于全部任务完成 evidence，且其中所有 required 项通过（`code_done` 会再次校验 plan/evidence/run 闭环）。
 - HTML 分支或前端源码变更已完成统一前端回检，或用户明确跳过；仍有 `must-fix` / 执行异常时不得推进 `code_done`。

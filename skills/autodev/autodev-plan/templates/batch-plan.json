@@ -1,0 +1,121 @@
+{
+  "featureId": "{feature}",
+  "batchId": "B001",
+  "title": "[spec capability name]",
+  "status": "todo",
+  "taskCount": 2,
+  "completedTaskCount": 0,
+  "completionEvidenceIds": [],
+  "startedAt": null,
+  "completedAt": null,
+  "tasks": [
+    {
+      "id": "T001",
+      "title": "[single observable behavior]",
+      "goal": "[observable outcome]",
+      "status": "todo",
+      "deps": [],
+      "uiRequired": false,
+      "scope": {
+        "modules": ["[module]"],
+        "entrypoints": [],
+        "pages": [],
+        "dataObjects": [],
+        "paths": []
+      },
+      "implementationPoints": [
+        "[implement the behavior]",
+        "[cover its boundary]"
+      ],
+      "acceptanceCriteria": [
+        {
+          "id": "AC-T001-01",
+          "text": "[observable acceptance result]",
+          "scenarioRefs": ["specs/[capability]/spec.md#SCN-001"]
+        }
+      ],
+      "nonGoals": [],
+      "specRefs": [
+        "specs/[capability]/spec.md#REQ-001",
+        "specs/[capability]/spec.md#SCN-001"
+      ],
+      "designRefs": ["design.md#D-001"],
+      "apiIds": [],
+      "dataIds": [],
+      "decisionIds": ["D-001"],
+      "completionPolicy": "all_required_validations_pass",
+      "validationCommands": [
+        {
+          "id": "VAL-T001-01",
+          "argv": ["[executable]", "[task test arguments]"],
+          "cwd": ".",
+          "kind": "behavior_test",
+          "required": true,
+          "covers": ["AC-T001-01"]
+        }
+      ],
+      "expectedFiles": [],
+      "evidenceIds": [],
+      "completionEvidenceIds": [],
+      "latestPassEvidenceId": null,
+      "blockers": []
+    },
+    {
+      "id": "T002",
+      "title": "[UI capability single page behavior]",
+      "goal": "[one observable page interaction result]",
+      "status": "todo",
+      "deps": ["T001"],
+      "uiRequired": true,
+      "uiRefs": {
+        "pageRefs": ["PAGE-001"],
+        "interactionRefs": ["UIX-001"],
+        "visualSourceRefs": [],
+        "frontendRoute": "spec-driven-ui"
+      },
+      "scope": {
+        "modules": ["[frontend module]"],
+        "entrypoints": ["[page route]"],
+        "pages": ["PAGE-001"],
+        "dataObjects": [],
+        "paths": []
+      },
+      "implementationPoints": [
+        "[project PAGE-001 and UIX-001]",
+        "[cover the observable UI state]"
+      ],
+      "acceptanceCriteria": [
+        {
+          "id": "AC-T002-01",
+          "text": "[observable UI result]",
+          "scenarioRefs": ["specs/[ui-capability]/spec.md#SCN-002"]
+        }
+      ],
+      "nonGoals": ["[do not implement unrelated pages]"],
+      "specRefs": [
+        "specs/[ui-capability]/spec.md#REQ-002",
+        "specs/[ui-capability]/spec.md#SCN-002"
+      ],
+      "designRefs": ["design.md#D-002"],
+      "apiIds": [],
+      "dataIds": [],
+      "decisionIds": ["D-002"],
+      "completionPolicy": "all_required_validations_pass",
+      "validationCommands": [
+        {
+          "id": "VAL-T002-01",
+          "argv": ["[executable]", "[UI behavior test arguments]"],
+          "cwd": ".",
+          "kind": "behavior_test",
+          "required": true,
+          "covers": ["AC-T002-01"]
+        }
+      ],
+      "expectedFiles": [],
+      "evidenceIds": [],
+      "completionEvidenceIds": [],
+      "latestPassEvidenceId": null,
+      "blockers": []
+    }
+  ]
+}

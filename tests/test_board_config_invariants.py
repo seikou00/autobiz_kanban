@@ -370,14 +370,19 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertEqual(offenders, [], "autodev-code route docs/tools must use references/ paths")
 
     def test_plan_template_keeps_ui_projection_examples(self) -> None:
-        template = json.loads(
+        root_template = json.loads(
             (ROOT / "skills/autodev/autodev-plan/templates/plan.json").read_text(encoding="utf-8")
+        )
+        template = json.loads(
+            (ROOT / "skills/autodev/autodev-plan/templates/batch-plan.json").read_text(encoding="utf-8")
         )
         tasks = template.get("tasks")
         self.assertIsInstance(tasks, list)
         self.assertTrue(tasks, "plan template must include task examples")
-        self.assertNotIn("version", template)
-        self.assertNotIn("taskDetailVersion", template)
+        self.assertNotIn("tasks", root_template)
+        self.assertEqual(root_template["batchPolicy"]["maxTasks"], 5)
+        self.assertNotIn("version", root_template)
+        self.assertNotIn("taskDetailVersion", root_template)
 
         missing_base_fields: list[str] = []
         for task in tasks:

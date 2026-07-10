@@ -26,8 +26,14 @@ from hooks.evidence_store import (  # noqa: E402
     validate_record,
     write_index,
 )
-from hooks.plan_json import validate_plan_data, write_plan_json  # noqa: E402
+from hooks.plan_json import (  # noqa: E402
+    batch_plan_path,
+    validate_plan_data,
+    validate_task_collection,
+    write_plan_json,
+)
 from hooks.evidence_kernel import check_record_artifacts, write_pending  # noqa: E402
+from hooks.evidence_kernel import write_sidecar  # noqa: E402
 
 
 def valid_plan(
@@ -94,6 +100,60 @@ def valid_plan(
     }
 
 
+def validate_test_tasks(plan: dict, **kwargs: object) -> list[str]:
+    return validate_task_collection(str(plan.get("featureId", "alpha")), plan.get("tasks", []), **kwargs)
+
+
+def write_test_plan(feature_dir: Path, plan: dict) -> None:
+    task_items = plan["tasks"]
+    all_done = bool(task_items) and all(item.get("status") == "done" for item in task_items)
+    batch_status = "done" if all_done else "todo"
+    root_status = "done" if all_done else "todo"
+    write_plan_json(
+        feature_dir / "plan.json",
+        {
+            "featureId": plan["featureId"],
+            "status": root_status,
+            "activeBatchId": None if all_done else "B001",
+            "nextBatchId": None,
+            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+            "batches": [
+                {
+                    "id": "B001",
+                    "path": "plans/B001/plan.json",
+                    "title": "capability",
+                    "specRoots": ["specs/capability/spec.md"],
+                    "deps": [],
+                    "taskIds": [item["id"] for item in task_items],
+                    "status": batch_status,
+                }
+            ],
+            "projectValidationCommands": plan["projectValidationCommands"],
+            "projectCheckEvidenceIds": plan.get("projectCheckEvidenceIds", []),
+            "latestProjectCheckEvidenceId": plan.get("latestProjectCheckEvidenceId"),
+        },
+    )
+    write_plan_json(
+        batch_plan_path(feature_dir, "B001"),
+        {
+            "featureId": plan["featureId"],
+            "batchId": "B001",
+            "title": "capability",
+            "status": batch_status,
+            "taskCount": len(task_items),
+            "completedTaskCount": sum(item.get("status") == "done" for item in task_items),
+            "completionEvidenceIds": [
+                evidence_id
+                for item in task_items
+                for evidence_id in item.get("completionEvidenceIds", [])
+            ],
+            "startedAt": None,
+            "completedAt": "2026-07-10T00:00:00Z" if all_done else None,
+            "tasks": task_items,
+        },
+    )
+
+
 def append_pass_evidence(feature_dir: Path, *, task_id: str = "T001") -> dict:
     return append_evidence(
         feature_dir,
@@ -158,7 +218,7 @@ class PlanJsonTest(unittest.TestCase):
     def test_plan_accepts_structured_completion_contract(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
 
-        self.assertEqual(validate_plan_data(plan), [])
+        self.assertEqual(validate_test_tasks(plan), [])
 
     def test_plan_rejects_legacy_version_field(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
@@ -171,14 +231,14 @@ class PlanJsonTest(unittest.TestCase):
         task = plan["tasks"][0]
         task["validationCommands"][0]["covers"] = ["AC-T001-99"]
 
-        self.assertIn("T001.validationCommands[0].covers_unknown:AC-T001-99", validate_plan_data(plan))
+        self.assertIn("T001.validationCommands[0].covers_unknown:AC-T001-99", validate_test_tasks(plan))
 
     def test_plan_rejects_compile_as_acceptance_coverage(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         task = plan["tasks"][0]
         task["validationCommands"][0]["kind"] = "compile"
 
-        self.assertIn("T001.validationCommands[0].compile_cannot_cover_acceptance", validate_plan_data(plan))
+        self.assertIn("T001.validationCommands[0].compile_cannot_cover_acceptance", validate_test_tasks(plan))
 
     def test_plan_requires_required_commands_to_cover_every_acceptance_criterion(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
@@ -186,7 +246,7 @@ class PlanJsonTest(unittest.TestCase):
 
         self.assertIn(
             "T001.acceptanceCriteria_uncovered:AC-T001-01",
-            validate_plan_data(plan),
+            validate_test_tasks(plan),
         )
 
     def test_plan_requires_acceptance_scenarios_to_exist_in_task_spec_refs(self) -> None:
@@ -195,7 +255,7 @@ class PlanJsonTest(unittest.TestCase):
 
         self.assertIn(
             "T001.acceptanceCriteria[0].scenario_not_in_task_specRefs:SCN-999",
-            validate_plan_data(plan),
+            validate_test_tasks(plan),
         )
 
     def test_plan_json_template_matches_initial_contract(self) -> None:
@@ -207,8 +267,8 @@ class PlanJsonTest(unittest.TestCase):
     def test_plan_stage_allows_empty_evidence_ids_until_done_gate(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
 
-        self.assertEqual(validate_plan_data(plan), [])
-        self.assertIn("T001.evidenceIds_missing", validate_plan_data(plan, require_all_done=True))
+        self.assertEqual(validate_test_tasks(plan), [])
+        self.assertIn("T001.evidenceIds_missing", validate_test_tasks(plan, require_all_done=True))
 
     def test_plan_requires_completion_and_project_pointers_to_reference_history(self) -> None:
         plan = valid_plan(status="done", evidence_ids=["ev_0001"])
@@ -218,7 +278,21 @@ class PlanJsonTest(unittest.TestCase):
         plan["projectCheckEvidenceIds"] = ["ev_0003", "ev_0004"]
         plan["latestProjectCheckEvidenceId"] = "ev_0003"
 
-        errors = validate_plan_data(plan, require_all_done=True)
+        errors = validate_test_tasks(plan, require_all_done=True)
+        errors.extend(validate_plan_data({
+            "featureId": "alpha",
+            "status": "done",
+            "activeBatchId": None,
+            "nextBatchId": None,
+            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+            "batches": [{
+                "id": "B001", "path": "plans/B001/plan.json", "title": "capability",
+                "specRoots": ["specs/capability/spec.md"], "deps": [], "taskIds": ["T001"], "status": "done",
+            }],
+            "projectValidationCommands": plan["projectValidationCommands"],
+            "projectCheckEvidenceIds": plan["projectCheckEvidenceIds"],
+            "latestProjectCheckEvidenceId": plan["latestProjectCheckEvidenceId"],
+        }, require_all_done=True))
 
         self.assertIn("T001.completionEvidenceId_not_in_evidenceIds:ev_0002", errors)
         self.assertIn("latestProjectCheckEvidenceId_not_latest:ev_0003", errors)
@@ -255,13 +329,13 @@ class PlanJsonTest(unittest.TestCase):
             }
         )
 
-        errors = validate_plan_data(plan)
+        errors = validate_test_tasks(plan)
 
         self.assertIn("T002.dependency_unknown:T003", errors)
 
         plan["tasks"][0]["deps"] = ["T002"]
         plan["tasks"][1]["deps"] = ["T001"]
-        errors = validate_plan_data(plan)
+        errors = validate_test_tasks(plan)
 
         self.assertTrue(any(error.startswith("task_dependency_cycle:") for error in errors))
 
@@ -269,7 +343,7 @@ class PlanJsonTest(unittest.TestCase):
         plan = valid_plan(status="todo", evidence_ids=[])
         del plan["tasks"][0]["goal"]
 
-        errors = validate_plan_data(plan, require_initial_status=True)
+        errors = validate_test_tasks(plan, require_initial_status=True)
 
         self.assertIn("T001.goal_missing", errors)
 
@@ -286,7 +360,7 @@ class PlanJsonTest(unittest.TestCase):
         task["scope"]["pages"] = ["PAGE-002"]
         task["nonGoals"] = ["do not implement unrelated pages"]
 
-        errors = validate_plan_data(plan, require_initial_status=True)
+        errors = validate_test_tasks(plan, require_initial_status=True)
 
         self.assertIn("T001.scope.pages_mismatch_uiRefs", errors)
 
@@ -296,7 +370,7 @@ class PlanJsonTest(unittest.TestCase):
         task["apiIds"] = ["API-001"]
         task["nonGoals"] = []
 
-        errors = validate_plan_data(plan, require_initial_status=True)
+        errors = validate_test_tasks(plan, require_initial_status=True)
 
         self.assertIn("T001.nonGoals_missing", errors)
 
@@ -331,7 +405,6 @@ class EvidenceStoreTest(unittest.TestCase):
             second_line = json.dumps(second, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n"
             stream_path(feature_dir).write_bytes(first_stream + second_line[: len(second_line) // 2])
             index_path(feature_dir).write_text(first_index, encoding="utf-8")
-            (feature_dir / "evidence" / "ev_0002.json").unlink()
             write_pending(feature_dir, second)
 
             third = append_pass_evidence(feature_dir)
@@ -345,26 +418,25 @@ class EvidenceStoreTest(unittest.TestCase):
             ])
             self.assertEqual(check_integrity(feature_dir), [])
 
-    def test_append_recovers_pending_sidecar_and_index_before_allocating_next_id(self) -> None:
+    def test_append_recovers_pending_index_before_allocating_next_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             first = append_pass_evidence(feature_dir)
             first_index = index_path(feature_dir).read_text(encoding="utf-8")
             second = append_pass_evidence(feature_dir)
             write_pending(feature_dir, second)
-            (feature_dir / "evidence" / "ev_0002.json").unlink()
             index_path(feature_dir).write_text(first_index, encoding="utf-8")
 
             third = append_pass_evidence(feature_dir)
 
             self.assertEqual(first["evidenceId"], "ev_0001")
             self.assertEqual(third["evidenceId"], "ev_0003")
-            restored = json.loads((feature_dir / "evidence" / "ev_0002.json").read_text(encoding="utf-8"))
+            restored = read_records(stream_path(feature_dir))[1]
             self.assertEqual(restored, second)
             self.assertFalse((feature_dir / "evidence" / ".pending" / "ev_0002.json").exists())
             self.assertEqual(check_integrity(feature_dir), [])
 
-    def test_append_creates_sidecar_and_hashes_captured_output(self) -> None:
+    def test_append_skips_sidecar_and_hashes_captured_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
 
@@ -386,9 +458,8 @@ class EvidenceStoreTest(unittest.TestCase):
             evidence_dir = feature_dir / "evidence"
             sidecar = evidence_dir / "ev_0001.json"
             log = evidence_dir / "ev_0001.log"
-            self.assertTrue(sidecar.is_file())
+            self.assertFalse(sidecar.exists())
             self.assertTrue(log.is_file())
-            self.assertEqual(json.loads(sidecar.read_text(encoding="utf-8")), record)
             self.assertEqual(log.read_text(encoding="utf-8"), "command output\n")
             self.assertEqual(
                 record["validation"]["outputSha256"],
@@ -416,7 +487,7 @@ class EvidenceStoreTest(unittest.TestCase):
                 output_tail="ok\n",
             )
 
-            self.assertEqual(record["artifactVersion"], 1)
+            self.assertEqual(record["artifactVersion"], 2)
             self.assertEqual(check_integrity(feature_dir), [])
 
     def test_append_redacts_secrets_and_truncates_large_logs(self) -> None:
@@ -466,11 +537,26 @@ class EvidenceStoreTest(unittest.TestCase):
             with self.assertRaisesRegex(EvidenceStoreError, "evidence_log_duplicates_record"):
                 append_evidence(feature_dir, raw_record, output_tail=json.dumps(raw_record))
 
-    def test_integrity_rejects_missing_or_modified_sidecar(self) -> None:
+    def test_integrity_ignores_unreferenced_sidecar_for_current_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             append_pass_evidence(feature_dir)
             sidecar = feature_dir / "evidence" / "ev_0001.json"
+
+            self.assertEqual(check_integrity(feature_dir), [])
+
+    def test_integrity_keeps_historical_artifact_v1_sidecar_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            current = append_pass_evidence(feature_dir)
+            legacy = dict(current)
+            legacy["artifactVersion"] = 1
+            stream_path(feature_dir).write_text(
+                json.dumps(legacy, ensure_ascii=False, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            sidecar = write_sidecar(feature_dir, legacy)
+            write_index(feature_dir, feature_id="alpha", verify_existing=False)
 
             self.assertEqual(check_integrity(feature_dir), [])
             sidecar.write_text("{}\n", encoding="utf-8")
@@ -495,7 +581,7 @@ class EvidenceStoreTest(unittest.TestCase):
             plan = valid_plan(status="todo", evidence_ids=[])
             plan["projectCheckEvidenceIds"] = ["ev_9999"]
             plan["latestProjectCheckEvidenceId"] = "ev_9999"
-            write_plan_json(feature_dir / "plan.json", plan)
+            write_test_plan(feature_dir, plan)
             append_pass_evidence(feature_dir)
 
             errors = check_plan_evidence_refs(feature_dir)
@@ -937,7 +1023,7 @@ class EvidenceGateTest(unittest.TestCase):
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
             plan = valid_plan()
-            write_plan_json(feature_dir / "plan.json", plan)
+            write_test_plan(feature_dir, plan)
             append_current_evidence(feature_dir)
 
             errors = check_code_done(feature_dir)
@@ -948,7 +1034,7 @@ class EvidenceGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
-            write_plan_json(feature_dir / "plan.json", valid_plan())
+            write_test_plan(feature_dir, valid_plan())
             append_pass_evidence(feature_dir)
 
             errors = check_code_done(feature_dir)
@@ -959,7 +1045,7 @@ class EvidenceGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
-            write_plan_json(feature_dir / "plan.json", valid_plan())
+            write_test_plan(feature_dir, valid_plan())
             append_current_evidence(feature_dir, task_id="T002")
 
             errors = check_code_done(feature_dir)
@@ -970,7 +1056,7 @@ class EvidenceGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
-            write_plan_json(feature_dir / "plan.json", valid_plan())
+            write_test_plan(feature_dir, valid_plan())
             append_current_evidence(
                 feature_dir,
                 command_id="VAL-T001-99",
@@ -987,7 +1073,7 @@ class EvidenceGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
-            write_plan_json(feature_dir / "plan.json", valid_plan(status="todo"))
+            write_test_plan(feature_dir, valid_plan(status="todo"))
             append_pass_evidence(feature_dir)
 
             self.assertTrue(any(error.startswith("plan_json:") for error in check_code_done(feature_dir)))
@@ -1006,8 +1092,8 @@ class EvidenceGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
-            write_plan_json(
-                feature_dir / "plan.json",
+            write_test_plan(
+                feature_dir,
                 valid_plan(status="done", evidence_ids=["ev_0001"], blockers=["waiting for API contract"]),
             )
             append_pass_evidence(feature_dir)
@@ -1021,7 +1107,7 @@ class EvidenceGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
             feature_dir.mkdir()
-            write_plan_json(feature_dir / "plan.json", valid_plan(status="done", evidence_ids=["ev_0001"]))
+            write_test_plan(feature_dir, valid_plan(status="done", evidence_ids=["ev_0001"]))
             append_evidence(
                 feature_dir,
                 {

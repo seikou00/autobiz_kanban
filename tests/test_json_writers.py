@@ -148,10 +148,42 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
     spec_refs = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"]
     if include_second:
         spec_refs.append("specs/cap/spec.md#SCN-002")
+    task = {
+        "id": "T001",
+        "title": "do",
+        "goal": "deliver behavior",
+        "status": "todo",
+        "deps": [],
+        "uiRequired": False,
+        "scope": {"modules": ["src"], "entrypoints": ["API-001"], "pages": [], "dataObjects": ["DATA-001"]},
+        "implementationPoints": ["update behavior", "cover boundary"],
+        "acceptanceCriteria": [{"id": "AC-T001-01", "text": "behavior is observable", "scenarioRefs": ["specs/cap/spec.md#SCN-001"]}],
+        "nonGoals": ["do not change unrelated behavior"],
+        "specRefs": spec_refs,
+        "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+        "apiIds": ["API-001"],
+        "dataIds": ["DATA-001"],
+        "decisionIds": ["D-001"],
+        "completionPolicy": "all_required_validations_pass",
+        "validationCommands": [{"id": "VAL-T001-01", "argv": ["echo", "ok"], "cwd": ".", "kind": "behavior_test", "required": True, "covers": ["AC-T001-01"]}],
+        "expectedFiles": [],
+        "evidenceIds": [],
+        "completionEvidenceIds": [],
+        "latestPassEvidenceId": None,
+        "blockers": [],
+    }
     (feature_dir / "plan.json").write_text(
         json.dumps(
             {
                 "featureId": "alpha",
+                "status": "todo",
+                "activeBatchId": "B001",
+                "nextBatchId": None,
+                "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+                "batches": [{
+                    "id": "B001", "path": "plans/B001/plan.json", "title": "cap",
+                    "specRoots": ["specs/cap/spec.md"], "deps": [], "taskIds": ["T001"], "status": "todo",
+                }],
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
@@ -163,52 +195,6 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                 ],
                 "projectCheckEvidenceIds": [],
                 "latestProjectCheckEvidenceId": None,
-                "tasks": [
-                    {
-                        "id": "T001",
-                        "title": "do",
-                        "goal": "deliver behavior",
-                        "status": "todo",
-                        "deps": [],
-                        "uiRequired": False,
-                        "scope": {
-                            "modules": ["src"],
-                            "entrypoints": ["API-001"],
-                            "pages": [],
-                            "dataObjects": ["DATA-001"],
-                        },
-                        "implementationPoints": ["update behavior", "cover boundary"],
-                        "acceptanceCriteria": [
-                            {
-                                "id": "AC-T001-01",
-                                "text": "behavior is observable",
-                                "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
-                            }
-                        ],
-                        "nonGoals": ["do not change unrelated behavior"],
-                        "specRefs": spec_refs,
-                        "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
-                        "apiIds": ["API-001"],
-                        "dataIds": ["DATA-001"],
-                        "decisionIds": ["D-001"],
-                        "completionPolicy": "all_required_validations_pass",
-                        "validationCommands": [
-                            {
-                                "id": "VAL-T001-01",
-                                "argv": ["echo", "ok"],
-                                "cwd": ".",
-                                "kind": "behavior_test",
-                                "required": True,
-                                "covers": ["AC-T001-01"],
-                            }
-                        ],
-                        "expectedFiles": [],
-                        "evidenceIds": [],
-                        "completionEvidenceIds": [],
-                        "latestPassEvidenceId": None,
-                        "blockers": [],
-                    }
-                ],
             },
             ensure_ascii=False,
             indent=2,
@@ -216,7 +202,41 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         + "\n",
         encoding="utf-8",
     )
+    batch_path = feature_dir / "plans" / "B001" / "plan.json"
+    batch_path.parent.mkdir(parents=True, exist_ok=True)
+    batch_path.write_text(
+        json.dumps(
+            {
+                "featureId": "alpha",
+                "batchId": "B001",
+                "title": "cap",
+                "status": "todo",
+                "taskCount": 1,
+                "completedTaskCount": 0,
+                "completionEvidenceIds": [],
+                "startedAt": None,
+                "completedAt": None,
+                "tasks": [task],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
     (feature_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+
+
+def _read_plan_tasks(feature_dir: Path) -> list[dict]:
+    batch = json.loads((feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8"))
+    return batch["tasks"]
+
+
+def _write_plan_tasks(feature_dir: Path, tasks: list[dict]) -> None:
+    path = feature_dir / "plans" / "B001" / "plan.json"
+    batch = json.loads(path.read_text(encoding="utf-8"))
+    batch["tasks"] = tasks
+    batch["taskCount"] = len(tasks)
+    path.write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _write_smoke_na(feature_dir: Path) -> None:
@@ -434,11 +454,11 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
             self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
             self.assertEqual(alias.returncode, 0, alias.stdout + alias.stderr)
-            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["tasks"][0]["id"], "T001")
-            self.assertEqual(plan["tasks"][0]["status"], "todo")
-            self.assertEqual(plan["tasks"][0]["evidenceIds"], [])
-            self.assertEqual(plan["tasks"][1]["deps"], ["T001"])
+            tasks = _read_plan_tasks(feature_dir)
+            self.assertEqual(tasks[0]["id"], "T001")
+            self.assertEqual(tasks[0]["status"], "todo")
+            self.assertEqual(tasks[0]["evidenceIds"], [])
+            self.assertEqual(tasks[1]["deps"], ["T001"])
 
     def test_plan_writer_body_file_reports_missing_required_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -527,10 +547,10 @@ class JsonWriterTests(unittest.TestCase):
 
             self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
             self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
-            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["tasks"][0]["id"], "T001")
-            self.assertEqual(plan["tasks"][0]["status"], "todo")
-            self.assertEqual(plan["tasks"][0]["evidenceIds"], [])
+            tasks = _read_plan_tasks(feature_dir)
+            self.assertEqual(tasks[0]["id"], "T001")
+            self.assertEqual(tasks[0]["status"], "todo")
+            self.assertEqual(tasks[0]["evidenceIds"], [])
 
     def test_plan_writer_body_stdin_rejects_conflicting_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -627,7 +647,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(body.returncode, 0)
             self.assertIn("oversized_plan_task_must_split", body.stdout)
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["tasks"], [])
+            self.assertEqual(plan["batches"], [])
 
     def test_plan_writer_rejects_large_task_without_split_rationale_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -667,7 +687,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(body.returncode, 0)
             self.assertIn("missing_plan_task_split_rationale", body.stdout)
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["tasks"], [])
+            self.assertEqual(plan["batches"], [])
 
     def test_plan_writer_add_task_cli_accepts_split_rationale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -715,9 +735,9 @@ class JsonWriterTests(unittest.TestCase):
 
             self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
             self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
-            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["tasks"][0]["id"], "T001")
-            self.assertEqual(plan["tasks"][0]["splitRationale"], rationale)
+            tasks = _read_plan_tasks(feature_dir)
+            self.assertEqual(tasks[0]["id"], "T001")
+            self.assertEqual(tasks[0]["splitRationale"], rationale)
 
     def test_plan_writer_counts_same_scenario_id_by_spec_path_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -758,7 +778,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertIn("missing_plan_task_split_rationale", body.stdout)
             self.assertIn("scenarios=6", body.stdout)
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["tasks"], [])
+            self.assertEqual(plan["batches"], [])
 
     def test_plan_writer_accepts_cross_spec_path_split_rationale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -797,9 +817,9 @@ class JsonWriterTests(unittest.TestCase):
 
             self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
             self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
-            plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["tasks"][0]["id"], "T001")
-            self.assertEqual(plan["tasks"][0]["splitRationale"], payload["splitRationale"])
+            tasks = _read_plan_tasks(feature_dir)
+            self.assertEqual(tasks[0]["id"], "T001")
+            self.assertEqual(tasks[0]["splitRationale"], payload["splitRationale"])
 
     def test_code_task_context_resolves_refs_from_artifact_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -826,10 +846,9 @@ class JsonWriterTests(unittest.TestCase):
             _write_specs(feature_dir)
             _write_design(feature_dir)
             _write_plan(feature_dir)
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            plan["tasks"][0]["specRefs"].append("specs/cap/spec.md#SCN-999")
-            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            tasks = _read_plan_tasks(feature_dir)
+            tasks[0]["specRefs"].append("specs/cap/spec.md#SCN-999")
+            _write_plan_tasks(feature_dir, tasks)
 
             result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
 
@@ -845,10 +864,9 @@ class JsonWriterTests(unittest.TestCase):
             _write_specs(feature_dir)
             _write_design(feature_dir)
             _write_plan(feature_dir)
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            plan["tasks"][0]["specRefs"].append("specs/missing/spec.md#SCN-001")
-            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            tasks = _read_plan_tasks(feature_dir)
+            tasks[0]["specRefs"].append("specs/missing/spec.md#SCN-001")
+            _write_plan_tasks(feature_dir, tasks)
 
             result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
 
@@ -861,15 +879,14 @@ class JsonWriterTests(unittest.TestCase):
             _write_specs(feature_dir)
             _write_design(feature_dir)
             _write_plan(feature_dir)
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            plan["tasks"][0]["specRefs"].extend(
+            tasks = _read_plan_tasks(feature_dir)
+            tasks[0]["specRefs"].extend(
                 [
                     f"{Path(tmp).resolve() / 'outside.md'}#SCN-001",
                     "../outside.md#SCN-001",
                 ]
             )
-            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            _write_plan_tasks(feature_dir, tasks)
 
             result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
 
@@ -895,10 +912,9 @@ class JsonWriterTests(unittest.TestCase):
             )
             _write_design(feature_dir)
             _write_plan(feature_dir)
-            plan_path = feature_dir / "plan.json"
-            plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            plan["tasks"][0]["specRefs"] = ["specs/cap/spec.md#REQ-001", "#SCN-001"]
-            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            tasks = _read_plan_tasks(feature_dir)
+            tasks[0]["specRefs"] = ["specs/cap/spec.md#REQ-001", "#SCN-001"]
+            _write_plan_tasks(feature_dir, tasks)
 
             result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
 

@@ -162,6 +162,8 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
 def check_code_done(target_feature_dir: Path) -> list[str]:
     errors = check_integrity(target_feature_dir, require_index=True)
     plan_path = plan_json_path(target_feature_dir)
+    if (target_feature_dir / "BATCH_HANDOFF.json").exists():
+        errors.append("unresolved_batch_handoff")
 
     if not errors:
         errors.extend(check_plan_evidence_refs(target_feature_dir))
@@ -169,7 +171,8 @@ def check_code_done(target_feature_dir: Path) -> list[str]:
     plan, plan_errors = load_and_validate_plan(plan_path, require_all_done=True)
     if plan_errors:
         errors.extend(f"plan_json:{error}" for error in plan_errors)
-        if plan is not None and (blocked := blocked_tasks(plan)):
+        diagnostic_plan, _ = load_and_validate_plan(plan_path)
+        if diagnostic_plan is not None and (blocked := blocked_tasks(diagnostic_plan)):
             errors.append("unresolved_blocker:" + ",".join(blocked))
         return errors
     if plan is None:

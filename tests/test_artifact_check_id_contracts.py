@@ -106,7 +106,49 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             evidence_ids = task.get("evidenceIds") if isinstance(task.get("evidenceIds"), list) else []
             task["completionEvidenceIds"] = evidence_ids if task.get("status") == "done" else []
             task["latestPassEvidenceId"] = evidence_ids[-1] if task.get("status") == "done" and evidence_ids else None
-        write_plan_json(path, data)
+        task_items = data.pop("tasks", [])
+        all_done = bool(task_items) and all(task.get("status") == "done" for task in task_items if isinstance(task, dict))
+        batch_status = "done" if all_done else "todo"
+        root = {
+            "featureId": data.get("featureId", "alpha"),
+            "status": "done" if all_done else "todo",
+            "activeBatchId": None if all_done else "B001",
+            "nextBatchId": None,
+            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+            "batches": [{
+                "id": "B001",
+                "path": "plans/B001/plan.json",
+                "title": "cap",
+                "specRoots": ["specs/cap/spec.md"],
+                "deps": [],
+                "taskIds": [task["id"] for task in task_items if isinstance(task, dict)],
+                "status": batch_status,
+            }],
+            "projectValidationCommands": data["projectValidationCommands"],
+            "projectCheckEvidenceIds": data["projectCheckEvidenceIds"],
+            "latestProjectCheckEvidenceId": data["latestProjectCheckEvidenceId"],
+        }
+        write_plan_json(path, root)
+        write_plan_json(
+            feature_dir / "plans" / "B001" / "plan.json",
+            {
+                "featureId": root["featureId"],
+                "batchId": "B001",
+                "title": "cap",
+                "status": batch_status,
+                "taskCount": len(task_items),
+                "completedTaskCount": sum(task.get("status") == "done" for task in task_items if isinstance(task, dict)),
+                "completionEvidenceIds": [
+                    evidence_id
+                    for task in task_items
+                    if isinstance(task, dict)
+                    for evidence_id in task.get("completionEvidenceIds", [])
+                ],
+                "startedAt": None,
+                "completedAt": "2026-07-10T00:00:00Z" if all_done else None,
+                "tasks": task_items,
+            },
+        )
 
     def _ctx(self, feature_dir: Path) -> HookContext:
         root = feature_dir.parent.parent.parent
@@ -244,6 +286,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 ],
             },
         )
+        self._rewrite_plan_fixture_to_current_schema(feature_dir)
         node_id = "dev.e2e" if e2e_evidence else "dev.code"
         skill = "autodev-e2e" if e2e_evidence else "autodev-code"
         checkpoint = "e2e_in_progress" if e2e_evidence else "code_in_progress"
@@ -343,6 +386,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "tasks": [task],
             },
         )
+        self._rewrite_plan_fixture_to_current_schema(feature_dir)
 
     def _write_smoke_plan(
         self,

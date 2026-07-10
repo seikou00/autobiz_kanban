@@ -287,7 +287,7 @@
         "group": "Dev",
         "skill": "autodev-plan",
         "order": 40,
-        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、plan.json（执行计划：任务 DAG 与各任务依据/验证/状态）、PLAN.md（从 plan.json 一一映射的内容）、SMOKE_TEST_PLAN.json（旁路冒烟案例计划）",
+        "description": "生成技术设计和批次执行计划 \n 产物：design.md、plan.json（批次索引与项目状态）、plans/Bxxx/plan.json（每批最多5个任务）、PLAN.md、SMOKE_TEST_PLAN.json",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },

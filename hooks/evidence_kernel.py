@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 
-EVIDENCE_ARTIFACT_VERSION = 1
+LEGACY_SIDECAR_ARTIFACT_VERSION = 1
+EVIDENCE_ARTIFACT_VERSION = 2
+SUPPORTED_EVIDENCE_ARTIFACT_VERSIONS = {
+    LEGACY_SIDECAR_ARTIFACT_VERSION,
+    EVIDENCE_ARTIFACT_VERSION,
+}
 MAX_LOG_BYTES = 1_000_000
 TRUNCATION_MARKER = b"\n... [LOG TRUNCATED] ...\n"
 SECRET_PATTERNS = (
@@ -130,24 +135,26 @@ def output_duplicates_record(output: str, record: dict[str, Any]) -> bool:
 
 
 def check_record_artifacts(target_feature_dir: Path, record: dict[str, Any]) -> list[str]:
-    if record.get("artifactVersion") != EVIDENCE_ARTIFACT_VERSION:
+    artifact_version = record.get("artifactVersion")
+    if artifact_version not in SUPPORTED_EVIDENCE_ARTIFACT_VERSIONS:
         return []
     evidence_id = record.get("evidenceId")
     if not isinstance(evidence_id, str) or not evidence_id:
-        return ["invalid_evidence_id_for_sidecar"]
+        return ["invalid_evidence_id_for_artifacts"]
 
     errors: list[str] = []
-    sidecar = sidecar_path(target_feature_dir, evidence_id)
-    if not sidecar.is_file():
-        errors.append(f"missing_evidence_sidecar:{evidence_id}")
-    else:
-        try:
-            sidecar_record = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            errors.append(f"invalid_evidence_sidecar:{evidence_id}")
+    if artifact_version == LEGACY_SIDECAR_ARTIFACT_VERSION:
+        sidecar = sidecar_path(target_feature_dir, evidence_id)
+        if not sidecar.is_file():
+            errors.append(f"missing_evidence_sidecar:{evidence_id}")
         else:
-            if sidecar_record != record:
-                errors.append(f"sidecar_record_mismatch:{evidence_id}")
+            try:
+                sidecar_record = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                errors.append(f"invalid_evidence_sidecar:{evidence_id}")
+            else:
+                if sidecar_record != record:
+                    errors.append(f"sidecar_record_mismatch:{evidence_id}")
 
     container_name = "smoke" if record.get("action") == "smoke" else "validation"
     container = record.get(container_name)

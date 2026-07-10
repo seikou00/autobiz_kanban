@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,10 +37,15 @@ from hooks.json_writer_common import (  # noqa: E402
 )
 from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
+    BATCH_STRATEGY,
+    MAX_BATCH_TASKS,
     VALIDATION_KINDS,
+    batch_plan_path,
+    load_plan_bundle,
     normalize_status,
     task_contract_sha256,
-    validate_plan_data,
+    validate_plan_bundle_data,
+    validate_task_collection,
 )
 from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
 
@@ -77,6 +83,14 @@ def _md_path(workspace: Path, feature: str) -> Path:
     return artifact_path(workspace, feature, PLAN_MD_FILE)
 
 
+def _handoff_path(workspace: Path, feature: str) -> Path:
+    return artifact_path(workspace, feature, "BATCH_HANDOFF.json")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def _plan_lock(workspace: Path, feature: str) -> FileLock:
     return FileLock(_path(workspace, feature).parent / ".plan.lock")
 
@@ -84,36 +98,220 @@ def _plan_lock(workspace: Path, feature: str) -> FileLock:
 def _initial(feature: str) -> dict[str, Any]:
     return {
         "featureId": feature,
+        "status": "todo",
+        "activeBatchId": None,
+        "nextBatchId": None,
+        "batchPolicy": {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY},
+        "batches": [],
         "projectValidationCommands": [],
         "projectCheckEvidenceIds": [],
         "latestProjectCheckEvidenceId": None,
-        "tasks": [],
+        "tasks": [],  # in-memory working view; never written to root plan.json
+        "_batchAssignments": {},
+        "_batchPlans": {},
     }
 
 
 def _load(workspace: Path, feature: str) -> dict[str, Any]:
-    data = load_json(_path(workspace, feature), default=_initial(feature))
-    if not isinstance(data, dict):
+    root = load_json(_path(workspace, feature), default=None)
+    if root is None:
+        return _initial(feature)
+    if not isinstance(root, dict):
         raise ValueError("plan.json root 必须是 object")
-    if "version" in data or "taskDetailVersion" in data:
+    if "tasks" in root:
+        raise PlanWriterInputError("monolithic_plan_requires_rebuild")
+    if "version" in root or "taskDetailVersion" in root:
         raise PlanWriterInputError("legacy_plan_requires_rebuild")
+    data = dict(root)
     data.setdefault("featureId", feature)
+    data.setdefault("status", "todo")
+    data.setdefault("activeBatchId", None)
+    data.setdefault("nextBatchId", None)
+    data.setdefault("batchPolicy", {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY})
+    data.setdefault("batches", [])
     data.setdefault("projectValidationCommands", [])
     data.setdefault("projectCheckEvidenceIds", [])
     data.setdefault("latestProjectCheckEvidenceId", None)
-    data.setdefault("tasks", [])
+    task_items: list[dict[str, Any]] = []
+    assignments: dict[str, str] = {}
+    batch_plans: dict[str, dict[str, Any]] = {}
+    feature_dir = _path(workspace, feature).parent
+    for entry in data.get("batches", []):
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        batch_id = str(entry["id"])
+        plan = load_json(batch_plan_path(feature_dir, batch_id))
+        if not isinstance(plan, dict):
+            raise PlanWriterInputError("missing_batch_plan", batch_id)
+        batch_plans[batch_id] = plan
+        for task in plan.get("tasks", []):
+            if isinstance(task, dict):
+                task_items.append(task)
+                if isinstance(task.get("id"), str):
+                    assignments[str(task["id"])] = batch_id
+    data["tasks"] = task_items
+    data["_batchAssignments"] = assignments
+    data["_batchPlans"] = batch_plans
     return data
 
 
 def _structure_errors(data: dict[str, Any], *, allow_empty: bool = False) -> list[str]:
-    if allow_empty and data.get("tasks") == []:
+    if allow_empty and _tasks(data) == []:
         errors: list[str] = []
         if "version" in data or "taskDetailVersion" in data:
             errors.append("legacy_plan_requires_rebuild")
         if not isinstance(data.get("featureId"), str) or not data.get("featureId"):
             errors.append("plan_json_missing_feature_id")
         return errors
-    return validate_plan_data(data)
+    return validate_task_collection(str(data.get("featureId", "")), _tasks(data))
+
+
+def _primary_spec_root(task: dict[str, Any]) -> str:
+    for ref in task.get("specRefs", []):
+        if isinstance(ref, str) and ref.strip():
+            return ref.split("#", 1)[0] or "specs/unspecified/spec.md"
+    return "specs/unspecified/spec.md"
+
+
+def _next_batch_id(batch_ids: set[str]) -> str:
+    numbers = [int(value[1:]) for value in batch_ids if len(value) == 4 and value[0] == "B" and value[1:].isdigit()]
+    return f"B{max(numbers, default=0) + 1:03d}"
+
+
+def _batch_status(batch_tasks: list[dict[str, Any]]) -> str:
+    statuses = [normalize_status(task.get("status")) for task in batch_tasks]
+    if statuses and all(status == "done" for status in statuses):
+        return "done"
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if any(status == "in_progress" for status in statuses) or any(status == "done" for status in statuses):
+        return "in_progress"
+    return "todo"
+
+
+def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    tasks_view = _tasks(data)
+    assignments = dict(data.get("_batchAssignments") or {})
+    prior_plans = data.get("_batchPlans") if isinstance(data.get("_batchPlans"), dict) else {}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    spec_roots: dict[str, str] = {}
+    existing_ids = {
+        str(entry.get("id"))
+        for entry in data.get("batches", [])
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    used_ids = set(existing_ids)
+    for task in tasks_view:
+        task_id = str(task.get("id", ""))
+        batch_id = assignments.get(task_id)
+        if batch_id is None:
+            primary = _primary_spec_root(task)
+            last_batch = sorted(groups)[-1] if groups else None
+            can_append_to_last = bool(
+                last_batch
+                and spec_roots.get(str(last_batch)) == primary
+                and len(groups[str(last_batch)]) < MAX_BATCH_TASKS
+            )
+            batch_id = str(last_batch) if can_append_to_last else _next_batch_id(used_ids)
+            used_ids.add(batch_id)
+            assignments[task_id] = batch_id
+        group = groups.setdefault(batch_id, [])
+        if len(group) >= MAX_BATCH_TASKS:
+            new_batch = _next_batch_id(used_ids)
+            used_ids.add(new_batch)
+            assignments[task_id] = new_batch
+            batch_id = new_batch
+            group = groups.setdefault(batch_id, [])
+        group.append(task)
+        spec_roots.setdefault(batch_id, _primary_spec_root(task))
+
+    ordered_ids = sorted(groups)
+    root = {
+        key: value
+        for key, value in data.items()
+        if key not in {"tasks", "_batchAssignments", "_batchPlans"}
+    }
+    root["batchPolicy"] = {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY}
+    root_entries: list[dict[str, Any]] = []
+    projected: dict[str, dict[str, Any]] = {}
+    task_to_batch = {
+        str(task.get("id")): batch_id
+        for batch_id, batch_tasks in groups.items()
+        for task in batch_tasks
+    }
+    for index, batch_id in enumerate(ordered_ids):
+        batch_tasks = groups[batch_id]
+        previous = prior_plans.get(batch_id) if isinstance(prior_plans, dict) else None
+        previous = previous if isinstance(previous, dict) else {}
+        status = _batch_status(batch_tasks)
+        completion_ids = [
+            evidence_id
+            for task in batch_tasks
+            for evidence_id in task.get("completionEvidenceIds", [])
+            if isinstance(evidence_id, str)
+        ]
+        spec_root = spec_roots[batch_id]
+        title = str(previous.get("title") or Path(spec_root).parent.name or batch_id)
+        projected[batch_id] = {
+            "featureId": root.get("featureId"),
+            "batchId": batch_id,
+            "title": title,
+            "status": status,
+            "taskCount": len(batch_tasks),
+            "completedTaskCount": sum(normalize_status(task.get("status")) == "done" for task in batch_tasks),
+            "completionEvidenceIds": completion_ids,
+            "startedAt": previous.get("startedAt"),
+            "completedAt": previous.get("completedAt") if status == "done" else None,
+            "tasks": batch_tasks,
+        }
+        cross_deps = {
+            task_to_batch[dep]
+            for task in batch_tasks
+            for dep in task.get("deps", [])
+            if isinstance(dep, str) and dep in task_to_batch and task_to_batch[dep] != batch_id
+        }
+        if index > 0:
+            cross_deps.add(ordered_ids[index - 1])
+        root_entries.append(
+            {
+                "id": batch_id,
+                "path": f"plans/{batch_id}/plan.json",
+                "title": title,
+                "specRoots": [spec_root],
+                "deps": sorted(cross_deps),
+                "taskIds": [str(task.get("id")) for task in batch_tasks],
+                "status": status,
+            }
+        )
+    root["batches"] = root_entries
+    unfinished = [entry["id"] for entry in root_entries if entry["status"] != "done"]
+    if not root_entries:
+        root.update({"status": "todo", "activeBatchId": None, "nextBatchId": None})
+    elif root.get("status") == "awaiting_next_conversation":
+        root["activeBatchId"] = None
+    elif not unfinished:
+        if data.get("status") == "failed":
+            root["status"] = "failed"
+        else:
+            root["status"] = "done" if root.get("latestProjectCheckEvidenceId") else "in_progress"
+        root["activeBatchId"] = None
+        root["nextBatchId"] = None
+    else:
+        active = root.get("activeBatchId")
+        if active not in unfinished:
+            active = unfinished[0]
+        root["activeBatchId"] = active
+        active_index = unfinished.index(active)
+        root["nextBatchId"] = unfinished[active_index + 1] if active_index + 1 < len(unfinished) else None
+        if any(entry["status"] == "failed" for entry in root_entries):
+            root["status"] = "failed"
+        elif data.get("status") == "in_progress" or any(entry["status"] == "in_progress" for entry in root_entries):
+            root["status"] = "in_progress"
+        else:
+            root["status"] = "todo"
+    data["_batchAssignments"] = assignments
+    data["_batchPlans"] = projected
+    return root, projected
 
 
 def _write(workspace: Path, feature: str, data: dict[str, Any], *, allow_empty: bool = False) -> WriterResult:
@@ -121,7 +319,16 @@ def _write(workspace: Path, feature: str, data: dict[str, Any], *, allow_empty: 
     errors = _structure_errors(data, allow_empty=allow_empty)
     if errors:
         return WriterResult(ok=False, path=path, errors=[{"reason": error} for error in errors])
-    changed = atomic_write_json(path, data)
+    root, batch_plans = _project_batches(data)
+    if batch_plans:
+        errors = validate_plan_bundle_data(root, batch_plans)
+        if errors:
+            return WriterResult(ok=False, path=path, errors=[{"reason": error} for error in errors])
+    changed = False
+    feature_dir = path.parent
+    for batch_id, batch in batch_plans.items():
+        changed = atomic_write_json(batch_plan_path(feature_dir, batch_id), batch) or changed
+    changed = atomic_write_json(path, root) or changed
     return WriterResult(ok=True, path=path, changed=changed)
 
 
@@ -141,6 +348,14 @@ def _find_task(data: dict[str, Any], task_id: str) -> dict[str, Any]:
 
 def _ids(data: dict[str, Any]) -> set[str]:
     return {task.get("id") for task in _tasks(data) if isinstance(task, dict) and isinstance(task.get("id"), str)}
+
+
+def _batch_for_task(data: dict[str, Any], task_id: str) -> str:
+    assignments = data.get("_batchAssignments")
+    batch_id = assignments.get(task_id) if isinstance(assignments, dict) else None
+    if not isinstance(batch_id, str):
+        raise ValueError(f"任务批次不存在: {task_id}")
+    return batch_id
 
 
 def _append_unique(values: list[str], items: list[str]) -> list[str]:
@@ -265,6 +480,20 @@ def _cmd_init(args: argparse.Namespace) -> int:
     existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
     if existing:
         return render_result(existing)
+    if args.force:
+        plans_dir = _path(workspace, feature).parent / "plans"
+        if plans_dir.is_dir():
+            for old_plan in plans_dir.glob("B*/plan.json"):
+                old_plan.unlink(missing_ok=True)
+                try:
+                    old_plan.parent.rmdir()
+                except OSError:
+                    pass
+            try:
+                plans_dir.rmdir()
+            except OSError:
+                pass
+        _handoff_path(workspace, feature).unlink(missing_ok=True)
     return render_result(with_result_data(_write(workspace, feature, _initial(feature), allow_empty=True), reset=bool(args.force)))
 
 
@@ -603,6 +832,13 @@ def set_task_execution_status(
         ):
             return fail("task_contract_changed_after_start", task_id, path=_path(workspace, feature))
         task["status"] = status
+        batch_id = _batch_for_task(data, task_id)
+        batch_plans = data.get("_batchPlans")
+        batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+        if isinstance(batch_plan, dict) and normalize_status(status) == "in_progress":
+            batch_plan["startedAt"] = batch_plan.get("startedAt") or _utc_now()
+            data["status"] = "in_progress"
+            data["activeBatchId"] = batch_id
         result = _write(workspace, feature, data)
         if result.ok:
             write_text(_md_path(workspace, feature), _render_plan_md(data))
@@ -634,9 +870,62 @@ def record_task_attempt(
         task["completionEvidenceIds"] = list(completion_evidence_ids) if success else []
         task["latestPassEvidenceId"] = completion_evidence_ids[-1] if success and completion_evidence_ids else None
         task["status"] = "done" if success else "failed"
+        batch_id = _batch_for_task(data, task_id)
+        batch_tasks = [
+            item
+            for item in _tasks(data)
+            if _batch_for_task(data, str(item.get("id"))) == batch_id
+        ]
+        batch_completed = success and all(normalize_status(item.get("status")) == "done" for item in batch_tasks)
+        root_entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
+        ordered_ids = [str(entry.get("id")) for entry in root_entries]
+        handoff: dict[str, Any] | None = None
+        if batch_completed:
+            batch_plans = data.get("_batchPlans")
+            batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+            if isinstance(batch_plan, dict):
+                batch_plan["completedAt"] = _utc_now()
+            batch_index = ordered_ids.index(batch_id)
+            if batch_index + 1 < len(ordered_ids):
+                next_batch = ordered_ids[batch_index + 1]
+                data["status"] = "awaiting_next_conversation"
+                data["activeBatchId"] = None
+                data["nextBatchId"] = next_batch
+                handoff = {
+                    "featureId": feature,
+                    "completedBatchId": batch_id,
+                    "nextBatchId": next_batch,
+                    "completedTaskIds": [str(item.get("id")) for item in batch_tasks],
+                    "completionEvidenceIds": [
+                        evidence_id
+                        for item in batch_tasks
+                        for evidence_id in item.get("completionEvidenceIds", [])
+                        if isinstance(evidence_id, str)
+                    ],
+                    "nextBatch": {
+                        "title": str(root_entries[batch_index + 1].get("title", "")),
+                        "taskIds": list(root_entries[batch_index + 1].get("taskIds", [])),
+                        "specRoots": list(root_entries[batch_index + 1].get("specRoots", [])),
+                        "deps": list(root_entries[batch_index + 1].get("deps", [])),
+                    },
+                    "status": "awaiting_next_conversation",
+                    "createdAt": _utc_now(),
+                    "activationCommand": (
+                        f"python hooks/task_runner.py activate-batch --workspace {workspace} "
+                        f"--feature {feature} --batch-id {next_batch}"
+                    ),
+                    "instruction": "Open a new conversation and activate the next batch before continuing code work.",
+                }
+            else:
+                data["status"] = "in_progress"
+                data["activeBatchId"] = None
+                data["nextBatchId"] = None
         result = _write(workspace, feature, data)
         if result.ok:
             write_text(_md_path(workspace, feature), _render_plan_md(data))
+            if handoff is not None:
+                atomic_write_json(_handoff_path(workspace, feature), handoff)
+                result = with_result_data(result, batchHandoff=handoff)
         return result
 
 
@@ -652,7 +941,34 @@ def record_project_check_attempt(
         existing = data.get("projectCheckEvidenceIds") if isinstance(data.get("projectCheckEvidenceIds"), list) else []
         data["projectCheckEvidenceIds"] = _append_unique(existing, evidence_ids)
         data["latestProjectCheckEvidenceId"] = evidence_ids[-1] if success and evidence_ids else None
+        data["status"] = "done" if success else "failed"
         return _write(workspace, feature, data)
+
+
+def activate_batch(workspace: Path, feature: str, batch_id: str) -> WriterResult:
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        if data.get("status") != "awaiting_next_conversation":
+            return fail("feature_not_awaiting_next_conversation", str(data.get("status")), path=_path(workspace, feature))
+        if data.get("nextBatchId") != batch_id:
+            return fail("batch_activation_mismatch", f"expected={data.get('nextBatchId')} actual={batch_id}", path=_path(workspace, feature))
+        entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
+        entry = next((item for item in entries if item.get("id") == batch_id), None)
+        if entry is None:
+            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
+        by_id = {str(item.get("id")): item for item in entries}
+        unfinished = [dep for dep in entry.get("deps", []) if by_id.get(dep, {}).get("status") != "done"]
+        if unfinished:
+            return fail("batch_dependencies_not_done", ",".join(unfinished), path=_path(workspace, feature))
+        ordered = [str(item.get("id")) for item in entries]
+        index = ordered.index(batch_id)
+        data["status"] = "in_progress"
+        data["activeBatchId"] = batch_id
+        data["nextBatchId"] = ordered[index + 1] if index + 1 < len(ordered) else None
+        result = _write(workspace, feature, data)
+        if result.ok:
+            _handoff_path(workspace, feature).unlink(missing_ok=True)
+        return with_result_data(result, activeBatchId=batch_id, nextBatchId=data.get("nextBatchId"))
 
 
 def _cmd_add_blocker(args: argparse.Namespace) -> int:
@@ -677,13 +993,15 @@ def _cmd_clear_blockers(args: argparse.Namespace) -> int:
 def _cmd_validate(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     path = _path(workspace, feature)
-    data = load_json(path)
-    errors = validate_plan_data(
-        data,
-        require_initial_status=args.initial,
-        require_all_done=args.done,
-        require_task_details=args.gate,
-    )
+    errors: list[str] = []
+    try:
+        load_plan_bundle(
+            path.parent,
+            require_initial_status=args.initial,
+            require_all_done=args.done,
+        )
+    except ValueError as exc:
+        errors = str(exc).split(";")
     return render_result(
         WriterResult(
             ok=not errors,
@@ -761,7 +1079,7 @@ def _render_plan_md(data: dict[str, Any]) -> str:
 def _cmd_render_md(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     data = _load(workspace, feature)
-    errors = validate_plan_data(data)
+    errors = _structure_errors(data)
     if errors:
         return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=[{"reason": error} for error in errors]))
     changed = write_text(_md_path(workspace, feature), _render_plan_md(data))

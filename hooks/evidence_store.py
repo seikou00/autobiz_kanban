@@ -18,32 +18,30 @@ from typing import Any
 try:
     from hooks.evidence_kernel import (
         EVIDENCE_ARTIFACT_VERSION,
+        SUPPORTED_EVIDENCE_ARTIFACT_VERSIONS,
         EvidenceLock,
         check_record_artifacts,
         log_path,
         output_duplicates_record,
         prepare_log,
         pending_path,
-        sidecar_path,
         write_log,
         write_json_artifact,
         write_pending,
-        write_sidecar,
     )
 except ImportError:  # pragma: no cover - direct script execution path
     from evidence_kernel import (
         EVIDENCE_ARTIFACT_VERSION,
+        SUPPORTED_EVIDENCE_ARTIFACT_VERSIONS,
         EvidenceLock,
         check_record_artifacts,
         log_path,
         output_duplicates_record,
         prepare_log,
         pending_path,
-        sidecar_path,
         write_log,
         write_json_artifact,
         write_pending,
-        write_sidecar,
     )
 
 try:  # Works both as ``python hooks/evidence_store.py`` and as ``hooks.evidence_store``.
@@ -300,7 +298,7 @@ def validate_detail_fields(record: dict[str, Any]) -> list[str]:
         return []
 
     errors: list[str] = []
-    if detail_version == 2 and record.get("artifactVersion") != EVIDENCE_ARTIFACT_VERSION:
+    if detail_version == 2 and record.get("artifactVersion") not in SUPPORTED_EVIDENCE_ARTIFACT_VERSIONS:
         errors.append("invalid_evidence_detail_artifactVersion")
     if not _non_empty_string(record.get("summary")):
         errors.append("missing_evidence_detail_summary")
@@ -473,7 +471,6 @@ def _recover_pending_appends(target_feature_dir: Path) -> None:
         streamed = by_id.get(evidence_id)
         if streamed is None:
             log_path(target_feature_dir, evidence_id).unlink(missing_ok=True)
-            sidecar_path(target_feature_dir, evidence_id).unlink(missing_ok=True)
             path.unlink()
             continue
         if streamed != pending:
@@ -502,7 +499,6 @@ def _recover_pending_appends(target_feature_dir: Path) -> None:
                 and existing_index.get("sha256") == prefix_sha
             ):
                 raise EvidenceStoreError(f"pending_evidence_prior_index_mismatch:{evidence_id}")
-        write_sidecar(target_feature_dir, streamed)
         artifact_errors = check_record_artifacts(target_feature_dir, streamed)
         if artifact_errors:
             raise EvidenceStoreError(";".join(artifact_errors))
@@ -641,7 +637,6 @@ def append_evidence(
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        write_sidecar(target_feature_dir, payload)
         write_index(
             target_feature_dir,
             feature_id=str(payload.get("featureId") or target_feature_dir.name),
@@ -752,6 +747,24 @@ def _cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_show(args: argparse.Namespace) -> int:
+    try:
+        feature = resolve_feature_arg(args.feature)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    target = feature_dir(resolve_workspace_arg(args.workspace), feature)
+    record = next(
+        (item for item in read_records(stream_path(target)) if item.get("evidenceId") == args.evidence_id),
+        None,
+    )
+    if record is None:
+        print(f"evidence_not_found:{args.evidence_id}", file=sys.stderr)
+        return 1
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Append or index Autodev evidence")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -791,6 +804,12 @@ def main(argv: list[str] | None = None) -> int:
     index.add_argument("--workspace", help="project plugin workspace; defaults to PLUGIN_WORKSPACE/PROJECT_DIR")
     index.add_argument("--feature", required=True)
     index.set_defaults(func=_cmd_index)
+
+    show = subparsers.add_parser("show")
+    show.add_argument("--workspace", help="project plugin workspace; defaults to PLUGIN_WORKSPACE/PROJECT_DIR")
+    show.add_argument("--feature", required=True)
+    show.add_argument("--evidence-id", required=True)
+    show.set_defaults(func=_cmd_show)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -20,12 +20,16 @@ from hooks.json_writer_common import (  # noqa: E402
     WriterResult,
     fail,
     feature_dir,
-    load_json,
     render_result,
     resolve_feature,
     resolve_workspace,
 )
-from hooks.plan_json import validate_plan_data  # noqa: E402
+from hooks.plan_json import (  # noqa: E402
+    batch_plan_path,
+    load_plan,
+    validate_batch_plan_data,
+    validate_plan_data,
+)
 
 
 PLAN_FILE = "plan.json"
@@ -191,11 +195,12 @@ def resolve_task_refs(base: Path, task: dict[str, Any]) -> tuple[list[dict[str, 
 def build_context(*, workspace: Path, feature: str, task_id: str) -> WriterResult:
     base = feature_dir(workspace, feature)
     plan_path = base / PLAN_FILE
-    data = load_json(plan_path)
-    if not isinstance(data, dict):
-        return fail("invalid_plan_json", "plan.json 顶层必须是 object", path=plan_path)
+    try:
+        data = load_plan(plan_path)
+    except ValueError as exc:
+        return fail("invalid_plan_json", str(exc), path=plan_path)
 
-    structure_errors = validate_plan_data(data, require_task_details=True)
+    structure_errors = validate_plan_data(data)
     if structure_errors:
         return WriterResult(
             ok=False,
@@ -203,8 +208,55 @@ def build_context(*, workspace: Path, feature: str, task_id: str) -> WriterResul
             errors=[{"reason": "invalid_plan_json", "detail": ",".join(structure_errors)}],
         )
 
+    active_batch_id = data.get("activeBatchId")
+    if not isinstance(active_batch_id, str):
+        next_batch_id = data.get("nextBatchId")
+        reason = "batch_handoff_required" if data.get("status") == "awaiting_next_conversation" else "no_active_batch"
+        return fail(reason, str(next_batch_id or ""), path=plan_path)
+    active_entry = next(
+        (item for item in data.get("batches", []) if isinstance(item, dict) and item.get("id") == active_batch_id),
+        None,
+    )
+    if not isinstance(active_entry, dict):
+        return fail("active_batch_not_found", active_batch_id, path=plan_path)
+    if task_id not in active_entry.get("taskIds", []):
+        known_task_ids = {
+            value
+            for entry in data.get("batches", [])
+            if isinstance(entry, dict)
+            for value in entry.get("taskIds", [])
+            if isinstance(value, str)
+        }
+        reason = "task_not_in_active_batch" if task_id in known_task_ids else "task_not_found"
+        return fail(reason, task_id, path=plan_path)
+
+    active_plan_path = batch_plan_path(base, active_batch_id)
+    try:
+        active_plan = load_plan(active_plan_path)
+    except ValueError as exc:
+        return fail("invalid_batch_plan", str(exc), path=active_plan_path)
+    known_task_ids = {
+        value
+        for entry in data.get("batches", [])
+        if isinstance(entry, dict)
+        for value in entry.get("taskIds", [])
+        if isinstance(value, str)
+    }
+    batch_errors = validate_batch_plan_data(
+        active_plan,
+        expected_feature_id=feature,
+        expected_batch_id=active_batch_id,
+        known_task_ids=known_task_ids,
+    )
+    if batch_errors:
+        return WriterResult(
+            ok=False,
+            path=active_plan_path,
+            errors=[{"reason": "invalid_batch_plan", "detail": ",".join(batch_errors)}],
+        )
+
     task = None
-    for item in data.get("tasks", []):
+    for item in active_plan.get("tasks", []):
         if isinstance(item, dict) and item.get("id") == task_id:
             task = item
             break
@@ -215,6 +267,15 @@ def build_context(*, workspace: Path, feature: str, task_id: str) -> WriterResul
 
     data_out = {
         "feature": feature,
+        "batchId": active_batch_id,
+        "batch": {
+            "id": active_batch_id,
+            "title": active_plan.get("title"),
+            "status": active_plan.get("status"),
+            "taskIds": active_entry.get("taskIds", []),
+            "completedTaskCount": active_plan.get("completedTaskCount"),
+            "taskCount": active_plan.get("taskCount"),
+        },
         "taskId": task_id,
         "artifactWorkspace": str(workspace),
         "artifactFeatureDir": str(base),
@@ -237,7 +298,7 @@ def build_context(*, workspace: Path, feature: str, task_id: str) -> WriterResul
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
     }
-    return WriterResult(ok=not errors, path=plan_path, errors=errors, data=data_out)
+    return WriterResult(ok=not errors, path=active_plan_path, errors=errors, data=data_out)
 
 
 def _cmd_context(args: argparse.Namespace) -> int:

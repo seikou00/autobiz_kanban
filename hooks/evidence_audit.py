@@ -20,7 +20,7 @@ from hooks.evidence_integrity_gate import check_code_done, check_integrity  # no
 from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.evidence_store import EvidenceStoreError, read_records, stream_path  # noqa: E402
 from hooks.json_writer_common import atomic_write_json  # noqa: E402
-from hooks.plan_json import load_plan, normalize_status  # noqa: E402
+from hooks.plan_json import batch_plan_path, load_plan, load_plan_bundle, normalize_status  # noqa: E402
 
 
 def _finding(code: str, *, task_id: str | None = None, detail: str = "") -> dict[str, str]:
@@ -53,10 +53,11 @@ def audit_feature(feature_dir: Path) -> tuple[dict[str, Any], set[str]]:
 
     plan_path = feature_dir / "plan.json"
     try:
-        plan = load_plan(plan_path)
+        bundle = load_plan_bundle(feature_dir)
+        plan_tasks = bundle.tasks
     except Exception as exc:
         findings.append(_finding("invalid_plan_json", detail=str(exc)))
-        plan = {"tasks": []}
+        plan_tasks = []
 
     by_id = {
         str(record.get("evidenceId")): record
@@ -69,7 +70,7 @@ def audit_feature(feature_dir: Path) -> tuple[dict[str, Any], set[str]]:
         for match in re.finditer(r"\bev_\d{4}\b", error)
     }
     global_integrity_failure = bool(integrity_errors) and not damaged_evidence_ids
-    for task in plan.get("tasks", []):
+    for task in plan_tasks:
         if not isinstance(task, dict):
             continue
         task_id = str(task.get("id", ""))
@@ -109,17 +110,45 @@ def audit_feature(feature_dir: Path) -> tuple[dict[str, Any], set[str]]:
 def reset_invalid_tasks(feature_dir: Path, invalid_tasks: set[str]) -> bool:
     plan_path = feature_dir / "plan.json"
     with FileLock(feature_dir / ".plan.lock"):
-        plan = load_plan(plan_path)
+        bundle = load_plan_bundle(feature_dir)
         changed = False
-        for task in plan.get("tasks", []):
-            if not isinstance(task, dict) or task.get("id") not in invalid_tasks:
-                continue
-            task["status"] = "todo"
-            task["completionEvidenceIds"] = []
-            task["latestPassEvidenceId"] = None
-            changed = True
+        root = bundle.root
+        for batch_id, batch in bundle.batches.items():
+            batch_changed = False
+            for task in batch.get("tasks", []):
+                if not isinstance(task, dict) or task.get("id") not in invalid_tasks:
+                    continue
+                task["status"] = "todo"
+                task["completionEvidenceIds"] = []
+                task["latestPassEvidenceId"] = None
+                batch_changed = True
+                changed = True
+            if batch_changed:
+                batch["status"] = "todo"
+                batch["completedTaskCount"] = sum(
+                    normalize_status(item.get("status")) == "done"
+                    for item in batch.get("tasks", [])
+                    if isinstance(item, dict)
+                )
+                batch["completedAt"] = None
+                atomic_write_json(batch_plan_path(feature_dir, batch_id), batch)
+                for entry in root.get("batches", []):
+                    if isinstance(entry, dict) and entry.get("id") == batch_id:
+                        entry["status"] = "todo"
         if changed:
-            atomic_write_json(plan_path, plan)
+            entries = [entry for entry in root.get("batches", []) if isinstance(entry, dict)]
+            unfinished = [str(entry.get("id")) for entry in entries if entry.get("status") != "done"]
+            if unfinished:
+                root["status"] = "in_progress"
+                root["activeBatchId"] = unfinished[0]
+                root["nextBatchId"] = unfinished[1] if len(unfinished) > 1 else None
+            else:
+                root["status"] = "done" if root.get("latestProjectCheckEvidenceId") else "in_progress"
+                root["activeBatchId"] = None
+                root["nextBatchId"] = None
+            root["latestProjectCheckEvidenceId"] = None
+            (feature_dir / "BATCH_HANDOFF.json").unlink(missing_ok=True)
+            atomic_write_json(plan_path, root)
         return changed
 
 

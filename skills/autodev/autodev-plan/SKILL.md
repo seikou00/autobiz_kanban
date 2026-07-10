@@ -237,23 +237,31 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 #### 生成 plan.json + PLAN.md
 
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。`PLAN.md` 是从 `plan.json` 投影的人类视图；`plan.json` 才是任务 DAG、状态与 evidenceIds 的机器事实源；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成 plan.json + PLAN.md，并同时生成 `plans/Bxxx/plan.json`。`plan.json` 只保存 feature 状态、批次索引、批次状态和项目级验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约与 task 状态。`PLAN.md` 是从 `plan.json` 投影的人类视图，并包含批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成 `plan.json` 时必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。复杂任务优先用 `plan_writer.py add-task --body-stdin` 通过 pipe/stdin 传入单个完整 task JSON object，不要裸运行后等待交互式输入，避免把大量字段塞进一条超长命令，也避免为每个 task 落盘临时 JSON 文件；简单任务才使用逐项 CLI 参数。简单任务只因软阈值需要合并说明时，直接在首次 `add-task` 使用 `--split-rationale "..."`，不要为了补一个 `splitRationale` 改成全量 JSON 重写。长文本、跨 spec 路径较多或 Windows shell 引号/编码不稳时，仍应使用 body 模式并在 JSON 内写 `splitRationale`；body 模式不得混用 `--split-rationale`，CLI 标志不会合并进 body JSON。只有运行环境无法传 stdin 时，才允许用 `--body-file` 作为降级方式，且 task 片段只能写入 feature 目录下的 `.tmp/plan_writer/tasks/`，成功写入 `plan.json` 后必须清理，不得放在 feature 根目录或作为正式产物保留。模板同时包含非 UI task 与 UI task 示例：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，只保留 `uiRequired:false` 的普通任务；`UI_CONTEXT.uiRequired=true` 时按 UI 示例生成至少一个 `uiRequired:true` 的 UI task。`plan.json` 的基础字段结构以模板和 validator 为唯一事实源；UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。本文只说明语义与边界，不重复维护完整 schema。`plan.json` 只能是合法 JSON，不允许 Markdown、注释、尾逗号或解释性文本。
+生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json` 和 `templates/batch-plan.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入。writer 会按 task 的主 `specRefs` 能力归组，同能力按依赖顺序装入批次，每批最多 5 个任务；超过 5 个自动生成下一批。任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖和跨批环。不得直接整份写入 root/batch JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks` 时直接清理并重跑 Plan。
+
+复杂任务优先用 `plan_writer.py add-task --body-stdin` 传入单个完整 task JSON object，简单任务才使用逐项 CLI 参数。只有运行环境无法传 stdin 时，才允许用 `--body-file` 降级，临时片段只能写入 feature 目录下 `.tmp/plan_writer/tasks/`，成功后必须清理。UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。
+
+`templates/batch-plan.json` 的任务示例用于基础字段，实际生成时模板同时包含非 UI task 与 UI task 示例的语义：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务；`UI_CONTEXT.uiRequired=true` 时至少一个 `uiRequired:true` 的 UI task。不得先自由生成再依赖 validator 反复修字段。
+
+任务需要 `splitRationale` 时必须在首次 `add-task` 写入。不要为了补一个 `splitRationale` 改成全量 JSON 重写；body 模式不得混用 `--split-rationale`，CLI 标志不会合并进 body JSON。
 
 `add-task` 会在写入前执行单任务结构与粒度校验；粒度错误处理见下方「与 writer 的衔接」。
 
 `plan.json` 语义规则：
 
 - Task ID 使用 `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID。
-- `plan.json` 只使用当前结构，不写 `version` / `taskDetailVersion` 字段。每个 task 必须写 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`completionPolicy: all_required_validations_pass`；`splitRationale` 仅在超过任务粒度阈值时填写。发现带版本字段或旧字段结构的 plan 时，不迁移、不兼容，清理后重新执行 Plan。
+- 根 `plan.json` 必须包含 `batchPolicy.maxTasks=5`、`batchPolicy.strategy=spec_capability_topological`、`batches[]`、`activeBatchId`、`nextBatchId` 和 feature `status`。每个 batch 索引引用唯一 `plans/Bxxx/plan.json`，task ID 在全部批次内全局唯一。
+- 只使用当前结构，不写 `version` / `taskDetailVersion` 字段。每个 batch task 必须写 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`completionPolicy: all_required_validations_pass`；发现带版本字段或根含 tasks 的 plan 时，不迁移、不兼容，清理后重新执行 Plan。
 - `goal` 写用户可观察结果；`scope.modules/entrypoints/pages/dataObjects` 写执行范围，能确定仓库相对路径时用 `scope.paths` 限定快照归因；`implementationPoints` 写 2-6 条可执行要点。每条 `acceptanceCriteria` 必须是 `{id,text,scenarioRefs}`，ID 使用 `AC-T001-01`，其中 `scenarioRefs` 必须已出现在 task `specRefs`，避免 AC 与 SCN 双轨漂移。
 - `validationCommands` 必须结构化为 `{id,argv,cwd,kind,required,covers}`；ID 使用 `VAL-T001-01`，`argv` 不经 shell，`cwd` 为仓库内相对路径。所有 AC 必须由 required 命令覆盖；`kind=compile` 不得覆盖 AC。多命令任务按 `all_required_validations_pass` 完成，并保留全部成功/失败尝试历史。
 - 多仓库任务为每条 validation/project command 增加 `repo`，值为对应 Git 根目录名；未涉及多仓库时省略。多仓库路径在 evidence 中使用 `repoId:relative/path`，但所有 evidence 文件仍属于 feature 产物目录。
 - 顶层 `projectValidationCommands` 使用 `PROJECT-VAL-001` 等 ID，承载项目编译、类型检查、lint 或静态检查；它与 task 行为验收分离，不能替代 AC 覆盖。至少配置一条 required 项目检查，Code 阶段仅在所有 task 完成后通过 `task_runner project-check` 执行。
 - Plan 阶段所有任务初始状态为 `todo`，`evidenceIds` / `completionEvidenceIds` 为空，`latestPassEvidenceId` 为 null；顶层 `projectCheckEvidenceIds` 为空，`latestProjectCheckEvidenceId` 为 null。以上运行字段只由 task runner 更新。
+- Plan 初始激活 `B001`；根、批次和 task 都必须记录状态。非末批完成后根状态会成为 `awaiting_next_conversation`，Code 必须在新对话用 `task_runner.py activate-batch` 激活下一批。
 - 每个任务必须追溯到真实 specs 与 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的决策。模板中的 API/Data/Decision ID 都是占位示例，必须替换成真实 ID。任务不涉及接口或数据变更时，不要为了过校验强行编造 `API-*` / `DATA-*`：`plan.json.apiIds` / `dataIds` 写空数组 `[]`，`PLAN.md` 的 `api_id` / `data_id` 写 `无` 或 `-`。如果 `design.md` 中存在 API/Data 决策，则这些决策必须被至少一个真正相关的任务覆盖；只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
 - `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
 - `validationCommands` 是 task 级强门禁，必须窄、快、可直接执行并由退出码/断言判读；不能确定真实文件时不要凭空填写 `expectedFiles`。只有 compile/typecheck/lint 的任务不能以“无需改文件”完成，至少要有一条 required 的 behavior/integration/e2e/static 验证。
@@ -364,7 +372,7 @@ python "${pluginPath}/hooks/plan_writer.py" validate --feature "${feature}" --st
 `SMOKE_TEST_PLAN.json` 规则：
 - 字段结构以 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json` 和 artifact validator 为准；本文只说明生成语义，不重复维护完整字段清单。
 - `flowBlocking` 必须为 `false`；`tests[]` 可以为空，确实没有旁路冒烟价值时写清 `skipReason`，不要为了填表编造案例。
-- 每条 smoke 按 `SMK-001` 起编号，引用一个真实 `plan.json.tasks[].id` 和一个 specs 中真实 `SCN-xxx`，不要把多个场景塞进一条冒烟。
+- 每条 smoke 按 `SMK-001` 起编号，引用一个真实 `plans/Bxxx/plan.json.tasks[].id` 和一个 specs 中真实 `SCN-xxx`，不要把多个场景塞进一条冒烟。
 - `seam` 描述测试站立的公开边界：`type` 使用 `startup/api/http/ui/cli/job/migration/health/custom` 之一，`entrypoint` 写调用方真实使用的入口，`observable` 写通过公开响应、页面、CLI 输出或健康信号观察到的结果；不得把私有方法、内部类、内部表查询当作 seam。
 - `verticalSlice` 只写一个最小闭环：`trigger` 是单一用户动作或系统触发，`expectedOutcome` 是来自 specs/design 的独立可观察结果；不要先规划一批横向用例再等 Code 阶段一起实现。
 - `mockPolicy.externalOnly` 必须为 `true`；`allowedMocks` 只能列外部 API、支付、邮件、时间、随机、文件系统或受控测试数据库等系统边界 mock。不得计划 mock 自有模块、内部服务或私有协作者。
@@ -372,16 +380,17 @@ python "${pluginPath}/hooks/plan_writer.py" validate --feature "${feature}" --st
 - `sourcePath` 只写计划中的目标测试源码或脚本路径，必须落在业务项目测试/冒烟目录，例如 `src/test/`、`tests/smoke/`、`scripts/smoke/`、`e2e/smoke/`；Plan 阶段不要求文件已存在。这些是 AutoDev 本地验证资产，不是业务项目长期测试资产，Code 阶段必须确保对应路径被目标项目 Git 忽略。
 - `command` 必须是只运行对应冒烟案例的 opt-in 命令，例如 `mvn -q -Psmoke -Dtest=OrderSmokeIT verify`、`npm run smoke -- order.spec.ts`；不得写需要人工参与的步骤。
 - 冒烟案例可覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号，但必须按场景拆成多条 SMK，每条只覆盖一个 vertical slice；不要用它替代单测/E2E。
-- 不得把冒烟命令复制进 `plan.json.tasks[].validationCommands`。`validationCommands` 是强门禁，必须快、稳、可重复；`SMOKE_TEST_PLAN.json` 是旁路风险信号，失败不阻断 `code_done`。
+- 不得把冒烟命令复制进 batch task 的 `validationCommands`。`validationCommands` 是强门禁，必须快、稳、可重复；`SMOKE_TEST_PLAN.json` 是旁路风险信号，失败不阻断 `code_done`。
 
 写入 `SMOKE_TEST_PLAN.json` 后，运行 `python "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`，冒烟计划可另行投影为人类摘要但不作为机器事实源。推进 checkpoint 前必须运行 `python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"`；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代阶段门禁。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘
+- [ ] `plans/B001/plan.json` 起的批次计划已写入磁盘，每批最多 5 个任务，根 plan 不含 tasks
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘，且从 `plan.json` 投影生成
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json` 文件已写入磁盘，`flowBlocking=false`
-- [ ] `plan.json` 可作为任务 DAG 的机器事实源被后续阶段优先读取
-- [ ] 每个任务符合 `templates/plan.json` 与 validator，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；Plan 初始状态为 `todo`，初始 evidence 为空
+- [ ] 根 `plan.json` 与各批次计划共同作为任务 DAG 机器事实源，状态投影一致
+- [ ] 每个任务符合 `templates/batch-plan.json` 与 validator，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；Plan 初始状态为 `todo`，初始 evidence 为空
 - [ ] 冒烟案例符合 `templates/smoke_test_plan.json` 与 validator；每条 smoke 绑定真实 `taskId` 与单个 `SCN-xxx`，包含公开 seam、单个 vertical slice 与 `mockPolicy.externalOnly=true`；没有冒烟案例时写明 `skipReason`
 - [ ] 任务按用户可观察 vertical slice 拆分，不按代码层或文件层机械拆分；超过 15 个 task 时已检查是否误拆到代码步骤，没有为了压低任务数合并独立场景
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx），验证命令带具体目标而非裸 mvn test/npm test；但没有写成逐行代码、逐文件微任务或 commit 步骤
