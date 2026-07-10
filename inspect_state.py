@@ -274,11 +274,29 @@ def _collect_project_runs(
 
     sync_result = check_or_fix_state_sync(project_workspace, fix=True)
     state_records = sync_result.records
-    feature_names = sorted(state_records.keys())
+    # Keep malformed records visible in the project overview.  State
+    # normalization intentionally omits them from ``records`` so callers that
+    # need a valid checkpoint can fail safely, but hiding the feature entirely
+    # makes the board unable to surface a state.json repair problem.
+    feature_names = sorted(set(state_records) | set(sync_result.raw_records))
 
     runs: list[dict] = []
     for feature in feature_names:
-        record = state_records.get(feature, {})
+        record = state_records.get(feature)
+        if record is None:
+            # An invalid checkpoint (or another invalid record field) cannot
+            # be routed reliably.  Preserve the feature in project status and
+            # use the neutral default workflow with an unknown current state.
+            runs.append({
+                "featureName": feature,
+                "featureId": feature,
+                "currentNodeId": "unknown",
+                "currentNodeStatus": "unknown",
+                "currentNodeStatusLabel": "未知",
+                "nodeIds": [node["id"] for node in config["workflow"]["nodes"]],
+            })
+            continue
+
         workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
         workflow_skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
         workflow_id, _workflow_profile, _workflow_decisions = workflow_marker(
