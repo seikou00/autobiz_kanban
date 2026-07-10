@@ -1,0 +1,51 @@
+{
+  "id": "T001",
+  "title": "[single observable behavior]",
+  "goal": "[observable outcome]",
+  "status": "todo",
+  "deps": [],
+  "uiRequired": false,
+  "scope": {
+    "modules": ["[module]"],
+    "entrypoints": [],
+    "pages": [],
+    "dataObjects": [],
+    "paths": []
+  },
+  "implementationPoints": [
+    "[implement the behavior]",
+    "[cover its public boundary]"
+  ],
+  "acceptanceCriteria": [
+    {
+      "id": "AC-T001-01",
+      "text": "[observable acceptance result]",
+      "scenarioRefs": ["specs/[capability]/spec.md#SCN-001"]
+    }
+  ],
+  "nonGoals": [],
+  "specRefs": [
+    "specs/[capability]/spec.md#REQ-001",
+    "specs/[capability]/spec.md#SCN-001"
+  ],
+  "designRefs": ["design.md#D-001"],
+  "apiIds": [],
+  "dataIds": [],
+  "decisionIds": ["D-001"],
+  "completionPolicy": "all_required_validations_pass",
+  "validationCommands": [
+    {
+      "id": "VAL-T001-01",
+      "argv": ["[executable]", "[task test arguments]"],
+      "cwd": ".",
+      "kind": "behavior_test",
+      "required": true,
+      "covers": ["AC-T001-01"]
+    }
+  ],
+  "expectedFiles": [],
+  "evidenceIds": [],
+  "completionEvidenceIds": [],
+  "latestPassEvidenceId": null,
+  "blockers": []
+}
