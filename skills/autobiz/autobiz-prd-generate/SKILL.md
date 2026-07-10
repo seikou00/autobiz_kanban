@@ -103,7 +103,7 @@ Skill 完成后，必须运行脚本校验：
 python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 
-通过脚本检查即视为**Skill 完成。**
+通过脚本检查即视为**Skill 完成。** 提醒用户：请回到特性面板新开新对话。
 
 ## 技能使用约束
 

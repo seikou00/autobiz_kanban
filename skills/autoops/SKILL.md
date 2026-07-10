@@ -58,7 +58,6 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_
 - `checkpoint` 为 `needs_fix` 时，停止，读取最近阶段报告中的建议回流阶段并提示用户。
 - `ok: false` 或 `recommendedNextSkill` 不属于 Ops skill 时，停止并展示脚本返回的错误或当前 checkpoint。
 
-所有非终止状态默认将 `$ARGUMENTS` 透传至子技能。
 
 ---
 
@@ -73,4 +72,3 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_
 
 ---
 
-$ARGUMENTS

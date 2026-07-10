@@ -275,7 +275,7 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "$
 - `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 
-**Skill 完成。**
+**Skill 完成。** 提醒用户：请回到特性面板新开新对话。
 
 ## 技能使用约束
 

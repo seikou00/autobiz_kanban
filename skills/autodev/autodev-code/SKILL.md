@@ -92,4 +92,5 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 - 必要验证通过；项目编译通过（code_done execute hook 另记模块编译结果，非阻断）。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 
-**Skill 完成。** 
+**Skill 完成。**
+提醒用户：请回到特性面板新开新对话。

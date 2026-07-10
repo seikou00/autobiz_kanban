@@ -112,3 +112,5 @@ Skill 完成前必须满足：
 - [ ] `.autobizdevops/archive/{slug}-iter{N}/` 已存在
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 已不存在
 - [ ] 已向用户输出归档路径与保留的过程产物清单
+
+Skill完成。提醒用户：请回到特性面板新开新对话。

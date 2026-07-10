@@ -57,3 +57,4 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 **Skill 完成。**
+提醒用户：请回到特性面板新开新对话。

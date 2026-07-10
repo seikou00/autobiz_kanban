@@ -145,3 +145,4 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 - 已调用 `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
 
 **Skill 完成。**
+提醒用户：请回到特性面板新开新对话。

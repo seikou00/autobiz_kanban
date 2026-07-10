@@ -181,6 +181,8 @@ Verdict: <PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED>
 只有最终 verdict 是 `PASS` 或 `PASS_WITH_WARNINGS` 时，本 skill 才算完成。
 **Skill 完成。**
 
+提醒用户：请回到特性面板新开新对话。
+
 ## Reviewer 必查项
 
 要求 reviewer 核对：
