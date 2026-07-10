@@ -10,6 +10,7 @@ from pathlib import Path
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.route_checkpoint import resolve_route
 from inspect_state import _load_board_config, project_mode, run_mode
+from read_state_json import _build_payload, _read_feature_checkpoint
 
 
 def _legacy_custom_record(feature: str) -> dict:
@@ -97,6 +98,34 @@ class LegacyCustomCompatibilityTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["workflowTemplate"], "custom")
         self.assertEqual(payload["currentNodeId"], "dev.code")
+
+    def test_other_invalid_feature_does_not_block_read_state_json(self) -> None:
+        _write_state_json(
+            self.project,
+            {
+                "legacy-custom": _legacy_custom_record("legacy-custom"),
+                "broken-other": {
+                    "feature": "broken-other",
+                    "checkpoint": "missing_checkpoint",
+                    "workflowTemplate": "standard",
+                },
+            },
+        )
+
+        checkpoint, exit_code = _read_feature_checkpoint(self.project, "legacy-custom")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            broken_checkpoint, broken_exit_code = _read_feature_checkpoint(self.project, "broken-other")
+        payload, payload_exit_code = _build_payload(self.project)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(checkpoint, "code_in_progress")
+        self.assertEqual(broken_checkpoint, "")
+        self.assertEqual(broken_exit_code, 1)
+        self.assertEqual(payload_exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertIn("legacy-custom", payload["records"])
+        self.assertIn("broken-other", payload["recordErrors"])
 
     def test_create_feature_preserves_unrelated_invalid_records(self) -> None:
         _write_state_json(
