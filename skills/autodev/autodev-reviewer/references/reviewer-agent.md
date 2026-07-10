@@ -56,7 +56,7 @@ git log --oneline -n 5
 rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 ```
 
-禁止运行会修改工作区、依赖、缓存、构建产物或远端状态的命令。
+禁止运行会修改工作区、依赖、缓存、构建产物或远端状态的命令，例如 git add、git commit、git push、git checkout、git reset、rm、mv、cp、npm install。
 
 ## 审查流程
 
@@ -71,7 +71,7 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 7. 在每个仓库中通过 shell/git 获取真实 changed files、staged files、diff 内容和最近提交。
 8. 对比 proposal.files_changed 与真实 git status / git diff --name-only / git diff --cached --name-only。跨仓库任务中，files_changed 每项必须能通过 repository_id 映射到 affected_repositories[].id。
 9. 对比 proposal.summary、behavior_changed、affected_repositories[].expected_changes 与各仓库真实 diff。
-10. 对比 proposal.md、specs/**/*.md 中的目标、Requirement / Scenario、约束、非目标与真实 diff/completion proposal，识别 requirement gap、scope creep、contract mismatch；如果 specs 或可选 PRD 要求多个系统、服务或仓库共同交付，检查 affected_repositories 是否覆盖这些边界。
+10. 对比 proposal.md、specs/**/*.md 中的目标、Requirement / Scenario、约束、非目标与真实 diff/completion proposal，识别 requirement gap、scope creep、contract mismatch，并检查权限、安全、性能、兼容性、可观测性、迁移、降级等非功能约束是否被处理；如果 specs 或可选 PRD 要求多个系统、服务或仓库共同交付，检查 affected_repositories 是否覆盖这些边界。
 11. 如有 design.md，对比其 API Decisions、Data Decisions、Technical Design 与真实 diff，识别接口、数据、权限、租户、审计、迁移或模块边界不一致；无 design.md 时按现有代码模式评估实现合理性。
 12. 评估 proposal.verification 中声称的测试、lint、build、手工验证是否可信，并判断验证是否覆盖 specs Requirement / Scenario。没有日志或可核验证据时，不要默认相信。
 13. 搜索 changed files 中的 TODO、FIXME、HACK、stub、测试外 mock、disabled tests、宽泛 catch、吞错、未解释 fallback。
