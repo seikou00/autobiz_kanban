@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,11 +27,13 @@ from evidence_store import (  # noqa: E402
     stream_path,
     validate_record,
 )
+from evidence_kernel import check_record_artifacts  # noqa: E402
 from plan_json import (  # noqa: E402
     blocked_tasks,
     failed_tasks,
     load_and_validate_plan,
     plan_json_path,
+    task_contract_sha256,
     task_ids,
     tasks,
     unfinished_tasks,
@@ -69,8 +72,14 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
             if evidence_id != _expected_evidence_id(line_no):
                 errors.append(f"non_sequential_evidence_id:line={line_no}:id={evidence_id}")
         task_id = record.get("taskId")
-        if isinstance(task_id, str) and task_id and not task_id.startswith("T"):
+        if (
+            isinstance(task_id, str)
+            and task_id
+            and task_id != "__project__"
+            and not task_id.startswith("T")
+        ):
             errors.append(f"line={line_no}:invalid_task_id:{task_id}")
+        errors.extend(check_record_artifacts(target_feature_dir, record))
 
     try:
         index = load_index(target_feature_dir)
@@ -92,14 +101,14 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
 
 
 def _validation_passed(record: dict[str, Any]) -> bool:
-    if record.get("action") != "validation":
+    if record.get("action") not in {"validation", "project_check"}:
         return False
     validation = record.get("validation")
     if not isinstance(validation, dict):
         return False
     result = validation.get("result")
-    if isinstance(result, str) and result.strip() in PASS_RESULTS:
-        return True
+    if isinstance(result, str) and result.strip():
+        return result.strip() in PASS_RESULTS and validation.get("exitCode") == 0
     exit_code = validation.get("exitCode")
     return exit_code == 0
 
@@ -121,7 +130,8 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
     known_tasks = task_ids(plan)
     for record in records:
         task_id = record.get("taskId")
-        if isinstance(task_id, str) and task_id and task_id not in known_tasks:
+        is_project_check = record.get("action") == "project_check" and task_id == "__project__"
+        if isinstance(task_id, str) and task_id and task_id not in known_tasks and not is_project_check:
             errors.append(f"unknown_evidence_task_id:{task_id}")
     for task in tasks(plan):
         task_id = str(task.get("id", ""))
@@ -133,15 +143,25 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
                 errors.append(f"{task_id}.invalid_evidence_id:{evidence_id}")
             elif evidence_id not in known_evidence_ids:
                 errors.append(f"{task_id}.unknown_evidence_id:{evidence_id}")
+    project_evidence_ids = plan.get("projectCheckEvidenceIds")
+    if isinstance(project_evidence_ids, list):
+        records_by_id = {
+            str(record.get("evidenceId")): record
+            for record in records
+            if isinstance(record.get("evidenceId"), str)
+        }
+        for evidence_id in project_evidence_ids:
+            record = records_by_id.get(str(evidence_id))
+            if record is None:
+                errors.append(f"unknown_project_check_evidence_id:{evidence_id}")
+            elif record.get("action") != "project_check" or record.get("taskId") != "__project__":
+                errors.append(f"invalid_project_check_evidence_id:{evidence_id}")
     return errors
 
 
-def check_code_done(target_feature_dir: Path, *, require_plan: bool = True) -> list[str]:
+def check_code_done(target_feature_dir: Path) -> list[str]:
     errors = check_integrity(target_feature_dir, require_index=True)
     plan_path = plan_json_path(target_feature_dir)
-    plan_exists = plan_path.is_file() and plan_path.stat().st_size > 0
-    if not require_plan and not plan_exists:
-        return errors
 
     if not errors:
         errors.extend(check_plan_evidence_refs(target_feature_dir))
@@ -168,16 +188,221 @@ def check_code_done(target_feature_dir: Path, *, require_plan: bool = True) -> l
     except EvidenceStoreError as exc:
         errors.append(str(exc))
         records = ()
-    pass_by_task = {
-        str(record.get("taskId"))
+    errors.extend(_check_completion(plan, records, feature_dir=target_feature_dir))
+    return errors
+
+
+def _check_completion(
+    plan: dict[str, Any],
+    records: tuple[dict[str, Any], ...],
+    *,
+    feature_dir: Path | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    by_id = {
+        str(record.get("evidenceId")): record
         for record in records
-        if isinstance(record.get("taskId"), str) and _validation_passed(record)
+        if isinstance(record.get("evidenceId"), str)
     }
     for task in tasks(plan):
         task_id = str(task.get("id", ""))
-        if task_id and task_id not in pass_by_task:
-            errors.append(f"missing_pass_evidence_for_task:{task_id}")
+        completion_ids = task.get("completionEvidenceIds")
+        if not isinstance(completion_ids, list):
+            completion_ids = []
+        planned_commands = {
+            str(command.get("id")): command
+            for command in task.get("validationCommands", [])
+            if isinstance(command, dict) and isinstance(command.get("id"), str)
+        }
+        required_command_ids = {
+            command_id
+            for command_id, command in planned_commands.items()
+            if command.get("required") is True
+        }
+        passed_command_ids: set[str] = set()
+        covered_criteria: set[str] = set()
+        completion_records: list[dict[str, Any]] = []
+        for evidence_id in completion_ids:
+            record = by_id.get(str(evidence_id))
+            if record is None:
+                continue
+            evidence_task_id = record.get("taskId")
+            if evidence_task_id != task_id:
+                errors.append(f"{task_id}.evidence_task_mismatch:{evidence_id}:{evidence_task_id}")
+                continue
+            if not _validation_passed(record):
+                errors.append(f"{task_id}.completion_evidence_not_pass:{evidence_id}")
+                continue
+            if record.get("detailVersion") != 2:
+                errors.append(f"{task_id}.completion_evidence_requires_detail_v2:{evidence_id}")
+                continue
+            completion_records.append(record)
+            validation = record.get("validation")
+            if not isinstance(validation, dict):
+                continue
+            command_id = validation.get("commandId")
+            if not isinstance(command_id, str) or command_id not in planned_commands:
+                errors.append(f"{task_id}.unplanned_validation_command:{command_id}")
+                continue
+            planned = planned_commands[command_id]
+            for field in ("argv", "cwd", "kind", "required", "repo"):
+                if validation.get(field) != planned.get(field):
+                    errors.append(f"{task_id}.validation_command_mismatch:{command_id}:{field}")
+            passed_command_ids.add(command_id)
+            checked = record.get("checkedCriteria")
+            if isinstance(checked, list):
+                unknown_criteria = sorted(
+                    item for item in checked if isinstance(item, str) and item not in _task_acceptance_ids(task)
+                )
+                if unknown_criteria:
+                    errors.append(
+                        f"{task_id}.completion_evidence_unknown_criteria:{evidence_id}:"
+                        + ",".join(unknown_criteria)
+                    )
+                covered_criteria.update(item for item in checked if isinstance(item, str))
+
+        if feature_dir is not None:
+            errors.extend(_check_task_run_state(feature_dir, task, completion_records))
+
+        for command_id in sorted(required_command_ids - passed_command_ids):
+            errors.append(f"{task_id}.missing_required_validation_pass:{command_id}")
+        acceptance_ids = _task_acceptance_ids(task)
+        missing_criteria = sorted(acceptance_ids - covered_criteria)
+        if missing_criteria:
+            errors.append(f"{task_id}.missing_acceptance_coverage:" + ",".join(missing_criteria))
+    errors.extend(_check_project_completion(plan, by_id))
     return errors
+
+
+def _task_acceptance_ids(task: dict[str, Any]) -> set[str]:
+    return {
+        str(item.get("id"))
+        for item in task.get("acceptanceCriteria", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+
+
+def _check_task_run_state(
+    feature_dir: Path,
+    task: dict[str, Any],
+    completion_records: list[dict[str, Any]],
+) -> list[str]:
+    errors: list[str] = []
+    task_id = str(task.get("id", ""))
+    by_run: dict[str, list[dict[str, Any]]] = {}
+    for record in completion_records:
+        run_id = record.get("runId")
+        if isinstance(run_id, str) and run_id:
+            by_run.setdefault(run_id, []).append(record)
+    if not by_run:
+        return [f"{task_id}.missing_task_run_state"]
+    if len(by_run) != 1:
+        errors.append(f"{task_id}.completion_evidence_multiple_runs:" + ",".join(sorted(by_run)))
+
+    for run_id, run_records in by_run.items():
+        run_path = feature_dir / ".task-runs" / task_id / f"{run_id}.json"
+        if not run_path.is_file():
+            errors.append(f"{task_id}.missing_task_run_state:{run_id}")
+            continue
+        try:
+            state = json.loads(run_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            errors.append(f"{task_id}.invalid_task_run_state:{run_id}")
+            continue
+        if not isinstance(state, dict):
+            errors.append(f"{task_id}.invalid_task_run_state:{run_id}")
+            continue
+        if state.get("taskId") != task_id or state.get("runId") != run_id:
+            errors.append(f"{task_id}.task_run_identity_mismatch:{run_id}")
+        if state.get("status") != "done" or state.get("success") is not True:
+            errors.append(f"{task_id}.task_run_not_successful:{run_id}")
+        if state.get("taskContractSha256") != task_contract_sha256(task):
+            errors.append(f"{task_id}.task_run_contract_mismatch:{run_id}")
+        state_evidence = set(state.get("evidenceIds", [])) if isinstance(state.get("evidenceIds"), list) else set()
+        state_completion = (
+            set(state.get("completionEvidenceIds", []))
+            if isinstance(state.get("completionEvidenceIds"), list)
+            else set()
+        )
+        expected_changed = state.get("changedFiles")
+        expected_file_changes = state.get("fileChanges")
+        for record in run_records:
+            evidence_id = str(record.get("evidenceId", ""))
+            if evidence_id not in state_evidence or evidence_id not in state_completion:
+                errors.append(f"{task_id}.task_run_evidence_not_bound:{evidence_id}")
+            if record.get("completionMode") != state.get("completionMode"):
+                errors.append(f"{task_id}.task_run_completion_mode_mismatch:{evidence_id}")
+            if record.get("changedFiles") != expected_changed:
+                errors.append(f"{task_id}.task_run_changed_files_mismatch:{evidence_id}")
+            if record.get("fileChanges") != expected_file_changes:
+                errors.append(f"{task_id}.task_run_file_changes_mismatch:{evidence_id}")
+    return errors
+
+
+def _check_project_completion(
+    plan: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    errors: list[str] = []
+    planned = {
+        str(command.get("id")): command
+        for command in plan.get("projectValidationCommands", [])
+        if isinstance(command, dict) and isinstance(command.get("id"), str)
+    }
+    required = {command_id for command_id, command in planned.items() if command.get("required") is True}
+    passed: set[str] = set()
+    evidence_ids = plan.get("projectCheckEvidenceIds")
+    if not isinstance(evidence_ids, list):
+        evidence_ids = []
+    latest_id = plan.get("latestProjectCheckEvidenceId")
+    latest_record = by_id.get(str(latest_id)) if isinstance(latest_id, str) else None
+    if latest_record is None:
+        errors.append("missing_latest_project_check_evidence")
+        current_run_id = None
+    elif latest_record.get("action") != "project_check" or latest_record.get("taskId") != "__project__":
+        errors.append(f"invalid_latest_project_check_evidence:{latest_id}")
+        current_run_id = None
+    else:
+        current_run_id = latest_record.get("runId")
+        latest_number = _evidence_number(str(latest_id))
+        task_completion_numbers = [
+            _evidence_number(str(evidence_id))
+            for task in tasks(plan)
+            for evidence_id in task.get("completionEvidenceIds", [])
+            if isinstance(evidence_id, str)
+        ]
+        if task_completion_numbers and latest_number <= max(task_completion_numbers):
+            errors.append(f"project_check_older_than_task_completion:{latest_id}")
+    for evidence_id in evidence_ids:
+        record = by_id.get(str(evidence_id))
+        if record is None or record.get("action") != "project_check" or record.get("taskId") != "__project__":
+            continue
+        if current_run_id is None or record.get("runId") != current_run_id:
+            continue
+        if not _validation_passed(record):
+            continue
+        validation = record.get("validation")
+        if not isinstance(validation, dict):
+            continue
+        command_id = validation.get("commandId")
+        if not isinstance(command_id, str) or command_id not in planned:
+            errors.append(f"unplanned_project_validation_command:{command_id}")
+            continue
+        command = planned[command_id]
+        for field in ("argv", "cwd", "kind", "required", "repo"):
+            if validation.get(field) != command.get(field):
+                errors.append(f"project_validation_command_mismatch:{command_id}:{field}")
+        passed.add(command_id)
+    for command_id in sorted(required - passed):
+        errors.append(f"missing_project_validation_pass:{command_id}")
+    return errors
+
+
+def _evidence_number(evidence_id: str) -> int:
+    try:
+        return int(evidence_id.removeprefix("ev_"))
+    except ValueError:
+        return -1
 
 
 def _cmd_check(args: argparse.Namespace) -> int:

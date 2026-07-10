@@ -7,12 +7,44 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    from hooks.evidence_kernel import (
+        EVIDENCE_ARTIFACT_VERSION,
+        EvidenceLock,
+        check_record_artifacts,
+        log_path,
+        output_duplicates_record,
+        prepare_log,
+        pending_path,
+        sidecar_path,
+        write_log,
+        write_json_artifact,
+        write_pending,
+        write_sidecar,
+    )
+except ImportError:  # pragma: no cover - direct script execution path
+    from evidence_kernel import (
+        EVIDENCE_ARTIFACT_VERSION,
+        EvidenceLock,
+        check_record_artifacts,
+        log_path,
+        output_duplicates_record,
+        prepare_log,
+        pending_path,
+        sidecar_path,
+        write_log,
+        write_json_artifact,
+        write_pending,
+        write_sidecar,
+    )
 
 try:  # Works both as ``python hooks/evidence_store.py`` and as ``hooks.evidence_store``.
     from hooks.paths import get_plugin_output_workspace, resolve_env_feature
@@ -21,7 +53,8 @@ except ImportError:  # pragma: no cover - direct script execution path
 
 
 EVIDENCE_VERSION = 1
-EVIDENCE_DETAIL_VERSION = 1
+EVIDENCE_DETAIL_VERSION = 2
+SUPPORTED_EVIDENCE_DETAIL_VERSIONS = {1, EVIDENCE_DETAIL_VERSION}
 INDEX_VERSION = 1
 EVIDENCE_ID_RE = re.compile(r"^ev_(\d{4})$")
 DEFAULT_STREAM_RELATIVE_PATH = Path("evidence") / "EVIDENCE.jsonl"
@@ -167,8 +200,7 @@ def write_index(
         "updatedAt": utc_now(),
     }
     path = index_path(target_feature_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_artifact(path, payload)
 
 
 def validate_record(record: dict[str, Any]) -> list[str]:
@@ -185,7 +217,7 @@ def validate_record(record: dict[str, Any]) -> list[str]:
     validation = record.get("validation")
     if validation is not None and not isinstance(validation, dict):
         errors.append("invalid_validation_object")
-    if record.get("action") == "validation":
+    if record.get("action") in {"validation", "project_check"}:
         if not isinstance(validation, dict):
             errors.append("validation_missing")
         else:
@@ -262,12 +294,14 @@ def validate_detail_fields(record: dict[str, Any]) -> list[str]:
     if "detailVersion" not in record:
         return []
     detail_version = record.get("detailVersion")
-    if detail_version != EVIDENCE_DETAIL_VERSION:
+    if detail_version not in SUPPORTED_EVIDENCE_DETAIL_VERSIONS:
         return ["invalid_evidence_detail_version"]
-    if record.get("action") != "validation":
+    if record.get("action") not in {"validation", "project_check"}:
         return []
 
     errors: list[str] = []
+    if detail_version == 2 and record.get("artifactVersion") != EVIDENCE_ARTIFACT_VERSION:
+        errors.append("invalid_evidence_detail_artifactVersion")
     if not _non_empty_string(record.get("summary")):
         errors.append("missing_evidence_detail_summary")
 
@@ -339,6 +373,58 @@ def validate_detail_fields(record: dict[str, Any]) -> list[str]:
         if not _non_empty_string(implementation.get("why")):
             errors.append("missing_evidence_detail_noCodeChange_why")
 
+    if detail_version == 2:
+        errors.extend(_validate_v2_detail_fields(record, file_changes, no_code_change))
+
+    return errors
+
+
+def _validate_v2_detail_fields(
+    record: dict[str, Any],
+    file_changes: list[Any],
+    no_code_change: bool,
+) -> list[str]:
+    errors: list[str] = []
+    if not _non_empty_string(record.get("runId")):
+        errors.append("missing_evidence_detail_runId")
+    completion_mode = record.get("completionMode")
+    if completion_mode not in {"implemented", "verified_existing"}:
+        errors.append("invalid_evidence_detail_completionMode")
+    checked_criteria = record.get("checkedCriteria")
+    if not _string_list(checked_criteria):
+        errors.append("invalid_evidence_detail_checkedCriteria")
+    supporting_files = record.get("supportingFiles")
+    if not _string_list(supporting_files):
+        errors.append("invalid_evidence_detail_supportingFiles")
+        supporting_files = []
+    validation = record.get("validation")
+    if isinstance(validation, dict):
+        if not _non_empty_string(validation.get("commandId")):
+            errors.append("missing_evidence_detail_validation_commandId")
+        if not _string_list(validation.get("argv")) or not validation.get("argv"):
+            errors.append("missing_evidence_detail_validation_argv")
+        if not _non_empty_string(validation.get("cwd")):
+            errors.append("missing_evidence_detail_validation_cwd")
+        if not _non_empty_string(validation.get("kind")):
+            errors.append("missing_evidence_detail_validation_kind")
+        if not isinstance(validation.get("required"), bool):
+            errors.append("missing_evidence_detail_validation_required")
+        if not _non_empty_string(validation.get("outputTailPath")):
+            errors.append("missing_evidence_detail_validation_outputTailPath")
+        output_sha = validation.get("outputSha256")
+        if not isinstance(output_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", output_sha):
+            errors.append("missing_evidence_detail_validation_outputSha256")
+        if not isinstance(validation.get("outputBytes"), int) or validation.get("outputBytes") < 0:
+            errors.append("missing_evidence_detail_validation_outputBytes")
+        if not isinstance(validation.get("emptyOutput"), bool):
+            errors.append("missing_evidence_detail_validation_emptyOutput")
+    if completion_mode == "verified_existing":
+        if not no_code_change or file_changes:
+            errors.append("invalid_verified_existing_file_changes")
+        if record.get("action") == "validation" and not supporting_files:
+            errors.append("missing_verified_existing_supportingFiles")
+    if completion_mode == "implemented" and (no_code_change or not file_changes):
+        errors.append("invalid_implemented_file_changes")
     return errors
 
 
@@ -362,6 +448,128 @@ def _ensure_index_matches(target_feature_dir: Path, *, allow_missing_for_empty_s
         raise EvidenceStoreError("evidence_stream_rewritten_or_truncated:" + ",".join(mismatches))
 
 
+def _recover_pending_appends(target_feature_dir: Path) -> None:
+    pending_dir = evidence_dir(target_feature_dir) / ".pending"
+    if not pending_dir.is_dir():
+        return
+    pending_files = sorted(pending_dir.glob("ev_*.json"))
+    if len(pending_files) > 1:
+        raise EvidenceStoreError("multiple_pending_evidence_records")
+    for path in pending_files:
+        try:
+            pending = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise EvidenceStoreError(f"invalid_pending_evidence:{path.name}") from exc
+        evidence_id = pending.get("evidenceId") if isinstance(pending, dict) else None
+        if not isinstance(evidence_id, str) or not EVIDENCE_ID_RE.fullmatch(evidence_id):
+            raise EvidenceStoreError(f"invalid_pending_evidence:{path.name}")
+        _repair_partial_pending_tail(target_feature_dir, pending)
+        records = read_records(stream_path(target_feature_dir))
+        by_id = {
+            str(record.get("evidenceId")): record
+            for record in records
+            if isinstance(record.get("evidenceId"), str)
+        }
+        streamed = by_id.get(evidence_id)
+        if streamed is None:
+            log_path(target_feature_dir, evidence_id).unlink(missing_ok=True)
+            sidecar_path(target_feature_dir, evidence_id).unlink(missing_ok=True)
+            path.unlink()
+            continue
+        if streamed != pending:
+            raise EvidenceStoreError(f"pending_evidence_stream_mismatch:{evidence_id}")
+        if not records or records[-1].get("evidenceId") != evidence_id:
+            raise EvidenceStoreError(f"pending_evidence_not_stream_tail:{evidence_id}")
+        existing_index = load_index(target_feature_dir)
+        current = snapshot(target_feature_dir)
+        index_matches_current = bool(
+            existing_index
+            and existing_index.get("lineCount") == current.line_count
+            and existing_index.get("lastEvidenceId") == current.last_evidence_id
+            and existing_index.get("sha256") == current.sha256
+        )
+        if existing_index is None:
+            if len(records) != 1:
+                raise EvidenceStoreError(f"pending_evidence_missing_prior_index:{evidence_id}")
+        elif not index_matches_current:
+            stream_bytes = stream_path(target_feature_dir).read_bytes()
+            lines = stream_bytes.splitlines(keepends=True)
+            prefix_sha = hashlib.sha256(b"".join(lines[:-1])).hexdigest()
+            prior_id = records[-2].get("evidenceId") if len(records) > 1 else ""
+            if not (
+                existing_index.get("lineCount") == len(records) - 1
+                and existing_index.get("lastEvidenceId") == prior_id
+                and existing_index.get("sha256") == prefix_sha
+            ):
+                raise EvidenceStoreError(f"pending_evidence_prior_index_mismatch:{evidence_id}")
+        write_sidecar(target_feature_dir, streamed)
+        artifact_errors = check_record_artifacts(target_feature_dir, streamed)
+        if artifact_errors:
+            raise EvidenceStoreError(";".join(artifact_errors))
+        write_index(
+            target_feature_dir,
+            feature_id=str(streamed.get("featureId") or target_feature_dir.name),
+            verify_existing=False,
+        )
+        path.unlink()
+
+
+def _repair_partial_pending_tail(target_feature_dir: Path, pending: dict[str, Any]) -> None:
+    path = stream_path(target_feature_dir)
+    if not path.is_file() or path.stat().st_size <= 0:
+        return
+    evidence_id = str(pending.get("evidenceId", ""))
+    expected_line = json.dumps(pending, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n"
+    stream_bytes = path.read_bytes()
+    existing_index = load_index(target_feature_dir)
+
+    if existing_index is None:
+        if evidence_id != "ev_0001":
+            return
+        committed_prefix = b""
+        tail = stream_bytes
+    else:
+        line_count = existing_index.get("lineCount")
+        if not isinstance(line_count, int) or line_count < 0:
+            raise EvidenceStoreError("invalid_evidence_index_lineCount")
+        lines = stream_bytes.splitlines(keepends=True)
+        if len(lines) < line_count:
+            raise EvidenceStoreError(f"pending_evidence_committed_prefix_missing:{evidence_id}")
+        committed_prefix = b"".join(lines[:line_count])
+        if hashlib.sha256(committed_prefix).hexdigest() != existing_index.get("sha256"):
+            raise EvidenceStoreError(f"pending_evidence_committed_prefix_mismatch:{evidence_id}")
+        committed_records = _records_from_bytes(committed_prefix)
+        committed_last = (
+            str(committed_records[-1].get("evidenceId", "")) if committed_records else ""
+        )
+        if len(committed_records) != line_count or committed_last != existing_index.get("lastEvidenceId"):
+            raise EvidenceStoreError(f"pending_evidence_committed_prefix_mismatch:{evidence_id}")
+        tail = stream_bytes[len(committed_prefix) :]
+        if existing_index.get("lastEvidenceId") == evidence_id:
+            return
+        if evidence_id != f"ev_{line_count + 1:04d}":
+            raise EvidenceStoreError(f"pending_evidence_id_not_next:{evidence_id}")
+
+    if not tail:
+        return
+    if not expected_line.startswith(tail):
+        raise EvidenceStoreError(f"pending_evidence_partial_tail_mismatch:{evidence_id}")
+    if tail == expected_line:
+        return
+    with path.open("ab") as handle:
+        handle.write(expected_line[len(tail) :])
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _records_from_bytes(content: bytes) -> tuple[dict[str, Any], ...]:
+    records: list[dict[str, Any]] = []
+    for line_no, raw in enumerate(content.decode("utf-8").splitlines(), start=1):
+        if raw.strip():
+            records.append(_parse_line(raw, line_no))
+    return tuple(records)
+
+
 def append_evidence(
     target_feature_dir: Path,
     record: dict[str, Any],
@@ -375,50 +583,72 @@ def append_evidence(
     noticed before new evidence is added.
     """
 
-    _ensure_index_matches(target_feature_dir, allow_missing_for_empty_stream=True)
-    records = read_records(stream_path(target_feature_dir))
-    payload = dict(record)
-    payload.setdefault("version", EVIDENCE_VERSION)
-    payload.setdefault("featureId", target_feature_dir.name)
-    payload.setdefault("createdAt", utc_now())
-    payload.setdefault("specRefs", [])
-    payload.setdefault("designRefs", [])
-    payload.setdefault("changedFiles", [])
-    if payload.get("action") == "validation":
-        payload.setdefault("validation", {})
-    payload["evidenceId"] = payload.get("evidenceId") or next_evidence_id(records)
+    if output_tail is not None and output_duplicates_record(output_tail, record):
+        raise EvidenceStoreError("evidence_log_duplicates_record")
+    if "evidenceId" in record:
+        raise EvidenceStoreError("evidence_id_must_be_allocated_by_store")
 
-    evidence_id = payload["evidenceId"]
-    if isinstance(evidence_id, str) and any(record.get("evidenceId") == evidence_id for record in records):
-        raise EvidenceStoreError(f"duplicate_evidence_id:{evidence_id}")
+    with EvidenceLock(target_feature_dir):
+        _recover_pending_appends(target_feature_dir)
+        _ensure_index_matches(target_feature_dir, allow_missing_for_empty_stream=True)
+        records = read_records(stream_path(target_feature_dir))
+        payload = dict(record)
+        payload.setdefault("version", EVIDENCE_VERSION)
+        payload["artifactVersion"] = EVIDENCE_ARTIFACT_VERSION
+        payload.setdefault("featureId", target_feature_dir.name)
+        payload.setdefault("createdAt", utc_now())
+        payload.setdefault("specRefs", [])
+        payload.setdefault("designRefs", [])
+        payload.setdefault("changedFiles", [])
+        if payload.get("action") == "validation":
+            payload.setdefault("validation", {})
+        payload["evidenceId"] = next_evidence_id(records)
 
-    if output_tail is not None:
-        if not isinstance(evidence_id, str):
-            raise EvidenceStoreError("invalid_evidence_id_for_tail")
-        tail_path = evidence_dir(target_feature_dir) / f"{evidence_id}.log"
-        tail_path.parent.mkdir(parents=True, exist_ok=True)
-        tail_path.write_text(output_tail, encoding="utf-8")
-        tail_container_name = "smoke" if payload.get("action") == "smoke" else "validation"
-        tail_container = payload.get(tail_container_name)
-        if not isinstance(tail_container, dict):
-            tail_container = {}
-            payload[tail_container_name] = tail_container
-        tail_container["outputTailPath"] = f"evidence/{evidence_id}.log"
+        evidence_id = payload["evidenceId"]
+        if isinstance(evidence_id, str) and any(item.get("evidenceId") == evidence_id for item in records):
+            raise EvidenceStoreError(f"duplicate_evidence_id:{evidence_id}")
 
-    errors = validate_record(payload)
-    if errors:
-        raise EvidenceStoreError(";".join(errors))
+        prepared_log: tuple[bytes, dict[str, Any]] | None = None
+        if output_tail is not None:
+            if not isinstance(evidence_id, str):
+                raise EvidenceStoreError("invalid_evidence_id_for_tail")
+            prepared_log = prepare_log(output_tail)
+            output_metadata = {
+                "outputTailPath": f"evidence/{evidence_id}.log",
+                **prepared_log[1],
+            }
+            tail_container_name = "smoke" if payload.get("action") == "smoke" else "validation"
+            tail_container = payload.get(tail_container_name)
+            if not isinstance(tail_container, dict):
+                tail_container = {}
+                payload[tail_container_name] = tail_container
+            tail_container.update(output_metadata)
 
-    path = stream_path(target_feature_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-    write_index(
-        target_feature_dir,
-        feature_id=str(payload.get("featureId") or target_feature_dir.name),
-        verify_existing=False,
-    )
-    return payload
+        if output_tail is not None and output_duplicates_record(output_tail, payload):
+            raise EvidenceStoreError("evidence_log_duplicates_record")
+
+        errors = validate_record(payload)
+        if errors:
+            raise EvidenceStoreError(";".join(errors))
+
+        write_pending(target_feature_dir, payload)
+        if output_tail is not None and isinstance(evidence_id, str):
+            write_log(target_feature_dir, evidence_id, output_tail, prepared=prepared_log)
+
+        path = stream_path(target_feature_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        write_sidecar(target_feature_dir, payload)
+        write_index(
+            target_feature_dir,
+            feature_id=str(payload.get("featureId") or target_feature_dir.name),
+            verify_existing=False,
+        )
+        pending_path(target_feature_dir, str(evidence_id)).unlink(missing_ok=True)
+        return payload
 
 
 def _cmd_append(args: argparse.Namespace) -> int:
@@ -458,6 +688,9 @@ def _cmd_append(args: argparse.Namespace) -> int:
         record["validation"] = validation
     if not record.get("action") and (args.command or args.exit_code is not None):
         record["action"] = "validation"
+    if record.get("skill") == "autodev-code" and record.get("action") in {"validation", "project_check"}:
+        print("code_validation_requires_task_runner", file=sys.stderr)
+        return 1
     tail = Path(args.output_tail).read_text(encoding="utf-8", errors="ignore") if args.output_tail else None
     try:
         appended = append_evidence(target, record, output_tail=tail)

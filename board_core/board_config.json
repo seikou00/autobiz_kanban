@@ -351,7 +351,7 @@
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "degrade": "无 plan.json 时，基于已有产物建轻量任务队列"
+                "degrade": "无 plan.json 或结构已过时时，回到 /autodev-plan 清理并按当前唯一结构重新生成；不得建立旁路任务队列"
               } },
             { "id": "smoke_test_plan_json", "label": "旁路冒烟测试计划", "artifactType": "json", "path": "SMOKE_TEST_PLAN.json", "required": false,
               "extract": {
@@ -365,7 +365,7 @@
           "outputs": [
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "degrade": "缺失时由 append 工具首次创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
+                "degrade": "缺失时由 task_runner 首次验证时在 Feature 产物目录原子创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
               } },
             { "id": "smoke_result_json", "label": "旁路冒烟执行结果", "artifactType": "json", "path": "SMOKE_RESULT.json", "required": false }
           ]

@@ -27,6 +27,7 @@ from board_core.workflow import build_workflow_shell  # noqa: E402
 from hooks.update_checkpoint import prepare_checkpoint_update  # noqa: E402
 from hooks.update_checkpoint import validate_plan_json_for_checkpoint  # noqa: E402
 from hooks.evidence_store import append_evidence  # noqa: E402
+from hooks.plan_json import task_contract_sha256  # noqa: E402
 
 
 def make_workspace(root: Path) -> Path:
@@ -111,12 +112,22 @@ def write_minimal_trace_sources(feature_dir: Path) -> None:
 
 def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alpha") -> None:
     feature_dir.mkdir(parents=True, exist_ok=True)
+    run_id = "run-test-state"
     (feature_dir / "plan.json").write_text(
         json.dumps(
             {
-                "version": 1,
-                "taskDetailVersion": 1,
                 "featureId": feature,
+                "projectValidationCommands": [
+                    {
+                        "id": "PROJECT-VAL-001",
+                        "argv": ["echo", "project ok"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ],
+                "projectCheckEvidenceIds": ["ev_0002"],
+                "latestProjectCheckEvidenceId": "ev_0002",
                 "tasks": [
                     {
                         "id": "T001",
@@ -131,16 +142,34 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                             "dataObjects": ["DATA-001"],
                         },
                         "implementationPoints": ["update implementation", "cover validation path"],
-                        "acceptanceCriteria": ["validation command passes"],
+                        "acceptanceCriteria": [
+                            {
+                                "id": "AC-T001-01",
+                                "text": "validation command passes",
+                                "scenarioRefs": ["specs/capability/spec.md#SCN-001"],
+                            }
+                        ],
                         "nonGoals": ["do not change unrelated behavior"],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                         "designRefs": ["design.md#API-001", "#DATA-001", "#D-001"],
                         "apiIds": ["API-001"],
                         "dataIds": ["DATA-001"],
                         "decisionIds": ["D-001"],
-                        "validationCommands": [{"command": "echo ok"}],
+                        "completionPolicy": "all_required_validations_pass",
+                        "validationCommands": [
+                            {
+                                "id": "VAL-T001-01",
+                                "argv": ["echo", "ok"],
+                                "cwd": ".",
+                                "kind": "behavior_test",
+                                "required": True,
+                                "covers": ["AC-T001-01"],
+                            }
+                        ],
                         "expectedFiles": [],
                         "evidenceIds": ["ev_0001"],
+                        "completionEvidenceIds": ["ev_0001"],
+                        "latestPassEvidenceId": "ev_0001",
                         "blockers": [],
                     }
                 ],
@@ -160,11 +189,117 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
             "skill": "autodev-code",
             "taskId": "T001",
             "action": "validation",
+            "detailVersion": 2,
+            "runId": run_id,
+            "completionMode": "implemented",
+            "summary": "VAL-T001-01 validation pass",
+            "implementation": {
+                "noCodeChange": False,
+                "whatChanged": ["src/example.py"],
+                "why": "deliver implementation behavior",
+            },
             "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
             "designRefs": ["design.md#API-001", "#DATA-001", "#D-001"],
             "changedFiles": ["src/example.py"],
-            "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+            "fileChanges": [
+                {
+                    "path": "src/example.py",
+                    "operation": "modified",
+                    "kind": "source",
+                    "summary": "updated example implementation",
+                    "reason": "task implementation",
+                }
+            ],
+            "supportingFiles": [],
+            "checkedCriteria": ["AC-T001-01"],
+            "validation": {
+                "commandId": "VAL-T001-01",
+                "argv": ["echo", "ok"],
+                "command": "echo ok",
+                "cwd": ".",
+                "kind": "behavior_test",
+                "required": True,
+                "exitCode": 0,
+                "result": "pass",
+            },
         },
+        output_tail="ok\n",
+    )
+    append_evidence(
+        feature_dir,
+        {
+            "featureId": feature,
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "__project__",
+            "action": "project_check",
+            "detailVersion": 2,
+            "runId": "run-project-state",
+            "completionMode": "verified_existing",
+            "summary": "PROJECT-VAL-001 project check pass",
+            "implementation": {
+                "noCodeChange": True,
+                "whatChanged": [],
+                "why": "project check validates the completed workspace",
+            },
+            "specRefs": [],
+            "designRefs": [],
+            "changedFiles": [],
+            "fileChanges": [],
+            "supportingFiles": [],
+            "checkedCriteria": ["PROJECT-VAL-001"],
+            "validation": {
+                "commandId": "PROJECT-VAL-001",
+                "argv": ["echo", "project ok"],
+                "command": "echo project ok",
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
+                "exitCode": 0,
+                "result": "pass",
+            },
+        },
+        output_tail="project ok\n",
+    )
+    run_dir = feature_dir / ".task-runs" / "T001"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    plan_task = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))["tasks"][0]
+    (run_dir / f"{run_id}.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "runId": run_id,
+                "featureId": feature,
+                "taskId": "T001",
+                "taskContractSha256": task_contract_sha256(plan_task),
+                "status": "done",
+                "success": True,
+                "completionMode": "implemented",
+                "changedFiles": ["src/example.py"],
+                "fileChanges": [
+                    {
+                        "path": "src/example.py",
+                        "operation": "modified",
+                        "kind": "source",
+                        "summary": "updated example implementation",
+                        "reason": "task implementation",
+                    }
+                ],
+                "evidenceIds": ["ev_0001"],
+                "completionEvidenceIds": ["ev_0001"],
+                "completedCommandEvidence": {
+                    "VAL-T001-01": {
+                        "evidenceId": "ev_0001",
+                        "result": "pass",
+                        "required": True,
+                    }
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
@@ -491,9 +626,18 @@ class StateIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             rich_plan = {
-                "version": 1,
-                "taskDetailVersion": 1,
                 "featureId": "alpha",
+                "projectValidationCommands": [
+                    {
+                        "id": "PROJECT-VAL-001",
+                        "argv": ["echo", "compile"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ],
+                "projectCheckEvidenceIds": [],
+                "latestProjectCheckEvidenceId": None,
                 "tasks": [
                     {
                         "id": "T001",
@@ -503,16 +647,34 @@ class StateIntegrationTests(unittest.TestCase):
                         "deps": [],
                         "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                         "implementationPoints": ["update one behavior", "cover one boundary"],
-                        "acceptanceCriteria": ["one behavior is observable"],
+                        "acceptanceCriteria": [
+                            {
+                                "id": "AC-T001-01",
+                                "text": "one behavior is observable",
+                                "scenarioRefs": ["#SCN-001"],
+                            }
+                        ],
                         "nonGoals": [],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                         "designRefs": ["design.md#D-001"],
                         "apiIds": [],
                         "dataIds": [],
                         "decisionIds": ["D-001"],
-                        "validationCommands": [{"command": "echo one"}],
+                        "completionPolicy": "all_required_validations_pass",
+                        "validationCommands": [
+                            {
+                                "id": "VAL-T001-01",
+                                "argv": ["echo", "one"],
+                                "cwd": ".",
+                                "kind": "behavior_test",
+                                "required": True,
+                                "covers": ["AC-T001-01"],
+                            }
+                        ],
                         "expectedFiles": ["src/a.py"],
                         "evidenceIds": ["ev_0001"],
+                        "completionEvidenceIds": [],
+                        "latestPassEvidenceId": None,
                         "blockers": [],
                     },
                     {
@@ -523,16 +685,34 @@ class StateIntegrationTests(unittest.TestCase):
                         "deps": ["T001"],
                         "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                         "implementationPoints": ["update two behavior", "cover two boundary"],
-                        "acceptanceCriteria": ["two behavior is observable"],
+                        "acceptanceCriteria": [
+                            {
+                                "id": "AC-T002-01",
+                                "text": "two behavior is observable",
+                                "scenarioRefs": ["#SCN-001"],
+                            }
+                        ],
                         "nonGoals": [],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                         "designRefs": ["design.md#D-001"],
                         "apiIds": [],
                         "dataIds": [],
                         "decisionIds": ["D-001"],
-                        "validationCommands": [{"command": "echo two"}],
+                        "completionPolicy": "all_required_validations_pass",
+                        "validationCommands": [
+                            {
+                                "id": "VAL-T002-01",
+                                "argv": ["echo", "two"],
+                                "cwd": ".",
+                                "kind": "behavior_test",
+                                "required": True,
+                                "covers": ["AC-T002-01"],
+                            }
+                        ],
                         "expectedFiles": ["src/b.py"],
                         "evidenceIds": ["ev_0002"],
+                        "completionEvidenceIds": [],
+                        "latestPassEvidenceId": None,
                         "blockers": [],
                     },
                 ],
@@ -577,7 +757,7 @@ class StateIntegrationTests(unittest.TestCase):
             synced, error = validate_plan_json_for_checkpoint(workspace=workspace, feature="alpha", checkpoint="plan_done")
 
             self.assertFalse(synced)
-            self.assertIn("plan_json_invalid_task_detail_version", error)
+            self.assertIn("legacy_plan_requires_rebuild", error)
 
     def test_plan_done_validation_rejects_missing_plan_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

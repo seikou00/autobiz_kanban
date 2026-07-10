@@ -10,6 +10,7 @@ evidence links.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -17,8 +18,6 @@ from pathlib import Path
 from typing import Any
 
 
-PLAN_VERSION = 1
-TASK_DETAIL_VERSION = 1
 TASK_ID_RE = re.compile(r"^T\d{3}$")
 REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
@@ -26,15 +25,35 @@ API_ID_RE = re.compile(r"^API-\d{3}$")
 DATA_ID_RE = re.compile(r"^DATA-\d{3}$")
 DECISION_ID_RE = re.compile(r"^D-\d{3}$")
 EVIDENCE_ID_RE = re.compile(r"^ev_\d{4}$")
+ACCEPTANCE_ID_RE = re.compile(r"^AC-T\d{3}-\d{2,3}$")
+VALIDATION_ID_RE = re.compile(r"^VAL-T\d{3}-\d{2,3}$")
+PROJECT_VALIDATION_ID_RE = re.compile(r"^PROJECT-VAL-\d{3}$")
+REPOSITORY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
 VISUAL_SOURCE_ID_RE = re.compile(r"^VIS-\d{3}$")
 FRONTEND_ROUTES = {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"}
+COMPLETION_POLICIES = {"all_required_validations_pass"}
+VALIDATION_KINDS = {
+    "behavior_test",
+    "integration_test",
+    "e2e_test",
+    "static_check",
+    "typecheck",
+    "lint",
+    "compile",
+}
 
 TODO_STATUSES = {"todo", "pending", "not_started", "not-started", "待做", "未开始"}
 IN_PROGRESS_STATUSES = {"in_progress", "in-progress", "doing", "进行中"}
 DONE_STATUSES = {"done", "completed", "complete", "pass", "passed", "完成", "已完成"}
 FAILED_STATUSES = {"failed", "fail", "blocked", "失败", "阻断"}
+TASK_RUNTIME_FIELDS = {
+    "status",
+    "evidenceIds",
+    "completionEvidenceIds",
+    "latestPassEvidenceId",
+}
 
 
 class PlanJsonError(ValueError):
@@ -59,6 +78,12 @@ def normalize_status(status: Any) -> str:
     if raw in FAILED_STATUSES or lowered in FAILED_STATUSES:
         return "failed"
     return ""
+
+
+def task_contract_sha256(task: dict[str, Any]) -> str:
+    payload = {key: value for key, value in task.items() if key not in TASK_RUNTIME_FIELDS}
+    content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(content).hexdigest()
 
 
 def _string_list(value: Any) -> list[str] | None:
@@ -119,19 +144,13 @@ def validate_plan_data(
     if not isinstance(data, dict):
         return ["plan_json_root_must_be_object"]
 
-    if data.get("version") != PLAN_VERSION:
-        errors.append("plan_json_invalid_version")
-    task_detail_value = data.get("taskDetailVersion")
-    task_detail_enabled = task_detail_value == TASK_DETAIL_VERSION
-    if task_detail_value is not None and task_detail_value != TASK_DETAIL_VERSION:
-        errors.append("plan_json_invalid_task_detail_version")
-    if require_initial_status or require_task_details:
-        if task_detail_value is None:
-            errors.append("plan_json_invalid_task_detail_version")
-        task_detail_enabled = True
+    if "version" in data or "taskDetailVersion" in data:
+        errors.append("legacy_plan_requires_rebuild")
     feature_id = data.get("featureId")
     if not isinstance(feature_id, str) or not feature_id.strip():
         errors.append("plan_json_missing_feature_id")
+
+    _validate_project_commands(errors, data, require_all_done=require_all_done)
 
     tasks = data.get("tasks")
     if not isinstance(tasks, list) or not tasks:
@@ -156,8 +175,7 @@ def validate_plan_data(
         if not isinstance(title, str) or not title.strip():
             errors.append(f"{task_id}.title_missing")
 
-        if task_detail_enabled:
-            _validate_task_details(errors, raw_task, task_id)
+        _validate_task_details(errors, raw_task, task_id)
 
         status = normalize_status(raw_task.get("status"))
         if not status:
@@ -192,6 +210,31 @@ def validate_plan_data(
         )
         if require_all_done and not evidence_ids:
             errors.append(f"{task_id}.evidenceIds_missing")
+        completion_evidence_ids = _validate_string_list(
+            errors,
+            raw_task,
+            task_id,
+            "completionEvidenceIds",
+            required=False,
+            item_re=EVIDENCE_ID_RE,
+        )
+        for completion_id in completion_evidence_ids:
+            if completion_id not in evidence_ids:
+                errors.append(f"{task_id}.completionEvidenceId_not_in_evidenceIds:{completion_id}")
+        latest_pass = raw_task.get("latestPassEvidenceId")
+        if latest_pass is not None and (
+            not isinstance(latest_pass, str) or not EVIDENCE_ID_RE.fullmatch(latest_pass)
+        ):
+            errors.append(f"{task_id}.latestPassEvidenceId_invalid")
+        if require_all_done:
+            if not completion_evidence_ids:
+                errors.append(f"{task_id}.completionEvidenceIds_missing")
+            if not isinstance(latest_pass, str) or not latest_pass:
+                errors.append(f"{task_id}.latestPassEvidenceId_missing")
+            elif latest_pass not in completion_evidence_ids:
+                errors.append(f"{task_id}.latestPassEvidenceId_not_completion_evidence:{latest_pass}")
+            elif latest_pass != completion_evidence_ids[-1]:
+                errors.append(f"{task_id}.latestPassEvidenceId_not_latest:{latest_pass}")
         _validate_string_list(errors, raw_task, task_id, "expectedFiles", required=False)
         blockers = _validate_string_list(errors, raw_task, task_id, "blockers", required=False)
         if require_all_done and blockers:
@@ -220,13 +263,24 @@ def validate_plan_data(
         elif not commands:
             errors.append(f"{task_id}.validationCommands_missing")
         else:
+            required_coverage: set[str] = set()
             for command_index, command in enumerate(commands):
                 if not isinstance(command, dict):
                     errors.append(f"{task_id}.validationCommands[{command_index}]_must_be_object")
                     continue
-                raw_command = command.get("command")
-                if not isinstance(raw_command, str) or not raw_command.strip():
-                    errors.append(f"{task_id}.validationCommands[{command_index}].command_missing")
+                _validate_validation_command(
+                    errors,
+                    command,
+                    task_id=task_id,
+                    command_index=command_index,
+                    acceptance_ids=_acceptance_ids(raw_task),
+                )
+                if command.get("required") is True:
+                    required_coverage.update(
+                        item for item in (command.get("covers") or []) if isinstance(item, str)
+                    )
+            for criterion_id in sorted(_acceptance_ids(raw_task) - required_coverage):
+                errors.append(f"{task_id}.acceptanceCriteria_uncovered:{criterion_id}")
 
     known_ids = {task_id for task_id in task_ids if TASK_ID_RE.match(task_id)}
     for task_id, deps in deps_by_task.items():
@@ -237,7 +291,167 @@ def validate_plan_data(
     return errors
 
 
-def _validate_task_details(errors: list[str], task: dict[str, Any], task_id: str) -> None:
+def _acceptance_ids(task: dict[str, Any]) -> set[str]:
+    values = task.get("acceptanceCriteria")
+    if not isinstance(values, list):
+        return set()
+    return {
+        str(item.get("id"))
+        for item in values
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+
+
+def _validate_acceptance_criteria(errors: list[str], task: dict[str, Any], task_id: str) -> None:
+    criteria = task.get("acceptanceCriteria")
+    if not isinstance(criteria, list):
+        errors.append(f"{task_id}.acceptanceCriteria_must_be_array")
+        return
+    if not criteria:
+        errors.append(f"{task_id}.acceptanceCriteria_missing")
+        return
+    seen: set[str] = set()
+    task_scenario_ids = {
+        match.group(0)
+        for ref in (_string_list(task.get("specRefs")) or [])
+        for match in SCN_ID_RE.finditer(ref)
+    }
+    for index, criterion in enumerate(criteria):
+        context = f"{task_id}.acceptanceCriteria[{index}]"
+        if not isinstance(criterion, dict):
+            errors.append(f"{context}_must_be_object")
+            continue
+        criterion_id = criterion.get("id")
+        if not isinstance(criterion_id, str) or not ACCEPTANCE_ID_RE.fullmatch(criterion_id):
+            errors.append(f"{context}.id_invalid")
+        elif not criterion_id.startswith(f"AC-{task_id}-"):
+            errors.append(f"{context}.id_task_mismatch:{criterion_id}")
+        elif criterion_id in seen:
+            errors.append(f"{task_id}.acceptanceCriteria_duplicate:{criterion_id}")
+        else:
+            seen.add(criterion_id)
+        text = criterion.get("text")
+        if not isinstance(text, str) or not text.strip():
+            errors.append(f"{context}.text_missing")
+        scenario_refs = _string_list(criterion.get("scenarioRefs"))
+        if scenario_refs is None:
+            errors.append(f"{context}.scenarioRefs_must_be_string_array")
+        elif not scenario_refs or not all(SCN_ID_RE.search(ref) for ref in scenario_refs):
+            errors.append(f"{context}.scenarioRefs_missing_scenario_id")
+        else:
+            criterion_scenario_ids = {
+                match.group(0)
+                for ref in scenario_refs
+                for match in SCN_ID_RE.finditer(ref)
+            }
+            for scenario_id in sorted(criterion_scenario_ids - task_scenario_ids):
+                errors.append(f"{context}.scenario_not_in_task_specRefs:{scenario_id}")
+
+
+def _validate_validation_command(
+    errors: list[str],
+    command: dict[str, Any],
+    *,
+    task_id: str,
+    command_index: int,
+    acceptance_ids: set[str],
+) -> None:
+    context = f"{task_id}.validationCommands[{command_index}]"
+    command_id = command.get("id")
+    if not isinstance(command_id, str) or not VALIDATION_ID_RE.fullmatch(command_id):
+        errors.append(f"{context}.id_invalid")
+    elif not command_id.startswith(f"VAL-{task_id}-"):
+        errors.append(f"{context}.id_task_mismatch:{command_id}")
+    argv = _string_list(command.get("argv"))
+    if argv is None or not argv:
+        errors.append(f"{context}.argv_missing")
+    cwd = command.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
+        errors.append(f"{context}.cwd_invalid")
+    kind = command.get("kind")
+    if kind not in VALIDATION_KINDS:
+        errors.append(f"{context}.kind_invalid")
+    if not isinstance(command.get("required"), bool):
+        errors.append(f"{context}.required_must_be_bool")
+    repository = command.get("repo")
+    if repository is not None and (
+        not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository)
+    ):
+        errors.append(f"{context}.repo_invalid")
+    covers = _string_list(command.get("covers"))
+    if covers is None:
+        errors.append(f"{context}.covers_must_be_string_array")
+    else:
+        if kind == "compile" and covers:
+            errors.append(f"{context}.compile_cannot_cover_acceptance")
+        for criterion_id in covers:
+            if criterion_id not in acceptance_ids:
+                errors.append(f"{context}.covers_unknown:{criterion_id}")
+
+
+def _validate_project_commands(
+    errors: list[str],
+    data: dict[str, Any],
+    *,
+    require_all_done: bool,
+) -> None:
+    commands = data.get("projectValidationCommands")
+    if not isinstance(commands, list):
+        errors.append("projectValidationCommands_must_be_array")
+        return
+    if not commands and require_all_done:
+        errors.append("projectValidationCommands_missing")
+    seen: set[str] = set()
+    for index, command in enumerate(commands):
+        context = f"projectValidationCommands[{index}]"
+        if not isinstance(command, dict):
+            errors.append(f"{context}_must_be_object")
+            continue
+        command_id = command.get("id")
+        if not isinstance(command_id, str) or not PROJECT_VALIDATION_ID_RE.fullmatch(command_id):
+            errors.append(f"{context}.id_invalid")
+        elif command_id in seen:
+            errors.append(f"projectValidationCommands_duplicate:{command_id}")
+        else:
+            seen.add(command_id)
+        argv = _string_list(command.get("argv"))
+        if argv is None or not argv:
+            errors.append(f"{context}.argv_missing")
+        cwd = command.get("cwd")
+        if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
+            errors.append(f"{context}.cwd_invalid")
+        if command.get("kind") not in {"compile", "typecheck", "lint", "static_check"}:
+            errors.append(f"{context}.kind_invalid")
+        if not isinstance(command.get("required"), bool):
+            errors.append(f"{context}.required_must_be_bool")
+        repository = command.get("repo")
+        if repository is not None and (
+            not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository)
+        ):
+            errors.append(f"{context}.repo_invalid")
+    project_evidence_ids = _validate_string_list(
+        errors,
+        data,
+        "plan",
+        "projectCheckEvidenceIds",
+        required=False,
+        item_re=EVIDENCE_ID_RE,
+    )
+    latest = data.get("latestProjectCheckEvidenceId")
+    if latest is not None and (not isinstance(latest, str) or not EVIDENCE_ID_RE.fullmatch(latest)):
+        errors.append("latestProjectCheckEvidenceId_invalid")
+    elif isinstance(latest, str):
+        if latest not in project_evidence_ids:
+            errors.append(f"latestProjectCheckEvidenceId_not_in_history:{latest}")
+        elif latest != project_evidence_ids[-1]:
+            errors.append(f"latestProjectCheckEvidenceId_not_latest:{latest}")
+
+
+def _validate_task_details(
+    errors: list[str],
+    task: dict[str, Any],
+    task_id: str,
+) -> None:
     goal = task.get("goal")
     if not isinstance(goal, str) or not goal.strip():
         errors.append(f"{task_id}.goal_missing")
@@ -247,11 +461,17 @@ def _validate_task_details(errors: list[str], task: dict[str, Any], task_id: str
     if not isinstance(scope, dict):
         errors.append(f"{task_id}.scope_must_be_object")
     else:
-        for field in ("modules", "entrypoints", "pages", "dataObjects"):
+        for field in ("modules", "entrypoints", "pages", "dataObjects", "paths"):
             values = _string_list(scope.get(field))
+            if field == "paths" and values is None:
+                continue
             if values is None:
                 errors.append(f"{task_id}.scope.{field}_must_be_string_array")
                 continue
+            if field == "paths":
+                for value in values:
+                    if Path(value).is_absolute() or ".." in Path(value).parts:
+                        errors.append(f"{task_id}.scope.paths_invalid:{value}")
             if field == "pages":
                 scope_pages = values
                 for value in values:
@@ -266,11 +486,9 @@ def _validate_task_details(errors: list[str], task: dict[str, Any], task_id: str
     elif len(implementation_points) > 6:
         errors.append(f"{task_id}.implementationPoints_too_many")
 
-    acceptance_criteria = _string_list(task.get("acceptanceCriteria"))
-    if acceptance_criteria is None:
-        errors.append(f"{task_id}.acceptanceCriteria_must_be_string_array")
-    elif not acceptance_criteria:
-        errors.append(f"{task_id}.acceptanceCriteria_missing")
+    _validate_acceptance_criteria(errors, task, task_id)
+    if task.get("completionPolicy") not in COMPLETION_POLICIES:
+        errors.append(f"{task_id}.completionPolicy_invalid")
 
     non_goals = _string_list(task.get("nonGoals"))
     if non_goals is None:

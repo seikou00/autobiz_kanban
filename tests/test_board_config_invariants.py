@@ -376,7 +376,8 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         tasks = template.get("tasks")
         self.assertIsInstance(tasks, list)
         self.assertTrue(tasks, "plan template must include task examples")
-        self.assertEqual(template.get("taskDetailVersion"), 1)
+        self.assertNotIn("version", template)
+        self.assertNotIn("taskDetailVersion", template)
 
         missing_base_fields: list[str] = []
         for task in tasks:

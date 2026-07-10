@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,8 +34,11 @@ from hooks.json_writer_common import (  # noqa: E402
     write_text,
     WriterError,
 )
+from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
-    TASK_DETAIL_VERSION,
+    VALIDATION_KINDS,
+    normalize_status,
+    task_contract_sha256,
     validate_plan_data,
 )
 from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
@@ -73,17 +77,30 @@ def _md_path(workspace: Path, feature: str) -> Path:
     return artifact_path(workspace, feature, PLAN_MD_FILE)
 
 
+def _plan_lock(workspace: Path, feature: str) -> FileLock:
+    return FileLock(_path(workspace, feature).parent / ".plan.lock")
+
+
 def _initial(feature: str) -> dict[str, Any]:
-    return {"version": 1, "taskDetailVersion": TASK_DETAIL_VERSION, "featureId": feature, "tasks": []}
+    return {
+        "featureId": feature,
+        "projectValidationCommands": [],
+        "projectCheckEvidenceIds": [],
+        "latestProjectCheckEvidenceId": None,
+        "tasks": [],
+    }
 
 
 def _load(workspace: Path, feature: str) -> dict[str, Any]:
     data = load_json(_path(workspace, feature), default=_initial(feature))
     if not isinstance(data, dict):
         raise ValueError("plan.json root 必须是 object")
-    data.setdefault("version", 1)
-    data.setdefault("taskDetailVersion", TASK_DETAIL_VERSION)
+    if "version" in data or "taskDetailVersion" in data:
+        raise PlanWriterInputError("legacy_plan_requires_rebuild")
     data.setdefault("featureId", feature)
+    data.setdefault("projectValidationCommands", [])
+    data.setdefault("projectCheckEvidenceIds", [])
+    data.setdefault("latestProjectCheckEvidenceId", None)
     data.setdefault("tasks", [])
     return data
 
@@ -91,10 +108,8 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
 def _structure_errors(data: dict[str, Any], *, allow_empty: bool = False) -> list[str]:
     if allow_empty and data.get("tasks") == []:
         errors: list[str] = []
-        if data.get("version") != 1:
-            errors.append("plan_json_invalid_version")
-        if data.get("taskDetailVersion") != TASK_DETAIL_VERSION:
-            errors.append("plan_json_invalid_task_detail_version")
+        if "version" in data or "taskDetailVersion" in data:
+            errors.append("legacy_plan_requires_rebuild")
         if not isinstance(data.get("featureId"), str) or not data.get("featureId"):
             errors.append("plan_json_missing_feature_id")
         return errors
@@ -145,6 +160,53 @@ def _split_values(values: list[str] | None) -> list[str]:
     return [value.strip() for value in values or [] if value.strip()]
 
 
+def _normalize_task(task: dict[str, Any], task_id: str) -> None:
+    scenario_refs = [
+        ref for ref in task.get("specRefs", []) if isinstance(ref, str) and "SCN-" in ref
+    ]
+    raw_criteria = task.get("acceptanceCriteria")
+    if isinstance(raw_criteria, list):
+        criteria: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_criteria, start=1):
+            if isinstance(item, dict):
+                criterion = dict(item)
+                criterion.setdefault("id", f"AC-{task_id}-{index:02d}")
+                criterion.setdefault("scenarioRefs", scenario_refs)
+            else:
+                criterion = {
+                    "id": f"AC-{task_id}-{index:02d}",
+                    "text": str(item),
+                    "scenarioRefs": scenario_refs,
+                }
+            criteria.append(criterion)
+        task["acceptanceCriteria"] = criteria
+
+    acceptance_ids = [
+        item["id"]
+        for item in task.get("acceptanceCriteria", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    raw_commands = task.get("validationCommands")
+    if isinstance(raw_commands, list):
+        commands: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_commands, start=1):
+            if isinstance(item, dict) and isinstance(item.get("argv"), list):
+                command = dict(item)
+            else:
+                text = item.get("command", "") if isinstance(item, dict) else str(item)
+                command = {"argv": shlex.split(text)}
+            command.setdefault("id", f"VAL-{task_id}-{index:02d}")
+            command.setdefault("cwd", ".")
+            command.setdefault("kind", "behavior_test")
+            command.setdefault("required", True)
+            command.setdefault("covers", acceptance_ids)
+            commands.append(command)
+        task["validationCommands"] = commands
+    task.setdefault("completionPolicy", "all_required_validations_pass")
+    task.setdefault("completionEvidenceIds", [])
+    task.setdefault("latestPassEvidenceId", None)
+
+
 def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
     implementation = _split_values(args.implementation_point)
     if not implementation:
@@ -169,6 +231,7 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
             "entrypoints": _split_values(args.entrypoint),
             "pages": _split_values(args.page),
             "dataObjects": _split_values(args.data_object),
+            "paths": _split_values(args.scope_path),
         },
         "implementationPoints": implementation,
         "acceptanceCriteria": acceptance,
@@ -193,6 +256,7 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
             "frontendRoute": args.frontend_route,
         }
         task["scope"]["pages"] = list(task["uiRefs"]["pageRefs"])
+    _normalize_task(task, task_id)
     return task
 
 
@@ -211,6 +275,13 @@ def _list_field_is_populated(task: dict[str, Any], field: str) -> bool:
     if field == "validationCommands":
         return any(
             (isinstance(item, dict) and isinstance(item.get("command"), str) and item.get("command", "").strip())
+            or (isinstance(item, dict) and isinstance(item.get("argv"), list) and bool(item.get("argv")))
+            or (isinstance(item, str) and item.strip())
+            for item in value
+        )
+    if field == "acceptanceCriteria":
+        return any(
+            (isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("text", "").strip())
             or (isinstance(item, str) and item.strip())
             for item in value
         )
@@ -275,7 +346,9 @@ def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str,
     task["status"] = "todo"
     task.setdefault("deps", [])
     task.setdefault("uiRequired", False)
-    task.setdefault("scope", {"modules": [], "entrypoints": [], "pages": [], "dataObjects": []})
+    task.setdefault("scope", {"modules": [], "entrypoints": [], "pages": [], "dataObjects": [], "paths": []})
+    if isinstance(task.get("scope"), dict):
+        task["scope"].setdefault("paths", [])
     task.setdefault("implementationPoints", [])
     task.setdefault("acceptanceCriteria", [])
     task.setdefault("nonGoals", [])
@@ -287,6 +360,9 @@ def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str,
     task.setdefault("validationCommands", [])
     task.setdefault("expectedFiles", [])
     task["evidenceIds"] = []
+    _normalize_task(task, str(task["id"]))
+    task["completionEvidenceIds"] = []
+    task["latestPassEvidenceId"] = None
     task.setdefault("blockers", [])
     return task
 
@@ -322,6 +398,8 @@ def _cmd_update_task(args: argparse.Namespace) -> int:
     for field in ("title", "goal", "status"):
         value = getattr(args, field)
         if value is not None:
+            if field == "status" and normalize_status(value) == "done":
+                return render_result(fail("task_completion_requires_task_runner", args.task_id))
             task[field] = value
     return render_result(_write(workspace, feature, data))
 
@@ -338,6 +416,7 @@ def _cmd_set_task_detail(args: argparse.Namespace) -> int:
     data = _load(workspace, feature)
     task = _find_task(data, args.task_id)
     task.update(patch)
+    _normalize_task(task, args.task_id)
     return render_result(_write(workspace, feature, data))
 
 
@@ -351,6 +430,7 @@ def _cmd_set_scope(args: argparse.Namespace) -> int:
         ("entrypoints", args.entrypoint),
         ("pages", args.page),
         ("dataObjects", args.data_object),
+        ("paths", args.scope_path),
     ):
         if source is not None:
             scope[field] = _split_values(source)
@@ -400,12 +480,39 @@ def _cmd_set_ui_refs(args: argparse.Namespace) -> int:
 
 def _cmd_list_field(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    if args.field == "evidenceIds":
+        return render_result(fail("task_evidence_binding_requires_task_runner", args.task_id))
     data = _load(workspace, feature)
     task = _find_task(data, args.task_id)
+    items = _split_values(args.value)
+    if args.field == "acceptanceCriteria":
+        current = task.get(args.field) if isinstance(task.get(args.field), list) else []
+        if args.remove:
+            remove = set(items)
+            task[args.field] = [
+                item
+                for item in current
+                if not isinstance(item, dict)
+                or (item.get("id") not in remove and item.get("text") not in remove)
+            ]
+        else:
+            scenario_refs = [
+                ref for ref in task.get("specRefs", []) if isinstance(ref, str) and "SCN-" in ref
+            ]
+            next_index = len(current) + 1
+            current.extend(
+                {
+                    "id": f"AC-{args.task_id}-{next_index + offset:02d}",
+                    "text": item,
+                    "scenarioRefs": scenario_refs,
+                }
+                for offset, item in enumerate(items)
+            )
+            task[args.field] = current
+        return render_result(_write(workspace, feature, data))
     current = task.get(args.field)
     if not isinstance(current, list):
         current = []
-    items = _split_values(args.value)
     task[args.field] = _remove_values(current, items) if args.remove else _append_unique(current, items)
     return render_result(_write(workspace, feature, data))
 
@@ -425,7 +532,39 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
     if not isinstance(commands, list):
         commands = []
         task["validationCommands"] = commands
-    commands.append({"command": args.command})
+    criteria = task.get("acceptanceCriteria") if isinstance(task.get("acceptanceCriteria"), list) else []
+    covers = [item.get("id") for item in criteria if isinstance(item, dict) and isinstance(item.get("id"), str)]
+    commands.append(
+        {
+            "id": args.command_id or f"VAL-{args.task_id}-{len(commands) + 1:02d}",
+            "argv": shlex.split(args.command),
+            "cwd": args.cwd,
+            "kind": args.kind,
+            "required": not args.optional,
+            "covers": args.covers if args.covers is not None else covers,
+            **({"repo": args.repo} if args.repo else {}),
+        }
+    )
+    return render_result(_write(workspace, feature, data))
+
+
+def _cmd_add_project_validation_command(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load(workspace, feature)
+    commands = data.setdefault("projectValidationCommands", [])
+    if not isinstance(commands, list):
+        commands = []
+        data["projectValidationCommands"] = commands
+    commands.append(
+        {
+            "id": args.command_id or f"PROJECT-VAL-{len(commands) + 1:03d}",
+            "argv": shlex.split(args.command),
+            "cwd": args.cwd,
+            "kind": args.kind,
+            "required": not args.optional,
+            **({"repo": args.repo} if args.repo else {}),
+        }
+    )
     return render_result(_write(workspace, feature, data))
 
 
@@ -438,9 +577,82 @@ def _cmd_set_split_rationale(args: argparse.Namespace) -> int:
 
 def _cmd_set_status(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    if normalize_status(args.status) == "done":
+        return render_result(fail("task_completion_requires_task_runner", args.task_id))
     data = _load(workspace, feature)
     _find_task(data, args.task_id)["status"] = args.status
     return render_result(_write(workspace, feature, data))
+
+
+def set_task_execution_status(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    status: str,
+    *,
+    expected_task_contract_sha256: str | None = None,
+) -> WriterResult:
+    """Internal task-runner API; public CLI cannot set a task to done."""
+
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        task = _find_task(data, task_id)
+        if (
+            expected_task_contract_sha256 is not None
+            and task_contract_sha256(task) != expected_task_contract_sha256
+        ):
+            return fail("task_contract_changed_after_start", task_id, path=_path(workspace, feature))
+        task["status"] = status
+        result = _write(workspace, feature, data)
+        if result.ok:
+            write_text(_md_path(workspace, feature), _render_plan_md(data))
+        return result
+
+
+def record_task_attempt(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    evidence_ids: list[str],
+    *,
+    completion_evidence_ids: list[str],
+    success: bool,
+    expected_task_contract_sha256: str | None = None,
+) -> WriterResult:
+    """Atomically bind one runner attempt and update its terminal task state."""
+
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        task = _find_task(data, task_id)
+        if (
+            expected_task_contract_sha256 is not None
+            and task_contract_sha256(task) != expected_task_contract_sha256
+        ):
+            return fail("task_contract_changed_after_start", task_id, path=_path(workspace, feature))
+        existing = task.get("evidenceIds") if isinstance(task.get("evidenceIds"), list) else []
+        task["evidenceIds"] = _append_unique(existing, evidence_ids)
+        task["completionEvidenceIds"] = list(completion_evidence_ids) if success else []
+        task["latestPassEvidenceId"] = completion_evidence_ids[-1] if success and completion_evidence_ids else None
+        task["status"] = "done" if success else "failed"
+        result = _write(workspace, feature, data)
+        if result.ok:
+            write_text(_md_path(workspace, feature), _render_plan_md(data))
+        return result
+
+
+def record_project_check_attempt(
+    workspace: Path,
+    feature: str,
+    evidence_ids: list[str],
+    *,
+    success: bool,
+) -> WriterResult:
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        existing = data.get("projectCheckEvidenceIds") if isinstance(data.get("projectCheckEvidenceIds"), list) else []
+        data["projectCheckEvidenceIds"] = _append_unique(existing, evidence_ids)
+        data["latestProjectCheckEvidenceId"] = evidence_ids[-1] if success and evidence_ids else None
+        return _write(workspace, feature, data)
 
 
 def _cmd_add_blocker(args: argparse.Namespace) -> int:
@@ -523,7 +735,10 @@ def _render_plan_md(data: dict[str, Any]) -> str:
             lines.append(f"  {index}. {point}")
         lines.append("- 验收标准:")
         for index, criterion in enumerate(task.get("acceptanceCriteria", []) if isinstance(task.get("acceptanceCriteria"), list) else [], start=1):
-            lines.append(f"  {index}. {criterion}")
+            text = criterion.get("text", "") if isinstance(criterion, dict) else criterion
+            criterion_id = criterion.get("id") if isinstance(criterion, dict) else None
+            label = f"{criterion_id}: {text}" if criterion_id else text
+            lines.append(f"  {index}. {label}")
         lines.append(f"- 非目标: {_fmt(task.get('nonGoals'))}")
         if task.get("splitRationale"):
             lines.append(f"- 合并理由: {task.get('splitRationale')}")
@@ -532,7 +747,10 @@ def _render_plan_md(data: dict[str, Any]) -> str:
         if isinstance(commands, list) and commands:
             for command in commands:
                 if isinstance(command, dict):
-                    lines.append(f"  - {command.get('command', '')}")
+                    argv = command.get("argv")
+                    rendered = shlex.join(argv) if isinstance(argv, list) and all(isinstance(item, str) for item in argv) else command.get("command", "")
+                    command_id = command.get("id")
+                    lines.append(f"  - {command_id}: {rendered}" if command_id else f"  - {rendered}")
         else:
             lines.append("  - -")
         lines.append(f"- 状态: {task.get('status', '')}")
@@ -600,6 +818,7 @@ def _add_task_fields(parser: argparse.ArgumentParser, *, require_title: bool = T
     parser.add_argument("--entrypoint", action="append")
     parser.add_argument("--page", action="append")
     parser.add_argument("--data-object", action="append")
+    parser.add_argument("--scope-path", action="append")
     parser.add_argument("--implementation-point", action="append")
     parser.add_argument("--acceptance-criterion", action="append")
     parser.add_argument("--non-goal", action="append")
@@ -656,6 +875,7 @@ def main(argv: list[str] | None = None) -> int:
     scope.add_argument("--entrypoint", action="append")
     scope.add_argument("--page", action="append")
     scope.add_argument("--data-object", action="append")
+    scope.add_argument("--scope-path", action="append")
     scope.set_defaults(func=_cmd_set_scope)
 
     ui_required = sub.add_parser("set-ui-required")
@@ -701,8 +921,32 @@ def main(argv: list[str] | None = None) -> int:
 
     validation_command = sub.add_parser("add-validation-command")
     _task_selector(validation_command)
+    validation_command.add_argument("--command-id")
     validation_command.add_argument("--command", required=True)
+    validation_command.add_argument("--cwd", default=".")
+    validation_command.add_argument(
+        "--kind",
+        choices=sorted(VALIDATION_KINDS),
+        default="behavior_test",
+    )
+    validation_command.add_argument("--repo")
+    validation_command.add_argument("--optional", action="store_true")
+    validation_command.add_argument("--covers", action="append")
     validation_command.set_defaults(func=_cmd_add_validation_command)
+
+    project_validation = sub.add_parser("add-project-validation-command")
+    _common(project_validation)
+    project_validation.add_argument("--command-id")
+    project_validation.add_argument("--command", required=True)
+    project_validation.add_argument("--cwd", default=".")
+    project_validation.add_argument("--repo")
+    project_validation.add_argument(
+        "--kind",
+        choices=["compile", "typecheck", "lint", "static_check"],
+        default="compile",
+    )
+    project_validation.add_argument("--optional", action="store_true")
+    project_validation.set_defaults(func=_cmd_add_project_validation_command)
 
     rationale = sub.add_parser("set-split-rationale")
     _task_selector(rationale)
@@ -742,7 +986,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        workspace, feature = _resolve(args)
+        with _plan_lock(workspace, feature):
+            return args.func(args)
     except PlanWriterInputError as exc:
         return render_result(fail(exc.reason, exc.detail))
     except Exception as exc:

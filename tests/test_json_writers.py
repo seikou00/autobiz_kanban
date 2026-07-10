@@ -151,9 +151,18 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
     (feature_dir / "plan.json").write_text(
         json.dumps(
             {
-                "version": 1,
-                "taskDetailVersion": 1,
                 "featureId": "alpha",
+                "projectValidationCommands": [
+                    {
+                        "id": "PROJECT-VAL-001",
+                        "argv": ["echo", "compile"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ],
+                "projectCheckEvidenceIds": [],
+                "latestProjectCheckEvidenceId": None,
                 "tasks": [
                     {
                         "id": "T001",
@@ -169,16 +178,34 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                             "dataObjects": ["DATA-001"],
                         },
                         "implementationPoints": ["update behavior", "cover boundary"],
-                        "acceptanceCriteria": ["behavior is observable"],
+                        "acceptanceCriteria": [
+                            {
+                                "id": "AC-T001-01",
+                                "text": "behavior is observable",
+                                "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                            }
+                        ],
                         "nonGoals": ["do not change unrelated behavior"],
                         "specRefs": spec_refs,
                         "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
                         "apiIds": ["API-001"],
                         "dataIds": ["DATA-001"],
                         "decisionIds": ["D-001"],
-                        "validationCommands": [{"command": "echo ok"}],
+                        "completionPolicy": "all_required_validations_pass",
+                        "validationCommands": [
+                            {
+                                "id": "VAL-T001-01",
+                                "argv": ["echo", "ok"],
+                                "cwd": ".",
+                                "kind": "behavior_test",
+                                "required": True,
+                                "covers": ["AC-T001-01"],
+                            }
+                        ],
                         "expectedFiles": [],
                         "evidenceIds": [],
+                        "completionEvidenceIds": [],
+                        "latestPassEvidenceId": None,
                         "blockers": [],
                     }
                 ],
@@ -222,6 +249,31 @@ def _run(
 
 
 class JsonWriterTests(unittest.TestCase):
+    def test_plan_writer_rejects_external_completion_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _ = _workspace(Path(tmp))
+            _write_plan(workspace / ".autobizdevops" / "features" / "alpha")
+
+            done = _run(
+                "plan_writer.py", "set-status", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "done",
+            )
+            add = _run(
+                "plan_writer.py", "add-evidence-id", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "ev_0001",
+            )
+            remove = _run(
+                "plan_writer.py", "remove-evidence-id", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "ev_0001",
+            )
+
+            self.assertNotEqual(done.returncode, 0)
+            self.assertIn("task_completion_requires_task_runner", done.stdout)
+            self.assertNotEqual(add.returncode, 0)
+            self.assertIn("task_evidence_binding_requires_task_runner", add.stdout)
+            self.assertNotEqual(remove.returncode, 0)
+            self.assertIn("task_evidence_binding_requires_task_runner", remove.stdout)
+
     def test_stage_gate_matches_run_postcheck(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))

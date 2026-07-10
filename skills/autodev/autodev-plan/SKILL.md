@@ -248,12 +248,15 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 `plan.json` 语义规则：
 
 - Task ID 使用 `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID。
-- 顶层必须保留 `taskDetailVersion: 1`。每个 task 必须写 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`；`splitRationale` 仅在超过任务粒度阈值时填写，不要为普通任务写空泛合并理由。
-- `goal` 写本任务交付的用户可观察结果；`scope.modules/entrypoints/pages/dataObjects` 写执行范围；`implementationPoints` 写 2-6 条可执行要点；`acceptanceCriteria` 写本任务可观察验收口径；`nonGoals` 写本任务明确不做的范围。`uiRequired=true` 或 `apiIds` 非空时，`nonGoals` 至少 1 条；纯后端小任务可写空数组。
-- Plan 阶段所有任务初始状态为 `todo`，初始 `evidenceIds` 为空；无阻断时 `blockers` 为空，有影响执行的待确认事项才写 blocker。
+- `plan.json` 只使用当前结构，不写 `version` / `taskDetailVersion` 字段。每个 task 必须写 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`completionPolicy: all_required_validations_pass`；`splitRationale` 仅在超过任务粒度阈值时填写。发现带版本字段或旧字段结构的 plan 时，不迁移、不兼容，清理后重新执行 Plan。
+- `goal` 写用户可观察结果；`scope.modules/entrypoints/pages/dataObjects` 写执行范围，能确定仓库相对路径时用 `scope.paths` 限定快照归因；`implementationPoints` 写 2-6 条可执行要点。每条 `acceptanceCriteria` 必须是 `{id,text,scenarioRefs}`，ID 使用 `AC-T001-01`，其中 `scenarioRefs` 必须已出现在 task `specRefs`，避免 AC 与 SCN 双轨漂移。
+- `validationCommands` 必须结构化为 `{id,argv,cwd,kind,required,covers}`；ID 使用 `VAL-T001-01`，`argv` 不经 shell，`cwd` 为仓库内相对路径。所有 AC 必须由 required 命令覆盖；`kind=compile` 不得覆盖 AC。多命令任务按 `all_required_validations_pass` 完成，并保留全部成功/失败尝试历史。
+- 多仓库任务为每条 validation/project command 增加 `repo`，值为对应 Git 根目录名；未涉及多仓库时省略。多仓库路径在 evidence 中使用 `repoId:relative/path`，但所有 evidence 文件仍属于 feature 产物目录。
+- 顶层 `projectValidationCommands` 使用 `PROJECT-VAL-001` 等 ID，承载项目编译、类型检查、lint 或静态检查；它与 task 行为验收分离，不能替代 AC 覆盖。至少配置一条 required 项目检查，Code 阶段仅在所有 task 完成后通过 `task_runner project-check` 执行。
+- Plan 阶段所有任务初始状态为 `todo`，`evidenceIds` / `completionEvidenceIds` 为空，`latestPassEvidenceId` 为 null；顶层 `projectCheckEvidenceIds` 为空，`latestProjectCheckEvidenceId` 为 null。以上运行字段只由 task runner 更新。
 - 每个任务必须追溯到真实 specs 与 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的决策。模板中的 API/Data/Decision ID 都是占位示例，必须替换成真实 ID。任务不涉及接口或数据变更时，不要为了过校验强行编造 `API-*` / `DATA-*`：`plan.json.apiIds` / `dataIds` 写空数组 `[]`，`PLAN.md` 的 `api_id` / `data_id` 写 `无` 或 `-`。如果 `design.md` 中存在 API/Data 决策，则这些决策必须被至少一个真正相关的任务覆盖；只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
 - `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
-- `validationCommands` 是强门禁验证命令，必须可直接运行并由命令退出码/断言自行判读；不能确定真实文件时不要凭空填写 `expectedFiles`。
+- `validationCommands` 是 task 级强门禁，必须窄、快、可直接执行并由退出码/断言判读；不能确定真实文件时不要凭空填写 `expectedFiles`。只有 compile/typecheck/lint 的任务不能以“无需改文件”完成，至少要有一条 required 的 behavior/integration/e2e/static 验证。
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。

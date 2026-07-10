@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -93,7 +94,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
             commands = task.get("validationCommands") if isinstance(task.get("validationCommands"), list) else []
             command = ""
             if commands and isinstance(commands[0], dict):
-                command = str(commands[0].get("command", ""))
+                argv = commands[0].get("argv")
+                command = (
+                    shlex.join(argv)
+                    if isinstance(argv, list) and all(isinstance(item, str) for item in argv)
+                    else str(commands[0].get("command", ""))
+                )
             data["targets"].append(
                 {
                     "targetId": f"UT-{index:03d}",

@@ -2082,7 +2082,7 @@ def validate_code_done_gate(ctx: HookContext) -> int:
         info(ctx, "code_done_gate_not_in_contract_degrade")
         return 0
     failures = 0
-    for error in check_code_done(ctx.feature_dir, require_plan=ctx.requires_artifact("plan.json")):
+    for error in check_code_done(ctx.feature_dir):
         failures += fail_line(ctx, "invalid_code_done_gate", f" detail={error}")
     return failures
 

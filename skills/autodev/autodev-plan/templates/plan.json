@@ -1,7 +1,19 @@
 {
-  "version": 1,
-  "taskDetailVersion": 1,
   "featureId": "{feature}",
+  "projectValidationCommands": [
+    {
+      "id": "PROJECT-VAL-001",
+      "argv": [
+        "[项目构建/类型检查可执行程序]",
+        "[项目级检查参数]"
+      ],
+      "cwd": ".",
+      "kind": "compile",
+      "required": true
+    }
+  ],
+  "projectCheckEvidenceIds": [],
+  "latestProjectCheckEvidenceId": null,
   "tasks": [
     {
       "id": "T001",
@@ -16,14 +28,21 @@
         ],
         "entrypoints": [],
         "pages": [],
-        "dataObjects": []
+        "dataObjects": [],
+        "paths": []
       },
       "implementationPoints": [
         "[定位现有入口或渲染条件，按 specs 的状态规则调整]",
         "[补齐边界状态和自动化验证断言]"
       ],
       "acceptanceCriteria": [
-        "[SCN-001 对应的可观察验收结果]"
+        {
+          "id": "AC-T001-01",
+          "text": "[SCN-001 对应的可观察验收结果]",
+          "scenarioRefs": [
+            "specs/[capability]/spec.md#SCN-001"
+          ]
+        }
       ],
       "nonGoals": [],
       "specRefs": [
@@ -38,13 +57,26 @@
       "decisionIds": [
         "D-001"
       ],
+      "completionPolicy": "all_required_validations_pass",
       "validationCommands": [
         {
-          "command": "[只覆盖本任务行为的测试/构建/lint/curl 命令]"
+          "id": "VAL-T001-01",
+          "argv": [
+            "[可执行程序]",
+            "[只覆盖本任务行为的测试参数]"
+          ],
+          "cwd": ".",
+          "kind": "behavior_test",
+          "required": true,
+          "covers": [
+            "AC-T001-01"
+          ]
         }
       ],
       "expectedFiles": [],
       "evidenceIds": [],
+      "completionEvidenceIds": [],
+      "latestPassEvidenceId": null,
       "blockers": []
     },
     {
@@ -66,7 +98,8 @@
         "pages": [],
         "dataObjects": [
           "DATA-001"
-        ]
+        ],
+        "paths": []
       },
       "implementationPoints": [
         "[按 design.md#API-001 接入请求校验与服务调用]",
@@ -74,8 +107,20 @@
         "[补齐失败路径与最小自动化验证]"
       ],
       "acceptanceCriteria": [
-        "[SCN-002 对应的成功路径可观察结果]",
-        "[SCN-003 对应的失败/边界路径可观察结果]"
+        {
+          "id": "AC-T002-01",
+          "text": "[SCN-002 对应的成功路径可观察结果]",
+          "scenarioRefs": [
+            "specs/[capability]/spec.md#SCN-002"
+          ]
+        },
+        {
+          "id": "AC-T002-02",
+          "text": "[SCN-003 对应的失败/边界路径可观察结果]",
+          "scenarioRefs": [
+            "specs/[capability]/spec.md#SCN-003"
+          ]
+        }
       ],
       "nonGoals": [
         "[不实现与本 API 闭环无关的页面、导出或批量流程]"
@@ -99,13 +144,27 @@
       "decisionIds": [
         "D-002"
       ],
+      "completionPolicy": "all_required_validations_pass",
       "validationCommands": [
         {
-          "command": "[只运行本提交/查询闭环的测试命令]"
+          "id": "VAL-T002-01",
+          "argv": [
+            "[可执行程序]",
+            "[只运行本提交/查询闭环的测试参数]"
+          ],
+          "cwd": ".",
+          "kind": "behavior_test",
+          "required": true,
+          "covers": [
+            "AC-T002-01",
+            "AC-T002-02"
+          ]
         }
       ],
       "expectedFiles": [],
       "evidenceIds": [],
+      "completionEvidenceIds": [],
+      "latestPassEvidenceId": null,
       "blockers": []
     },
     {
@@ -137,7 +196,8 @@
         "pages": [
           "PAGE-001"
         ],
-        "dataObjects": []
+        "dataObjects": [],
+        "paths": []
       },
       "implementationPoints": [
         "[从 UI_CONTEXT.json 投影 PAGE-001 / UIX-001 的页面和交互边界]",
@@ -145,7 +205,13 @@
         "[补齐 UI 行为的自动化验证或可运行脚本]"
       ],
       "acceptanceCriteria": [
-        "[SCN-004 对应的页面行为可观察结果]"
+        {
+          "id": "AC-T003-01",
+          "text": "[SCN-004 对应的页面行为可观察结果]",
+          "scenarioRefs": [
+            "specs/[ui-capability]/spec.md#SCN-004"
+          ]
+        }
       ],
       "nonGoals": [
         "[不实现其他页面或未被 UI_CONTEXT.json 引用的交互]"
@@ -165,13 +231,26 @@
       "decisionIds": [
         "D-003"
       ],
+      "completionPolicy": "all_required_validations_pass",
       "validationCommands": [
         {
-          "command": "[覆盖本 UI 行为的可直接运行验证命令]"
+          "id": "VAL-T003-01",
+          "argv": [
+            "[可执行程序]",
+            "[覆盖本 UI 行为的验证参数]"
+          ],
+          "cwd": ".",
+          "kind": "behavior_test",
+          "required": true,
+          "covers": [
+            "AC-T003-01"
+          ]
         }
       ],
       "expectedFiles": [],
       "evidenceIds": [],
+      "completionEvidenceIds": [],
+      "latestPassEvidenceId": null,
       "blockers": []
     }
   ]

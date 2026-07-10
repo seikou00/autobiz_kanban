@@ -1,5 +1,7 @@
 # Evidence 详细化改造方案
 
+> 历史设计说明：当前结构化 plan 与 `detailVersion: 2` 已由 `hooks/task_runner.py`、`hooks/evidence_kernel.py` 实现。当前运行契约见 `docs/evidence-task-runner.md`；下文关于手工 `evidence_store.py append`、可选 detail v1 或仅按 validation pass 判断 `code_done` 的内容只保留为迁移历史，不再定义新 code task 的完成流程。
+
 ## 1. 背景
 
 当前 `evidence/EVIDENCE.jsonl` 已经能支撑 `code_done` 硬门禁：

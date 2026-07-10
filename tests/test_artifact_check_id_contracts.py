@@ -51,6 +51,63 @@ from hooks.ui_context import validate_ui_context_data  # noqa: E402
 
 
 class ArtifactCheckIdContractsTest(unittest.TestCase):
+    def _rewrite_plan_fixture_to_current_schema(self, feature_dir: Path) -> None:
+        path = feature_dir / "plan.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("version", None)
+        data["projectValidationCommands"] = [
+            {
+                "id": "PROJECT-VAL-001",
+                "argv": ["echo", "compile"],
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
+            }
+        ]
+        data["projectCheckEvidenceIds"] = []
+        data["latestProjectCheckEvidenceId"] = None
+        for index, task in enumerate(data.get("tasks", []), start=1):
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("id", f"T{index:03d}"))
+            scenario_refs = [ref for ref in task.get("specRefs", []) if isinstance(ref, str) and "SCN-" in ref]
+            task.setdefault("goal", f"deliver {task.get('title', task_id)} behavior")
+            task.setdefault(
+                "scope",
+                {
+                    "modules": ["src"],
+                    "entrypoints": [],
+                    "pages": list(task.get("uiRefs", {}).get("pageRefs", []))
+                    if isinstance(task.get("uiRefs"), dict)
+                    else [],
+                    "dataObjects": [],
+                },
+            )
+            task.setdefault("implementationPoints", ["update the behavior", "cover the boundary"])
+            task["acceptanceCriteria"] = [
+                {
+                    "id": f"AC-{task_id}-01",
+                    "text": "the behavior is observable",
+                    "scenarioRefs": scenario_refs,
+                }
+            ]
+            task.setdefault("nonGoals", ["do not change unrelated behavior"] if task.get("apiIds") or task.get("uiRequired") else [])
+            task["completionPolicy"] = "all_required_validations_pass"
+            task["validationCommands"] = [
+                {
+                    "id": f"VAL-{task_id}-01",
+                    "argv": ["echo", "ok"],
+                    "cwd": ".",
+                    "kind": "behavior_test",
+                    "required": True,
+                    "covers": [f"AC-{task_id}-01"],
+                }
+            ]
+            evidence_ids = task.get("evidenceIds") if isinstance(task.get("evidenceIds"), list) else []
+            task["completionEvidenceIds"] = evidence_ids if task.get("status") == "done" else []
+            task["latestPassEvidenceId"] = evidence_ids[-1] if task.get("status") == "done" and evidence_ids else None
+        write_plan_json(path, data)
+
     def _ctx(self, feature_dir: Path) -> HookContext:
         root = feature_dir.parent.parent.parent
         return HookContext(skill="autodev-sample", slug="alpha", root=root)
@@ -115,9 +172,18 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         write_plan_json(
             feature_dir / "plan.json",
             {
-                "version": 1,
-                "taskDetailVersion": 1,
                 "featureId": "alpha",
+                "projectValidationCommands": [
+                    {
+                        "id": "PROJECT-VAL-001",
+                        "argv": ["echo", "compile"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ],
+                "projectCheckEvidenceIds": [],
+                "latestProjectCheckEvidenceId": None,
                 "tasks": [
                     {
                         "id": "T001",
@@ -132,7 +198,13 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "dataObjects": ["DATA-001"],
                         },
                         "implementationPoints": ["update the behavior", "cover the boundary"],
-                        "acceptanceCriteria": ["the behavior is observable"],
+                        "acceptanceCriteria": [
+                            {
+                                "id": "AC-T001-01",
+                                "text": "the behavior is observable",
+                                "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                            }
+                        ],
                         "nonGoals": ["do not change unrelated behavior"],
                         **(
                             {
@@ -152,9 +224,21 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                         "apiIds": ["API-001"],
                         "dataIds": ["DATA-001"],
                         "decisionIds": ["D-001"],
-                        "validationCommands": [{"command": "echo ok"}],
+                        "completionPolicy": "all_required_validations_pass",
+                        "validationCommands": [
+                            {
+                                "id": "VAL-T001-01",
+                                "argv": ["echo", "ok"],
+                                "cwd": ".",
+                                "kind": "behavior_test",
+                                "required": True,
+                                "covers": ["AC-T001-01"],
+                            }
+                        ],
                         "expectedFiles": [],
                         "evidenceIds": ["ev_0001"],
+                        "completionEvidenceIds": ["ev_0001"],
+                        "latestPassEvidenceId": "ev_0001",
                         "blockers": [],
                     }
                 ],
@@ -193,6 +277,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         blockers: list[str] | None = None,
         extra_task_fields: dict | None = None,
     ) -> None:
+        effective_spec_refs = spec_refs or ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"]
+        scenario_refs = [ref for ref in effective_spec_refs if "SCN-" in ref]
+        effective_evidence_ids = ["ev_0001"] if evidence_ids is None else evidence_ids
         task = {
             "id": "T001",
             "title": "do",
@@ -206,16 +293,34 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "dataObjects": ["DATA-001"] if data_ids else [],
             },
             "implementationPoints": ["update the behavior", "cover the boundary"],
-            "acceptanceCriteria": ["the behavior is observable"],
+            "acceptanceCriteria": [
+                {
+                    "id": "AC-T001-01",
+                    "text": "the behavior is observable",
+                    "scenarioRefs": scenario_refs,
+                }
+            ],
             "nonGoals": ["do not change unrelated behavior"] if api_ids else [],
-            "specRefs": spec_refs or ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+            "specRefs": effective_spec_refs,
             "designRefs": design_refs or ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
             "apiIds": [] if api_ids is None else api_ids,
             "dataIds": [] if data_ids is None else data_ids,
             "decisionIds": ["D-001"] if decision_ids is None else decision_ids,
-            "validationCommands": [{"command": "echo ok"}],
+            "completionPolicy": "all_required_validations_pass",
+            "validationCommands": [
+                {
+                    "id": "VAL-T001-01",
+                    "argv": ["echo", "ok"],
+                    "cwd": ".",
+                    "kind": "behavior_test",
+                    "required": True,
+                    "covers": ["AC-T001-01"],
+                }
+            ],
             "expectedFiles": [],
-            "evidenceIds": ["ev_0001"] if evidence_ids is None else evidence_ids,
+            "evidenceIds": effective_evidence_ids,
+            "completionEvidenceIds": effective_evidence_ids if status == "done" else [],
+            "latestPassEvidenceId": effective_evidence_ids[-1] if status == "done" and effective_evidence_ids else None,
             "blockers": [] if blockers is None else blockers,
         }
         if extra_task_fields:
@@ -223,9 +328,18 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         write_plan_json(
             feature_dir / "plan.json",
             {
-                "version": 1,
-                "taskDetailVersion": 1,
                 "featureId": "alpha",
+                "projectValidationCommands": [
+                    {
+                        "id": "PROJECT-VAL-001",
+                        "argv": ["echo", "compile"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ],
+                "projectCheckEvidenceIds": [],
+                "latestProjectCheckEvidenceId": None,
                 "tasks": [task],
             },
         )
@@ -732,6 +846,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     ],
                 },
             )
+            self._rewrite_plan_fixture_to_current_schema(feature_dir)
 
             self.assertGreater(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
 
@@ -810,6 +925,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     ],
                 },
             )
+            self._rewrite_plan_fixture_to_current_schema(feature_dir)
 
             self.assertGreater(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
 
@@ -872,6 +988,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     ],
                 },
             )
+            self._rewrite_plan_fixture_to_current_schema(feature_dir)
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -988,6 +1105,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     ],
                 },
             )
+            self._rewrite_plan_fixture_to_current_schema(feature_dir)
 
             self.assertEqual(validate_plan_json_contract(self._plan_ctx(feature_dir)), 0)
 
@@ -2640,7 +2758,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
 
             self.assertGreater(validate_code_done_gate(ctx), 0)
 
-    def test_code_done_gate_degrades_plan_check_when_plan_not_in_contract(self) -> None:
+    def test_code_done_gate_requires_plan_even_when_not_listed_in_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = self._feature_dir(tmp)
             append_evidence(
@@ -2665,7 +2783,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 required_outputs=("evidence/EVIDENCE.jsonl",),
             )
 
-            self.assertEqual(validate_code_done_gate(ctx), 0)
+            self.assertGreater(validate_code_done_gate(ctx), 0)
 
     def test_evidence_detail_quality_ignores_legacy_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
