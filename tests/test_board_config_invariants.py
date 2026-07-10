@@ -447,6 +447,32 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"},
             )
 
+    def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "templates/task.json",
+            "add-task-contract",
+            "每次 Plan 会话首次调用 `add-task` 前只执行一次",
+            "跨平台默认使用 `--body-file`",
+            ".tmp/plan_writer/tasks/Txxx.json",
+            "不得裸启动 `--body-stdin`",
+            "同一次工具调用绑定非空 stdin",
+            "禁止使用 `python -c`",
+            "不得向 `add-task` 传 `--batch-id`",
+            "不得自创 `--spec-refs`",
+            "不得使用 `AC-ID::text::refs`",
+            "不得通过 validator 失败来探索 schema",
+            "不得读取 writer 源码来发现参数或枚举值",
+            "required command 的 `covers` 并集覆盖全部 AC",
+            "scope.pages` 与 `uiRefs.pageRefs`",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-plan skill must define the deterministic task writer protocol: " + ", ".join(missing),
+        )
+
     def test_plan_skill_keeps_ui_projection_generation_guidance(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         required = [

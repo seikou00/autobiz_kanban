@@ -52,6 +52,7 @@ from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: 
 
 PLAN_FILE = "plan.json"
 PLAN_MD_FILE = "PLAN.md"
+TASK_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task.json"
 TASK_DETAIL_PATCH_FIELDS = {"goal", "implementationPoints", "acceptanceCriteria", "nonGoals", "blockers"}
 TASK_DETAIL_FORBIDDEN_FIELDS = {
     "id",
@@ -620,6 +621,44 @@ def _cmd_add_task(args: argparse.Namespace) -> int:
     return render_result(_write(workspace, feature, data))
 
 
+def _cmd_add_task_contract(args: argparse.Namespace) -> int:
+    del args
+    return render_result(
+        WriterResult(
+            ok=True,
+            data={
+                "contract": {
+                    "taskTemplate": TASK_TEMPLATE_RELATIVE_PATH,
+                    "recommendedInputMode": "body-file",
+                    "supportedInputModes": ["body-file", "body-stdin", "task-json", "cli-fields"],
+                    "requiredTaskFields": [
+                        "title",
+                        "goal",
+                        "specRefs",
+                        "implementationPoints",
+                        "acceptanceCriteria",
+                        "validationCommands",
+                    ],
+                    "validationKinds": sorted(VALIDATION_KINDS),
+                    "validationCoverage": {
+                        "rule": "required_commands_cover_all_acceptance_criteria",
+                        "compileMayCoverAcceptanceCriteria": False,
+                    },
+                    "batchAssignment": {
+                        "strategy": BATCH_STRATEGY,
+                        "maxTasks": MAX_BATCH_TASKS,
+                        "manualBatchIdSupported": False,
+                        "primaryCapabilitySource": "first_spec_ref_file",
+                        "appendRule": "same_as_immediately_preceding_batch_and_not_full",
+                    },
+                    "forbiddenArguments": ["--batch-id", "--spec-refs", "--design-refs", "--decision-ids"],
+                    "uiRule": "scope.pages_must_equal_uiRefs.pageRefs_when_uiRequired",
+                }
+            },
+        )
+    )
+
+
 def _cmd_update_task(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     data = _load(workspace, feature)
@@ -1175,6 +1214,9 @@ def main(argv: list[str] | None = None) -> int:
     _add_task_fields(add_task, require_title=False)
     add_task.set_defaults(func=_cmd_add_task)
 
+    add_task_contract = sub.add_parser("add-task-contract")
+    add_task_contract.set_defaults(func=_cmd_add_task_contract)
+
     update_task = sub.add_parser("update-task")
     _task_selector(update_task)
     update_task.add_argument("--title")
@@ -1303,6 +1345,8 @@ def main(argv: list[str] | None = None) -> int:
     show.set_defaults(func=_cmd_show)
 
     args = parser.parse_args(argv)
+    if args.command == "add-task-contract":
+        return args.func(args)
     try:
         workspace, feature = _resolve(args)
         with _plan_lock(workspace, feature):

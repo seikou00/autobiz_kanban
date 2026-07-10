@@ -19,6 +19,7 @@ if str(AUTODEV_HOOKS) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS))
 
 from hooks.json_writer_common import parse_postcheck_output  # noqa: E402
+from hooks.plan_json import BATCH_STRATEGY, MAX_BATCH_TASKS, VALIDATION_KINDS  # noqa: E402
 from hooks.stage_gate import validate_stage  # noqa: E402
 from skills.autodev.hooks.artifact_check import run_postcheck  # noqa: E402
 
@@ -269,6 +270,109 @@ def _run(
 
 
 class JsonWriterTests(unittest.TestCase):
+    def test_plan_writer_add_task_contract_is_machine_readable_without_workspace(self) -> None:
+        env = os.environ.copy()
+        env.pop("PLUGIN_WORKSPACE", None)
+        env.pop("PROJECT_DIR", None)
+        env.pop("FEATURE_ID", None)
+
+        result = _run("plan_writer.py", "add-task-contract", env=env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        contract = payload["contract"]
+        self.assertEqual(contract["taskTemplate"], "skills/autodev/autodev-plan/templates/task.json")
+        self.assertEqual(contract["recommendedInputMode"], "body-file")
+        self.assertEqual(contract["validationKinds"], sorted(VALIDATION_KINDS))
+        self.assertEqual(contract["batchAssignment"]["strategy"], BATCH_STRATEGY)
+        self.assertEqual(contract["batchAssignment"]["maxTasks"], MAX_BATCH_TASKS)
+        self.assertEqual(contract["batchAssignment"]["primaryCapabilitySource"], "first_spec_ref_file")
+        self.assertFalse(contract["batchAssignment"]["manualBatchIdSupported"])
+        self.assertIn("--batch-id", contract["forbiddenArguments"])
+        self.assertIn("validationCommands", contract["requiredTaskFields"])
+        self.assertEqual(contract["validationCoverage"]["rule"], "required_commands_cover_all_acceptance_criteria")
+
+    def test_plan_writer_task_template_supports_chinese_body_file_and_creates_first_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            feature = "代发准入测试"
+            feature_dir = workspace / ".autobizdevops" / "features" / feature
+            feature_dir.mkdir(parents=True)
+            (workspace / ".autobizdevops" / "state.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "autobizdevops.state.v3",
+                        "features": {feature: {**_state_record(), "feature": feature}},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            task = json.loads(
+                (ROOT / "skills/autodev/autodev-plan/templates/task.json").read_text(encoding="utf-8")
+            )
+            task.update(
+                {
+                    "id": "T001",
+                    "title": "代发协议管控菜单与路由配置",
+                    "goal": "用户可以进入代发协议管控页面",
+                    "scope": {
+                        "modules": ["bcpccomplianceui"],
+                        "entrypoints": ["/protocol-control-apply-report"],
+                        "pages": [],
+                        "dataObjects": [],
+                        "paths": [],
+                    },
+                    "implementationPoints": ["注册页面路由", "验证菜单入口可达"],
+                    "acceptanceCriteria": [
+                        {
+                            "id": "AC-T001-01",
+                            "text": "目标用户可以进入代发协议管控页面",
+                            "scenarioRefs": ["specs/protocol-control-menu/spec.md#SCN-001"],
+                        }
+                    ],
+                    "nonGoals": ["不实现申请提交"],
+                    "specRefs": [
+                        "specs/protocol-control-menu/spec.md#REQ-001",
+                        "specs/protocol-control-menu/spec.md#SCN-001",
+                    ],
+                    "designRefs": ["design.md#D-001"],
+                    "decisionIds": ["D-001"],
+                    "validationCommands": [
+                        {
+                            "id": "VAL-T001-01",
+                            "argv": ["npm", "test", "--", "protocol-control"],
+                            "cwd": "bcpccomplianceui",
+                            "kind": "behavior_test",
+                            "required": True,
+                            "covers": ["AC-T001-01"],
+                        }
+                    ],
+                }
+            )
+            body_file = feature_dir / ".tmp" / "plan_writer" / "tasks" / "T001.json"
+            body_file.parent.mkdir(parents=True)
+            body_file.write_text(json.dumps(task, ensure_ascii=False), encoding="utf-8")
+
+            initialized = _run(
+                "plan_writer.py", "init", "--workspace", str(workspace), "--feature", feature
+            )
+            added = _run(
+                "plan_writer.py", "add-task", "--workspace", str(workspace), "--feature", feature,
+                "--body-file", str(body_file),
+            )
+
+            self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            batch_plan = json.loads((feature_dir / "plans/B001/plan.json").read_text(encoding="utf-8"))
+            self.assertNotIn("tasks", root_plan)
+            self.assertEqual(root_plan["activeBatchId"], "B001")
+            self.assertEqual(root_plan["batches"][0]["taskIds"], ["T001"])
+            self.assertEqual(batch_plan["tasks"][0]["title"], "代发协议管控菜单与路由配置")
+
     def test_plan_writer_rejects_external_completion_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, _ = _workspace(Path(tmp))

@@ -241,11 +241,29 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json` 和 `templates/batch-plan.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入。writer 会按 task 的主 `specRefs` 能力归组，同能力按依赖顺序装入批次，每批最多 5 个任务；超过 5 个自动生成下一批。任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖和跨批环。不得直接整份写入 root/batch JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks` 时直接清理并重跑 Plan。
+生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`、`templates/batch-plan.json` 和 `templates/task.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入。根模板定义批次索引，batch 模板定义批次落盘结构，task 模板是单次 `add-task` 的直接输入结构；不得把 batch 包装传给 `add-task`。
 
-复杂任务优先用 `plan_writer.py add-task --body-stdin` 传入单个完整 task JSON object，简单任务才使用逐项 CLI 参数。只有运行环境无法传 stdin 时，才允许用 `--body-file` 降级，临时片段只能写入 feature 目录下 `.tmp/plan_writer/tasks/`，成功后必须清理。UI 条件字段见本文「UI 任务投影规则」并由 validator 校验。所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。
+每次 Plan 会话首次调用 `add-task` 前只执行一次以下只读命令，并以其 JSON 输出获取模板路径、合法 validation kind、必填字段、AC 覆盖规则和自动分组规则；后续 task 复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
-`templates/batch-plan.json` 的任务示例用于基础字段，实际生成时模板同时包含非 UI task 与 UI task 示例的语义：`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务；`UI_CONTEXT.uiRequired=true` 时至少一个 `uiRequired:true` 的 UI task。不得先自由生成再依赖 validator 反复修字段。
+```bash
+python "${pluginPath}/hooks/plan_writer.py" add-task-contract
+```
+
+writer 自动分组，调用方不指定 batch。它按 DAG 拓扑写入顺序处理 task，以第一个 `specRefs` 中 `#` 前的文件路径作为主 capability；只有与紧邻前一批的主 capability 相同且该批少于 5 个任务时才合批，否则创建下一 `Bxxx`。已有 task 的批次后续保持不变。不得向 `add-task` 传 `--batch-id`，也不得通过调整 `specRefs` 顺序伪造分组结果。
+
+复杂 task 跨平台默认使用 `--body-file`。先按 `templates/task.json` 生成一个 UTF-8 JSON object 到 feature 目录 `.tmp/plan_writer/tasks/Txxx.json`，再执行：
+
+```bash
+python "${pluginPath}/hooks/plan_writer.py" add-task --feature "${feature}" --body-file "${FEATURE_DIR}/.tmp/plan_writer/tasks/T001.json"
+```
+
+只有返回 `ok: true` 后才删除对应临时文件；失败时保留并直接修正同一文件，不得重新 `init --force`。`--body-stdin` 只允许在执行工具能在同一次工具调用绑定非空 stdin 时使用，不得裸启动 `--body-stdin` 后等待交互输入。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。简单任务可以使用逐项 CLI 参数，但参数必须来自 `add-task --help`；不得自创 `--spec-refs`、`--design-refs`、`--decision-ids` 等复数参数，不得使用 `AC-ID::text::refs` 等分隔符协议表达结构化 AC。复杂 AC 始终写入 body JSON。
+
+每个 task 在首次调用 `add-task` 前必须已经包含完整 `validationCommands`：`kind` 来自 contract 的 `validationKinds`，每条 AC 的 ID 都存在，required command 的 `covers` 并集覆盖全部 AC，且 `compile` 不覆盖 AC。UI task 还必须确保 `scope.pages` 与 `uiRefs.pageRefs` 集合一致。不得通过 validator 失败来探索 schema，不得以反复试错、读取 writer 源码或搜索常量的方式学习调用协议。
+
+所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。writer 会按 task 的主 `specRefs` capability 归组，每批最多 5 个任务；任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖和跨批环。不得直接整份写入 root/batch 正式 JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks` 时直接清理并重跑 Plan。
+
+`templates/task.json` 提供单 task 基础字段，`templates/batch-plan.json` 另含 UI task 投影示例；模板同时包含非 UI task 与 UI task 示例的完整语义。`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，不得生成 UI task；`UI_CONTEXT.uiRequired=true` 时至少一个 `uiRequired:true` 的 UI task。不得先自由生成再依赖 validator 反复修字段。
 
 任务需要 `splitRationale` 时必须在首次 `add-task` 写入。不要为了补一个 `splitRationale` 改成全量 JSON 重写；body 模式不得混用 `--split-rationale`，CLI 标志不会合并进 body JSON。
 
