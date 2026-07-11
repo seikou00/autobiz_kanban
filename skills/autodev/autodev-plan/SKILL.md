@@ -241,7 +241,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/plan.json`、`templates/batch-plan.json` 和 `templates/task.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入。根模板定义批次索引，batch 模板定义批次落盘结构，task 模板是单次 `add-task` 的直接输入结构；不得把 batch 包装传给 `add-task`。
+生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-input.json`，再通过 `plan_writer.py init/add-task/set-*` 增量写入。`task-input.json` 是单次 `add-task` 的唯一直接输入示例；根 `plan.json` 和 `plans/Bxxx/plan.json` 都是 writer-owned generated artifacts，分别由 writer 初始化和批次投影生成，调用方不得手写、套用或读取静态输出模板。
 
 每次 Plan 会话首次调用 `add-task` 前只执行一次以下只读命令，并以其 JSON 输出获取模板路径、合法 validation kind、必填字段、AC 覆盖规则和自动分组规则；后续 task 复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
@@ -251,7 +251,7 @@ python "${pluginPath}/hooks/plan_writer.py" add-task-contract
 
 writer 自动分组，调用方不指定 batch。它按 DAG 拓扑写入顺序处理 task，以第一个 `specRefs` 中 `#` 前的文件路径作为主 capability；只有与紧邻前一批的主 capability 相同且该批少于 5 个任务时才合批，否则创建下一 `Bxxx`。已有 task 的批次后续保持不变。不得向 `add-task` 传 `--batch-id`，也不得通过调整 `specRefs` 顺序伪造分组结果。
 
-复杂 task 跨平台默认使用 `--body-file`。先按 `templates/task.json` 生成一个 UTF-8 JSON object 到 feature 目录 `.tmp/plan_writer/tasks/Txxx.json`，再执行：
+复杂 task 跨平台默认使用 `--body-file`。先按 `templates/task-input.json` 生成一个 UTF-8 JSON object 到 feature 目录 `.tmp/plan_writer/tasks/Txxx.json`，再执行：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" add-task --feature "${feature}" --body-file "${FEATURE_DIR}/.tmp/plan_writer/tasks/T001.json"
@@ -263,7 +263,7 @@ python "${pluginPath}/hooks/plan_writer.py" add-task --feature "${feature}" --bo
 
 所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。writer 会按 task 的主 `specRefs` capability 归组，每批最多 5 个任务；任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖和跨批环。不得直接整份写入 root/batch 正式 JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks` 时直接清理并重跑 Plan。
 
-`templates/task.json` 提供单 task 基础字段，`templates/batch-plan.json` 另含 UI task 投影示例；模板同时包含非 UI task 与 UI task 示例的完整语义。`UI_CONTEXT.uiRequired=false` 时删除 UI 示例任务，不得生成 UI task；`UI_CONTEXT.uiRequired=true` 时至少一个 `uiRequired:true` 的 UI task。不得先自由生成再依赖 validator 反复修字段。
+`templates/task-input.json` 提供完整的非 UI task 输入示例。`status`、`evidenceIds`、`completionEvidenceIds`、`latestPassEvidenceId` 和 `completionPolicy` 由 writer 设置或覆盖，调用方不得在输入中维护。`UI_CONTEXT.uiRequired=false` 时保持 `uiRequired:false` 且不写 `uiRefs`；`UI_CONTEXT.uiRequired=true` 时仅在 `uiRequired:true` 时添加 `uiRefs`，其中必须包含 `pageRefs`、`interactionRefs`、`visualSourceRefs` 和 `frontendRoute`，并保证 `scope.pages` 与 `uiRefs.pageRefs` 一致。项目级验证命令使用 `id`、`argv`、`cwd`、`kind`、`required` 结构，通过 writer 的项目级命令接口写入。不得先自由生成再依赖 validator 反复修字段。
 
 任务需要 `splitRationale` 时必须在首次 `add-task` 写入。不要为了补一个 `splitRationale` 改成全量 JSON 重写；body 模式不得混用 `--split-rationale`，CLI 标志不会合并进 body JSON。
 
@@ -296,7 +296,7 @@ python "${pluginPath}/hooks/plan_writer.py" add-task --feature "${feature}" --bo
 
 UI 任务投影规则：
 - 必须读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json`；UI 范围只从该 JSON 投影，不从 PRD/specs/PLAN Markdown 关键词推导。
-- UI 任务需要按模板中的 UI task 示例投影 UI 条件字段；`uiRequired` 是 task 顶层字段，不在 `uiRefs` 内部。`uiRefs` 只包含 `pageRefs`、`interactionRefs`、`visualSourceRefs`、`frontendRoute`。模板里的 `PAGE-001` / `UIX-001` 只是占位示例，必须替换为 `UI_CONTEXT.json` 中真实存在的 ID，禁止原样复制占位 ID。缺失或与 `UI_CONTEXT.json` 不一致会被拒绝。
+- UI 任务需要按 `add-task-contract` 的 `conditionalFields.uiRefs` 和 `UI_CONTEXT.json` 投影 UI 条件字段；`uiRequired` 是 task 顶层字段，不在 `uiRefs` 内部。`uiRefs` 只包含 `pageRefs`、`interactionRefs`、`visualSourceRefs`、`frontendRoute`，必须替换为 `UI_CONTEXT.json` 中真实存在的 ID，禁止原样复制占位 ID。缺失或与 `UI_CONTEXT.json` 不一致会被拒绝。
 - `UI_CONTEXT.uiRequired=true` 但缺少带 `REQ/SCN specRefs` 的 UI capability 时，不生成 UI 任务，回到 `/autodev-specs` 补齐 UI 场景分母。
 - `UI_CONTEXT.uiRequired=true` 时，只为 UI capability 生成 `uiRequired=true` 的任务，并补齐 `uiRefs.pageRefs`、`uiRefs.interactionRefs`、`uiRefs.visualSourceRefs` 和 `uiRefs.frontendRoute`。
 - UI feature 下，`uiRequired` 不是 `true` 的任务必须显式写 `uiRequired:false`，且不得带非空 `uiRefs`；纯后端支撑任务只保留业务/设计/验证依据。
@@ -408,7 +408,7 @@ python "${pluginPath}/hooks/plan_writer.py" validate --feature "${feature}" --st
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘，且从 `plan.json` 投影生成
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json` 文件已写入磁盘，`flowBlocking=false`
 - [ ] 根 `plan.json` 与各批次计划共同作为任务 DAG 机器事实源，状态投影一致
-- [ ] 每个任务符合 `templates/batch-plan.json` 与 validator，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；Plan 初始状态为 `todo`，初始 evidence 为空
+- [ ] 每个任务符合 `templates/task-input.json` 与 validator，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；writer 初始化状态为 `todo`，初始 evidence 为空
 - [ ] 冒烟案例符合 `templates/smoke_test_plan.json` 与 validator；每条 smoke 绑定真实 `taskId` 与单个 `SCN-xxx`，包含公开 seam、单个 vertical slice 与 `mockPolicy.externalOnly=true`；没有冒烟案例时写明 `skipReason`
 - [ ] 任务按用户可观察 vertical slice 拆分，不按代码层或文件层机械拆分；超过 15 个 task 时已检查是否误拆到代码步骤，没有为了压低任务数合并独立场景
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx），验证命令带具体目标而非裸 mvn test/npm test；但没有写成逐行代码、逐文件微任务或 commit 步骤

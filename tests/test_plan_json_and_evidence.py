@@ -258,11 +258,10 @@ class PlanJsonTest(unittest.TestCase):
             validate_test_tasks(plan),
         )
 
-    def test_plan_json_template_matches_initial_contract(self) -> None:
+    def test_root_plan_is_not_a_static_template(self) -> None:
         template_path = ROOT / "skills" / "autodev" / "autodev-plan" / "templates" / "plan.json"
-        data = json.loads(template_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(validate_plan_data(data, require_initial_status=True), [])
+        self.assertFalse(template_path.exists())
 
     def test_plan_stage_allows_empty_evidence_ids_until_done_gate(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
@@ -363,6 +362,24 @@ class PlanJsonTest(unittest.TestCase):
         errors = validate_test_tasks(plan, require_initial_status=True)
 
         self.assertIn("T001.scope.pages_mismatch_uiRefs", errors)
+
+    def test_ui_task_requires_complete_ui_refs(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["uiRequired"] = True
+        task["nonGoals"] = ["do not implement unrelated pages"]
+
+        errors = validate_test_tasks(plan, require_initial_status=True)
+
+        self.assertIn("T001.uiRefs_missing", errors)
+
+        task["uiRefs"] = {}
+        errors = validate_test_tasks(plan, require_initial_status=True)
+
+        self.assertIn("T001.uiRefs.pageRefs_missing", errors)
+        self.assertIn("T001.uiRefs.interactionRefs_missing", errors)
+        self.assertIn("T001.uiRefs.visualSourceRefs_missing", errors)
+        self.assertIn("T001.uiRefs.frontendRoute_missing", errors)
 
     def test_api_task_requires_non_goals_in_detail_schema(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])

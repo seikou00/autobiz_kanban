@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import sys
 from datetime import datetime, timezone
@@ -52,7 +53,8 @@ from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: 
 
 PLAN_FILE = "plan.json"
 PLAN_MD_FILE = "PLAN.md"
-TASK_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task.json"
+TASK_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-input.json"
+TASK_TEMPLATE_PATH = ROOT / TASK_TEMPLATE_RELATIVE_PATH
 TASK_DETAIL_PATCH_FIELDS = {"goal", "implementationPoints", "acceptanceCriteria", "nonGoals", "blockers"}
 TASK_DETAIL_FORBIDDEN_FIELDS = {
     "id",
@@ -94,6 +96,16 @@ def _utc_now() -> str:
 
 def _plan_lock(workspace: Path, feature: str) -> FileLock:
     return FileLock(_path(workspace, feature).parent / ".plan.lock")
+
+
+def _task_input_example() -> dict[str, Any]:
+    try:
+        value = json.loads(TASK_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"task_input_template_unavailable:{exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("task_input_template_must_be_object")
+    return value
 
 
 def _initial(feature: str) -> dict[str, Any]:
@@ -629,6 +641,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
             data={
                 "contract": {
                     "taskTemplate": TASK_TEMPLATE_RELATIVE_PATH,
+                    "taskInputExample": _task_input_example(),
                     "recommendedInputMode": "body-file",
                     "supportedInputModes": ["body-file", "body-stdin", "task-json", "cli-fields"],
                     "requiredTaskFields": [
@@ -653,6 +666,24 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     },
                     "forbiddenArguments": ["--batch-id", "--spec-refs", "--design-refs", "--decision-ids"],
                     "uiRule": "scope.pages_must_equal_uiRefs.pageRefs_when_uiRequired",
+                    "conditionalFields": {
+                        "uiRefs": {
+                            "when": "uiRequired_is_true",
+                            "requiredFields": [
+                                "pageRefs",
+                                "interactionRefs",
+                                "visualSourceRefs",
+                                "frontendRoute",
+                            ],
+                        }
+                    },
+                    "projectValidationCommand": {
+                        "requiredFields": ["id", "argv", "cwd", "kind", "required"]
+                    },
+                    "writerOwnedGeneratedArtifacts": {
+                        "rootPlan": "plan.json",
+                        "batchPlans": "plans/Bxxx/plan.json",
+                    },
                 }
             },
         )

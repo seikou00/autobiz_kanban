@@ -369,88 +369,48 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                         offenders.append(f"{path.relative_to(ROOT)}: {pattern}")
         self.assertEqual(offenders, [], "autodev-code route docs/tools must use references/ paths")
 
-    def test_plan_template_keeps_ui_projection_examples(self) -> None:
-        root_template = json.loads(
-            (ROOT / "skills/autodev/autodev-plan/templates/plan.json").read_text(encoding="utf-8")
-        )
-        template = json.loads(
-            (ROOT / "skills/autodev/autodev-plan/templates/batch-plan.json").read_text(encoding="utf-8")
-        )
-        tasks = template.get("tasks")
-        self.assertIsInstance(tasks, list)
-        self.assertTrue(tasks, "plan template must include task examples")
-        self.assertNotIn("tasks", root_template)
-        self.assertEqual(root_template["batchPolicy"]["maxTasks"], 5)
-        self.assertNotIn("version", root_template)
-        self.assertNotIn("taskDetailVersion", root_template)
-
-        missing_base_fields: list[str] = []
-        for task in tasks:
-            task_id = task.get("id", "?") if isinstance(task, dict) else "?"
-            if not isinstance(task, dict):
-                missing_base_fields.append(f"{task_id}: not_object")
-                continue
-            for field in (
-                "goal",
-                "scope",
-                "implementationPoints",
-                "acceptanceCriteria",
-                "nonGoals",
-                "uiRequired",
-                "apiIds",
-                "dataIds",
-            ):
-                if field not in task:
-                    missing_base_fields.append(f"{task_id}: {field}")
-        self.assertEqual(
-            missing_base_fields,
-            [],
-            "plan template tasks must show UI and API/DATA fields so first generation matches validators: "
-            + ", ".join(missing_base_fields),
-        )
-        empty_api_data_examples = [
-            str(task.get("id", "?"))
-            for task in tasks
-            if isinstance(task, dict) and task.get("apiIds") == [] and task.get("dataIds") == []
-        ]
-        self.assertTrue(
-            empty_api_data_examples,
-            "plan template must include a task example with apiIds/dataIds as empty arrays "
-            "for work that does not touch API or data",
-        )
-
-        ui_tasks = [task for task in tasks if isinstance(task, dict) and task.get("uiRequired") is True]
-        self.assertTrue(ui_tasks, "plan template must include a uiRequired=true task example")
-        non_ui_tasks = [
-            task
-            for task in tasks
-            if isinstance(task, dict) and "UI capability" not in str(task.get("title", ""))
-        ]
-        non_ui_offenders = [
-            str(task.get("id", "?"))
-            for task in non_ui_tasks
-            if task.get("uiRequired") is not False
-        ]
-        self.assertEqual(
-            non_ui_offenders,
-            [],
-            "non-UI task examples must explicitly set uiRequired=false: " + ", ".join(non_ui_offenders),
-        )
-        for task in ui_tasks:
-            ui_refs = task.get("uiRefs")
-            self.assertIsInstance(ui_refs, dict)
-            self.assertNotIn("uiRequired", ui_refs, "uiRequired is a task-level field, not nested in uiRefs")
-            for field in ("pageRefs", "interactionRefs", "visualSourceRefs"):
-                self.assertIsInstance(ui_refs.get(field), list)
-            self.assertIn(
-                ui_refs.get("frontendRoute"),
-                {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"},
-            )
+    def test_plan_template_has_one_task_input_example(self) -> None:
+        template_dir = ROOT / "skills/autodev/autodev-plan/templates"
+        template = json.loads((template_dir / "task-input.json").read_text(encoding="utf-8"))
+        self.assertFalse((template_dir / "plan.json").exists())
+        self.assertFalse((template_dir / "batch-plan.json").exists())
+        for field in (
+            "id",
+            "title",
+            "goal",
+            "deps",
+            "uiRequired",
+            "scope",
+            "implementationPoints",
+            "acceptanceCriteria",
+            "nonGoals",
+            "specRefs",
+            "designRefs",
+            "apiIds",
+            "dataIds",
+            "decisionIds",
+            "validationCommands",
+            "expectedFiles",
+            "blockers",
+        ):
+            self.assertIn(field, template)
+        for writer_owned_field in (
+            "status",
+            "evidenceIds",
+            "completionEvidenceIds",
+            "latestPassEvidenceId",
+            "completionPolicy",
+        ):
+            self.assertNotIn(writer_owned_field, template)
+        self.assertFalse(template["uiRequired"])
+        self.assertNotIn("uiRefs", template)
+        self.assertEqual(template["apiIds"], [])
+        self.assertEqual(template["dataIds"], [])
 
     def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "templates/task.json",
+            "templates/task-input.json",
             "add-task-contract",
             "每次 Plan 会话首次调用 `add-task` 前只执行一次",
             "跨平台默认使用 `--body-file`",
@@ -476,13 +436,11 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_plan_skill_keeps_ui_projection_generation_guidance(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "templates/plan.json",
+            "templates/task-input.json",
             "不得先自由生成再依赖 validator 反复修字段",
-            "模板同时包含非 UI task 与 UI task 示例",
             "UI_CONTEXT.uiRequired=false",
-            "删除 UI 示例任务",
             "UI_CONTEXT.uiRequired=true",
-            "至少一个 `uiRequired:true`",
+            "仅在 `uiRequired:true` 时添加 `uiRefs`",
             "模板中的 API/Data/Decision ID 都是占位示例",
             "不要为了过校验强行编造",
             "空数组 `[]`",

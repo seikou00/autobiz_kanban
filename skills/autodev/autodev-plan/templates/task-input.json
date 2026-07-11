@@ -2,7 +2,6 @@
   "id": "T001",
   "title": "[single observable behavior]",
   "goal": "[observable outcome]",
-  "status": "todo",
   "deps": [],
   "uiRequired": false,
   "scope": {
@@ -32,7 +31,6 @@
   "apiIds": [],
   "dataIds": [],
   "decisionIds": ["D-001"],
-  "completionPolicy": "all_required_validations_pass",
   "validationCommands": [
     {
       "id": "VAL-T001-01",
@@ -44,8 +42,5 @@
     }
   ],
   "expectedFiles": [],
-  "evidenceIds": [],
-  "completionEvidenceIds": [],
-  "latestPassEvidenceId": null,
   "blockers": []
 }

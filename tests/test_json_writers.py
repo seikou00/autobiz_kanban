@@ -282,7 +282,10 @@ class JsonWriterTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertTrue(payload["ok"])
         contract = payload["contract"]
-        self.assertEqual(contract["taskTemplate"], "skills/autodev/autodev-plan/templates/task.json")
+        self.assertEqual(contract["taskTemplate"], "skills/autodev/autodev-plan/templates/task-input.json")
+        self.assertEqual(contract["taskInputExample"]["id"], "T001")
+        self.assertIn("validationCommands", contract["taskInputExample"])
+        self.assertNotIn("status", contract["taskInputExample"])
         self.assertEqual(contract["recommendedInputMode"], "body-file")
         self.assertEqual(contract["validationKinds"], sorted(VALIDATION_KINDS))
         self.assertEqual(contract["batchAssignment"]["strategy"], BATCH_STRATEGY)
@@ -292,6 +295,24 @@ class JsonWriterTests(unittest.TestCase):
         self.assertIn("--batch-id", contract["forbiddenArguments"])
         self.assertIn("validationCommands", contract["requiredTaskFields"])
         self.assertEqual(contract["validationCoverage"]["rule"], "required_commands_cover_all_acceptance_criteria")
+        self.assertEqual(
+            contract["conditionalFields"]["uiRefs"],
+            {
+                "when": "uiRequired_is_true",
+                "requiredFields": ["pageRefs", "interactionRefs", "visualSourceRefs", "frontendRoute"],
+            },
+        )
+        self.assertEqual(
+            contract["projectValidationCommand"],
+            {"requiredFields": ["id", "argv", "cwd", "kind", "required"]},
+        )
+        self.assertEqual(
+            contract["writerOwnedGeneratedArtifacts"],
+            {
+                "rootPlan": "plan.json",
+                "batchPlans": "plans/Bxxx/plan.json",
+            },
+        )
 
     def test_plan_writer_task_template_supports_chinese_body_file_and_creates_first_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -311,8 +332,16 @@ class JsonWriterTests(unittest.TestCase):
                 encoding="utf-8",
             )
             task = json.loads(
-                (ROOT / "skills/autodev/autodev-plan/templates/task.json").read_text(encoding="utf-8")
+                (ROOT / "skills/autodev/autodev-plan/templates/task-input.json").read_text(encoding="utf-8")
             )
+            for writer_owned_field in (
+                "status",
+                "evidenceIds",
+                "completionEvidenceIds",
+                "latestPassEvidenceId",
+                "completionPolicy",
+            ):
+                self.assertNotIn(writer_owned_field, task)
             task.update(
                 {
                     "id": "T001",

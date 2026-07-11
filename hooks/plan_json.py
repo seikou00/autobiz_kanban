@@ -258,21 +258,32 @@ def _validate_tasks_container(
             errors.append(f"{task_id}.blockers_unresolved")
 
         ui_required = raw_task.get("uiRequired")
+        is_ui_required = ui_required is True
         if ui_required is not None and not isinstance(ui_required, bool):
             errors.append(f"{task_id}.uiRequired_must_be_bool")
         ui_refs = raw_task.get("uiRefs")
-        if ui_refs is not None:
-            if not isinstance(ui_refs, dict):
-                errors.append(f"{task_id}.uiRefs_must_be_object")
-            else:
-                _validate_string_list(errors, ui_refs, task_id, "pageRefs", required=False, item_re=PAGE_ID_RE)
-                _validate_string_list(errors, ui_refs, task_id, "interactionRefs", required=False, item_re=INTERACTION_ID_RE)
-                _validate_string_list(errors, ui_refs, task_id, "visualSourceRefs", required=False, item_re=VISUAL_SOURCE_ID_RE)
-                frontend_route = ui_refs.get("frontendRoute")
-                if frontend_route is not None and (
-                    not isinstance(frontend_route, str) or frontend_route not in FRONTEND_ROUTES
-                ):
-                    errors.append(f"{task_id}.uiRefs.frontendRoute_invalid")
+        if ui_refs is None:
+            if is_ui_required:
+                errors.append(f"{task_id}.uiRefs_missing")
+        elif not isinstance(ui_refs, dict):
+            errors.append(f"{task_id}.uiRefs_must_be_object")
+        else:
+            for field, item_re in (
+                ("pageRefs", PAGE_ID_RE),
+                ("interactionRefs", INTERACTION_ID_RE),
+                ("visualSourceRefs", VISUAL_SOURCE_ID_RE),
+            ):
+                if field not in ui_refs and is_ui_required:
+                    errors.append(f"{task_id}.uiRefs.{field}_missing")
+                elif field in ui_refs:
+                    _validate_string_list(errors, ui_refs, task_id, field, required=False, item_re=item_re)
+            frontend_route = ui_refs.get("frontendRoute")
+            if frontend_route is None and is_ui_required:
+                errors.append(f"{task_id}.uiRefs.frontendRoute_missing")
+            elif frontend_route is not None and (
+                not isinstance(frontend_route, str) or frontend_route not in FRONTEND_ROUTES
+            ):
+                errors.append(f"{task_id}.uiRefs.frontendRoute_invalid")
 
         commands = raw_task.get("validationCommands")
         if not isinstance(commands, list):
