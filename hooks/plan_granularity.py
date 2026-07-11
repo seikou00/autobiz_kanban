@@ -9,12 +9,13 @@ from typing import Any
 
 
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
+SCN_SUBSTRING = re.compile(r"SCN-\d{3}")
 
 PLAN_TASK_MAX_SCENARIOS = 5
 PLAN_TASK_MAX_APIS = 2
 PLAN_TASK_MAX_UI_PAGES = 1
 PLAN_TASK_MAX_UI_INTERACTIONS = 3
-PLAN_TASK_HARD_MAX_SCENARIOS = 8
+PLAN_TASK_MATRIX_MAX_SCENARIOS = 12
 PLAN_TASK_HARD_MAX_APIS = 3
 PLAN_TASK_HARD_MAX_UI_PAGES = 2
 PLAN_TASK_HARD_MAX_UI_INTERACTIONS = 4
@@ -59,11 +60,11 @@ PLAN_TASK_SPLIT_RATIONALE_VALIDATION_TERMS = (
     "same response assertion",
 )
 PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX = {
-    "SCN": 3,
     "API": 2,
     "PAGE": 2,
     "UIX": 3,
 }
+MATRIX_VALIDATION_KINDS = {"behavior_test", "integration_test", "e2e_test"}
 
 
 def scenario_refs_from_spec_refs(spec_refs: list[str]) -> set[str]:
@@ -78,13 +79,72 @@ def scenario_refs_from_spec_refs(spec_refs: list[str]) -> set[str]:
             path_part, _, anchor = stripped.partition("#")
         else:
             path_part, anchor = "", stripped
-        scenario_ids = SCN_ID.findall(anchor)
+        scenario_ids = SCN_SUBSTRING.findall(anchor)
         if not scenario_ids:
             continue
         normalized_path = path_part.strip().replace("\\", "/")
         for scn_id in scenario_ids:
             refs.add(f"{normalized_path}#{scn_id}" if normalized_path else scn_id)
     return refs
+
+
+def _scenario_reference_error(spec_refs: list[str]) -> bool:
+    for raw_ref in spec_refs:
+        if not isinstance(raw_ref, str):
+            continue
+        stripped = raw_ref.strip()
+        if "#" not in stripped:
+            continue
+        path_part, _, anchor = stripped.partition("#")
+        scenario_ids = SCN_SUBSTRING.findall(anchor)
+        if not scenario_ids:
+            continue
+        if not path_part.strip() or len(scenario_ids) != 1 or anchor.strip() != scenario_ids[0]:
+            return True
+    return False
+
+
+def _normalized_merged_scenario_refs(task: dict[str, Any]) -> set[str] | None:
+    raw_refs = task.get("mergedScenarioRefs")
+    if not isinstance(raw_refs, list):
+        return None
+    normalized: set[str] = set()
+    for raw_ref in raw_refs:
+        if not isinstance(raw_ref, str):
+            return None
+        stripped = raw_ref.strip()
+        if "#" not in stripped:
+            return None
+        path_part, _, anchor = stripped.partition("#")
+        scenario_ids = SCN_SUBSTRING.findall(anchor)
+        if not path_part.strip() or len(scenario_ids) != 1 or anchor.strip() != scenario_ids[0]:
+            return None
+        normalized.add(f"{path_part.strip().replace('\\', '/')}#{scenario_ids[0]}")
+    return normalized
+
+
+def _has_single_complete_matrix_validation(task: dict[str, Any]) -> bool:
+    acceptance_ids = {
+        item.get("id")
+        for item in task.get("acceptanceCriteria", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    commands = task.get("validationCommands")
+    if not acceptance_ids or not isinstance(commands, list):
+        return False
+    behavior_commands = [
+        command
+        for command in commands
+        if isinstance(command, dict)
+        and command.get("required") is True
+        and command.get("kind") in MATRIX_VALIDATION_KINDS
+    ]
+    if len(behavior_commands) != 1:
+        return False
+    covers = {
+        item for item in behavior_commands[0].get("covers", []) if isinstance(item, str)
+    }
+    return covers == acceptance_ids
 
 
 def _string_list_value(value: Any) -> list[str]:
@@ -154,14 +214,21 @@ def _split_rationale_is_invalid(rationale: str, related_ids_by_prefix: dict[str,
 
 def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -> list[dict[str, str]]:
     spec_refs = _string_list_value(task.get("specRefs"))
+    if _scenario_reference_error(spec_refs):
+        return [
+            {
+                "reason": "invalid_plan_task_scenario_reference",
+                "detail": f"task={task_id} scenario refs must be individually expanded and fully qualified",
+            }
+        ]
     scenario_refs = scenario_refs_from_spec_refs(spec_refs)
     api_ids = set(_string_list_value(task.get("apiIds")))
     page_refs = set(_task_ui_refs(task, "pageRefs"))
     interaction_refs = set(_task_ui_refs(task, "interactionRefs"))
 
     hard_reasons: list[str] = []
-    if len(scenario_refs) > PLAN_TASK_HARD_MAX_SCENARIOS:
-        hard_reasons.append(f"scenarios={len(scenario_refs)}>{PLAN_TASK_HARD_MAX_SCENARIOS}")
+    if len(scenario_refs) > PLAN_TASK_MATRIX_MAX_SCENARIOS:
+        hard_reasons.append(f"scenarios={len(scenario_refs)}>{PLAN_TASK_MATRIX_MAX_SCENARIOS}")
     if len(api_ids) > PLAN_TASK_HARD_MAX_APIS:
         hard_reasons.append(f"apis={len(api_ids)}>{PLAN_TASK_HARD_MAX_APIS}")
     if len(page_refs) > PLAN_TASK_HARD_MAX_UI_PAGES:
@@ -180,7 +247,6 @@ def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -
     related_ids_by_prefix: dict[str, set[str]] = {}
     if len(scenario_refs) > PLAN_TASK_MAX_SCENARIOS:
         threshold_reasons.append(f"scenarios={len(scenario_refs)}")
-        related_ids_by_prefix["SCN"] = set(scenario_refs)
     if len(api_ids) > PLAN_TASK_MAX_APIS:
         threshold_reasons.append(f"apis={len(api_ids)}")
         related_ids_by_prefix["API"] = set(api_ids)
@@ -193,6 +259,29 @@ def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -
 
     if not threshold_reasons:
         return []
+    if len(scenario_refs) > PLAN_TASK_MAX_SCENARIOS:
+        if "mergedScenarioRefs" not in task:
+            return [
+                {
+                    "reason": "missing_plan_task_merged_scenario_refs",
+                    "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
+                }
+            ]
+        merged_refs = _normalized_merged_scenario_refs(task)
+        if merged_refs != scenario_refs:
+            return [
+                {
+                    "reason": "invalid_plan_task_merged_scenario_refs",
+                    "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
+                }
+            ]
+        if not _has_single_complete_matrix_validation(task):
+            return [
+                {
+                    "reason": "invalid_plan_task_matrix_validation",
+                    "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
+                }
+            ]
     rationale = task.get("splitRationale")
     if not isinstance(rationale, str) or not rationale.strip():
         return [

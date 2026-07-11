@@ -27,6 +27,7 @@
     "specs/[capability]/spec.md#REQ-001",
     "specs/[capability]/spec.md#SCN-001"
   ],
+  "mergedScenarioRefs": [],
   "designRefs": ["design.md#D-001"],
   "apiIds": [],
   "dataIds": [],

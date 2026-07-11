@@ -406,6 +406,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertNotIn("uiRefs", template)
         self.assertEqual(template["apiIds"], [])
         self.assertEqual(template["dataIds"], [])
+        self.assertEqual(template["mergedScenarioRefs"], [])
 
     def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
@@ -511,9 +512,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "CLI 标志不会合并进 body JSON",
             "任务超过软阈值时默认必须继续拆分",
             "SCN `<=5`",
-            "SCN `<=8`",
-            "硬上限不可豁免",
-            "SCN 数 `>8`",
+            "SCN `<=12`",
+            "SCN 数 `>12`",
+            "mergedScenarioRefs",
+            "用户动作 + 公开 seam + 自动化验证边界",
+            "只允许一次拆分",
+            "不得输出 `v2`、`v3`",
             "最终候选任务分组表不得包含 `拆分结论=需拆分` 的行",
             "基础能力可以单独成 task",
             "validationCommands` 必须验证下游公开 seam",

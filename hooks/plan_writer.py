@@ -48,7 +48,11 @@ from hooks.plan_json import (  # noqa: E402
     validate_plan_bundle_data,
     validate_task_collection,
 )
-from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
+from hooks.plan_granularity import (  # noqa: E402
+    PLAN_TASK_MATRIX_MAX_SCENARIOS,
+    PLAN_TASK_MAX_SCENARIOS,
+    validate_plan_task_granularity_item,
+)
 
 
 PLAN_FILE = "plan.json"
@@ -106,6 +110,32 @@ def _task_input_example() -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError("task_input_template_must_be_object")
     return value
+
+
+def _matrix_exception_example() -> dict[str, Any]:
+    scenario_refs = [f"specs/[capability]/spec.md#SCN-{index:03d}" for index in range(1, 7)]
+    return {
+        "specRefs": ["specs/[capability]/spec.md#REQ-001", *scenario_refs],
+        "mergedScenarioRefs": scenario_refs,
+        "acceptanceCriteria": [
+            {
+                "id": "AC-T001-01",
+                "text": "[shared observable matrix result]",
+                "scenarioRefs": scenario_refs,
+            }
+        ],
+        "validationCommands": [
+            {
+                "id": "VAL-T001-01",
+                "argv": ["[executable]", "[matrix validation arguments]"],
+                "cwd": ".",
+                "kind": "integration_test",
+                "required": True,
+                "covers": ["AC-T001-01"],
+            }
+        ],
+        "splitRationale": "[one request/response or state matrix shares one validation loop]",
+    }
 
 
 def _initial(feature: str) -> dict[str, Any]:
@@ -624,12 +654,12 @@ def _cmd_add_task(args: argparse.Namespace) -> int:
     if task_id in _ids(data):
         return render_result(fail("duplicate_task_id", task_id, path=_path(workspace, feature)))
     _tasks(data).append(task)
-    structure_errors = _structure_errors(data)
-    if structure_errors:
-        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=[{"reason": error} for error in structure_errors]))
     granularity_errors = validate_plan_task_granularity_item(task, task_id=task_id)
     if granularity_errors:
         return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=granularity_errors))
+    structure_errors = _structure_errors(data)
+    if structure_errors:
+        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=[{"reason": error} for error in structure_errors]))
     return render_result(_write(workspace, feature, data))
 
 
@@ -675,8 +705,19 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                                 "visualSourceRefs",
                                 "frontendRoute",
                             ],
-                        }
+                        },
+                        "mergedScenarioRefs": {
+                            "when": "scenario_refs_count_is_6_to_12",
+                            "requiredFields": [],
+                            "mustEqual": "fully_qualified_scenario_refs_from_specRefs",
+                        },
                     },
+                    "matrixException": {
+                        "normalScenarioMaximum": PLAN_TASK_MAX_SCENARIOS,
+                        "scenarioMaximum": PLAN_TASK_MATRIX_MAX_SCENARIOS,
+                        "requiredValidation": "one_complete_required_non_compile_behavior_command",
+                    },
+                    "matrixExceptionExample": _matrix_exception_example(),
                     "projectValidationCommand": {
                         "requiredFields": ["id", "argv", "cwd", "kind", "required"]
                     },

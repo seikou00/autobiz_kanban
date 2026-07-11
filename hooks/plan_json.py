@@ -214,6 +214,8 @@ def _validate_tasks_container(
             errors.append(f"{task_id}.specRefs_missing_scenario_id")
 
         _validate_string_list(errors, raw_task, task_id, "designRefs", required=False)
+        if "mergedScenarioRefs" in raw_task:
+            _validate_string_list(errors, raw_task, task_id, "mergedScenarioRefs", required=False)
         _validate_string_list(errors, raw_task, task_id, "apiIds", required=False, item_re=API_ID_RE)
         _validate_string_list(errors, raw_task, task_id, "dataIds", required=False, item_re=DATA_ID_RE)
         _validate_string_list(errors, raw_task, task_id, "decisionIds", item_re=DECISION_ID_RE)

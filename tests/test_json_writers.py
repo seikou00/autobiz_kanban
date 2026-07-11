@@ -303,6 +303,31 @@ class JsonWriterTests(unittest.TestCase):
             },
         )
         self.assertEqual(
+            contract["conditionalFields"]["mergedScenarioRefs"],
+            {
+                "when": "scenario_refs_count_is_6_to_12",
+                "requiredFields": [],
+                "mustEqual": "fully_qualified_scenario_refs_from_specRefs",
+            },
+        )
+        self.assertEqual(
+            contract["matrixException"],
+            {
+                "normalScenarioMaximum": 5,
+                "scenarioMaximum": 12,
+                "requiredValidation": "one_complete_required_non_compile_behavior_command",
+            },
+        )
+        self.assertEqual(len(contract["matrixExceptionExample"]["mergedScenarioRefs"]), 6)
+        self.assertEqual(
+            contract["matrixExceptionExample"]["mergedScenarioRefs"],
+            contract["matrixExceptionExample"]["specRefs"][1:],
+        )
+        self.assertEqual(
+            contract["matrixExceptionExample"]["validationCommands"][0]["covers"],
+            ["AC-T001-01"],
+        )
+        self.assertEqual(
             contract["projectValidationCommand"],
             {"requiredFields": ["id", "argv", "cwd", "kind", "required"]},
         )
@@ -755,7 +780,7 @@ class JsonWriterTests(unittest.TestCase):
                 "nonGoals": [],
                 "specRefs": [
                     "specs/cap/spec.md#REQ-001",
-                    *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 10)],
+                    *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 14)],
                 ],
                 "designRefs": ["design.md#D-001"],
                 "apiIds": [],
@@ -782,6 +807,94 @@ class JsonWriterTests(unittest.TestCase):
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(plan["batches"], [])
 
+    def test_plan_writer_accepts_matrix_exception_body_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            scenario_refs = [f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 10)]
+            acceptance_ids = [f"AC-T001-{index:02d}" for index in range(1, 10)]
+            payload = {
+                "id": "T001",
+                "title": "matrix query task",
+                "goal": "deliver one query response matrix",
+                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "implementationPoints": ["update query", "cover response matrix"],
+                "acceptanceCriteria": [
+                    {"id": acceptance_id, "text": "matrix value is observable", "scenarioRefs": [scenario_ref]}
+                    for acceptance_id, scenario_ref in zip(acceptance_ids, scenario_refs)
+                ],
+                "nonGoals": ["do not add another query seam"],
+                "specRefs": ["specs/cap/spec.md#REQ-001", *scenario_refs],
+                "mergedScenarioRefs": scenario_refs,
+                "designRefs": ["design.md#D-001"],
+                "apiIds": ["API-001"],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [
+                    {
+                        "id": "VAL-T001-01",
+                        "argv": ["echo", "ok"],
+                        "cwd": ".",
+                        "kind": "integration_test",
+                        "required": True,
+                        "covers": acceptance_ids,
+                    }
+                ],
+                "splitRationale": "同一查询请求返回字段矩阵，并由同一个响应断言验证，拆开会复制同一验证闭环。",
+            }
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = _run(
+                "plan_writer.py",
+                "add-task",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--body-stdin",
+                input_text=json.dumps(payload, ensure_ascii=False),
+            )
+
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
+            self.assertEqual(_read_plan_tasks(feature_dir)[0]["mergedScenarioRefs"], scenario_refs)
+
+    def test_plan_writer_rejects_scenario_range_or_concatenation_shorthand_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, anchor in enumerate(("SCN-001~SCN-009", "SCN-001, SCN-002", "SCN-001SCN-006", "SCN-001到SCN-009"), start=1):
+                workspace, feature_dir = _workspace(Path(tmp) / str(index))
+                payload = {
+                    "id": "T001",
+                    "title": "range shorthand task",
+                    "goal": "reject ambiguous scenario coverage",
+                    "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                    "implementationPoints": ["validate references", "reject shorthand"],
+                    "acceptanceCriteria": ["reference validation is observable"],
+                    "nonGoals": [],
+                    "specRefs": ["specs/cap/spec.md#REQ-001", f"specs/cap/spec.md#{anchor}"],
+                    "designRefs": ["design.md#D-001"],
+                    "apiIds": [],
+                    "dataIds": [],
+                    "decisionIds": ["D-001"],
+                    "validationCommands": [{"command": "echo ok"}],
+                }
+
+                init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+                body = _run(
+                    "plan_writer.py",
+                    "add-task",
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                    "--body-stdin",
+                    input_text=json.dumps(payload, ensure_ascii=False),
+                )
+
+                self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+                self.assertNotEqual(body.returncode, 0, anchor)
+                self.assertIn("invalid_plan_task_scenario_reference", body.stdout, anchor)
+                self.assertEqual(json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))["batches"], [], anchor)
+
     def test_plan_writer_rejects_large_task_without_split_rationale_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
@@ -795,6 +908,9 @@ class JsonWriterTests(unittest.TestCase):
                 "nonGoals": [],
                 "specRefs": [
                     "specs/cap/spec.md#REQ-001",
+                    *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 7)],
+                ],
+                "mergedScenarioRefs": [
                     *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 7)],
                 ],
                 "designRefs": ["design.md#D-001"],
@@ -822,7 +938,7 @@ class JsonWriterTests(unittest.TestCase):
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(plan["batches"], [])
 
-    def test_plan_writer_add_task_cli_accepts_split_rationale(self) -> None:
+    def test_plan_writer_add_task_cli_rejects_matrix_exception_without_structured_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             rationale = "SCN-001、SCN-003、SCN-006 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
@@ -867,10 +983,9 @@ class JsonWriterTests(unittest.TestCase):
             )
 
             self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
-            self.assertEqual(body.returncode, 0, body.stdout + body.stderr)
-            tasks = _read_plan_tasks(feature_dir)
-            self.assertEqual(tasks[0]["id"], "T001")
-            self.assertEqual(tasks[0]["splitRationale"], rationale)
+            self.assertNotEqual(body.returncode, 0)
+            self.assertIn("missing_plan_task_merged_scenario_refs", body.stdout)
+            self.assertEqual(json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))["batches"], [])
 
     def test_plan_writer_counts_same_scenario_id_by_spec_path_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -885,6 +1000,9 @@ class JsonWriterTests(unittest.TestCase):
                 "nonGoals": [],
                 "specRefs": [
                     "specs/cap1/spec.md#REQ-001",
+                    *[f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)],
+                ],
+                "mergedScenarioRefs": [
                     *[f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)],
                 ],
                 "designRefs": ["design.md#D-001"],
@@ -926,6 +1044,9 @@ class JsonWriterTests(unittest.TestCase):
                 "nonGoals": [],
                 "specRefs": [
                     "specs/cap1/spec.md#REQ-001",
+                    *[f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)],
+                ],
+                "mergedScenarioRefs": [
                     *[f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)],
                 ],
                 "designRefs": ["design.md#D-001"],

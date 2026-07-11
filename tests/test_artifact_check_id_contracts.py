@@ -2304,6 +2304,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 status="todo",
                 spec_refs=spec_refs,
                 extra_task_fields={
+                    "mergedScenarioRefs": [
+                        f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)
+                    ],
                     "splitRationale": "specs/cap1/spec.md#SCN-001、specs/cap3/spec.md#SCN-001、specs/cap5/spec.md#SCN-001 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
                 },
             )
@@ -2355,6 +2358,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 status="todo",
                 spec_refs=spec_refs,
                 extra_task_fields={
+                    "mergedScenarioRefs": [
+                        f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 8)
+                    ],
                     "splitRationale": "SCN-001、SCN-004、SCN-007 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。"
                 },
             )
@@ -2372,6 +2378,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 status="todo",
                 spec_refs=spec_refs,
                 extra_task_fields={
+                    "mergedScenarioRefs": [
+                        f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 8)
+                    ],
                     "splitRationale": "SCN-001, SCN-004, and SCN-007 cannot be validated independently because they share the same validation loop and same response assertion."
                 },
             )
