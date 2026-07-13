@@ -289,10 +289,6 @@
             { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
               "extract": {
                 "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
-              } },
-            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": false,
-              "extract": {
-                "degrade": "无 UI_CONTEXT.json 时，本阶段必须基于用户描述生成并锁定 UI_CONTEXT.json"
               } }
           ],
           "outputs": [
