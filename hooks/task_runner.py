@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 import sys
@@ -23,6 +22,7 @@ from hooks.evidence_store import EvidenceStoreError, append_evidence, read_recor
 from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
+    EXECUTION_LANES,
     PlanBundle,
     bundle_unfinished_tasks,
     find_task,
@@ -37,6 +37,14 @@ from hooks.plan_writer import (  # noqa: E402
     record_task_attempt,
     set_task_execution_status,
 )
+from hooks.repository_snapshot import (  # noqa: E402
+    RepositoryMap,
+    RepositorySnapshotError,
+    capture_file_snapshot,
+    resolve_git_root,
+    resolve_repositories,
+    snapshot_changes,
+)
 
 
 DEFAULT_TIMEOUT_SECONDS = 300
@@ -45,9 +53,6 @@ BEHAVIOR_VALIDATION_KINDS = {"behavior_test", "integration_test", "e2e_test", "s
 
 class TaskRunnerError(ValueError):
     pass
-
-
-RepositoryMap = dict[str, Path]
 
 
 def _utc_now() -> str:
@@ -108,33 +113,17 @@ def _unfinished_dependencies(plan: PlanBundle, task: dict[str, Any]) -> list[str
 
 
 def _git_root(code_workspace: Path) -> Path:
-    completed = subprocess.run(
-        ["git", "-C", str(code_workspace), "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise TaskRunnerError(f"code_workspace_not_git_repository:{code_workspace}")
-    return Path(completed.stdout.strip()).resolve()
+    try:
+        return resolve_git_root(code_workspace)
+    except RepositorySnapshotError as exc:
+        raise TaskRunnerError(str(exc)) from exc
 
 
 def _resolve_repositories(code_workspaces: Path | list[Path]) -> RepositoryMap:
-    values = code_workspaces if isinstance(code_workspaces, list) else [code_workspaces]
-    repositories: RepositoryMap = {}
-    seen_roots: set[Path] = set()
-    for workspace in values:
-        root = _git_root(workspace)
-        if root in seen_roots:
-            continue
-        repository_id = root.name
-        if repository_id in repositories:
-            raise TaskRunnerError(f"duplicate_repository_id:{repository_id}")
-        repositories[repository_id] = root
-        seen_roots.add(root)
-    if not repositories:
-        raise TaskRunnerError("code_workspace_missing")
-    return repositories
+    try:
+        return resolve_repositories(code_workspaces)
+    except RepositorySnapshotError as exc:
+        raise TaskRunnerError(str(exc)) from exc
 
 
 def _repository_state(repositories: RepositoryMap) -> list[dict[str, Any]]:
@@ -175,102 +164,18 @@ def _assert_repositories_match(state: dict[str, Any], repositories: RepositoryMa
         raise TaskRunnerError("task_run_code_workspace_mismatch")
 
 
-def _hash_file(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _git_snapshot(repo: Path) -> dict[str, str | None]:
-    completed = subprocess.run(
-        ["git", "-C", str(repo), "ls-files", "-co", "--exclude-standard", "-z"],
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise TaskRunnerError("git_snapshot_failed")
-    paths = sorted({raw.decode("utf-8", errors="surrogateescape") for raw in completed.stdout.split(b"\0") if raw})
-    return {path: _hash_file(repo / path) for path in paths}
+    try:
+        return capture_file_snapshot(repo)
+    except RepositorySnapshotError as exc:
+        raise TaskRunnerError(str(exc)) from exc
 
 
 def _snapshot_changes(
     before: dict[str, str | None],
     after: dict[str, str | None],
 ) -> list[dict[str, str]]:
-    changes: list[dict[str, str]] = []
-    deleted = {
-        path: digest
-        for path, digest in before.items()
-        if (path not in after or after.get(path) is None) and isinstance(digest, str)
-    }
-    created = {
-        path: digest
-        for path, digest in after.items()
-        if path not in before and isinstance(digest, str)
-    }
-    renamed_from: set[str] = set()
-    renamed_to: set[str] = set()
-    for old_path, old_digest in sorted(deleted.items()):
-        new_path = next(
-            (
-                candidate
-                for candidate, digest in sorted(created.items())
-                if candidate not in renamed_to and digest == old_digest
-            ),
-            None,
-        )
-        if new_path is None:
-            continue
-        renamed_from.add(old_path)
-        renamed_to.add(new_path)
-        changes.append(
-            {
-                "path": new_path,
-                "fromPath": old_path,
-                "operation": "renamed",
-                "kind": _file_kind(new_path),
-                "summary": f"Task execution renamed {old_path} to {new_path}",
-                "reason": "Detected from matching task run file hashes",
-            }
-        )
-    for path in sorted(set(before) | set(after)):
-        if path in renamed_from or path in renamed_to:
-            continue
-        old = before.get(path)
-        new = after.get(path)
-        if old == new:
-            continue
-        if path not in before:
-            operation = "created"
-        elif path not in after or new is None:
-            operation = "deleted"
-        else:
-            operation = "modified"
-        changes.append(
-            {
-                "path": path,
-                "operation": operation,
-                "kind": _file_kind(path),
-                "summary": f"Task execution {operation} {path}",
-                "reason": "Detected from the task run Git snapshot",
-            }
-        )
-    return changes
-
-
-def _file_kind(path: str) -> str:
-    suffix = Path(path).suffix.lower()
-    if suffix in {".md", ".rst", ".txt"}:
-        return "docs"
-    if suffix in {".json", ".yaml", ".yml", ".toml", ".ini", ".properties"}:
-        return "config"
-    if "test" in Path(path).parts or Path(path).name.lower().startswith("test"):
-        return "test"
-    return "source"
+    return snapshot_changes(before, after)
 
 
 def _new_run_id() -> str:
@@ -1014,17 +919,93 @@ def run_project_checks(
         return _run_project_checks_unlocked(workspace, feature, code_workspace)
 
 
+def _activate_batch_unlocked(workspace: Path, feature: str, batch_id: str) -> dict[str, Any]:
+    result = activate_plan_batch(workspace, feature, batch_id)
+    if not result.ok:
+        errors = result.errors or []
+        detail = ";".join(
+            f"{item.get('reason')}:{item.get('detail', '')}" for item in errors
+        )
+        raise TaskRunnerError(detail or "batch_activation_failed")
+    return dict(result.data or {})
+
+
 def activate_batch(workspace: Path, feature: str, batch_id: str) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
-        result = activate_plan_batch(workspace, feature, batch_id)
-        if not result.ok:
-            errors = result.errors or []
-            detail = ";".join(
-                f"{item.get('reason')}:{item.get('detail', '')}" for item in errors
-            )
-            raise TaskRunnerError(detail or "batch_activation_failed")
-        return dict(result.data or {})
+        return _activate_batch_unlocked(workspace, feature, batch_id)
+
+
+def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
+    feature_dir = _feature_dir(workspace, feature)
+    try:
+        bundle = load_plan_bundle(feature_dir)
+    except ValueError as exc:
+        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+
+    activated_from_handoff = False
+    if bundle.root.get("status") == "awaiting_next_conversation":
+        next_batch_id = bundle.root.get("nextBatchId")
+        if not isinstance(next_batch_id, str):
+            raise TaskRunnerError("batch_handoff_missing_next_batch")
+        handoff_path = feature_dir / "BATCH_HANDOFF.json"
+        if not handoff_path.is_file():
+            raise TaskRunnerError(f"batch_handoff_missing:{next_batch_id}")
+        try:
+            handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TaskRunnerError(f"batch_handoff_invalid:{next_batch_id}") from exc
+        if not isinstance(handoff, dict) or handoff.get("nextBatchId") != next_batch_id:
+            raise TaskRunnerError(f"batch_handoff_mismatch:{next_batch_id}")
+        _activate_batch_unlocked(workspace, feature, next_batch_id)
+        activated_from_handoff = True
+        try:
+            bundle = load_plan_bundle(feature_dir)
+        except ValueError as exc:
+            raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+
+    active_batch_id = bundle.root.get("activeBatchId")
+    if isinstance(active_batch_id, str):
+        entry = next(
+            (item for item in bundle.root.get("batches", []) if item.get("id") == active_batch_id),
+            None,
+        )
+        if not isinstance(entry, dict):
+            raise TaskRunnerError(f"active_batch_missing:{active_batch_id}")
+        execution_lane = entry.get("executionLane")
+        if execution_lane not in EXECUTION_LANES:
+            raise TaskRunnerError(f"active_batch_execution_lane_invalid:{active_batch_id}")
+        return {
+            "action": "execute_active_batch",
+            "activeBatchId": active_batch_id,
+            "executionLane": execution_lane,
+            "taskIds": list(entry.get("taskIds", [])),
+            "activatedFromHandoff": activated_from_handoff,
+            "userMessage": f"开始执行批次 {active_batch_id}。",
+        }
+
+    unfinished = bundle_unfinished_tasks(bundle)
+    if unfinished:
+        raise TaskRunnerError("no_active_batch_for_unfinished_tasks:" + ",".join(unfinished))
+    if isinstance(bundle.root.get("latestProjectCheckEvidenceId"), str):
+        return {
+            "action": "code_done_ready",
+            "activeBatchId": None,
+            "activatedFromHandoff": False,
+            "userMessage": "所有批次及项目级最终校验已完成。",
+        }
+    return {
+        "action": "run_project_check",
+        "activeBatchId": None,
+        "activatedFromHandoff": False,
+        "userMessage": "所有批次已完成，开始执行项目级最终校验。",
+    }
+
+
+def code_session(workspace: Path, feature: str) -> dict[str, Any]:
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        return _code_session_unlocked(workspace, feature)
 
 
 def _resolve(args: argparse.Namespace) -> tuple[Path, str, list[Path]]:
@@ -1055,6 +1036,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             no_code_change_why=args.no_code_change_why,
             supporting_files=args.supporting_file or [],
         )
+        batch_handoff = state.get("batchHandoff")
+        batch_handoff = batch_handoff if isinstance(batch_handoff, dict) else None
         return _emit(
             success,
             error=None if success else "validation_failed",
@@ -1063,8 +1046,13 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             completionMode=state.get("completionMode"),
             evidenceIds=state.get("evidenceIds", []),
             completionEvidenceIds=state.get("completionEvidenceIds", []),
-            batchHandoff=state.get("batchHandoff"),
-            stopAfterBatch=bool(state.get("batchHandoff")),
+            batchHandoff=batch_handoff,
+            stopAfterBatch=bool(batch_handoff),
+            requiresNewConversation=(
+                bool(batch_handoff.get("requiresNewConversation")) if batch_handoff else False
+            ),
+            requiredAction=batch_handoff.get("requiredAction") if batch_handoff else None,
+            userMessage=batch_handoff.get("userMessage") if batch_handoff else None,
         )
     except (TaskRunnerError, ValueError) as exc:
         return _emit(False, error=str(exc))
@@ -1112,6 +1100,15 @@ def _cmd_activate_batch(args: argparse.Namespace) -> int:
         workspace = resolve_workspace(args.workspace)
         feature = resolve_feature(args.feature)
         return _emit(True, **activate_batch(workspace, feature, args.batch_id))
+    except (TaskRunnerError, ValueError) as exc:
+        return _emit(False, error=str(exc))
+
+
+def _cmd_code_session(args: argparse.Namespace) -> int:
+    try:
+        workspace = resolve_workspace(args.workspace)
+        feature = resolve_feature(args.feature)
+        return _emit(True, **code_session(workspace, feature))
     except (TaskRunnerError, ValueError) as exc:
         return _emit(False, error=str(exc))
 
@@ -1164,6 +1161,11 @@ def main(argv: list[str] | None = None) -> int:
     activate.add_argument("--feature")
     activate.add_argument("--batch-id", required=True)
     activate.set_defaults(func=_cmd_activate_batch)
+
+    session = subparsers.add_parser("code-session")
+    session.add_argument("--workspace")
+    session.add_argument("--feature")
+    session.set_defaults(func=_cmd_code_session)
 
     args = parser.parse_args(argv)
     return args.func(args)

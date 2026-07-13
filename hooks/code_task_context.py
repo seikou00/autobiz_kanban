@@ -24,6 +24,8 @@ from hooks.json_writer_common import (  # noqa: E402
     resolve_feature,
     resolve_workspace,
 )
+from hooks.code_exploration import CodeExplorationError  # noqa: E402
+from hooks.code_exploration_writer import inspect_caches  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
     load_plan,
@@ -192,7 +194,13 @@ def resolve_task_refs(base: Path, task: dict[str, Any]) -> tuple[list[dict[str, 
     return resolved_specs, resolved_design, spec_errors + design_errors
 
 
-def build_context(*, workspace: Path, feature: str, task_id: str) -> WriterResult:
+def build_context(
+    *,
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    code_workspaces: list[Path] | None = None,
+) -> WriterResult:
     base = feature_dir(workspace, feature)
     plan_path = base / PLAN_FILE
     try:
@@ -268,6 +276,7 @@ def build_context(*, workspace: Path, feature: str, task_id: str) -> WriterResul
     data_out = {
         "feature": feature,
         "batchId": active_batch_id,
+        "executionLane": active_entry.get("executionLane"),
         "batch": {
             "id": active_batch_id,
             "title": active_plan.get("title"),
@@ -298,6 +307,19 @@ def build_context(*, workspace: Path, feature: str, task_id: str) -> WriterResul
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
     }
+    if code_workspaces:
+        try:
+            data_out.update(inspect_caches(workspace, feature, task_id, code_workspaces))
+        except CodeExplorationError as exc:
+            return fail("code_exploration_inspect_failed", str(exc), path=active_plan_path)
+    else:
+        data_out["explorationCaches"] = []
+        data_out["explorationPolicy"] = {
+            "status": "unavailable",
+            "explorationPolicy": "repository_required",
+            "requiresRecord": False,
+            "requiresPatch": False,
+        }
     return WriterResult(ok=not errors, path=active_plan_path, errors=errors, data=data_out)
 
 
@@ -305,7 +327,13 @@ def _cmd_context(args: argparse.Namespace) -> int:
     try:
         workspace = resolve_workspace(args.workspace)
         feature = resolve_feature(args.feature)
-        result = build_context(workspace=workspace, feature=feature, task_id=args.task_id)
+        code_workspaces = [Path(item).expanduser().resolve() for item in (args.code_workspace or [])]
+        result = build_context(
+            workspace=workspace,
+            feature=feature,
+            task_id=args.task_id,
+            code_workspaces=code_workspaces,
+        )
     except WriterError as exc:
         result = fail("path_resolution_failed", str(exc))
     return render_result(result)
@@ -316,6 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", help="产物工作区根目录，默认由 PLUGIN_WORKSPACE/PROJECT_DIR 推导")
     parser.add_argument("--feature", help="Feature ID，默认读取 FEATURE_ID")
     parser.add_argument("--task-id", required=True, help="Task ID，例如 T001")
+    parser.add_argument("--code-workspace", action="append", help="业务代码仓库路径，可重复传入")
     return parser
 
 

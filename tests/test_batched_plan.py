@@ -767,7 +767,22 @@ class BatchRunnerContractTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             completed_payload = json.loads(completed.stdout)
             self.assertTrue(completed_payload["stopAfterBatch"])
+            self.assertTrue(completed_payload["requiresNewConversation"])
+            self.assertEqual(completed_payload["requiredAction"], "stop_and_open_new_conversation")
+            self.assertEqual(
+                completed_payload["userMessage"],
+                "当前批次 B001 已完成，请打开新的对话继续执行 B002。",
+            )
             self.assertEqual(completed_payload["batchHandoff"]["nextBatchId"], "B002")
+            self.assertTrue(completed_payload["batchHandoff"]["requiresNewConversation"])
+            self.assertEqual(
+                completed_payload["batchHandoff"]["instruction"],
+                "当前批次 B001 已完成，请打开新的对话继续执行 B002。",
+            )
+            self.assertIn("task_runner.py code-session", completed_payload["batchHandoff"]["activationCommand"])
+            self.assertNotIn("activate-batch", completed_payload["batchHandoff"]["activationCommand"])
+            self.assertNotIn("--batch-id", completed_payload["batchHandoff"]["activationCommand"])
+            self.assertNotIn("Open a new conversation", completed.stdout)
             root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(root_plan["status"], "awaiting_next_conversation")
             self.assertIsNone(root_plan["activeBatchId"])
@@ -789,15 +804,17 @@ class BatchRunnerContractTest(unittest.TestCase):
             self.assertIn("batch_handoff_requires_new_conversation:B002", blocked.stdout)
 
             activated = runner(
-                "activate-batch",
+                "code-session",
                 "--workspace",
                 str(workspace),
                 "--feature",
                 "alpha",
-                "--batch-id",
-                "B002",
             )
             self.assertEqual(activated.returncode, 0, activated.stdout + activated.stderr)
+            activated_payload = json.loads(activated.stdout)
+            self.assertEqual(activated_payload["action"], "execute_active_batch")
+            self.assertEqual(activated_payload["activeBatchId"], "B002")
+            self.assertTrue(activated_payload["activatedFromHandoff"])
             self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
             activated_root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(activated_root["activeBatchId"], "B002")
@@ -855,7 +872,15 @@ class BatchRunnerContractTest(unittest.TestCase):
 
             self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
             self.assertEqual(json.loads(run_path.read_text(encoding="utf-8"))["status"], "done")
-            self.assertEqual(json.loads(recovered.stdout)["batchHandoff"]["nextBatchId"], "B002")
+            recovered_payload = json.loads(recovered.stdout)
+            self.assertEqual(recovered_payload["batchHandoff"]["nextBatchId"], "B002")
+            self.assertTrue(recovered_payload["stopAfterBatch"])
+            self.assertTrue(recovered_payload["requiresNewConversation"])
+            self.assertEqual(recovered_payload["requiredAction"], "stop_and_open_new_conversation")
+            self.assertEqual(
+                recovered_payload["userMessage"],
+                "当前批次 B001 已完成，请打开新的对话继续执行 B002。",
+            )
 
 
 if __name__ == "__main__":

@@ -537,6 +537,56 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-plan skill must keep the pre-write task splitting algorithm: " + ", ".join(missing),
         )
 
+    def test_code_skill_requires_batch_session_entry_and_handoff_stop(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "task_runner.py\" code-session",
+            "每次进入 Code 阶段或在新对话恢复 Code 时",
+            "execute_active_batch",
+            "run_project_check",
+            "code_done_ready",
+            "stop_and_open_new_conversation",
+            "原样输出 `userMessage`",
+            "立即结束当前回复",
+            "不得在同一对话再次调用 `code-session`",
+            "requiresNewConversation",
+            "协议层约束",
+            "宿主未提供 conversation ID",
+            "explorationCaches",
+            "full_bounded_explore",
+            "task_scope_only",
+            "targeted_reread",
+            "requiresRecord",
+            "requiresPatch",
+            "changedPaths + 1-hop 依赖 + 当前 Task scope",
+            "fresh/reusable_with_changes 时禁止无边界全仓探索",
+            "code_exploration_writer.py",
+            "explorationPolicy.status=unavailable",
+            "必须停止并补传 `--code-workspace`",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-code must enforce Code session entry and batch handoff stop: " + ", ".join(missing),
+        )
+
+    def test_code_exploration_cache_is_an_optional_code_output(self) -> None:
+        code = next(
+            item
+            for context, item in _iter_nodes(_board_config())
+            if context == "workflow.nodes" and item.get("id") == "dev.code"
+        )
+        outputs = code["artifacts"]["outputs"]
+        matches = [item for item in outputs if item.get("path") == "cache/code-exploration/**/*.json"]
+        self.assertEqual(len(matches), 1)
+        self.assertFalse(matches[0]["required"])
+
+    def test_plan_skill_points_batch_resume_to_code_session(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("task_runner.py code-session", content)
+        self.assertNotIn("task_runner.py activate-batch", content)
+
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:
         offenders: list[str] = []
         for context, node in _iter_nodes(_board_config()):

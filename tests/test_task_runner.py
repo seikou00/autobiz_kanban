@@ -5,13 +5,17 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 if str(ROOT := Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_store import append_evidence  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done  # noqa: E402
+from hooks import task_runner as task_runner_module  # noqa: E402
 
 
 
@@ -194,6 +198,136 @@ def _start(workspace: Path, code: Path) -> dict:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_code_session_holds_task_run_lock_across_handoff_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            (feature_dir / "BATCH_HANDOFF.json").write_text(
+                json.dumps({"nextBatchId": "B002"}),
+                encoding="utf-8",
+            )
+            awaiting_bundle = SimpleNamespace(
+                root={
+                    "status": "awaiting_next_conversation",
+                    "activeBatchId": None,
+                    "nextBatchId": "B002",
+                }
+            )
+            active_bundle = SimpleNamespace(
+                root={
+                    "status": "in_progress",
+                    "activeBatchId": "B002",
+                    "nextBatchId": None,
+                    "executionLane": "backend",
+                    "batches": [{"id": "B002", "executionLane": "backend", "taskIds": ["T002"]}],
+                }
+            )
+            lock_held = False
+            bundles = iter([awaiting_bundle, active_bundle])
+
+            @contextmanager
+            def observed_lock(_feature_dir: Path):
+                nonlocal lock_held
+                self.assertFalse(lock_held)
+                lock_held = True
+                try:
+                    yield
+                finally:
+                    lock_held = False
+
+            def guarded_load(*_args, **_kwargs):
+                self.assertTrue(lock_held)
+                return next(bundles)
+
+            def guarded_activate(*_args, **_kwargs):
+                self.assertTrue(lock_held)
+                return {}
+
+            with (
+                patch.object(task_runner_module, "_task_run_lock", side_effect=observed_lock),
+                patch.object(
+                    task_runner_module,
+                    "load_plan_bundle",
+                    side_effect=guarded_load,
+                ),
+                patch.object(
+                    task_runner_module,
+                    "_activate_batch_unlocked",
+                    side_effect=guarded_activate,
+                ),
+            ):
+                result = task_runner_module.code_session(workspace, "alpha")
+
+            self.assertEqual(result["action"], "execute_active_batch")
+            self.assertEqual(result["activeBatchId"], "B002")
+            self.assertTrue(result["activatedFromHandoff"])
+
+    def test_code_session_rejects_missing_invalid_and_mismatched_handoff(self) -> None:
+        cases = [
+            ("missing", None, "batch_handoff_missing:B002"),
+            ("invalid", "{", "batch_handoff_invalid:B002"),
+            ("mismatch", json.dumps({"nextBatchId": "B003"}), "batch_handoff_mismatch:B002"),
+        ]
+        for label, handoff_content, expected_error in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+                feature_dir.mkdir(parents=True)
+                if handoff_content is not None:
+                    (feature_dir / "BATCH_HANDOFF.json").write_text(handoff_content, encoding="utf-8")
+                bundle = SimpleNamespace(
+                    root={
+                        "status": "awaiting_next_conversation",
+                        "nextBatchId": "B002",
+                    }
+                )
+
+                with patch.object(task_runner_module, "load_plan_bundle", return_value=bundle):
+                    with self.assertRaisesRegex(task_runner_module.TaskRunnerError, expected_error):
+                        task_runner_module.code_session(workspace, "alpha")
+
+    def test_code_session_routes_active_batch_then_final_project_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+
+            active = _run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(active.returncode, 0, active.stdout + active.stderr)
+            active_payload = json.loads(active.stdout)
+            self.assertEqual(active_payload["action"], "execute_active_batch")
+            self.assertEqual(active_payload["activeBatchId"], "B001")
+            self.assertEqual(active_payload["executionLane"], "backend")
+            self.assertFalse(active_payload["activatedFromHandoff"])
+
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            project_required = _run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(project_required.returncode, 0, project_required.stdout + project_required.stderr)
+            self.assertEqual(json.loads(project_required.stdout)["action"], "run_project_check")
+
+            project_check = _run(
+                "project-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(project_check.returncode, 0, project_check.stdout + project_check.stderr)
+            ready = _run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(ready.returncode, 0, ready.stdout + ready.stderr)
+            self.assertEqual(json.loads(ready.stdout)["action"], "code_done_ready")
+
     def test_multiple_repositories_are_snapshotted_but_artifacts_stay_in_feature_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

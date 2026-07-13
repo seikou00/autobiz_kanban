@@ -147,6 +147,22 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ## 执行协议
 
+### Code 会话入口
+
+每次进入 Code 阶段或在新对话恢复 Code 时，第一条 runner 命令必须是：
+
+```bash
+python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
+```
+
+该命令只读取根计划和批次摘要；若根计划处于 `awaiting_next_conversation`，它会校验并消费 `BATCH_HANDOFF.json`，自动激活 `nextBatchId`，无需用户提供 batch ID。必须严格按返回的 `action` 分支：
+
+- `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
+- `run_project_check`：所有批次已完成，跳过 Task 队列，执行「全部任务完成后的验证」。
+- `code_done_ready`：批次和项目级最终校验都已完成，不重复执行 Task 或 project-check，继续 Code 完成门禁。
+
+入口返回失败、活动批次缺失或 handoff 不一致时必须停止，不得猜测 batch ID、直接编辑计划或绕过入口启动 Task。`code-session` 只允许在 Code 会话入口调用；收到批次完成的 `stop_and_open_new_conversation` 后，不得在同一对话再次调用 `code-session`。
+
 ### 建立执行上下文与任务队列
 
 - 只读取根 `plan.json` 的批次摘要和 `activeBatchId` 对应的一个 `plans/Bxxx/plan.json`，不得把其他批次完整 task 契约加载进当前对话。使用 `write_todos` 映射当前批次任务，状态用待做 / 进行中 / 完成 / 失败；每次只置一个任务为进行中。根 plan 含 `tasks` 或缺少批次时回流 `/autodev-plan` 重建。
@@ -170,13 +186,23 @@ python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-
 2. 读唯一 `plan.json` 中的结构化执行契约。必须先运行任务上下文解析脚本：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/code_task_context.py" --feature "{FEATURE_ID}" --task-id "<TASK_ID>"
+python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
+该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches` 和 `explorationPolicy`。多仓库任务按稳定顺序重复传入 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
+
+必须按每个仓库的缓存状态执行，不能只看总体最严 policy 后忽略其他仓库：
+
+若 `explorationPolicy.status=unavailable`，说明没有传入业务仓库，必须停止并补传 `--code-workspace`，不得绕过缓存协议继续编码。
+
+- `missing` / `stale`（`full_bounded_explore`、`requiresRecord=true`）：读取 `staleReasons` / `criticalHits`，完成一次有界探索；先读取 `code_exploration_writer.py contract`，并确认业务仓内存在的 `.autobizdevops/`、`.cmbdevclaw/` 等运行期目录已被 Git ignore，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `record --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 写入完整 findings。重新运行 `code_task_context.py`，对应仓库必须成为 `fresh` 后才能改业务代码。`headCommit` 变化即使文件哈希相同也按 `stale` 处理，这是避免 rebase/merge 后误复用的保守失效策略。
+- `fresh`（`task_scope_only`）：直接使用缓存 findings，只定点读取当前 Task scope / entrypoint 涉及文件；不得重复探测项目框架、模块布局和测试运行器。
+- `reusable_with_changes`（`targeted_reread`、`requiresPatch=true`）：只读取 `changedPaths + 1-hop 依赖 + 当前 Task scope`，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `patch --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 确认；即使事实未变化，也必须传完整 `reviewedPaths` 和空 `findingUpdates`。`findingUpdates` 对每个字段采用整类替换语义，不得只传该列表的一部分；writer 会在合并后重新校验完整 findings。重新运行 context，成为 `fresh` 后才能改业务代码。
+
+`fresh/reusable_with_changes 时禁止无边界全仓探索`：不得重新运行无范围全仓 `rg`、递归目录 listing 或框架发现。缓存只能通过 `code_exploration_writer.py` 修改，禁止直接编辑 `cache/code-exploration/**/*.json`。共享路径只更新当前 executionLane；另一 lane 在后续 inspect 时独立判定。runner 能返回 machine policy，但宿主未提供工具调用遥测，无法独立证明 Agent 执行过多少次搜索，这是协议层约束。
 
 必须读取当前 task 的 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `goal` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
-3. 改代码前做有界探索定位真实文件与既有模式：只读上游产物或 `rg` 命中的相关文件；先识别项目分层、命名、错误处理、校验、日志、测试风格；形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
+3. 改代码前按 `explorationPolicy` 进行首次有界探索或缓存定点复核；先识别或复用项目分层、命名、错误处理、校验、日志、测试风格，形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
 4. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的范围；不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
@@ -196,13 +222,9 @@ python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --ta
 
 验证失败仍会写 `result=fail` evidence 和真实 log，但任务状态为 `failed`，不得完成。写 evidence 后异常中断时使用同参数执行 `recover`，runner 会从 `.task-runs/<TASK_ID>/<RUN_ID>.json` 续跑或只补 plan 绑定，且不会重复已有命令 evidence。结构化记录只存在 `EVIDENCE.jsonl`；`ev_XXXX.log` 只保存脱敏后的真实命令输出，即使命令无输出也必须存在零字节 log。不得新建 `ev_XXXX.json` sidecar；查看单条记录使用 `evidence_store.py show --evidence-id ev_XXXX`。日志错绑、缺失或哈希不一致会被拒绝。`ev_XXXX` 按全流自动递增，任何流/index/log 被重写或重排都必须停止并恢复。
 
-若 `complete` 返回 `stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须立即停止本对话，不得继续读取或实现下一批；向用户明确提示打开新对话，并给出 `batchHandoff.activationCommand`。新对话首先执行：
+若 `complete` 返回 `requiredAction=stop_and_open_new_conversation`、`requiresNewConversation=true`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 smoke/project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。
 
-```bash
-python "${pluginPath}/hooks/task_runner.py" activate-batch --feature "${feature}" --batch-id "<NEXT_BATCH_ID>"
-```
-
-激活成功后才能加载下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，激活时消费并删除。
+宿主未提供 conversation ID，因此 runner 无法从进程参数中证明调用来自新对话；`requiresNewConversation` 是供宿主和 Agent 执行的协议层约束，不是 runner 可独立验证的身份凭据。`activate-batch` CLI 仅保留给兼容或诊断场景，正常 Code 流程不得直接调用。
 7. 若 `SMOKE_TEST_PLAN.json`存在，按其中 `tests[]` 生成或补齐旁路冒烟测试源码/脚本。每条 smoke 必须按计划中的 `seam` 站在公开边界上验证，不测私有方法、不查内部实现细节；按 `verticalSlice` 一次只实现一个最小闭环，不把多个场景合成一条大烟测；按 `mockPolicy` 只 mock 系统边界，不 mock 自有模块或内部协作者。冒烟测试必须是 opt-in：Java/Spring 可用 `*SmokeIT` + `-Psmoke`，前端可用 `tests/smoke/` + 单独 smoke script，CLI/API 可用 `scripts/smoke/`；这些源码/脚本只用于本地验证，可以放在业务项目测试目录，但不得进入业务项目 Git 托管。生成后必须确保 `sourcePath` 被目标项目 Git 忽略，优先把精确路径或窄范围 AutoDev smoke 模式写入 `.git/info/exclude`，不要把 smoke 源码 `git add`，也不得让默认 `validationCommands` 无意中跑到慢/脆的冒烟。全部强 validation 通过后，运行：
 
 ```bash
@@ -219,7 +241,7 @@ python "${pluginPath}/hooks/run_advisory_smoke.py" --feature "${feature}"
 
 ###  全部任务完成后的验证
 
-只有最终批次全部任务完成、没有 `BATCH_HANDOFF.json` 后，才通过 runner 跑根 plan 的 `projectValidationCommands`。提前执行会被拒绝；项目检查单独写 `action=project_check` evidence，不参与任一 task 的验收覆盖：
+只有 Code 会话入口返回 `run_project_check`，即最终批次全部任务完成且没有 `BATCH_HANDOFF.json` 后，才通过 runner 跑根 plan 的 `projectValidationCommands`。提前执行会被拒绝；项目检查单独写 `action=project_check` evidence，不参与任一 task 的验收覆盖：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" project-check --feature "${feature}" --code-workspace "<BUSINESS_REPO>"
@@ -256,7 +278,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 - 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
 - 所有任务由 task runner 完成；required validation 全部通过；`checkedCriteria` 并集覆盖全部 AC；完成 evidence 与命令、runId、快照 changedFiles 一致。旧结构 plan 必须重跑 Plan，不提供兼容完成路径。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 validation/project-check evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
-- 每个批次最多 5 个任务；非末批完成后已停止当前对话并生成 `BATCH_HANDOFF.json`，下一批只在新对话显式激活。
+- 每个批次最多 5 个任务；非末批完成后已停止当前对话并生成 `BATCH_HANDOFF.json`，下一批只在新对话通过 `code-session` 自动激活。
 - 若 `SMOKE_TEST_PLAN.json`存在：已按计划生成/补齐冒烟测试源码并确认其被目标项目 Git 忽略，已运行 `run_advisory_smoke.py`；`SMOKE_RESULT.json` 已写入。`SMOKE_RESULT.json.verdict` 为 `FAIL` / `BLOCKED` / `SKIPPED` 时，记录为风险但不阻断本阶段流转。
 - 必要验证通过；最新一次 `project-check` 晚于全部任务完成 evidence，且其中所有 required 项通过（`code_done` 会再次校验 plan/evidence/run 闭环）。
 - HTML 分支或前端源码变更已完成统一前端回检，或用户明确跳过；仍有 `must-fix` / 执行异常时不得推进 `code_done`。

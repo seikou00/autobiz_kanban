@@ -1281,6 +1281,7 @@ def record_task_attempt(
             batch_index = ordered_ids.index(batch_id)
             if batch_index + 1 < len(ordered_ids):
                 next_batch = ordered_ids[batch_index + 1]
+                user_message = f"当前批次 {batch_id} 已完成，请打开新的对话继续执行 {next_batch}。"
                 data["status"] = "awaiting_next_conversation"
                 data["activeBatchId"] = None
                 data["nextBatchId"] = next_batch
@@ -1302,12 +1303,15 @@ def record_task_attempt(
                         "deps": list(root_entries[batch_index + 1].get("deps", [])),
                     },
                     "status": "awaiting_next_conversation",
+                    "requiredAction": "stop_and_open_new_conversation",
+                    "requiresNewConversation": True,
+                    "userMessage": user_message,
                     "createdAt": _utc_now(),
                     "activationCommand": (
-                        f"python hooks/task_runner.py activate-batch --workspace {workspace} "
-                        f"--feature {feature} --batch-id {next_batch}"
+                        f"python hooks/task_runner.py code-session --workspace {workspace} "
+                        f"--feature {feature}"
                     ),
-                    "instruction": "Open a new conversation and activate the next batch before continuing code work.",
+                    "instruction": user_message,
                 }
             else:
                 data["status"] = "in_progress"
