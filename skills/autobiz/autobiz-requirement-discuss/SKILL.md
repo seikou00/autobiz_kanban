@@ -42,6 +42,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
  `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md`
    - 需求内容评估准则，包含检查项和优化建议
 
+ `${pluginPath}/skills/references/ask-user-question.md`
+   - 使用 `request_user_input` 时的统一提问、选项和回答处理协议
+
 执行流程时，必须以评估准则作为判断依据，确保分析有据可依。
 
 ###  更新状态
@@ -148,10 +151,10 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 
 #### 询问用户是否需要补充
 
-展示问题清单后，使用 `request_user_input` 询问用户：
+展示问题清单后，按共享 `ask-user-question.md` 协议使用 `request_user_input` 询问用户：
 
 问题清单已生成，请确认是否需要补充其他问题？
-- **选项1**：确认讨论当前问题清单
+- **选项1**：确认讨论当前问题清单 (Recommended)
 - **选项2**：补充其他问题
 
 **处理逻辑**：
@@ -173,16 +176,16 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 **对话流程（每个问题单独执行）：**
 
 1. **展示当前问题**：展示问题的检查项、问题描述和优化建议
-2. **智能生成选项**：根据问题类型生成 1-2 个选项
+2. **智能生成选项**：根据问题类型生成 2-3 个互斥选项；推荐项在前并标记 `(Recommended)`，不要手工添加“其他”
     - P0 问题示例选项：「已明确」「暂时搁置」
     - P1 问题示例选项：「确认按建议处理」「后续讨论」
     - P2 问题示例选项：「确认按建议处理」「本期不做」
-3. **使用 request_user_input 询问**：
+3. **按共享 `ask-user-question.md` 协议使用 request_user_input 询问**：
     - 问题：描述当前问题，询问 PM 的处理意向
     - 选项：智能生成的选项
 4. **处理用户回复**：
     - 若选择预设选项 → 记录选择结果，继续下一问题
-    - 若选择「其他」→ 引导用户补充说明 → 记录补充内容，继续下一问题
+    - 若用户通过客户端自动提供的 Other 自由输入补充说明 → 记录补充内容，继续下一问题
 5. **记录完整对话**：将每个问题的对话内容（问题、选项、用户选择、补充内容）记录到 PRD_DISCUSS.md
 
 **示例对话流程：**
@@ -196,9 +199,8 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 【询问】
 问题：用户ID字段未明确定义，请问如何处理？
 选项：
-1. 补充字段定义为 VARCHAR(32)（推荐）
+1. 补充字段定义为 VARCHAR(32) (Recommended)
 2. 后续讨论
-3. 其他
 
 【用户选择后记录】
 - 用户选择：补充字段定义为 VARCHAR(32)

@@ -12,6 +12,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 # /autodev-plan - Executable Task Plan
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
 ## explore
 进入设计探索模式，严禁使用task工具。未提供的上游产物根据缺失清单处理（如基于用户直供需求建立上下文），不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
@@ -180,7 +181,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ## explore 结束
 **结束决策**：当你判断 explore 已足够支撑 Plan 时，必须询问用户是否结束探索并进入 Plan 生成/更新。
 
-- 提出上面的结束询问时，用 `request_user_input`发起选择，选项至少含 `进入 Plan 生成/更新 (Recommended)` / `继续探索` / `暂不生成、停在澄清结果` / `其他`；
+- 提出上面的结束询问时，按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `进入 Plan 生成/更新 (Recommended)` / `继续探索` / `暂不生成、停在澄清结果`；Other 由客户端自动提供；
 - **自由表达即退出结构化**：若用户不点选项、而是直接给出实质回复（补需求、改约束、抛新问题），
   当作普通文本吸收、更新探索结论后继续探索，**不得机械重复同一结构化选择**；下一轮再择机重发该门。
 - 未拿到明确答复前，不得写入 `plan_in_progress`，也不得生成 design.md / plan.md。

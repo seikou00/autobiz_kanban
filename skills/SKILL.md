@@ -23,6 +23,10 @@ version: v1.1.2609
 
 ## 入口约定
 
+### 用户交互协议
+
+任何技能准备使用 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。业务技能中定义的问题、选项和阶段门继续有效；工具字段、问题数量、Other 处理、自动继续和文本降级方式以该共享协议为准。
+
 以下三个为 `autobizdevops` 的唯一直接入口。所有 Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口按 checkpoint 路由，不允许跳过前置准入直接调用子技能。
 ### 技能映射
 | 阶段                  | 调用 Skill   | 本工程文件                               |
@@ -48,7 +52,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 python "${pluginPath}/read_state_json.py"
 ```
 
-- 需要用户从候选 Feature 中选择时，若当前运行模式支持 `request_user_input`，必须优先用它把 `STATE.records` 中的候选列成结构化选项供用户单选；若不支持，必须列出候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
+- 需要用户从候选 Feature 中选择时，按 `${pluginPath}/skills/references/ask-user-question.md` 提问。候选不超过 3 个时直接列成结构化选项；超过 3 个时先展示完整 slug 清单，再把最多 3 个最相关候选放入结构化选项，其他候选由客户端自动提供的 Other 自由输入承接。若当前模式不支持 `request_user_input`，必须列出完整候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
 
 只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
 

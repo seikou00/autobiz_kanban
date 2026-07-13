@@ -8,6 +8,8 @@ description: 统一负责绝对定位高保真 HTML 路线的整页还原、结�
 本文中的 `SKILL.md` 均指仓库根技能 `../../../SKILL.md`。  
 本文件只能由 `../SKILL.md` 转交进入，是绝对定位高保真 HTML 主线里唯一负责“整页还原 + 局部组件替换 + 代码写入”的核心依赖。
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
 ## 1. 入口契约
 
 | 项 | 规则 |
@@ -360,7 +362,7 @@ HTML 类型：<type>
 | 动作 | 规则 |
 | --- | --- |
 | 1 | 输出完 `【HTML 转换结果】` 后，必须立刻发起一次回检选择；不能只在汇报里写“回检确认”说明然后结束 |
-| 2 | 若当前运行模式支持 `request_user_input`，必须立刻按它的结构化模式调用它，不得改成普通文本追问 |
+| 2 | 若当前运行模式支持 `request_user_input`，必须立刻按共享 `ask-user-question.md` 协议调用它，不得改成普通文本追问 |
 | 3 | `request_user_input` 的询问目标必须等价于：`是否现在进入回检流程？` |
 | 4 | 推荐选项至少包含：`继续回检 (Recommended)` / `先不回检` |
 | 5 | 若当前运行模式不支持 `request_user_input`，必须单独追问：`是否现在进入回检流程？请回复“继续回检”或“先不回检”。` |

@@ -6,6 +6,8 @@ version: v1.1.1604
 
 # /autodev-frontend - HTML 转前端实现
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
 本技能是 `frontend_before_specs` workflow profile 中的正式 Dev 节点。它只保留两种实现路线：
 
 | 输入形态 | 路线 |
@@ -204,7 +206,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 - 主线交付总结和是否进入 review 是两个连续但不同的步骤。
 - 主线 route 可以汇报结果，但不能用“如需我可以继续回检”替代真实决策。
 - 顶层收到主线结果后，必须立即发起是否进入 `route/review/SKILL.md` 的确认。
-- 若当前运行模式支持 `request_user_input`，必须优先使用它发起“继续回检 / 先不回检”选择。
+- 若当前运行模式支持 `request_user_input`，必须按共享 `ask-user-question.md` 协议发起 `继续回检 (Recommended)` / `先不回检` 选择。
 - 若当前运行模式不支持 `request_user_input`，必须显式追问：`是否现在进入回检流程？请回复“继续回检”或“先不回检”。`
 - 未拿到用户明确答复前，不得自动进入 review，也不得把主线交付当成整轮结束。
 

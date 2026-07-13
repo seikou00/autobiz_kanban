@@ -5,6 +5,8 @@ description: 主线生成完成后，按用户确认进入回检路线。它负�
 
 # 回检路由
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
 这是独立的 route 技能目录。
 
 - 当前 route 技能入口：`SKILL.md`
@@ -22,6 +24,6 @@ description: 主线生成完成后，按用户确认进入回检路线。它负�
 ## 进入条件
 
 - 只有主线代码生成、联调 / 校验和主线抽取都完成后，才允许进入本 route
-- 进入前必须先拿到用户确认；若当前运行模式支持 `request_user_input`，优先使用它；若不支持，则必须做显式文本确认
+- 进入前必须先拿到用户确认；若当前运行模式支持 `request_user_input`，按共享 `ask-user-question.md` 协议优先使用它；若不支持，则必须做显式文本确认
 - 在拿到用户确认之前，本 route 不能被隐式触发，也不能作为主线收尾的一部分自动进入
 - 主线交付总结后的“是否回检”必须是一个真实决策动作，而不是一句可选提示；没有用户答复时，本 route 视为尚未获准进入

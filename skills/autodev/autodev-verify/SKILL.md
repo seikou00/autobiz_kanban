@@ -13,6 +13,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature 
 
 # /autodev-verify — 验收汇总 + 分支决策
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
 ## 执行主体
 
@@ -266,7 +267,7 @@ K 个 specs 行为契约未通过（来源：UNIT_TEST_REPORT / E2E_REPORT / e2e
 >
 > 若只有需人工验证（K=0, J>0）：等待用户逐项回复。
 
-等待用户逐项裁定：若当前运行模式支持 `request_user_input`，必须优先用它就每个待人工验证项（或整体）发起 `通过` / `有问题（需说明）` 选择；若不支持，必须显式追问用户逐项回复"通过"或问题描述。
+等待用户逐项裁定：按共享 `ask-user-question.md` 协议，用 `request_user_input` 就每个待人工验证项（或整体）发起 `有问题、需说明 (Recommended)` / `通过` 选择，每轮最多 3 项；人工结果未知时不得把“通过”设为推荐项。若当前模式不支持该工具，必须显式追问用户逐项回复“通过”或问题描述。
 - 选择"通过" → 标记为通过；若全部通过 → 路径 A
 - 选择"有问题" / 回复问题描述 → 标记为失败 → 路径 B
 未拿到用户裁定前，保持 `verify_in_progress`，不得擅自判 `verify_done` 或 `needs_fix`。

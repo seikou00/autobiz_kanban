@@ -12,6 +12,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 # /autodev-specs — Proposal + Behavior Specs
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
 ## 阶段定位
 
 `autodev-specs` 是 Dev 阶段的上下文边界，负责把上游需求输入转成稳定的行为契约。
@@ -73,8 +75,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 讨论时只提出影响实现路径或验收结果的关键问题，并给出当前建议、备选方案和影响面；不要机械问卷。
 - 仍有 `待确认` 且会影响接口形态、数据模型、权限/租户/审计、幂等、分页、异步、状态流、迁移或验收结果时，不要结束探索进入 specs 生成。
 - 待确认决策逐项与用户对齐后，是否结束探索进入 specs 生成必须由用户拍板：
-- 用 `request_user_input`发起选择，选项至少含
-  `这些决策已确认、生成 specs (Recommended)` / `继续讨论待确认项` / `其他`；
+- 按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为
+  `这些决策已确认、生成 specs (Recommended)` / `继续讨论待确认项`；Other 由客户端自动提供；
 - **自由表达即退出结构化**：若用户不点选项、而是直接给出实质回复（补一条决策、
   改一个字段、提新问题），当作普通文本吸收进待确认表并更新建议，**不得机械重复弹同一个
   结构化选择**；下一轮合适时机再重新发起该门。
