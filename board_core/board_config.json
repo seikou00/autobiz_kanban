@@ -2,6 +2,7 @@
   "apiVersion": 1,
   "agentsRepo": {
     "url": "https://gitee.paas.cmbchina.cn/S992391/LF39_Product_Knowledge.git",
+    "sshUrl": "git@gitee.paas.cmbchina.cn:S992391/LF39_Product_Knowledge.git",
     "ref": "master"
   },
   "supported_deploy_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
