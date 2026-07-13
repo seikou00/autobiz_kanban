@@ -136,6 +136,10 @@ reviewer 必须直接写这个文件。它是下游 `/autodev-utest` 与 `/autod
 ```
 # Requirements Evaluation
 
+## Review Mode
+
+independent_task | inline_main_agent
+
 ## Verdict
 
 PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
@@ -190,6 +194,7 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 规则：
 
 - `REQUIREMENTS_EVAL.md` 必须落盘到 `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`。
+- `Review Mode` 必须与启动 prompt 的 `Review execution mode` 一致；`inline_main_agent` 不得表述为独立子代理审查。
 - 不新增 `VERIFY_REPORT.md` 等后置文件门禁；没有额外 PRD 引用时不要求读取 PRD.md。
 - verdict 必须能追溯到 completion proposal、proposal.md、specs、design.md、可选 PRD、shell/git 输出和实际文件内容。
 - 跨仓库任务中，verdict 必须能追溯到每个 affected repository 的 shell/git 输出和实际文件内容。

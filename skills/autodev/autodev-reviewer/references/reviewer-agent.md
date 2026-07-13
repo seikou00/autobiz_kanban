@@ -24,6 +24,7 @@ tools: Read, Glob, Grep, Bash, Write
 
 ## 输入
 
+- 启动 prompt 中的 `Review execution mode`：`independent_task` 或 `inline_main_agent`
 - `.autobizdevops/features/{slug}/completion-proposal.json`
 - 当前 feature slug 和目标路径 `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`
 - `.autobizdevops/features/{slug}/proposal.md`
@@ -101,10 +102,16 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 
 ## 返回给主 agent 的内容
 
-`REQUIREMENTS_EVAL.md` 必须先落盘。最后只返回简短摘要，并明确要求主 agent 停止当前回合、等待用户下一步指令：
+`REQUIREMENTS_EVAL.md` 必须先落盘。最后只返回下列简短摘要：
 
+- Review execution mode
 - Verdict
 - REQUIREMENTS_EVAL.md path
 - Blockers count
 - Warnings count
-- Required next action: PASS/PASS_WITH_WARNINGS 时进入下游；FAIL 时由主 agent 修复 blockers 后重新 review；DEGRADED 时停止并说明独立审查未成立
+- Required next action: PASS/PASS_WITH_WARNINGS 时由主 agent 写入完成 checkpoint 并收敛 review；FAIL 时由主 agent 修复 blockers 后重新 review；DEGRADED 时由主 agent 停止并说明独立审查未成立
+
+返回行为按 `Review execution mode` 分支：
+
+- `independent_task`：把控制权交还主 agent，不得要求主 agent 停止当前回合或等待用户。主 agent 会在同一回合读取 verdict 并继续父技能分支。
+- `inline_main_agent`：必须停止当前回合，明确告知用户平台未提供 task 工具、本次由主 agent 内联执行 reviewer 角色，并请用户确认是否在下一回合切回 executor 角色继续。未获得确认前，不得执行 verdict 分支、修复或 checkpoint 推进。

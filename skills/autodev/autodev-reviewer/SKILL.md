@@ -1,7 +1,7 @@
 ---
 name: autodev-reviewer
 description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，启动 source-read-only 的独立 reviewer 子代理核验真实仓库状态，落盘 REQUIREMENTS_EVAL.md，并按 verdict 走修复复审闭环。
-version: v1.3.0710
+version: v1.3.0713
 ---
 
 ## 缺失产物处理
@@ -21,10 +21,10 @@ reviewer 没有隐式用户对话上下文。所有可审查上下文必须来�
 
 | 角色                | 职责                                                         | 禁止                                                         |
 | ------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| 主 agent / Executor | 写 completion-proposal.json；启动 reviewer；FAIL 时修复 blockers 并重新 review；最后摘要 verdict | 自己给 PASS；替 reviewer 改评估；未经重新 review 就宣称完成 |
+| 主 agent / Executor | 写 completion-proposal.json；启动 reviewer；FAIL 时修复 blockers 并重新 review；最后摘要 verdict | 在同一回合同时执行 reviewer 与 executor 角色；替 reviewer 改评估；未经重新 review 就宣称完成 |
 | Reviewer agent      | 通过 shell/git/read/search 独立核验 proposal；只允许写 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md` | 修改源码、测试、配置、依赖、锁文件；运行任何写操作命令；修复问题 |
 
-reviewer 的只读命令白名单、禁止清单、审查流程和评分标准全部在 references/reviewer-agent.md。如果 reviewer 无法用 shell/git 获取真实状态、无法访问 required 仓库或无法写报告文件，本次独立 review 不成立，verdict 记 `DEGRADED`；不得把自检包装成独立 review。
+reviewer 的只读命令白名单、禁止清单、审查流程和评分标准全部在 references/reviewer-agent.md。如果 reviewer 无法用 shell/git 获取真实状态、无法访问 required 仓库或无法写报告文件，本次 review 不成立，verdict 记 `DEGRADED`。平台禁用 task 工具时允许主 agent 内联执行 reviewer 角色，但必须显式记录 `inline_main_agent` 模式并通过用户确认把 reviewer 与 executor 分隔到不同回合；不得把该模式包装成独立 review。
 
 ## 执行步骤
 
@@ -50,10 +50,16 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - **PRD（可选，不是前置条件）**：用户提供 PRD 路径时（如"参考 .autobizdevops/features/feat-demo/PRD.md 做完成审查"），把路径原样写入 `prd_references`，支持多个；没有则写空数组。不要用自己总结的 PRD 内容替代文件路径，也不要提前判断实现是否满足 PRD——PRD 验收由 reviewer 独立完成。
 - **跨仓库**：跨仓库任务必须写 `affected_repositories`（字段规则和示例见 references/schemas.md），且 `files_changed` 每项带 `repository_id`；单仓库任务省略，reviewer 会把当前 cwd 当作唯一仓库。用户主动输入的仓库必须以 `source: "user_input"` 记录并转写依据到 `source_evidence`。
 
-### 3. 启动独立 reviewer 子代理
+### 3. 启动 reviewer 角色
 
-使用 subagent 机制启动独立 reviewer，把 references/reviewer-agent.md 中的指令作为 prompt，并附带：
+先检查当前平台是否提供 task 工具，然后二选一执行：
 
+- **`independent_task`**：task 工具可用时，通过 task 工具启动独立 reviewer 子代理。reviewer 返回后，主 agent 在同一回合继续执行第 4 步。
+- **`inline_main_agent`**：task 工具被平台禁用或不可用时，主 agent 切换为 source-read-only reviewer 角色内联完成审查。`REQUIREMENTS_EVAL.md` 落盘后必须停止当前回合，明确告知用户本次为主 agent 内联 review，并请用户确认是否切回 executor 角色继续。未获得确认前，不得在同一回合读取 verdict 分支、修复问题或推进 checkpoint。
+
+把 references/reviewer-agent.md 中的指令作为 reviewer prompt，并附带：
+
+- `Review execution mode:` `independent_task` 或 `inline_main_agent`。
 - `User PRD references:` 用户提供的原始 PRD 路径列表；没有则写 none。
 - `User repository references:`（可选）仅当流程需要 reviewer 核对用户主动输入的仓库是否被 proposal 遗漏时附带；否则省略，reviewer 只以 proposal 和真实仓库状态为依据。
 
@@ -61,7 +67,7 @@ reviewer 自己通过工具获取真实仓库状态并直接写 `REQUIREMENTS_EV
 
 ### 4. 读取 verdict 并分支
 
-reviewer 写完 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md` 后，主 agent 读取其中的 verdict。不要接受自由文本的 "looks good" 作为 review 结果。
+`independent_task` 返回后，或 `inline_main_agent` 在后续回合获得用户明确确认后，主 agent 读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md` 中的 verdict。不要接受自由文本的 "looks good" 作为 review 结果。
 
 | Verdict | 含义 | 主 agent 动作 |
 | --- | --- | --- |
