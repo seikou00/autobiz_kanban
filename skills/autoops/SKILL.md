@@ -44,7 +44,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_DIR}" --feature "{FEATURE_ID}" --json
+python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --json
 ```
 
 ---
@@ -71,4 +71,3 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --workspace "{PROJECT_PLUGIN_
 4. 若脚本推荐 `/autoops-archive`，继续归档；`archived` 后 Ops 阶段结束。
 
 ---
-

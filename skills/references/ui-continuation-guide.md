@@ -25,10 +25,7 @@
 执行以下命令：
 
 ```bash
-python "${pluginPath}/hooks/resolve_next_skill.py" \
-  --workspace "${pluginWorkspace}/${projectDir}" \
-  --feature "${feature}" \
-  --json
+python "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 始终以脚本返回的 checkpoint 和路由结果为准，不要根据之前的对话、静态流程说明或记忆猜测下一阶段。
