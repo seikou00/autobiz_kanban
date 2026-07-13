@@ -134,6 +134,14 @@ def load_json(path: Path, *, default: Any | None = None) -> Any:
         raise WriterError(f"JSON 产物格式错误: {path}:{exc}") from exc
 
 
+def require_finalized_plan(workspace: Path, feature: str) -> WriterResult | None:
+    path = artifact_path(workspace, feature, "plan.json")
+    data = load_json(path)
+    if not isinstance(data, dict) or data.get("taskSetStatus") != "finalized":
+        return fail("plan_task_set_not_finalized", path=path)
+    return None
+
+
 def atomic_write_json(path: Path, data: Any) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False) + "\n"

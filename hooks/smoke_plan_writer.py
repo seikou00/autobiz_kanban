@@ -24,6 +24,7 @@ from hooks.json_writer_common import (  # noqa: E402
     next_numbered_id,
     read_object_file,
     render_result,
+    require_finalized_plan,
     resolve_feature,
     resolve_workspace,
     with_result_data,
@@ -160,6 +161,9 @@ def _write(workspace: Path, feature: str, data: dict[str, Any], *, allow_skeleto
 
 def _cmd_init(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    guard = require_finalized_plan(workspace, feature)
+    if guard:
+        return render_result(guard)
     existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
     if existing:
         return render_result(existing)

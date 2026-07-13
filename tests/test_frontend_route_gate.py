@@ -79,15 +79,17 @@ def write_plan_route(workspace: Path, route: str) -> None:
         {
             "featureId": "alpha",
             "status": "todo",
+            "taskSetStatus": "finalized",
             "activeBatchId": "B001",
             "nextBatchId": None,
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
             "batches": [
                 {
                     "id": "B001",
                     "path": "plans/B001/plan.json",
                     "title": "ui",
                     "specRoots": ["specs/cap/spec.md"],
+                    "executionLane": "frontend",
                     "deps": [],
                     "taskIds": ["T001"],
                     "status": "todo",
@@ -104,6 +106,7 @@ def write_plan_route(workspace: Path, route: str) -> None:
             "featureId": "alpha",
             "batchId": "B001",
             "title": "ui",
+            "executionLane": "frontend",
             "status": "todo",
             "taskCount": 1,
             "completedTaskCount": 0,

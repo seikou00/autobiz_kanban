@@ -2013,10 +2013,12 @@ def validate_plan_json_initial_tasks(ctx: HookContext) -> int:
             return fail_line(ctx, "missing_plan_json", " detail=PLAN.md_present_but_not_machine_source")
         info(ctx, "plan_json_not_in_contract_degrade")
         return 0
-    _, errors = load_and_validate_plan(ctx.file("plan.json"), require_initial_status=True)
+    data, errors = load_and_validate_plan(ctx.file("plan.json"), require_initial_status=True)
     failures = 0
     for error in errors:
         failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+    if data is not None and not errors and data.get("taskSetStatus") != "finalized":
+        failures += fail_line(ctx, "plan_task_set_not_finalized")
     return failures
 
 

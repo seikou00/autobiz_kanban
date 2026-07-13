@@ -178,12 +178,14 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
             {
                 "featureId": "alpha",
                 "status": "todo",
+                "taskSetStatus": "finalized",
                 "activeBatchId": "B001",
                 "nextBatchId": None,
-                "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+                "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
                 "batches": [{
                     "id": "B001", "path": "plans/B001/plan.json", "title": "cap",
-                    "specRoots": ["specs/cap/spec.md"], "deps": [], "taskIds": ["T001"], "status": "todo",
+                    "specRoots": ["specs/cap/spec.md"], "executionLane": "backend",
+                    "deps": [], "taskIds": ["T001"], "status": "todo",
                 }],
                 "projectValidationCommands": [
                     {
@@ -211,6 +213,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                 "featureId": "alpha",
                 "batchId": "B001",
                 "title": "cap",
+                "executionLane": "backend",
                 "status": "todo",
                 "taskCount": 1,
                 "completedTaskCount": 0,
@@ -252,6 +255,42 @@ def _write_smoke_na(feature_dir: Path) -> None:
     )
 
 
+def _plan_task_body() -> dict:
+    return {
+        "id": "T001",
+        "title": "do",
+        "goal": "deliver behavior",
+        "deps": [],
+        "uiRequired": False,
+        "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+        "implementationPoints": ["update behavior", "cover boundary"],
+        "acceptanceCriteria": [
+            {
+                "id": "AC-T001-01",
+                "text": "behavior is observable",
+                "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+            }
+        ],
+        "nonGoals": [],
+        "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+        "designRefs": ["design.md#D-001"],
+        "apiIds": [],
+        "dataIds": [],
+        "decisionIds": ["D-001"],
+        "validationCommands": [
+            {
+                "id": "VAL-T001-01",
+                "argv": ["echo", "ok"],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "required": True,
+                "covers": ["AC-T001-01"],
+            }
+        ],
+        "expectedFiles": [],
+    }
+
+
 def _run(
     script: str,
     *args: str,
@@ -270,6 +309,64 @@ def _run(
 
 
 class JsonWriterTests(unittest.TestCase):
+    def test_downstream_plan_artifacts_require_finalized_task_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            body_file = Path(tmp) / "T001.json"
+            body_file.write_text(json.dumps(_plan_task_body()), encoding="utf-8")
+
+            self.assertEqual(
+                _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha").returncode,
+                0,
+            )
+            self.assertEqual(
+                _run(
+                    "plan_writer.py", "add-task", "--workspace", str(workspace), "--feature", "alpha",
+                    "--body-file", str(body_file),
+                ).returncode,
+                0,
+            )
+
+            project = _run(
+                "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--command", "echo compile",
+            )
+            rendered = _run(
+                "plan_writer.py", "render-md", "--workspace", str(workspace), "--feature", "alpha"
+            )
+            smoke = _run(
+                "smoke_plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha",
+                "--skip-reason", "no smoke needed",
+            )
+
+            for result in (project, rendered, smoke):
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("plan_task_set_not_finalized", result.stdout + result.stderr)
+
+            finalized = _run(
+                "plan_writer.py", "finalize-task-set", "--workspace", str(workspace), "--feature", "alpha"
+            )
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+            self.assertEqual(
+                _run(
+                    "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+                    "--feature", "alpha", "--command", "echo compile",
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                _run("plan_writer.py", "render-md", "--workspace", str(workspace), "--feature", "alpha").returncode,
+                0,
+            )
+            self.assertEqual(
+                _run(
+                    "smoke_plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha",
+                    "--skip-reason", "no smoke needed",
+                ).returncode,
+                0,
+            )
+
     def test_plan_writer_add_task_contract_is_machine_readable_without_workspace(self) -> None:
         env = os.environ.copy()
         env.pop("PLUGIN_WORKSPACE", None)
@@ -291,7 +388,33 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["batchAssignment"]["strategy"], BATCH_STRATEGY)
         self.assertEqual(contract["batchAssignment"]["maxTasks"], MAX_BATCH_TASKS)
         self.assertEqual(contract["batchAssignment"]["primaryCapabilitySource"], "first_spec_ref_file")
+        self.assertIn("executionLaneSource", contract["batchAssignment"])
+        self.assertIn("executionLaneMapping", contract["batchAssignment"])
+        self.assertIn("executionLaneOrder", contract["batchAssignment"])
+        self.assertEqual(contract["batchAssignment"]["executionLaneSource"], "uiRequired")
+        self.assertEqual(
+            contract["batchAssignment"]["executionLaneMapping"],
+            {"uiRequired_false": "backend", "uiRequired_true": "frontend"},
+        )
+        self.assertEqual(contract["batchAssignment"]["executionLaneOrder"], ["backend", "frontend"])
+        self.assertEqual(
+            contract["batchAssignment"]["appendRule"],
+            "same_primary_capability_and_execution_lane_as_immediately_preceding_batch_and_not_full",
+        )
         self.assertFalse(contract["batchAssignment"]["manualBatchIdSupported"])
+        self.assertIn("taskSetFinalization", contract)
+        self.assertEqual(
+            contract["taskSetFinalization"],
+            {
+                "command": "finalize-task-set",
+                "coverage": "all_path_qualified_spec_scenarios",
+                "requiredBefore": [
+                    "add-project-validation-command",
+                    "render-md",
+                    "smoke_plan_writer.init",
+                ],
+            },
+        )
         self.assertIn("--batch-id", contract["forbiddenArguments"])
         self.assertIn("validationCommands", contract["requiredTaskFields"])
         self.assertEqual(contract["validationCoverage"]["rule"], "required_commands_cover_all_acceptance_criteria")
@@ -514,6 +637,11 @@ class JsonWriterTests(unittest.TestCase):
             first_plan = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
             second_plan = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
             forced_plan = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha", "--force")
+
+            plan_path = workspace / ".autobizdevops" / "features" / "alpha" / "plan.json"
+            finalized_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            finalized_plan["taskSetStatus"] = "finalized"
+            plan_path.write_text(json.dumps(finalized_plan), encoding="utf-8")
 
             first_smoke = _run("smoke_plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
             second_smoke = _run("smoke_plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")

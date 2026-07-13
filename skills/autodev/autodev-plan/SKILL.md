@@ -237,7 +237,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 #### 生成 plan.json + PLAN.md
 
-本阶段必须生成 plan.json + PLAN.md，并同时生成 `plans/Bxxx/plan.json`。`plan.json` 只保存 feature 状态、批次索引、批次状态和项目级验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约与 task 状态。`PLAN.md` 是从 `plan.json` 投影的人类视图，并包含批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须一次性生成完整的 plan.json + PLAN.md，并同时生成全部 `plans/Bxxx/plan.json`。不得只生成第一批并等待 Code 跑完后再规划下一批。`plan.json` 只保存 feature 状态、任务集封口状态、批次索引、批次状态和项目级验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约与 task 状态。`PLAN.md` 是从 `plan.json` 投影的人类视图，并包含全部批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
@@ -249,7 +249,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 python "${pluginPath}/hooks/plan_writer.py" add-task-contract
 ```
 
-writer 自动分组，调用方不指定 batch。它按 DAG 拓扑写入顺序处理 task，以第一个 `specRefs` 中 `#` 前的文件路径作为主 capability；只有与紧邻前一批的主 capability 相同且该批少于 5 个任务时才合批，否则创建下一 `Bxxx`。已有 task 的批次后续保持不变。不得向 `add-task` 传 `--batch-id`，也不得通过调整 `specRefs` 顺序伪造分组结果。
+writer 自动分组，调用方不指定 batch。`executionLane` 由 writer 根据 `uiRequired` 自动推导：`false=backend`、`true=frontend`，调用方不得自行维护该字段。先按 DAG 拓扑序写入全部 backend task，再写入全部 frontend task；frontend task 可以依赖已落盘的 backend task，backend task 不得依赖 frontend task，首个 frontend task 落盘后不得再添加 backend task。writer 以第一个 `specRefs` 中 `#` 前的文件路径作为主 capability；只有与紧邻前一批的主 capability 和 execution lane 都相同且该批少于 5 个任务时才合批，否则创建下一 `Bxxx`。因此即使最后一个 backend batch 未满，首个 frontend task 也必须新建 batch。已有 task 的批次后续保持不变。不得向 `add-task` 传 `--batch-id`，也不得通过调整 `specRefs` 顺序伪造分组结果。
 
 复杂 task 跨平台默认使用 `--body-file`。先按 `templates/task-input.json` 生成一个 UTF-8 JSON object 到 feature 目录 `.tmp/plan_writer/tasks/Txxx.json`，再执行：
 
@@ -261,7 +261,7 @@ python "${pluginPath}/hooks/plan_writer.py" add-task --feature "${feature}" --bo
 
 每个 task 在首次调用 `add-task` 前必须已经包含完整 `validationCommands`：`kind` 来自 contract 的 `validationKinds`，每条 AC 的 ID 都存在，required command 的 `covers` 并集覆盖全部 AC，且 `compile` 不覆盖 AC。UI task 还必须确保 `scope.pages` 与 `uiRefs.pageRefs` 集合一致。不得通过 validator 失败来探索 schema，不得以反复试错、读取 writer 源码或搜索常量的方式学习调用协议。
 
-所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。writer 会按 task 的主 `specRefs` capability 归组，每批最多 5 个任务；任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖和跨批环。不得直接整份写入 root/batch 正式 JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks` 时直接清理并重跑 Plan。
+所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。writer 会按 task 的主 `specRefs` capability 和 execution lane 归组，每批最多 5 个任务；任何 batch 都不得混合 backend/frontend task。任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖、backend 依赖 frontend 和跨批环。不得直接整份写入 root/batch 正式 JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks`、缺少 `taskSetStatus` / `executionLane` 或使用旧 batch strategy 时不迁移、不兼容，直接清理并重跑 Plan。
 
 `templates/task-input.json` 提供完整的非 UI task 输入示例。`status`、`evidenceIds`、`completionEvidenceIds`、`latestPassEvidenceId` 和 `completionPolicy` 由 writer 设置或覆盖，调用方不得在输入中维护。`UI_CONTEXT.uiRequired=false` 时保持 `uiRequired:false` 且不写 `uiRefs`；`UI_CONTEXT.uiRequired=true` 时仅在 `uiRequired:true` 时添加 `uiRefs`，其中必须包含 `pageRefs`、`interactionRefs`、`visualSourceRefs` 和 `frontendRoute`，并保证 `scope.pages` 与 `uiRefs.pageRefs` 一致。项目级验证命令使用 `id`、`argv`、`cwd`、`kind`、`required` 结构，通过 writer 的项目级命令接口写入。不得先自由生成再依赖 validator 反复修字段。
 
@@ -272,7 +272,7 @@ python "${pluginPath}/hooks/plan_writer.py" add-task --feature "${feature}" --bo
 `plan.json` 语义规则：
 
 - Task ID 使用 `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID。
-- 根 `plan.json` 必须包含 `batchPolicy.maxTasks=5`、`batchPolicy.strategy=spec_capability_topological`、`batches[]`、`activeBatchId`、`nextBatchId` 和 feature `status`。每个 batch 索引引用唯一 `plans/Bxxx/plan.json`，task ID 在全部批次内全局唯一。
+- 根 `plan.json` 必须包含 `taskSetStatus`、`batchPolicy.maxTasks=5`、`batchPolicy.strategy=spec_capability_execution_lane_topological`、`batches[]`、`activeBatchId`、`nextBatchId` 和 feature `status`。收集 Task 时 `taskSetStatus=collecting`，完整覆盖封口后为 `finalized`。每个 batch 索引和对应 batch plan 必须记录相同的 `executionLane`，引用唯一 `plans/Bxxx/plan.json`，task ID 在全部批次内全局唯一。
 - 只使用当前结构，不写 `version` / `taskDetailVersion` 字段。每个 batch task 必须写 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`completionPolicy: all_required_validations_pass`；发现带版本字段或根含 tasks 的 plan 时，不迁移、不兼容，清理后重新执行 Plan。
 - `goal` 写用户可观察结果；`scope.modules/entrypoints/pages/dataObjects` 写执行范围，能确定仓库相对路径时用 `scope.paths` 限定快照归因；`implementationPoints` 写 2-6 条可执行要点。每条 `acceptanceCriteria` 必须是 `{id,text,scenarioRefs}`，ID 使用 `AC-T001-01`，其中 `scenarioRefs` 必须已出现在 task `specRefs`，避免 AC 与 SCN 双轨漂移。
 - `validationCommands` 必须结构化为 `{id,argv,cwd,kind,required,covers}`；ID 使用 `VAL-T001-01`，`argv` 不经 shell，`cwd` 为仓库内相对路径。所有 AC 必须由 required 命令覆盖；`kind=compile` 不得覆盖 AC。多命令任务按 `all_required_validations_pass` 完成，并保留全部成功/失败尝试历史。
@@ -372,6 +372,7 @@ UI 任务投影规则：
 与 writer 的衔接：
 
 - 调用 `add-task` 前必须完成候选任务分组表计数预检；不得通过 writer 失败来探索如何拆分。每确定一个预检通过的 task，才调用 `plan_writer.py add-task`，不要批量写完后再等 `stage_gate` 兜底。
+- 最终候选任务分组表必须先覆盖全部 Scenario，并按 `backend`、`frontend` 两个区段排序。必须先逐个写完所有 backend task，再逐个写完所有 frontend task；不得写完恰好 5 个 backend task 后把 B001 当成 Plan 完成，也不得把剩余 task 延迟到 Code 阶段生成。
 - 禁止用脚本一次性循环写入多个 task 后再看失败列表；脚本只允许用于构造单个 task JSON 或解决 stdin/编码问题。每个 task 必须单独完成最终表预检、单独 `add-task`、单独处理返回结果。
 - 必须按 DAG 拓扑序写入：当前 task 的 `deps` 全部成功落盘后才允许写入当前 task。若失败原因是依赖未落盘，修写入顺序，不要改粒度或补 `splitRationale`。
 - 第一个 task 成功落盘后，禁止因为后续 task 失败重新 `init --force` 或全量重建 `plan.json`；只能修正未写入的候选 task。`init --force` 只允许在尚未成功写入任何 task，且明确需要重建空计划时使用。
@@ -380,13 +381,21 @@ UI 任务投影规则：
 - 若最终分组表已判定为 `可合并(附 splitRationale)`，首次写入就必须携带合并说明：逐项 CLI 使用 `add-task --split-rationale`，body 模式在 task JSON 中写 `splitRationale`；不要先提交缺少 rationale 的 task 再等待 writer 打回。
 - 若已有 task 成功写入后后续 `add-task` 失败，只重新分组未写入的候选 task，不得修改已落盘 task 的 ID 与 `specRefs`。
 
-写入 `plan.json` 后，必须立即运行本产物结构校验：
+每个 task 写入后可运行本产物结构校验作为增量诊断，但 `validate --structure` 只证明当前已写入内容结构合法，不证明候选任务表、Scenario 覆盖或全部批次已经完成：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" validate --feature "${feature}" --structure
 ```
 
-结构校验通过后，再生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json`。必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json`，再通过 `smoke_plan_writer.py init/add-test/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。
+全部 backend/frontend task 均成功落盘、全部 `plans/Bxxx/plan.json` 已生成且最终结构校验通过后，必须先封口任务集：
+
+```bash
+python "${pluginPath}/hooks/plan_writer.py" finalize-task-set --feature "${feature}"
+```
+
+`finalize-task-set` 会按完整路径检查 specs 中每个 Scenario 都已被某个 task 覆盖，并复核 lane 与依赖规则。返回 `ok:true` 后根计划变为 `taskSetStatus=finalized`，规划契约不再允许修改；需要改变 task 时清理产物并重跑 Plan，不提供旧计划迁移或原地解封。未封口时不得添加项目级 validation command、不得初始化 `SMOKE_TEST_PLAN.json`、不得运行 `render-md`。
+
+封口成功后，先通过 writer 添加至少一条 required 项目级 validation command，再生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json`。必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json`，再通过 `smoke_plan_writer.py init/add-test/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。
 
 `SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 与 TDD 的克制粒度：每个案例只描述一个站在公开 seam 上的 vertical slice，必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码，不批量设计覆盖想象行为的测试矩阵。
 

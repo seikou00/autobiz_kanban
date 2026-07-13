@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from hooks.code_task_context import build_context  # noqa: E402
 from hooks.evidence_store import append_evidence, main as evidence_store_main  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
+    BATCH_STRATEGY,
     batch_plan_path,
     load_and_validate_plan,
     load_plan_bundle,
@@ -26,15 +27,26 @@ from hooks.plan_json import (  # noqa: E402
 from hooks.plan_writer import record_project_check_attempt  # noqa: E402
 
 
-def task(task_id: str, *, deps: list[str] | None = None, status: str = "todo") -> dict:
-    return {
+def task(
+    task_id: str,
+    *,
+    deps: list[str] | None = None,
+    status: str = "todo",
+    ui_required: bool = False,
+) -> dict:
+    item = {
         "id": task_id,
         "title": f"task {task_id}",
         "goal": f"deliver {task_id}",
         "status": status,
         "deps": deps or [],
-        "uiRequired": False,
-        "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+        "uiRequired": ui_required,
+        "scope": {
+            "modules": ["src"],
+            "entrypoints": [],
+            "pages": ["PAGE-001"] if ui_required else [],
+            "dataObjects": [],
+        },
         "implementationPoints": ["implement behavior", "cover boundary"],
         "acceptanceCriteria": [
             {
@@ -66,15 +78,25 @@ def task(task_id: str, *, deps: list[str] | None = None, status: str = "todo") -
         "latestPassEvidenceId": None,
         "blockers": [],
     }
+    if ui_required:
+        item["uiRefs"] = {
+            "pageRefs": ["PAGE-001"],
+            "interactionRefs": ["UIX-001"],
+            "visualSourceRefs": [],
+            "frontendRoute": "spec-driven-ui",
+        }
+        item["nonGoals"] = ["do not change unrelated UI behavior"]
+    return item
 
 
 def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: str | None = None) -> dict:
     return {
         "featureId": "alpha",
         "status": "todo",
+        "taskSetStatus": "finalized",
         "activeBatchId": active,
         "nextBatchId": next_batch,
-        "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+        "batchPolicy": {"maxTasks": 5, "strategy": BATCH_STRATEGY},
         "batches": batches,
         "projectValidationCommands": [
             {
@@ -90,23 +112,31 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
     }
 
 
-def batch_entry(batch_id: str, task_ids: list[str], *, deps: list[str] | None = None) -> dict:
+def batch_entry(
+    batch_id: str,
+    task_ids: list[str],
+    *,
+    deps: list[str] | None = None,
+    execution_lane: str = "backend",
+) -> dict:
     return {
         "id": batch_id,
         "path": f"plans/{batch_id}/plan.json",
         "title": f"batch {batch_id}",
         "specRoots": ["specs/cap/spec.md"],
+        "executionLane": execution_lane,
         "deps": deps or [],
         "taskIds": task_ids,
         "status": "todo",
     }
 
 
-def batch_plan(batch_id: str, batch_tasks: list[dict]) -> dict:
+def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = "backend") -> dict:
     return {
         "featureId": "alpha",
         "batchId": batch_id,
         "title": f"batch {batch_id}",
+        "executionLane": execution_lane,
         "status": "todo",
         "taskCount": len(batch_tasks),
         "completedTaskCount": 0,
@@ -134,7 +164,34 @@ def write_bundle(feature_dir: Path, batches: list[list[dict]]) -> None:
     )
 
 
+def write_plan_state(workspace: Path) -> None:
+    state_path = workspace / ".autobizdevops" / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "autobizdevops.state.v3",
+                "features": {
+                    "alpha": {
+                        "feature": "alpha",
+                        "checkpoint": "plan_in_progress",
+                        "stage": "Plan",
+                        "iteration": "1",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_root_plan_requires_task_set_status(self) -> None:
+        plan = root_plan(batches=[batch_entry("B001", ["T001"])])
+        del plan["taskSetStatus"]
+
+        self.assertIn("plan_json_taskSetStatus_invalid", validate_plan_data(plan))
+
     def test_monolithic_root_plan_requires_rebuild(self) -> None:
         monolithic = root_plan(batches=[])
         monolithic["tasks"] = [task("T001")]
@@ -265,6 +322,196 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(len(second["tasks"]), 1)
             self.assertEqual(root["activeBatchId"], "B001")
             self.assertEqual(root["nextBatchId"], "B002")
+
+    def test_plan_writer_starts_frontend_task_in_new_batch_for_same_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_plan_state(workspace)
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            for item in (task("T001"), task("T002", deps=["T001"], ui_required=True)):
+                body = Path(tmp) / f"{item['id']}.json"
+                body.write_text(json.dumps(item), encoding="utf-8")
+                added = writer("add-task", "--body-file", str(body))
+                self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual([entry["taskIds"] for entry in root["batches"]], [["T001"], ["T002"]])
+
+            backend = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
+            frontend = json.loads(batch_plan_path(feature_dir, "B002").read_text(encoding="utf-8"))
+            self.assertEqual([entry["executionLane"] for entry in root["batches"]], ["backend", "frontend"])
+            self.assertEqual(backend["executionLane"], "backend")
+            self.assertEqual(frontend["executionLane"], "frontend")
+
+    def test_plan_writer_rejects_backend_task_after_frontend_collection_started(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            write_plan_state(workspace)
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            for item in (task("T001"), task("T002", deps=["T001"], ui_required=True)):
+                body = Path(tmp) / f"{item['id']}.json"
+                body.write_text(json.dumps(item), encoding="utf-8")
+                self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+
+            body = Path(tmp) / "T003.json"
+            body.write_text(json.dumps(task("T003", deps=["T001"])), encoding="utf-8")
+            added = writer("add-task", "--body-file", str(body))
+
+            self.assertNotEqual(added.returncode, 0)
+            self.assertIn("backend_task_after_frontend", added.stdout + added.stderr)
+
+    def test_plan_writer_finalizes_only_after_complete_scenario_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "\n".join(
+                    [
+                        "## ADDED Requirements",
+                        "### Requirement [REQ-001]: capability",
+                        "#### Scenario [SCN-001]: happy path",
+                        "#### Scenario [SCN-002]: alternate path",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_plan_state(workspace)
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            first_body = Path(tmp) / "T001.json"
+            first_body.write_text(json.dumps(task("T001")), encoding="utf-8")
+            self.assertEqual(writer("add-task", "--body-file", str(first_body)).returncode, 0)
+
+            incomplete = writer("finalize-task-set")
+            self.assertNotEqual(incomplete.returncode, 0)
+            self.assertIn("missing_plan_scenario_coverage", incomplete.stdout + incomplete.stderr)
+
+            second = task("T002", deps=["T001"])
+            second["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            second["acceptanceCriteria"][0]["scenarioRefs"] = ["specs/cap/spec.md#SCN-002"]
+            second_body = Path(tmp) / "T002.json"
+            second_body.write_text(json.dumps(second), encoding="utf-8")
+            self.assertEqual(writer("add-task", "--body-file", str(second_body)).returncode, 0)
+
+            finalized = writer("finalize-task-set")
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(root["taskSetStatus"], "finalized")
+
+            third_body = Path(tmp) / "T003.json"
+            third_body.write_text(json.dumps(task("T003", deps=["T002"])), encoding="utf-8")
+            locked = writer("add-task", "--body-file", str(third_body))
+            self.assertNotEqual(locked.returncode, 0)
+            self.assertIn("plan_task_set_finalized", locked.stdout + locked.stderr)
+
+            dependency_update = writer("set-deps", "--task-id", "T002", "--dep", "T001")
+            self.assertNotEqual(dependency_update.returncode, 0)
+            self.assertIn("plan_task_set_finalized", dependency_update.stdout + dependency_update.stderr)
+
+            runtime_update = writer("set-status", "--task-id", "T002", "failed")
+            self.assertEqual(runtime_update.returncode, 0, runtime_update.stdout + runtime_update.stderr)
+
+    def test_plan_writer_finalization_scans_all_spec_markdown_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "\n".join(
+                    [
+                        "## ADDED Requirements",
+                        "### Requirement [REQ-001]: capability",
+                        "#### Scenario [SCN-001]: happy path",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (spec_dir / "supplement.md").write_text(
+                "#### Scenario [SCN-002]: supplemental path",
+                encoding="utf-8",
+            )
+            write_plan_state(workspace)
+            body = Path(tmp) / "T001.json"
+            body.write_text(json.dumps(task("T001")), encoding="utf-8")
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+
+            finalized = writer("finalize-task-set")
+
+            self.assertNotEqual(finalized.returncode, 0)
+            self.assertIn("specs/cap/supplement.md#SCN-002", finalized.stdout + finalized.stderr)
+
+    def test_bundle_rejects_mixed_execution_lane_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            write_bundle(feature_dir, [[task("T001"), task("T002", ui_required=True)]])
+
+            _, errors = load_and_validate_plan(feature_dir / "plan.json")
+
+            self.assertIn("B001.mixed_execution_lanes", errors)
+
+    def test_bundle_rejects_backend_batch_after_frontend_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            frontend_task = task("T001", ui_required=True)
+            backend_task = task("T002")
+            entries = [
+                batch_entry("B001", ["T001"], execution_lane="frontend"),
+                batch_entry("B002", ["T002"], deps=["B001"], execution_lane="backend"),
+            ]
+            write_plan_json(batch_plan_path(feature_dir, "B001"), batch_plan("B001", [frontend_task], execution_lane="frontend"))
+            write_plan_json(batch_plan_path(feature_dir, "B002"), batch_plan("B002", [backend_task], execution_lane="backend"))
+            write_plan_json(feature_dir / "plan.json", root_plan(batches=entries, next_batch="B002"))
+
+            _, errors = load_and_validate_plan(feature_dir / "plan.json")
+
+            self.assertIn("backend_batch_after_frontend:B002", errors)
 
     def test_plan_writer_does_not_backfill_an_earlier_capability_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -187,15 +187,17 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
             {
                 "featureId": feature,
                 "status": "done",
+                "taskSetStatus": "finalized",
                 "activeBatchId": None,
                 "nextBatchId": None,
-                "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+                "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
                 "batches": [
                     {
                         "id": "B001",
                         "path": "plans/B001/plan.json",
                         "title": "capability",
                         "specRoots": ["specs/capability/spec.md"],
+                        "executionLane": "backend",
                         "deps": [],
                         "taskIds": ["T001"],
                         "status": "done",
@@ -218,6 +220,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                 "featureId": feature,
                 "batchId": "B001",
                 "title": "capability",
+                "executionLane": "backend",
                 "status": "done",
                 "taskCount": 1,
                 "completedTaskCount": 1,
@@ -772,15 +775,17 @@ class StateIntegrationTests(unittest.TestCase):
             rich_plan.update(
                 {
                     "status": "todo",
+                    "taskSetStatus": "finalized",
                     "activeBatchId": "B001",
                     "nextBatchId": None,
-                    "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+                    "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
                     "batches": [
                         {
                             "id": "B001",
                             "path": "plans/B001/plan.json",
                             "title": "capability",
                             "specRoots": ["specs/capability/spec.md"],
+                            "executionLane": "backend",
                             "deps": [],
                             "taskIds": ["T001", "T002"],
                             "status": "todo",
@@ -797,6 +802,7 @@ class StateIntegrationTests(unittest.TestCase):
                         "featureId": "alpha",
                         "batchId": "B001",
                         "title": "capability",
+                        "executionLane": "backend",
                         "status": "todo",
                         "taskCount": 2,
                         "completedTaskCount": 0,

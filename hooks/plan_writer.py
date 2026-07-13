@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sys
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from hooks.json_writer_common import (  # noqa: E402
     read_object_file,
     read_object_stdin,
     render_result,
+    require_finalized_plan,
     resolve_feature,
     resolve_workspace,
     string_list,
@@ -44,6 +46,7 @@ from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
     load_plan_bundle,
     normalize_status,
+    task_execution_lane,
     task_contract_sha256,
     validate_plan_bundle_data,
     validate_task_collection,
@@ -57,6 +60,8 @@ from hooks.plan_granularity import (  # noqa: E402
 
 PLAN_FILE = "plan.json"
 PLAN_MD_FILE = "PLAN.md"
+SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
+SCENARIO_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 TASK_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-input.json"
 TASK_TEMPLATE_PATH = ROOT / TASK_TEMPLATE_RELATIVE_PATH
 TASK_DETAIL_PATCH_FIELDS = {"goal", "implementationPoints", "acceptanceCriteria", "nonGoals", "blockers"}
@@ -72,6 +77,33 @@ TASK_DETAIL_FORBIDDEN_FIELDS = {
     "decisionIds",
     "uiRefs",
     "uiRequired",
+}
+PLANNING_MUTATION_COMMANDS = {
+    "add-task",
+    "update-task",
+    "set-task-detail",
+    "set-scope",
+    "set-ui-required",
+    "set-ui-refs",
+    "add-spec-ref",
+    "remove-spec-ref",
+    "add-api-id",
+    "remove-api-id",
+    "add-data-id",
+    "remove-data-id",
+    "add-design-ref",
+    "remove-design-ref",
+    "add-decision-id",
+    "remove-decision-id",
+    "add-implementation-point",
+    "remove-implementation-point",
+    "add-acceptance-criterion",
+    "remove-acceptance-criterion",
+    "add-non-goal",
+    "remove-non-goal",
+    "set-deps",
+    "add-validation-command",
+    "set-split-rationale",
 }
 
 
@@ -142,6 +174,7 @@ def _initial(feature: str) -> dict[str, Any]:
     return {
         "featureId": feature,
         "status": "todo",
+        "taskSetStatus": "collecting",
         "activeBatchId": None,
         "nextBatchId": None,
         "batchPolicy": {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY},
@@ -238,6 +271,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     prior_plans = data.get("_batchPlans") if isinstance(data.get("_batchPlans"), dict) else {}
     groups: dict[str, list[dict[str, Any]]] = {}
     spec_roots: dict[str, str] = {}
+    execution_lanes: dict[str, str] = {}
     existing_ids = {
         str(entry.get("id"))
         for entry in data.get("batches", [])
@@ -249,10 +283,12 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         batch_id = assignments.get(task_id)
         if batch_id is None:
             primary = _primary_spec_root(task)
+            execution_lane = task_execution_lane(task)
             last_batch = sorted(groups)[-1] if groups else None
             can_append_to_last = bool(
                 last_batch
                 and spec_roots.get(str(last_batch)) == primary
+                and execution_lanes.get(str(last_batch)) == execution_lane
                 and len(groups[str(last_batch)]) < MAX_BATCH_TASKS
             )
             batch_id = str(last_batch) if can_append_to_last else _next_batch_id(used_ids)
@@ -267,6 +303,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             group = groups.setdefault(batch_id, [])
         group.append(task)
         spec_roots.setdefault(batch_id, _primary_spec_root(task))
+        execution_lanes.setdefault(batch_id, task_execution_lane(task))
 
     ordered_ids = sorted(groups)
     root = {
@@ -294,11 +331,13 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             if isinstance(evidence_id, str)
         ]
         spec_root = spec_roots[batch_id]
+        execution_lane = execution_lanes[batch_id]
         title = str(previous.get("title") or Path(spec_root).parent.name or batch_id)
         projected[batch_id] = {
             "featureId": root.get("featureId"),
             "batchId": batch_id,
             "title": title,
+            "executionLane": execution_lane,
             "status": status,
             "taskCount": len(batch_tasks),
             "completedTaskCount": sum(normalize_status(task.get("status")) == "done" for task in batch_tasks),
@@ -321,6 +360,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                 "path": f"plans/{batch_id}/plan.json",
                 "title": title,
                 "specRoots": [spec_root],
+                "executionLane": execution_lane,
                 "deps": sorted(cross_deps),
                 "taskIds": [str(task.get("id")) for task in batch_tasks],
                 "status": status,
@@ -380,6 +420,31 @@ def _tasks(data: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(tasks, list):
         raise ValueError("plan.json.tasks 必须是数组")
     return tasks
+
+
+def _require_collecting(data: dict[str, Any]) -> None:
+    if data.get("taskSetStatus") == "finalized":
+        raise PlanWriterInputError("plan_task_set_finalized")
+
+
+def _scenario_coverage(feature_dir: Path, task_items: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
+    expected: set[str] = set()
+    for spec_path in sorted((feature_dir / "specs").glob("**/*.md")):
+        relative = spec_path.relative_to(feature_dir).as_posix()
+        text = spec_path.read_text(encoding="utf-8")
+        expected.update(f"{relative}#{scenario_id}" for scenario_id in SPEC_SCENARIO_DEF_RE.findall(text))
+
+    covered: set[str] = set()
+    for task in task_items:
+        for raw_ref in task.get("specRefs", []):
+            if not isinstance(raw_ref, str):
+                continue
+            path_part, separator, anchor = raw_ref.partition("#")
+            scenario_ids = SCENARIO_ID_RE.findall(anchor) if separator else []
+            normalized_path = path_part.strip().replace("\\", "/")
+            if normalized_path:
+                covered.update(f"{normalized_path}#{scenario_id}" for scenario_id in scenario_ids)
+    return expected, covered
 
 
 def _find_task(data: dict[str, Any], task_id: str) -> dict[str, Any]:
@@ -642,6 +707,7 @@ def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str,
 def _cmd_add_task(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     data = _load(workspace, feature)
+    _require_collecting(data)
     body_task = _task_from_body(args, data)
     if body_task is None:
         if not args.title or not args.goal:
@@ -653,6 +719,10 @@ def _cmd_add_task(args: argparse.Namespace) -> int:
         task_id = str(task["id"])
     if task_id in _ids(data):
         return render_result(fail("duplicate_task_id", task_id, path=_path(workspace, feature)))
+    if task_execution_lane(task) == "backend" and any(
+        task_execution_lane(existing) == "frontend" for existing in _tasks(data)
+    ):
+        return render_result(fail("backend_task_after_frontend", task_id, path=_path(workspace, feature)))
     _tasks(data).append(task)
     granularity_errors = validate_plan_task_granularity_item(task, task_id=task_id)
     if granularity_errors:
@@ -660,6 +730,24 @@ def _cmd_add_task(args: argparse.Namespace) -> int:
     structure_errors = _structure_errors(data)
     if structure_errors:
         return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=[{"reason": error} for error in structure_errors]))
+    return render_result(_write(workspace, feature, data))
+
+
+def _cmd_finalize_task_set(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load(workspace, feature)
+    errors = _structure_errors(data)
+    if errors:
+        return render_result(
+            WriterResult(ok=False, path=_path(workspace, feature), errors=[{"reason": error} for error in errors])
+        )
+    expected, covered = _scenario_coverage(_path(workspace, feature).parent, _tasks(data))
+    missing = sorted(expected - covered)
+    if missing:
+        return render_result(
+            fail("missing_plan_scenario_coverage", ",".join(missing), path=_path(workspace, feature))
+        )
+    data["taskSetStatus"] = "finalized"
     return render_result(_write(workspace, feature, data))
 
 
@@ -692,7 +780,22 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "maxTasks": MAX_BATCH_TASKS,
                         "manualBatchIdSupported": False,
                         "primaryCapabilitySource": "first_spec_ref_file",
-                        "appendRule": "same_as_immediately_preceding_batch_and_not_full",
+                        "executionLaneSource": "uiRequired",
+                        "executionLaneMapping": {
+                            "uiRequired_false": "backend",
+                            "uiRequired_true": "frontend",
+                        },
+                        "executionLaneOrder": ["backend", "frontend"],
+                        "appendRule": "same_primary_capability_and_execution_lane_as_immediately_preceding_batch_and_not_full",
+                    },
+                    "taskSetFinalization": {
+                        "command": "finalize-task-set",
+                        "coverage": "all_path_qualified_spec_scenarios",
+                        "requiredBefore": [
+                            "add-project-validation-command",
+                            "render-md",
+                            "smoke_plan_writer.init",
+                        ],
                     },
                     "forbiddenArguments": ["--batch-id", "--spec-refs", "--design-refs", "--decision-ids"],
                     "uiRule": "scope.pages_must_equal_uiRefs.pageRefs_when_uiRequired",
@@ -890,6 +993,9 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
 
 def _cmd_add_project_validation_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    guard = require_finalized_plan(workspace, feature)
+    if guard:
+        return render_result(guard)
     data = _load(workspace, feature)
     commands = data.setdefault("projectValidationCommands", [])
     if not isinstance(commands, list):
@@ -1189,6 +1295,9 @@ def _render_plan_md(data: dict[str, Any]) -> str:
 
 def _cmd_render_md(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    guard = require_finalized_plan(workspace, feature)
+    if guard:
+        return render_result(guard)
     data = _load(workspace, feature)
     errors = _structure_errors(data)
     if errors:
@@ -1288,6 +1397,10 @@ def main(argv: list[str] | None = None) -> int:
 
     add_task_contract = sub.add_parser("add-task-contract")
     add_task_contract.set_defaults(func=_cmd_add_task_contract)
+
+    finalize_task_set = sub.add_parser("finalize-task-set")
+    _common(finalize_task_set)
+    finalize_task_set.set_defaults(func=_cmd_finalize_task_set)
 
     update_task = sub.add_parser("update-task")
     _task_selector(update_task)
@@ -1422,6 +1535,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         workspace, feature = _resolve(args)
         with _plan_lock(workspace, feature):
+            if args.command in PLANNING_MUTATION_COMMANDS:
+                _require_collecting(_load(workspace, feature))
             return args.func(args)
     except PlanWriterInputError as exc:
         return render_result(fail(exc.reason, exc.detail))

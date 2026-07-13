@@ -107,48 +107,59 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             task["completionEvidenceIds"] = evidence_ids if task.get("status") == "done" else []
             task["latestPassEvidenceId"] = evidence_ids[-1] if task.get("status") == "done" and evidence_ids else None
         task_items = data.pop("tasks", [])
+        task_groups: list[list[dict]] = []
+        for task in task_items:
+            lane = "frontend" if task.get("uiRequired") is True else "backend"
+            if not task_groups or ("frontend" if task_groups[-1][0].get("uiRequired") is True else "backend") != lane:
+                task_groups.append([])
+            task_groups[-1].append(task)
         all_done = bool(task_items) and all(task.get("status") == "done" for task in task_items if isinstance(task, dict))
-        batch_status = "done" if all_done else "todo"
+        root_entries = []
+        for index, group in enumerate(task_groups, start=1):
+            batch_id = f"B{index:03d}"
+            lane = "frontend" if group[0].get("uiRequired") is True else "backend"
+            status = "done" if all(task.get("status") == "done" for task in group) else "todo"
+            root_entries.append({
+                "id": batch_id,
+                "path": f"plans/{batch_id}/plan.json",
+                "title": "cap",
+                "specRoots": ["specs/cap/spec.md"],
+                "executionLane": lane,
+                "deps": [f"B{index - 1:03d}"] if index > 1 else [],
+                "taskIds": [task["id"] for task in group],
+                "status": status,
+            })
         root = {
             "featureId": data.get("featureId", "alpha"),
             "status": "done" if all_done else "todo",
+            "taskSetStatus": "finalized",
             "activeBatchId": None if all_done else "B001",
-            "nextBatchId": None,
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
-            "batches": [{
-                "id": "B001",
-                "path": "plans/B001/plan.json",
-                "title": "cap",
-                "specRoots": ["specs/cap/spec.md"],
-                "deps": [],
-                "taskIds": [task["id"] for task in task_items if isinstance(task, dict)],
-                "status": batch_status,
-            }],
+            "nextBatchId": "B002" if not all_done and len(task_groups) > 1 else None,
+            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+            "batches": root_entries,
             "projectValidationCommands": data["projectValidationCommands"],
             "projectCheckEvidenceIds": data["projectCheckEvidenceIds"],
             "latestProjectCheckEvidenceId": data["latestProjectCheckEvidenceId"],
         }
         write_plan_json(path, root)
-        write_plan_json(
-            feature_dir / "plans" / "B001" / "plan.json",
-            {
+        for entry, group in zip(root_entries, task_groups):
+            write_plan_json(feature_dir / "plans" / entry["id"] / "plan.json", {
                 "featureId": root["featureId"],
-                "batchId": "B001",
+                "batchId": entry["id"],
                 "title": "cap",
-                "status": batch_status,
-                "taskCount": len(task_items),
-                "completedTaskCount": sum(task.get("status") == "done" for task in task_items if isinstance(task, dict)),
+                "executionLane": entry["executionLane"],
+                "status": entry["status"],
+                "taskCount": len(group),
+                "completedTaskCount": sum(task.get("status") == "done" for task in group),
                 "completionEvidenceIds": [
                     evidence_id
-                    for task in task_items
-                    if isinstance(task, dict)
+                    for task in group
                     for evidence_id in task.get("completionEvidenceIds", [])
                 ],
                 "startedAt": None,
-                "completedAt": "2026-07-10T00:00:00Z" if all_done else None,
-                "tasks": task_items,
-            },
-        )
+                "completedAt": "2026-07-10T00:00:00Z" if entry["status"] == "done" else None,
+                "tasks": group,
+            })
 
     def _ctx(self, feature_dir: Path) -> HookContext:
         root = feature_dir.parent.parent.parent
@@ -2258,6 +2269,21 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             self._write_plan_json(feature_dir, status="todo")
 
             self.assertEqual(validate_plan_json_initial_tasks(self._ctx(feature_dir)), 0)
+
+    def test_plan_json_initial_tasks_rejects_unfinalized_task_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = self._feature_dir(tmp)
+            self._write_plan_json(feature_dir, status="todo", evidence_ids=[])
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            root["taskSetStatus"] = "collecting"
+            write_plan_json(feature_dir / "plan.json", root)
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                failures = validate_plan_json_initial_tasks(self._ctx(feature_dir))
+
+            self.assertGreater(failures, 0)
+            self.assertIn("plan_task_set_not_finalized", output.getvalue())
 
     def test_plan_json_initial_tasks_rejects_non_initial_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

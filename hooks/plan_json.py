@@ -46,7 +46,9 @@ VALIDATION_KINDS = {
     "compile",
 }
 MAX_BATCH_TASKS = 5
-BATCH_STRATEGY = "spec_capability_topological"
+BATCH_STRATEGY = "spec_capability_execution_lane_topological"
+EXECUTION_LANES = {"backend", "frontend"}
+TASK_SET_STATUSES = {"collecting", "finalized"}
 FEATURE_STATUSES = {"todo", "in_progress", "awaiting_next_conversation", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
 
@@ -98,6 +100,10 @@ def normalize_status(status: Any) -> str:
     if raw in FAILED_STATUSES or lowered in FAILED_STATUSES:
         return "failed"
     return ""
+
+
+def task_execution_lane(task: dict[str, Any]) -> str:
+    return "frontend" if task.get("uiRequired") is True else "backend"
 
 
 def task_contract_sha256(task: dict[str, Any]) -> str:
@@ -341,6 +347,8 @@ def validate_plan_data(
     feature_id = data.get("featureId")
     if not isinstance(feature_id, str) or not feature_id.strip():
         errors.append("plan_json_missing_feature_id")
+    if data.get("taskSetStatus") not in TASK_SET_STATUSES:
+        errors.append("plan_json_taskSetStatus_invalid")
 
     status = data.get("status")
     if status not in FEATURE_STATUSES:
@@ -381,6 +389,8 @@ def validate_plan_data(
                 errors.append(f"{batch_id}.path_invalid")
             if not isinstance(entry.get("title"), str) or not str(entry.get("title")).strip():
                 errors.append(f"{batch_id}.title_missing")
+            if entry.get("executionLane") not in EXECUTION_LANES:
+                errors.append(f"{batch_id}.executionLane_invalid")
             _validate_string_list(errors, entry, batch_id, "specRoots", required=True)
             _validate_string_list(errors, entry, batch_id, "deps", required=False, item_re=BATCH_ID_RE)
             _validate_string_list(errors, entry, batch_id, "taskIds", required=True, item_re=TASK_ID_RE)
@@ -429,6 +439,8 @@ def validate_batch_plan_data(
         batch_id = "batch"
     elif expected_batch_id is not None and batch_id != expected_batch_id:
         errors.append(f"batch_plan_id_mismatch:{batch_id}")
+    if data.get("executionLane") not in EXECUTION_LANES:
+        errors.append(f"{batch_id}.executionLane_invalid")
     if not isinstance(data.get("title"), str) or not str(data.get("title")).strip():
         errors.append(f"{batch_id}.title_missing")
     status = data.get("status")
@@ -797,9 +809,15 @@ def _bundle_consistency_errors(
     batch_order = {str(entry.get("id")): index for index, entry in enumerate(entries)}
     task_by_id = {str(item.get("id")): item for item in all_tasks}
     deps_by_task: dict[str, list[str]] = {}
+    frontend_batch_seen = False
     for entry in entries:
         batch_id = str(entry.get("id"))
         data = batch_data[batch_id]
+        entry_lane = entry.get("executionLane")
+        if entry_lane == "frontend":
+            frontend_batch_seen = True
+        elif entry_lane == "backend" and frontend_batch_seen:
+            errors.append(f"backend_batch_after_frontend:{batch_id}")
         errors.extend(
             validate_batch_plan_data(
                 data,
@@ -815,6 +833,15 @@ def _bundle_consistency_errors(
             errors.append(f"{batch_id}.taskIds_mismatch")
         if entry.get("status") != data.get("status"):
             errors.append(f"{batch_id}.root_status_projection_mismatch")
+        root_lane = entry.get("executionLane")
+        batch_lane = data.get("executionLane")
+        if root_lane != batch_lane:
+            errors.append(f"{batch_id}.executionLane_projection_mismatch")
+        task_lanes = {task_execution_lane(item) for item in tasks(data)}
+        if len(task_lanes) > 1:
+            errors.append(f"{batch_id}.mixed_execution_lanes")
+        elif task_lanes and batch_lane not in task_lanes:
+            errors.append(f"{batch_id}.executionLane_task_mismatch")
 
         declared_batch_deps = set(entry.get("deps") or [])
         for dep_batch in declared_batch_deps:
@@ -831,6 +858,8 @@ def _bundle_consistency_errors(
                 dep_batch = task_batches.get(dep)
                 if dep_batch is None:
                     continue
+                if task_execution_lane(item) == "backend" and task_execution_lane(task_by_id[dep]) == "frontend":
+                    errors.append(f"{task_id}.backend_dependency_on_frontend:{dep}")
                 if batch_order[dep_batch] > batch_order[batch_id]:
                     errors.append(f"{task_id}.dependency_not_in_earlier_batch:{dep}")
                 elif dep_batch != batch_id:

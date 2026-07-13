@@ -123,15 +123,17 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
     root_plan = {
         "featureId": "alpha",
         "status": "todo",
+        "taskSetStatus": "finalized",
         "activeBatchId": "B001",
         "nextBatchId": None,
-        "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+        "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
         "batches": [
             {
                 "id": "B001",
                 "path": "plans/B001/plan.json",
                 "title": "cap",
                 "specRoots": ["specs/cap/spec.md"],
+                "executionLane": "backend",
                 "deps": [],
                 "taskIds": [item["id"] for item in tasks],
                 "status": "todo",
@@ -160,6 +162,7 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
             "featureId": "alpha",
             "batchId": "B001",
             "title": "cap",
+            "executionLane": "backend",
             "status": "todo",
             "taskCount": len(tasks),
             "completedTaskCount": 0,

@@ -106,6 +106,7 @@ def validate_test_tasks(plan: dict, **kwargs: object) -> list[str]:
 
 def write_test_plan(feature_dir: Path, plan: dict) -> None:
     task_items = plan["tasks"]
+    execution_lane = "frontend" if any(item.get("uiRequired") is True for item in task_items) else "backend"
     all_done = bool(task_items) and all(item.get("status") == "done" for item in task_items)
     batch_status = "done" if all_done else "todo"
     root_status = "done" if all_done else "todo"
@@ -114,15 +115,17 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
         {
             "featureId": plan["featureId"],
             "status": root_status,
+            "taskSetStatus": "finalized",
             "activeBatchId": None if all_done else "B001",
             "nextBatchId": None,
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
             "batches": [
                 {
                     "id": "B001",
                     "path": "plans/B001/plan.json",
                     "title": "capability",
                     "specRoots": ["specs/capability/spec.md"],
+                    "executionLane": execution_lane,
                     "deps": [],
                     "taskIds": [item["id"] for item in task_items],
                     "status": batch_status,
@@ -139,6 +142,7 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
             "featureId": plan["featureId"],
             "batchId": "B001",
             "title": "capability",
+            "executionLane": execution_lane,
             "status": batch_status,
             "taskCount": len(task_items),
             "completedTaskCount": sum(item.get("status") == "done" for item in task_items),
@@ -281,12 +285,14 @@ class PlanJsonTest(unittest.TestCase):
         errors.extend(validate_plan_data({
             "featureId": "alpha",
             "status": "done",
+            "taskSetStatus": "finalized",
             "activeBatchId": None,
             "nextBatchId": None,
-            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_topological"},
+            "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
             "batches": [{
                 "id": "B001", "path": "plans/B001/plan.json", "title": "capability",
-                "specRoots": ["specs/capability/spec.md"], "deps": [], "taskIds": ["T001"], "status": "done",
+                "specRoots": ["specs/capability/spec.md"], "executionLane": "backend",
+                "deps": [], "taskIds": ["T001"], "status": "done",
             }],
             "projectValidationCommands": plan["projectValidationCommands"],
             "projectCheckEvidenceIds": plan["projectCheckEvidenceIds"],
