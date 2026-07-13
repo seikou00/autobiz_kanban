@@ -8,7 +8,6 @@ version: v1.1.2609
 
 - 根工作目录总入口，分为 `biz`、`dev`、`ops` 三个阶段。完整链路 `biz -> dev -> ops`，每个阶段执行完成后必须由用户确认后继续执行。
 - Dev 阶段除 `/autodev-reviewer` 可启动独立只读 reviewer 外，其余阶段均由当前会话内联执行，不得委派给下级 agent。
-- 当前技能完成后，如果用户输入“继续”“下一步”等续办意图，必须读取并遵循 `references/ui-continuation-guide.md`；当前技能尚未完成时不得使用该引导。
 
 ## 目录结构与路径约定
 
