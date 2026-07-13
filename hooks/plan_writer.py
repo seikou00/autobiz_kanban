@@ -48,6 +48,7 @@ from hooks.plan_json import (  # noqa: E402
     normalize_status,
     task_execution_lane,
     task_contract_sha256,
+    task_set_digest,
     validate_plan_bundle_data,
     validate_task_collection,
 )
@@ -80,6 +81,8 @@ TASK_DETAIL_FORBIDDEN_FIELDS = {
 }
 PLANNING_MUTATION_COMMANDS = {
     "add-task",
+    "replace-task",
+    "remove-task",
     "update-task",
     "set-task-detail",
     "set-scope",
@@ -225,6 +228,11 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
                 task_items.append(task)
                 if isinstance(task.get("id"), str):
                     assignments[str(task["id"])] = batch_id
+    if data.get("taskSetDigest") is not None and data.get("taskSetDigest") != task_set_digest(data, batch_plans):
+        raise PlanWriterInputError(
+            "task_set_digest_mismatch",
+            "formal plan artifacts were modified outside plan_writer",
+        )
     data["tasks"] = task_items
     data["_batchAssignments"] = assignments
     data["_batchPlans"] = batch_plans
@@ -240,6 +248,20 @@ def _structure_errors(data: dict[str, Any], *, allow_empty: bool = False) -> lis
             errors.append("plan_json_missing_feature_id")
         return errors
     return validate_task_collection(str(data.get("featureId", "")), _tasks(data))
+
+
+def _task_set_validation_errors(
+    data: dict[str, Any],
+    *,
+    allow_empty: bool = False,
+) -> list[dict[str, str]]:
+    errors = [{"reason": reason} for reason in _structure_errors(data, allow_empty=allow_empty)]
+    if errors or (allow_empty and not _tasks(data)):
+        return errors
+    for task in _tasks(data):
+        task_id = str(task.get("id", "task"))
+        errors.extend(validate_plan_task_granularity_item(task, task_id=task_id))
+    return errors
 
 
 def _primary_spec_root(task: dict[str, Any]) -> str:
@@ -367,6 +389,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             }
         )
     root["batches"] = root_entries
+    root["taskSetDigest"] = task_set_digest(root, projected)
     unfinished = [entry["id"] for entry in root_entries if entry["status"] != "done"]
     if not root_entries:
         root.update({"status": "todo", "activeBatchId": None, "nextBatchId": None})
@@ -399,9 +422,9 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
 
 def _write(workspace: Path, feature: str, data: dict[str, Any], *, allow_empty: bool = False) -> WriterResult:
     path = _path(workspace, feature)
-    errors = _structure_errors(data, allow_empty=allow_empty)
+    errors = _task_set_validation_errors(data, allow_empty=allow_empty)
     if errors:
-        return WriterResult(ok=False, path=path, errors=[{"reason": error} for error in errors])
+        return WriterResult(ok=False, path=path, errors=errors)
     root, batch_plans = _project_batches(data)
     if batch_plans:
         errors = validate_plan_bundle_data(root, batch_plans)
@@ -670,13 +693,24 @@ def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str,
     else:
         return None
 
+    return _normalize_task_body(task, requested_id=args.task_id, data=data)
+
+
+def _normalize_task_body(
+    task: dict[str, Any],
+    *,
+    requested_id: str | None,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    task = dict(task)
+    task.pop("matrixExceptionExample", None)
     body_id = task.get("id")
     if body_id is not None and not isinstance(body_id, str):
         raise ValueError("task body 的 id 必须是字符串")
-    if args.task_id and body_id and args.task_id != body_id:
-        raise ValueError(f"--task-id 与 task body id 不一致: {args.task_id} != {body_id}")
+    if requested_id and body_id and requested_id != body_id:
+        raise PlanWriterInputError("task_body_id_mismatch", f"{requested_id}!={body_id}")
     if not body_id:
-        task["id"] = args.task_id or next_numbered_id(_ids(data), "T")
+        task["id"] = requested_id or next_numbered_id(_ids(data), "T")
     missing = _validate_task_body_minimum(task)
     if missing:
         raise PlanWriterInputError("invalid_plan_task_body", f"missing={','.join(missing)}")
@@ -702,6 +736,132 @@ def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str,
     task["latestPassEvidenceId"] = None
     task.setdefault("blockers", [])
     return task
+
+
+def _reset_batch_projection(data: dict[str, Any]) -> None:
+    data["batches"] = []
+    data["_batchAssignments"] = {}
+    data["_batchPlans"] = {}
+
+
+def _cmd_replace_task(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load(workspace, feature)
+    _require_collecting(data)
+    replacement = _normalize_task_body(read_object_file(args.body_file), requested_id=args.task_id, data=data)
+    task_items = _tasks(data)
+    index = next((index for index, task in enumerate(task_items) if task.get("id") == args.task_id), None)
+    if index is None:
+        return render_result(fail("task_not_found", args.task_id, path=_path(workspace, feature)))
+    task_items[index] = replacement
+    _reset_batch_projection(data)
+    return render_result(_write(workspace, feature, data))
+
+
+def _cmd_remove_task(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load(workspace, feature)
+    _require_collecting(data)
+    dependents = sorted(
+        str(task.get("id"))
+        for task in _tasks(data)
+        if args.task_id in task.get("deps", [])
+    )
+    if dependents:
+        return render_result(
+            fail("task_has_dependents", f"task={args.task_id};dependents={','.join(dependents)}", path=_path(workspace, feature))
+        )
+    before = len(_tasks(data))
+    data["tasks"] = [task for task in _tasks(data) if task.get("id") != args.task_id]
+    if len(data["tasks"]) == before:
+        return render_result(fail("task_not_found", args.task_id, path=_path(workspace, feature)))
+    _reset_batch_projection(data)
+    return render_result(_write(workspace, feature, data, allow_empty=True))
+
+
+def _load_task_directory(task_dir: Path, feature: str) -> dict[str, Any]:
+    if not task_dir.is_dir():
+        raise PlanWriterInputError("task_directory_missing", str(task_dir))
+    paths = sorted(task_dir.glob("T*.json"))
+    if not paths:
+        raise PlanWriterInputError("task_directory_empty", str(task_dir))
+    data = _initial(feature)
+    tasks: list[dict[str, Any]] = []
+    for index, path in enumerate(paths, start=1):
+        expected_id = f"T{index:03d}"
+        if path.stem != expected_id:
+            raise PlanWriterInputError("task_file_sequence_invalid", f"expected={expected_id};actual={path.stem}")
+        task = _normalize_task_body(read_object_file(path), requested_id=expected_id, data=data)
+        tasks.append(task)
+        data["tasks"] = tasks
+    return data
+
+
+def _task_set_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> list[dict[str, str]]:
+    errors = _task_set_validation_errors(data)
+    if errors:
+        return errors
+    root, batches = _project_batches(data)
+    bundle_errors = validate_plan_bundle_data(root, batches)
+    if bundle_errors:
+        return [{"reason": error} for error in bundle_errors]
+    expected, covered = _scenario_coverage(feature_dir, _tasks(data))
+    missing = sorted(expected - covered)
+    if missing:
+        return [{
+            "reason": "missing_plan_scenario_coverage",
+            "detail": f"return_to_scenario_matrix;ids={','.join(missing)}",
+        }]
+    return []
+
+
+def _task_set_summary(data: dict[str, Any]) -> dict[str, Any]:
+    root, _ = _project_batches(data)
+    return {
+        "taskCount": len(_tasks(data)),
+        "batchCount": len(root.get("batches", [])),
+        "batches": [
+            {"id": entry["id"], "executionLane": entry["executionLane"], "taskIds": entry["taskIds"]}
+            for entry in root.get("batches", [])
+        ],
+    }
+
+
+def _cmd_preflight_task_set(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load_task_directory(Path(args.task_dir).resolve(), feature)
+    errors = _task_set_preflight_errors(_path(workspace, feature).parent, data)
+    return render_result(WriterResult(
+        ok=not errors,
+        path=_path(workspace, feature),
+        errors=errors,
+        data={"preflight": _task_set_summary(data)} if not errors else {},
+    ))
+
+
+def _cmd_materialize_task_set(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
+    if existing:
+        return render_result(existing)
+    plans_dir = _path(workspace, feature).parent / "plans"
+    data = _load_task_directory(Path(args.task_dir).resolve(), feature)
+    errors = _task_set_preflight_errors(_path(workspace, feature).parent, data)
+    if errors:
+        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=errors))
+    data["taskSetStatus"] = "finalized"
+    summary = _task_set_summary(data)
+    result = _write(workspace, feature, data)
+    if result.ok and args.force and plans_dir.is_dir():
+        referenced = {item["id"] for item in summary["batches"]}
+        for old_plan in plans_dir.glob("B*/plan.json"):
+            if old_plan.parent.name not in referenced:
+                old_plan.unlink(missing_ok=True)
+                try:
+                    old_plan.parent.rmdir()
+                except OSError:
+                    pass
+    return render_result(with_result_data(result, materialized=summary))
 
 
 def _cmd_add_task(args: argparse.Namespace) -> int:
@@ -736,16 +896,18 @@ def _cmd_add_task(args: argparse.Namespace) -> int:
 def _cmd_finalize_task_set(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     data = _load(workspace, feature)
-    errors = _structure_errors(data)
+    errors = _task_set_validation_errors(data)
     if errors:
-        return render_result(
-            WriterResult(ok=False, path=_path(workspace, feature), errors=[{"reason": error} for error in errors])
-        )
+        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=errors))
     expected, covered = _scenario_coverage(_path(workspace, feature).parent, _tasks(data))
     missing = sorted(expected - covered)
     if missing:
         return render_result(
-            fail("missing_plan_scenario_coverage", ",".join(missing), path=_path(workspace, feature))
+            fail(
+                "missing_plan_scenario_coverage",
+                f"return_to_scenario_matrix;ids={','.join(missing)}",
+                path=_path(workspace, feature),
+            )
         )
     data["taskSetStatus"] = "finalized"
     return render_result(_write(workspace, feature, data))
@@ -760,8 +922,8 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                 "contract": {
                     "taskTemplate": TASK_TEMPLATE_RELATIVE_PATH,
                     "taskInputExample": _task_input_example(),
-                    "recommendedInputMode": "body-file",
-                    "supportedInputModes": ["body-file", "body-stdin", "task-json", "cli-fields"],
+                    "recommendedInputMode": "task-directory",
+                    "supportedInputModes": ["task-directory", "body-file", "body-stdin", "task-json", "cli-fields"],
                     "requiredTaskFields": [
                         "title",
                         "goal",
@@ -770,6 +932,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "acceptanceCriteria",
                         "validationCommands",
                     ],
+                    "exampleOnlyTaskFields": ["matrixExceptionExample"],
                     "validationKinds": sorted(VALIDATION_KINDS),
                     "validationCoverage": {
                         "rule": "required_commands_cover_all_acceptance_criteria",
@@ -789,13 +952,26 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "appendRule": "same_primary_capability_and_execution_lane_as_immediately_preceding_batch_and_not_full",
                     },
                     "taskSetFinalization": {
-                        "command": "finalize-task-set",
+                        "command": "materialize-task-set --task-dir <directory>",
+                        "preflightCommand": "preflight-task-set --task-dir <directory>",
                         "coverage": "all_path_qualified_spec_scenarios",
                         "requiredBefore": [
                             "add-project-validation-command",
                             "render-md",
                             "smoke_plan_writer.init",
                         ],
+                    },
+                    "collectingRepairs": {
+                        "replace": "replace-task --task-id <id> --body-file <file>",
+                        "remove": "remove-task --task-id <id>",
+                        "atomic": True,
+                    },
+                    "formalArtifacts": {
+                        "root": "plan.json",
+                        "batches": "plans/Bxxx/plan.json",
+                        "ownership": "writer-owned",
+                        "integrityField": "taskSetDigest",
+                        "directEditingSupported": False,
                     },
                     "forbiddenArguments": ["--batch-id", "--spec-refs", "--design-refs", "--decision-ids"],
                     "uiRule": "scope.pages_must_equal_uiRefs.pageRefs_when_uiRequired",
@@ -1212,11 +1388,15 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     path = _path(workspace, feature)
     errors: list[str] = []
     try:
-        load_plan_bundle(
+        bundle = load_plan_bundle(
             path.parent,
             require_initial_status=args.initial,
             require_all_done=args.done,
         )
+        for task in bundle.tasks:
+            for error in validate_plan_task_granularity_item(task, task_id=str(task.get("id", "task"))):
+                detail = error.get("detail")
+                errors.append(f"{error['reason']}:{detail}" if detail else error["reason"])
     except ValueError as exc:
         errors = str(exc).split(";")
     return render_result(
@@ -1394,6 +1574,26 @@ def main(argv: list[str] | None = None) -> int:
     add_task.add_argument("--body-stdin", action="store_true")
     _add_task_fields(add_task, require_title=False)
     add_task.set_defaults(func=_cmd_add_task)
+
+    replace_task = sub.add_parser("replace-task")
+    _task_selector(replace_task)
+    replace_task.add_argument("--body-file", required=True)
+    replace_task.set_defaults(func=_cmd_replace_task)
+
+    remove_task = sub.add_parser("remove-task")
+    _task_selector(remove_task)
+    remove_task.set_defaults(func=_cmd_remove_task)
+
+    preflight_task_set = sub.add_parser("preflight-task-set")
+    _common(preflight_task_set)
+    preflight_task_set.add_argument("--task-dir", required=True)
+    preflight_task_set.set_defaults(func=_cmd_preflight_task_set)
+
+    materialize_task_set = sub.add_parser("materialize-task-set")
+    _common(materialize_task_set)
+    materialize_task_set.add_argument("--task-dir", required=True)
+    materialize_task_set.add_argument("--force", action="store_true")
+    materialize_task_set.set_defaults(func=_cmd_materialize_task_set)
 
     add_task_contract = sub.add_parser("add-task-contract")
     add_task_contract.set_defaults(func=_cmd_add_task_contract)

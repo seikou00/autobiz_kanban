@@ -241,7 +241,6 @@ class TaskRunnerTest(unittest.TestCase):
     def test_start_rejects_another_active_task_run_in_same_feature(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _start(workspace, code)
             plan_path = feature_dir / "plan.json"
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             batch = _read_batch(feature_dir)
@@ -256,6 +255,7 @@ class TaskRunnerTest(unittest.TestCase):
             plan["batches"][0]["taskIds"].append("T002")
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             _write_batch(feature_dir, batch)
+            _start(workspace, code)
 
             started = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
@@ -281,13 +281,15 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+            self.assertFalse(json.loads(aborted.stdout)["planStatusReset"])
             updated = _read_batch(feature_dir)
-            self.assertEqual(updated["tasks"][0]["status"], "todo")
+            self.assertEqual(updated["tasks"][0]["status"], "in_progress")
             restarted = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
             )
-            self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
+            self.assertNotEqual(restarted.returncode, 0)
+            self.assertIn("task_set_digest_mismatch", restarted.stdout + restarted.stderr)
 
     def test_project_check_records_non_task_evidence_and_binds_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -414,7 +416,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("task_contract_changed_after_start:T001", completed.stdout)
+            self.assertIn("task_set_digest_mismatch", completed.stdout)
             self.assertFalse((feature_dir / "evidence" / "EVIDENCE.jsonl").exists())
 
     def test_complete_runs_all_required_validation_commands(self) -> None:
@@ -849,10 +851,7 @@ class TaskRunnerTest(unittest.TestCase):
             plan["tasks"][0]["goal"] = "changed after completion"
             _write_batch(feature_dir, plan)
 
-            self.assertIn(
-                f"T001.task_run_contract_mismatch:{started['runId']}",
-                check_code_done(feature_dir),
-            )
+            self.assertIn("plan_json:task_set_digest_mismatch", check_code_done(feature_dir))
 
     def test_code_done_rejects_project_check_older_than_task_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -971,7 +970,14 @@ class TaskRunnerTest(unittest.TestCase):
 
     def test_failed_task_can_retry_without_losing_evidence_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, code = _workspace(Path(tmp), command_exit=3)
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["validationCommands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; raise SystemExit(0 if Path('retry-ready').exists() else 3)",
+            ]
+            _write_batch(feature_dir, batch)
             first_run = _start(workspace, code)
             failed = _run(
                 "complete", "--workspace", str(workspace), "--feature", "alpha",
@@ -982,14 +988,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertNotEqual(failed.returncode, 0)
 
-            plan_path = _batch_path(feature_dir)
-            plan = _read_batch(feature_dir)
-            plan["tasks"][0]["validationCommands"][0]["argv"] = [
-                sys.executable,
-                "-c",
-                "print('validation pass')",
-            ]
-            _write_batch(feature_dir, plan)
+            (code / "retry-ready").write_text("ready\n", encoding="utf-8")
             second_run = _start(workspace, code)
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
             completed = _run(

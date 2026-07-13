@@ -31,6 +31,7 @@ from hooks.plan_json import (  # noqa: E402
     task_contract_sha256,
 )
 from hooks.plan_writer import (  # noqa: E402
+    PlanWriterInputError,
     activate_batch as activate_plan_batch,
     record_project_check_attempt,
     record_task_attempt,
@@ -868,14 +869,25 @@ def _abort_task_unlocked(workspace: Path, feature: str, task_id: str, run_id: st
         raise TaskRunnerError(f"task_run_cannot_abort:{state.get('status')}")
     state["status"] = "aborted"
     _save_run(path, state)
-    result = set_task_execution_status(
-        workspace,
-        feature,
-        task_id,
-        "todo",
-    )
+    try:
+        result = set_task_execution_status(
+            workspace,
+            feature,
+            task_id,
+            "todo",
+        )
+    except PlanWriterInputError:
+        state["planStatusReset"] = False
+        state["planStatusResetError"] = "plan_integrity_error"
+        _save_run(path, state)
+        return state
     if not result.ok:
-        raise TaskRunnerError("plan_status_update_failed")
+        state["planStatusReset"] = False
+        state["planStatusResetError"] = "plan_status_update_failed"
+        _save_run(path, state)
+        return state
+    state["planStatusReset"] = True
+    _save_run(path, state)
     return state
 
 

@@ -19,7 +19,7 @@ if str(AUTODEV_HOOKS) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS))
 
 from hooks.json_writer_common import parse_postcheck_output  # noqa: E402
-from hooks.plan_json import BATCH_STRATEGY, MAX_BATCH_TASKS, VALIDATION_KINDS  # noqa: E402
+from hooks.plan_json import BATCH_STRATEGY, MAX_BATCH_TASKS, VALIDATION_KINDS, task_set_digest  # noqa: E402
 from hooks.stage_gate import validate_stage  # noqa: E402
 from skills.autodev.hooks.artifact_check import run_postcheck  # noqa: E402
 
@@ -173,9 +173,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "latestPassEvidenceId": None,
         "blockers": [],
     }
-    (feature_dir / "plan.json").write_text(
-        json.dumps(
-            {
+    root = {
                 "featureId": "alpha",
                 "status": "todo",
                 "taskSetStatus": "finalized",
@@ -198,33 +196,28 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                 ],
                 "projectCheckEvidenceIds": [],
                 "latestProjectCheckEvidenceId": None,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+            }
+    batch = {
+        "featureId": "alpha",
+        "batchId": "B001",
+        "title": "cap",
+        "executionLane": "backend",
+        "status": "todo",
+        "taskCount": 1,
+        "completedTaskCount": 0,
+        "completionEvidenceIds": [],
+        "startedAt": None,
+        "completedAt": None,
+        "tasks": [task],
+    }
+    root["taskSetDigest"] = task_set_digest(root, {"B001": batch})
+    (feature_dir / "plan.json").write_text(
+        json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     batch_path = feature_dir / "plans" / "B001" / "plan.json"
     batch_path.parent.mkdir(parents=True, exist_ok=True)
     batch_path.write_text(
-        json.dumps(
-            {
-                "featureId": "alpha",
-                "batchId": "B001",
-                "title": "cap",
-                "executionLane": "backend",
-                "status": "todo",
-                "taskCount": 1,
-                "completedTaskCount": 0,
-                "completionEvidenceIds": [],
-                "startedAt": None,
-                "completedAt": None,
-                "tasks": [task],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ) + "\n",
+        json.dumps(batch, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     (feature_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
@@ -309,6 +302,193 @@ def _run(
 
 
 class JsonWriterTests(unittest.TestCase):
+    def test_plan_writer_rejects_direct_batch_contract_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task_dir = Path(tmp) / "tasks"
+            task_dir.mkdir()
+            (task_dir / "T001.json").write_text(json.dumps(_plan_task_body()), encoding="utf-8")
+            self.assertEqual(_run(
+                "plan_writer.py", "materialize-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-dir", str(task_dir),
+            ).returncode, 0)
+
+            batch_path = feature_dir / "plans" / "B001" / "plan.json"
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+            batch["tasks"][0]["title"] = "edited outside writer"
+            batch_path.write_text(json.dumps(batch), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "show", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("task_set_digest_mismatch", result.stdout + result.stderr)
+
+    def test_plan_writer_replaces_and_removes_collecting_tasks_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir, second=True)
+            task_dir = Path(tmp) / "tasks"
+            task_dir.mkdir()
+            first = _plan_task_body()
+            second = _plan_task_body()
+            second.update({"id": "T002", "title": "second", "deps": ["T001"]})
+            second["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            second["acceptanceCriteria"][0].update({
+                "id": "AC-T002-01",
+                "scenarioRefs": ["specs/cap/spec.md#SCN-002"],
+            })
+            second["validationCommands"][0].update({"id": "VAL-T002-01", "covers": ["AC-T002-01"]})
+            for task in (first, second):
+                path = task_dir / f"{task['id']}.json"
+                path.write_text(json.dumps(task), encoding="utf-8")
+
+            self.assertEqual(_run(
+                "plan_writer.py", "materialize-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-dir", str(task_dir),
+            ).returncode, 0)
+            finalized_replace = _run(
+                "plan_writer.py", "replace-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--body-file", str(task_dir / "T001.json"),
+            )
+            self.assertNotEqual(finalized_replace.returncode, 0)
+            self.assertIn("plan_task_set_finalized", finalized_replace.stdout + finalized_replace.stderr)
+
+            collecting_workspace, collecting_feature = _workspace(Path(tmp) / "collecting")
+            _write_specs(collecting_feature, second=True)
+            self.assertEqual(_run(
+                "plan_writer.py", "init", "--workspace", str(collecting_workspace), "--feature", "alpha",
+            ).returncode, 0)
+            for task in (first, second):
+                self.assertEqual(_run(
+                    "plan_writer.py", "add-task", "--workspace", str(collecting_workspace), "--feature", "alpha",
+                    "--body-file", str(task_dir / f"{task['id']}.json"),
+                ).returncode, 0)
+            blocked = _run(
+                "plan_writer.py", "remove-task", "--workspace", str(collecting_workspace), "--feature", "alpha",
+                "--task-id", "T001",
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("task_has_dependents", blocked.stdout + blocked.stderr)
+
+            replacement = dict(second)
+            replacement["deps"] = []
+            replacement_path = task_dir / "T002-replacement.json"
+            replacement_path.write_text(json.dumps(replacement), encoding="utf-8")
+            self.assertEqual(_run(
+                "plan_writer.py", "replace-task", "--workspace", str(collecting_workspace), "--feature", "alpha",
+                "--task-id", "T002", "--body-file", str(replacement_path),
+            ).returncode, 0)
+            self.assertEqual(_run(
+                "plan_writer.py", "remove-task", "--workspace", str(collecting_workspace), "--feature", "alpha",
+                "--task-id", "T001",
+            ).returncode, 0)
+            self.assertEqual(_read_plan_tasks(collecting_feature)[0]["id"], "T002")
+
+    def test_plan_writer_preflights_all_lanes_before_materializing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir, second=True)
+            task_dir = Path(tmp) / "tasks"
+            task_dir.mkdir()
+            backend = _plan_task_body()
+            frontend = _plan_task_body()
+            frontend.update({"id": "T002", "title": "frontend", "uiRequired": True, "deps": ["T001"]})
+            frontend["scope"] = {
+                "modules": ["ui"], "entrypoints": ["route"], "pages": ["PAGE-001"],
+                "dataObjects": [], "paths": [],
+            }
+            frontend["uiRefs"] = {
+                "pageRefs": ["PAGE-001"], "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": [], "frontendRoute": "spec-driven-ui",
+            }
+            frontend["nonGoals"] = ["no unrelated UI changes"]
+            frontend["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            frontend["acceptanceCriteria"][0].update({
+                "id": "AC-T002-01", "scenarioRefs": ["specs/cap/spec.md#SCN-002"],
+            })
+            frontend["validationCommands"][0].update({"id": "VAL-T002-01", "covers": ["AC-T002-01"]})
+            for task in (backend, frontend):
+                (task_dir / f"{task['id']}.json").write_text(json.dumps(task), encoding="utf-8")
+
+            preflight = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-dir", str(task_dir),
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
+            self.assertFalse((feature_dir / "plan.json").exists())
+            lanes = [item["executionLane"] for item in json.loads(preflight.stdout)["preflight"]["batches"]]
+            self.assertEqual(lanes, ["backend", "frontend"])
+
+            materialized = _run(
+                "plan_writer.py", "materialize-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-dir", str(task_dir),
+            )
+            self.assertEqual(materialized.returncode, 0, materialized.stdout + materialized.stderr)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(root["taskSetStatus"], "finalized")
+            self.assertEqual([item["executionLane"] for item in root["batches"]], ["backend", "frontend"])
+
+    def test_plan_writer_preflight_returns_missing_coverage_to_matrix_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir, second=True)
+            task_dir = Path(tmp) / "tasks"
+            task_dir.mkdir()
+            (task_dir / "T001.json").write_text(json.dumps(_plan_task_body()), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-dir", str(task_dir),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing_plan_scenario_coverage", result.stdout + result.stderr)
+            self.assertIn("return_to_scenario_matrix", result.stdout + result.stderr)
+            self.assertFalse((feature_dir / "plan.json").exists())
+            self.assertFalse((feature_dir / "plans").exists())
+
+    def test_plan_writer_revalidates_granularity_after_spec_ref_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            scenario_lines = [f"#### Scenario [SCN-{index:03d}]: path {index}" for index in range(1, 14)]
+            (spec_dir / "spec.md").write_text(
+                "\n".join(["## ADDED Requirements", "### Requirement [REQ-001]: capability", *scenario_lines]),
+                encoding="utf-8",
+            )
+            body = _plan_task_body()
+            first_refs = [f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 6)]
+            body["specRefs"] = ["specs/cap/spec.md#REQ-001", *first_refs]
+            body["acceptanceCriteria"][0]["scenarioRefs"] = first_refs
+            body_file = Path(tmp) / "T001.json"
+            body_file.write_text(json.dumps(body), encoding="utf-8")
+
+            self.assertEqual(
+                _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha").returncode,
+                0,
+            )
+            self.assertEqual(
+                _run(
+                    "plan_writer.py", "add-task", "--workspace", str(workspace), "--feature", "alpha",
+                    "--body-file", str(body_file),
+                ).returncode,
+                0,
+            )
+
+            extra_refs = [f"specs/cap/spec.md#SCN-{index:03d}" for index in range(6, 14)]
+            mutated = _run(
+                "plan_writer.py", "add-spec-ref", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", *extra_refs,
+            )
+
+            self.assertNotEqual(mutated.returncode, 0)
+            self.assertIn("oversized_plan_task_must_split", mutated.stdout + mutated.stderr)
+            batch = json.loads((feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(batch["tasks"][0]["specRefs"], ["specs/cap/spec.md#REQ-001", *first_refs])
+
     def test_downstream_plan_artifacts_require_finalized_task_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
@@ -382,8 +562,10 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["taskTemplate"], "skills/autodev/autodev-plan/templates/task-input.json")
         self.assertEqual(contract["taskInputExample"]["id"], "T001")
         self.assertIn("validationCommands", contract["taskInputExample"])
+        self.assertIn("matrixExceptionExample", contract["taskInputExample"])
+        self.assertEqual(contract["exampleOnlyTaskFields"], ["matrixExceptionExample"])
         self.assertNotIn("status", contract["taskInputExample"])
-        self.assertEqual(contract["recommendedInputMode"], "body-file")
+        self.assertEqual(contract["recommendedInputMode"], "task-directory")
         self.assertEqual(contract["validationKinds"], sorted(VALIDATION_KINDS))
         self.assertEqual(contract["batchAssignment"]["strategy"], BATCH_STRATEGY)
         self.assertEqual(contract["batchAssignment"]["maxTasks"], MAX_BATCH_TASKS)
@@ -406,7 +588,8 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["taskSetFinalization"],
             {
-                "command": "finalize-task-set",
+                "command": "materialize-task-set --task-dir <directory>",
+                "preflightCommand": "preflight-task-set --task-dir <directory>",
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
                     "add-project-validation-command",
@@ -415,6 +598,9 @@ class JsonWriterTests(unittest.TestCase):
                 ],
             },
         )
+        self.assertTrue(contract["collectingRepairs"]["atomic"])
+        self.assertEqual(contract["formalArtifacts"]["integrityField"], "taskSetDigest")
+        self.assertFalse(contract["formalArtifacts"]["directEditingSupported"])
         self.assertIn("--batch-id", contract["forbiddenArguments"])
         self.assertIn("validationCommands", contract["requiredTaskFields"])
         self.assertEqual(contract["validationCoverage"]["rule"], "required_commands_cover_all_acceptance_criteria")

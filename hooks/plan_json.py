@@ -34,6 +34,7 @@ REPOSITORY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
 VISUAL_SOURCE_ID_RE = re.compile(r"^VIS-\d{3}$")
+TASK_SET_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 FRONTEND_ROUTES = {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"}
 COMPLETION_POLICIES = {"all_required_validations_pass"}
 VALIDATION_KINDS = {
@@ -109,6 +110,33 @@ def task_execution_lane(task: dict[str, Any]) -> str:
 def task_contract_sha256(task: dict[str, Any]) -> str:
     payload = {key: value for key, value in task.items() if key not in TASK_RUNTIME_FIELDS}
     content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(content).hexdigest()
+
+
+def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]]) -> str:
+    entries: list[dict[str, Any]] = []
+    for raw_entry in root.get("batches", []):
+        if not isinstance(raw_entry, dict):
+            continue
+        batch_id = str(raw_entry.get("id", ""))
+        batch = batch_data.get(batch_id, {})
+        batch_tasks = tasks(batch) if isinstance(batch, dict) else []
+        entries.append({
+            "id": batch_id,
+            "path": raw_entry.get("path"),
+            "title": raw_entry.get("title"),
+            "specRoots": raw_entry.get("specRoots"),
+            "executionLane": raw_entry.get("executionLane"),
+            "deps": raw_entry.get("deps"),
+            "taskIds": raw_entry.get("taskIds"),
+            "batchTitle": batch.get("title") if isinstance(batch, dict) else None,
+            "batchExecutionLane": batch.get("executionLane") if isinstance(batch, dict) else None,
+            "tasks": [
+                {"id": task.get("id"), "contractSha256": task_contract_sha256(task)}
+                for task in batch_tasks
+            ],
+        })
+    content = json.dumps(entries, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(content).hexdigest()
 
 
@@ -349,6 +377,9 @@ def validate_plan_data(
         errors.append("plan_json_missing_feature_id")
     if data.get("taskSetStatus") not in TASK_SET_STATUSES:
         errors.append("plan_json_taskSetStatus_invalid")
+    digest = data.get("taskSetDigest")
+    if digest is not None and (not isinstance(digest, str) or not TASK_SET_DIGEST_RE.fullmatch(digest)):
+        errors.append("plan_json_taskSetDigest_invalid")
 
     status = data.get("status")
     if status not in FEATURE_STATUSES:
@@ -804,6 +835,8 @@ def _bundle_consistency_errors(
                 all_tasks.append(item)
     if errors:
         return errors
+    if root.get("taskSetDigest") is not None and root.get("taskSetDigest") != task_set_digest(root, batch_data):
+        errors.append("task_set_digest_mismatch")
 
     known_task_ids = set(task_batches)
     batch_order = {str(entry.get("id")): index for index, entry in enumerate(entries)}
