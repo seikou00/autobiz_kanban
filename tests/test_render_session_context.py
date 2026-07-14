@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,10 +17,14 @@ if str(ROOT) not in sys.path:
 from hooks.render_session_context import (  # noqa: E402
     _heading_slug,
     _parse_selected,
+    _runtime_policy,
     _unit_heading_label,
+    main,
     render,
 )
 from hooks.agents_repo import display_path_join  # noqa: E402
+from hooks.init_workspace import create_feature, init_workspace  # noqa: E402
+from board_core.state_store import load_state_json_records, write_state_records  # noqa: E402
 
 
 MANIFEST = {
@@ -84,6 +90,12 @@ def _workspace(body="# 会话工作区指令\n- 工作区约束\n"):
     return str(d)
 
 
+def _board_config(workflow):
+    path = Path(tempfile.mkdtemp()) / "board_config.json"
+    path.write_text(json.dumps({"workflow": workflow}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 class ParseSelectedTest(unittest.TestCase):
     def test_empty_and_blank(self):
         self.assertEqual(_parse_selected(None), [])
@@ -119,6 +131,7 @@ class RenderShapeTest(unittest.TestCase):
         res = render([], plugin_root=_plugin_root())
         self.assertIn("sessionContext", res)
         self.assertIn("agentmdLoadStatus", res)
+        self.assertIn("runtimePolicy", res)
         self.assertNotIn("inlineSystemPrompt", res)  # 破坏性切换，不留旧字段
 
     def test_empty_selection_is_noop(self):
@@ -126,6 +139,196 @@ class RenderShapeTest(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["sessionContext"], "")
         self.assertEqual(res["agentmdLoadStatus"], [])
+
+
+class RuntimePolicyTest(unittest.TestCase):
+    @staticmethod
+    def _feature_environment(checkpoint="discuss_in_progress"):
+        root = Path(tempfile.mkdtemp()).resolve()
+        project = root / "demo"
+        project.mkdir()
+        init_workspace(project)
+        feature = "runtime-policy"
+        create_feature(project, feature)
+        records, errors, exists = load_state_json_records(project)
+        assert exists and not errors
+        record = dict(records[feature])
+        record["checkpoint"] = checkpoint
+        record["stage"] = checkpoint
+        records[feature] = record
+        write_state_records(project, records)
+        return project, feature, {
+            "PLUGIN_WORKSPACE": str(root),
+            "PROJECT_DIR": project.name,
+            "FEATURE_ID": feature,
+        }
+
+    def test_session_context_commands_use_dialog_environment(self):
+        config = json.loads(
+            (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
+        )
+        for platform in ("darwin", "linux", "win32"):
+            command = config["inspectCommands"][platform]["session_context_inject"]
+            self.assertNotIn("--node-id", command)
+            self.assertNotIn("--plugin-workspace", command)
+            self.assertNotIn("--project", command)
+            self.assertNotIn("--feature", command)
+
+    def test_dialog_environment_feature_status_selects_node_policy(self):
+        project, feature, env = self._feature_environment()
+        cases = (
+            ("discuss_in_progress", False),
+            ("prd_in_progress", False),
+            ("specs_in_progress", False),
+            ("code_in_progress", True),
+        )
+
+        for checkpoint, expected_enabled in cases:
+            with self.subTest(checkpoint=checkpoint):
+                records, errors, exists = load_state_json_records(project)
+                self.assertTrue(exists)
+                self.assertEqual(errors, [])
+                record = dict(records[feature])
+                record["checkpoint"] = checkpoint
+                record["stage"] = checkpoint
+                records[feature] = record
+                write_state_records(project, records)
+
+                policy = render([], runtime_env=env)["runtimePolicy"]
+                self.assertEqual(policy["agentMode"], "solo")
+                self.assertEqual(
+                    policy["toolCustomConfig"]["task"]["enabled"],
+                    expected_enabled,
+                )
+
+    def test_explicit_node_id_overrides_dialog_environment(self):
+        _project, _feature, env = self._feature_environment("discuss_in_progress")
+        policy = render([], node_id="dev.code", runtime_env=env)["runtimePolicy"]
+        self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
+
+    def test_missing_environment_or_feature_falls_back_to_defaults(self):
+        expected = {
+            "agentMode": "solo",
+            "toolCustomConfig": {"task": {"enabled": True}},
+        }
+        self.assertEqual(render([], runtime_env={})["runtimePolicy"], expected)
+
+        _project, _feature, env = self._feature_environment()
+        env["FEATURE_ID"] = "missing-feature"
+        self.assertEqual(render([], runtime_env=env)["runtimePolicy"], expected)
+
+    def test_board_config_disables_task_only_for_configured_early_nodes(self):
+        for node_id in ("biz.discuss", "biz.prd", "dev.specs"):
+            policy = _runtime_policy(node_id)
+            self.assertEqual(policy["agentMode"], "solo")
+            self.assertFalse(policy["toolCustomConfig"]["task"]["enabled"])
+
+        self.assertTrue(
+            _runtime_policy("dev.code")["toolCustomConfig"]["task"]["enabled"]
+        )
+
+    def test_missing_node_config_uses_required_defaults(self):
+        expected = {
+            "agentMode": "solo",
+            "toolCustomConfig": {"task": {"enabled": True}},
+        }
+        self.assertEqual(_runtime_policy(None), expected)
+        self.assertEqual(
+            _runtime_policy(
+                "dev.unknown",
+                board_config_path=_board_config({"nodes": []}),
+            ),
+            expected,
+        )
+
+    def test_reads_agent_mode_and_disabled_task_from_current_node(self):
+        config_path = _board_config(
+            {
+                "nodes": [
+                    {
+                        "id": "dev.specs",
+                        "runtimePolicy": {
+                            "agentMode": "solo",
+                            "toolCustomConfig": {"task": {"enabled": False}},
+                        },
+                    },
+                    {
+                        "id": "dev.code",
+                        "runtimePolicy": {
+                            "agentMode": "coordinator",
+                            "toolCustomConfig": {"task": {"enabled": True}},
+                        },
+                    },
+                ]
+            }
+        )
+
+        specs = render([], node_id="dev.specs", board_config_path=config_path)
+        code = render([], node_id="dev.code", board_config_path=config_path)
+
+        self.assertEqual(
+            specs["runtimePolicy"],
+            {
+                "agentMode": "solo",
+                "toolCustomConfig": {"task": {"enabled": False}},
+            },
+        )
+        self.assertEqual(code["runtimePolicy"]["agentMode"], "coordinator")
+        self.assertTrue(code["runtimePolicy"]["toolCustomConfig"]["task"]["enabled"])
+
+    def test_finds_runtime_policy_on_dynamic_node(self):
+        config_path = _board_config(
+            {
+                "nodes": [],
+                "dynamicStages": [
+                    {
+                        "id": "detail_design_before_code",
+                        "nodes": [
+                            {
+                                "id": "dev.detail_design",
+                                "runtimePolicy": {
+                                    "agentMode": "solo",
+                                    "toolCustomConfig": {"task": {"enabled": False}},
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        policy = _runtime_policy("dev.detail_design", board_config_path=config_path)
+        self.assertFalse(policy["toolCustomConfig"]["task"]["enabled"])
+
+    def test_invalid_fields_fall_back_independently(self):
+        config_path = _board_config(
+            {
+                "nodes": [
+                    {
+                        "id": "dev.code",
+                        "runtimePolicy": {
+                            "agentMode": "  ",
+                            "toolCustomConfig": {"task": {"enabled": "false"}},
+                        },
+                    }
+                ]
+            }
+        )
+        self.assertEqual(
+            _runtime_policy("dev.code", board_config_path=config_path),
+            {
+                "agentMode": "solo",
+                "toolCustomConfig": {"task": {"enabled": True}},
+            },
+        )
+
+    def test_invalid_selected_json_still_returns_runtime_policy(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["--node-id", "dev.specs", "--selected-deployUnit", "not-json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["runtimePolicy"]["toolCustomConfig"]["task"]["enabled"])
 
 
 class RenderRemoteTest(unittest.TestCase):

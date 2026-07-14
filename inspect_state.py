@@ -149,9 +149,8 @@ def _hook_log_refs(workspace: Path, feature: str, feature_dir: Path | None = Non
     ]
 
 
-
-def run_mode(workspace: Path, feature: str, config: dict) -> int:
-    """Handle --mode run."""
+def build_run_payload(workspace: Path, feature: str, config: dict) -> dict:
+    """Build the Feature Status payload used by both CLI and session context."""
     sync_result = check_or_fix_state_sync(workspace, fix=True)
     state_records = sync_result.records
     state_record_errors: list[str] = []
@@ -255,7 +254,13 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     if workflow_skipped:
         output["run"]["workflowSkippedNodes"] = list(workflow_skipped)
 
-    json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
+    return output
+
+
+def run_mode(workspace: Path, feature: str, config: dict) -> int:
+    """Handle --mode run."""
+    payload = build_run_payload(workspace, feature, config)
+    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
     print()
     return 0
 

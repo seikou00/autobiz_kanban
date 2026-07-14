@@ -17,9 +17,14 @@ board_config.json 注册（样例，附件约定）::
   · ``--session-workspace-path`` 是会话工作区目录的路径字符串（可空）；脚本读取该目录下的
     ``AGENTS.md`` 作为「会话工作区指令」。路径为空 / 该文件缺失 / 全空白 → 不生成该段。
 
+  · 当前 workflow 节点从对话环境的 ``PLUGIN_WORKSPACE``、``PROJECT_DIR``、``FEATURE_ID``
+    解析，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口。
+    节点、环境、配置或单个字段缺失时分别使用默认值：``agentMode = \"solo\"``、
+    ``toolCustomConfig.task.enabled = true``。
+
 输出（固定形状，注入项目模式系统提示词）::
 
-    { "ok": true, "message": "...", "sessionContext": "...",
+    { "ok": true, "message": "...", "sessionContext": "...", "runtimePolicy": { ... },
       "agentmdLoadStatus": [ {deployUnitId, path, loaded, source, message} ] }
 
 ``sessionContext`` 分段拼接（见 docs/agents-loading-remote-local.md），各层次各用一对
@@ -59,7 +64,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Mapping, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -75,6 +80,8 @@ from hooks.agents_repo import (  # noqa: E402
     sys_abspath,
     sys_abs_display,
 )
+from hooks.paths import get_plugin_output_workspace, resolve_env_feature  # noqa: E402
+from inspect_state import build_run_payload  # noqa: E402
 
 PLUGIN_ROOT_PLACEHOLDER = "{plugin_root}"  # md 正文里的占位符，替换为知识库根目录 <pluginPath>/sys
 PLUGIN_ROOT_WIN32_PATH_RE = re.compile(
@@ -84,6 +91,124 @@ PLUGIN_ROOT_WIN32_PATH_RE = re.compile(
 LOCAL_AGENTS_MD = "AGENTS.md"  # local 兜底文件名（§8 #1：直接读用户仓库既有 AGENTS.md）
 
 WORKSPACE_AGENTS_MD = "AGENTS.md"  # 工程级「会话工作区指令」文件名（sessionWorkspacePath 下）
+
+BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
+DEFAULT_AGENT_MODE = "solo"
+DEFAULT_TASK_ENABLED = True
+
+
+def _find_workflow_node(value: object, node_id: str) -> Optional[dict]:
+    """在 workflow 的主节点、profile 节点和 dynamic stage 节点中查找 id。"""
+    if isinstance(value, dict):
+        nodes = value.get("nodes")
+        if isinstance(nodes, list):
+            for item in nodes:
+                if isinstance(item, dict) and item.get("id") == node_id:
+                    return item
+        for nested in value.values():
+            found = _find_workflow_node(nested, node_id)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_workflow_node(nested, node_id)
+            if found is not None:
+                return found
+    return None
+
+
+def _runtime_policy(
+    node_id: Optional[str],
+    *,
+    board_config_path: Optional[Path] = None,
+) -> dict:
+    """读取当前 workflow 节点的 ``runtimePolicy``，并补齐稳定默认值。
+
+    session context 是会话启动链路；节点 id 缺失、配置文件不可用或字段类型错误时
+    都不应阻断会话，而是逐字段回退到 ``solo`` / ``task.enabled=true``。
+    """
+    agent_mode = DEFAULT_AGENT_MODE
+    task_enabled = DEFAULT_TASK_ENABLED
+    current_node_id = (node_id or "").strip()
+
+    if current_node_id:
+        path = board_config_path or BOARD_CONFIG_PATH
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            config = {}
+
+        workflow = config.get("workflow") if isinstance(config, dict) else None
+        if isinstance(workflow, dict):
+            node = _find_workflow_node(workflow, current_node_id)
+            policy = node.get("runtimePolicy") if isinstance(node, dict) else None
+            if isinstance(policy, dict):
+                configured_agent_mode = policy.get("agentMode")
+                if isinstance(configured_agent_mode, str) and configured_agent_mode.strip():
+                    agent_mode = configured_agent_mode.strip()
+
+                tool_config = policy.get("toolCustomConfig")
+                task_config = tool_config.get("task") if isinstance(tool_config, dict) else None
+                configured_task_enabled = (
+                    task_config.get("enabled") if isinstance(task_config, dict) else None
+                )
+                if isinstance(configured_task_enabled, bool):
+                    task_enabled = configured_task_enabled
+
+    return {
+        "agentMode": agent_mode,
+        "toolCustomConfig": {
+            "task": {
+                "enabled": task_enabled,
+            }
+        },
+    }
+
+
+def _session_node_id(
+    node_id: Optional[str] = None,
+    *,
+    board_config_path: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> str:
+    """解析当前节点：显式调试值优先，否则读取对话环境并复用 Feature Status。
+
+    session context 不应因状态或环境异常中断；任何失败均返回空节点，由 runtime policy
+    使用 ``solo`` / ``task.enabled=true`` 默认值。
+    """
+    explicit = (node_id or "").strip()
+    if explicit:
+        return explicit
+
+    try:
+        workspace = get_plugin_output_workspace(env)
+        feature = resolve_env_feature(None, required=True, env=env)
+        path = board_config_path or BOARD_CONFIG_PATH
+        config = json.loads(path.read_text(encoding="utf-8"))
+        payload = build_run_payload(workspace, feature or "", config)
+        run = payload.get("run") if isinstance(payload, dict) else None
+        current_node_id = run.get("currentNodeId") if isinstance(run, dict) else None
+    except Exception:
+        return ""
+
+    if not isinstance(current_node_id, str):
+        return ""
+    current_node_id = current_node_id.strip()
+    return "" if not current_node_id or current_node_id == "unknown" else current_node_id
+
+
+def _session_runtime_policy(
+    node_id: Optional[str] = None,
+    *,
+    board_config_path: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> dict:
+    current_node_id = _session_node_id(
+        node_id,
+        board_config_path=board_config_path,
+        env=env,
+    )
+    return _runtime_policy(current_node_id, board_config_path=board_config_path)
 
 
 def _parse_selected(raw: Optional[str]) -> List[dict]:
@@ -424,8 +549,16 @@ def render(
     plugin_root: Optional[Path] = None,
     session_workspace_path: Optional[str] = None,
     platform: Optional[str] = None,
+    node_id: Optional[str] = None,
+    board_config_path: Optional[Path] = None,
+    runtime_env: Optional[Mapping[str, str]] = None,
 ) -> dict:
     """核心逻辑（无 I/O 边界外副作用），便于单测。"""
+    runtime_policy = _session_runtime_policy(
+        node_id,
+        board_config_path=board_config_path,
+        env=runtime_env,
+    )
     # 「会话工作区指令」独立于部署单元选择：先行构建，未选单元也可单独注入。
     workspace_content = _build_workspace_content(session_workspace_path)
 
@@ -436,6 +569,7 @@ def render(
                 "message": "未选择部署单元，无需注入",
                 "sessionContext": "",
                 "agentmdLoadStatus": [],
+                "runtimePolicy": runtime_policy,
             }
         # 即便未选单元，工作区指令也在适用范围表里占一行映射。
         bindings = [_workspace_binding(session_workspace_path)]
@@ -445,6 +579,7 @@ def render(
             "message": "未选择部署单元，仅注入会话工作区指令",
             "sessionContext": prompt,
             "agentmdLoadStatus": [_workspace_status(session_workspace_path, platform=platform)],
+            "runtimePolicy": runtime_policy,
         }
 
     # 清单不可用（缺失/非法）时降级：所有单元当作未命中，直接走 local 兜底。
@@ -587,6 +722,7 @@ def render(
         "message": message,
         "sessionContext": prompt,
         "agentmdLoadStatus": result_status,
+        "runtimePolicy": runtime_policy,
     }
 
 
@@ -608,6 +744,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="JSON 数组字符串：[{\"deployUnitId\":\"...\",\"localRepoPath\":\"...\"}]",
     )
     parser.add_argument(
+        "--node-id",
+        dest="node_id",
+        default="",
+        help="本地调试覆盖：显式指定 workflow 节点 id；宿主运行时从对话环境自动解析",
+    )
+    parser.add_argument(
         "--session-workspace-path",
         dest="session_workspace_path",
         default="",
@@ -623,12 +765,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             "message": str(exc),
             "sessionContext": "",
             "agentmdLoadStatus": [],
+            "runtimePolicy": _session_runtime_policy(args.node_id),
         }
     else:
         result = render(
             selected,
             session_workspace_path=args.session_workspace_path,
             platform=args.platform,
+            node_id=args.node_id,
         )
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)

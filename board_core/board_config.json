@@ -6,7 +6,6 @@
     "ref": "master"
   },
   "supported_deploy_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
-  "enable_task_tool": false,
   "inspectCommands": {
     "darwin": {
       "knowledge_path": "${pluginPath}/sys",
@@ -224,6 +223,14 @@
         "group": "Biz",
         "skill": "autobiz-requirement-discuss",
         "order": 10,
+        "runtimePolicy": {
+          "agentMode": "solo",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": false
+            }
+          }
+        },
         "description": "沉淀需求讨论稿 \n 产物：PRD_DISCUSS.md（需求讨论稿：澄清结论、边界与待确认项）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清。" } },
@@ -248,6 +255,14 @@
         "group": "Biz",
         "skill": "autobiz-prd-generate",
         "order": 20,
+        "runtimePolicy": {
+          "agentMode": "solo",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": false
+            }
+          }
+        },
         "description": "生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
@@ -277,6 +292,14 @@
         "group": "Dev",
         "skill": "autodev-specs",
         "order": 30,
+        "runtimePolicy": {
+          "agentMode": "solo",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": false
+            }
+          }
+        },
         "description": "生成 proposal 与行为规格 \n 产物：proposal.md（变更提案：本轮目标、范围与非目标）、specs/**/*.md（行为规格：各能力 Requirement/Scenario 契约）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "当前阶段：行为规格。" } },
