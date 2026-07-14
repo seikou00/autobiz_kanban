@@ -720,6 +720,9 @@ class BatchRunnerContractTest(unittest.TestCase):
             subprocess.run(["git", "init", "-b", "main"], cwd=code, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=code, check=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=code, check=True)
+            (code / ".git" / "info" / "exclude").write_text(
+                ".cmbdevclaw/large_tool_results/\n", encoding="utf-8"
+            )
             (code / "existing.txt").write_text("already implemented\n", encoding="utf-8")
             subprocess.run(["git", "add", "existing.txt"], cwd=code, check=True)
             subprocess.run(["git", "commit", "-m", "initial"], cwd=code, check=True, capture_output=True)
@@ -835,6 +838,9 @@ class BatchRunnerContractTest(unittest.TestCase):
             subprocess.run(["git", "init", "-b", "main"], cwd=code, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=code, check=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=code, check=True)
+            (code / ".git" / "info" / "exclude").write_text(
+                ".cmbdevclaw/large_tool_results/\n", encoding="utf-8"
+            )
             (code / "existing.txt").write_text("already implemented\n", encoding="utf-8")
             subprocess.run(["git", "add", "existing.txt"], cwd=code, check=True)
             subprocess.run(["git", "commit", "-m", "initial"], cwd=code, check=True, capture_output=True)

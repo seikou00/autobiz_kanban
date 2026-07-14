@@ -173,13 +173,16 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 
 ###  执行单个任务
 
-1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。在修改业务代码前必须启动任务运行并保存 Git 快照：
+1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。启动前必须确保每个业务仓库都通过 `.gitignore` 或 `.git/info/exclude` 忽略 `.cmbdevclaw/large_tool_results/`；runner 只校验该契约，不会代写业务仓库。未命中 ignore 时先配置窄规则，再执行 start。
+
+在修改业务代码前必须启动任务运行并保存 Git 快照：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `recover` / `abort` 处理原 run。
+`--code-workspace` 同时是 Git 仓库定位入口和 task scope 基准：即使传模块子目录，runner 也会解析并快照整个 Git 根，但 `scope.paths` 以该请求路径为基准。start 会保存 `scopePathBase=requested_code_workspace`、`workspacePrefixes` 和 `resolvedScopePaths`，输出中的 `requestedCodeWorkspaces` 与 `repositories[].path` 分别表示请求路径和解析后的仓库根。complete / abort / resume 必须继续传相同请求路径；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。
 `start` 会固化当前 task 契约哈希。run 活动期间不得修改该 task 的 goal/scope/AC/validationCommands 等计划字段；确需修 Plan 时先 abort，再修正并重新 start。Plan 的全部读改写由 feature 产物目录内 `.plan.lock` 串行化，禁止绕开 writer 直接覆写。
 
 任务跨多个业务仓库时，按稳定顺序重复传入 `--code-workspace`。Plan 中每条 validation command 必须用 `repo` 指明 Git 根目录名；changed/supporting 路径使用 `repoId:relative/path`。无论单仓或多仓，`evidence/` 与 `.task-runs/` 只能写入 feature 产物目录，禁止写入任一业务仓库。
@@ -214,11 +217,19 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
 python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
+若 `complete` 返回 `requiredAction=fix_workspace_and_retry_same_run`，说明变更位于请求 workspace 外，先清理或正确 ignore 报告的越界运行产物，然后使用同一个 runId 重试同一个 run。若返回 `correct_plan_scope_and_rebuild_task_baseline`，说明文件位于请求 workspace 内但 Plan 漏列 domain/test/resources 等真实实现范围；不得直接编辑 active task 合同，必须保存 patch、按有审计原因的 force abort 回流 Plan、恢复任务前文件、以修正后的完整 scope 新 start 后重新应用 patch。不得仅靠 abort 后重新 start，否则已完成实现会进入新基线。普通 `abort` 在检测到未记录文件变更时会拒绝执行；只有明确放弃这些变更时才能同时传 `--force-with-changes --abort-why "<REASON>"`。若无 evidence 且合同未变化的原 run 已被误 abort，先结束较新的活动 run，再恢复原始快照：
+
+```bash
+python "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task-id "<TASK_ID>" --run-id "<ORIGINAL_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
+```
+
 确实没有文件变更时，不得伪造 changedFiles，也不得把空 diff 当遗漏。必须说明原因并提供至少一个仓库内已有实现/测试文件；该任务还必须有 required 的行为、集成、E2E 或静态验证，只有 compile/typecheck/lint 不够：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
 ```
+
+`--supporting-file` 必须是仓库根相对路径；多仓库时使用 `repoId:relative/path`。`--no-code-change-why` 只用于 start 前已经存在且经行为验证确认满足契约的实现，不得用它绕过误 abort、重启 run 或 staging 操作造成的空 diff；runner 会拒绝与历史 aborted run 变更冲突的 no-code claim。
 
 验证失败仍会写 `result=fail` evidence 和真实 log，但任务状态为 `failed`，不得完成。写 evidence 后异常中断时使用同参数执行 `recover`，runner 会从 `.task-runs/<TASK_ID>/<RUN_ID>.json` 续跑或只补 plan 绑定，且不会重复已有命令 evidence。结构化记录只存在 `EVIDENCE.jsonl`；`ev_XXXX.log` 只保存脱敏后的真实命令输出，即使命令无输出也必须存在零字节 log。不得新建 `ev_XXXX.json` sidecar；查看单条记录使用 `evidence_store.py show --evidence-id ev_XXXX`。日志错绑、缺失或哈希不一致会被拒绝。`ev_XXXX` 按全流自动递增，任何流/index/log 被重写或重排都必须停止并恢复。
 

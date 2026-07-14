@@ -571,6 +571,46 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-code must enforce Code session entry and batch handoff stop: " + ", ".join(missing),
         )
 
+    def test_code_skill_protects_task_runner_snapshot_baseline(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            ".cmbdevclaw/large_tool_results/",
+            "task_runner.py\" resume",
+            "staging / unstaging",
+            "同一个 run",
+            "--no-code-change-why",
+            "仓库根相对路径",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-code must protect task snapshot baselines: " + ", ".join(missing),
+        )
+
+    def test_plan_and_code_skills_define_requested_workspace_scope_base(self) -> None:
+        plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
+        plan_required = [
+            "`scope.paths` 以 Code 阶段传入的 `--code-workspace` 为基准",
+            "domain、test、resources",
+            "`repoId:relative/path`",
+        ]
+        code_required = [
+            "`scope.paths` 以该请求路径为基准",
+            "`scopePathBase=requested_code_workspace`",
+            "`task_run_requested_workspace_mismatch`",
+            "`correct_plan_scope_and_rebuild_task_baseline`",
+        ]
+        missing = [phrase for phrase in plan_required if phrase not in plan]
+        missing.extend(phrase for phrase in code_required if phrase not in code)
+        self.assertEqual(
+            missing,
+            [],
+            "Plan and Code must share the requested-workspace scope contract: "
+            + ", ".join(missing),
+        )
+
     def test_code_exploration_cache_is_an_optional_code_output(self) -> None:
         code = next(
             item

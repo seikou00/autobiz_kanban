@@ -10,6 +10,7 @@ from typing import Any
 
 
 RepositoryMap = dict[str, Path]
+REQUIRED_IGNORED_RUNTIME_PATHS = (".cmbdevclaw/large_tool_results/",)
 
 
 class RepositorySnapshotError(ValueError):
@@ -48,6 +49,22 @@ def resolve_repositories(code_workspaces: Path | list[Path]) -> RepositoryMap:
     if not repositories:
         raise RepositorySnapshotError("code_workspace_missing")
     return repositories
+
+
+def unignored_runtime_artifact_paths(
+    repo: Path,
+    paths: tuple[str, ...] = REQUIRED_IGNORED_RUNTIME_PATHS,
+) -> list[str]:
+    unignored: list[str] = []
+    for raw in paths:
+        relative = raw.rstrip("/")
+        probe = f"{relative}/.task-runner-ignore-probe"
+        completed = _run_text(repo, "check-ignore", "--quiet", "--no-index", "--", probe)
+        if completed.returncode == 1:
+            unignored.append(raw)
+        elif completed.returncode != 0:
+            raise RepositorySnapshotError("git_ignore_check_failed")
+    return unignored
 
 
 def hash_file(path: Path) -> str | None:

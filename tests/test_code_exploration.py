@@ -68,6 +68,24 @@ class RepositorySnapshotTest(unittest.TestCase):
         self.assertEqual(renamed["fromPath"], "old.py")
         self.assertEqual(renamed["kind"], "source")
 
+    def test_runtime_artifact_path_must_be_git_ignored(self) -> None:
+        from hooks.repository_snapshot import unignored_runtime_artifact_paths
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+
+            self.assertEqual(
+                unignored_runtime_artifact_paths(repo),
+                [".cmbdevclaw/large_tool_results/"],
+            )
+
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".cmbdevclaw/large_tool_results/\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(unignored_runtime_artifact_paths(repo), [])
+
 
 class CacheClassificationTest(unittest.TestCase):
     def _snapshot(

@@ -37,12 +37,20 @@ JSON and log have different roles and must not contain the same JSON object. Eve
 
 ## Task Lifecycle
 
-Start before changing code:
+Before starting, every business repository must ignore the tool-owned runtime path. Use a shared `.gitignore` rule or a local `.git/info/exclude` rule:
+
+```gitignore
+.cmbdevclaw/large_tool_results/
+```
+
+The runner validates this rule but never writes either Git configuration file. Start before changing code:
 
 ```bash
 python hooks/task_runner.py start --workspace "$ARTIFACT_WORKSPACE" --feature "$FEATURE" \
   --task-id T001 --code-workspace "$BUSINESS_REPO"
 ```
+
+`--code-workspace` locates a repository and defines the base for task `scope.paths`. Git resolves a supplied module directory to the repository root, while start projects module-relative scope paths to Git-root-relative `resolvedScopePaths`. The start response records `scopePathBase=requested_code_workspace`, `requestedCodeWorkspaces`, `workspacePrefixes`, `resolvedScopePaths`, and the resolved `repositories[].path`. Snapshots still hash tracked and untracked, non-ignored file contents across the complete Git root. Complete, abort, and resume must receive the same requested module paths; changing only the module under the same Git root fails with `task_run_requested_workspace_mismatch`. Staging or unstaging a file does not change its content hash and therefore does not create a task-run delta.
 
 Complete after implementation. Validation commands come from `plan.json`; command text, output, exit code, and changed files are not accepted from the caller:
 
@@ -62,7 +70,20 @@ python hooks/task_runner.py complete --workspace "$ARTIFACT_WORKSPACE" --feature
 
 This mode requires an empty snapshot diff, a real supporting file, and a required behavior/integration/E2E/static validation. Compile, typecheck, or lint alone cannot complete a no-change task.
 
+`--supporting-file` is relative to the resolved Git root; prefix it with `repoId:` for a multi-repository run. Verified-existing mode is only for behavior that existed before start. It is not a recovery mechanism for implementation files absorbed into a replacement run's baseline, and the runner rejects conflicts found in earlier aborted runs.
+
 `start` also stores a hash of the task contract, excluding only runtime status/evidence pointers. Do not edit the active task's goal, scope, AC, validation commands, or other contract fields after start; `complete`, recovery, and `code-done` reject contract drift. Abort the run and restart after an intentional Plan correction.
+
+An out-of-scope result with `requiredAction=fix_workspace_and_retry_same_run` means the change is outside the requested workspace: fix or ignore the reported tool output and retry `complete` with the same run ID. `requiredAction=correct_plan_scope_and_rebuild_task_baseline` means the change is inside the requested workspace but missing from the declared task scope. Preserve the patch, force-abort with an audit reason, correct the Plan through its writer, restore task files, start from the corrected contract, and reapply the patch. Do not abort just to pass a narrower workspace or to restage files. Abort rejects a changed repository by default. Intentional abandonment requires `--force-with-changes` plus `--abort-why`, and records the changed snapshot for audit.
+
+An accidentally aborted run that has no validation evidence can resume with its original snapshot:
+
+```bash
+python hooks/task_runner.py resume --workspace "$ARTIFACT_WORKSPACE" --feature "$FEATURE" \
+  --task-id T001 --run-id "$ORIGINAL_RUN_ID" --code-workspace "$BUSINESS_REPO"
+```
+
+Resume rejects contract drift, repository mismatch, evidence-bearing runs, and any competing active run in the feature.
 
 If validation fails, fail evidence and its log are still written, while the task becomes `failed`. After interruption, use `recover` with the same arguments. Recovery can adopt evidence already appended for the same `runId` and command, so a crash between evidence append and run-state update does not duplicate validation. A crash between JSONL append and index commit is repaired from `evidence/.pending` before the next append. Use `inspect` to read run state and `abort` only before evidence reaches its terminal write phase.
 

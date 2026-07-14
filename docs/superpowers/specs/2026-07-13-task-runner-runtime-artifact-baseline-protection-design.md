@@ -16,12 +16,13 @@ Two failure modes make that safety model difficult to operate:
 - Prevent accidental abort when a run has unrecorded repository changes.
 - Allow a deliberately aborted, pre-evidence run to resume with its original snapshot.
 - Make workspace resolution and snapshot semantics explicit in command output and documentation.
+- Resolve module-relative `scope.paths` against the exact requested code workspace while keeping repository-wide snapshots.
 - Reject `verified_existing` when an earlier aborted run proves that the current implementation was created after that earlier baseline.
 - Provide an exact recovery path for existing affected runs without deleting or restaging implementation files.
 
 ## Non-Goals
 
-- Do not limit snapshots to the requested subdirectory. A subdirectory is only a locator for its containing Git repository.
+- Do not limit snapshots to the requested subdirectory. A subdirectory locates its containing Git repository and defines the base for task `scope.paths`, while snapshot coverage remains repository-wide.
 - Do not silently exclude `.cmbdevclaw` or accept caller-provided arbitrary snapshot exclusions.
 - Do not modify a business repository's `.gitignore` or `.git/info/exclude` automatically.
 - Do not infer which dirty files belong to a task when the plan has no `scope.paths`; conservative rejection is preferred.
@@ -75,6 +76,30 @@ Every new run stores:
 ```
 
 The existing `repositories[].path` remains the resolved Git root. CLI output therefore makes it clear that a requested module directory still maps to a repository-wide snapshot.
+
+### Requested-Workspace Scope Resolution
+
+For a new single-repository run, every task `scope.paths` entry is relative to the exact `--code-workspace` supplied to `start`. Git snapshots and `fileChanges[].path` remain relative to the resolved Git root. Start computes the requested workspace's Git-root-relative prefix and stores the canonical projection:
+
+```json
+{
+  "scopePathBase": "requested_code_workspace",
+  "requestedCodeWorkspaces": ["<absolute requested module path>"],
+  "workspacePrefixes": ["path/from/git/root/to/module"],
+  "declaredScopePaths": ["src/main/java/example"],
+  "resolvedScopePaths": ["path/from/git/root/to/module/src/main/java/example"]
+}
+```
+
+All canonical paths use Git's forward-slash form regardless of operating system. Absolute paths, `..`, empty normalized paths, and requested workspaces outside the resolved Git root are rejected before run creation.
+
+`complete`, `abort`, and `resume` must receive the same requested workspace paths in the same repository order. Matching only the same Git root is insufficient because a different module directory would change the scope base. A mismatch fails with `task_run_requested_workspace_mismatch`.
+
+For multiple repositories, every scope entry must use `repoId:relative/path`. The relative portion is resolved against that repository's requested workspace. An unprefixed entry fails with `scope_path_repository_prefix_required`. Supplying two different requested directories that resolve to the same Git root is rejected as `ambiguous_code_workspace_base`.
+
+Runs created before `scopePathBase` existed retain the legacy behavior: their `scope.paths` are interpreted relative to the Git root. New runs never accept both interpretations, because dual matching would silently widen the declared scope.
+
+Scope normalization does not repair an incomplete plan. Domain, test, resource, migration, or configuration directories that the task is expected to modify must be declared before start. Out-of-scope errors include both declared and resolved scope paths. A changed file inside the requested workspace but outside the resolved scope returns `requiredAction=correct_plan_scope_and_rebuild_task_baseline`; a change outside the requested workspace keeps `requiredAction=fix_workspace_and_retry_same_run`.
 
 ### Abort Protection
 
@@ -181,6 +206,12 @@ For the reported Windows workspace:
 
 - `start` rejects an unignored runtime path before creating run state.
 - `start` reports requested module paths and resolved Git roots.
+- A module-relative scope matches Git-root-relative changed paths after canonical resolution.
+- A missing domain, test, or resources scope remains out of scope after prefix resolution.
+- Complete, abort, and resume reject a different requested module under the same Git root.
+- Windows separators normalize to Git forward-slash paths.
+- Multi-repository scope paths require `repoId:` and resolve against the matching requested workspace.
+- Legacy run states without scope metadata retain Git-root-relative matching.
 - Staging and unstaging unchanged file content never creates a snapshot delta.
 - `abort` succeeds when the workspace matches the original snapshot.
 - `abort` rejects changed workspaces and leaves run/task state unchanged.

@@ -22,7 +22,7 @@ The current checkout contains relevant uncommitted extraction work in `hooks/rep
 - Modify: `tests/test_task_runner.py`
 - Modify: `tests/test_batched_plan.py`
 
-- [ ] **Step 1: Add failing repository policy tests**
+- [x] **Step 1: Add failing repository policy tests**
 
 Add tests that call `unignored_runtime_artifact_paths` before and after writing the narrow rule to `.git/info/exclude`:
 
@@ -43,7 +43,7 @@ def test_runtime_artifact_path_must_be_git_ignored(self) -> None:
         self.assertEqual(unignored_runtime_artifact_paths(repo), [])
 ```
 
-- [ ] **Step 2: Run the unit test and observe the missing API**
+- [x] **Step 2: Run the unit test and observe the missing API**
 
 Run:
 
@@ -53,7 +53,7 @@ python -m unittest tests.test_code_exploration.RepositorySnapshotTest.test_runti
 
 Expected: `ImportError` for `unignored_runtime_artifact_paths`.
 
-- [ ] **Step 3: Implement the narrow ignore-policy helper**
+- [x] **Step 3: Implement the narrow ignore-policy helper**
 
 Add to `hooks/repository_snapshot.py`:
 
@@ -77,7 +77,7 @@ def unignored_runtime_artifact_paths(
     return unignored
 ```
 
-- [ ] **Step 4: Give all existing task-runner fixtures the required local ignore rule**
+- [x] **Step 4: Give all existing task-runner fixtures the required local ignore rule**
 
 Immediately after each temporary Git repository is initialized, write:
 
@@ -90,7 +90,7 @@ Immediately after each temporary Git repository is initialized, write:
 
 Apply the equivalent statement for secondary repositories and both standalone repositories in `tests/test_batched_plan.py`.
 
-- [ ] **Step 5: Verify repository snapshot tests**
+- [x] **Step 5: Verify repository snapshot tests**
 
 Run:
 
@@ -106,7 +106,7 @@ Expected: all `RepositorySnapshotTest` tests pass.
 - Modify: `hooks/task_runner.py`
 - Modify: `tests/test_task_runner.py`
 
-- [ ] **Step 1: Add failing start preflight and metadata tests**
+- [x] **Step 1: Add failing start preflight and metadata tests**
 
 Cover both an unignored repository and a requested module subdirectory:
 
@@ -147,7 +147,7 @@ def test_start_reports_requested_workspace_and_resolved_git_root(self) -> None:
         self.assertFalse(payload["stagingAffectsSnapshot"])
 ```
 
-- [ ] **Step 2: Run the focused tests and verify failure**
+- [x] **Step 2: Run the focused tests and verify failure**
 
 Run:
 
@@ -159,7 +159,7 @@ python -m unittest \
 
 Expected: failures because start has no preflight or metadata fields.
 
-- [ ] **Step 3: Add structured task-runner errors**
+- [x] **Step 3: Add structured task-runner errors**
 
 Replace the empty error type and add a shared CLI emitter:
 
@@ -177,7 +177,7 @@ def _emit_error(exc: ValueError) -> int:
 
 All command handlers must call `_emit_error(exc)` in their exception branches.
 
-- [ ] **Step 4: Add runtime ignore preflight before run creation**
+- [x] **Step 4: Add runtime ignore preflight before run creation**
 
 Import `unignored_runtime_artifact_paths` and add:
 
@@ -197,7 +197,7 @@ def _assert_runtime_artifacts_ignored(repositories: RepositoryMap) -> None:
 
 Call it immediately after `_resolve_repositories` in `_start_task_unlocked`, before `_repository_state` or any plan mutation.
 
-- [ ] **Step 5: Persist explicit snapshot metadata**
+- [x] **Step 5: Persist explicit snapshot metadata**
 
 Add these run-state fields without changing `repositories[].path`:
 
@@ -207,7 +207,7 @@ Add these run-state fields without changing `repositories[].path`:
 "stagingAffectsSnapshot": False,
 ```
 
-- [ ] **Step 6: Verify focused and existing start tests**
+- [x] **Step 6: Verify focused and existing start tests**
 
 Run:
 
@@ -226,7 +226,7 @@ Expected: all tests pass.
 - Modify: `hooks/task_runner.py`
 - Modify: `tests/test_task_runner.py`
 
-- [ ] **Step 1: Add failing abort-protection tests**
+- [x] **Step 1: Add failing abort-protection tests**
 
 Add tests that modify `implemented.txt` after start and assert normal abort fails without state mutation, while forced abort requires a reason and records audit data:
 
@@ -255,11 +255,11 @@ def test_abort_rejects_unrecorded_changes_without_mutating_run(self) -> None:
 
 Add a forced-abort test using `--force-with-changes --abort-why "abandon implementation"` and assert `changedFilesAtAbort`, `fileChangesAtAbort`, `abortSnapshot`, and `abortWhy` are stored.
 
-- [ ] **Step 2: Add a failing resume integration test**
+- [x] **Step 2: Add a failing resume integration test**
 
 Force-abort the original run, start and cleanly abort a replacement run whose baseline contains `implemented.txt`, then resume the original run and complete it. Assert completion evidence reports `implemented.txt` as created.
 
-- [ ] **Step 3: Run abort/resume tests and verify failure**
+- [x] **Step 3: Run abort/resume tests and verify failure**
 
 Run:
 
@@ -272,7 +272,7 @@ python -m unittest \
 
 Expected: failures because abort ignores repository state and `resume` is not a command.
 
-- [ ] **Step 4: Extract reusable repository-diff collection**
+- [x] **Step 4: Extract reusable repository-diff collection**
 
 Move the complete-time repository loop into:
 
@@ -308,7 +308,7 @@ def _repository_changes(
 
 Add `_changed_files(file_changes)` to normalize `path` and `fromPath`. Use both helpers in `complete` and `abort`.
 
-- [ ] **Step 5: Implement guarded and forced abort**
+- [x] **Step 5: Implement guarded and forced abort**
 
 Change `abort_task` and `_abort_task_unlocked` to accept repositories plus `force_with_changes` and `abort_why`. Reject changed snapshots unless forced; reject forced changed aborts without a reason. On forced abort, persist:
 
@@ -326,7 +326,7 @@ state.update(
 
 Add `--force-with-changes` and `--abort-why` to the abort parser.
 
-- [ ] **Step 6: Implement resume without recapturing the baseline**
+- [x] **Step 6: Implement resume without recapturing the baseline**
 
 Add `_resume_task_unlocked`, `resume_task`, `_cmd_resume`, and a `resume` parser using the existing common run arguments. Validate status, evidence, task contract, repositories, runtime ignore policy, and competing active runs before plan mutation. After `set_task_execution_status(..., "in_progress")` succeeds, update only lifecycle fields:
 
@@ -342,7 +342,7 @@ state.update(
 
 Do not replace `snapshot` or `repositories`.
 
-- [ ] **Step 7: Make out-of-scope completion explicitly recoverable**
+- [x] **Step 7: Make out-of-scope completion explicitly recoverable**
 
 Raise the existing error with structured guidance:
 
@@ -356,7 +356,7 @@ raise TaskRunnerError(
 )
 ```
 
-- [ ] **Step 8: Verify abort/resume and recovery regressions**
+- [x] **Step 8: Verify abort/resume and recovery regressions**
 
 Run:
 
@@ -377,7 +377,7 @@ Expected: all tests pass.
 - Modify: `hooks/task_runner.py`
 - Modify: `tests/test_task_runner.py`
 
-- [ ] **Step 1: Add a failing historical-baseline test**
+- [x] **Step 1: Add a failing historical-baseline test**
 
 Start a run, create an in-scope file, force-abort it, start a replacement run with that file already present, then attempt verified-existing completion. Assert:
 
@@ -390,7 +390,7 @@ self.assertIn(
 
 Also keep the existing genuine verified-existing test as the non-conflicting control.
 
-- [ ] **Step 2: Run the focused test and verify the false claim currently passes**
+- [x] **Step 2: Run the focused test and verify the false claim currently passes**
 
 Run:
 
@@ -402,7 +402,7 @@ python -m unittest \
 
 Expected: the new rejection test fails.
 
-- [ ] **Step 3: Implement prior aborted-run conflict detection**
+- [x] **Step 3: Implement prior aborted-run conflict detection**
 
 Add a helper that reads older aborted run JSON files, uses `changedFilesAtAbort` when present, otherwise compares the prior original snapshot with current repository snapshots, and filters changes through current `scope.paths`:
 
@@ -436,7 +436,7 @@ def _prior_aborted_run_conflict(
 
 Before selecting `verified_existing`, reject a conflict with the specified error and structured `requiredAction="resume_original_run_or_rebuild_baseline"`.
 
-- [ ] **Step 4: Verify both guarded and genuine no-change flows**
+- [x] **Step 4: Verify both guarded and genuine no-change flows**
 
 Run:
 
@@ -456,7 +456,7 @@ Expected: all tests pass.
 - Modify: `skills/autodev/autodev-code/SKILL.md`
 - Modify: `tests/test_board_config_invariants.py`
 
-- [ ] **Step 1: Update operator documentation**
+- [x] **Step 1: Update operator documentation**
 
 Document the required ignore rule and the exact behavior:
 
@@ -466,11 +466,11 @@ Document the required ignore rule and the exact behavior:
 
 State that `--code-workspace` resolves to the Git root, snapshots compare file content rather than staging state, out-of-scope failures must retry the same run, `resume` restores an accidentally aborted original baseline, and `--no-code-change-why` is not a baseline-recovery mechanism.
 
-- [ ] **Step 2: Update the Code skill contract**
+- [x] **Step 2: Update the Code skill contract**
 
 Add the pre-start check, same-run retry rule, protected abort command, and resume command to `skills/autodev/autodev-code/SKILL.md`. Require repository-root-relative supporting-file paths.
 
-- [ ] **Step 3: Add invariant assertions for the workflow text**
+- [x] **Step 3: Add invariant assertions for the workflow text**
 
 Assert the skill contains:
 
@@ -482,7 +482,7 @@ self.assertIn("同一个 run", content)
 self.assertIn("--no-code-change-why", content)
 ```
 
-- [ ] **Step 4: Run focused suites**
+- [x] **Step 4: Run focused suites**
 
 Run:
 
@@ -496,7 +496,7 @@ python -m unittest \
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Run the full Python suite**
+- [x] **Step 5: Run the full Python suite**
 
 Run:
 
@@ -506,7 +506,9 @@ python -m unittest discover -s tests
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Inspect final scope and whitespace**
+Actual on 2026-07-13: the focused suites pass. Full discovery runs 588 tests with 32 failures and 8 errors; the implementation-before baseline at `100ce34` runs 577 tests with the same 32 failures and 8 errors. The unchanged failures are in workflow template, artifact glob, skip CLI, and legacy path-contract tests outside this plan.
+
+- [x] **Step 6: Inspect final scope and whitespace**
 
 Run:
 
@@ -516,3 +518,47 @@ git status --short
 ```
 
 Expected: no whitespace errors; status contains the pre-existing exploration changes plus the files intentionally modified by this plan.
+
+### Task 6: Resolve Scope Paths Against The Requested Module Workspace
+
+**Files:**
+- Modify: `hooks/task_runner.py`
+- Modify: `tests/test_task_runner.py`
+- Modify: `docs/evidence-task-runner.md`
+- Modify: `skills/autodev/autodev-code/SKILL.md`
+- Modify: `skills/autodev/autodev-plan/SKILL.md`
+- Modify: `tests/test_board_config_invariants.py`
+
+- [x] **Step 1: Add a failing monorepo module-scope integration test**
+
+Create `code/backend/LF39.05_bccompliancemng`, set task scope to `src/main/java/example`, start with the module directory, create the implementation below it, and assert complete succeeds while evidence retains the Git-root-relative changed path.
+
+- [x] **Step 2: Add failing requested-workspace consistency and incomplete-scope tests**
+
+Assert complete rejects a sibling module under the same Git root with `task_run_requested_workspace_mismatch`. Assert a domain file under the requested module remains out of scope when only adapter is declared, and the structured error returns `correct_plan_scope_and_rebuild_task_baseline`, `declaredScopePaths`, and `resolvedScopePaths`.
+
+- [x] **Step 3: Run focused tests and confirm the current direct path comparison fails**
+
+Run the new `TaskRunnerTest` cases. Expected: module-relative scope is reported out of scope, workspace substitution is accepted, and structured scope details are absent.
+
+- [x] **Step 4: Implement deterministic scope projection at start**
+
+Add helpers that pair requested workspaces with resolved repositories, normalize Git-style paths, reject ambiguous bases, and build `workspacePrefixes` plus `resolvedScopePaths`. Store `scopePathBase=requested_code_workspace`, `declaredScopePaths`, and the projection in the run state before saving it.
+
+- [x] **Step 5: Enforce the stored requested workspace and resolved scope**
+
+Replace complete-time use of raw task scope with run-state `resolvedScopePaths`. Validate exact requested workspace equality in complete, abort, and resume. Legacy states without `scopePathBase` continue to use raw Git-root-relative task scope.
+
+- [x] **Step 6: Add multi-repository prefix validation**
+
+Require `repoId:relative/path` when more than one repository participates, resolve each relative part against the matching requested workspace, and reject duplicate requested bases for the same Git root.
+
+- [x] **Step 7: Update Plan and Code contracts**
+
+Document that `scope.paths` is relative to `--code-workspace`, does not limit repository snapshot coverage, and must enumerate domain/test/resources when implementation touches them. Add invariant assertions for the new contract and error actions.
+
+- [x] **Step 8: Run focused and full regression verification**
+
+Run `RepositorySnapshotTest`, `TaskRunnerTest`, `test_batched_plan`, and `test_board_config_invariants`; then run full discovery and compare any failures with the recorded baseline.
+
+Actual on 2026-07-13 after Task 6: the four affected suites pass 100 tests. Full discovery runs 603 tests with the same 32 failures and 8 errors recorded before implementation; no failing test name changed.

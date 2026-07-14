@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -44,6 +44,7 @@ from hooks.repository_snapshot import (  # noqa: E402
     resolve_git_root,
     resolve_repositories,
     snapshot_changes,
+    unignored_runtime_artifact_paths,
 )
 
 
@@ -52,7 +53,9 @@ BEHAVIOR_VALIDATION_KINDS = {"behavior_test", "integration_test", "e2e_test", "s
 
 
 class TaskRunnerError(ValueError):
-    pass
+    def __init__(self, message: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 def _utc_now() -> str:
@@ -62,6 +65,11 @@ def _utc_now() -> str:
 def _emit(ok: bool, **data: Any) -> int:
     print(json.dumps({"ok": ok, **data}, ensure_ascii=False, indent=2))
     return 0 if ok else 1
+
+
+def _emit_error(exc: ValueError) -> int:
+    details = exc.details if isinstance(exc, TaskRunnerError) else {}
+    return _emit(False, error=str(exc), **details)
 
 
 def _feature_dir(workspace: Path, feature: str) -> Path:
@@ -133,6 +141,125 @@ def _repository_state(repositories: RepositoryMap) -> list[dict[str, Any]]:
     ]
 
 
+def _assert_runtime_artifacts_ignored(repositories: RepositoryMap) -> None:
+    for repository_id, repo in repositories.items():
+        unignored = unignored_runtime_artifact_paths(repo)
+        if unignored:
+            raise TaskRunnerError(
+                f"runtime_artifact_path_not_ignored:{repository_id}:{unignored[0]}",
+                requiredAction="configure_git_ignore_and_retry",
+                resolvedGitRoots=[str(item) for item in repositories.values()],
+                runtimeArtifactPaths=unignored,
+            )
+
+
+def _normalize_git_relative_path(raw: str, *, error: str) -> str:
+    normalized = raw.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    windows_path = PureWindowsPath(raw)
+    value = normalized.strip("/")
+    if (
+        not value
+        or value == "."
+        or path.is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or ".." in path.parts
+    ):
+        raise TaskRunnerError(f"{error}:{raw}")
+    return PurePosixPath(value).as_posix()
+
+
+def _scope_workspaces(
+    requested_workspaces: list[Path],
+    repositories: RepositoryMap,
+) -> list[dict[str, str]]:
+    contexts: list[dict[str, str]] = []
+    seen_roots: dict[Path, Path] = {}
+    for requested in requested_workspaces:
+        requested = requested.resolve()
+        root = _git_root(requested)
+        previous = seen_roots.get(root)
+        if previous is not None:
+            if previous != requested:
+                raise TaskRunnerError(
+                    f"ambiguous_code_workspace_base:{root}",
+                    requestedCodeWorkspaces=[str(previous), str(requested)],
+                )
+            continue
+        repository_id = root.name
+        if repositories.get(repository_id) != root:
+            raise TaskRunnerError(f"task_run_repository_snapshot_missing:{repository_id}")
+        try:
+            relative = requested.relative_to(root)
+        except ValueError as exc:
+            raise TaskRunnerError(f"code_workspace_outside_git_root:{requested}") from exc
+        prefix = "" if relative == Path(".") else relative.as_posix()
+        contexts.append(
+            {
+                "repository": repository_id,
+                "requestedPath": str(requested),
+                "resolvedGitRoot": str(root),
+                "workspacePrefix": prefix,
+            }
+        )
+        seen_roots[root] = requested
+    return contexts
+
+
+def _resolved_scope_paths(
+    task: dict[str, Any],
+    contexts: list[dict[str, str]],
+) -> tuple[list[str], list[str]]:
+    scope = task.get("scope")
+    raw_paths = scope.get("paths") if isinstance(scope, dict) else []
+    raw_paths = raw_paths if isinstance(raw_paths, list) else []
+    declared = [item for item in raw_paths if isinstance(item, str)]
+    if not declared:
+        return [], []
+    multiple = len(contexts) > 1
+    by_repository = {item["repository"]: item for item in contexts}
+    resolved: list[str] = []
+    for raw in declared:
+        repository_id: str | None = None
+        relative = raw
+        if multiple:
+            repository_id, separator, relative = raw.partition(":")
+            if not separator:
+                raise TaskRunnerError(f"scope_path_repository_prefix_required:{raw}")
+            if repository_id not in by_repository:
+                raise TaskRunnerError(f"scope_path_repository_not_found:{raw}")
+        context = (
+            by_repository[repository_id]
+            if repository_id is not None
+            else contexts[0]
+        )
+        normalized = _normalize_git_relative_path(relative, error="invalid_scope_path")
+        prefix = context["workspacePrefix"]
+        projected = f"{prefix}/{normalized}" if prefix else normalized
+        resolved.append(f"{repository_id}:{projected}" if repository_id else projected)
+    return declared, sorted(set(resolved))
+
+
+def _assert_requested_workspaces_match(
+    state: dict[str, Any],
+    requested_workspaces: list[Path],
+    repositories: RepositoryMap,
+) -> None:
+    if state.get("scopePathBase") != "requested_code_workspace":
+        return
+    actual_contexts = _scope_workspaces(requested_workspaces, repositories)
+    actual = [item["requestedPath"] for item in actual_contexts]
+    expected = state.get("requestedCodeWorkspaces")
+    if expected != actual:
+        raise TaskRunnerError(
+            "task_run_requested_workspace_mismatch",
+            expectedRequestedCodeWorkspaces=expected,
+            requestedCodeWorkspaces=actual,
+            resolvedGitRoots=[str(item) for item in repositories.values()],
+        )
+
+
 def _repository_snapshots_match(
     expected: list[dict[str, Any]],
     actual: list[dict[str, Any]],
@@ -178,6 +305,46 @@ def _snapshot_changes(
     return snapshot_changes(before, after)
 
 
+def _changed_files(file_changes: list[dict[str, str]]) -> list[str]:
+    return sorted(
+        {
+            value
+            for change in file_changes
+            for value in (change.get("path"), change.get("fromPath"))
+            if isinstance(value, str)
+        }
+    )
+
+
+def _repository_changes(
+    state: dict[str, Any],
+    repositories: RepositoryMap,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    repository_states = _state_repositories(state)
+    if not repository_states:
+        raise TaskRunnerError("task_run_snapshot_missing")
+    multiple = len(repository_states) > 1
+    changes: list[dict[str, str]] = []
+    final: list[dict[str, Any]] = []
+    for repository_state in repository_states:
+        repository_id = str(repository_state.get("id", ""))
+        before = repository_state.get("snapshot")
+        repo = repositories.get(repository_id)
+        if not isinstance(before, dict) or repo is None:
+            raise TaskRunnerError(f"task_run_repository_snapshot_missing:{repository_id}")
+        after = _git_snapshot(repo)
+        repo_changes = _snapshot_changes(before, after)
+        if multiple:
+            for change in repo_changes:
+                change["path"] = f"{repository_id}:{change['path']}"
+                if "fromPath" in change:
+                    change["fromPath"] = f"{repository_id}:{change['fromPath']}"
+                change["repository"] = repository_id
+        changes.extend(repo_changes)
+        final.append({"id": repository_id, "path": str(repo), "snapshot": after})
+    return changes, final
+
+
 def _new_run_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"run-{stamp}-{uuid.uuid4().hex[:8]}"
@@ -186,6 +353,20 @@ def _new_run_id() -> str:
 def _save_run(path: Path, state: dict[str, Any]) -> None:
     state["updatedAt"] = _utc_now()
     atomic_write_json(path, state)
+
+
+def _active_feature_runs(feature_dir: Path, *, exclude: Path | None = None) -> list[str]:
+    active: list[str] = []
+    for path in (feature_dir / ".task-runs").glob("T*/*.json"):
+        if exclude is not None and path == exclude:
+            continue
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if item.get("status") not in {"done", "failed", "aborted"}:
+            active.append(f"{item.get('taskId', path.parent.name)}:{item.get('runId', path.stem)}")
+    return sorted(active)
 
 
 def _start_task_unlocked(
@@ -202,22 +383,28 @@ def _start_task_unlocked(
         raise TaskRunnerError("unfinished_task_dependencies:" + ",".join(unfinished))
     if normalize_status(task.get("status")) == "done":
         raise TaskRunnerError(f"task_already_done:{task_id}")
-    repositories = _resolve_repositories(code_workspace)
+    requested_workspaces = (
+        [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    )
+    repositories = _resolve_repositories(requested_workspaces)
+    _assert_runtime_artifacts_ignored(repositories)
+    scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
+    declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
     repository_state = _repository_state(repositories)
-    active: list[str] = []
-    runs_root = feature_dir / ".task-runs"
-    for path in runs_root.glob("T*/*.json"):
-        try:
-            item = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if item.get("status") not in {"done", "failed", "aborted"}:
-            active.append(f"{item.get('taskId', path.parent.name)}:{item.get('runId', path.stem)}")
+    active = _active_feature_runs(feature_dir)
     if active:
         active_tasks = sorted({item.partition(":")[0] for item in active})
         if task_id in active_tasks:
-            raise TaskRunnerError("active_task_run_exists:" + ",".join(active))
-        raise TaskRunnerError("active_feature_task_run_exists:" + ",".join(active_tasks))
+            raise TaskRunnerError(
+                "active_task_run_exists:" + ",".join(active),
+                requiredAction="inspect_and_retry_existing_run",
+                activeRuns=active,
+            )
+        raise TaskRunnerError(
+            "active_feature_task_run_exists:" + ",".join(active_tasks),
+            requiredAction="inspect_and_retry_existing_run",
+            activeRuns=active,
+        )
 
     run_id = _new_run_id()
     state = {
@@ -229,7 +416,16 @@ def _start_task_unlocked(
         "taskContractSha256": task_contract_sha256(task),
         "status": "started",
         "codeWorkspace": str(next(iter(repositories.values()))),
+        "requestedCodeWorkspaces": [item["requestedPath"] for item in scope_workspaces],
+        "resolvedGitRoots": [item["resolvedGitRoot"] for item in scope_workspaces],
+        "workspacePrefixes": [item["workspacePrefix"] for item in scope_workspaces],
+        "scopeWorkspaces": scope_workspaces,
+        "scopePathBase": "requested_code_workspace",
+        "declaredScopePaths": declared_scope_paths,
+        "resolvedScopePaths": resolved_scope_paths,
         "repositories": repository_state,
+        "snapshotMode": "git_visible_file_content_sha256",
+        "stagingAffectsSnapshot": False,
         "startedAt": _utc_now(),
         "snapshot": repository_state[0]["snapshot"],
         "evidenceIds": [],
@@ -553,8 +749,12 @@ def _complete_task_unlocked(
     stored_batch = state.get("batchId")
     if stored_batch is not None and stored_batch != batch_id:
         raise TaskRunnerError(f"task_batch_changed_after_start:{task_id}")
-    repositories = _resolve_repositories(code_workspace)
+    requested_workspaces = (
+        [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    )
+    repositories = _resolve_repositories(requested_workspaces)
     _assert_repositories_match(state, repositories)
+    _assert_requested_workspaces_match(state, requested_workspaces, repositories)
     if state.get("status") in {"done", "failed"}:
         return state.get("status") == "done", state
     if state.get("status") == "evidence_written":
@@ -582,29 +782,9 @@ def _complete_task_unlocked(
         _save_run(path, state)
 
     repository_states = _state_repositories(state)
-    if not repository_states:
-        raise TaskRunnerError("task_run_snapshot_missing")
     multiple_repositories = len(repository_states) > 1
-    file_changes: list[dict[str, str]] = []
-    final_repositories: list[dict[str, Any]] = []
-    for repository_state in repository_states:
-        repository_id = str(repository_state.get("id", ""))
-        before = repository_state.get("snapshot")
-        repo = repositories.get(repository_id)
-        if not isinstance(before, dict) or repo is None:
-            raise TaskRunnerError(f"task_run_repository_snapshot_missing:{repository_id}")
-        final_snapshot = _git_snapshot(repo)
-        repo_changes = _snapshot_changes(before, final_snapshot)
-        if multiple_repositories:
-            for change in repo_changes:
-                change["path"] = f"{repository_id}:{change['path']}"
-                if "fromPath" in change:
-                    change["fromPath"] = f"{repository_id}:{change['fromPath']}"
-                change["repository"] = repository_id
-        file_changes.extend(repo_changes)
-        final_repositories.append({"id": repository_id, "path": str(repo), "snapshot": final_snapshot})
-    scope = task.get("scope")
-    scope_paths = scope.get("paths") if isinstance(scope, dict) and isinstance(scope.get("paths"), list) else []
+    file_changes, final_repositories = _repository_changes(state, repositories)
+    declared_scope_paths, scope_paths = _run_scope_paths(state, task)
     if scope_paths:
         outside = [
             path
@@ -613,7 +793,21 @@ def _complete_task_unlocked(
             if isinstance(path, str) and not _path_in_scope(path, scope_paths)
         ]
         if outside:
-            raise TaskRunnerError("out_of_scope_changes_detected:" + ",".join(sorted(set(outside))))
+            required_action = (
+                "correct_plan_scope_and_rebuild_task_baseline"
+                if _paths_within_requested_workspaces(outside, state)
+                else "fix_workspace_and_retry_same_run"
+            )
+            raise TaskRunnerError(
+                "out_of_scope_changes_detected:" + ",".join(sorted(set(outside))),
+                requiredAction=required_action,
+                runId=run_id,
+                changedFiles=_changed_files(file_changes),
+                declaredScopePaths=declared_scope_paths,
+                resolvedScopePaths=scope_paths,
+                requestedCodeWorkspaces=state.get("requestedCodeWorkspaces", []),
+                resolvedGitRoots=[str(item) for item in repositories.values()],
+            )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
     if file_changes:
         if no_code_change_why or normalized_supporting:
@@ -622,20 +816,29 @@ def _complete_task_unlocked(
     else:
         if not no_code_change_why or not normalized_supporting:
             raise TaskRunnerError("no_code_change_requires_reason_and_supporting_files")
+        conflict = _prior_aborted_run_conflict(
+            feature_dir,
+            task,
+            run_id,
+            repositories,
+            scope_paths,
+        )
+        if conflict:
+            prior_run_id, prior_changed_files = conflict
+            raise TaskRunnerError(
+                f"verified_existing_conflicts_with_prior_run_changes:{prior_run_id}:"
+                + ",".join(prior_changed_files),
+                requiredAction="resume_original_run_or_rebuild_baseline",
+                priorRunId=prior_run_id,
+                changedFiles=prior_changed_files,
+            )
         commands = [item for item in task.get("validationCommands", []) if isinstance(item, dict)]
         if not any(item.get("kind") in BEHAVIOR_VALIDATION_KINDS for item in commands if item.get("required") is True):
             raise TaskRunnerError("verified_existing_requires_behavior_validation")
         completion_mode = "verified_existing"
 
     _check_required_coverage(task)
-    changed_files = sorted(
-        {
-            value
-            for change in file_changes
-            for value in (change.get("path"), change.get("fromPath"))
-            if isinstance(value, str)
-        }
-    )
+    changed_files = _changed_files(file_changes)
     if state.get("status") == "validation_running":
         if state.get("changedFiles") != changed_files or state.get("fileChanges") != file_changes:
             raise TaskRunnerError("task_run_workspace_changed_after_validation_started")
@@ -757,22 +960,149 @@ def _complete_task_unlocked(
 
 
 def _path_in_scope(path: str, scope_paths: list[Any]) -> bool:
-    candidate = Path(path)
+    candidate = PurePosixPath(path)
     for raw in scope_paths:
         if not isinstance(raw, str) or not raw:
             continue
-        scope = Path(raw)
+        scope = PurePosixPath(raw)
         if candidate == scope or scope in candidate.parents:
             return True
     return False
 
 
-def _abort_task_unlocked(workspace: Path, feature: str, task_id: str, run_id: str) -> dict[str, Any]:
+def _run_scope_paths(
+    state: dict[str, Any],
+    task: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    scope = task.get("scope")
+    raw_paths = scope.get("paths") if isinstance(scope, dict) else []
+    raw_paths = raw_paths if isinstance(raw_paths, list) else []
+    declared = [item for item in raw_paths if isinstance(item, str)]
+    if state.get("scopePathBase") != "requested_code_workspace":
+        return declared, declared
+    stored_declared = state.get("declaredScopePaths")
+    stored_resolved = state.get("resolvedScopePaths")
+    if not isinstance(stored_declared, list) or not all(
+        isinstance(item, str) for item in stored_declared
+    ):
+        raise TaskRunnerError("task_run_declared_scope_paths_missing")
+    if not isinstance(stored_resolved, list) or not all(
+        isinstance(item, str) for item in stored_resolved
+    ):
+        raise TaskRunnerError("task_run_resolved_scope_paths_missing")
+    return stored_declared, stored_resolved
+
+
+def _paths_within_requested_workspaces(paths: list[str], state: dict[str, Any]) -> bool:
+    contexts = state.get("scopeWorkspaces")
+    if not isinstance(contexts, list) or not contexts:
+        return False
+    by_repository = {
+        item.get("repository"): item
+        for item in contexts
+        if isinstance(item, dict) and isinstance(item.get("repository"), str)
+    }
+    multiple = len(contexts) > 1
+    for raw in paths:
+        repository_id: str | None = None
+        relative = raw
+        if multiple:
+            repository_id, separator, relative = raw.partition(":")
+            if not separator or repository_id not in by_repository:
+                return False
+        context = (
+            by_repository.get(repository_id)
+            if repository_id is not None
+            else contexts[0]
+        )
+        if not isinstance(context, dict):
+            return False
+        prefix = context.get("workspacePrefix")
+        if not isinstance(prefix, str) or not prefix:
+            return False
+        candidate = PurePosixPath(relative)
+        workspace = PurePosixPath(prefix)
+        if candidate != workspace and workspace not in candidate.parents:
+            return False
+    return True
+
+
+def _prior_aborted_run_conflict(
+    feature_dir: Path,
+    task: dict[str, Any],
+    current_run_id: str,
+    repositories: RepositoryMap,
+    scope_paths: list[str],
+) -> tuple[str, list[str]] | None:
+    for path in sorted(_runs_dir(feature_dir, str(task.get("id"))).glob("*.json")):
+        try:
+            prior = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if prior.get("runId") == current_run_id or prior.get("status") != "aborted":
+            continue
+        changed = prior.get("changedFilesAtAbort")
+        if not isinstance(changed, list):
+            try:
+                changed = _changed_files(_repository_changes(prior, repositories)[0])
+            except TaskRunnerError:
+                continue
+        relevant = [
+            item
+            for item in changed
+            if isinstance(item, str) and (not scope_paths or _path_in_scope(item, scope_paths))
+        ]
+        if relevant:
+            return str(prior.get("runId")), sorted(set(relevant))
+    return None
+
+
+def _abort_task_unlocked(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    code_workspace: Path | list[Path],
+    run_id: str,
+    *,
+    force_with_changes: bool,
+    abort_why: str | None,
+) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     path, state = _load_run(feature_dir, task_id, run_id)
     if state.get("status") in {"evidence_written", "done", "failed"}:
         raise TaskRunnerError(f"task_run_cannot_abort:{state.get('status')}")
+    requested_workspaces = (
+        [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    )
+    repositories = _resolve_repositories(requested_workspaces)
+    _assert_repositories_match(state, repositories)
+    _assert_requested_workspaces_match(state, requested_workspaces, repositories)
+    file_changes, final_repositories = _repository_changes(state, repositories)
+    changed_files = _changed_files(file_changes)
+    if file_changes and not force_with_changes:
+        raise TaskRunnerError(
+            "task_run_has_unrecorded_changes:" + ",".join(changed_files),
+            requiredAction="fix_workspace_and_retry_complete_or_force_abort",
+            changedFiles=changed_files,
+            resolvedGitRoots=[str(item) for item in repositories.values()],
+        )
+    if file_changes and force_with_changes and not abort_why:
+        raise TaskRunnerError(
+            "abort_with_changes_requires_reason",
+            requiredAction="provide_abort_reason_or_retry_complete",
+            changedFiles=changed_files,
+        )
     state["status"] = "aborted"
+    if file_changes:
+        state.update(
+            {
+                "abortSnapshot": final_repositories[0]["snapshot"],
+                "abortRepositories": final_repositories,
+                "fileChangesAtAbort": file_changes,
+                "changedFilesAtAbort": changed_files,
+                "abortWhy": abort_why,
+            }
+        )
     _save_run(path, state)
     try:
         result = set_task_execution_status(
@@ -792,6 +1122,69 @@ def _abort_task_unlocked(workspace: Path, feature: str, task_id: str, run_id: st
         _save_run(path, state)
         return state
     state["planStatusReset"] = True
+    _save_run(path, state)
+    return state
+
+
+def _resume_task_unlocked(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    code_workspace: Path | list[Path],
+    run_id: str,
+) -> dict[str, Any]:
+    feature_dir = _feature_dir(workspace, feature)
+    _, batch_id, task = _load_plan_and_task(feature_dir, task_id)
+    path, state = _load_run(feature_dir, task_id, run_id)
+    if state.get("status") != "aborted":
+        raise TaskRunnerError(f"task_run_cannot_resume:{state.get('status')}")
+    if (
+        state.get("evidenceIds")
+        or state.get("completionEvidenceIds")
+        or state.get("completedCommandEvidence")
+    ):
+        raise TaskRunnerError("task_run_cannot_resume_with_evidence")
+    if state.get("taskContractSha256") != task_contract_sha256(task):
+        raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
+    if state.get("batchId") is not None and state.get("batchId") != batch_id:
+        raise TaskRunnerError(f"task_batch_changed_after_start:{task_id}")
+    requested_workspaces = (
+        [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    )
+    repositories = _resolve_repositories(requested_workspaces)
+    _assert_repositories_match(state, repositories)
+    _assert_requested_workspaces_match(state, requested_workspaces, repositories)
+    _assert_runtime_artifacts_ignored(repositories)
+    active = _active_feature_runs(feature_dir, exclude=path)
+    if active:
+        active_tasks = sorted({item.partition(":")[0] for item in active})
+        if task_id in active_tasks:
+            raise TaskRunnerError(
+                "active_task_run_exists:" + ",".join(active),
+                requiredAction="finish_or_abort_active_run_before_resume",
+                activeRuns=active,
+            )
+        raise TaskRunnerError(
+            "active_feature_task_run_exists:" + ",".join(active_tasks),
+            requiredAction="finish_or_abort_active_run_before_resume",
+            activeRuns=active,
+        )
+    result = set_task_execution_status(
+        workspace,
+        feature,
+        task_id,
+        "in_progress",
+        expected_task_contract_sha256=str(state["taskContractSha256"]),
+    )
+    if not result.ok:
+        raise TaskRunnerError("plan_status_update_failed")
+    state.update(
+        {
+            "status": "started",
+            "resumedAt": _utc_now(),
+            "resumeCount": int(state.get("resumeCount", 0)) + 1,
+        }
+    )
     _save_run(path, state)
     return state
 
@@ -903,10 +1296,39 @@ def complete_task(
         )
 
 
-def abort_task(workspace: Path, feature: str, task_id: str, run_id: str) -> dict[str, Any]:
+def abort_task(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    code_workspace: Path | list[Path],
+    run_id: str,
+    *,
+    force_with_changes: bool,
+    abort_why: str | None,
+) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
-        return _abort_task_unlocked(workspace, feature, task_id, run_id)
+        return _abort_task_unlocked(
+            workspace,
+            feature,
+            task_id,
+            code_workspace,
+            run_id,
+            force_with_changes=force_with_changes,
+            abort_why=abort_why,
+        )
+
+
+def resume_task(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    code_workspace: Path | list[Path],
+    run_id: str,
+) -> dict[str, Any]:
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        return _resume_task_unlocked(workspace, feature, task_id, code_workspace, run_id)
 
 
 def run_project_checks(
@@ -1021,7 +1443,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
         state = start_task(workspace, feature, args.task_id, code_workspace)
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
-        return _emit(False, error=str(exc))
+        return _emit_error(exc)
 
 
 def _cmd_complete(args: argparse.Namespace) -> int:
@@ -1055,7 +1477,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             userMessage=batch_handoff.get("userMessage") if batch_handoff else None,
         )
     except (TaskRunnerError, ValueError) as exc:
-        return _emit(False, error=str(exc))
+        return _emit_error(exc)
 
 
 def _cmd_recover(args: argparse.Namespace) -> int:
@@ -1064,11 +1486,28 @@ def _cmd_recover(args: argparse.Namespace) -> int:
 
 def _cmd_abort(args: argparse.Namespace) -> int:
     try:
-        workspace, feature, _ = _resolve(args)
-        state = abort_task(workspace, feature, args.task_id, args.run_id)
+        workspace, feature, code_workspace = _resolve(args)
+        state = abort_task(
+            workspace,
+            feature,
+            args.task_id,
+            code_workspace,
+            args.run_id,
+            force_with_changes=args.force_with_changes,
+            abort_why=args.abort_why,
+        )
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
-        return _emit(False, error=str(exc))
+        return _emit_error(exc)
+
+
+def _cmd_resume(args: argparse.Namespace) -> int:
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        state = resume_task(workspace, feature, args.task_id, code_workspace, args.run_id)
+        return _emit(True, **state)
+    except (TaskRunnerError, ValueError) as exc:
+        return _emit_error(exc)
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
@@ -1083,7 +1522,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             runs.append(json.loads(path.read_text(encoding="utf-8")))
         return _emit(True, runs=runs)
     except (TaskRunnerError, ValueError, json.JSONDecodeError) as exc:
-        return _emit(False, error=str(exc))
+        return _emit_error(exc)
 
 
 def _cmd_project_check(args: argparse.Namespace) -> int:
@@ -1092,7 +1531,7 @@ def _cmd_project_check(args: argparse.Namespace) -> int:
         success, evidence_ids = run_project_checks(workspace, feature, code_workspace)
         return _emit(success, error=None if success else "project_validation_failed", evidenceIds=evidence_ids)
     except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
-        return _emit(False, error=str(exc))
+        return _emit_error(exc)
 
 
 def _cmd_activate_batch(args: argparse.Namespace) -> int:
@@ -1101,7 +1540,7 @@ def _cmd_activate_batch(args: argparse.Namespace) -> int:
         feature = resolve_feature(args.feature)
         return _emit(True, **activate_batch(workspace, feature, args.batch_id))
     except (TaskRunnerError, ValueError) as exc:
-        return _emit(False, error=str(exc))
+        return _emit_error(exc)
 
 
 def _cmd_code_session(args: argparse.Namespace) -> int:
@@ -1110,7 +1549,7 @@ def _cmd_code_session(args: argparse.Namespace) -> int:
         feature = resolve_feature(args.feature)
         return _emit(True, **code_session(workspace, feature))
     except (TaskRunnerError, ValueError) as exc:
-        return _emit(False, error=str(exc))
+        return _emit_error(exc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1143,7 +1582,13 @@ def main(argv: list[str] | None = None) -> int:
 
     abort = subparsers.add_parser("abort")
     common(abort, needs_run=True)
+    abort.add_argument("--force-with-changes", action="store_true")
+    abort.add_argument("--abort-why")
     abort.set_defaults(func=_cmd_abort)
+
+    resume = subparsers.add_parser("resume")
+    common(resume, needs_run=True)
+    resume.set_defaults(func=_cmd_resume)
 
     inspect = subparsers.add_parser("inspect")
     common(inspect)

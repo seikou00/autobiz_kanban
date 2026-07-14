@@ -23,6 +23,13 @@ def _git(root: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
 
 
+def _configure_runtime_ignore(repo: Path) -> None:
+    (repo / ".git" / "info" / "exclude").write_text(
+        ".cmbdevclaw/large_tool_results/\n",
+        encoding="utf-8",
+    )
+
+
 def _batch_path(feature_dir: Path) -> Path:
     return feature_dir / "plans" / "B001" / "plan.json"
 
@@ -56,6 +63,7 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
     _git(code, "init", "-b", "main")
     _git(code, "config", "user.email", "test@example.com")
     _git(code, "config", "user.name", "Test")
+    _configure_runtime_ignore(code)
     (code / "existing.txt").write_text("existing\n", encoding="utf-8")
     _git(code, "add", "existing.txt")
     _git(code, "commit", "-m", "initial")
@@ -198,6 +206,531 @@ def _start(workspace: Path, code: Path) -> dict:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_module_relative_scope_matches_git_root_relative_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
+            _write_batch(feature_dir, batch)
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            source = module / "src" / "main" / "java" / "example" / "ProtocolCtrl.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class ProtocolCtrl {}\n", encoding="utf-8")
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+                "--run-id", json.loads(started.stdout)["runId"],
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(
+                _evidence(feature_dir, "ev_0001")["changedFiles"],
+                ["backend/LF39.05_bccompliancemng/src/main/java/example/ProtocolCtrl.java"],
+            )
+
+    def test_complete_rejects_different_requested_workspace_under_same_git_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            sibling = code / "backend" / "LF39.05_other"
+            module.mkdir(parents=True)
+            sibling.mkdir(parents=True)
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(sibling),
+                "--run-id", json.loads(started.stdout)["runId"],
+                "--no-code-change-why", "existing implementation",
+                "--supporting-file", "existing.txt",
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("task_run_requested_workspace_mismatch", completed.stdout)
+
+    def test_module_change_missing_from_scope_requires_plan_correction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = [
+                "src/main/java/example/adapter/protocolctrl"
+            ]
+            _write_batch(feature_dir, batch)
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout)
+            domain = module / "src" / "main" / "java" / "example" / "domain" / "Service.java"
+            domain.parent.mkdir(parents=True)
+            domain.write_text("interface Service {}\n", encoding="utf-8")
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+                "--run-id", json.loads(started.stdout)["runId"],
+            )
+
+            payload = json.loads(completed.stdout)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(
+                payload["requiredAction"],
+                "correct_plan_scope_and_rebuild_task_baseline",
+            )
+            self.assertEqual(
+                payload["declaredScopePaths"],
+                ["src/main/java/example/adapter/protocolctrl"],
+            )
+            self.assertEqual(
+                payload["resolvedScopePaths"],
+                [
+                    "backend/LF39.05_bccompliancemng/"
+                    "src/main/java/example/adapter/protocolctrl"
+                ],
+            )
+
+    def test_multi_repository_scope_requires_repository_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, code = _workspace(root)
+            second = root / "secondary"
+            second.mkdir()
+            _git(second, "init", "-b", "main")
+            _git(second, "config", "user.email", "test@example.com")
+            _git(second, "config", "user.name", "Test")
+            _configure_runtime_ignore(second)
+            (second / "base.txt").write_text("base\n", encoding="utf-8")
+            _git(second, "add", "base.txt")
+            _git(second, "commit", "-m", "initial")
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
+            _write_batch(feature_dir, batch)
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--code-workspace", str(second),
+            )
+
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("scope_path_repository_prefix_required", started.stdout)
+
+    def test_start_rejects_absolute_scope_path_before_run_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = ["/src/main/java/example"]
+            _write_batch(feature_dir, batch)
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("scope.paths_invalid:/src/main/java/example", started.stdout)
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
+
+    def test_scope_path_normalizer_rejects_absolute_path(self) -> None:
+        for raw in (
+            "",
+            ".",
+            "/src/main/java/example",
+            "C:\\src\\main\\java\\example",
+        ):
+            with self.subTest(raw=raw), self.assertRaisesRegex(
+                task_runner_module.TaskRunnerError,
+                "invalid_scope_path:",
+            ):
+                task_runner_module._normalize_git_relative_path(
+                    raw,
+                    error="invalid_scope_path",
+                )
+
+    def test_scope_path_normalizer_uses_git_separators(self) -> None:
+        self.assertEqual(
+            task_runner_module._normalize_git_relative_path(
+                "src\\main\\java\\example\\",
+                error="invalid_scope_path",
+            ),
+            "src/main/java/example",
+        )
+
+    def test_abort_and_resume_reject_different_requested_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            sibling = code / "backend" / "LF39.05_other"
+            module.mkdir(parents=True)
+            sibling.mkdir(parents=True)
+            original = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+            self.assertEqual(original.returncode, 0, original.stdout + original.stderr)
+            run_id = json.loads(original.stdout)["runId"]
+
+            mismatched_abort = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(sibling),
+                "--run-id", run_id,
+            )
+            self.assertNotEqual(mismatched_abort.returncode, 0)
+            self.assertIn("task_run_requested_workspace_mismatch", mismatched_abort.stdout)
+
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+                "--run-id", run_id,
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+            mismatched_resume = _run(
+                "resume", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(sibling),
+                "--run-id", run_id,
+            )
+            self.assertNotEqual(mismatched_resume.returncode, 0)
+            self.assertIn("task_run_requested_workspace_mismatch", mismatched_resume.stdout)
+
+    def test_legacy_run_without_scope_base_uses_git_root_relative_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
+            _write_batch(feature_dir, batch)
+            started = _start(workspace, code)
+            run_path = feature_dir / ".task-runs" / "T001" / f"{started['runId']}.json"
+            state = json.loads(run_path.read_text(encoding="utf-8"))
+            for field in (
+                "scopePathBase",
+                "scopeWorkspaces",
+                "workspacePrefixes",
+                "declaredScopePaths",
+                "resolvedScopePaths",
+            ):
+                state.pop(field, None)
+            run_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+            source = code / "src" / "main" / "java" / "example" / "Legacy.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class Legacy {}\n", encoding="utf-8")
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_multi_repository_prefixed_scope_matches_changed_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, code = _workspace(root)
+            second = root / "secondary"
+            second.mkdir()
+            _git(second, "init", "-b", "main")
+            _git(second, "config", "user.email", "test@example.com")
+            _git(second, "config", "user.name", "Test")
+            _configure_runtime_ignore(second)
+            (second / "base.txt").write_text("base\n", encoding="utf-8")
+            _git(second, "add", "base.txt")
+            _git(second, "commit", "-m", "initial")
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = [
+                f"{code.name}:src/main/java/example",
+                f"{second.name}:src/main/java/example",
+            ]
+            batch["tasks"][0]["validationCommands"][0]["repo"] = code.name
+            _write_batch(feature_dir, batch)
+            source = second / "src" / "main" / "java" / "example" / "Service.java"
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--code-workspace", str(second),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            source.parent.mkdir(parents=True)
+            source.write_text("interface Service {}\n", encoding="utf-8")
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--code-workspace", str(second),
+                "--run-id", json.loads(started.stdout)["runId"],
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(
+                _evidence(feature_dir, "ev_0001")["changedFiles"],
+                ["secondary:src/main/java/example/Service.java"],
+            )
+
+    def test_start_rejects_two_scope_bases_for_same_git_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            first = code / "backend" / "first"
+            second = code / "backend" / "second"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(first),
+                "--code-workspace", str(second),
+            )
+
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("ambiguous_code_workspace_base", started.stdout)
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
+
+    def test_multi_repository_scope_resolves_each_requested_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, code = _workspace(root)
+            second = root / "secondary"
+            second.mkdir()
+            _git(second, "init", "-b", "main")
+            _git(second, "config", "user.email", "test@example.com")
+            _git(second, "config", "user.name", "Test")
+            _configure_runtime_ignore(second)
+            (second / "base.txt").write_text("base\n", encoding="utf-8")
+            _git(second, "add", "base.txt")
+            _git(second, "commit", "-m", "initial")
+            first_module = code / "services" / "compliance"
+            second_module = second / "services" / "protocol"
+            first_module.mkdir(parents=True)
+            second_module.mkdir(parents=True)
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = [
+                f"{code.name}:src/main/java/example",
+                f"{second.name}:src/main/java/example",
+            ]
+            batch["tasks"][0]["validationCommands"][0]["repo"] = code.name
+            _write_batch(feature_dir, batch)
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(first_module),
+                "--code-workspace", str(second_module),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            payload = json.loads(started.stdout)
+            self.assertEqual(
+                payload["resolvedScopePaths"],
+                [
+                    "code:services/compliance/src/main/java/example",
+                    "secondary:services/protocol/src/main/java/example",
+                ],
+            )
+            source = second_module / "src" / "main" / "java" / "example" / "Service.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("interface Service {}\n", encoding="utf-8")
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(first_module),
+                "--code-workspace", str(second_module),
+                "--run-id", payload["runId"],
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_start_rejects_unignored_runtime_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            (code / ".git" / "info" / "exclude").write_text("", encoding="utf-8")
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+
+            payload = json.loads(started.stdout)
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn(
+                "runtime_artifact_path_not_ignored:code:.cmbdevclaw/large_tool_results/",
+                payload["error"],
+            )
+            self.assertEqual(payload["requiredAction"], "configure_git_ignore_and_retry")
+            self.assertEqual(payload["resolvedGitRoots"], [str(code.resolve())])
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
+            self.assertEqual(_read_batch(feature_dir)["tasks"][0]["status"], "todo")
+
+    def test_start_reports_requested_workspace_and_resolved_git_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, code = _workspace(Path(tmp))
+            module = code / "bccompliancemng"
+            module.mkdir()
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+
+            payload = json.loads(started.stdout)
+            self.assertEqual(payload["requestedCodeWorkspaces"], [str(module.resolve())])
+            self.assertEqual(payload["repositories"][0]["path"], str(code.resolve()))
+            self.assertEqual(payload["snapshotMode"], "git_visible_file_content_sha256")
+            self.assertFalse(payload["stagingAffectsSnapshot"])
+
+    def test_abort_rejects_unrecorded_changes_without_mutating_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+
+            payload = json.loads(aborted.stdout)
+            self.assertNotEqual(aborted.returncode, 0)
+            self.assertEqual(
+                payload["requiredAction"],
+                "fix_workspace_and_retry_complete_or_force_abort",
+            )
+            run = json.loads(
+                (
+                    feature_dir / ".task-runs" / "T001" / f"{started['runId']}.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(run["status"], "started")
+            self.assertEqual(_read_batch(feature_dir)["tasks"][0]["status"], "in_progress")
+
+    def test_force_abort_requires_reason_and_records_changed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+
+            missing_reason = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"], "--force-with-changes",
+            )
+            self.assertNotEqual(missing_reason.returncode, 0)
+            self.assertIn("abort_with_changes_requires_reason", missing_reason.stdout)
+
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"], "--force-with-changes",
+                "--abort-why", "abandon implementation",
+            )
+
+            self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+            run = json.loads(
+                (
+                    feature_dir / ".task-runs" / "T001" / f"{started['runId']}.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(run["status"], "aborted")
+            self.assertEqual(run["abortWhy"], "abandon implementation")
+            self.assertEqual(run["changedFilesAtAbort"], ["implemented.txt"])
+            self.assertEqual(run["fileChangesAtAbort"][0]["operation"], "created")
+
+    def test_resume_reuses_original_snapshot_and_completes_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            original = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+
+            force_aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"], "--force-with-changes",
+                "--abort-why", "preserve implementation for resume",
+            )
+            self.assertEqual(force_aborted.returncode, 0, force_aborted.stdout)
+
+            replacement = _start(workspace, code)
+            clean_abort = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", replacement["runId"],
+            )
+            self.assertEqual(clean_abort.returncode, 0, clean_abort.stdout)
+
+            resumed = _run(
+                "resume", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            resumed_payload = json.loads(resumed.stdout)
+            self.assertEqual(resumed_payload["status"], "started")
+            self.assertEqual(resumed_payload["resumeCount"], 1)
+            self.assertEqual(resumed_payload["snapshot"], original["snapshot"])
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(_evidence(feature_dir, "ev_0001")["changedFiles"], ["implemented.txt"])
+
+    def test_verified_existing_rejects_changes_from_prior_aborted_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, code = _workspace(Path(tmp))
+            original = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"], "--force-with-changes",
+                "--abort-why", "preserve implementation for diagnosis",
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout)
+
+            replacement = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", replacement["runId"],
+                "--no-code-change-why", "existing implementation satisfies the contract",
+                "--supporting-file", "implemented.txt",
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                f"verified_existing_conflicts_with_prior_run_changes:{original['runId']}:implemented.txt",
+                completed.stdout,
+            )
+
+    def test_staging_existing_file_does_not_create_snapshot_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, code = _workspace(Path(tmp))
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            started = _start(workspace, code)
+
+            _git(code, "add", "implemented.txt")
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("no_code_change_requires_reason_and_supporting_files", completed.stdout)
+
     def test_code_session_holds_task_run_lock_across_handoff_activation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -337,6 +870,7 @@ class TaskRunnerTest(unittest.TestCase):
             _git(second, "init", "-b", "main")
             _git(second, "config", "user.email", "test@example.com")
             _git(second, "config", "user.name", "Test")
+            _configure_runtime_ignore(second)
             (second / "base.txt").write_text("base\n", encoding="utf-8")
             _git(second, "add", "base.txt")
             _git(second, "commit", "-m", "initial")
@@ -398,6 +932,133 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertNotEqual(started.returncode, 0)
             self.assertIn("active_feature_task_run_exists:T001", started.stdout)
+            self.assertEqual(
+                json.loads(started.stdout)["requiredAction"],
+                "inspect_and_retry_existing_run",
+            )
+
+    def test_resume_rejects_active_run_from_another_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            plan_path = feature_dir / "plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            batch = _read_batch(feature_dir)
+            second = json.loads(json.dumps(batch["tasks"][0]))
+            second["id"] = "T002"
+            second["status"] = "todo"
+            second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
+            second["validationCommands"][0]["id"] = "VAL-T002-01"
+            second["validationCommands"][0]["covers"] = ["AC-T002-01"]
+            batch["tasks"].append(second)
+            batch["taskCount"] = 2
+            plan["batches"][0]["taskIds"].append("T002")
+            plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+            _write_batch(feature_dir, batch)
+
+            original = _start(workspace, code)
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout)
+            active = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--code-workspace", str(code),
+            )
+            self.assertEqual(active.returncode, 0, active.stdout)
+
+            resumed = _run(
+                "resume", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+
+            self.assertNotEqual(resumed.returncode, 0)
+            self.assertIn("active_feature_task_run_exists:T002", resumed.stdout)
+
+    def test_resume_rejects_run_with_completed_command_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            original = _start(workspace, code)
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout)
+            run_path = feature_dir / ".task-runs" / "T001" / f"{original['runId']}.json"
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+            run["completedCommandEvidence"] = {
+                "VAL-T001-01": {
+                    "evidenceId": "ev_0001",
+                    "result": "pass",
+                    "required": True,
+                }
+            }
+            run_path.write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
+
+            resumed = _run(
+                "resume", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+
+            self.assertNotEqual(resumed.returncode, 0)
+            self.assertIn("task_run_cannot_resume_with_evidence", resumed.stdout)
+
+    def test_resume_rejects_task_contract_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            original = _start(workspace, code)
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout)
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["goal"] = "changed after the original run"
+            _write_batch(feature_dir, batch)
+
+            resumed = _run(
+                "resume", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+
+            self.assertNotEqual(resumed.returncode, 0)
+            self.assertIn("task_set_digest_mismatch", resumed.stdout)
+
+    def test_resume_rejects_repository_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, _, code = _workspace(root)
+            original = _start(workspace, code)
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"],
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout)
+            other = root / "other"
+            other.mkdir()
+            _git(other, "init", "-b", "main")
+            _git(other, "config", "user.email", "test@example.com")
+            _git(other, "config", "user.name", "Test")
+            _configure_runtime_ignore(other)
+            (other / "existing.txt").write_text("existing\n", encoding="utf-8")
+            _git(other, "add", "existing.txt")
+            _git(other, "commit", "-m", "initial")
+
+            resumed = _run(
+                "resume", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(other),
+                "--run-id", original["runId"],
+            )
+
+            self.assertNotEqual(resumed.returncode, 0)
+            self.assertIn("task_run_code_workspace_mismatch", resumed.stdout)
 
     def test_abort_can_clear_run_after_plan_contract_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -532,6 +1193,10 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("out_of_scope_changes_detected:outside.txt", completed.stdout)
+            self.assertEqual(
+                json.loads(completed.stdout)["requiredAction"],
+                "fix_workspace_and_retry_same_run",
+            )
 
     def test_complete_rejects_task_contract_changed_after_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
