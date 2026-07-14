@@ -35,29 +35,63 @@ def resolve_project_dir(values: Mapping[str, str]) -> str:
     return _env_value(values, "PROJECT_DIR") or _env_value(values, "PROJECT_CODE")
 
 
-def get_plugin_output_workspace(env: Optional[Mapping[str, str]] = None) -> Path:
-    values = os.environ if env is None else env
-    plugin_workspace_raw = _env_value(values, "PLUGIN_WORKSPACE")
-    project_code = resolve_project_dir(values)
-
-    missing = [name for name, value in (("PLUGIN_WORKSPACE", plugin_workspace_raw), ("PROJECT_DIR", project_code)) if not value]
+def _validate_plugin_output_workspace(
+    plugin_workspace_raw: str,
+    project_code: str,
+    *,
+    plugin_workspace_name: str,
+    project_name: str,
+    missing_suffix: str = "",
+) -> Path:
+    missing = [
+        name
+        for name, value in (
+            (plugin_workspace_name, plugin_workspace_raw),
+            (project_name, project_code),
+        )
+        if not value
+    ]
     if missing:
-        raise ValueError(f"{', '.join(missing)} 未设置；状态脚本必须由插件环境提供 PLUGIN_WORKSPACE 和 PROJECT_DIR")
+        raise ValueError(f"{', '.join(missing)} 未设置{missing_suffix}")
     if "/" in project_code or "\\" in project_code:
-        raise ValueError(f"PROJECT_DIR 不能包含路径分隔符: {project_code}")
+        raise ValueError(f"{project_name} 不能包含路径分隔符: {project_code}")
 
     plugin_workspace = Path(plugin_workspace_raw).expanduser().resolve(strict=False)
     if not plugin_workspace.is_dir():
-        raise ValueError(f"PLUGIN_WORKSPACE 指向的目录不存在: {plugin_workspace}")
+        raise ValueError(f"{plugin_workspace_name} 指向的目录不存在: {plugin_workspace}")
 
     workspace = (plugin_workspace / project_code).resolve(strict=False)
     if not workspace.is_dir():
-        raise ValueError(f"PROJECT_DIR 对应的项目插件目录不存在: {workspace}")
+        raise ValueError(f"{project_name} 对应的项目插件目录不存在: {workspace}")
 
     state_json_path = workspace / ".autobizdevops" / "state.json"
     if not state_json_path.is_file():
         raise ValueError(f"state.json 未找到: {state_json_path}")
     return workspace
+
+
+def get_plugin_output_workspace(env: Optional[Mapping[str, str]] = None) -> Path:
+    values = os.environ if env is None else env
+    return _validate_plugin_output_workspace(
+        _env_value(values, "PLUGIN_WORKSPACE"),
+        resolve_project_dir(values),
+        plugin_workspace_name="PLUGIN_WORKSPACE",
+        project_name="PROJECT_DIR",
+        missing_suffix="；状态脚本必须由插件环境提供 PLUGIN_WORKSPACE 和 PROJECT_DIR",
+    )
+
+
+def get_plugin_output_workspace_from_args(
+    plugin_workspace: Optional[PathLike],
+    project: Optional[str],
+) -> Path:
+    """通过显式 CLI 参数定位项目插件目录，不读取进程环境变量。"""
+    return _validate_plugin_output_workspace(
+        str(plugin_workspace or "").strip(),
+        str(project or "").strip(),
+        plugin_workspace_name="--plugin-workspace",
+        project_name="--project",
+    )
 
 
 def resolve_env_feature(

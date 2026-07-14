@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -143,7 +145,7 @@ class RenderShapeTest(unittest.TestCase):
 
 class RuntimePolicyTest(unittest.TestCase):
     @staticmethod
-    def _feature_environment(checkpoint="discuss_in_progress"):
+    def _feature_arguments(checkpoint="discuss_in_progress"):
         root = Path(tempfile.mkdtemp()).resolve()
         project = root / "demo"
         project.mkdir()
@@ -158,24 +160,24 @@ class RuntimePolicyTest(unittest.TestCase):
         records[feature] = record
         write_state_records(project, records)
         return project, feature, {
-            "PLUGIN_WORKSPACE": str(root),
-            "PROJECT_DIR": project.name,
-            "FEATURE_ID": feature,
+            "plugin_workspace": str(root),
+            "project": project.name,
+            "feature": feature,
         }
 
-    def test_session_context_commands_use_dialog_environment(self):
+    def test_session_context_commands_pass_explicit_project_and_feature_arguments(self):
         config = json.loads(
             (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
         )
         for platform in ("darwin", "linux", "win32"):
             command = config["inspectCommands"][platform]["session_context_inject"]
             self.assertNotIn("--node-id", command)
-            self.assertNotIn("--plugin-workspace", command)
-            self.assertNotIn("--project", command)
-            self.assertNotIn("--feature", command)
+            self.assertIn("--plugin-workspace ${pluginWorkspace}", command)
+            self.assertIn("--project ${projectDir}", command)
+            self.assertIn("--feature ${feature}", command)
 
-    def test_dialog_environment_feature_status_selects_node_policy(self):
-        project, feature, env = self._feature_environment()
+    def test_explicit_project_and_feature_select_node_policy(self):
+        project, feature, arguments = self._feature_arguments()
         cases = (
             ("discuss_in_progress", False),
             ("prd_in_progress", False),
@@ -194,28 +196,62 @@ class RuntimePolicyTest(unittest.TestCase):
                 records[feature] = record
                 write_state_records(project, records)
 
-                policy = render([], runtime_env=env)["runtimePolicy"]
+                policy = render([], **arguments)["runtimePolicy"]
                 self.assertEqual(policy["agentMode"], "solo")
                 self.assertEqual(
                     policy["toolCustomConfig"]["task"]["enabled"],
                     expected_enabled,
                 )
 
-    def test_explicit_node_id_overrides_dialog_environment(self):
-        _project, _feature, env = self._feature_environment("discuss_in_progress")
-        policy = render([], node_id="dev.code", runtime_env=env)["runtimePolicy"]
+    def test_explicit_node_id_overrides_project_and_feature_arguments(self):
+        _project, _feature, arguments = self._feature_arguments("discuss_in_progress")
+        policy = render([], node_id="dev.code", **arguments)["runtimePolicy"]
         self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
 
-    def test_missing_environment_or_feature_falls_back_to_defaults(self):
+    def test_missing_arguments_or_feature_falls_back_to_defaults(self):
         expected = {
             "agentMode": "solo",
             "toolCustomConfig": {"task": {"enabled": True}},
         }
-        self.assertEqual(render([], runtime_env={})["runtimePolicy"], expected)
+        self.assertEqual(render([])["runtimePolicy"], expected)
 
-        _project, _feature, env = self._feature_environment()
-        env["FEATURE_ID"] = "missing-feature"
-        self.assertEqual(render([], runtime_env=env)["runtimePolicy"], expected)
+        _project, _feature, arguments = self._feature_arguments()
+        arguments["feature"] = "missing-feature"
+        self.assertEqual(render([], **arguments)["runtimePolicy"], expected)
+
+    def test_process_environment_is_not_used_for_node_resolution(self):
+        expected = {
+            "agentMode": "solo",
+            "toolCustomConfig": {"task": {"enabled": True}},
+        }
+        _project, _feature, arguments = self._feature_arguments()
+        environment = {
+            "PLUGIN_WORKSPACE": arguments["plugin_workspace"],
+            "PROJECT_DIR": arguments["project"],
+            "FEATURE_ID": arguments["feature"],
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(render([])["runtimePolicy"], expected)
+
+    def test_cli_arguments_select_node_policy(self):
+        _project, _feature, arguments = self._feature_arguments()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--plugin-workspace",
+                    arguments["plugin_workspace"],
+                    "--project",
+                    arguments["project"],
+                    "--feature",
+                    arguments["feature"],
+                    "--selected-deployUnit",
+                    "[]",
+                ]
+            )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(payload["runtimePolicy"]["toolCustomConfig"]["task"]["enabled"])
 
     def test_board_config_disables_task_only_for_configured_early_nodes(self):
         for node_id in ("biz.discuss", "biz.prd", "dev.specs"):

@@ -4,7 +4,7 @@
 
 board_config.json 注册（样例，附件约定）::
 
-    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
 
 入参：
   · ``--platform`` 是目标平台键（``darwin`` / ``linux`` / ``win32``），用于把输出中的
@@ -17,9 +17,9 @@ board_config.json 注册（样例，附件约定）::
   · ``--session-workspace-path`` 是会话工作区目录的路径字符串（可空）；脚本读取该目录下的
     ``AGENTS.md`` 作为「会话工作区指令」。路径为空 / 该文件缺失 / 全空白 → 不生成该段。
 
-  · 当前 workflow 节点从对话环境的 ``PLUGIN_WORKSPACE``、``PROJECT_DIR``、``FEATURE_ID``
-    解析，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口。
-    节点、环境、配置或单个字段缺失时分别使用默认值：``agentMode = \"solo\"``、
+  · 当前 workflow 节点通过 ``--plugin-workspace``、``--project``、``--feature``
+    显式定位，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口。
+    节点、参数、配置或单个字段缺失时分别使用默认值：``agentMode = \"solo\"``、
     ``toolCustomConfig.task.enabled = true``。
 
 输出（固定形状，注入项目模式系统提示词）::
@@ -64,7 +64,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import List, Mapping, Optional, Tuple
+from typing import List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -80,7 +80,7 @@ from hooks.agents_repo import (  # noqa: E402
     sys_abspath,
     sys_abs_display,
 )
-from hooks.paths import get_plugin_output_workspace, resolve_env_feature  # noqa: E402
+from hooks.paths import get_plugin_output_workspace_from_args  # noqa: E402
 from inspect_state import build_run_payload  # noqa: E402
 
 PLUGIN_ROOT_PLACEHOLDER = "{plugin_root}"  # md 正文里的占位符，替换为知识库根目录 <pluginPath>/sys
@@ -168,12 +168,14 @@ def _runtime_policy(
 def _session_node_id(
     node_id: Optional[str] = None,
     *,
+    plugin_workspace: Optional[str] = None,
+    project: Optional[str] = None,
+    feature: Optional[str] = None,
     board_config_path: Optional[Path] = None,
-    env: Optional[Mapping[str, str]] = None,
 ) -> str:
-    """解析当前节点：显式调试值优先，否则读取对话环境并复用 Feature Status。
+    """解析当前节点：显式调试值优先，否则使用调用参数复用 Feature Status。
 
-    session context 不应因状态或环境异常中断；任何失败均返回空节点，由 runtime policy
+    session context 不应因参数、状态或配置异常中断；任何失败均返回空节点，由 runtime policy
     使用 ``solo`` / ``task.enabled=true`` 默认值。
     """
     explicit = (node_id or "").strip()
@@ -181,11 +183,13 @@ def _session_node_id(
         return explicit
 
     try:
-        workspace = get_plugin_output_workspace(env)
-        feature = resolve_env_feature(None, required=True, env=env)
+        workspace = get_plugin_output_workspace_from_args(plugin_workspace, project)
+        current_feature = (feature or "").strip()
+        if not current_feature:
+            raise ValueError("--feature 不能为空")
         path = board_config_path or BOARD_CONFIG_PATH
         config = json.loads(path.read_text(encoding="utf-8"))
-        payload = build_run_payload(workspace, feature or "", config)
+        payload = build_run_payload(workspace, current_feature, config)
         run = payload.get("run") if isinstance(payload, dict) else None
         current_node_id = run.get("currentNodeId") if isinstance(run, dict) else None
     except Exception:
@@ -200,13 +204,17 @@ def _session_node_id(
 def _session_runtime_policy(
     node_id: Optional[str] = None,
     *,
+    plugin_workspace: Optional[str] = None,
+    project: Optional[str] = None,
+    feature: Optional[str] = None,
     board_config_path: Optional[Path] = None,
-    env: Optional[Mapping[str, str]] = None,
 ) -> dict:
     current_node_id = _session_node_id(
         node_id,
+        plugin_workspace=plugin_workspace,
+        project=project,
+        feature=feature,
         board_config_path=board_config_path,
-        env=env,
     )
     return _runtime_policy(current_node_id, board_config_path=board_config_path)
 
@@ -550,14 +558,18 @@ def render(
     session_workspace_path: Optional[str] = None,
     platform: Optional[str] = None,
     node_id: Optional[str] = None,
+    plugin_workspace: Optional[str] = None,
+    project: Optional[str] = None,
+    feature: Optional[str] = None,
     board_config_path: Optional[Path] = None,
-    runtime_env: Optional[Mapping[str, str]] = None,
 ) -> dict:
     """核心逻辑（无 I/O 边界外副作用），便于单测。"""
     runtime_policy = _session_runtime_policy(
         node_id,
+        plugin_workspace=plugin_workspace,
+        project=project,
+        feature=feature,
         board_config_path=board_config_path,
-        env=runtime_env,
     )
     # 「会话工作区指令」独立于部署单元选择：先行构建，未选单元也可单独注入。
     workspace_content = _build_workspace_content(session_workspace_path)
@@ -747,7 +759,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--node-id",
         dest="node_id",
         default="",
-        help="本地调试覆盖：显式指定 workflow 节点 id；宿主运行时从对话环境自动解析",
+        help="本地调试覆盖：显式指定 workflow 节点 id；宿主运行时从项目与 Feature 参数自动解析",
+    )
+    parser.add_argument(
+        "--plugin-workspace",
+        dest="plugin_workspace",
+        default="",
+        help="项目集合工作区路径；与 --project 组合定位项目插件目录",
+    )
+    parser.add_argument(
+        "--project",
+        dest="project",
+        default="",
+        help="项目插件目录名",
+    )
+    parser.add_argument(
+        "--feature",
+        dest="feature",
+        default="",
+        help="当前 Feature 标识",
     )
     parser.add_argument(
         "--session-workspace-path",
@@ -765,7 +795,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             "message": str(exc),
             "sessionContext": "",
             "agentmdLoadStatus": [],
-            "runtimePolicy": _session_runtime_policy(args.node_id),
+            "runtimePolicy": _session_runtime_policy(
+                args.node_id,
+                plugin_workspace=args.plugin_workspace,
+                project=args.project,
+                feature=args.feature,
+            ),
         }
     else:
         result = render(
@@ -773,6 +808,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             session_workspace_path=args.session_workspace_path,
             platform=args.platform,
             node_id=args.node_id,
+            plugin_workspace=args.plugin_workspace,
+            project=args.project,
+            feature=args.feature,
         )
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
