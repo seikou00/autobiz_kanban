@@ -210,6 +210,7 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的范围；不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 任务需要写 / 改测试时，遵循 `${pluginPath}/skills/references/test-quality.md`：站在 seam 上验证、期望值来自独立事实源（勿同义反复）、mock 只在系统边界。
+   - 只为本轮实现验证而临时创建、任务完成后不提交的测试文件，必须保持未跟踪且未暂存，不得 `git add`。runner 仅将同时满足“本轮新建、位于请求 workspace 下的 `src/test`、`test`、`tests` 测试根、complete 时仍未跟踪且未暂存”的文件归入 `transientValidationFiles`；这些文件仍参与验证，但不进入正式 `changedFiles`，也不触发 task scope 越界。已跟踪、已暂存或 start 前已存在的测试文件仍是正式代码变更，必须由 Plan scope 覆盖，不得借临时测试规则绕过审计。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 6. 任务完成必须只走 `task_runner complete`。runner 从 active batch 读取并执行全部 `validationCommands`，采集真实 stdout/stderr 与退出码，依据 start 快照计算 changedFiles/fileChanges，写 `EVIDENCE.jsonl`、`ev_XXXX.log`、`EVIDENCE.index.json`，再绑定 batch task 并投影 batch/root 状态；不得手工调用 `evidence_store.py append`、`plan_writer.py add-evidence-id` 或 `set-status done` 代替：
 

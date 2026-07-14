@@ -637,6 +637,25 @@ class EvidenceStoreTest(unittest.TestCase):
         record["validation"] = {"command": "pytest", "exitCode": 1, "result": "pass"}
         self.assertIn("validation.result_exitCode_mismatch", validate_record(record))
 
+    def test_validation_evidence_validates_transient_validation_files(self) -> None:
+        record = {
+            "version": 1,
+            "evidenceId": "ev_0001",
+            "featureId": "alpha",
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "T001",
+            "action": "validation",
+            "createdAt": "2026-07-14T00:00:00Z",
+            "transientValidationFiles": "src/test/example_test.py",
+            "validation": {"command": "pytest", "exitCode": 0, "result": "pass"},
+        }
+
+        self.assertIn("invalid_transientValidationFiles", validate_record(record))
+        record["transientValidationFiles"] = ["src/test/example_test.py"]
+        self.assertNotIn("invalid_transientValidationFiles", validate_record(record))
+
     def test_detail_version_validates_file_changes_projection(self) -> None:
         record = {
             "version": 1,

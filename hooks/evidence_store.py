@@ -263,6 +263,9 @@ def validate_record(record: dict[str, Any]) -> list[str]:
     changed_files = record.get("changedFiles")
     if changed_files is not None and not _string_list(changed_files):
         errors.append("invalid_changedFiles")
+    transient_validation_files = record.get("transientValidationFiles")
+    if transient_validation_files is not None and not _string_list(transient_validation_files):
+        errors.append("invalid_transientValidationFiles")
     spec_refs = record.get("specRefs")
     if spec_refs is not None and not _string_list(spec_refs):
         errors.append("invalid_specRefs")

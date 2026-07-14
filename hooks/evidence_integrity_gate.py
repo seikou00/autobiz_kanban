@@ -329,6 +329,7 @@ def _check_task_run_state(
         )
         expected_changed = state.get("changedFiles")
         expected_file_changes = state.get("fileChanges")
+        expected_transient_validation_files = state.get("transientValidationFiles", [])
         for record in run_records:
             evidence_id = str(record.get("evidenceId", ""))
             if evidence_id not in state_evidence or evidence_id not in state_completion:
@@ -339,6 +340,10 @@ def _check_task_run_state(
                 errors.append(f"{task_id}.task_run_changed_files_mismatch:{evidence_id}")
             if record.get("fileChanges") != expected_file_changes:
                 errors.append(f"{task_id}.task_run_file_changes_mismatch:{evidence_id}")
+            if record.get("transientValidationFiles", []) != expected_transient_validation_files:
+                errors.append(
+                    f"{task_id}.task_run_transient_validation_files_mismatch:{evidence_id}"
+                )
     return errors
 
 

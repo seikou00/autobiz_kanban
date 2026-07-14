@@ -41,6 +41,7 @@ from hooks.repository_snapshot import (  # noqa: E402
     RepositoryMap,
     RepositorySnapshotError,
     capture_file_snapshot,
+    capture_untracked_files,
     resolve_git_root,
     resolve_repositories,
     snapshot_changes,
@@ -136,7 +137,12 @@ def _resolve_repositories(code_workspaces: Path | list[Path]) -> RepositoryMap:
 
 def _repository_state(repositories: RepositoryMap) -> list[dict[str, Any]]:
     return [
-        {"id": repository_id, "path": str(repo), "snapshot": _git_snapshot(repo)}
+        {
+            "id": repository_id,
+            "path": str(repo),
+            "snapshot": _git_snapshot(repo),
+            "untrackedFiles": _git_untracked_files(repo),
+        }
         for repository_id, repo in repositories.items()
     ]
 
@@ -298,6 +304,13 @@ def _git_snapshot(repo: Path) -> dict[str, str | None]:
         raise TaskRunnerError(str(exc)) from exc
 
 
+def _git_untracked_files(repo: Path) -> list[str]:
+    try:
+        return capture_untracked_files(repo)
+    except RepositorySnapshotError as exc:
+        raise TaskRunnerError(str(exc)) from exc
+
+
 def _snapshot_changes(
     before: dict[str, str | None],
     after: dict[str, str | None],
@@ -333,6 +346,7 @@ def _repository_changes(
         if not isinstance(before, dict) or repo is None:
             raise TaskRunnerError(f"task_run_repository_snapshot_missing:{repository_id}")
         after = _git_snapshot(repo)
+        untracked_files = _git_untracked_files(repo)
         repo_changes = _snapshot_changes(before, after)
         if multiple:
             for change in repo_changes:
@@ -341,8 +355,81 @@ def _repository_changes(
                     change["fromPath"] = f"{repository_id}:{change['fromPath']}"
                 change["repository"] = repository_id
         changes.extend(repo_changes)
-        final.append({"id": repository_id, "path": str(repo), "snapshot": after})
+        final.append(
+            {
+                "id": repository_id,
+                "path": str(repo),
+                "snapshot": after,
+                "untrackedFiles": untracked_files,
+            }
+        )
     return changes, final
+
+
+def _requested_workspace_relative_path(
+    state: dict[str, Any],
+    repository_id: str,
+    path: str,
+) -> str | None:
+    contexts = state.get("scopeWorkspaces")
+    if not isinstance(contexts, list):
+        return None
+    for context in contexts:
+        if not isinstance(context, dict) or context.get("repository") != repository_id:
+            continue
+        prefix = context.get("workspacePrefix")
+        if not isinstance(prefix, str):
+            return None
+        if not prefix:
+            return path
+        if path.startswith(f"{prefix}/"):
+            return path[len(prefix) + 1 :]
+        return None
+    return None
+
+
+def _is_transient_validation_path(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    if parts and parts[0] in {"test", "tests"}:
+        return True
+    return any(parts[index : index + 2] == ("src", "test") for index in range(len(parts) - 1))
+
+
+def _partition_transient_validation_changes(
+    state: dict[str, Any],
+    file_changes: list[dict[str, str]],
+    final_repositories: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], list[str]]:
+    repositories = {
+        str(item.get("id")): item
+        for item in final_repositories
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    default_repository_id = next(iter(repositories)) if len(repositories) == 1 else None
+    formal_changes: list[dict[str, str]] = []
+    transient_files: list[str] = []
+    for change in file_changes:
+        display_path = change.get("path")
+        repository_id = change.get("repository") or default_repository_id
+        if not isinstance(display_path, str) or not isinstance(repository_id, str):
+            formal_changes.append(change)
+            continue
+        repository_path = display_path
+        if change.get("repository") == repository_id and display_path.startswith(f"{repository_id}:"):
+            repository_path = display_path[len(repository_id) + 1 :]
+        untracked = repositories.get(repository_id, {}).get("untrackedFiles")
+        relative_path = _requested_workspace_relative_path(state, repository_id, repository_path)
+        if (
+            change.get("operation") == "created"
+            and isinstance(untracked, list)
+            and repository_path in untracked
+            and isinstance(relative_path, str)
+            and _is_transient_validation_path(relative_path)
+        ):
+            transient_files.append(display_path)
+            continue
+        formal_changes.append(change)
+    return formal_changes, sorted(set(transient_files))
 
 
 def _new_run_id() -> str:
@@ -478,6 +565,7 @@ def _validate_run_evidence(feature_dir: Path, state: dict[str, Any]) -> None:
     )
     expected_changed_files = state.get("changedFiles")
     expected_file_changes = state.get("fileChanges")
+    expected_transient_validation_files = state.get("transientValidationFiles", [])
     expected_mode = state.get("completionMode")
     for evidence_id in state.get("evidenceIds", []):
         record = records.get(str(evidence_id))
@@ -502,6 +590,10 @@ def _validate_run_evidence(feature_dir: Path, state: dict[str, Any]) -> None:
             state["fileChanges"] = expected_file_changes
         elif record.get("fileChanges") != expected_file_changes:
             raise TaskRunnerError(f"task_run_evidence_file_changes_mismatch:{evidence_id}")
+        if record.get("transientValidationFiles", []) != expected_transient_validation_files:
+            raise TaskRunnerError(
+                f"task_run_evidence_transient_validation_files_mismatch:{evidence_id}"
+            )
         if evidence_id in completion_ids:
             validation = record.get("validation")
             if not isinstance(validation, dict) or validation.get("result") != "pass":
@@ -567,6 +659,10 @@ def _adopt_streamed_run_evidence(
             raise TaskRunnerError(f"streamed_run_evidence_changed_files_mismatch:{evidence_id}")
         if record.get("fileChanges") != state.get("fileChanges"):
             raise TaskRunnerError(f"streamed_run_evidence_file_changes_mismatch:{evidence_id}")
+        if record.get("transientValidationFiles", []) != state.get("transientValidationFiles", []):
+            raise TaskRunnerError(
+                f"streamed_run_evidence_transient_validation_files_mismatch:{evidence_id}"
+            )
         result = validation.get("result")
         completed[command_id] = {
             "evidenceId": evidence_id,
@@ -680,6 +776,7 @@ def _record_for_command(
     exit_code: int,
     completion_mode: str,
     file_changes: list[dict[str, str]],
+    transient_validation_files: list[str],
     supporting_files: list[str],
     no_change_why: str | None,
     repository_id: str | None,
@@ -715,6 +812,7 @@ def _record_for_command(
         "designRefs": task.get("designRefs", []),
         "changedFiles": changed_files,
         "fileChanges": file_changes,
+        "transientValidationFiles": transient_validation_files,
         "supportingFiles": supporting_files,
         "checkedCriteria": checked_criteria,
         "validation": {
@@ -786,6 +884,11 @@ def _complete_task_unlocked(
     repository_states = _state_repositories(state)
     multiple_repositories = len(repository_states) > 1
     file_changes, final_repositories = _repository_changes(state, repositories)
+    file_changes, transient_validation_files = _partition_transient_validation_changes(
+        state,
+        file_changes,
+        final_repositories,
+    )
     declared_scope_paths, scope_paths = _run_scope_paths(state, task)
     if scope_paths:
         outside = [
@@ -852,6 +955,7 @@ def _complete_task_unlocked(
             "completionMode": completion_mode,
             "changedFiles": changed_files,
             "fileChanges": file_changes,
+            "transientValidationFiles": transient_validation_files,
             "finalSnapshot": final_repositories[0]["snapshot"],
             "finalRepositories": final_repositories,
             "supportingFiles": normalized_supporting,
@@ -903,6 +1007,7 @@ def _complete_task_unlocked(
             exit_code=exit_code,
             completion_mode=completion_mode,
             file_changes=file_changes,
+            transient_validation_files=transient_validation_files,
             supporting_files=normalized_supporting,
             no_change_why=no_code_change_why,
             repository_id=command_repository_id if multiple_repositories or command.get("repo") else None,
@@ -1048,7 +1153,13 @@ def _prior_aborted_run_conflict(
         changed = prior.get("changedFilesAtAbort")
         if not isinstance(changed, list):
             try:
-                changed = _changed_files(_repository_changes(prior, repositories)[0])
+                prior_changes, prior_final = _repository_changes(prior, repositories)
+                prior_changes, _ = _partition_transient_validation_changes(
+                    prior,
+                    prior_changes,
+                    prior_final,
+                )
+                changed = _changed_files(prior_changes)
             except TaskRunnerError:
                 continue
         relevant = [
@@ -1082,6 +1193,11 @@ def _abort_task_unlocked(
     _assert_repositories_match(state, repositories)
     _assert_requested_workspaces_match(state, requested_workspaces, repositories)
     file_changes, final_repositories = _repository_changes(state, repositories)
+    file_changes, transient_validation_files = _partition_transient_validation_changes(
+        state,
+        file_changes,
+        final_repositories,
+    )
     changed_files = _changed_files(file_changes)
     if file_changes and not force_with_changes:
         raise TaskRunnerError(
@@ -1097,6 +1213,8 @@ def _abort_task_unlocked(
             changedFiles=changed_files,
         )
     state["status"] = "aborted"
+    if transient_validation_files:
+        state["transientValidationFilesAtAbort"] = transient_validation_files
     if file_changes:
         state.update(
             {
@@ -1474,6 +1592,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             completionMode=state.get("completionMode"),
             evidenceIds=state.get("evidenceIds", []),
             completionEvidenceIds=state.get("completionEvidenceIds", []),
+            transientValidationFiles=state.get("transientValidationFiles", []),
             batchHandoff=batch_handoff,
             batchContinuation=batch_continuation,
             stopAfterBatch=bool(batch_handoff),

@@ -604,6 +604,23 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-code must protect task snapshot baselines: " + ", ".join(missing),
         )
 
+    def test_code_skill_defines_transient_validation_files(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "transientValidationFiles",
+            "本轮新建",
+            "未跟踪且未暂存",
+            "`src/test`、`test`、`tests`",
+            "不得 `git add`",
+            "已跟踪、已暂存或 start 前已存在",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-code must define transient validation file handling: " + ", ".join(missing),
+        )
+
     def test_plan_and_code_skills_define_requested_workspace_scope_base(self) -> None:
         plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")

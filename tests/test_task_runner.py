@@ -15,6 +15,7 @@ if str(ROOT := Path(__file__).resolve().parents[1]) not in sys.path:
 
 from hooks.evidence_store import append_evidence  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done  # noqa: E402
+from hooks import evidence_integrity_gate as evidence_integrity_gate_module  # noqa: E402
 from hooks import task_runner as task_runner_module  # noqa: E402
 
 
@@ -206,6 +207,145 @@ def _start(workspace: Path, code: Path) -> dict:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_complete_classifies_new_untracked_test_as_transient_validation_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = [
+                "src/main/java/example/application"
+            ]
+            _write_batch(feature_dir, batch)
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+
+            source = module / "src" / "main" / "java" / "example" / "application" / "App.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class App {}\n", encoding="utf-8")
+            test = module / "src" / "test" / "java" / "example" / "application" / "AppTest.java"
+            test.parent.mkdir(parents=True)
+            test.write_text("class AppTest {}\n", encoding="utf-8")
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+                "--run-id", json.loads(started.stdout)["runId"],
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            payload = json.loads(completed.stdout)
+            source_path = (
+                "backend/LF39.05_bccompliancemng/"
+                "src/main/java/example/application/App.java"
+            )
+            test_path = (
+                "backend/LF39.05_bccompliancemng/"
+                "src/test/java/example/application/AppTest.java"
+            )
+            self.assertEqual(payload["transientValidationFiles"], [test_path])
+            evidence = _evidence(feature_dir, "ev_0001")
+            self.assertEqual(evidence["changedFiles"], [source_path])
+            self.assertEqual(evidence["transientValidationFiles"], [test_path])
+            run_path = (
+                feature_dir
+                / ".task-runs"
+                / "T001"
+                / f"{json.loads(started.stdout)['runId']}.json"
+            )
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+            run["transientValidationFiles"] = []
+            run_path.write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
+            self.assertIn(
+                "T001.task_run_transient_validation_files_mismatch:ev_0001",
+                evidence_integrity_gate_module._check_task_run_state(
+                    feature_dir,
+                    _read_batch(feature_dir)["tasks"][0],
+                    [evidence],
+                ),
+            )
+
+    def test_complete_keeps_staged_existing_and_tracked_tests_in_formal_scope(self) -> None:
+        for test_state in ("staged", "preexisting_untracked", "tracked"):
+            with self.subTest(test_state=test_state), tempfile.TemporaryDirectory() as tmp:
+                workspace, feature_dir, code = _workspace(Path(tmp))
+                module = code / "backend" / "LF39.05_bccompliancemng"
+                module.mkdir(parents=True)
+                batch = _read_batch(feature_dir)
+                batch["tasks"][0]["scope"]["paths"] = [
+                    "src/main/java/example/application"
+                ]
+                _write_batch(feature_dir, batch)
+                test = (
+                    module
+                    / "src"
+                    / "test"
+                    / "java"
+                    / "example"
+                    / "application"
+                    / "AppTest.java"
+                )
+                if test_state in {"preexisting_untracked", "tracked"}:
+                    test.parent.mkdir(parents=True)
+                    test.write_text("class AppTest {}\n", encoding="utf-8")
+                if test_state == "tracked":
+                    _git(code, "add", test.relative_to(code).as_posix())
+                    _git(code, "commit", "-m", "add test baseline")
+
+                started = _run(
+                    "start", "--workspace", str(workspace), "--feature", "alpha",
+                    "--task-id", "T001", "--code-workspace", str(module),
+                )
+                self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+                test.parent.mkdir(parents=True, exist_ok=True)
+                test.write_text(f"class AppTest {{ /* {test_state} */ }}\n", encoding="utf-8")
+                if test_state == "staged":
+                    _git(code, "add", test.relative_to(code).as_posix())
+
+                completed = _run(
+                    "complete", "--workspace", str(workspace), "--feature", "alpha",
+                    "--task-id", "T001", "--code-workspace", str(module),
+                    "--run-id", json.loads(started.stdout)["runId"],
+                )
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("out_of_scope_changes_detected", completed.stdout)
+                self.assertIn("src/test/java/example/application/AppTest.java", completed.stdout)
+
+    def test_complete_keeps_tests_outside_requested_workspace_in_formal_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            sibling = code / "backend" / "LF39.05_other"
+            module.mkdir(parents=True)
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
+            _write_batch(feature_dir, batch)
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            source = module / "src" / "main" / "java" / "example" / "App.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class App {}\n", encoding="utf-8")
+            test = sibling / "src" / "test" / "java" / "example" / "AppTest.java"
+            test.parent.mkdir(parents=True)
+            test.write_text("class AppTest {}\n", encoding="utf-8")
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+                "--run-id", json.loads(started.stdout)["runId"],
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("out_of_scope_changes_detected", completed.stdout)
+            self.assertIn("backend/LF39.05_other/src/test", completed.stdout)
+
     def test_module_relative_scope_matches_git_root_relative_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -586,6 +726,42 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(payload["repositories"][0]["path"], str(code.resolve()))
             self.assertEqual(payload["snapshotMode"], "git_visible_file_content_sha256")
             self.assertFalse(payload["stagingAffectsSnapshot"])
+
+    def test_abort_classifies_new_untracked_test_without_forcing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            started_payload = json.loads(started.stdout)
+            test = module / "src" / "test" / "java" / "example" / "AppTest.java"
+            test.parent.mkdir(parents=True)
+            test.write_text("class AppTest {}\n", encoding="utf-8")
+
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+                "--run-id", started_payload["runId"],
+            )
+
+            self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+            payload = json.loads(aborted.stdout)
+            test_path = (
+                "backend/LF39.05_bccompliancemng/"
+                "src/test/java/example/AppTest.java"
+            )
+            self.assertEqual(payload["transientValidationFilesAtAbort"], [test_path])
+            run = json.loads(
+                (
+                    feature_dir / ".task-runs" / "T001" / f"{started_payload['runId']}.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(run["status"], "aborted")
+            self.assertEqual(run["transientValidationFilesAtAbort"], [test_path])
 
     def test_abort_rejects_unrecorded_changes_without_mutating_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

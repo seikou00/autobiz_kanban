@@ -95,6 +95,23 @@ def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
     return {path: hash_file(repo / path) for path in paths}
 
 
+def capture_untracked_files(repo: Path) -> list[str]:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "-o", "--exclude-standard", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RepositorySnapshotError("git_snapshot_failed")
+    return sorted(
+        {
+            raw.decode("utf-8", errors="surrogateescape")
+            for raw in completed.stdout.split(b"\0")
+            if raw
+        }
+    )
+
+
 def capture_repository_snapshot(repo: Path) -> dict[str, Any]:
     head = _run_text(repo, "rev-parse", "HEAD")
     index = _run_text(repo, "write-tree")
