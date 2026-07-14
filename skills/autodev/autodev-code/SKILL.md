@@ -233,6 +233,8 @@ python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --ta
 
 验证失败仍会写 `result=fail` evidence 和真实 log，但任务状态为 `failed`，不得完成。写 evidence 后异常中断时使用同参数执行 `recover`，runner 会从 `.task-runs/<TASK_ID>/<RUN_ID>.json` 续跑或只补 plan 绑定，且不会重复已有命令 evidence。结构化记录只存在 `EVIDENCE.jsonl`；`ev_XXXX.log` 只保存脱敏后的真实命令输出，即使命令无输出也必须存在零字节 log。不得新建 `ev_XXXX.json` sidecar；查看单条记录使用 `evidence_store.py show --evidence-id ev_XXXX`。日志错绑、缺失或哈希不一致会被拒绝。`ev_XXXX` 按全流自动递增，任何流/index/log 被重写或重排都必须停止并恢复。
 
+若 `complete` 成功并返回 `requiredAction=continue_active_batch`、`continueCurrentBatch=true` 和 `nextTaskId`，说明当前 Task 已完成且活动批次还有依赖已满足的任务。必须将当前 Task 在 `write_todos` 中置为完成、将 `nextTaskId` 置为进行中，并立即进入下一个 Task 的 start/context/实现/complete 协议；同批续跑不得再次调用 `code-session`。同批仍有可执行任务时禁止询问用户是否继续，也不得先输出阶段性完成总结后结束回复；只有遇到真实阻断、Task 失败或 runner 明确要求停止时才能结束当前批次执行循环。
+
 若 `complete` 返回 `requiredAction=stop_and_open_new_conversation`、`requiresNewConversation=true`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 smoke/project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。
 
 宿主未提供 conversation ID，因此 runner 无法从进程参数中证明调用来自新对话；`requiresNewConversation` 是供宿主和 Agent 执行的协议层约束，不是 runner 可独立验证的身份凭据。`activate-batch` CLI 仅保留给兼容或诊断场景，正常 Code 流程不得直接调用。

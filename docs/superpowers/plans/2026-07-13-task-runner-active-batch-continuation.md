@@ -15,7 +15,7 @@
 **Files:**
 - Modify: `tests/test_batched_plan.py`
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 Create one B001 containing T001, T002, and T003. Start and complete T001 against a temporary Git repository, then assert:
 
@@ -28,7 +28,7 @@ self.assertFalse(payload["stopAfterBatch"])
 self.assertIsNone(payload["batchHandoff"])
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run:
 
@@ -44,7 +44,7 @@ Expected: failure because `requiredAction` is currently `None` and continuation 
 - Modify: `hooks/plan_writer.py`
 - Modify: `hooks/task_runner.py`
 
-- [ ] **Step 1: Compute the next runnable task**
+- [x] **Step 1: Compute the next runnable task**
 
 After recording a successful attempt for an incomplete batch, scan that batch in plan order. Select the first non-done task whose `deps` all reference done tasks. Add this payload to the writer result:
 
@@ -57,11 +57,11 @@ continuation = {
 }
 ```
 
-- [ ] **Step 2: Expose the payload from `complete`**
+- [x] **Step 2: Expose the payload from `complete`**
 
 Return the continuation fields from `_cmd_complete`, while preserving handoff precedence and returning false/null defaults when no continuation exists.
 
-- [ ] **Step 3: Run the focused integration test and verify GREEN**
+- [x] **Step 3: Run the focused integration test and verify GREEN**
 
 Run:
 
@@ -77,11 +77,11 @@ Expected: `OK`.
 - Modify: `skills/autodev/autodev-code/SKILL.md`
 - Modify: `tests/test_board_config_invariants.py`
 
-- [ ] **Step 1: Add the Skill invariant test**
+- [x] **Step 1: Add the Skill invariant test**
 
 Require the Skill to contain `continue_active_batch`, `nextTaskId`, and an explicit prohibition on asking whether to continue while the active batch has a runnable task.
 
-- [ ] **Step 2: Verify the invariant test fails before the Skill edit**
+- [x] **Step 2: Verify the invariant test fails before the Skill edit**
 
 Run:
 
@@ -91,11 +91,11 @@ python3 -m unittest tests.test_board_config_invariants.BoardConfigInvariantTest
 
 Expected: failure identifying the missing continuation wording.
 
-- [ ] **Step 3: Update the Code Skill**
+- [x] **Step 3: Update the Code Skill**
 
 Document the mandatory same-conversation branch immediately after the `complete` command contract and before the cross-batch stop branch.
 
-- [ ] **Step 4: Run relevant regression tests**
+- [x] **Step 4: Run relevant regression tests**
 
 Run:
 
@@ -105,7 +105,7 @@ python3 -m unittest tests.test_batched_plan tests.test_board_config_invariants
 
 Expected: all tests pass with no failures or errors.
 
-- [ ] **Step 5: Inspect the final diff**
+- [x] **Step 5: Inspect the final diff**
 
 Run:
 

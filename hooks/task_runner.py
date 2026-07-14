@@ -774,6 +774,8 @@ def _complete_task_unlocked(
             raise TaskRunnerError("plan_binding_failed")
         if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
             state["batchHandoff"] = result.data["batchHandoff"]
+        if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
+            state["batchContinuation"] = result.data["batchContinuation"]
         state["status"] = "done" if success else "failed"
         _save_run(path, state)
         return success, state
@@ -954,6 +956,8 @@ def _complete_task_unlocked(
         raise TaskRunnerError("plan_binding_failed")
     if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
         state["batchHandoff"] = result.data["batchHandoff"]
+    if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
+        state["batchContinuation"] = result.data["batchContinuation"]
     state["status"] = "done" if success else "failed"
     _save_run(path, state)
     return success, state
@@ -1460,6 +1464,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         )
         batch_handoff = state.get("batchHandoff")
         batch_handoff = batch_handoff if isinstance(batch_handoff, dict) else None
+        batch_continuation = state.get("batchContinuation")
+        batch_continuation = batch_continuation if isinstance(batch_continuation, dict) else None
         return _emit(
             success,
             error=None if success else "validation_failed",
@@ -1469,11 +1475,21 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             evidenceIds=state.get("evidenceIds", []),
             completionEvidenceIds=state.get("completionEvidenceIds", []),
             batchHandoff=batch_handoff,
+            batchContinuation=batch_continuation,
             stopAfterBatch=bool(batch_handoff),
+            continueCurrentBatch=(
+                bool(batch_continuation.get("continueCurrentBatch")) if batch_continuation else False
+            ),
+            activeBatchId=batch_continuation.get("activeBatchId") if batch_continuation else None,
+            nextTaskId=batch_continuation.get("nextTaskId") if batch_continuation else None,
             requiresNewConversation=(
                 bool(batch_handoff.get("requiresNewConversation")) if batch_handoff else False
             ),
-            requiredAction=batch_handoff.get("requiredAction") if batch_handoff else None,
+            requiredAction=(
+                batch_handoff.get("requiredAction")
+                if batch_handoff
+                else batch_continuation.get("requiredAction") if batch_continuation else None
+            ),
             userMessage=batch_handoff.get("userMessage") if batch_handoff else None,
         )
     except (TaskRunnerError, ValueError) as exc:

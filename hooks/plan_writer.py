@@ -1273,6 +1273,7 @@ def record_task_attempt(
         root_entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
         ordered_ids = [str(entry.get("id")) for entry in root_entries]
         handoff: dict[str, Any] | None = None
+        continuation: dict[str, Any] | None = None
         if batch_completed:
             batch_plans = data.get("_batchPlans")
             batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
@@ -1317,12 +1318,40 @@ def record_task_attempt(
                 data["status"] = "in_progress"
                 data["activeBatchId"] = None
                 data["nextBatchId"] = None
+        elif success:
+            tasks_by_id = {
+                str(item.get("id")): item
+                for item in _tasks(data)
+                if isinstance(item.get("id"), str)
+            }
+            next_task = next(
+                (
+                    item
+                    for item in batch_tasks
+                    if normalize_status(item.get("status")) in {"todo", "in_progress"}
+                    and all(
+                        normalize_status(tasks_by_id.get(dep, {}).get("status")) == "done"
+                        for dep in item.get("deps", [])
+                        if isinstance(dep, str)
+                    )
+                ),
+                None,
+            )
+            if next_task is not None:
+                continuation = {
+                    "requiredAction": "continue_active_batch",
+                    "continueCurrentBatch": True,
+                    "activeBatchId": batch_id,
+                    "nextTaskId": str(next_task.get("id")),
+                }
         result = _write(workspace, feature, data)
         if result.ok:
             write_text(_md_path(workspace, feature), _render_plan_md(data))
             if handoff is not None:
                 atomic_write_json(_handoff_path(workspace, feature), handoff)
                 result = with_result_data(result, batchHandoff=handoff)
+            elif continuation is not None:
+                result = with_result_data(result, batchContinuation=continuation)
         return result
 
 

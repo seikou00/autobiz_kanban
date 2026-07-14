@@ -571,6 +571,22 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-code must enforce Code session entry and batch handoff stop: " + ", ".join(missing),
         )
 
+    def test_code_skill_requires_same_batch_continuation(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "continue_active_batch",
+            "continueCurrentBatch=true",
+            "nextTaskId",
+            "同批仍有可执行任务时禁止询问用户是否继续",
+            "立即进入下一个 Task",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-code must continue runnable tasks in the active batch: " + ", ".join(missing),
+        )
+
     def test_code_skill_protects_task_runner_snapshot_baseline(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [

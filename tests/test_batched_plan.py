@@ -692,6 +692,133 @@ class EvidenceLayoutContractTest(unittest.TestCase):
 
 
 class BatchRunnerContractTest(unittest.TestCase):
+    def test_incomplete_batch_returns_next_runnable_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "artifacts"
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            (workspace / ".autobizdevops" / "state.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "autobizdevops.state.v3",
+                        "features": {
+                            "alpha": {
+                                "feature": "alpha",
+                                "checkpoint": "code_in_progress",
+                                "stage": "Code",
+                                "iteration": "1",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            write_bundle(
+                feature_dir,
+                [[task("T001"), task("T002", deps=["T001"]), task("T003", deps=["T002"])]],
+            )
+            code = root / "code"
+            code.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=code, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=code, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=code, check=True)
+            (code / ".git" / "info" / "exclude").write_text(
+                ".cmbdevclaw/large_tool_results/\n", encoding="utf-8"
+            )
+            (code / "existing.txt").write_text("already implemented\n", encoding="utf-8")
+            subprocess.run(["git", "add", "existing.txt"], cwd=code, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=code, check=True, capture_output=True)
+
+            def runner(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "task_runner.py"), *args],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            started = runner(
+                "start",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--task-id",
+                "T001",
+                "--code-workspace",
+                str(code),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            run_id = json.loads(started.stdout)["runId"]
+
+            completed = runner(
+                "complete",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--task-id",
+                "T001",
+                "--run-id",
+                run_id,
+                "--code-workspace",
+                str(code),
+                "--no-code-change-why",
+                "behavior already exists",
+                "--supporting-file",
+                "existing.txt",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertEqual(payload["requiredAction"], "continue_active_batch")
+            self.assertTrue(payload["continueCurrentBatch"])
+            self.assertEqual(payload["activeBatchId"], "B001")
+            self.assertEqual(payload["nextTaskId"], "T002")
+            self.assertFalse(payload["stopAfterBatch"])
+            self.assertIsNone(payload["batchHandoff"])
+
+            next_started = runner(
+                "start",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--task-id",
+                "T002",
+                "--code-workspace",
+                str(code),
+            )
+            self.assertEqual(next_started.returncode, 0, next_started.stdout + next_started.stderr)
+            next_run_id = json.loads(next_started.stdout)["runId"]
+            next_completed = runner(
+                "complete",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--task-id",
+                "T002",
+                "--run-id",
+                next_run_id,
+                "--code-workspace",
+                str(code),
+                "--no-code-change-why",
+                "behavior already exists",
+                "--supporting-file",
+                "existing.txt",
+            )
+
+            self.assertEqual(next_completed.returncode, 0, next_completed.stdout + next_completed.stderr)
+            next_payload = json.loads(next_completed.stdout)
+            self.assertEqual(next_payload["requiredAction"], "continue_active_batch")
+            self.assertTrue(next_payload["continueCurrentBatch"])
+            self.assertEqual(next_payload["activeBatchId"], "B001")
+            self.assertEqual(next_payload["nextTaskId"], "T003")
+            self.assertFalse(next_payload["stopAfterBatch"])
+
     def test_non_final_batch_requires_new_conversation_activation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -770,6 +897,8 @@ class BatchRunnerContractTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             completed_payload = json.loads(completed.stdout)
             self.assertTrue(completed_payload["stopAfterBatch"])
+            self.assertFalse(completed_payload["continueCurrentBatch"])
+            self.assertIsNone(completed_payload["nextTaskId"])
             self.assertTrue(completed_payload["requiresNewConversation"])
             self.assertEqual(completed_payload["requiredAction"], "stop_and_open_new_conversation")
             self.assertEqual(
