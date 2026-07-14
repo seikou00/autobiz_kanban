@@ -15,7 +15,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
 ## explore
-进入设计探索模式，严禁使用task工具。未提供的上游产物根据缺失清单处理（如基于用户直供需求建立上下文），不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+进入设计探索模式。未提供的上游产物根据缺失清单处理（如基于用户直供需求建立上下文），不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
 > 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 plan.json` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
@@ -72,7 +72,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 ---
 
-### autodev-plan 上下文感知
+### 上下文感知
 
 探索开始时，优先确认当前 Feature：
 
@@ -82,7 +82,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
 
-- 按 Source Bundle 读取上游产物原件、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。
+- 读取上游产物原件、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。
 - 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
 
@@ -103,8 +103,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 如果新增或修改 HTTP/API、函数入口、请求响应、错误码、权限、租户、审计、幂等、分页、异步行为，但接口形态还不准确，先进入 API Decisions 讨论，不要直接生成 PLAN。
 - 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据决策还不准确，先进入 Data Decisions 讨论，不要直接生成 PLAN。
 - 讨论时只提出会影响实现路径的关键问题，并给出当前建议、备选方案和影响面；不要把用户带进机械问卷。
-- 已确认的决策沉淀为 `design.md` 中的 `已确认`；仍不确定但不影响实现路径的内容可标为 `待确认` 并进入风险；会影响实现路径的 `待确认` 必须先和用户讨论清楚。
-- 如果仍有 `待确认` 且会影响接口形态、数据模型、权限/租户/审计、幂等、分页、异步、状态流、迁移或验收结果，不要结束探索进入 Plan 生成。
+- 已确认的决策沉淀为 `design.md` 中的 `已确认`；仍不确定但不影响实现路径的内容可标为 `待确认` 并进入风险；`待确认` 必须先和用户讨论清楚。
+- 如果仍有 `待确认` 且会影响接口形态、数据模型、权限/租户/审计、幂等、分页、异步、状态流、迁移或验收结果，不要结束探索进入 Plan 生成，直接和用户确认。
 
 讨论输出建议：
 
@@ -181,7 +181,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ## explore 结束
 **结束决策**：当你判断 explore 已足够支撑 Plan 时，必须询问用户是否结束探索并进入 Plan 生成/更新。
 
-- 提出上面的结束询问时，按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `进入 Plan 生成/更新 (Recommended)` / `继续探索` / `暂不生成、停在澄清结果`；Other 由客户端自动提供；
+- 提出上面的结束询问时，按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `进入 Plan 生成/更新 (Recommended)` / `继续探索` / `暂不生成、停在澄清结果`；
 - **自由表达即退出结构化**：若用户不点选项、而是直接给出实质回复（补需求、改约束、抛新问题），
   当作普通文本吸收、更新探索结论后继续探索，**不得机械重复同一结构化选择**；下一轮再择机重发该门。
 - 未拿到明确答复前，不得写入 `plan_in_progress`，也不得生成 design.md / plan.md。
@@ -229,6 +229,38 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
 - [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
 - [ ] 未确认项没有进入硬约束，已标注为待确认
+
+#### design.md 确认规则
+
+**「文件已写入」不等于「已向用户展示」**：用户不会自动去读 design.md。写入 design.md 之后、进入 PLAN 生成之前，必须把其中的 API Decisions 表格、Data Decisions 表格和影响实现路径的关键 Technical Decisions 摘录到对话里，让用户直接看到接口形态、字段变更、索引/迁移和回滚方式。展示格式：
+
+```markdown
+## 技术设计确认（design.md）
+
+**API Decisions**（x-auto-no-http-api: true/false）
+[摘录 API Decisions 表格；无 API 时一句话说明原因]
+
+**Data Decisions**（x-auto-no-sql: true/false）
+[摘录 Data Decisions 表格；无数据变更时一句话说明原因]
+
+**关键技术决策**
+[D-xx 中影响实现路径的决策及备选方案]
+
+**待确认项**
+[所有 Status 为「待确认」的条目，逐条说明影响]
+```
+
+展示后的确认规则：
+
+- **待确认项逐条裁定**：Status 为「待确认」的 API/Data 决策必须作为明确问题提给用户裁定，不得埋在表格里随整体确认默认通过。
+- **发起阶段门**：按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `确认设计，进入 PLAN 生成 (Recommended)` / `需要调整设计` / `暂停，稍后继续`；这是阶段门，不设置 `autoResolutionMs`，必须等待明确答复。
+- **自由表达即退出结构化**：用户不点选项、直接给出修改意见时，当作普通文本吸收，更新 design.md 对应章节并重新展示变更部分，再择机重发确认门。
+
+反模式（禁止）：
+
+- 只问「以上技术设计是否满足需求？」「是否可以继续？」这类未展示具体内容的笼统问题。
+- 以「内容已经写在 design.md 里」为由省略对话内展示。
+- 未拿到明确确认就开始生成 PLAN.md。
 
 ---
 
