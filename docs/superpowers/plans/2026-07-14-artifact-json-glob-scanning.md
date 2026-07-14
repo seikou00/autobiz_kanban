@@ -15,7 +15,7 @@
 **Files:**
 - Modify: `tests/test_state_json_source.py`
 
-- [ ] **Step 1: Add a focused failing test**
+- [x] **Step 1: Add a focused failing test**
 
 Add a test to `ArtifactScanTests` that creates nested cache JSON files and a non-JSON neighbor, invokes the real scanner, and expects only JSON paths:
 
@@ -46,7 +46,7 @@ def test_scan_code_exploration_cache_glob_returns_json_paths(self) -> None:
         self.assertEqual(artifacts[0]["artifactStatus"], "generated")
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -61,7 +61,7 @@ Expected: error containing `only specs artifacts may use glob paths`.
 **Files:**
 - Modify: `board_core/artifacts.py`
 
-- [ ] **Step 1: Replace the specs-only constant with exact contracts**
+- [x] **Step 1: Replace the specs-only constant with exact contracts**
 
 Define:
 
@@ -75,15 +75,15 @@ GLOB_ARTIFACT_CONTRACTS = {
 }
 ```
 
-- [ ] **Step 2: Return the required suffix from validation**
+- [x] **Step 2: Return the required suffix from validation**
 
 Validate the artifact ID and exact path against the table. Raise `ValueError` for unknown IDs or mismatched paths; otherwise return the configured suffix.
 
-- [ ] **Step 3: Scan using the contract suffix**
+- [x] **Step 3: Scan using the contract suffix**
 
 Use the returned suffix instead of the hard-coded `.md` comparison while preserving sorted workspace-relative paths and the existing missing fallback.
 
-- [ ] **Step 4: Verify GREEN and existing rejection behavior**
+- [x] **Step 4: Verify GREEN and existing rejection behavior**
 
 Run:
 
@@ -99,7 +99,7 @@ Expected: all artifact scanner tests pass, including rejection of `logs/**/*.md`
 - Verify: `tests/test_dynamic_workflow.py`
 - Package: `dist/autobiz_kanban_workspace.zip`
 
-- [ ] **Step 1: Run the original failing integration test**
+- [x] **Step 1: Run the original failing integration test**
 
 Run:
 
@@ -109,7 +109,7 @@ python3 -m unittest tests.test_dynamic_workflow.DynamicWorkflowRuntimeTests.test
 
 Expected: `OK` with no artifact glob traceback.
 
-- [ ] **Step 2: Run related regressions and syntax checks**
+- [x] **Step 2: Run related regressions and syntax checks**
 
 Run:
 
@@ -121,7 +121,7 @@ git diff --check
 
 Expected: all selected tests pass; syntax and whitespace checks return zero.
 
-- [ ] **Step 3: Rebuild and clean the plugin archive**
+- [x] **Step 3: Rebuild and clean the plugin archive**
 
 Run:
 
@@ -133,7 +133,7 @@ unzip -t dist/autobiz_kanban_workspace.zip
 
 Expected: ZIP integrity succeeds and its file list contains no runtime caches.
 
-- [ ] **Step 4: Commit the bug fix independently**
+- [x] **Step 4: Commit the bug fix independently**
 
 Stage only:
 

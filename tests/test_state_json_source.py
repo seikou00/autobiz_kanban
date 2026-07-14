@@ -592,6 +592,42 @@ class ArtifactScanTests(unittest.TestCase):
                 ],
             )
 
+    def test_scan_code_exploration_cache_glob_returns_json_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            cache_dir = feature_dir / "cache" / "code-exploration" / "repo"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "backend.json").write_text("{}", encoding="utf-8")
+            (cache_dir / "notes.md").write_text("skip", encoding="utf-8")
+
+            artifacts = scan_artifacts(
+                feature_dir,
+                workspace,
+                [
+                    {
+                        "id": "code_exploration_cache",
+                        "label": "代码探索缓存",
+                        "path": "cache/code-exploration/**/*.json",
+                    }
+                ],
+            )
+
+            self.assertEqual(
+                artifacts,
+                [
+                    {
+                        "id": "code_exploration_cache",
+                        "artifactLabel": "代码探索缓存",
+                        "paths": [
+                            ".autobizdevops/features/alpha/cache/code-exploration/repo/backend.json"
+                        ],
+                        "artifactStatus": "generated",
+                        "artifactStatusLabel": "已生成",
+                    }
+                ],
+            )
+
     def test_scan_specs_glob_without_matches_returns_fallback_glob_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
