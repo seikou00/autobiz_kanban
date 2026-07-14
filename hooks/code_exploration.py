@@ -18,7 +18,7 @@ from hooks.repository_snapshot import capture_repository_snapshot, snapshot_chan
 
 
 SCHEMA_VERSION = "autodev.code-exploration.v1"
-CACHE_STATUSES = {"missing", "fresh", "reusable_with_changes", "stale"}
+CACHE_STATUSES = {"missing", "fresh", "fresh_with_trusted_changes", "reusable_with_changes", "stale"}
 POLICIES: dict[str, dict[str, Any]] = {
     "missing": {
         "explorationPolicy": "full_bounded_explore",
@@ -35,13 +35,25 @@ POLICIES: dict[str, dict[str, Any]] = {
         "requiresRecord": False,
         "requiresPatch": False,
     },
+    "fresh_with_trusted_changes": {
+        "explorationPolicy": "task_scope_only",
+        "requiresRecord": False,
+        "requiresPatch": False,
+        "deferredCacheUpdate": True,
+    },
     "reusable_with_changes": {
         "explorationPolicy": "targeted_reread",
         "requiresRecord": False,
         "requiresPatch": True,
     },
 }
-POLICY_PRIORITY = {"fresh": 0, "reusable_with_changes": 1, "missing": 2, "stale": 3}
+POLICY_PRIORITY = {
+    "fresh": 0,
+    "fresh_with_trusted_changes": 1,
+    "reusable_with_changes": 2,
+    "missing": 3,
+    "stale": 4,
+}
 REPOSITORY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 FINDING_FIELDS = (
     "moduleMap",
@@ -110,6 +122,7 @@ class TrustedEvolution:
     task_ids: tuple[str, ...]
     evidence_ids: tuple[str, ...]
     untrusted_reasons: tuple[str, ...]
+    transient_paths: frozenset[str] = frozenset()
 
     @classmethod
     def empty(cls) -> "TrustedEvolution":
@@ -281,6 +294,8 @@ def classify_cache(
     cache: dict[str, Any] | None,
     current_snapshot: dict[str, Any],
     trusted: TrustedEvolution,
+    *,
+    current_batch_id: str | None = None,
 ) -> dict[str, Any]:
     if cache is None:
         return _result("missing")
@@ -294,9 +309,17 @@ def classify_cache(
     if not isinstance(after, dict):
         return _result("stale", stale_reasons=["current_git_snapshot_invalid"])
     changes = snapshot_changes(before, after)
-    changed_paths = sorted({item.get("path") for item in changes if isinstance(item.get("path"), str)} | {
-        item.get("fromPath") for item in changes if isinstance(item.get("fromPath"), str)
-    })
+    changed_paths = {
+        item.get("path")
+        for item in changes
+        if isinstance(item.get("path"), str)
+    } | {
+        item.get("fromPath")
+        for item in changes
+        if isinstance(item.get("fromPath"), str)
+    }
+    changed_paths.difference_update(trusted.transient_paths - trusted.changed_paths)
+    changed_paths = sorted(changed_paths)
     if not changed_paths:
         return _result("fresh")
     critical_hits = [path for path in changed_paths if is_critical_path(path)]
@@ -323,6 +346,24 @@ def classify_cache(
             trusted=trusted,
             stale_reasons=stale_reasons,
         )
+    sensitive_paths = _cache_sensitive_paths(cache)
+    sensitive_change = any(
+        _path_matches_scope(path, sensitive)
+        for path in trusted.changed_paths
+        for sensitive in sensitive_paths
+    )
+    if (
+        current_batch_id is not None
+        and cache.get("capturedBatchId") == current_batch_id
+        and not sensitive_change
+    ):
+        return _result(
+            "fresh_with_trusted_changes",
+            changed_paths=changed_paths,
+            critical_hits=critical_hits,
+            unexplained_paths=unexplained,
+            trusted=trusted,
+        )
     return _result(
         "reusable_with_changes",
         changed_paths=changed_paths,
@@ -330,6 +371,28 @@ def classify_cache(
         unexplained_paths=unexplained,
         trusted=trusted,
     )
+
+
+def _path_matches_scope(path: str, scope: str) -> bool:
+    candidate = Path(path.replace("\\", "/"))
+    normalized_scope = Path(scope.replace("\\", "/").rstrip("/"))
+    return candidate == normalized_scope or normalized_scope in candidate.parents
+
+
+def _cache_sensitive_paths(cache: dict[str, Any]) -> set[str]:
+    paths = {
+        item
+        for item in cache.get("sharedPaths", [])
+        if isinstance(item, str) and item.strip()
+    }
+    findings = cache.get("findings")
+    integration_points = findings.get("integrationPoints", []) if isinstance(findings, dict) else []
+    paths.update(
+        item.get("path")
+        for item in integration_points
+        if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"].strip()
+    )
+    return paths
 
 
 def _read_run(feature_dir: Path, task_id: str, run_id: str) -> dict[str, Any] | None:
@@ -373,6 +436,7 @@ def collect_trusted_evolution(
     covered_evidence = set(coverage.get("completionEvidenceIds", [])) if isinstance(coverage, dict) else set()
     evidence_by_id, evidence_order, stream_errors = _evidence_by_id(feature_dir)
     changed_paths: set[str] = set()
+    transient_paths: set[str] = set()
     task_ids: list[str] = []
     evidence_ids: list[str] = []
     untrusted = list(stream_errors)
@@ -429,6 +493,24 @@ def collect_trusted_evolution(
                 else:
                     untrusted.append(f"repository_prefix_missing:{evidence_id}:{raw_path}")
                     task_valid = False
+            raw_transient_paths = record.get("transientValidationFiles", [])
+            if raw_transient_paths is None:
+                raw_transient_paths = []
+            if not isinstance(raw_transient_paths, list) or not all(
+                isinstance(item, str) for item in raw_transient_paths
+            ):
+                untrusted.append(f"transient_files_invalid:{evidence_id}")
+                task_valid = False
+            else:
+                for raw_path in raw_transient_paths:
+                    prefix = f"{repository_id}:"
+                    if raw_path.startswith(prefix):
+                        transient_paths.add(raw_path[len(prefix):])
+                    elif len(run_ids) == 1:
+                        transient_paths.add(raw_path)
+                    else:
+                        untrusted.append(f"repository_prefix_missing:{evidence_id}:{raw_path}")
+                        task_valid = False
         task_latest_files: dict[str, str | None] | None = None
         task_completion_order = -1
         for run_id in sorted(run_ids, key=lambda item: (run_completion_order.get(item, -1), item)):
@@ -462,6 +544,7 @@ def collect_trusted_evolution(
         task_ids=tuple(task_ids),
         evidence_ids=tuple(evidence_ids),
         untrusted_reasons=tuple(sorted(set(untrusted))),
+        transient_paths=frozenset(transient_paths),
     )
 
 
@@ -498,7 +581,7 @@ def inspect_exploration_cache(
         cache = value
     current = capture_repository_snapshot(repository_root)
     trusted = collect_trusted_evolution(feature_dir, bundle, cache, repository_id)
-    result = classify_cache(cache, current, trusted)
+    result = classify_cache(cache, current, trusted, current_batch_id=batch_id)
     result.update(
         {
             "repositoryId": repository_id,

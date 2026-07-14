@@ -621,6 +621,23 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-code must define transient validation file handling: " + ", ".join(missing),
         )
 
+    def test_code_skill_defines_batch_level_exploration_cache_policy(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "fresh_with_trusted_changes",
+            "同一 active batch",
+            "批次边界",
+            "shared/integration",
+            "deferredCacheUpdate",
+            "transientValidationFiles",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-code must define batch-level exploration cache policy: " + ", ".join(missing),
+        )
+
     def test_plan_and_code_skills_define_requested_workspace_scope_base(self) -> None:
         plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")

@@ -305,6 +305,12 @@ def _contract() -> dict[str, Any]:
             "headCommitChanged": "stale_even_when_file_hashes_match",
             "criticalPathChanged": "stale_even_when_completion_evidence_explains_the_change",
         },
+        "batchUpdateRules": {
+            "sameBatch": "fresh_with_trusted_changes_without_patch",
+            "newBatch": "reusable_with_changes_requires_targeted_patch",
+            "sensitivePaths": "shared_paths_and_integration_points_require_targeted_patch",
+            "transientValidationFiles": "excluded_unless_formal_changed",
+        },
         "runtimeIgnoreRequirements": {
             "paths": [".autobizdevops/", ".cmbdevclaw/"],
             "rule": "when_present_inside_a_business_repository_the_path_must_be_git_ignored_before_record",

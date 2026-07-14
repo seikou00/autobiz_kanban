@@ -191,6 +191,110 @@ class CacheClassificationTest(unittest.TestCase):
         self.assertTrue(result["policy"]["requiresPatch"])
         self.assertEqual(result["matchedTaskIds"], ["T001"])
 
+    def test_trusted_change_in_captured_batch_is_deferred_without_patch(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        current = self._snapshot(files={"src/a.py": "new"})
+        trusted = TrustedEvolution(
+            changed_paths=frozenset({"src/a.py"}),
+            latest_files=current["files"],
+            task_ids=("T001",),
+            evidence_ids=("ev_0001",),
+            untrusted_reasons=(),
+        )
+
+        result = classify_cache(self._cache(), current, trusted, current_batch_id="B001")
+
+        self.assertEqual(result["status"], "fresh_with_trusted_changes")
+        self.assertFalse(result["policy"]["requiresPatch"])
+        self.assertEqual(result["changedPaths"], ["src/a.py"])
+
+    def test_trusted_change_from_previous_batch_requires_patch(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        current = self._snapshot(files={"src/a.py": "new"})
+        trusted = TrustedEvolution(
+            changed_paths=frozenset({"src/a.py"}),
+            latest_files=current["files"],
+            task_ids=("T001",),
+            evidence_ids=("ev_0001",),
+            untrusted_reasons=(),
+        )
+
+        result = classify_cache(self._cache(), current, trusted, current_batch_id="B002")
+
+        self.assertEqual(result["status"], "reusable_with_changes")
+        self.assertTrue(result["policy"]["requiresPatch"])
+
+    def test_shared_path_change_requires_patch_within_batch(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        cache = self._cache()
+        cache["sharedPaths"] = ["src/shared"]
+        current = self._snapshot(files={"src/a.py": "old", "src/shared/contract.py": "new"})
+        trusted = TrustedEvolution(
+            changed_paths=frozenset({"src/shared/contract.py"}),
+            latest_files=current["files"],
+            task_ids=("T001",),
+            evidence_ids=("ev_0001",),
+            untrusted_reasons=(),
+        )
+
+        result = classify_cache(cache, current, trusted, current_batch_id="B001")
+
+        self.assertEqual(result["status"], "reusable_with_changes")
+        self.assertTrue(result["policy"]["requiresPatch"])
+
+    def test_integration_path_change_requires_patch_within_batch(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        cache = self._cache()
+        cache["findings"]["integrationPoints"] = [
+            {"kind": "controller", "path": "src/api", "purpose": "public entrypoint"}
+        ]
+        current = self._snapshot(files={"src/a.py": "old", "src/api/Controller.py": "new"})
+        trusted = TrustedEvolution(
+            changed_paths=frozenset({"src/api/Controller.py"}),
+            latest_files=current["files"],
+            task_ids=("T001",),
+            evidence_ids=("ev_0001",),
+            untrusted_reasons=(),
+        )
+
+        result = classify_cache(cache, current, trusted, current_batch_id="B001")
+
+        self.assertEqual(result["status"], "reusable_with_changes")
+        self.assertTrue(result["policy"]["requiresPatch"])
+
+    def test_transient_validation_path_is_ignored_but_formal_change_wins(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        current = self._snapshot(files={"src/a.py": "new", "tests/temp.py": "new"})
+        trusted = TrustedEvolution(
+            changed_paths=frozenset({"src/a.py"}),
+            transient_paths=frozenset({"tests/temp.py"}),
+            latest_files=current["files"],
+            task_ids=("T001",),
+            evidence_ids=("ev_0001",),
+            untrusted_reasons=(),
+        )
+
+        result = classify_cache(self._cache(), current, trusted, current_batch_id="B001")
+
+        self.assertEqual(result["status"], "fresh_with_trusted_changes")
+        self.assertEqual(result["changedPaths"], ["src/a.py"])
+
+        formal = TrustedEvolution(
+            changed_paths=frozenset({"src/a.py", "tests/temp.py"}),
+            transient_paths=frozenset({"tests/temp.py"}),
+            latest_files=current["files"],
+            task_ids=("T001",),
+            evidence_ids=("ev_0001",),
+            untrusted_reasons=(),
+        )
+        formal_result = classify_cache(self._cache(), current, formal, current_batch_id="B001")
+        self.assertIn("tests/temp.py", formal_result["changedPaths"])
+
     def test_same_path_modified_after_task_completion_is_stale(self) -> None:
         from hooks.code_exploration import TrustedEvolution, classify_cache
 
@@ -243,7 +347,17 @@ class CodeExplorationWriterTest(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["schemaVersion"], "autodev.code-exploration.v1")
         self.assertEqual(payload["executionLanes"], ["backend", "frontend"])
+        self.assertFalse(payload["policies"]["fresh_with_trusted_changes"]["requiresPatch"])
+        self.assertTrue(payload["policies"]["fresh_with_trusted_changes"]["deferredCacheUpdate"])
         self.assertEqual(payload["policies"]["reusable_with_changes"]["requiresPatch"], True)
+        self.assertEqual(
+            payload["batchUpdateRules"]["sameBatch"],
+            "fresh_with_trusted_changes_without_patch",
+        )
+        self.assertEqual(
+            payload["batchUpdateRules"]["transientValidationFiles"],
+            "excluded_unless_formal_changed",
+        )
         self.assertIn("package.json", payload["criticalPathRules"]["basenames"])
         self.assertEqual(
             payload["invalidationRules"]["headCommitChanged"],
@@ -337,6 +451,9 @@ class CodeExplorationWriterTest(unittest.TestCase):
             self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
             run_id = json.loads(started.stdout)["runId"]
             (repo / "existing.txt").write_text("implemented\n", encoding="utf-8")
+            transient_test = repo / "tests" / "temp_validation.py"
+            transient_test.parent.mkdir(parents=True)
+            transient_test.write_text("def test_temp(): pass\n", encoding="utf-8")
             completed = subprocess.run(
                 [sys.executable, "hooks/task_runner.py", "complete", "--workspace", str(workspace),
                  "--feature", "alpha", "--task-id", "T001", "--run-id", run_id,
@@ -344,6 +461,9 @@ class CodeExplorationWriterTest(unittest.TestCase):
                 cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            evidence_lines = (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines()
+            evidence = json.loads(evidence_lines[-1])
+            self.assertEqual(evidence["transientValidationFiles"], ["tests/temp_validation.py"])
 
             inspected = self._run_writer(
                 "inspect", "--workspace", str(workspace), "--feature", "alpha",
@@ -351,12 +471,21 @@ class CodeExplorationWriterTest(unittest.TestCase):
             )
             self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
             cache = json.loads(inspected.stdout)["explorationCaches"][0]
+            self.assertEqual(cache["status"], "fresh_with_trusted_changes")
+            cache_path = feature_dir / "cache" / "code-exploration" / repo.name / "backend.json"
+            persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+            persisted["capturedBatchId"] = "B000"
+            cache_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            inspected = self._run_writer(
+                "inspect", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--code-workspace", str(repo),
+            )
+            cache = json.loads(inspected.stdout)["explorationCaches"][0]
             self.assertEqual(cache["status"], "reusable_with_changes")
             self.assertEqual(cache["matchedTaskIds"], ["T001"])
             self.assertEqual(cache["changedPaths"], ["existing.txt"])
 
             patch_body = Path(tmp) / "patch.json"
-            cache_path = feature_dir / "cache" / "code-exploration" / repo.name / "backend.json"
             before_rejected_patch = cache_path.read_bytes()
             patch_body.write_text(
                 json.dumps(
@@ -484,6 +613,16 @@ class CodeExplorationWriterTest(unittest.TestCase):
             )
             self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
             cache = json.loads(inspected.stdout)["explorationCaches"][0]
+            self.assertEqual(cache["status"], "fresh_with_trusted_changes")
+            cache_path = feature_dir / "cache" / "code-exploration" / repo.name / "backend.json"
+            persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+            persisted["capturedBatchId"] = "B000"
+            cache_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            inspected = self._run_writer(
+                "inspect", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T003", "--code-workspace", str(repo),
+            )
+            cache = json.loads(inspected.stdout)["explorationCaches"][0]
             self.assertEqual(cache["status"], "reusable_with_changes")
             self.assertEqual(cache["matchedTaskIds"], ["T001", "T002"])
             self.assertEqual(len(cache["matchedEvidenceIds"]), 2)
@@ -506,7 +645,6 @@ class CodeExplorationWriterTest(unittest.TestCase):
                 "--expected-cache-sha256", cache["cacheSha256"], "--body-file", str(patch_body),
             )
             self.assertEqual(patched.returncode, 0, patched.stdout + patched.stderr)
-            cache_path = feature_dir / "cache" / "code-exploration" / repo.name / "backend.json"
             persisted = json.loads(cache_path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["evidenceCoverage"]["explainedTaskIds"], ["T001", "T002"])
 
