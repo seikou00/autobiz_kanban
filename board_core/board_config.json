@@ -358,7 +358,7 @@
         "group": "Dev",
         "skill": "autodev-code",
         "order": 50,
-        "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码（本轮新增/修改的代码，按 PLAN 就地更新任务状态；无独立文档产物）",
+        "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码（本轮新增/修改的代码，按 PLAN 就地更新任务状态）、review-baseline.json（代码修改前的逐仓库 Git 审查基线）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
@@ -391,9 +391,10 @@
               } }
           ],
           "outputs": [
+            { "id": "review_baseline", "label": "代码审查基线", "artifactType": "file", "path": "review-baseline.json", "required": true }
           ]
         },
-        "validators": ["plan_finished_tasks"],
+        "validators": ["plan_finished_tasks", "review_baseline_contract"],
         "guards": ["code_compile"]
       },
       {
@@ -430,6 +431,10 @@
             { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
               "extract": {
                 "degrade": "无 PLAN 时以代码 diff 与提交记录核对实现闭环"
+              } },
+            { "id": "review_baseline", "label": "代码审查基线", "artifactType": "file", "path": "review-baseline.json", "required": false,
+              "extract": {
+                "degrade": "旧 Feature 无审查基线时使用当前 Git 状态建立 legacy_scope，并在报告中标注范围置信度；无法可靠界定 Feature 变更时 verdict=DEGRADED"
               } }
           ],
           "outputs": [

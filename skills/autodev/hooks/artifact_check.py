@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -25,7 +26,10 @@ from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profi
 
 
 PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
-VALID_VERDICT = re.compile(r"verdict\s*[:=]\s*(PASS_WITH_WARNINGS|PASS|FAIL|DEGRADED)\b", re.IGNORECASE)
+VALID_VERDICT = re.compile(
+    r"^##\s+Verdict\s*$\s*(PASS_WITH_WARNINGS|PASS|FAIL|DEGRADED)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
 UNIT_TEST_VERDICT = re.compile(
     r"verdict\W*[:=]\W*(PASS_WITH_WARNINGS|PASS|FAIL|BLOCKED)\b",
@@ -152,20 +156,146 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
     return failures
 
 
+def validate_review_baseline_contract(ctx: HookContext) -> int:
+    baseline = ctx.file("review-baseline.json")
+    if not is_nonempty(baseline):
+        return fail_line(ctx, "missing_review_baseline")
+
+    try:
+        payload = json.loads(read_text(baseline))
+    except json.JSONDecodeError:
+        return fail_line(ctx, "invalid_review_baseline_json")
+
+    if not isinstance(payload, dict) or payload.get("schema_version") != "autobizdevops.review-baseline.v1":
+        return fail_line(ctx, "invalid_review_baseline_schema")
+    repositories = payload.get("repositories")
+    if not isinstance(repositories, list) or not repositories:
+        return fail_line(ctx, "invalid_review_baseline_repositories")
+
+    failures = 0
+    seen_paths: set[str] = set()
+    for index, repository in enumerate(repositories, start=1):
+        if not isinstance(repository, dict):
+            failures += fail_line(ctx, "invalid_review_baseline_repository", f" index={index}")
+            continue
+        path = repository.get("path")
+        if not isinstance(path, str) or not Path(path).is_absolute() or path in seen_paths:
+            failures += fail_line(ctx, "invalid_review_baseline_path", f" index={index}")
+        else:
+            seen_paths.add(path)
+        if not re.fullmatch(
+            r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})",
+            str(repository.get("base_sha", "")),
+        ):
+            failures += fail_line(ctx, "invalid_review_baseline_sha", f" index={index}")
+        if repository.get("scope_confidence") not in {"full", "partial"}:
+            failures += fail_line(ctx, "invalid_review_baseline_confidence", f" index={index}")
+        for field in ("initial_status", "initial_dirty_paths", "initial_untracked_paths"):
+            if not isinstance(repository.get(field), list):
+                failures += fail_line(
+                    ctx,
+                    "invalid_review_baseline_list_field",
+                    f" index={index} field={field!r}",
+                )
+    return failures
+
+
 def validate_requirements_eval_verdict(ctx: HookContext) -> int:
     eval_report = ctx.file("REQUIREMENTS_EVAL.md")
     if not is_nonempty(eval_report):
         return fail_line(ctx, "missing_requirements_eval")
 
     content = read_text(eval_report)
-    if not re.search(r"verdict\s*[:=]", content, re.IGNORECASE):
-        return fail_line(ctx, "missing_verdict_in_eval")
     verdict_match = VALID_VERDICT.search(content)
     if not verdict_match:
-        return fail_line(ctx, "invalid_verdict")
+        return fail_line(ctx, "missing_or_invalid_verdict")
     if verdict_match.group(1).upper() not in TERMINAL_PASS:
         return fail_line(ctx, "non_terminal_verdict")
-    return 0
+
+    failures = 0
+    required_sections = [
+        "Review Mode",
+        "Review Topology",
+        "Verdict",
+        "Summary",
+        "Review Scope",
+        "Evidence",
+        "Repositories Reviewed",
+        "Axis Summary",
+        "Standards Sources",
+        "Standards Review",
+        "Spec Review",
+        "Requirement Coverage",
+        "E2E Focus",
+        "Blockers",
+        "Warnings",
+        "Required Next Action",
+    ]
+    for section in required_sections:
+        if not re.search(rf"^##\s+{re.escape(section)}\s*$", content, re.MULTILINE):
+            failures += fail_line(
+                ctx,
+                "invalid_requirements_eval_missing_section",
+                f" section={section!r}",
+            )
+
+    mode_match = re.search(
+        r"^##\s+Review Mode\s*$\s*(independent_task|inline_main_agent)\b",
+        content,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if not mode_match:
+        failures += fail_line(ctx, "invalid_requirements_eval_review_mode")
+    topology_match = re.search(
+        r"^##\s+Review Topology\s*$\s*"
+        r"(dual_axis_parallel|dual_axis_single_reviewer)\b",
+        content,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if not topology_match:
+        failures += fail_line(ctx, "invalid_requirements_eval_review_topology")
+    if (
+        mode_match
+        and topology_match
+        and mode_match.group(1).lower() == "inline_main_agent"
+        and topology_match.group(1).lower() != "dual_axis_single_reviewer"
+    ):
+        failures += fail_line(ctx, "invalid_requirements_eval_inline_parallel_topology")
+
+    axis_statuses: dict[str, str] = {}
+    for axis in ("Standards", "Spec"):
+        axis_match = re.search(
+            rf"^\|\s*{axis}\s*\|\s*(PASS|WARN|FAIL)\s*\|",
+            content,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if not axis_match:
+            failures += fail_line(
+                ctx,
+                "invalid_requirements_eval_missing_axis_status",
+                f" axis={axis!r}",
+            )
+        else:
+            axis_statuses[axis] = axis_match.group(1).upper()
+
+    verdict = verdict_match.group(1).upper()
+    if "FAIL" in axis_statuses.values():
+        failures += fail_line(ctx, "invalid_requirements_eval_terminal_verdict_with_failed_axis")
+    if verdict == "PASS" and "WARN" in axis_statuses.values():
+        failures += fail_line(ctx, "invalid_requirements_eval_pass_with_warning_axis")
+
+    scope_match = re.search(
+        r"^##\s+Review Scope\s*$([\s\S]*?)(?=^##\s+|\Z)",
+        content,
+        re.MULTILINE,
+    )
+    if verdict == "PASS" and scope_match and re.search(
+        r"\|\s*partial\s*\|",
+        scope_match.group(1),
+        re.IGNORECASE,
+    ):
+        failures += fail_line(ctx, "invalid_requirements_eval_pass_with_partial_scope")
+    return failures
 
 
 def validate_unit_test_report_contract(ctx: HookContext) -> int:
@@ -216,6 +346,7 @@ VALIDATORS = {
     "design_contract": validate_design_contract,
     "plan_initial_tasks": validate_plan_initial_tasks,
     "plan_finished_tasks": validate_plan_finished_tasks,
+    "review_baseline_contract": validate_review_baseline_contract,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
     "unit_test_report_contract": validate_unit_test_report_contract,
 }

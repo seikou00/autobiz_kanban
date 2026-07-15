@@ -1,7 +1,6 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.2.0703
 ---
 
 # /autodev-code — 代码执行
@@ -42,6 +41,21 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 ```
+
+## 捕获代码审查基线
+
+推进到 `code_in_progress` 后、修改任何业务文件前，生成当前 Feature 的正式审查基线：
+
+```bash
+python "${pluginPath}/skills/autodev/autodev-reviewer/scripts/capture_review_baseline.py" \
+  --output "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/review-baseline.json" \
+  --module-manifest "${pluginWorkspace}/${projectDir}/.autobizdevops/modules_compile.json"
+```
+
+- 模块清单未覆盖某个受影响仓库时，为每个遗漏仓库追加 `--repo "<repository-id>=<path>"`。
+- 首次进入 `code_in_progress` 时必须捕获；捕获失败立即停止，不得开始编码。
+- 恢复 `code_in_progress` 时必须复用已有 `review-baseline.json`，不得重新捕获或覆盖。文件缺失时停止并说明无法重建修改前基线，不得继续推进 `code_done`。`legacy_scope` 只兼容升级前已经完成代码阶段的旧 Feature，不是新代码阶段的绕过入口。
+- 基线中的 `scope_confidence: partial` 表示仓库在编码前已有脏文件。不得擅自把这些文件全部归入当前 Feature；完成摘要必须指出其中哪些路径与当前任务重叠，交由 reviewer 独立判定范围可信度。
 
 ## 执行协议
 
