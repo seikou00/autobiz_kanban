@@ -72,6 +72,37 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 ---
 
+### 深模块设计探索
+
+设计分析统一使用以下词汇：**Module**（具有 Interface 与 Implementation 的代码单元）、**Interface**（调用方必须知道的全部约束）、**Seam**（可替换行为的位置）、**Adapter**（实现 Seam 处 Interface 的具体角色）、**Depth**、**Leverage**、**Locality**。这些词只用于分析和产物表述，不得为了统一词汇而重命名项目现有的 Service、API、Repository 等代码概念。
+
+出现以下任一情况时，必须进行深模块设计检查；普通局部修改不强制增加设计流程：
+
+- 新增或修改公共 Interface。
+- 拆分、合并 Module，或移动 Seam。
+- 引入远程依赖、第三方依赖或新的 I/O 依赖。
+- 同一业务规则、校验或错误转换将分散到多个调用方。
+- 拟新增只做参数转交、结果转交的疑似浅模块。
+
+检查规则：
+
+1. **删除测试：**假设删除拟新增 Module；若复杂度没有回流到多个调用方，它没有产生足够 Leverage，不应作为纯转发抽象引入。
+2. **依赖分类：**将相关依赖标为「进程内」「本地可替代」「远程自有」「真正外部」，并据此确定测试方式和 Adapter 策略：进程内依赖直接测试；本地可替代依赖使用本地 stand-in 且保持内部 Seam；远程自有依赖使用 Port + 生产传输 Adapter + 内存测试 Adapter；真正外部依赖通过注入 Port 并由测试提供 Mock Adapter。
+3. **Seam 纪律：**没有真实替换需求时不创建猜测性 Port；不得仅为了测试把内部 Seam 暴露为公共 Interface。
+4. **范围纪律：**只约束当前 Feature 的新增或修改；发现无关历史浅模块时记入风险，不得顺手扩展重构范围。
+
+当探索后仍存在至少两种合理的 Interface/Seam 方案，且选择会影响多个调用方或跨进程依赖时，条件式执行 **Design It Twice**：
+
+1. 先向用户展示任何方案都必须满足的约束、依赖类别和一段仅用于说明问题空间的示意调用。
+2. 生成至少三种明显不同的方案：最小 Interface、最大灵活性、默认调用最简单；涉及跨进程依赖时再增加 Ports & Adapters 方案。
+3. 当前环境支持并行 agent 时并行生成；不支持时由当前会话顺序生成，不因此阻断探索。
+4. 每个方案说明 Interface 及约束、调用示例、Seam 后隐藏的实现、依赖/Adapter 策略和取舍。
+5. 按 Depth、Locality、Seam placement 比较，给出明确推荐；用户确认前不得写入 design.md 的「已确认」决策。
+
+未命中上述条件时不得为普通任务强制执行 Design It Twice。
+
+---
+
 ### 上下文感知
 
 探索开始时，优先确认当前 Feature：
@@ -221,6 +252,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
   - 如涉及数据变更，记录表/模型、字段、索引、迁移、回滚和状态。
   - specs 明确涉及数据但字段/类型/索引缺失时，必须回到用户追问或标为待确认；不得凭空发明字段。
 - **Technical Design / 技术设计**：记录现状、决策、备选方案、集成点和涉及路径。
+- **Module Decisions / 模块决策**：用 `MOD-xx` 记录 Module 职责、Interface 约束、Seam、Test Surface 与状态；无深模块设计影响时明确写「无」。
+- **Dependency Decisions / 依赖决策**：用 `DEP-xx` 记录所属 Module、依赖类别、生产/Test Adapter 策略与状态；无相关依赖时明确写「无」。
 - **Risks / Open Questions**：所有未确认业务语义、技术假设、兼容风险必须落在这里。
 
 完成条件：
@@ -228,6 +261,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] design.md 包含 Context、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
 - [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
 - [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
+- [ ] Module/Dependency Decisions 已记录 MOD/DEP 决策，或明确说明无相关设计影响
 - [ ] 未确认项没有进入硬约束，已标注为待确认
 
 #### design.md 确认规则
@@ -246,13 +280,19 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 **关键技术决策**
 [D-xx 中影响实现路径的决策及备选方案]
 
+**Module Decisions**
+[摘录 MOD-xx 的 Module、Interface、Seam、Test Surface 与状态；无相关影响时说明无]
+
+**Dependency Decisions**
+[摘录 DEP-xx 的依赖类别、生产/Test Adapter 策略与状态；无相关依赖时说明无]
+
 **待确认项**
 [所有 Status 为「待确认」的条目，逐条说明影响]
 ```
 
 展示后的确认规则：
 
-- **待确认项逐条裁定**：Status 为「待确认」的 API/Data 决策必须作为明确问题提给用户裁定，不得埋在表格里随整体确认默认通过。
+- **待确认项逐条裁定**：Status 为「待确认」的 API/Data/MOD/DEP 决策必须作为明确问题提给用户裁定，不得埋在表格里随整体确认默认通过；影响实现路径的 Module、Interface、Seam 或依赖策略未确认时不得进入 PLAN 生成。
 - **发起阶段门**：按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `确认设计，进入 PLAN 生成 (Recommended)` / `需要调整设计` / `暂停，稍后继续`；这是阶段门，不设置 `autoResolutionMs`，必须等待明确答复。
 - **自由表达即退出结构化**：用户不点选项、直接给出修改意见时，当作普通文本吸收，更新 design.md 对应章节并重新展示变更部分，再择机重发确认门。
 
@@ -288,7 +328,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
 - 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
 
-每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
+每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision、Module Decision、Dependency Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
 按 `{PLUGIN_ROOT}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 
@@ -298,7 +338,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] 每个任务都包含「做什么」「规格依据」「设计依据」「验证方法」「状态: 待做」
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
 - [ ] specs 中每个 Requirement / Scenario 至少被一个任务覆盖
-- [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
+- [ ] design.md 中每个接口/数据/模块/依赖/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
 - [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 PLAN.md 已同步记录，并更新相关任务或风险项。
 
 ---

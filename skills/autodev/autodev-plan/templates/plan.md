@@ -36,8 +36,8 @@ graph TD
 
 | #    | 任务           | 依赖 | 覆盖规格/设计项          | 状态 |
 | ---- | -------------- | ---- | ------------------------ | ---- |
-| 1    | [需求闭环名称] | 无   | REQ- / API- / DATA- / D- | 待做 |
-| 2    | [需求闭环名称] | 1    | REQ- / API- / DATA- / D- | 待做 |
+| 1    | [需求闭环名称] | 无   | REQ- / API- / DATA- / MOD- / DEP- / D- | 待做 |
+| 2    | [需求闭环名称] | 1    | REQ- / API- / DATA- / MOD- / DEP- / D- | 待做 |
 
 ---
 
@@ -47,7 +47,7 @@ graph TD
 
 - **做什么:** [本任务交付的需求能力、用户可观察行为或验收闭环；不要写成单个文件/类/方法修改]
 - **规格依据:** [specs/[capability]/spec.md 中的 Requirement / Scenario]
-- **设计依据:** [design.md 中的 API/Data/Decision ID]
+- **设计依据:** [design.md 中的 API/DATA/MOD/DEP/D ID]
 - **验证方法:** [可执行检查命令或测试命令] 预期结果：[明确可观察结果]
 - **状态:** 待做
 
@@ -55,7 +55,7 @@ graph TD
 
 - **做什么:** [本任务交付的需求能力、用户可观察行为或验收闭环；不要写成单个文件/类/方法修改]
 - **规格依据:** [specs/[capability]/spec.md 中的 Requirement / Scenario]
-- **设计依据:** [design.md 中的 API/Data/Decision ID]
+- **设计依据:** [design.md 中的 API/DATA/MOD/DEP/D ID]
 - **验证方法:** [可执行检查命令或测试命令] 预期结果：[明确可观察结果]
 - **状态:** 待做
 ---
@@ -75,6 +75,8 @@ graph TD
 | REQ-01                      | Behavior           | 任务 1      | [验证方法]    |
 | API-01 / x-auto-no-http-api | API                | 任务 2 / 无 | [验证方法]    |
 | DATA-01 / x-auto-no-sql     | Data               | 任务 3 / 无 | [验证方法]    |
+| MOD-01                      | Module Design      | 任务 1 / 无 | [验证方法]    |
+| DEP-01                      | Dependency Design  | 任务 1 / 无 | [验证方法]    |
 | D-01                        | Technical Decision | 任务 1      | [验证方法]    |
 
 ---

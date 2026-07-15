@@ -55,6 +55,22 @@
 ### Integration Points
 - [模块/文件/入口路径]
 
+### Module Decisions / 模块决策
+
+[无 Module/Interface/Seam 设计影响时明确写「无」。]
+
+| ID | Module / Responsibility | Interface / Constraints | Seam | Test Surface | Status |
+|----|-------------------------|-------------------------|------|--------------|--------|
+| MOD-01 | [模块及职责] | [入口、参数、返回、不变量、顺序、错误模式] | [行为可替换位置] | [调用方实际使用的可观察接口] | 已确认/待确认 |
+
+### Dependency Decisions / 依赖决策
+
+[无相关依赖时明确写「无」。依赖类别只能使用：进程内 / 本地可替代 / 远程自有 / 真正外部。]
+
+| ID | Owner Module | Dependency | Category | Production / Test Adapter Strategy | Status |
+|----|--------------|------------|----------|------------------------------------|--------|
+| DEP-01 | MOD-01 | [依赖名称] | [进程内/本地可替代/远程自有/真正外部] | [生产实现、测试 stand-in/adapter/mock；不需要 Adapter 时写无] | 已确认/待确认 |
+
 ## 6. Risks / Open Questions
 
 | ID | Type | Description | Impact | Owner/Next Step |

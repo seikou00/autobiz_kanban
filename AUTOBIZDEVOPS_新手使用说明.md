@@ -420,10 +420,11 @@ cicd_done -> archived
 - 生成 `{FEATURE_DIR}/PLAN.md`。
    注意：
 - 这个阶段不写业务代码。
-- `design.md` 记录 API 决策、数据决策、技术设计、风险。
+- `design.md` 除 API、数据和技术决策外，还用 `MOD-xx` / `DEP-xx` 记录 Module、Interface、Seam、依赖类别与 Adapter 策略。
 - 如果不涉及 HTTP/API，要写明 `x-auto-no-http-api: true`。
 - 如果不涉及数据库或持久化，要写明 `x-auto-no-sql: true`。
-- `PLAN.md` 应按业务闭环拆任务，不要拆成“新增 DTO”“修改 Controller”这类纯代码步骤。
+- 新增公共 Interface、移动 Seam、引入外部依赖或出现多个合理模块方案时，会比较不同设计并由用户确认；普通局部修改不会强制增加这一步。
+- `PLAN.md` 应按业务闭环拆任务，并覆盖相关 MOD/DEP 决策，不要拆成“新增 DTO”“修改 Controller”这类纯代码步骤。
 ### 9.6 Dev: 可选详细设计
 技能：`/autodev-detail-design`
 触发时机：
@@ -431,9 +432,10 @@ cicd_done -> archived
    作用：
 - 生成 `{FEATURE_DIR}/DETAIL_DESIGN.md`。
 - 明确预计新增、修改、删除哪些文件。
-- 写清楚文件级逻辑、模块调用、数据和状态流转。
+- 把已确认的 MOD/DEP 决策映射到真实文件、调用方、Adapter 接线和验证方法，并写清数据和状态流转。
    注意：
 - 仍然不能改业务代码。
+- 不能重新选择 Interface 或 Seam；代码现实与设计冲突时应回到 Plan。
 - 不确定的路径、字段、接口、权限、数据模型必须标记待确认。
 ### 9.7 Dev: 代码实现
 技能：`/autodev-code`
@@ -445,6 +447,8 @@ cicd_done -> archived
    注意：
 - 代码阶段不能偷偷修改 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`。
 - 如果发现规格或设计冲突，应停止并回流到 Specs 或 Plan。
+- 涉及 Module、Interface、Seam 或新依赖时，代码阶段会核对 MOD/DEP 决策，避免纯转发模块、猜测性 Adapter 和为了测试暴露内部实现；局部修改只记录“架构影响：无”。
+- Code 只落实已确认设计，不临时重做多方案设计；接口或依赖策略未确认回到 Plan，只有文件落点和接线细节不清时回到 Detail Design。
 - 每次只处理一个任务，完成后验证，再进入下一个任务。
 - 不要为了通过验证削弱校验、安全检查、日志或错误处理。
 ### 9.8 Dev: 独立需求评审
