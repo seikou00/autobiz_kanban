@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from hooks.plan_granularity import validate_plan_task_granularity_item
+from hooks.plan_granularity import (
+    validate_plan_task_granularity_item,
+    validate_plan_task_grouping_item,
+)
 
 
 def _task_with_scenarios(count: int) -> dict:
@@ -36,6 +39,24 @@ def _reasons(task: dict) -> list[str]:
 
 
 class PlanGranularityTests(unittest.TestCase):
+    def test_grouping_preflight_rejects_hard_cap_without_full_task_content(self) -> None:
+        task = {
+            "id": "T001",
+            "specRefs": [
+                "specs/capability/spec.md#REQ-001",
+                *[f"specs/capability/spec.md#SCN-{index:03d}" for index in range(1, 14)],
+            ],
+            "apiIds": [],
+            "uiRequired": False,
+        }
+
+        reasons = [
+            item["reason"]
+            for item in validate_plan_task_grouping_item(task, task_id="T001")
+        ]
+
+        self.assertEqual(reasons, ["oversized_plan_task_must_split"])
+
     def test_matrix_exception_requires_complete_merged_scenario_refs(self) -> None:
         task = _task_with_scenarios(9)
 

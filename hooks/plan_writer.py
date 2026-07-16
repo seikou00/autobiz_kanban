@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -57,7 +58,9 @@ from hooks.plan_json import (  # noqa: E402
 from hooks.plan_granularity import (  # noqa: E402
     PLAN_TASK_MATRIX_MAX_SCENARIOS,
     PLAN_TASK_MAX_SCENARIOS,
+    scenario_refs_from_spec_refs,
     validate_plan_task_granularity_item,
+    validate_plan_task_grouping_item,
 )
 
 
@@ -65,8 +68,15 @@ PLAN_FILE = "plan.json"
 PLAN_MD_FILE = "PLAN.md"
 SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
 SCENARIO_ID_RE = re.compile(r"\bSCN-\d{3}\b")
+TASK_GROUP_TASK_ID_RE = re.compile(r"^T\d{3}$")
+TASK_GROUP_REQUIREMENT_ID_RE = re.compile(r"\bREQ-\d{3}\b")
+TASK_GROUP_API_ID_RE = re.compile(r"^API-\d{3}$")
+TASK_GROUP_PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
+TASK_GROUP_INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
 TASK_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-input.json"
 TASK_TEMPLATE_PATH = ROOT / TASK_TEMPLATE_RELATIVE_PATH
+TASK_GROUP_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-groups.json"
+TASK_GROUP_TEMPLATE_PATH = ROOT / TASK_GROUP_TEMPLATE_RELATIVE_PATH
 TASK_DETAIL_PATCH_FIELDS = {"goal", "implementationPoints", "acceptanceCriteria", "nonGoals", "blockers"}
 TASK_DETAIL_FORBIDDEN_FIELDS = {
     "id",
@@ -146,6 +156,16 @@ def _task_input_example() -> dict[str, Any]:
         raise RuntimeError(f"task_input_template_unavailable:{exc}") from exc
     if not isinstance(value, dict):
         raise RuntimeError("task_input_template_must_be_object")
+    return value
+
+
+def _task_group_example() -> dict[str, Any]:
+    try:
+        value = json.loads(TASK_GROUP_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"task_group_template_unavailable:{exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("task_group_template_must_be_object")
     return value
 
 
@@ -254,18 +274,219 @@ def _structure_errors(data: dict[str, Any], *, allow_empty: bool = False) -> lis
     return validate_task_collection(str(data.get("featureId", "")), _tasks(data))
 
 
+def _task_groups(data: dict[str, Any]) -> list[dict[str, Any]]:
+    groups = data.get("groups")
+    if not isinstance(groups, list):
+        return []
+    return [item for item in groups if isinstance(item, dict)]
+
+
+def _group_string_list(
+    errors: list[dict[str, str]],
+    group: dict[str, Any],
+    task_id: str,
+    field: str,
+    *,
+    required: bool = True,
+    item_re: re.Pattern[str] | None = None,
+) -> list[str]:
+    value = group.get(field)
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        errors.append({"reason": f"{task_id}.{field}_must_be_string_array"})
+        return []
+    normalized = [item.strip() for item in value]
+    if required and not normalized:
+        errors.append({"reason": f"{task_id}.{field}_missing"})
+    if item_re is not None:
+        for item in normalized:
+            if not item_re.fullmatch(item):
+                errors.append({"reason": f"{task_id}.{field}_invalid:{item}"})
+    return normalized
+
+
+def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    feature_id = data.get("featureId")
+    if not isinstance(feature_id, str) or not feature_id.strip():
+        errors.append({"reason": "task_groups_feature_id_missing"})
+    raw_groups = data.get("groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        return [*errors, {"reason": "task_groups_missing"}]
+
+    prior_ids: set[str] = set()
+    frontend_seen = False
+    for index, raw_group in enumerate(raw_groups, start=1):
+        if not isinstance(raw_group, dict):
+            errors.append({"reason": f"task_groups[{index - 1}]_must_be_object"})
+            continue
+        expected_id = f"T{index:03d}"
+        task_id = raw_group.get("id")
+        if task_id != expected_id:
+            errors.append({"reason": "task_group_sequence_invalid", "detail": f"expected={expected_id};actual={task_id}"})
+            task_id = expected_id
+        title = raw_group.get("title")
+        if not isinstance(title, str) or not title.strip():
+            errors.append({"reason": f"{task_id}.title_missing"})
+
+        deps = _group_string_list(
+            errors,
+            raw_group,
+            task_id,
+            "deps",
+            required=False,
+            item_re=TASK_GROUP_TASK_ID_RE,
+        )
+        for dep in deps:
+            if dep not in prior_ids:
+                errors.append({
+                    "reason": "task_group_dependency_must_reference_earlier_task",
+                    "detail": f"task={task_id};dep={dep}",
+                })
+
+        spec_refs = _group_string_list(errors, raw_group, task_id, "specRefs")
+        if spec_refs and not any(TASK_GROUP_REQUIREMENT_ID_RE.search(ref) for ref in spec_refs):
+            errors.append({"reason": f"{task_id}.specRefs_missing_requirement_id"})
+        if spec_refs and not any(SCENARIO_ID_RE.search(ref) for ref in spec_refs):
+            errors.append({"reason": f"{task_id}.specRefs_missing_scenario_id"})
+        _group_string_list(
+            errors,
+            raw_group,
+            task_id,
+            "apiIds",
+            required=False,
+            item_re=TASK_GROUP_API_ID_RE,
+        )
+        if "mergedScenarioRefs" in raw_group:
+            _group_string_list(errors, raw_group, task_id, "mergedScenarioRefs", required=False)
+
+        ui_required = raw_group.get("uiRequired")
+        if not isinstance(ui_required, bool):
+            errors.append({"reason": f"{task_id}.uiRequired_must_be_bool"})
+            ui_required = False
+        if frontend_seen and not ui_required:
+            errors.append({"reason": "backend_task_after_frontend", "detail": f"task={task_id}"})
+        frontend_seen = frontend_seen or ui_required
+
+        ui_refs = raw_group.get("uiRefs")
+        if ui_required and not isinstance(ui_refs, dict):
+            errors.append({"reason": f"{task_id}.uiRefs_missing"})
+        elif isinstance(ui_refs, dict):
+            _group_string_list(
+                errors,
+                ui_refs,
+                task_id,
+                "pageRefs",
+                required=ui_required,
+                item_re=TASK_GROUP_PAGE_ID_RE,
+            )
+            _group_string_list(
+                errors,
+                ui_refs,
+                task_id,
+                "interactionRefs",
+                required=False,
+                item_re=TASK_GROUP_INTERACTION_ID_RE,
+            )
+
+        validation_boundary = raw_group.get("validationBoundary")
+        if not isinstance(validation_boundary, str) or len(validation_boundary.strip()) < 10:
+            errors.append({"reason": f"{task_id}.validationBoundary_missing_or_too_short"})
+        prior_ids.add(task_id)
+    return errors
+
+
+def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> list[dict[str, str]]:
+    errors = _task_group_structure_errors(data)
+    if errors:
+        return errors
+    for group in _task_groups(data):
+        task_id = str(group.get("id", "task"))
+        errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
+    if errors:
+        return errors
+    expected, covered = _scenario_coverage(feature_dir, _task_groups(data))
+    missing = sorted(expected - covered)
+    if missing:
+        return [{
+            "reason": "missing_plan_scenario_coverage",
+            "detail": f"return_to_scenario_matrix;ids={','.join(missing)}",
+        }]
+    return []
+
+
+def _task_group_digest(data: dict[str, Any]) -> str:
+    payload = {
+        "featureId": data.get("featureId"),
+        "groups": data.get("groups"),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
+    ui_refs = item.get("uiRefs") if isinstance(item.get("uiRefs"), dict) else {}
+    return {
+        "id": item.get("id"),
+        "title": item.get("title"),
+        "deps": item.get("deps") if isinstance(item.get("deps"), list) else [],
+        "uiRequired": item.get("uiRequired"),
+        "specRefs": item.get("specRefs") if isinstance(item.get("specRefs"), list) else [],
+        "mergedScenarioRefs": (
+            item.get("mergedScenarioRefs") if isinstance(item.get("mergedScenarioRefs"), list) else []
+        ),
+        "apiIds": item.get("apiIds") if isinstance(item.get("apiIds"), list) else [],
+        "pageRefs": ui_refs.get("pageRefs") if isinstance(ui_refs.get("pageRefs"), list) else [],
+        "interactionRefs": (
+            ui_refs.get("interactionRefs") if isinstance(ui_refs.get("interactionRefs"), list) else []
+        ),
+        "splitRationale": item.get("splitRationale") or None,
+    }
+
+
+def _task_group_contract_errors(
+    group_data: dict[str, Any],
+    task_items: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    groups = _task_groups(group_data)
+    if len(groups) != len(task_items):
+        return [{
+            "reason": "task_group_contract_count_mismatch",
+            "detail": f"groups={len(groups)};tasks={len(task_items)}",
+        }]
+    errors: list[dict[str, str]] = []
+    for group, task in zip(groups, task_items):
+        expected = _task_group_projection(group)
+        actual = _task_group_projection(task)
+        changed_fields = [field for field in expected if expected[field] != actual[field]]
+        if changed_fields:
+            errors.append({
+                "reason": "task_group_contract_mismatch",
+                "detail": f"task={expected.get('id')};fields={','.join(changed_fields)}",
+            })
+    return errors
+
+
 def _task_set_validation_errors(
     data: dict[str, Any],
     *,
     allow_empty: bool = False,
 ) -> list[dict[str, str]]:
-    errors = [{"reason": reason} for reason in _structure_errors(data, allow_empty=allow_empty)]
-    if errors or (allow_empty and not _tasks(data)):
-        return errors
+    grouping_errors: list[dict[str, str]] = []
     for task in _tasks(data):
         task_id = str(task.get("id", "task"))
-        errors.extend(validate_plan_task_granularity_item(task, task_id=task_id))
-    return errors
+        grouping_errors.extend(validate_plan_task_grouping_item(task, task_id=task_id))
+    if grouping_errors:
+        return grouping_errors
+
+    structure_errors = [{"reason": reason} for reason in _structure_errors(data, allow_empty=allow_empty)]
+    if structure_errors or (allow_empty and not _tasks(data)):
+        return structure_errors
+
+    granularity_errors: list[dict[str, str]] = []
+    for task in _tasks(data):
+        task_id = str(task.get("id", "task"))
+        granularity_errors.extend(validate_plan_task_granularity_item(task, task_id=task_id))
+    return granularity_errors
 
 
 def _primary_spec_root(task: dict[str, Any]) -> str:
@@ -828,7 +1049,48 @@ def _load_task_directory(task_dir: Path, feature: str) -> dict[str, Any]:
     return data
 
 
-def _task_set_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> list[dict[str, str]]:
+def _load_task_group_file(group_file: Path, feature: str) -> dict[str, Any]:
+    data = read_object_file(group_file)
+    manifest_feature = data.get("featureId")
+    if manifest_feature != feature:
+        raise PlanWriterInputError(
+            "task_groups_feature_mismatch",
+            f"expected={feature};actual={manifest_feature}",
+        )
+    return data
+
+
+def _task_group_summary(data: dict[str, Any]) -> dict[str, Any]:
+    groups = _task_groups(data)
+    return {
+        "groupCount": len(groups),
+        "groupingDigest": _task_group_digest(data),
+        "groups": [
+            {
+                "id": group.get("id"),
+                "executionLane": "frontend" if group.get("uiRequired") is True else "backend",
+                "scenarioCount": len(
+                    scenario_refs_from_spec_refs(
+                        [item for item in group.get("specRefs", []) if isinstance(item, str)]
+                    )
+                ),
+            }
+            for group in groups
+        ],
+    }
+
+
+def _task_set_preflight_errors(
+    feature_dir: Path,
+    data: dict[str, Any],
+    group_data: dict[str, Any],
+) -> list[dict[str, str]]:
+    errors = _task_group_preflight_errors(feature_dir, group_data)
+    if errors:
+        return errors
+    errors = _task_group_contract_errors(group_data, _tasks(data))
+    if errors:
+        return errors
     errors = _task_set_validation_errors(data)
     if errors:
         return errors
@@ -860,13 +1122,37 @@ def _task_set_summary(data: dict[str, Any]) -> dict[str, Any]:
 
 def _cmd_preflight_task_set(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    group_data = _load_task_group_file(Path(args.group_file).resolve(), feature)
+    feature_dir = _path(workspace, feature).parent
+    errors = _task_group_preflight_errors(feature_dir, group_data)
+    if errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_path(workspace, feature),
+            errors=errors,
+        ))
     data = _load_task_directory(Path(args.task_dir).resolve(), feature)
-    errors = _task_set_preflight_errors(_path(workspace, feature).parent, data)
+    errors = _task_set_preflight_errors(feature_dir, data, group_data)
     return render_result(WriterResult(
         ok=not errors,
         path=_path(workspace, feature),
         errors=errors,
-        data={"preflight": _task_set_summary(data)} if not errors else {},
+        data={
+            "grouping": _task_group_summary(group_data),
+            "preflight": _task_set_summary(data),
+        } if not errors else {},
+    ))
+
+
+def _cmd_preflight_task_groups(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    group_data = _load_task_group_file(Path(args.group_file).resolve(), feature)
+    errors = _task_group_preflight_errors(_path(workspace, feature).parent, group_data)
+    return render_result(WriterResult(
+        ok=not errors,
+        path=Path(args.group_file).resolve(),
+        errors=errors,
+        data={"grouping": _task_group_summary(group_data)} if not errors else {},
     ))
 
 
@@ -876,8 +1162,13 @@ def _cmd_materialize_task_set(args: argparse.Namespace) -> int:
     if existing:
         return render_result(existing)
     plans_dir = _path(workspace, feature).parent / "plans"
+    group_data = _load_task_group_file(Path(args.group_file).resolve(), feature)
+    feature_dir = _path(workspace, feature).parent
+    errors = _task_group_preflight_errors(feature_dir, group_data)
+    if errors:
+        return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=errors))
     data = _load_task_directory(Path(args.task_dir).resolve(), feature)
-    errors = _task_set_preflight_errors(_path(workspace, feature).parent, data)
+    errors = _task_set_preflight_errors(feature_dir, data, group_data)
     if errors:
         return render_result(WriterResult(ok=False, path=_path(workspace, feature), errors=errors))
     data["taskSetStatus"] = "finalized"
@@ -953,6 +1244,8 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                 "contract": {
                     "taskTemplate": TASK_TEMPLATE_RELATIVE_PATH,
                     "taskInputExample": _task_input_example(),
+                    "taskGroupTemplate": TASK_GROUP_TEMPLATE_RELATIVE_PATH,
+                    "taskGroupInputExample": _task_group_example(),
                     "recommendedInputMode": "task-directory",
                     "supportedInputModes": ["task-directory", "body-file", "body-stdin", "task-json", "cli-fields"],
                     "requiredTaskFields": [
@@ -984,8 +1277,9 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "appendRule": "same_primary_capability_and_execution_lane_as_immediately_preceding_batch_and_not_full",
                     },
                     "taskSetFinalization": {
-                        "command": "materialize-task-set --task-dir <directory>",
-                        "preflightCommand": "preflight-task-set --task-dir <directory>",
+                        "groupingPreflightCommand": "preflight-task-groups --group-file <file>",
+                        "command": "materialize-task-set --group-file <file> --task-dir <directory>",
+                        "preflightCommand": "preflight-task-set --group-file <file> --task-dir <directory>",
                         "coverage": "all_path_qualified_spec_scenarios",
                         "requiredBefore": [
                             "add-batch-validation-command",
@@ -1816,13 +2110,20 @@ def main(argv: list[str] | None = None) -> int:
     _task_selector(remove_task)
     remove_task.set_defaults(func=_cmd_remove_task)
 
+    preflight_task_groups = sub.add_parser("preflight-task-groups")
+    _common(preflight_task_groups)
+    preflight_task_groups.add_argument("--group-file", required=True)
+    preflight_task_groups.set_defaults(func=_cmd_preflight_task_groups)
+
     preflight_task_set = sub.add_parser("preflight-task-set")
     _common(preflight_task_set)
+    preflight_task_set.add_argument("--group-file", required=True)
     preflight_task_set.add_argument("--task-dir", required=True)
     preflight_task_set.set_defaults(func=_cmd_preflight_task_set)
 
     materialize_task_set = sub.add_parser("materialize-task-set")
     _common(materialize_task_set)
+    materialize_task_set.add_argument("--group-file", required=True)
     materialize_task_set.add_argument("--task-dir", required=True)
     materialize_task_set.add_argument("--force", action="store_true")
     materialize_task_set.set_defaults(func=_cmd_materialize_task_set)

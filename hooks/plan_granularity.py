@@ -212,7 +212,9 @@ def _split_rationale_is_invalid(rationale: str, related_ids_by_prefix: dict[str,
     return False
 
 
-def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -> list[dict[str, str]]:
+def validate_plan_task_grouping_item(task: dict[str, Any], *, task_id: str) -> list[dict[str, str]]:
+    """Validate split/grouping decisions without requiring the full task contract."""
+
     spec_refs = _string_list_value(task.get("specRefs"))
     if _scenario_reference_error(spec_refs):
         return [
@@ -275,13 +277,6 @@ def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -
                     "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
                 }
             ]
-        if not _has_single_complete_matrix_validation(task):
-            return [
-                {
-                    "reason": "invalid_plan_task_matrix_validation",
-                    "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
-                }
-            ]
     rationale = task.get("splitRationale")
     if not isinstance(rationale, str) or not rationale.strip():
         return [
@@ -295,6 +290,22 @@ def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -
             {
                 "reason": "invalid_plan_task_split_rationale",
                 "detail": f"task={task_id} detail={','.join(threshold_reasons)}",
+            }
+        ]
+    return []
+
+
+def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -> list[dict[str, str]]:
+    grouping_errors = validate_plan_task_grouping_item(task, task_id=task_id)
+    if grouping_errors:
+        return grouping_errors
+
+    scenario_refs = scenario_refs_from_spec_refs(_string_list_value(task.get("specRefs")))
+    if len(scenario_refs) > PLAN_TASK_MAX_SCENARIOS and not _has_single_complete_matrix_validation(task):
+        return [
+            {
+                "reason": "invalid_plan_task_matrix_validation",
+                "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
             }
         ]
     return []

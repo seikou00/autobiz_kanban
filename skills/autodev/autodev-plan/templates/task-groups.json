@@ -1,0 +1,18 @@
+{
+  "featureId": "[feature]",
+  "groups": [
+    {
+      "id": "T001",
+      "title": "[single observable behavior]",
+      "deps": [],
+      "uiRequired": false,
+      "specRefs": [
+        "specs/[capability]/spec.md#REQ-001",
+        "specs/[capability]/spec.md#SCN-001"
+      ],
+      "mergedScenarioRefs": [],
+      "apiIds": [],
+      "validationBoundary": "[public seam plus one executable validation command or assertion]"
+    }
+  ]
+}

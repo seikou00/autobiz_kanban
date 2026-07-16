@@ -318,6 +318,35 @@ def _plan_task_body() -> dict:
     }
 
 
+def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
+    groups = []
+    for task in tasks:
+        group = {
+            "id": task["id"],
+            "title": task["title"],
+            "deps": list(task.get("deps", [])),
+            "uiRequired": task.get("uiRequired") is True,
+            "specRefs": list(task.get("specRefs", [])),
+            "mergedScenarioRefs": list(task.get("mergedScenarioRefs", [])),
+            "apiIds": list(task.get("apiIds", [])),
+            "validationBoundary": "public behavior seam validated by one executable command",
+        }
+        if task.get("splitRationale"):
+            group["splitRationale"] = task["splitRationale"]
+        if task.get("uiRequired") is True:
+            ui_refs = task.get("uiRefs", {})
+            group["uiRefs"] = {
+                "pageRefs": list(ui_refs.get("pageRefs", [])),
+                "interactionRefs": list(ui_refs.get("interactionRefs", [])),
+            }
+        groups.append(group)
+    path.write_text(
+        json.dumps({"featureId": "alpha", "groups": groups}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _run(
     script: str,
     *args: str,
@@ -342,10 +371,12 @@ class JsonWriterTests(unittest.TestCase):
             _write_specs(feature_dir)
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
-            (task_dir / "T001.json").write_text(json.dumps(_plan_task_body()), encoding="utf-8")
+            task = _plan_task_body()
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
             self.assertEqual(_run(
                 "plan_writer.py", "materialize-task-set", "--workspace", str(workspace),
-                "--feature", "alpha", "--task-dir", str(task_dir),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
             ).returncode, 0)
 
             batch_path = feature_dir / "plans" / "B001" / "plan.json"
@@ -377,10 +408,11 @@ class JsonWriterTests(unittest.TestCase):
             for task in (first, second):
                 path = task_dir / f"{task['id']}.json"
                 path.write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [first, second])
 
             self.assertEqual(_run(
                 "plan_writer.py", "materialize-task-set", "--workspace", str(workspace),
-                "--feature", "alpha", "--task-dir", str(task_dir),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
             ).returncode, 0)
             finalized_replace = _run(
                 "plan_writer.py", "replace-task", "--workspace", str(workspace), "--feature", "alpha",
@@ -445,10 +477,21 @@ class JsonWriterTests(unittest.TestCase):
             frontend["validationCommands"][0].update({"id": "VAL-T002-01", "covers": ["AC-T002-01"]})
             for task in (backend, frontend):
                 (task_dir / f"{task['id']}.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [backend, frontend])
+
+            grouping_preflight = _run(
+                "plan_writer.py", "preflight-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+            self.assertEqual(
+                grouping_preflight.returncode,
+                0,
+                grouping_preflight.stdout + grouping_preflight.stderr,
+            )
 
             preflight = _run(
                 "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
-                "--feature", "alpha", "--task-dir", str(task_dir),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
             )
             self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
             self.assertFalse((feature_dir / "plan.json").exists())
@@ -457,12 +500,58 @@ class JsonWriterTests(unittest.TestCase):
 
             materialized = _run(
                 "plan_writer.py", "materialize-task-set", "--workspace", str(workspace),
-                "--feature", "alpha", "--task-dir", str(task_dir),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
             )
             self.assertEqual(materialized.returncode, 0, materialized.stdout + materialized.stderr)
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(root["taskSetStatus"], "finalized")
             self.assertEqual([item["executionLane"] for item in root["batches"]], ["backend", "frontend"])
+
+    def test_plan_writer_reports_required_split_before_task_content_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task_dir = Path(tmp) / "tasks"
+            task_dir.mkdir()
+            task = _plan_task_body()
+            task["specRefs"] = [
+                "specs/cap/spec.md#REQ-001",
+                *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 14)],
+            ]
+            del task["goal"]
+            task["implementationPoints"] = [f"point {index}" for index in range(1, 8)]
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+
+            result = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("oversized_plan_task_must_split", result.stdout)
+            self.assertNotIn("invalid_plan_task_body", result.stdout)
+            self.assertNotIn("implementationPoints_too_many", result.stdout)
+
+    def test_plan_writer_rejects_task_changes_after_grouping_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task_dir = Path(tmp) / "tasks"
+            task_dir.mkdir()
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            task["title"] = "changed after grouping"
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("task_group_contract_mismatch", result.stdout)
+            self.assertIn("fields=title", result.stdout)
 
     def test_plan_writer_preflight_returns_missing_coverage_to_matrix_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,11 +559,13 @@ class JsonWriterTests(unittest.TestCase):
             _write_specs(feature_dir, second=True)
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
-            (task_dir / "T001.json").write_text(json.dumps(_plan_task_body()), encoding="utf-8")
+            task = _plan_task_body()
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
 
             result = _run(
                 "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
-                "--feature", "alpha", "--task-dir", str(task_dir),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
             )
 
             self.assertNotEqual(result.returncode, 0)
@@ -600,6 +691,11 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["exampleOnlyTaskFields"], ["matrixExceptionExample"])
         self.assertNotIn("status", contract["taskInputExample"])
         self.assertEqual(contract["recommendedInputMode"], "task-directory")
+        self.assertEqual(
+            contract["taskGroupTemplate"],
+            "skills/autodev/autodev-plan/templates/task-groups.json",
+        )
+        self.assertIn("groups", contract["taskGroupInputExample"])
         self.assertEqual(contract["validationKinds"], sorted(TASK_VALIDATION_KINDS))
         self.assertEqual(contract["batchValidationKinds"], sorted(BATCH_VALIDATION_KINDS))
         self.assertEqual(
@@ -631,8 +727,9 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["taskSetFinalization"],
             {
-                "command": "materialize-task-set --task-dir <directory>",
-                "preflightCommand": "preflight-task-set --task-dir <directory>",
+                "groupingPreflightCommand": "preflight-task-groups --group-file <file>",
+                "command": "materialize-task-set --group-file <file> --task-dir <directory>",
+                "preflightCommand": "preflight-task-set --group-file <file> --task-dir <directory>",
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
                     "add-batch-validation-command",

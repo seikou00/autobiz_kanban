@@ -407,14 +407,21 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertEqual(template["apiIds"], [])
         self.assertEqual(template["dataIds"], [])
         self.assertEqual(template["mergedScenarioRefs"], [])
+        grouping = json.loads((template_dir / "task-groups.json").read_text(encoding="utf-8"))
+        self.assertIn("featureId", grouping)
+        self.assertEqual(len(grouping["groups"]), 1)
+        self.assertIn("validationBoundary", grouping["groups"][0])
 
     def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         required = [
             "templates/task-input.json",
+            "templates/task-groups.json",
             "add-task-contract",
             "每次 Plan 会话生成 task 文件前只执行一次",
             ".tmp/plan_writer/tasks/",
+            ".tmp/plan_writer/task-groups.json",
+            "preflight-task-groups",
             "preflight-task-set",
             "materialize-task-set",
             "失败时不写任何正式产物",
@@ -521,10 +528,11 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "oversized_plan_task_must_split",
             "missing_plan_task_split_rationale",
             "invalid_plan_task_split_rationale",
-            "不得通过 writer 失败来探索如何拆分",
+            "不得通过完整 task 的内容校验失败来探索如何拆分",
             "必须按 DAG 拓扑序编号",
+            "在创建任何 `Txxx.json` 前必须运行一次 `preflight-task-groups`",
             "只在全部 `Txxx.json` 完成后运行一次 `preflight-task-set`",
-            "不得用 `stage_gate` 失败探索 task schema 或拆分",
+            "不得用 `stage_gate` 或完整 task 内容失败探索拆分",
             "回 Scenario 覆盖矩阵定位遗漏并重新分组",
             "运行一次 `materialize-task-set`",
             "replace-task` / `remove-task",
