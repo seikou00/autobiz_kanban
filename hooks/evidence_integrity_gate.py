@@ -107,7 +107,7 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
 
 
 def _validation_passed(record: dict[str, Any]) -> bool:
-    if record.get("action") not in {"validation", "project_check"}:
+    if record.get("action") not in {"validation", "batch_validation", "project_check"}:
         return False
     validation = record.get("validation")
     if not isinstance(validation, dict):
@@ -169,6 +169,26 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
                 errors.append(f"unknown_project_check_evidence_id:{evidence_id}")
             elif record.get("action") != "project_check" or record.get("taskId") != "__project__":
                 errors.append(f"invalid_project_check_evidence_id:{evidence_id}")
+    batch_plans = plan.get("_bundleBatches")
+    if isinstance(batch_plans, dict):
+        records_by_id = {
+            str(record.get("evidenceId")): record
+            for record in records
+            if isinstance(record.get("evidenceId"), str)
+        }
+        for batch_id, batch in batch_plans.items():
+            validation = batch.get("batchValidation") if isinstance(batch, dict) else None
+            evidence_ids = validation.get("evidenceIds") if isinstance(validation, dict) else None
+            for evidence_id in evidence_ids or []:
+                record = records_by_id.get(str(evidence_id))
+                if record is None:
+                    errors.append(f"{batch_id}.unknown_batch_validation_evidence_id:{evidence_id}")
+                elif (
+                    record.get("action") != "batch_validation"
+                    or record.get("taskId") != "__batch__"
+                    or record.get("batchId") != batch_id
+                ):
+                    errors.append(f"{batch_id}.invalid_batch_validation_evidence_id:{evidence_id}")
     return errors
 
 
@@ -222,6 +242,8 @@ def _check_completion(
     }
     for task in tasks(plan):
         task_id = str(task.get("id", ""))
+        if isinstance(task.get("pendingRevalidation"), dict):
+            errors.append(f"{task_id}.pending_batch_revalidation")
         completion_ids = task.get("completionEvidenceIds")
         if not isinstance(completion_ids, list):
             completion_ids = []
@@ -286,7 +308,106 @@ def _check_completion(
         missing_criteria = sorted(acceptance_ids - covered_criteria)
         if missing_criteria:
             errors.append(f"{task_id}.missing_acceptance_coverage:" + ",".join(missing_criteria))
+    errors.extend(_check_batch_completion(plan, by_id, feature_dir=feature_dir))
     errors.extend(_check_project_completion(plan, by_id))
+    return errors
+
+
+def _check_batch_completion(
+    plan: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+    *,
+    feature_dir: Path | None,
+) -> list[str]:
+    errors: list[str] = []
+    batch_plans = plan.get("_bundleBatches")
+    if not isinstance(batch_plans, dict):
+        return ["missing_batch_plan_projection"]
+    for batch_id, batch in batch_plans.items():
+        if not isinstance(batch, dict):
+            continue
+        validation = batch.get("batchValidation")
+        if not isinstance(validation, dict):
+            errors.append(f"{batch_id}.batch_validation_contract_missing")
+            continue
+        if validation.get("status") != "passed":
+            errors.append(f"{batch_id}.batch_validation_not_passed")
+        planned = {
+            str(command.get("id")): command
+            for command in validation.get("commands", [])
+            if isinstance(command, dict) and isinstance(command.get("id"), str)
+        }
+        required = {
+            command_id
+            for command_id, command in planned.items()
+            if command.get("required") is True
+        }
+        latest_ids = validation.get("latestPassEvidenceIds")
+        latest_ids = latest_ids if isinstance(latest_ids, list) else []
+        passed: set[str] = set()
+        run_ids: set[str] = set()
+        for evidence_id in latest_ids:
+            record = by_id.get(str(evidence_id))
+            if (
+                not isinstance(record, dict)
+                or record.get("action") != "batch_validation"
+                or record.get("taskId") != "__batch__"
+                or record.get("batchId") != batch_id
+                or not _validation_passed(record)
+            ):
+                errors.append(f"{batch_id}.invalid_batch_validation_pass:{evidence_id}")
+                continue
+            run_id = record.get("runId")
+            if isinstance(run_id, str):
+                run_ids.add(run_id)
+            command_payload = record.get("validation")
+            command_id = command_payload.get("commandId") if isinstance(command_payload, dict) else None
+            if not isinstance(command_id, str) or command_id not in planned:
+                errors.append(f"{batch_id}.unplanned_batch_validation_command:{command_id}")
+                continue
+            command = planned[command_id]
+            for field in ("argv", "cwd", "kind", "required", "repo"):
+                if command_payload.get(field) != command.get(field):
+                    errors.append(f"{batch_id}.batch_validation_command_mismatch:{command_id}:{field}")
+            passed.add(command_id)
+        for command_id in sorted(required - passed):
+            errors.append(f"{batch_id}.missing_batch_validation_pass:{command_id}")
+
+        task_completion_numbers = [
+            _evidence_number(str(evidence_id))
+            for task in batch.get("tasks", [])
+            if isinstance(task, dict)
+            for evidence_id in task.get("completionEvidenceIds", [])
+            if isinstance(evidence_id, str)
+        ]
+        latest_batch_number = max(
+            (_evidence_number(str(evidence_id)) for evidence_id in latest_ids),
+            default=-1,
+        )
+        if task_completion_numbers and latest_batch_number <= max(task_completion_numbers):
+            errors.append(f"{batch_id}.batch_validation_older_than_task_completion")
+
+        if len(run_ids) > 1:
+            errors.append(f"{batch_id}.batch_validation_multiple_runs:" + ",".join(sorted(run_ids)))
+        if feature_dir is not None and len(run_ids) == 1:
+            run_id = next(iter(run_ids))
+            run_path = feature_dir / ".batch-runs" / str(batch_id) / f"{run_id}.json"
+            if not run_path.is_file():
+                errors.append(f"{batch_id}.missing_batch_run_state:{run_id}")
+            else:
+                try:
+                    state = json.loads(run_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    state = None
+                if not isinstance(state, dict):
+                    errors.append(f"{batch_id}.invalid_batch_run_state:{run_id}")
+                else:
+                    if state.get("status") != "done" or state.get("success") is not True:
+                        errors.append(f"{batch_id}.batch_run_not_successful:{run_id}")
+                    attempts = state.get("attempts")
+                    latest_attempt = attempts[-1] if isinstance(attempts, list) and attempts else None
+                    if not isinstance(latest_attempt, dict) or latest_attempt.get("evidenceIds") != latest_ids:
+                        errors.append(f"{batch_id}.batch_run_evidence_not_bound:{run_id}")
     return errors
 
 
@@ -370,6 +491,8 @@ def _check_project_completion(
         for command in plan.get("projectValidationCommands", [])
         if isinstance(command, dict) and isinstance(command.get("id"), str)
     }
+    if not planned:
+        return errors
     required = {command_id for command_id, command in planned.items() if command.get("required") is True}
     passed: set[str] = set()
     evidence_ids = plan.get("projectCheckEvidenceIds")
@@ -392,7 +515,19 @@ def _check_project_completion(
             for evidence_id in task.get("completionEvidenceIds", [])
             if isinstance(evidence_id, str)
         ]
-        if task_completion_numbers and latest_number <= max(task_completion_numbers):
+        batch_completion_numbers = [
+            _evidence_number(str(evidence_id))
+            for batch in (plan.get("_bundleBatches") or {}).values()
+            if isinstance(batch, dict)
+            for evidence_id in (
+                batch.get("batchValidation", {}).get("latestPassEvidenceIds", [])
+                if isinstance(batch.get("batchValidation"), dict)
+                else []
+            )
+            if isinstance(evidence_id, str)
+        ]
+        completion_numbers = [*task_completion_numbers, *batch_completion_numbers]
+        if completion_numbers and latest_number <= max(completion_numbers):
             errors.append(f"project_check_older_than_task_completion:{latest_id}")
     for evidence_id in evidence_ids:
         record = by_id.get(str(evidence_id))

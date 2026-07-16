@@ -88,6 +88,103 @@ class RepositorySnapshotTest(unittest.TestCase):
 
 
 class CacheClassificationTest(unittest.TestCase):
+    def test_batch_remediation_evidence_is_trusted_evolution(self) -> None:
+        from hooks.code_exploration import collect_trusted_evolution
+        from hooks.evidence_store import append_evidence
+        from hooks.plan_json import PlanBundle
+
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            evidence = append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "__batch__",
+                    "batchId": "B001",
+                    "action": "batch_validation",
+                    "detailVersion": 2,
+                    "runId": "batch-run-1",
+                    "completionMode": "implemented",
+                    "summary": "batch repair passed",
+                    "implementation": {
+                        "noCodeChange": False,
+                        "whatChanged": ["existing.txt"],
+                        "why": "repair compile failure",
+                    },
+                    "specRefs": [],
+                    "designRefs": [],
+                    "changedFiles": ["existing.txt"],
+                    "fileChanges": [
+                        {
+                            "path": "existing.txt",
+                            "operation": "modified",
+                            "kind": "docs",
+                            "summary": "batch repair modified existing.txt",
+                        }
+                    ],
+                    "supportingFiles": [],
+                    "checkedCriteria": ["BATCH-B001-VAL-001"],
+                    "validation": {
+                        "commandId": "BATCH-B001-VAL-001",
+                        "argv": ["echo", "compile"],
+                        "command": "echo compile",
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                        "exitCode": 0,
+                        "result": "pass",
+                    },
+                },
+                output_tail="compile passed\n",
+            )
+            run_path = feature_dir / ".batch-runs" / "B001" / "batch-run-1.json"
+            run_path.parent.mkdir(parents=True)
+            run_path.write_text(
+                json.dumps(
+                    {
+                        "batchId": "B001",
+                        "runId": "batch-run-1",
+                        "status": "done",
+                        "success": True,
+                        "evidenceIds": [evidence["evidenceId"]],
+                        "finalRepositories": [
+                            {
+                                "id": "code",
+                                "path": "/repo/code",
+                                "snapshot": {"existing.txt": "new"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            task = {"id": "T001", "status": "done", "completionEvidenceIds": []}
+            batch = {
+                "batchId": "B001",
+                "tasks": [task],
+                "batchValidation": {
+                    "status": "passed",
+                    "evidenceIds": [evidence["evidenceId"]],
+                    "latestPassEvidenceIds": [evidence["evidenceId"]],
+                },
+            }
+            bundle = PlanBundle(
+                root={"batches": [{"id": "B001"}]},
+                batches={"B001": batch},
+                tasks=[task],
+                task_batches={"T001": "B001"},
+            )
+
+            trusted = collect_trusted_evolution(feature_dir, bundle, None, "code")
+
+            self.assertEqual(trusted.changed_paths, frozenset({"existing.txt"}))
+            self.assertEqual(trusted.evidence_ids, (evidence["evidenceId"],))
+            self.assertEqual(trusted.latest_files, {"existing.txt": "new"})
+
     def _snapshot(
         self,
         *,

@@ -15,6 +15,7 @@ if str(ROOT := Path(__file__).resolve().parents[1]) not in sys.path:
 
 from hooks.evidence_store import append_evidence  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done  # noqa: E402
+from hooks.plan_json import task_set_digest  # noqa: E402
 from hooks import evidence_integrity_gate as evidence_integrity_gate_module  # noqa: E402
 from hooks import task_runner as task_runner_module  # noqa: E402
 
@@ -245,6 +246,91 @@ def _check_batch(workspace: Path, code: Path) -> dict:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_code_done_rejects_missing_batch_validation_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            _check_batch(workspace, code)
+            project = _run(
+                "project-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"]["latestPassEvidenceIds"] = []
+            _write_batch(feature_dir, batch)
+
+            self.assertIn(
+                "B001.missing_batch_validation_pass:BATCH-B001-VAL-001",
+                check_code_done(feature_dir),
+            )
+
+    def test_code_done_rejects_batch_validation_command_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            _check_batch(workspace, code)
+            project = _run(
+                "project-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"]["commands"][0]["argv"] = ["echo", "forged"]
+            root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = ["echo", "forged"]
+            root["taskSetDigest"] = task_set_digest(root, {"B001": batch})
+            _write_batch(feature_dir, batch)
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            self.assertIn(
+                "B001.batch_validation_command_mismatch:BATCH-B001-VAL-001:argv",
+                check_code_done(feature_dir),
+            )
+
+    def test_code_done_accepts_empty_project_validation_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["projectValidationCommands"] = []
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            _check_batch(workspace, code)
+
+            session = _run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            )
+
+            self.assertEqual(session.returncode, 0, session.stdout + session.stderr)
+            self.assertEqual(json.loads(session.stdout)["action"], "code_done_ready")
+            self.assertEqual(check_code_done(feature_dir), [])
+
     def test_ambiguous_batch_repair_revalidates_entire_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

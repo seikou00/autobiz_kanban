@@ -772,8 +772,6 @@ def _validate_project_commands(
     if not isinstance(commands, list):
         errors.append("projectValidationCommands_must_be_array")
         return
-    if not commands and require_all_done:
-        errors.append("projectValidationCommands_missing")
     seen: set[str] = set()
     for index, command in enumerate(commands):
         context = f"projectValidationCommands[{index}]"
@@ -1186,6 +1184,7 @@ def load_and_validate_plan(path: Path, **kwargs: Any) -> tuple[dict[str, Any] | 
     view = dict(data)
     view["_bundleTasks"] = bundle.tasks
     view["_bundleTaskBatches"] = bundle.task_batches
+    view["_bundleBatches"] = bundle.batches
     view["tasks"] = bundle.tasks
     return view, []
 

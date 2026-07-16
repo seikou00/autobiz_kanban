@@ -425,7 +425,12 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         if data.get("status") == "failed":
             root["status"] = "failed"
         else:
-            root["status"] = "done" if root.get("latestProjectCheckEvidenceId") else "in_progress"
+            project_commands = root.get("projectValidationCommands")
+            project_ready = (
+                isinstance(project_commands, list)
+                and (not project_commands or isinstance(root.get("latestProjectCheckEvidenceId"), str))
+            )
+            root["status"] = "done" if project_ready else "in_progress"
         root["activeBatchId"] = None
         root["nextBatchId"] = None
     else:

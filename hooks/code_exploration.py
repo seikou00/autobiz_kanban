@@ -538,6 +538,91 @@ def collect_trusted_evolution(
             if task_latest_files is not None and task_completion_order > latest_completion_order:
                 latest_files = task_latest_files
                 latest_completion_order = task_completion_order
+
+    for batch_id, batch in bundle.batches.items():
+        validation = batch.get("batchValidation") if isinstance(batch, dict) else None
+        latest_pass_ids = (
+            [item for item in validation.get("latestPassEvidenceIds", []) if isinstance(item, str)]
+            if isinstance(validation, dict)
+            else []
+        )
+        new_ids = [item for item in latest_pass_ids if item not in covered_evidence]
+        if not new_ids:
+            continue
+        batch_valid = True
+        run_ids: set[str] = set()
+        batch_records: list[tuple[str, dict[str, Any]]] = []
+        for evidence_id in new_ids:
+            record = evidence_by_id.get(evidence_id)
+            validation_payload = record.get("validation") if isinstance(record, dict) else None
+            if (
+                not isinstance(record, dict)
+                or record.get("action") != "batch_validation"
+                or record.get("batchId") != batch_id
+                or record.get("taskId") != "__batch__"
+                or record.get("detailVersion") != 2
+                or not isinstance(validation_payload, dict)
+                or validation_payload.get("required") is not True
+                or validation_payload.get("result") != "pass"
+                or not isinstance(record.get("runId"), str)
+            ):
+                untrusted.append(f"batch_evidence_invalid:{evidence_id}")
+                batch_valid = False
+                continue
+            run_ids.add(str(record["runId"]))
+            batch_records.append((evidence_id, record))
+        if len(run_ids) != 1:
+            if run_ids:
+                untrusted.append(f"batch_evidence_multiple_runs:{batch_id}")
+            continue
+        run_id = next(iter(run_ids))
+        run_path = feature_dir / ".batch-runs" / batch_id / f"{run_id}.json"
+        try:
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            run = None
+        if not isinstance(run, dict) or run.get("batchId") != batch_id:
+            untrusted.append(f"batch_run_state_invalid:{batch_id}:{run_id}")
+            continue
+        run_evidence = set(run.get("evidenceIds", [])) if isinstance(run.get("evidenceIds"), list) else set()
+        if not all(evidence_id in run_evidence for evidence_id, _ in batch_records):
+            untrusted.append(f"batch_run_evidence_not_bound:{batch_id}:{run_id}")
+            continue
+        repositories = run.get("finalRepositories")
+        if not isinstance(repositories, list):
+            repositories = run.get("revalidationBaselineRepositories")
+        matching = next(
+            (
+                item
+                for item in repositories or []
+                if isinstance(item, dict) and item.get("id") == repository_id
+            ),
+            None,
+        )
+        if not isinstance(matching, dict) or not isinstance(matching.get("snapshot"), dict):
+            untrusted.append(f"batch_run_snapshot_invalid:{batch_id}:{run_id}")
+            continue
+        repository_count = len([item for item in repositories or [] if isinstance(item, dict)])
+        for evidence_id, record in batch_records:
+            raw_paths = record.get("changedFiles")
+            if not isinstance(raw_paths, list) or not all(isinstance(item, str) for item in raw_paths):
+                untrusted.append(f"batch_changed_files_invalid:{evidence_id}")
+                batch_valid = False
+                continue
+            for raw_path in raw_paths:
+                prefix = f"{repository_id}:"
+                if raw_path.startswith(prefix):
+                    changed_paths.add(raw_path[len(prefix):])
+                elif repository_count == 1:
+                    changed_paths.add(raw_path)
+                else:
+                    untrusted.append(f"batch_repository_prefix_missing:{evidence_id}:{raw_path}")
+                    batch_valid = False
+            evidence_ids.append(evidence_id)
+        batch_order = max((evidence_order.get(evidence_id, -1) for evidence_id, _ in batch_records), default=-1)
+        if batch_valid and batch_order > latest_completion_order:
+            latest_files = matching["snapshot"]
+            latest_completion_order = batch_order
     return TrustedEvolution(
         changed_paths=frozenset(changed_paths),
         latest_files=latest_files,

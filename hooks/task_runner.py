@@ -1336,6 +1336,7 @@ def _run_batch_checks_unlocked(
         }
     )
     state["attempts"] = attempts
+    state["finalRepositories"] = _repository_state(repositories)
     if success and affected_task_ids:
         result = request_batch_revalidation(
             workspace,
@@ -1875,6 +1876,14 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
     unfinished = bundle_unfinished_tasks(bundle)
     if unfinished:
         raise TaskRunnerError("no_active_batch_for_unfinished_tasks:" + ",".join(unfinished))
+    project_commands = bundle.root.get("projectValidationCommands")
+    if isinstance(project_commands, list) and not project_commands:
+        return {
+            "action": "code_done_ready",
+            "activeBatchId": None,
+            "activatedFromHandoff": False,
+            "userMessage": "所有批次已完成，且没有额外的跨批次项目校验。",
+        }
     if isinstance(bundle.root.get("latestProjectCheckEvidenceId"), str):
         return {
             "action": "code_done_ready",
