@@ -418,4 +418,3 @@ Expected: no output and exit code 0.
 git add skills/autodev/autodev-plan/SKILL.md skills/autodev/autodev-code/SKILL.md docs/evidence-task-runner.md AUTOBIZDEVOPS_新手使用说明.md tests/test_skill_artifact_drift.py tests/test_inspect_skill_contract_plain.py
 git commit -m "docs: move compile validation to batch boundary"
 ```
-
