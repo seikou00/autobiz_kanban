@@ -424,6 +424,8 @@ cicd_done -> archived
 - 如果不涉及 HTTP/API，要写明 `x-auto-no-http-api: true`。
 - 如果不涉及数据库或持久化，要写明 `x-auto-no-sql: true`。
 - `PLAN.md` 应按业务闭环拆任务，不要拆成“新增 DTO”“修改 Controller”这类纯代码步骤。
+- 每个 TASK 只配置窄范围的行为、集成、E2E 或静态验证；编译、构建、类型检查和 lint 按 backend/frontend lane 配成批次验证，每个实际使用的 lane 至少一条 required 命令。
+- 项目级最终验证是可选项，只在确有跨前后端或跨批次检查时配置，不重复批次已经执行的编译命令。
 ### 9.6 Dev: 可选详细设计
 技能：`/autodev-detail-design`
 触发时机：
@@ -445,7 +447,9 @@ cicd_done -> archived
    注意：
 - 代码阶段不能偷偷修改 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`。
 - 如果发现规格或设计冲突，应停止并回流到 Specs 或 Plan。
-- 每次只处理一个任务，完成后验证，再进入下一个任务。
+- 每次只处理一个任务，完成时运行该任务的行为/集成验证，再进入下一个任务；不在每个 TASK 后重复编译。
+- 当前 batch 的 TASK 全部完成后，再统一执行一次该 lane 的编译/构建/typecheck/lint。失败时在同一个 batch run 修复并重跑。
+- 批次修复若改到 TASK 范围，旧 evidence 历史保留，但受影响 TASK 必须重新验证并追加新 evidence；随后还要再跑一次最终 batch 验证，全部通过后才能进入下一批。
 - 不要为了通过验证削弱校验、安全检查、日志或错误处理。
 ### 9.8 Dev: 独立需求评审
 技能：`/autodev-reviewer`

@@ -77,6 +77,20 @@ class SkillArtifactDriftTests(unittest.TestCase):
         self.assertIn("### Requirement [REQ-001]:", template)
         self.assertIn("#### Scenario [SCN-001]:", template)
 
+    def test_plan_and_code_skills_document_batch_validation_boundary(self) -> None:
+        plan_skill = (ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        code_skill = (ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("add-batch-validation-command", plan_skill)
+        self.assertIn("TASK 禁止配置 compile/build/typecheck/lint", plan_skill)
+        self.assertIn("requiredAction=run_batch_check", code_skill)
+        self.assertIn("fix_batch_and_retry_same_run", code_skill)
+        self.assertIn("attemptType=batch_revalidation", code_skill)
+
 
 if __name__ == "__main__":
     unittest.main()

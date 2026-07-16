@@ -16,6 +16,7 @@ ${artifactWorkspace}/.autobizdevops/features/${feature}/
   PLAN.md
   .plan.lock
   .task-runs/<taskId>/<runId>.json
+  .batch-runs/<batchId>/<runId>.json
   evidence/EVIDENCE.jsonl
   evidence/EVIDENCE.index.json
   evidence/.pending/ev_XXXX.json
@@ -29,11 +30,12 @@ Business repositories are read for Git snapshots and used as validation working 
 - `EVIDENCE.jsonl`: append-only evidence fact stream.
 - `EVIDENCE.index.json`: stream line count, last ID, and SHA-256 integrity index.
 - `ev_XXXX.log`: only captured command stdout/stderr, redacted and size-limited.
-- `.task-runs/...json`: transaction state, start/final snapshots, and evidence bindings.
+- `.task-runs/...json`: task transaction state, start/final snapshots, and evidence bindings.
+- `.batch-runs/...json`: resumable batch validation attempts, workspace identity, remediation snapshots, and evidence bindings.
 - `.plan.lock`: serializes every plan read-modify-write transaction so evidence bindings cannot be overwritten by a concurrent writer.
 - `evidence/.pending/...json`: short-lived append transaction state, removed after JSONL/log/index commit.
 
-JSON and log have different roles and must not contain the same JSON object. Every current task/project validation record has a corresponding log, including a zero-byte file for commands with no output. Records include log SHA-256 and byte count; the gate rejects missing, changed, or cross-bound logs.
+JSON and log have different roles and must not contain the same JSON object. Every current task/batch/project validation record has a corresponding log, including a zero-byte file for commands with no output. Records include log SHA-256 and byte count; the gate rejects missing, changed, or cross-bound logs.
 
 ## Task Lifecycle
 
@@ -70,6 +72,8 @@ python hooks/task_runner.py complete --workspace "$ARTIFACT_WORKSPACE" --feature
 
 This mode requires an empty snapshot diff, a real supporting file, and a required behavior/integration/E2E/static validation. Compile, typecheck, or lint alone cannot complete a no-change task.
 
+Task `validationCommands` accept only behavior, integration, E2E, or static checks. Compile, build, typecheck, and lint belong to the lane-specific batch profile and never run once per task.
+
 `--supporting-file` is relative to the resolved Git root; prefix it with `repoId:` for a multi-repository run. Verified-existing mode is only for behavior that existed before start. It is not a recovery mechanism for implementation files absorbed into a replacement run's baseline, and the runner rejects conflicts found in earlier aborted runs.
 
 `start` also stores a hash of the task contract, excluding only runtime status/evidence pointers. Do not edit the active task's goal, scope, AC, validation commands, or other contract fields after start; `complete`, recovery, and `code-done` reject contract drift. Abort the run and restart after an intentional Plan correction.
@@ -87,15 +91,28 @@ Resume rejects contract drift, repository mismatch, evidence-bearing runs, and a
 
 If validation fails, fail evidence and its log are still written, while the task becomes `failed`. After interruption, use `recover` with the same arguments. Recovery can adopt evidence already appended for the same `runId` and command, so a crash between evidence append and run-state update does not duplicate validation. A crash between JSONL append and index commit is repaired from `evidence/.pending` before the next append. Use `inspect` to read run state and `abort` only before evidence reaches its terminal write phase.
 
+## Batch Validation And Revalidation
+
+After every task in the active batch is done, run the lane-specific compile/build/typecheck/lint profile once:
+
+```bash
+python hooks/task_runner.py batch-check --workspace "$ARTIFACT_WORKSPACE" \
+  --feature "$FEATURE" --batch-id B001 --code-workspace "$BUSINESS_REPO"
+```
+
+The first call creates a batch run. On `fix_batch_and_retry_same_run`, fix only paths covered by the batch task scopes and retry with the returned `--run-id`. Attempts and `action=batch_validation` evidence are append-only. A validation command that modifies Git-visible files is rejected.
+
+If remediation changes task-owned files, the passing attempt requests task revalidation. Historical task evidence remains immutable, while the affected tasks lose only their current completion pointers and return to `todo`. Their next successful task evidence records `attemptType=batch_revalidation`, the triggering batch evidence IDs, and superseded completion evidence IDs. Ambiguous or shared scope revalidates the whole batch; an out-of-scope remediation is rejected. After task revalidation, the same batch run must pass one final batch-check before handoff.
+
 ## Multiple Repositories
 
 Repeat `--code-workspace` for each repository. Every validation command must set `repo` to the Git root directory name when more than one repository participates. Multi-repository changed and supporting paths use `repoId:relative/path`. Duplicate root names are rejected as ambiguous.
 
 All evidence remains in the single feature artifact directory, never in participating business repositories.
 
-## Project Check And Gate
+## Optional Project Check And Gate
 
-Project compile/typecheck/lint/static checks are separate from task acceptance:
+Cross-lane or cross-batch project checks are optional and separate from both task acceptance and batch validation:
 
 ```bash
 python hooks/task_runner.py project-check --workspace "$ARTIFACT_WORKSPACE" \
@@ -103,7 +120,7 @@ python hooks/task_runner.py project-check --workspace "$ARTIFACT_WORKSPACE" \
 python hooks/evidence_integrity_gate.py code-done --feature-dir "$FEATURE_DIR"
 ```
 
-`project-check` is accepted only after every batch is done, rejects validation commands that modify Git-visible files, and must be newer in the evidence stream than every current task completion record. `code-done` requires all task required commands to pass, full AC coverage, exact command equality, task-run/snapshot/contract consistency, valid log hashes, and a passing latest project-check run.
+`project-check` is accepted only after every batch is done and is skipped when no project commands are configured. It rejects validation commands that modify Git-visible files and, when configured, must be newer in the evidence stream than every current task and batch validation record. `code-done` always requires all task required commands and every batch profile to pass, full AC coverage, exact command equality, task/batch run consistency, current revalidation pointers, and valid log hashes; it requires a passing latest project-check only when project commands exist.
 
 `EVIDENCE.jsonl` is the only structured evidence fact source. Use `evidence_store.py show --evidence-id ev_XXXX` to inspect one record; new evidence never creates an `ev_XXXX.json` sidecar.
 

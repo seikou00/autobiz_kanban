@@ -158,7 +158,8 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 该命令只读取根计划和批次摘要；若根计划处于 `awaiting_next_conversation`，它会校验并消费 `BATCH_HANDOFF.json`，自动激活 `nextBatchId`，无需用户提供 batch ID。必须严格按返回的 `action` 分支：
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
-- `run_project_check`：所有批次已完成，跳过 Task 队列，执行「全部任务完成后的验证」。
+- `run_batch_check`：当前批次 TASK 已全部完成，执行下方「批次验证与重验证」，不得直接 handoff 或进入项目检查。
+- `run_project_check`：所有批次验证已完成且配置了额外项目检查，跳过 Task 队列，执行「全部任务完成后的验证」。
 - `code_done_ready`：批次和项目级最终校验都已完成，不重复执行 Task 或 project-check，继续 Code 完成门禁。
 
 入口返回失败、活动批次缺失或 handoff 不一致时必须停止，不得猜测 batch ID、直接编辑计划或绕过入口启动 Task。`code-session` 只允许在 Code 会话入口调用；收到批次完成的 `stop_and_open_new_conversation` 后，不得在同一对话再次调用 `code-session`。
@@ -226,7 +227,7 @@ python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --ta
 python "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task-id "<TASK_ID>" --run-id "<ORIGINAL_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-确实没有文件变更时，不得伪造 changedFiles，也不得把空 diff 当遗漏。必须说明原因并提供至少一个仓库内已有实现/测试文件；该任务还必须有 required 的行为、集成、E2E 或静态验证，只有 compile/typecheck/lint 不够：
+确实没有文件变更时，不得伪造 changedFiles，也不得把空 diff 当遗漏。必须说明原因并提供至少一个仓库内已有实现/测试文件；该任务还必须有 required 的行为、集成、E2E 或静态验证，compile/build/typecheck/lint 只属于批次验证，不能配置在 TASK：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
@@ -238,7 +239,22 @@ python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --ta
 
 若 `complete` 成功并返回 `requiredAction=continue_active_batch`、`continueCurrentBatch=true` 和 `nextTaskId`，说明当前 Task 已完成且活动批次还有依赖已满足的任务。必须将当前 Task 在 `write_todos` 中置为完成、将 `nextTaskId` 置为进行中，并立即进入下一个 Task 的 start/context/实现/complete 协议；同批续跑不得再次调用 `code-session`。同批仍有可执行任务时禁止询问用户是否继续，也不得先输出阶段性完成总结后结束回复；只有遇到真实阻断、Task 失败或 runner 明确要求停止时才能结束当前批次执行循环。
 
-若 `complete` 返回 `requiredAction=stop_and_open_new_conversation`、`requiresNewConversation=true`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 smoke/project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。
+若最后一个 TASK 的 `complete` 返回 `requiredAction=run_batch_check` 和 `batchCheck`，TASK 队列已经完成，但当前批次尚未完成。必须立即进入「批次验证与重验证」，不得提前生成 handoff、运行 project-check 或结束当前批次。
+
+### 批次验证与重验证
+
+第一次执行当前批次验证时不传 run ID；runner 创建 `.batch-runs/<BATCH_ID>/<RUN_ID>.json`，按该 lane 的 `batchValidation.commands` 运行 compile/build/typecheck/lint，并分别写入 `action=batch_validation` evidence：
+
+```bash
+python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
+```
+
+- 返回 `requiredAction=fix_batch_and_retry_same_run` 时，保留返回的 `runId`，只在当前批次 TASK scope 并集内修复问题，然后用完全相同的 workspace 和 `--run-id "<RUN_ID>"` 重跑 `batch-check`。批次失败 evidence 只追加，不覆盖；不得新建 run 隐藏失败历史。验证命令若修改 Git 可见文件会被拒绝。
+- 修复路径不命中任何当前批次 TASK scope 时返回 `batch_fix_out_of_scope`，必须停止并回流 Plan；只命中一个 TASK 时仅重验证该 TASK，命中多个或共享/歧义范围时重验证整批 TASK。
+- 修复后的 batch-check 返回 `requiredAction=revalidate_affected_tasks` 时，原 TASK evidence 历史继续保留，但受影响 TASK 的当前 `completionEvidenceIds` / `latestPassEvidenceId` 被清空并回到 `todo`。逐个按正常 start/context/complete 协议重跑；新 evidence 必须包含 `attemptType=batch_revalidation`、`triggeredByBatchEvidenceIds` 和 `supersedesEvidenceIds`。全部受影响 TASK 再次完成后，使用同一个 batch run ID 再跑最终 batch-check；在这次最终检查通过前不得 handoff。
+- batch-check 直接通过且没有批次修复，或重验证后的最终 batch-check 通过时，runner 才把批次置为完成。非末批会返回 `stop_and_open_new_conversation` 与 `batchHandoff`；末批则进入可选项目检查或完成门禁。
+
+若 `batch-check` 返回 `requiredAction=stop_and_open_new_conversation`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 smoke/project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。
 
 宿主未提供 conversation ID，因此 runner 无法从进程参数中证明调用来自新对话；`requiresNewConversation` 是供宿主和 Agent 执行的协议层约束，不是 runner 可独立验证的身份凭据。`activate-batch` CLI 仅保留给兼容或诊断场景，正常 Code 流程不得直接调用。
 7. 若 `SMOKE_TEST_PLAN.json`存在，按其中 `tests[]` 生成或补齐旁路冒烟测试源码/脚本。每条 smoke 必须按计划中的 `seam` 站在公开边界上验证，不测私有方法、不查内部实现细节；按 `verticalSlice` 一次只实现一个最小闭环，不把多个场景合成一条大烟测；按 `mockPolicy` 只 mock 系统边界，不 mock 自有模块或内部协作者。冒烟测试必须是 opt-in：Java/Spring 可用 `*SmokeIT` + `-Psmoke`，前端可用 `tests/smoke/` + 单独 smoke script，CLI/API 可用 `scripts/smoke/`；这些源码/脚本只用于本地验证，可以放在业务项目测试目录，但不得进入业务项目 Git 托管。生成后必须确保 `sourcePath` 被目标项目 Git 忽略，优先把精确路径或窄范围 AutoDev smoke 模式写入 `.git/info/exclude`，不要把 smoke 源码 `git add`，也不得让默认 `validationCommands` 无意中跑到慢/脆的冒烟。全部强 validation 通过后，运行：
@@ -251,19 +267,19 @@ python "${pluginPath}/hooks/run_advisory_smoke.py" --feature "${feature}"
 
 若 `run_advisory_smoke.py` 在执行前置检查阶段返回非 0（例如 `sourcePath` 对应测试源码不存在、测试条目非法、命令缺失、sourcePath 已被 Git 跟踪或未被 Git ignore 命中），这表示 Code 阶段尚未按 `SMOKE_TEST_PLAN.json` 补齐本地冒烟测试资产；必须先补齐测试源码/修正计划/更新 `.git/info/exclude` 后重跑。只有冒烟命令已经实际执行后的 PASS/FAIL/BLOCKED/SKIPPED 结果才属于不阻断流转的旁路风险信号。
 
-策略边界：batch task 的 `validationCommands`、`action=validation` evidence 与 `code_done_gate` 仍是强门禁；`SMOKE_TEST_PLAN.json` / `SMOKE_RESULT.json` 只表达旁路冒烟风险。
+策略边界：batch task 的 `validationCommands`、批次 `batchValidation.commands`、`action=validation` / `action=batch_validation` evidence 与 `code_done_gate` 都是强门禁；`SMOKE_TEST_PLAN.json` / `SMOKE_RESULT.json` 只表达旁路冒烟风险。
 
 > 一致性：任务的依据在对应上游产物里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 
 ###  全部任务完成后的验证
 
-只有 Code 会话入口返回 `run_project_check`，即最终批次全部任务完成且没有 `BATCH_HANDOFF.json` 后，才通过 runner 跑根 plan 的 `projectValidationCommands`。提前执行会被拒绝；项目检查单独写 `action=project_check` evidence，不参与任一 task 的验收覆盖：
+只有 Code 会话入口返回 `run_project_check`，即全部批次验证通过且根 plan 配置了非空 `projectValidationCommands` 后，才通过 runner 跑额外的跨 lane/跨批次项目检查。提前执行会被拒绝；项目检查单独写 `action=project_check` evidence，不参与任一 TASK 的验收覆盖。未配置项目检查时入口直接返回 `code_done_ready`，不要求伪造一轮最终编译：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" project-check --feature "${feature}" --code-workspace "<BUSINESS_REPO>"
 ```
 
-如本轮触发 HTML 分支，或变更了前端源码（`.tsx` / `.jsx` / `.ts` / `.js` / `.vue` 及相关样式文件），项目级验证通过后必须运行统一前端回检；只有用户明确要求“跳过回检 / 先不回检 / 不要跑回检 / 先不验证”时才跳过，并在最终摘要写 `reviewStatus=skipped-by-user`。默认命令：
+如本轮触发 HTML 分支，或变更了前端源码（`.tsx` / `.jsx` / `.ts` / `.js` / `.vue` 及相关样式文件），全部批次验证以及配置了的项目级验证通过后必须运行统一前端回检；只有用户明确要求“跳过回检 / 先不回检 / 不要跑回检 / 先不验证”时才跳过，并在最终摘要写 `reviewStatus=skipped-by-user`。默认命令：
 
 ```bash
 python "{PLUGIN_ROOT}/skills/autodev/autodev-code/references/frontend-html/scripts/review_runner.py" --target "<file-or-dir>" --antd-audit auto --format markdown
@@ -293,10 +309,10 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 - 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
 - 所有任务由 task runner 完成；required validation 全部通过；`checkedCriteria` 并集覆盖全部 AC；完成 evidence 与命令、runId、快照 changedFiles 一致。旧结构 plan 必须重跑 Plan，不提供兼容完成路径。
-- `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 validation/project-check evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
-- 每个批次最多 5 个任务；非末批完成后已停止当前对话并生成 `BATCH_HANDOFF.json`，下一批只在新对话通过 `code-session` 自动激活。
+- `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 task/batch/project validation evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
+- 每个批次最多 5 个任务；该批全部 TASK 完成后批次验证已通过，存在批次修复时受影响 TASK 已产生 `attemptType=batch_revalidation` 的新完成 evidence，且随后最终 batch-check 再次通过；非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
 - 若 `SMOKE_TEST_PLAN.json`存在：已按计划生成/补齐冒烟测试源码并确认其被目标项目 Git 忽略，已运行 `run_advisory_smoke.py`；`SMOKE_RESULT.json` 已写入。`SMOKE_RESULT.json.verdict` 为 `FAIL` / `BLOCKED` / `SKIPPED` 时，记录为风险但不阻断本阶段流转。
-- 必要验证通过；最新一次 `project-check` 晚于全部任务完成 evidence，且其中所有 required 项通过（`code_done` 会再次校验 plan/evidence/run 闭环）。
+- 必要验证通过；每批最新 batch-check 晚于该批当前 TASK 完成 evidence，且所有 required 项通过；配置了项目检查时，最新 `project-check` 还必须晚于全部当前 TASK/batch evidence（`code_done` 会再次校验 plan/evidence/run 闭环）。
 - HTML 分支或前端源码变更已完成统一前端回检，或用户明确跳过；仍有 `must-fix` / 执行异常时不得推进 `code_done`。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 

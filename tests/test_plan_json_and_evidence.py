@@ -242,7 +242,7 @@ class PlanJsonTest(unittest.TestCase):
         task = plan["tasks"][0]
         task["validationCommands"][0]["kind"] = "compile"
 
-        self.assertIn("T001.validationCommands[0].compile_cannot_cover_acceptance", validate_test_tasks(plan))
+        self.assertIn("T001.validationCommands[0].kind_invalid", validate_test_tasks(plan))
 
     def test_plan_requires_required_commands_to_cover_every_acceptance_criterion(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])

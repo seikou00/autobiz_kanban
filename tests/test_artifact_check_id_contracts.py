@@ -136,6 +136,23 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             "activeBatchId": None if all_done else "B001",
             "nextBatchId": "B002" if not all_done and len(task_groups) > 1 else None,
             "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+            "batchValidationProfiles": {
+                lane: {
+                    "commands": [
+                        {
+                            "argv": ["echo", f"{lane} compile"],
+                            "cwd": ".",
+                            "kind": "compile",
+                            "required": True,
+                        }
+                    ]
+                }
+                for lane in {
+                    "frontend" if task.get("uiRequired") is True else "backend"
+                    for task in task_items
+                    if isinstance(task, dict)
+                }
+            },
             "batches": root_entries,
             "projectValidationCommands": data["projectValidationCommands"],
             "projectCheckEvidenceIds": data["projectCheckEvidenceIds"],
@@ -156,6 +173,22 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     for task in group
                     for evidence_id in task.get("completionEvidenceIds", [])
                 ],
+                "batchValidation": {
+                    "profile": entry["executionLane"],
+                    "status": "passed" if entry["status"] == "done" else "pending",
+                    "commands": [
+                        {
+                            "id": f"BATCH-{entry['id']}-VAL-001",
+                            "argv": ["echo", f"{entry['executionLane']} compile"],
+                            "cwd": ".",
+                            "kind": "compile",
+                            "required": True,
+                        }
+                    ],
+                    "evidenceIds": [],
+                    "latestPassEvidenceIds": [],
+                    "activeRunId": None,
+                },
                 "startedAt": None,
                 "completedAt": "2026-07-10T00:00:00Z" if entry["status"] == "done" else None,
                 "tasks": group,

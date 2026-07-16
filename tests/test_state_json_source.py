@@ -113,6 +113,14 @@ def write_minimal_trace_sources(feature_dir: Path) -> None:
 def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alpha") -> None:
     feature_dir.mkdir(parents=True, exist_ok=True)
     run_id = "run-test-state"
+    batch_run_id = "run-batch-state"
+    batch_command = {
+        "id": "BATCH-B001-VAL-001",
+        "argv": ["echo", "batch ok"],
+        "cwd": ".",
+        "kind": "compile",
+        "required": True,
+    }
     (feature_dir / "plan.json").write_text(
         json.dumps(
             {
@@ -126,8 +134,8 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                         "required": True,
                     }
                 ],
-                "projectCheckEvidenceIds": ["ev_0002"],
-                "latestProjectCheckEvidenceId": "ev_0002",
+                "projectCheckEvidenceIds": ["ev_0003"],
+                "latestProjectCheckEvidenceId": "ev_0003",
                 "tasks": [
                     {
                         "id": "T001",
@@ -191,6 +199,18 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                 "activeBatchId": None,
                 "nextBatchId": None,
                 "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+                "batchValidationProfiles": {
+                    "backend": {
+                        "commands": [
+                            {
+                                "argv": batch_command["argv"],
+                                "cwd": batch_command["cwd"],
+                                "kind": batch_command["kind"],
+                                "required": batch_command["required"],
+                            }
+                        ]
+                    }
+                },
                 "batches": [
                     {
                         "id": "B001",
@@ -225,6 +245,14 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                 "taskCount": 1,
                 "completedTaskCount": 1,
                 "completionEvidenceIds": ["ev_0001"],
+                "batchValidation": {
+                    "profile": "backend",
+                    "status": "passed",
+                    "commands": [batch_command],
+                    "evidenceIds": ["ev_0002"],
+                    "latestPassEvidenceIds": ["ev_0002"],
+                    "activeRunId": batch_run_id,
+                },
                 "startedAt": "2026-07-10T00:00:00Z",
                 "completedAt": "2026-07-10T00:01:00Z",
                 "tasks": task_items,
@@ -278,6 +306,45 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
             },
         },
         output_tail="ok\n",
+    )
+    append_evidence(
+        feature_dir,
+        {
+            "featureId": feature,
+            "checkpoint": "code_in_progress",
+            "nodeId": "dev.code",
+            "skill": "autodev-code",
+            "taskId": "__batch__",
+            "batchId": "B001",
+            "action": "batch_validation",
+            "detailVersion": 2,
+            "runId": batch_run_id,
+            "completionMode": "verified_existing",
+            "summary": "BATCH-B001-VAL-001 batch validation pass",
+            "implementation": {
+                "noCodeChange": True,
+                "whatChanged": [],
+                "why": "batch check validates the completed workspace",
+            },
+            "specRefs": [],
+            "designRefs": [],
+            "changedFiles": [],
+            "fileChanges": [],
+            "transientValidationFiles": [],
+            "supportingFiles": [],
+            "checkedCriteria": ["BATCH-B001-VAL-001"],
+            "validation": {
+                "commandId": batch_command["id"],
+                "argv": batch_command["argv"],
+                "command": "echo batch ok",
+                "cwd": batch_command["cwd"],
+                "kind": batch_command["kind"],
+                "required": batch_command["required"],
+                "exitCode": 0,
+                "result": "pass",
+            },
+        },
+        output_tail="batch ok\n",
     )
     append_evidence(
         feature_dir,
@@ -349,6 +416,32 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                         "required": True,
                     }
                 },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    batch_run_dir = feature_dir / ".batch-runs" / "B001"
+    batch_run_dir.mkdir(parents=True, exist_ok=True)
+    (batch_run_dir / f"{batch_run_id}.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "runId": batch_run_id,
+                "featureId": feature,
+                "batchId": "B001",
+                "status": "done",
+                "success": True,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "evidenceIds": ["ev_0002"],
+                        "result": "pass",
+                        "completedAt": "2026-07-10T00:01:00Z",
+                    }
+                ],
+                "evidenceIds": ["ev_0002"],
             },
             indent=2,
         )
@@ -815,6 +908,18 @@ class StateIntegrationTests(unittest.TestCase):
                     "activeBatchId": "B001",
                     "nextBatchId": None,
                     "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+                    "batchValidationProfiles": {
+                        "backend": {
+                            "commands": [
+                                {
+                                    "argv": ["echo", "backend compile"],
+                                    "cwd": ".",
+                                    "kind": "compile",
+                                    "required": True,
+                                }
+                            ]
+                        }
+                    },
                     "batches": [
                         {
                             "id": "B001",
@@ -843,6 +948,22 @@ class StateIntegrationTests(unittest.TestCase):
                         "taskCount": 2,
                         "completedTaskCount": 0,
                         "completionEvidenceIds": [],
+                        "batchValidation": {
+                            "profile": "backend",
+                            "status": "pending",
+                            "commands": [
+                                {
+                                    "id": "BATCH-B001-VAL-001",
+                                    "argv": ["echo", "backend compile"],
+                                    "cwd": ".",
+                                    "kind": "compile",
+                                    "required": True,
+                                }
+                            ],
+                            "evidenceIds": [],
+                            "latestPassEvidenceIds": [],
+                            "activeRunId": None,
+                        },
                         "startedAt": None,
                         "completedAt": None,
                         "tasks": tasks,
