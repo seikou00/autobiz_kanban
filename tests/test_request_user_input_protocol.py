@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 PROTOCOL = SKILLS / "references" / "ask-user-question.md"
 DISCUSS_SKILL = SKILLS / "autobiz" / "autobiz-requirement-discuss" / "SKILL.md"
+PLAN_SKILL = SKILLS / "autodev" / "autodev-plan" / "SKILL.md"
 
 
 class RequestUserInputProtocolTest(unittest.TestCase):
@@ -42,6 +43,23 @@ class RequestUserInputProtocolTest(unittest.TestCase):
 
         self.assertNotIn("**选项2**：补充其他问题", content)
         self.assertNotIn("引导用户补充说明", content)
+
+    def test_plan_adjudication_gate_forbids_placeholder_options(self) -> None:
+        content = PLAN_SKILL.read_text(encoding="utf-8")
+
+        for required_rule in (
+            "裁定即消解",
+            "凡选中后条目仍处于待确认状态的选项都是非法选项",
+            "声称拥有 ≠ 提供",
+            "信息实体",
+            "暂停，拿到材料后继续",
+            "消解自查",
+            "禁止搬进裁定门",
+        ):
+            self.assertIn(required_rule, content)
+
+        protocol = PROTOCOL.read_text(encoding="utf-8")
+        self.assertIn("逐条裁定环节禁止使用延后类预设选项", protocol)
 
     def test_every_usage_loads_the_shared_protocol(self) -> None:
         missing: list[str] = []
