@@ -66,7 +66,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 > 3. 按 prd-formatter.md 模板改造需求文档并写入 PRD_DISCUSS.md
 > 4. 需求分析 — 角色选择与通用基础检查
 > 5. 需求分析 — 角色专项检查
-> 6. 询问用户提供 HTML 文件位置并逐一分析
+> 6. 角色选择前端则询问用户提供 HTML 文件位置并逐一分析
 > 7. 需求分析 — 输出规范检查
 > 8. 问题清单展示与用户确认
 > 9. 对话式引导与 PRD_DISCUSS.md 调整
