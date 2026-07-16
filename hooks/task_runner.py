@@ -37,6 +37,7 @@ from hooks.plan_writer import (  # noqa: E402
     record_batch_validation_attempt,
     record_project_check_attempt,
     record_task_attempt,
+    request_batch_revalidation,
     set_task_execution_status,
 )
 from hooks.repository_snapshot import (  # noqa: E402
@@ -525,6 +526,9 @@ def _start_task_unlocked(
         "completionEvidenceIds": [],
         "completedCommandEvidence": {},
     }
+    pending_revalidation = task.get("pendingRevalidation")
+    if isinstance(pending_revalidation, dict):
+        state["revalidation"] = dict(pending_revalidation)
     path = _run_path(feature_dir, task_id, run_id)
     _save_run(path, state)
     result = set_task_execution_status(
@@ -786,6 +790,7 @@ def _record_for_command(
     supporting_files: list[str],
     no_change_why: str | None,
     repository_id: str | None,
+    revalidation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     changed_files = sorted(
         {
@@ -832,6 +837,17 @@ def _record_for_command(
             "exitCode": exit_code,
             "result": result,
         },
+        **(
+            {
+                "attemptType": revalidation.get("attemptType"),
+                "triggeredByBatchEvidenceIds": list(
+                    revalidation.get("triggeredByBatchEvidenceIds", [])
+                ),
+                "supersedesEvidenceIds": list(revalidation.get("supersedesEvidenceIds", [])),
+            }
+            if isinstance(revalidation, dict)
+            else {}
+        ),
     }
 
 
@@ -1019,6 +1035,7 @@ def _complete_task_unlocked(
             supporting_files=normalized_supporting,
             no_change_why=no_code_change_why,
             repository_id=command_repository_id if multiple_repositories or command.get("repo") else None,
+            revalidation=state.get("revalidation") if isinstance(state.get("revalidation"), dict) else None,
         )
         try:
             evidence = append_evidence(feature_dir, record, output_tail=output)
@@ -1138,6 +1155,50 @@ def _record_for_batch_command(
     }
 
 
+def _affected_tasks_for_batch_changes(
+    batch: dict[str, Any],
+    file_changes: list[dict[str, str]],
+    requested_workspaces: list[Path],
+    repositories: RepositoryMap,
+) -> list[str]:
+    changed_paths = _changed_files(file_changes)
+    if not changed_paths:
+        return []
+    scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
+    task_scopes: dict[str, list[str]] = {}
+    batch_task_ids: list[str] = []
+    for task in batch.get("tasks", []):
+        if not isinstance(task, dict) or not isinstance(task.get("id"), str):
+            continue
+        task_id = str(task["id"])
+        batch_task_ids.append(task_id)
+        _, resolved = _resolved_scope_paths(task, scope_workspaces)
+        task_scopes[task_id] = resolved
+
+    affected: set[str] = set()
+    ambiguous = False
+    outside: list[str] = []
+    for changed_path in changed_paths:
+        matches = {
+            task_id
+            for task_id, scope_paths in task_scopes.items()
+            if _path_in_scope(changed_path, scope_paths)
+        }
+        if not matches:
+            outside.append(changed_path)
+        elif len(matches) > 1:
+            ambiguous = True
+        else:
+            affected.update(matches)
+    if outside:
+        raise TaskRunnerError(
+            "batch_fix_out_of_scope:" + ",".join(sorted(outside)),
+            requiredAction="correct_plan_scope_and_retry_same_batch_run",
+            changedFiles=changed_paths,
+        )
+    return sorted(batch_task_ids if ambiguous else affected)
+
+
 def _run_batch_checks_unlocked(
     workspace: Path,
     feature: str,
@@ -1224,6 +1285,20 @@ def _run_batch_checks_unlocked(
             return True, state
 
     file_changes, _ = _repository_changes(state, repositories)
+    revalidation_baseline = state.get("revalidationBaselineRepositories")
+    if isinstance(revalidation_baseline, list) and revalidation_baseline:
+        relevant_changes, _ = _repository_changes(
+            {"repositories": revalidation_baseline},
+            repositories,
+        )
+    else:
+        relevant_changes = file_changes
+    affected_task_ids = _affected_tasks_for_batch_changes(
+        batch,
+        relevant_changes,
+        requested_workspaces,
+        repositories,
+    )
     validation_snapshot = _repository_state(repositories)
     multiple_repositories = len(repositories) > 1
     attempt_evidence_ids: list[str] = []
@@ -1261,6 +1336,26 @@ def _run_batch_checks_unlocked(
         }
     )
     state["attempts"] = attempts
+    if success and affected_task_ids:
+        result = request_batch_revalidation(
+            workspace,
+            feature,
+            batch_id,
+            attempt_evidence_ids,
+            affected_task_ids=affected_task_ids,
+            run_id=run_id,
+        )
+        if not result.ok:
+            raise TaskRunnerError("batch_revalidation_plan_binding_failed")
+        state["status"] = "revalidation_required"
+        state["success"] = False
+        state["requiredAction"] = "revalidate_affected_tasks"
+        state["affectedTaskIds"] = affected_task_ids
+        state["revalidationBaselineRepositories"] = _repository_state(repositories)
+        state["triggeredByBatchEvidenceIds"] = attempt_evidence_ids
+        _save_run(path, state)
+        return True, state
+
     state["status"] = "done" if success else "failed"
     state["success"] = success
     result = record_batch_validation_attempt(
@@ -1275,6 +1370,10 @@ def _run_batch_checks_unlocked(
         raise TaskRunnerError("batch_validation_plan_binding_failed")
     if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
         state["batchHandoff"] = result.data["batchHandoff"]
+    if success:
+        state.pop("affectedTaskIds", None)
+        state.pop("revalidationBaselineRepositories", None)
+        state.pop("triggeredByBatchEvidenceIds", None)
     state["requiredAction"] = (
         state.get("batchHandoff", {}).get("requiredAction")
         if isinstance(state.get("batchHandoff"), dict)
@@ -1937,6 +2036,7 @@ def _cmd_batch_check(args: argparse.Namespace) -> int:
             ),
             allEvidenceIds=state.get("evidenceIds", []),
             requiredAction=state.get("requiredAction"),
+            affectedTaskIds=state.get("affectedTaskIds", []),
             batchHandoff=batch_handoff,
             stopAfterBatch=bool(batch_handoff),
             requiresNewConversation=(

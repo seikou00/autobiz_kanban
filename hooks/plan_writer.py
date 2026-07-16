@@ -1323,6 +1323,8 @@ def record_task_attempt(
         task["completionEvidenceIds"] = list(completion_evidence_ids) if success else []
         task["latestPassEvidenceId"] = completion_evidence_ids[-1] if success and completion_evidence_ids else None
         task["status"] = "done" if success else "failed"
+        if success:
+            task.pop("pendingRevalidation", None)
         batch_id = _batch_for_task(data, task_id)
         batch_tasks = [
             item
@@ -1494,6 +1496,72 @@ def record_batch_validation_attempt(
             if handoff is not None:
                 atomic_write_json(_handoff_path(workspace, feature), handoff)
                 result = with_result_data(result, batchHandoff=handoff)
+        return result
+
+
+def request_batch_revalidation(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    evidence_ids: list[str],
+    *,
+    affected_task_ids: list[str],
+    run_id: str,
+) -> WriterResult:
+    """Bind a passing repair check and reopen affected TASK validation pointers."""
+
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        batch_plans = data.get("_batchPlans")
+        batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+        if not isinstance(batch_plan, dict):
+            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
+        validation = batch_plan.get("batchValidation")
+        if not isinstance(validation, dict):
+            return fail("batch_validation_contract_missing", batch_id, path=_path(workspace, feature))
+        history = validation.get("evidenceIds")
+        history = history if isinstance(history, list) else []
+        validation["evidenceIds"] = _append_unique(history, evidence_ids)
+        validation["latestPassEvidenceIds"] = list(evidence_ids)
+        validation["activeRunId"] = run_id
+        validation["status"] = "revalidation_required"
+        batch_plan["completedAt"] = None
+
+        affected = set(affected_task_ids)
+        known = {
+            str(task.get("id"))
+            for task in batch_plan.get("tasks", [])
+            if isinstance(task, dict)
+        }
+        if not affected or not affected.issubset(known):
+            return fail(
+                "batch_revalidation_tasks_invalid",
+                ",".join(sorted(affected - known)),
+                path=_path(workspace, feature),
+            )
+        for task in batch_plan.get("tasks", []):
+            if not isinstance(task, dict) or task.get("id") not in affected:
+                continue
+            superseded = (
+                list(task.get("completionEvidenceIds", []))
+                if isinstance(task.get("completionEvidenceIds"), list)
+                else []
+            )
+            task["pendingRevalidation"] = {
+                "attemptType": "batch_revalidation",
+                "triggeredByBatchEvidenceIds": list(evidence_ids),
+                "supersedesEvidenceIds": superseded,
+            }
+            task["completionEvidenceIds"] = []
+            task["latestPassEvidenceId"] = None
+            task["status"] = "todo"
+
+        data["status"] = "in_progress"
+        data["activeBatchId"] = batch_id
+        result = _write(workspace, feature, data)
+        if result.ok:
+            write_text(_md_path(workspace, feature), _render_plan_md(data))
+            result = with_result_data(result, affectedTaskIds=sorted(affected))
         return result
 
 

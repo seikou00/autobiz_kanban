@@ -68,6 +68,7 @@ TASK_RUNTIME_FIELDS = {
     "evidenceIds",
     "completionEvidenceIds",
     "latestPassEvidenceId",
+    "pendingRevalidation",
 }
 
 

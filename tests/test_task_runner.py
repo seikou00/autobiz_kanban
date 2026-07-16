@@ -245,6 +245,39 @@ def _check_batch(workspace: Path, code: Path) -> dict:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_ambiguous_batch_repair_revalidates_entire_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "code"
+            repo.mkdir()
+            _git(repo, "init", "-b", "main")
+            _git(repo, "config", "user.email", "test@example.com")
+            _git(repo, "config", "user.name", "Test")
+            repositories = task_runner_module._resolve_repositories([repo])
+            batch = {
+                "tasks": [
+                    {"id": "T001", "scope": {"paths": ["shared.txt"]}},
+                    {"id": "T002", "scope": {"paths": ["shared.txt"]}},
+                    {"id": "T003", "scope": {"paths": ["other.txt"]}},
+                ]
+            }
+
+            affected = task_runner_module._affected_tasks_for_batch_changes(
+                batch,
+                [
+                    {
+                        "path": "shared.txt",
+                        "operation": "modified",
+                        "kind": "code",
+                        "summary": "shared file changed",
+                    }
+                ],
+                [repo],
+                repositories,
+            )
+
+            self.assertEqual(affected, ["T001", "T002", "T003"])
+
     def test_batch_check_completes_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -298,6 +331,7 @@ class TaskRunnerTest(unittest.TestCase):
             }
             batch = _read_batch(feature_dir)
             batch["batchValidation"]["commands"] = [command]
+            batch["tasks"][0]["scope"]["paths"] = ["existing.txt"]
             _write_batch(feature_dir, batch)
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
@@ -326,24 +360,111 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(_evidence(feature_dir, failed_payload["evidenceIds"][0])["validation"]["result"], "fail")
 
             (code / "existing.txt").write_text("fixed\n", encoding="utf-8")
-            passed = _run(
+            repaired = _run(
                 "batch-check", "--workspace", str(workspace), "--feature", "alpha",
                 "--batch-id", "B001", "--code-workspace", str(code),
                 "--run-id", failed_payload["runId"],
             )
 
+            self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+            repaired_payload = json.loads(repaired.stdout)
+            self.assertEqual(repaired_payload["runId"], failed_payload["runId"])
+            self.assertEqual(repaired_payload["requiredAction"], "revalidate_affected_tasks")
+            self.assertEqual(repaired_payload["affectedTaskIds"], ["T001"])
+            task_after_repair = _read_batch(feature_dir)["tasks"][0]
+            self.assertEqual(task_after_repair["evidenceIds"], ["ev_0001"])
+            self.assertEqual(task_after_repair["completionEvidenceIds"], [])
+            self.assertEqual(
+                task_after_repair["pendingRevalidation"]["supersedesEvidenceIds"],
+                ["ev_0001"],
+            )
+
+            revalidation = _start(workspace, code)
+            revalidated = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", revalidation["runId"],
+                "--no-code-change-why", "batch repair is implemented and needs behavior revalidation",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(revalidated.returncode, 0, revalidated.stdout + revalidated.stderr)
+            current_task = _read_batch(feature_dir)["tasks"][0]
+            self.assertEqual(current_task["evidenceIds"], ["ev_0001", "ev_0004"])
+            self.assertEqual(current_task["completionEvidenceIds"], ["ev_0004"])
+            self.assertNotIn("pendingRevalidation", current_task)
+            revalidation_evidence = _evidence(feature_dir, "ev_0004")
+            self.assertEqual(revalidation_evidence["attemptType"], "batch_revalidation")
+            self.assertEqual(revalidation_evidence["supersedesEvidenceIds"], ["ev_0001"])
+
+            passed = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+                "--run-id", failed_payload["runId"],
+            )
             self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
             passed_payload = json.loads(passed.stdout)
-            self.assertEqual(passed_payload["runId"], failed_payload["runId"])
+            self.assertEqual(passed_payload["requiredAction"], "batch_validation_passed")
             state = json.loads(
                 (feature_dir / ".batch-runs" / "B001" / f"{passed_payload['runId']}.json").read_text(
                     encoding="utf-8"
                 )
             )
             self.assertEqual(state["status"], "done")
-            self.assertEqual(len(state["attempts"]), 2)
-            self.assertEqual(len(state["evidenceIds"]), 2)
+            self.assertEqual(len(state["attempts"]), 3)
+            self.assertEqual(len(state["evidenceIds"]), 3)
             self.assertEqual(_evidence(feature_dir, state["evidenceIds"][-1])["validation"]["result"], "pass")
+
+    def test_batch_repair_rejects_out_of_scope_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            command = {
+                "id": "BATCH-B001-VAL-001",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "raise SystemExit(0 if Path('existing.txt').read_text().strip() == 'fixed' else 3)"
+                    ),
+                ],
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
+            }
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"]["commands"] = [command]
+            batch["tasks"][0]["scope"]["paths"] = ["src"]
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batchValidationProfiles"]["backend"]["commands"] = [
+                {key: value for key, value in command.items() if key != "id"}
+            ]
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            failed = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            failed_payload = json.loads(failed.stdout)
+            (code / "existing.txt").write_text("fixed\n", encoding="utf-8")
+
+            retried = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+                "--run-id", failed_payload["runId"],
+            )
+
+            self.assertNotEqual(retried.returncode, 0)
+            self.assertIn("batch_fix_out_of_scope:existing.txt", retried.stdout)
 
     def test_batch_check_rejects_validation_that_mutates_git_visible_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
