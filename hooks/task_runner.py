@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from hooks.plan_json import (  # noqa: E402
 from hooks.plan_writer import (  # noqa: E402
     PlanWriterInputError,
     activate_batch as activate_plan_batch,
+    record_batch_validation_attempt,
     record_project_check_attempt,
     record_task_attempt,
     set_task_execution_status,
@@ -83,6 +85,10 @@ def _runs_dir(feature_dir: Path, task_id: str) -> Path:
 
 def _run_path(feature_dir: Path, task_id: str, run_id: str) -> Path:
     return _runs_dir(feature_dir, task_id) / f"{run_id}.json"
+
+
+def _batch_run_path(feature_dir: Path, batch_id: str, run_id: str) -> Path:
+    return feature_dir / ".batch-runs" / batch_id / f"{run_id}.json"
 
 
 def _task_run_lock(feature_dir: Path) -> FileLock:
@@ -1072,6 +1078,224 @@ def _complete_task_unlocked(
     return success, state
 
 
+def _batch_commands_sha256(commands: list[dict[str, Any]]) -> str:
+    content = json.dumps(commands, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(content).hexdigest()
+
+
+def _record_for_batch_command(
+    *,
+    feature: str,
+    batch_id: str,
+    run_id: str,
+    command: dict[str, Any],
+    exit_code: int,
+    file_changes: list[dict[str, str]],
+    repository_id: str | None,
+) -> dict[str, Any]:
+    changed_files = _changed_files(file_changes)
+    result = "pass" if exit_code == 0 else "fail"
+    no_code_change = not file_changes
+    return {
+        "featureId": feature,
+        "checkpoint": "code_in_progress",
+        "nodeId": "dev.code",
+        "skill": "autodev-code",
+        "taskId": "__batch__",
+        "batchId": batch_id,
+        "action": "batch_validation",
+        "detailVersion": 2,
+        "runId": run_id,
+        "completionMode": "verified_existing" if no_code_change else "implemented",
+        "summary": f"{command.get('id')} batch validation {result}",
+        "implementation": {
+            "noCodeChange": no_code_change,
+            "whatChanged": [] if no_code_change else changed_files,
+            "why": (
+                "Batch-level checks validate the completed workspace without changing files"
+                if no_code_change
+                else "Changes repair the failed batch validation"
+            ),
+        },
+        "specRefs": [],
+        "designRefs": [],
+        "changedFiles": changed_files,
+        "fileChanges": file_changes,
+        "transientValidationFiles": [],
+        "supportingFiles": [],
+        "checkedCriteria": [str(command.get("id"))],
+        "validation": {
+            "commandId": command.get("id"),
+            "argv": command.get("argv"),
+            "command": " ".join(str(item) for item in command.get("argv", [])),
+            "cwd": command.get("cwd"),
+            "kind": command.get("kind"),
+            "required": command.get("required"),
+            **({"repo": repository_id} if repository_id else {}),
+            "exitCode": exit_code,
+            "result": result,
+        },
+    }
+
+
+def _run_batch_checks_unlocked(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    code_workspace: Path | list[Path],
+    run_id: str | None,
+) -> tuple[bool, dict[str, Any]]:
+    feature_dir = _feature_dir(workspace, feature)
+    try:
+        bundle = load_plan_bundle(feature_dir)
+    except ValueError as exc:
+        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    if bundle.root.get("activeBatchId") != batch_id:
+        raise TaskRunnerError(f"batch_validation_not_active:{batch_id}")
+    batch = bundle.batches.get(batch_id)
+    if not isinstance(batch, dict):
+        raise TaskRunnerError(f"batch_not_found:{batch_id}")
+    unfinished = [
+        str(task.get("id"))
+        for task in batch.get("tasks", [])
+        if isinstance(task, dict) and normalize_status(task.get("status")) != "done"
+    ]
+    if unfinished:
+        raise TaskRunnerError("batch_validation_requires_tasks_done:" + ",".join(unfinished))
+    validation = batch.get("batchValidation")
+    if not isinstance(validation, dict):
+        raise TaskRunnerError(f"batch_validation_contract_missing:{batch_id}")
+    commands = [item for item in validation.get("commands", []) if isinstance(item, dict)]
+    if not commands or not any(command.get("required") is True for command in commands):
+        raise TaskRunnerError(f"batch_validation_commands_missing:{batch_id}")
+    commands_sha256 = _batch_commands_sha256(commands)
+
+    requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    repositories = _resolve_repositories(requested_workspaces)
+    _assert_runtime_artifacts_ignored(repositories)
+    if run_id is None:
+        active_run_id = validation.get("activeRunId")
+        if isinstance(active_run_id, str):
+            raise TaskRunnerError(
+                f"active_batch_run_exists:{active_run_id}",
+                requiredAction="retry_same_batch_run",
+                runId=active_run_id,
+            )
+        run_id = _new_run_id()
+        repository_state = _repository_state(repositories)
+        scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
+        state = {
+            "version": 1,
+            "runId": run_id,
+            "featureId": feature,
+            "batchId": batch_id,
+            "status": "started",
+            "commandsSha256": commands_sha256,
+            "commands": commands,
+            "codeWorkspace": str(next(iter(repositories.values()))),
+            "requestedCodeWorkspaces": [item["requestedPath"] for item in scope_workspaces],
+            "resolvedGitRoots": [item["resolvedGitRoot"] for item in scope_workspaces],
+            "scopePathBase": "requested_code_workspace",
+            "scopeWorkspaces": scope_workspaces,
+            "repositories": repository_state,
+            "snapshot": repository_state[0]["snapshot"],
+            "snapshotMode": "git_visible_file_content_sha256",
+            "startedAt": _utc_now(),
+            "attempts": [],
+            "evidenceIds": [],
+        }
+        path = _batch_run_path(feature_dir, batch_id, run_id)
+        _save_run(path, state)
+    else:
+        path = _batch_run_path(feature_dir, batch_id, run_id)
+        if not path.is_file():
+            raise TaskRunnerError(f"batch_run_not_found:{run_id}")
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise TaskRunnerError(f"invalid_batch_run:{run_id}") from exc
+        if not isinstance(state, dict) or state.get("batchId") != batch_id:
+            raise TaskRunnerError(f"invalid_batch_run:{run_id}")
+        if state.get("commandsSha256") != commands_sha256:
+            raise TaskRunnerError(f"batch_validation_commands_changed:{batch_id}")
+        _assert_repositories_match(state, repositories)
+        _assert_requested_workspaces_match(state, requested_workspaces, repositories)
+        if state.get("status") == "done":
+            return True, state
+
+    file_changes, _ = _repository_changes(state, repositories)
+    validation_snapshot = _repository_state(repositories)
+    multiple_repositories = len(repositories) > 1
+    attempt_evidence_ids: list[str] = []
+    required_failed = False
+    for command in commands:
+        repository_id, _ = _command_repository(command, repositories)
+        exit_code, output = _run_validation(command, repositories)
+        if not _repository_snapshots_match(validation_snapshot, _repository_state(repositories)):
+            raise TaskRunnerError(f"batch_validation_modified_workspace:{command.get('id', '')}")
+        record = _record_for_batch_command(
+            feature=feature,
+            batch_id=batch_id,
+            run_id=run_id,
+            command=command,
+            exit_code=exit_code,
+            file_changes=file_changes,
+            repository_id=repository_id if multiple_repositories or command.get("repo") else None,
+        )
+        evidence = append_evidence(feature_dir, record, output_tail=output)
+        evidence_id = str(evidence["evidenceId"])
+        attempt_evidence_ids.append(evidence_id)
+        if command.get("required") is True and exit_code != 0:
+            required_failed = True
+
+    success = not required_failed
+    evidence_history = state.get("evidenceIds") if isinstance(state.get("evidenceIds"), list) else []
+    state["evidenceIds"] = [*evidence_history, *attempt_evidence_ids]
+    attempts = state.get("attempts") if isinstance(state.get("attempts"), list) else []
+    attempts.append(
+        {
+            "attempt": len(attempts) + 1,
+            "evidenceIds": attempt_evidence_ids,
+            "result": "pass" if success else "fail",
+            "completedAt": _utc_now(),
+        }
+    )
+    state["attempts"] = attempts
+    state["status"] = "done" if success else "failed"
+    state["success"] = success
+    result = record_batch_validation_attempt(
+        workspace,
+        feature,
+        batch_id,
+        attempt_evidence_ids,
+        success=success,
+        run_id=run_id,
+    )
+    if not result.ok:
+        raise TaskRunnerError("batch_validation_plan_binding_failed")
+    if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
+        state["batchHandoff"] = result.data["batchHandoff"]
+    state["requiredAction"] = (
+        state.get("batchHandoff", {}).get("requiredAction")
+        if isinstance(state.get("batchHandoff"), dict)
+        else "batch_validation_passed" if success else "fix_batch_and_retry_same_run"
+    )
+    _save_run(path, state)
+    return success, state
+
+
+def run_batch_checks(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    code_workspace: Path | list[Path],
+    run_id: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        return _run_batch_checks_unlocked(workspace, feature, batch_id, code_workspace, run_id)
+
+
 def _path_in_scope(path: str, scope_paths: list[Any]) -> bool:
     candidate = PurePosixPath(path)
     for raw in scope_paths:
@@ -1689,6 +1913,41 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
+def _cmd_batch_check(args: argparse.Namespace) -> int:
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        success, state = run_batch_checks(
+            workspace,
+            feature,
+            args.batch_id,
+            code_workspace,
+            args.run_id,
+        )
+        batch_handoff = state.get("batchHandoff")
+        batch_handoff = batch_handoff if isinstance(batch_handoff, dict) else None
+        return _emit(
+            success,
+            error=None if success else "batch_validation_failed",
+            runId=state.get("runId"),
+            status=state.get("status"),
+            evidenceIds=(
+                state.get("attempts", [])[-1].get("evidenceIds", [])
+                if isinstance(state.get("attempts"), list) and state.get("attempts")
+                else []
+            ),
+            allEvidenceIds=state.get("evidenceIds", []),
+            requiredAction=state.get("requiredAction"),
+            batchHandoff=batch_handoff,
+            stopAfterBatch=bool(batch_handoff),
+            requiresNewConversation=(
+                bool(batch_handoff.get("requiresNewConversation")) if batch_handoff else False
+            ),
+            userMessage=batch_handoff.get("userMessage") if batch_handoff else None,
+        )
+    except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
+        return _emit_error(exc)
+
+
 def _cmd_project_check(args: argparse.Namespace) -> int:
     try:
         workspace, feature, code_workspace = _resolve(args)
@@ -1758,6 +2017,14 @@ def main(argv: list[str] | None = None) -> int:
     common(inspect)
     inspect.add_argument("--run-id")
     inspect.set_defaults(func=_cmd_inspect)
+
+    batch_check = subparsers.add_parser("batch-check")
+    batch_check.add_argument("--workspace")
+    batch_check.add_argument("--feature")
+    batch_check.add_argument("--batch-id", required=True)
+    batch_check.add_argument("--code-workspace", required=True, action="append")
+    batch_check.add_argument("--run-id")
+    batch_check.set_defaults(func=_cmd_batch_check)
 
     project_check = subparsers.add_parser("project-check")
     project_check.add_argument("--workspace")

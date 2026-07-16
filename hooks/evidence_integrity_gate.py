@@ -72,10 +72,16 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
             if evidence_id != _expected_evidence_id(line_no):
                 errors.append(f"non_sequential_evidence_id:line={line_no}:id={evidence_id}")
         task_id = record.get("taskId")
+        is_batch_validation = (
+            record.get("action") == "batch_validation"
+            and task_id == "__batch__"
+            and isinstance(record.get("batchId"), str)
+        )
         if (
             isinstance(task_id, str)
             and task_id
             and task_id != "__project__"
+            and not is_batch_validation
             and not task_id.startswith("T")
         ):
             errors.append(f"line={line_no}:invalid_task_id:{task_id}")
@@ -131,7 +137,14 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
     for record in records:
         task_id = record.get("taskId")
         is_project_check = record.get("action") == "project_check" and task_id == "__project__"
-        if isinstance(task_id, str) and task_id and task_id not in known_tasks and not is_project_check:
+        is_batch_validation = record.get("action") == "batch_validation" and task_id == "__batch__"
+        if (
+            isinstance(task_id, str)
+            and task_id
+            and task_id not in known_tasks
+            and not is_project_check
+            and not is_batch_validation
+        ):
             errors.append(f"unknown_evidence_task_id:{task_id}")
     for task in tasks(plan):
         task_id = str(task.get("id", ""))

@@ -234,7 +234,163 @@ def _start(workspace: Path, code: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def _check_batch(workspace: Path, code: Path) -> dict:
+    result = _run(
+        "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+        "--batch-id", "B001", "--code-workspace", str(code),
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stdout + result.stderr)
+    return json.loads(result.stdout)
+
+
 class TaskRunnerTest(unittest.TestCase):
+    def test_batch_check_completes_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            checked = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            payload = json.loads(checked.stdout)
+            self.assertEqual(payload["requiredAction"], "batch_validation_passed")
+            self.assertEqual(payload["status"], "done")
+            run_path = feature_dir / ".batch-runs" / "B001" / f"{payload['runId']}.json"
+            self.assertTrue(run_path.is_file())
+            evidence = _evidence(feature_dir, payload["evidenceIds"][0])
+            self.assertEqual(evidence["action"], "batch_validation")
+            self.assertEqual(evidence["taskId"], "__batch__")
+            self.assertEqual(evidence["batchId"], "B001")
+            self.assertEqual(_read_batch(feature_dir)["batchValidation"]["status"], "passed")
+            session = _run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(json.loads(session.stdout)["action"], "run_project_check")
+
+    def test_batch_check_retries_failed_commands_in_same_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            command = {
+                "id": "BATCH-B001-VAL-001",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "raise SystemExit(0 if Path('existing.txt').read_text().strip() == 'fixed' else 3)"
+                    ),
+                ],
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
+            }
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"]["commands"] = [command]
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batchValidationProfiles"]["backend"]["commands"] = [
+                {key: value for key, value in command.items() if key != "id"}
+            ]
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            failed = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertTrue(failed.stdout, failed.stderr)
+            failed_payload = json.loads(failed.stdout)
+            self.assertEqual(failed_payload["requiredAction"], "fix_batch_and_retry_same_run")
+            self.assertEqual(_evidence(feature_dir, failed_payload["evidenceIds"][0])["validation"]["result"], "fail")
+
+            (code / "existing.txt").write_text("fixed\n", encoding="utf-8")
+            passed = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+                "--run-id", failed_payload["runId"],
+            )
+
+            self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+            passed_payload = json.loads(passed.stdout)
+            self.assertEqual(passed_payload["runId"], failed_payload["runId"])
+            state = json.loads(
+                (feature_dir / ".batch-runs" / "B001" / f"{passed_payload['runId']}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(state["status"], "done")
+            self.assertEqual(len(state["attempts"]), 2)
+            self.assertEqual(len(state["evidenceIds"]), 2)
+            self.assertEqual(_evidence(feature_dir, state["evidenceIds"][-1])["validation"]["result"], "pass")
+
+    def test_batch_check_rejects_validation_that_mutates_git_visible_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            command = {
+                "id": "BATCH-B001-VAL-001",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('generated.txt').write_text('generated')",
+                ],
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
+            }
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"]["commands"] = [command]
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batchValidationProfiles"]["backend"]["commands"] = [
+                {key: value for key, value in command.items() if key != "id"}
+            ]
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            checked = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+
+            self.assertNotEqual(checked.returncode, 0)
+            self.assertIn("batch_validation_modified_workspace:BATCH-B001-VAL-001", checked.stdout)
+            records = [
+                json.loads(line)
+                for line in (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([record["action"] for record in records], ["validation"])
+
     def test_final_task_completion_waits_for_batch_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -989,7 +1145,13 @@ class TaskRunnerTest(unittest.TestCase):
                     "nextBatchId": None,
                     "executionLane": "backend",
                     "batches": [{"id": "B002", "executionLane": "backend", "taskIds": ["T002"]}],
-                }
+                },
+                batches={
+                    "B002": {
+                        "tasks": [{"id": "T002", "status": "todo"}],
+                        "batchValidation": {"status": "pending"},
+                    }
+                },
             )
             lock_held = False
             bundles = iter([awaiting_bundle, active_bundle])
@@ -1078,6 +1240,7 @@ class TaskRunnerTest(unittest.TestCase):
                 "--supporting-file", "existing.txt",
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            _check_batch(workspace, code)
 
             project_required = _run(
                 "code-session", "--workspace", str(workspace), "--feature", "alpha",
@@ -1333,6 +1496,8 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
+            _check_batch(workspace, code)
+
             checked = _run(
                 "project-check", "--workspace", str(workspace), "--feature", "alpha",
                 "--code-workspace", str(code),
@@ -1340,9 +1505,9 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["projectCheckEvidenceIds"], ["ev_0002"])
-            self.assertEqual(plan["latestProjectCheckEvidenceId"], "ev_0002")
-            evidence = _evidence(feature_dir, "ev_0002")
+            self.assertEqual(plan["projectCheckEvidenceIds"], ["ev_0003"])
+            self.assertEqual(plan["latestProjectCheckEvidenceId"], "ev_0003")
+            evidence = _evidence(feature_dir, "ev_0003")
             self.assertEqual(evidence["action"], "project_check")
             self.assertEqual(evidence["taskId"], "__project__")
             self.assertEqual(evidence["validation"]["commandId"], "PROJECT-VAL-001")
@@ -1372,6 +1537,7 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", started["runId"],
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            _check_batch(workspace, code)
             plan_path = feature_dir / "plan.json"
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             plan["projectValidationCommands"][0]["argv"] = [
@@ -1388,8 +1554,11 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertNotEqual(checked.returncode, 0)
             self.assertIn("project_validation_modified_workspace:PROJECT-VAL-001", checked.stdout)
-            records = (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(records), 1)
+            records = [
+                json.loads(line)
+                for line in (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([record["action"] for record in records], ["validation", "batch_validation"])
 
     def test_complete_detects_renamed_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1830,6 +1999,8 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(evidence["completionMode"], "implemented")
             self.assertIn("validation", (feature_dir / "evidence" / "ev_0001.log").read_text(encoding="utf-8"))
 
+            _check_batch(workspace, code)
+
             project_check = _run(
                 "project-check", "--workspace", str(workspace), "--feature", "alpha",
                 "--code-workspace", str(code),
@@ -1848,6 +2019,7 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", started["runId"],
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            _check_batch(workspace, code)
             project_check = _run(
                 "project-check", "--workspace", str(workspace), "--feature", "alpha",
                 "--code-workspace", str(code),
@@ -1875,6 +2047,7 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", started["runId"],
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            _check_batch(workspace, code)
             project_check = _run(
                 "project-check", "--workspace", str(workspace), "--feature", "alpha",
                 "--code-workspace", str(code),
@@ -1935,6 +2108,7 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", started["runId"],
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            _check_batch(workspace, code)
             plan_path = feature_dir / "plan.json"
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             plan["projectCheckEvidenceIds"] = [project_evidence["evidenceId"]]

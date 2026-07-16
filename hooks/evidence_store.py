@@ -215,7 +215,7 @@ def validate_record(record: dict[str, Any]) -> list[str]:
     validation = record.get("validation")
     if validation is not None and not isinstance(validation, dict):
         errors.append("invalid_validation_object")
-    if record.get("action") in {"validation", "project_check"}:
+    if record.get("action") in {"validation", "batch_validation", "project_check"}:
         if not isinstance(validation, dict):
             errors.append("validation_missing")
         else:
@@ -297,7 +297,7 @@ def validate_detail_fields(record: dict[str, Any]) -> list[str]:
     detail_version = record.get("detailVersion")
     if detail_version not in SUPPORTED_EVIDENCE_DETAIL_VERSIONS:
         return ["invalid_evidence_detail_version"]
-    if record.get("action") not in {"validation", "project_check"}:
+    if record.get("action") not in {"validation", "batch_validation", "project_check"}:
         return []
 
     errors: list[str] = []
