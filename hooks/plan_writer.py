@@ -280,12 +280,12 @@ def _next_batch_id(batch_ids: set[str]) -> str:
     return f"B{max(numbers, default=0) + 1:03d}"
 
 
-def _batch_status(batch_tasks: list[dict[str, Any]]) -> str:
+def _batch_status(batch_tasks: list[dict[str, Any]], batch_validation: dict[str, Any]) -> str:
     statuses = [normalize_status(task.get("status")) for task in batch_tasks]
-    if statuses and all(status == "done" for status in statuses):
-        return "done"
-    if any(status == "failed" for status in statuses):
+    if any(status == "failed" for status in statuses) or batch_validation.get("status") == "failed":
         return "failed"
+    if statuses and all(status == "done" for status in statuses):
+        return "done" if batch_validation.get("status") == "passed" else "in_progress"
     if any(status == "in_progress" for status in statuses) or any(status == "done" for status in statuses):
         return "in_progress"
     return "todo"
@@ -349,7 +349,6 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         batch_tasks = groups[batch_id]
         previous = prior_plans.get(batch_id) if isinstance(prior_plans, dict) else None
         previous = previous if isinstance(previous, dict) else {}
-        status = _batch_status(batch_tasks)
         completion_ids = [
             evidence_id
             for task in batch_tasks
@@ -380,6 +379,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             ),
             "activeRunId": previous_validation.get("activeRunId") if commands_unchanged else None,
         }
+        status = _batch_status(batch_tasks, batch_validation)
         projected[batch_id] = {
             "featureId": root.get("featureId"),
             "batchId": batch_id,
@@ -435,7 +435,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         root["activeBatchId"] = active
         active_index = unfinished.index(active)
         root["nextBatchId"] = unfinished[active_index + 1] if active_index + 1 < len(unfinished) else None
-        if any(entry["status"] == "failed" for entry in root_entries):
+        if data.get("status") == "failed" or any(entry["status"] == "failed" for entry in root_entries):
             root["status"] = "failed"
         elif data.get("status") == "in_progress" or any(entry["status"] == "in_progress" for entry in root_entries):
             root["status"] = "in_progress"
@@ -1332,52 +1332,22 @@ def record_task_attempt(
         batch_completed = success and all(normalize_status(item.get("status")) == "done" for item in batch_tasks)
         root_entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
         ordered_ids = [str(entry.get("id")) for entry in root_entries]
-        handoff: dict[str, Any] | None = None
+        batch_check: dict[str, Any] | None = None
         continuation: dict[str, Any] | None = None
         if batch_completed:
             batch_plans = data.get("_batchPlans")
             batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
             if isinstance(batch_plan, dict):
-                batch_plan["completedAt"] = _utc_now()
-            batch_index = ordered_ids.index(batch_id)
-            if batch_index + 1 < len(ordered_ids):
-                next_batch = ordered_ids[batch_index + 1]
-                user_message = f"当前批次 {batch_id} 已完成，请打开新的对话继续执行 {next_batch}。"
-                data["status"] = "awaiting_next_conversation"
-                data["activeBatchId"] = None
-                data["nextBatchId"] = next_batch
-                handoff = {
-                    "featureId": feature,
-                    "completedBatchId": batch_id,
-                    "nextBatchId": next_batch,
-                    "completedTaskIds": [str(item.get("id")) for item in batch_tasks],
-                    "completionEvidenceIds": [
-                        evidence_id
-                        for item in batch_tasks
-                        for evidence_id in item.get("completionEvidenceIds", [])
-                        if isinstance(evidence_id, str)
-                    ],
-                    "nextBatch": {
-                        "title": str(root_entries[batch_index + 1].get("title", "")),
-                        "taskIds": list(root_entries[batch_index + 1].get("taskIds", [])),
-                        "specRoots": list(root_entries[batch_index + 1].get("specRoots", [])),
-                        "deps": list(root_entries[batch_index + 1].get("deps", [])),
-                    },
-                    "status": "awaiting_next_conversation",
-                    "requiredAction": "stop_and_open_new_conversation",
-                    "requiresNewConversation": True,
-                    "userMessage": user_message,
-                    "createdAt": _utc_now(),
-                    "activationCommand": (
-                        f"python hooks/task_runner.py code-session --workspace {workspace} "
-                        f"--feature {feature}"
-                    ),
-                    "instruction": user_message,
-                }
-            else:
-                data["status"] = "in_progress"
-                data["activeBatchId"] = None
-                data["nextBatchId"] = None
+                validation = batch_plan.get("batchValidation")
+                if isinstance(validation, dict):
+                    validation["status"] = "pending"
+            data["status"] = "in_progress"
+            data["activeBatchId"] = batch_id
+            batch_check = {
+                "requiredAction": "run_batch_check",
+                "activeBatchId": batch_id,
+                "batchValidationStatus": "pending",
+            }
         elif success:
             tasks_by_id = {
                 str(item.get("id")): item
@@ -1407,9 +1377,8 @@ def record_task_attempt(
         result = _write(workspace, feature, data)
         if result.ok:
             write_text(_md_path(workspace, feature), _render_plan_md(data))
-            if handoff is not None:
-                atomic_write_json(_handoff_path(workspace, feature), handoff)
-                result = with_result_data(result, batchHandoff=handoff)
+            if batch_check is not None:
+                result = with_result_data(result, batchCheck=batch_check)
             elif continuation is not None:
                 result = with_result_data(result, batchContinuation=continuation)
         return result
@@ -1429,6 +1398,103 @@ def record_project_check_attempt(
         data["latestProjectCheckEvidenceId"] = evidence_ids[-1] if success and evidence_ids else None
         data["status"] = "done" if success else "failed"
         return _write(workspace, feature, data)
+
+
+def record_batch_validation_attempt(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    evidence_ids: list[str],
+    *,
+    success: bool,
+    run_id: str,
+) -> WriterResult:
+    """Bind one batch validation attempt and advance only after a passing gate."""
+
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        batch_plans = data.get("_batchPlans")
+        batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+        if not isinstance(batch_plan, dict):
+            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
+        batch_tasks = [item for item in batch_plan.get("tasks", []) if isinstance(item, dict)]
+        unfinished = [
+            str(item.get("id"))
+            for item in batch_tasks
+            if normalize_status(item.get("status")) != "done"
+        ]
+        if unfinished:
+            return fail(
+                "batch_validation_requires_tasks_done",
+                ",".join(unfinished),
+                path=_path(workspace, feature),
+            )
+        validation = batch_plan.get("batchValidation")
+        if not isinstance(validation, dict):
+            return fail("batch_validation_contract_missing", batch_id, path=_path(workspace, feature))
+        history = validation.get("evidenceIds")
+        history = history if isinstance(history, list) else []
+        validation["evidenceIds"] = _append_unique(history, evidence_ids)
+        validation["latestPassEvidenceIds"] = list(evidence_ids) if success else []
+        validation["activeRunId"] = None if success else run_id
+        validation["status"] = "passed" if success else "failed"
+
+        handoff: dict[str, Any] | None = None
+        if success:
+            batch_plan["completedAt"] = _utc_now()
+            entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
+            ordered_ids = [str(entry.get("id")) for entry in entries]
+            batch_index = ordered_ids.index(batch_id)
+            if batch_index + 1 < len(ordered_ids):
+                next_batch = ordered_ids[batch_index + 1]
+                user_message = f"当前批次 {batch_id} 已完成，请打开新的对话继续执行 {next_batch}。"
+                data["status"] = "awaiting_next_conversation"
+                data["activeBatchId"] = None
+                data["nextBatchId"] = next_batch
+                handoff = {
+                    "featureId": feature,
+                    "completedBatchId": batch_id,
+                    "nextBatchId": next_batch,
+                    "completedTaskIds": [str(item.get("id")) for item in batch_tasks],
+                    "completionEvidenceIds": [
+                        evidence_id
+                        for item in batch_tasks
+                        for evidence_id in item.get("completionEvidenceIds", [])
+                        if isinstance(evidence_id, str)
+                    ],
+                    "batchValidationEvidenceIds": list(evidence_ids),
+                    "nextBatch": {
+                        "title": str(entries[batch_index + 1].get("title", "")),
+                        "taskIds": list(entries[batch_index + 1].get("taskIds", [])),
+                        "specRoots": list(entries[batch_index + 1].get("specRoots", [])),
+                        "deps": list(entries[batch_index + 1].get("deps", [])),
+                    },
+                    "status": "awaiting_next_conversation",
+                    "requiredAction": "stop_and_open_new_conversation",
+                    "requiresNewConversation": True,
+                    "userMessage": user_message,
+                    "createdAt": _utc_now(),
+                    "activationCommand": (
+                        f"python hooks/task_runner.py code-session --workspace {workspace} "
+                        f"--feature {feature}"
+                    ),
+                    "instruction": user_message,
+                }
+            else:
+                data["status"] = "in_progress"
+                data["activeBatchId"] = None
+                data["nextBatchId"] = None
+        else:
+            data["status"] = "failed"
+            data["activeBatchId"] = batch_id
+
+        result = _write(workspace, feature, data)
+        if result.ok:
+            write_text(_md_path(workspace, feature), _render_plan_md(data))
+            if handoff is not None:
+                atomic_write_json(_handoff_path(workspace, feature), handoff)
+                result = with_result_data(result, batchHandoff=handoff)
+        return result
 
 
 def activate_batch(workspace: Path, feature: str, batch_id: str) -> WriterResult:

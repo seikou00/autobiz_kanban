@@ -25,7 +25,11 @@ from hooks.plan_json import (  # noqa: E402
     validate_plan_data,
     write_plan_json,
 )
-from hooks.plan_writer import record_project_check_attempt  # noqa: E402
+from hooks.plan_writer import (  # noqa: E402
+    record_batch_validation_attempt,
+    record_project_check_attempt,
+    record_task_attempt,
+)
 
 
 def task(
@@ -224,6 +228,75 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_batch_validation_pass_creates_handoff_after_tasks_are_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_bundle(feature_dir, [[task("T001")], [task("T002", deps=["T001"])]] )
+
+            completed = record_task_attempt(
+                workspace,
+                "alpha",
+                "T001",
+                ["ev_0001"],
+                completion_evidence_ids=["ev_0001"],
+                success=True,
+            )
+            validated = record_batch_validation_attempt(
+                workspace,
+                "alpha",
+                "B001",
+                ["ev_0002"],
+                success=True,
+                run_id="batch_run_1",
+            )
+
+            self.assertTrue(completed.ok)
+            self.assertTrue(validated.ok)
+            self.assertEqual(validated.data["batchHandoff"]["completedBatchId"], "B001")
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
+            self.assertEqual(batch["status"], "done")
+            self.assertEqual(batch["batchValidation"]["status"], "passed")
+            self.assertEqual(batch["batchValidation"]["latestPassEvidenceIds"], ["ev_0002"])
+            self.assertEqual(root["status"], "awaiting_next_conversation")
+            self.assertIsNone(root["activeBatchId"])
+            self.assertEqual(root["nextBatchId"], "B002")
+            self.assertTrue((feature_dir / "BATCH_HANDOFF.json").is_file())
+
+    def test_batch_validation_failure_keeps_batch_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_bundle(feature_dir, [[task("T001")]])
+            record_task_attempt(
+                workspace,
+                "alpha",
+                "T001",
+                ["ev_0001"],
+                completion_evidence_ids=["ev_0001"],
+                success=True,
+            )
+
+            validated = record_batch_validation_attempt(
+                workspace,
+                "alpha",
+                "B001",
+                ["ev_0002"],
+                success=False,
+                run_id="batch_run_1",
+            )
+
+            self.assertTrue(validated.ok)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
+            self.assertEqual(batch["batchValidation"]["status"], "failed")
+            self.assertEqual(batch["batchValidation"]["evidenceIds"], ["ev_0002"])
+            self.assertEqual(root["activeBatchId"], "B001")
+            self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
+
     def test_plan_writer_projects_lane_batch_validation_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

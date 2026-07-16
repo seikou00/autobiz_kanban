@@ -140,6 +140,18 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
         "activeBatchId": "B001",
         "nextBatchId": None,
         "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+        "batchValidationProfiles": {
+            "backend": {
+                "commands": [
+                    {
+                        "argv": [sys.executable, "-c", "print('batch compile')"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ]
+            }
+        },
         "batches": [
             {
                 "id": "B001",
@@ -180,6 +192,22 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
             "taskCount": len(tasks),
             "completedTaskCount": 0,
             "completionEvidenceIds": [],
+            "batchValidation": {
+                "profile": "backend",
+                "status": "pending",
+                "commands": [
+                    {
+                        "id": "BATCH-B001-VAL-001",
+                        "argv": [sys.executable, "-c", "print('batch compile')"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ],
+                "evidenceIds": [],
+                "latestPassEvidenceIds": [],
+                "activeRunId": None,
+            },
             "startedAt": None,
             "completedAt": None,
             "tasks": tasks,
@@ -207,6 +235,37 @@ def _start(workspace: Path, code: Path) -> dict:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_final_task_completion_waits_for_batch_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertEqual(payload["requiredAction"], "run_batch_check")
+            self.assertEqual(payload["activeBatchId"], "B001")
+            self.assertFalse(payload["stopAfterBatch"])
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            batch = _read_batch(feature_dir)
+            self.assertEqual(batch["tasks"][0]["status"], "done")
+            self.assertEqual(batch["status"], "in_progress")
+            self.assertEqual(batch["batchValidation"]["status"], "pending")
+            self.assertEqual(root["activeBatchId"], "B001")
+            self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
+            session = _run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(session.returncode, 0, session.stdout + session.stderr)
+            self.assertEqual(json.loads(session.stdout)["action"], "run_batch_check")
+
     def test_complete_classifies_new_untracked_test_as_transient_validation_asset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))

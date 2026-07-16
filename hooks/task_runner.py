@@ -874,6 +874,8 @@ def _complete_task_unlocked(
             state["batchHandoff"] = result.data["batchHandoff"]
         if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
             state["batchContinuation"] = result.data["batchContinuation"]
+        if isinstance(result.data, dict) and isinstance(result.data.get("batchCheck"), dict):
+            state["batchCheck"] = result.data["batchCheck"]
         state["status"] = "done" if success else "failed"
         _save_run(path, state)
         return success, state
@@ -1063,6 +1065,8 @@ def _complete_task_unlocked(
         state["batchHandoff"] = result.data["batchHandoff"]
     if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
         state["batchContinuation"] = result.data["batchContinuation"]
+    if isinstance(result.data, dict) and isinstance(result.data.get("batchCheck"), dict):
+        state["batchCheck"] = result.data["batchCheck"]
     state["status"] = "done" if success else "failed"
     _save_run(path, state)
     return success, state
@@ -1519,6 +1523,23 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
         execution_lane = entry.get("executionLane")
         if execution_lane not in EXECUTION_LANES:
             raise TaskRunnerError(f"active_batch_execution_lane_invalid:{active_batch_id}")
+        batch_plan = bundle.batches.get(active_batch_id)
+        batch_tasks = batch_plan.get("tasks", []) if isinstance(batch_plan, dict) else []
+        all_tasks_done = bool(batch_tasks) and all(
+            isinstance(task, dict) and normalize_status(task.get("status")) == "done"
+            for task in batch_tasks
+        )
+        batch_validation = batch_plan.get("batchValidation") if isinstance(batch_plan, dict) else None
+        if all_tasks_done and isinstance(batch_validation, dict) and batch_validation.get("status") != "passed":
+            return {
+                "action": "run_batch_check",
+                "activeBatchId": active_batch_id,
+                "executionLane": execution_lane,
+                "batchValidationStatus": batch_validation.get("status"),
+                "activeRunId": batch_validation.get("activeRunId"),
+                "activatedFromHandoff": activated_from_handoff,
+                "userMessage": f"批次 {active_batch_id} 的 TASK 已完成，开始执行批次级验证。",
+            }
         return {
             "action": "execute_active_batch",
             "activeBatchId": active_batch_id,
@@ -1584,6 +1605,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         batch_handoff = batch_handoff if isinstance(batch_handoff, dict) else None
         batch_continuation = state.get("batchContinuation")
         batch_continuation = batch_continuation if isinstance(batch_continuation, dict) else None
+        batch_check = state.get("batchCheck")
+        batch_check = batch_check if isinstance(batch_check, dict) else None
         return _emit(
             success,
             error=None if success else "validation_failed",
@@ -1599,7 +1622,11 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             continueCurrentBatch=(
                 bool(batch_continuation.get("continueCurrentBatch")) if batch_continuation else False
             ),
-            activeBatchId=batch_continuation.get("activeBatchId") if batch_continuation else None,
+            activeBatchId=(
+                batch_continuation.get("activeBatchId")
+                if batch_continuation
+                else batch_check.get("activeBatchId") if batch_check else None
+            ),
             nextTaskId=batch_continuation.get("nextTaskId") if batch_continuation else None,
             requiresNewConversation=(
                 bool(batch_handoff.get("requiresNewConversation")) if batch_handoff else False
@@ -1607,7 +1634,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             requiredAction=(
                 batch_handoff.get("requiredAction")
                 if batch_handoff
-                else batch_continuation.get("requiredAction") if batch_continuation else None
+                else batch_continuation.get("requiredAction")
+                if batch_continuation
+                else batch_check.get("requiredAction") if batch_check else None
             ),
             userMessage=batch_handoff.get("userMessage") if batch_handoff else None,
         )
