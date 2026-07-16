@@ -40,9 +40,11 @@ from hooks.json_writer_common import (  # noqa: E402
 )
 from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
+    BATCH_VALIDATION_KINDS,
     BATCH_STRATEGY,
+    EXECUTION_LANES,
     MAX_BATCH_TASKS,
-    VALIDATION_KINDS,
+    TASK_VALIDATION_KINDS,
     batch_plan_path,
     load_plan_bundle,
     normalize_status,
@@ -182,6 +184,7 @@ def _initial(feature: str) -> dict[str, Any]:
         "nextBatchId": None,
         "batchPolicy": {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY},
         "batches": [],
+        "batchValidationProfiles": {},
         "projectValidationCommands": [],
         "projectCheckEvidenceIds": [],
         "latestProjectCheckEvidenceId": None,
@@ -208,6 +211,7 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     data.setdefault("nextBatchId", None)
     data.setdefault("batchPolicy", {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY})
     data.setdefault("batches", [])
+    data.setdefault("batchValidationProfiles", {})
     data.setdefault("projectValidationCommands", [])
     data.setdefault("projectCheckEvidenceIds", [])
     data.setdefault("latestProjectCheckEvidenceId", None)
@@ -355,6 +359,27 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         spec_root = spec_roots[batch_id]
         execution_lane = execution_lanes[batch_id]
         title = str(previous.get("title") or Path(spec_root).parent.name or batch_id)
+        profiles = root.get("batchValidationProfiles")
+        profile = profiles.get(execution_lane) if isinstance(profiles, dict) else None
+        profile_commands = profile.get("commands") if isinstance(profile, dict) else []
+        effective_commands = [
+            {**command, "id": f"BATCH-{batch_id}-VAL-{command_index:03d}"}
+            for command_index, command in enumerate(profile_commands, start=1)
+            if isinstance(command, dict)
+        ]
+        previous_validation = previous.get("batchValidation")
+        previous_validation = previous_validation if isinstance(previous_validation, dict) else {}
+        commands_unchanged = previous_validation.get("commands") == effective_commands
+        batch_validation = {
+            "profile": execution_lane,
+            "status": previous_validation.get("status", "pending") if commands_unchanged else "pending",
+            "commands": effective_commands,
+            "evidenceIds": list(previous_validation.get("evidenceIds", [])) if commands_unchanged else [],
+            "latestPassEvidenceIds": (
+                list(previous_validation.get("latestPassEvidenceIds", [])) if commands_unchanged else []
+            ),
+            "activeRunId": previous_validation.get("activeRunId") if commands_unchanged else None,
+        }
         projected[batch_id] = {
             "featureId": root.get("featureId"),
             "batchId": batch_id,
@@ -364,6 +389,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             "taskCount": len(batch_tasks),
             "completedTaskCount": sum(normalize_status(task.get("status")) == "done" for task in batch_tasks),
             "completionEvidenceIds": completion_ids,
+            "batchValidation": batch_validation,
             "startedAt": previous.get("startedAt"),
             "completedAt": previous.get("completedAt") if status == "done" else None,
             "tasks": batch_tasks,
@@ -933,7 +959,8 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "validationCommands",
                     ],
                     "exampleOnlyTaskFields": ["matrixExceptionExample"],
-                    "validationKinds": sorted(VALIDATION_KINDS),
+                    "validationKinds": sorted(TASK_VALIDATION_KINDS),
+                    "batchValidationKinds": sorted(BATCH_VALIDATION_KINDS),
                     "validationCoverage": {
                         "rule": "required_commands_cover_all_acceptance_criteria",
                         "compileMayCoverAcceptanceCriteria": False,
@@ -956,6 +983,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "preflightCommand": "preflight-task-set --task-dir <directory>",
                         "coverage": "all_path_qualified_spec_scenarios",
                         "requiredBefore": [
+                            "add-batch-validation-command",
                             "add-project-validation-command",
                             "render-md",
                             "smoke_plan_writer.init",
@@ -999,6 +1027,14 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "matrixExceptionExample": _matrix_exception_example(),
                     "projectValidationCommand": {
                         "requiredFields": ["id", "argv", "cwd", "kind", "required"]
+                    },
+                    "batchValidationCommand": {
+                        "command": (
+                            "add-batch-validation-command --lane <backend|frontend> "
+                            "--command <command>"
+                        ),
+                        "requiredFields": ["argv", "cwd", "kind", "required"],
+                        "requiredPerUsedLane": True,
                     },
                     "writerOwnedGeneratedArtifacts": {
                         "rootPlan": "plan.json",
@@ -1161,6 +1197,30 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
             "kind": args.kind,
             "required": not args.optional,
             "covers": args.covers if args.covers is not None else covers,
+            **({"repo": args.repo} if args.repo else {}),
+        }
+    )
+    return render_result(_write(workspace, feature, data))
+
+
+def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load(workspace, feature)
+    profiles = data.setdefault("batchValidationProfiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+        data["batchValidationProfiles"] = profiles
+    profile = profiles.setdefault(args.lane, {"commands": []})
+    commands = profile.setdefault("commands", [])
+    if not isinstance(commands, list):
+        commands = []
+        profile["commands"] = commands
+    commands.append(
+        {
+            "argv": shlex.split(args.command),
+            "cwd": args.cwd,
+            "kind": args.kind,
+            "required": not args.optional,
             **({"repo": args.repo} if args.repo else {}),
         }
     )
@@ -1704,13 +1764,27 @@ def main(argv: list[str] | None = None) -> int:
     validation_command.add_argument("--cwd", default=".")
     validation_command.add_argument(
         "--kind",
-        choices=sorted(VALIDATION_KINDS),
+        choices=sorted(TASK_VALIDATION_KINDS),
         default="behavior_test",
     )
     validation_command.add_argument("--repo")
     validation_command.add_argument("--optional", action="store_true")
     validation_command.add_argument("--covers", action="append")
     validation_command.set_defaults(func=_cmd_add_validation_command)
+
+    batch_validation = sub.add_parser("add-batch-validation-command")
+    _common(batch_validation)
+    batch_validation.add_argument("--lane", choices=sorted(EXECUTION_LANES), required=True)
+    batch_validation.add_argument("--command", required=True)
+    batch_validation.add_argument("--cwd", default=".")
+    batch_validation.add_argument("--repo")
+    batch_validation.add_argument(
+        "--kind",
+        choices=sorted(BATCH_VALIDATION_KINDS),
+        default="compile",
+    )
+    batch_validation.add_argument("--optional", action="store_true")
+    batch_validation.set_defaults(func=_cmd_add_batch_validation_command)
 
     project_validation = sub.add_parser("add-project-validation-command")
     _common(project_validation)

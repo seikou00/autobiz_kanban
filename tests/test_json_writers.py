@@ -19,7 +19,13 @@ if str(AUTODEV_HOOKS) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS))
 
 from hooks.json_writer_common import parse_postcheck_output  # noqa: E402
-from hooks.plan_json import BATCH_STRATEGY, MAX_BATCH_TASKS, VALIDATION_KINDS, task_set_digest  # noqa: E402
+from hooks.plan_json import (  # noqa: E402
+    BATCH_STRATEGY,
+    BATCH_VALIDATION_KINDS,
+    MAX_BATCH_TASKS,
+    TASK_VALIDATION_KINDS,
+    task_set_digest,
+)
 from hooks.stage_gate import validate_stage  # noqa: E402
 from skills.autodev.hooks.artifact_check import run_postcheck  # noqa: E402
 
@@ -185,6 +191,18 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                     "specRoots": ["specs/cap/spec.md"], "executionLane": "backend",
                     "deps": [], "taskIds": ["T001"], "status": "todo",
                 }],
+                "batchValidationProfiles": {
+                    "backend": {
+                        "commands": [
+                            {
+                                "argv": ["echo", "compile"],
+                                "cwd": ".",
+                                "kind": "compile",
+                                "required": True,
+                            }
+                        ]
+                    }
+                },
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
@@ -206,6 +224,22 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "taskCount": 1,
         "completedTaskCount": 0,
         "completionEvidenceIds": [],
+        "batchValidation": {
+            "profile": "backend",
+            "status": "pending",
+            "commands": [
+                {
+                    "id": "BATCH-B001-VAL-001",
+                    "argv": ["echo", "compile"],
+                    "cwd": ".",
+                    "kind": "compile",
+                    "required": True,
+                }
+            ],
+            "evidenceIds": [],
+            "latestPassEvidenceIds": [],
+            "activeRunId": None,
+        },
         "startedAt": None,
         "completedAt": None,
         "tasks": [task],
@@ -566,7 +600,16 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["exampleOnlyTaskFields"], ["matrixExceptionExample"])
         self.assertNotIn("status", contract["taskInputExample"])
         self.assertEqual(contract["recommendedInputMode"], "task-directory")
-        self.assertEqual(contract["validationKinds"], sorted(VALIDATION_KINDS))
+        self.assertEqual(contract["validationKinds"], sorted(TASK_VALIDATION_KINDS))
+        self.assertEqual(contract["batchValidationKinds"], sorted(BATCH_VALIDATION_KINDS))
+        self.assertEqual(
+            contract["batchValidationCommand"],
+            {
+                "command": "add-batch-validation-command --lane <backend|frontend> --command <command>",
+                "requiredFields": ["argv", "cwd", "kind", "required"],
+                "requiredPerUsedLane": True,
+            },
+        )
         self.assertEqual(contract["batchAssignment"]["strategy"], BATCH_STRATEGY)
         self.assertEqual(contract["batchAssignment"]["maxTasks"], MAX_BATCH_TASKS)
         self.assertEqual(contract["batchAssignment"]["primaryCapabilitySource"], "first_spec_ref_file")
@@ -592,6 +635,7 @@ class JsonWriterTests(unittest.TestCase):
                 "preflightCommand": "preflight-task-set --task-dir <directory>",
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
+                    "add-batch-validation-command",
                     "add-project-validation-command",
                     "render-md",
                     "smoke_plan_writer.init",

@@ -18,6 +18,7 @@ from hooks.code_task_context import build_context  # noqa: E402
 from hooks.evidence_store import append_evidence, main as evidence_store_main  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
+    PlanJsonError,
     batch_plan_path,
     load_and_validate_plan,
     load_plan_bundle,
@@ -98,6 +99,28 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
         "nextBatchId": next_batch,
         "batchPolicy": {"maxTasks": 5, "strategy": BATCH_STRATEGY},
         "batches": batches,
+        "batchValidationProfiles": {
+            "backend": {
+                "commands": [
+                    {
+                        "argv": ["echo", "backend compile"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ]
+            },
+            "frontend": {
+                "commands": [
+                    {
+                        "argv": ["echo", "frontend build"],
+                        "cwd": ".",
+                        "kind": "build",
+                        "required": True,
+                    }
+                ]
+            },
+        },
         "projectValidationCommands": [
             {
                 "id": "PROJECT-VAL-001",
@@ -132,6 +155,13 @@ def batch_entry(
 
 
 def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = "backend") -> dict:
+    command = {
+        "id": f"BATCH-{batch_id}-VAL-001",
+        "argv": ["echo", "frontend build" if execution_lane == "frontend" else "backend compile"],
+        "cwd": ".",
+        "kind": "build" if execution_lane == "frontend" else "compile",
+        "required": True,
+    }
     return {
         "featureId": "alpha",
         "batchId": batch_id,
@@ -141,6 +171,14 @@ def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = 
         "taskCount": len(batch_tasks),
         "completedTaskCount": 0,
         "completionEvidenceIds": [],
+        "batchValidation": {
+            "profile": execution_lane,
+            "status": "pending",
+            "commands": [command],
+            "evidenceIds": [],
+            "latestPassEvidenceIds": [],
+            "activeRunId": None,
+        },
         "startedAt": None,
         "completedAt": None,
         "tasks": batch_tasks,
@@ -186,6 +224,86 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_plan_writer_projects_lane_batch_validation_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_plan_state(workspace)
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "hooks" / "plan_writer.py"),
+                        *args,
+                        "--workspace",
+                        str(workspace),
+                        "--feature",
+                        "alpha",
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            body = Path(tmp) / "T001.json"
+            body.write_text(json.dumps(task("T001")), encoding="utf-8")
+            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+
+            added = writer(
+                "add-batch-validation-command",
+                "--lane",
+                "backend",
+                "--command",
+                "echo backend compile",
+                "--kind",
+                "compile",
+            )
+
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
+            self.assertEqual(root["batchValidationProfiles"]["backend"]["commands"][0]["kind"], "compile")
+            self.assertEqual(batch["batchValidation"]["commands"][0]["id"], "BATCH-B001-VAL-001")
+            self.assertEqual(batch["batchValidation"]["status"], "pending")
+
+    def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            item = task("T001")
+            item["validationCommands"].append(
+                {
+                    "id": "VAL-T001-02",
+                    "argv": ["echo", "compile"],
+                    "cwd": ".",
+                    "kind": "compile",
+                    "required": True,
+                    "covers": [],
+                }
+            )
+            write_bundle(feature_dir, [[item]])
+
+            _, errors = load_and_validate_plan(feature_dir / "plan.json")
+
+            self.assertIn("T001.validationCommands[1].kind_invalid", errors)
+
+    def test_initial_bundle_requires_profile_for_every_used_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            write_bundle(feature_dir, [[task("T001")]])
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            del root["batchValidationProfiles"]["backend"]
+            write_plan_json(root_path, root)
+
+            with self.assertRaisesRegex(PlanJsonError, "batchValidationProfiles_missing_lane:backend"):
+                load_plan_bundle(feature_dir, require_initial_status=True)
+
     def test_root_plan_requires_task_set_status(self) -> None:
         plan = root_plan(batches=[batch_entry("B001", ["T001"])])
         del plan["taskSetStatus"]

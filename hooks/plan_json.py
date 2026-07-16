@@ -30,6 +30,7 @@ EVIDENCE_ID_RE = re.compile(r"^ev_\d{4}$")
 ACCEPTANCE_ID_RE = re.compile(r"^AC-T\d{3}-\d{2,3}$")
 VALIDATION_ID_RE = re.compile(r"^VAL-T\d{3}-\d{2,3}$")
 PROJECT_VALIDATION_ID_RE = re.compile(r"^PROJECT-VAL-\d{3}$")
+BATCH_VALIDATION_ID_RE = re.compile(r"^BATCH-B\d{3}-VAL-\d{3}$")
 REPOSITORY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
@@ -37,21 +38,26 @@ VISUAL_SOURCE_ID_RE = re.compile(r"^VIS-\d{3}$")
 TASK_SET_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 FRONTEND_ROUTES = {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"}
 COMPLETION_POLICIES = {"all_required_validations_pass"}
-VALIDATION_KINDS = {
+TASK_VALIDATION_KINDS = {
     "behavior_test",
     "integration_test",
     "e2e_test",
     "static_check",
+}
+BATCH_VALIDATION_KINDS = {
+    "build",
     "typecheck",
     "lint",
     "compile",
 }
+VALIDATION_KINDS = TASK_VALIDATION_KINDS | BATCH_VALIDATION_KINDS
 MAX_BATCH_TASKS = 5
 BATCH_STRATEGY = "spec_capability_execution_lane_topological"
 EXECUTION_LANES = {"backend", "frontend"}
 TASK_SET_STATUSES = {"collecting", "finalized"}
 FEATURE_STATUSES = {"todo", "in_progress", "awaiting_next_conversation", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
+BATCH_VALIDATION_STATUSES = {"pending", "running", "failed", "revalidation_required", "passed"}
 
 TODO_STATUSES = {"todo", "pending", "not_started", "not-started", "待做", "未开始"}
 IN_PROGRESS_STATUSES = {"in_progress", "in-progress", "doing", "进行中"}
@@ -131,6 +137,11 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
             "taskIds": raw_entry.get("taskIds"),
             "batchTitle": batch.get("title") if isinstance(batch, dict) else None,
             "batchExecutionLane": batch.get("executionLane") if isinstance(batch, dict) else None,
+            "batchValidationCommands": (
+                batch.get("batchValidation", {}).get("commands")
+                if isinstance(batch, dict) and isinstance(batch.get("batchValidation"), dict)
+                else None
+            ),
             "tasks": [
                 {"id": task.get("id"), "contractSha256": task_contract_sha256(task)}
                 for task in batch_tasks
@@ -433,6 +444,18 @@ def validate_plan_data(
             elif require_all_done and batch_status != "done":
                 errors.append(f"{batch_id}.status_not_done")
 
+    used_lanes = {
+        str(entry.get("executionLane"))
+        for entry in raw_batches or []
+        if isinstance(entry, dict) and entry.get("executionLane") in EXECUTION_LANES
+    }
+    _validate_batch_profiles(
+        errors,
+        data,
+        require_initial_status=require_initial_status,
+        used_lanes=used_lanes,
+    )
+
     known_batches = set(batch_ids)
     for field in ("activeBatchId", "nextBatchId"):
         value = data.get(field)
@@ -490,6 +513,7 @@ def validate_batch_plan_data(
     completed_count = sum(normalize_status(item.get("status")) == "done" for item in batch_tasks)
     if data.get("completedTaskCount") != completed_count:
         errors.append(f"{batch_id}.completedTaskCount_mismatch")
+    _validate_batch_validation(errors, data, str(batch_id))
     _validate_string_list(errors, data, str(batch_id), "completionEvidenceIds", required=False, item_re=EVIDENCE_ID_RE)
     for field in ("startedAt", "completedAt"):
         value = data.get(field)
@@ -608,7 +632,7 @@ def _validate_validation_command(
     if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
         errors.append(f"{context}.cwd_invalid")
     kind = command.get("kind")
-    if kind not in VALIDATION_KINDS:
+    if kind not in TASK_VALIDATION_KINDS:
         errors.append(f"{context}.kind_invalid")
     if not isinstance(command.get("required"), bool):
         errors.append(f"{context}.required_must_be_bool")
@@ -621,11 +645,120 @@ def _validate_validation_command(
     if covers is None:
         errors.append(f"{context}.covers_must_be_string_array")
     else:
-        if kind == "compile" and covers:
-            errors.append(f"{context}.compile_cannot_cover_acceptance")
         for criterion_id in covers:
             if criterion_id not in acceptance_ids:
                 errors.append(f"{context}.covers_unknown:{criterion_id}")
+
+
+def _validate_batch_command(
+    errors: list[str],
+    command: Any,
+    *,
+    context: str,
+    command_id_required: bool,
+) -> None:
+    if not isinstance(command, dict):
+        errors.append(f"{context}_must_be_object")
+        return
+    if command_id_required:
+        command_id = command.get("id")
+        if not isinstance(command_id, str) or not BATCH_VALIDATION_ID_RE.fullmatch(command_id):
+            errors.append(f"{context}.id_invalid")
+    argv = _string_list(command.get("argv"))
+    if argv is None or not argv:
+        errors.append(f"{context}.argv_missing")
+    cwd = command.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
+        errors.append(f"{context}.cwd_invalid")
+    if command.get("kind") not in BATCH_VALIDATION_KINDS:
+        errors.append(f"{context}.kind_invalid")
+    if not isinstance(command.get("required"), bool):
+        errors.append(f"{context}.required_must_be_bool")
+    repository = command.get("repo")
+    if repository is not None and (
+        not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository)
+    ):
+        errors.append(f"{context}.repo_invalid")
+
+
+def _validate_batch_profiles(
+    errors: list[str],
+    data: dict[str, Any],
+    *,
+    require_initial_status: bool,
+    used_lanes: set[str],
+) -> None:
+    profiles = data.get("batchValidationProfiles")
+    if profiles is None and not require_initial_status:
+        return
+    if not isinstance(profiles, dict):
+        errors.append("batchValidationProfiles_must_be_object")
+        return
+    for lane, profile in profiles.items():
+        if lane not in EXECUTION_LANES:
+            errors.append(f"batchValidationProfiles_unknown_lane:{lane}")
+            continue
+        if not isinstance(profile, dict):
+            errors.append(f"batchValidationProfiles.{lane}_must_be_object")
+            continue
+        commands = profile.get("commands")
+        if not isinstance(commands, list):
+            errors.append(f"batchValidationProfiles.{lane}.commands_must_be_array")
+            continue
+        for index, command in enumerate(commands):
+            _validate_batch_command(
+                errors,
+                command,
+                context=f"batchValidationProfiles.{lane}.commands[{index}]",
+                command_id_required=False,
+            )
+    if require_initial_status:
+        for lane in sorted(used_lanes):
+            profile = profiles.get(lane)
+            commands = profile.get("commands") if isinstance(profile, dict) else None
+            if not isinstance(commands, list) or not any(
+                isinstance(command, dict) and command.get("required") is True
+                for command in commands
+            ):
+                errors.append(f"batchValidationProfiles_missing_lane:{lane}")
+
+
+def _validate_batch_validation(errors: list[str], data: dict[str, Any], batch_id: str) -> None:
+    validation = data.get("batchValidation")
+    if validation is None:
+        return
+    if not isinstance(validation, dict):
+        errors.append(f"{batch_id}.batchValidation_must_be_object")
+        return
+    if validation.get("profile") != data.get("executionLane"):
+        errors.append(f"{batch_id}.batchValidation.profile_mismatch")
+    if validation.get("status") not in BATCH_VALIDATION_STATUSES:
+        errors.append(f"{batch_id}.batchValidation.status_invalid")
+    commands = validation.get("commands")
+    if not isinstance(commands, list):
+        errors.append(f"{batch_id}.batchValidation.commands_must_be_array")
+    else:
+        seen: set[str] = set()
+        for index, command in enumerate(commands):
+            context = f"{batch_id}.batchValidation.commands[{index}]"
+            _validate_batch_command(errors, command, context=context, command_id_required=True)
+            command_id = command.get("id") if isinstance(command, dict) else None
+            if isinstance(command_id, str):
+                if command_id in seen:
+                    errors.append(f"{batch_id}.batchValidation.commands_duplicate:{command_id}")
+                seen.add(command_id)
+    _validate_string_list(errors, validation, batch_id, "evidenceIds", required=False, item_re=EVIDENCE_ID_RE)
+    _validate_string_list(
+        errors,
+        validation,
+        batch_id,
+        "latestPassEvidenceIds",
+        required=False,
+        item_re=EVIDENCE_ID_RE,
+    )
+    active_run_id = validation.get("activeRunId")
+    if active_run_id is not None and (not isinstance(active_run_id, str) or not active_run_id.strip()):
+        errors.append(f"{batch_id}.batchValidation.activeRunId_invalid")
 
 
 def _validate_project_commands(
