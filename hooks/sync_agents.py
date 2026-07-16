@@ -65,6 +65,7 @@ from board_core.contracts import BoardConfigError, load_board_config  # noqa: E4
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 DEFAULT_REF = "main"
+HTTPS_CLONE_TIMEOUT_SECONDS = 5
 
 
 class _CloneUnavailableError(RuntimeError):
@@ -106,13 +107,19 @@ def _resolve_repo(
     return url, (resolved_ref or DEFAULT_REF), resolved_ssh_url
 
 
-def _run_git(args: List[str], *, cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+def _run_git(
+    args: List[str],
+    *,
+    cwd: Optional[Path] = None,
+    timeout: Optional[float] = None,
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *args],
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout,
     )
 
 
@@ -120,6 +127,10 @@ def _git_error(proc: subprocess.CompletedProcess, action: str) -> str:
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
     tail = detail[-1] if detail else f"git 返回码 {proc.returncode}"
     return f"{action} 失败: {tail}"
+
+
+def _git_timeout_error(action: str, timeout: float) -> str:
+    return f"{action} 超时（{timeout:g} 秒）"
 
 
 def _rmtree(path: Path) -> None:
@@ -141,20 +152,42 @@ def _transport_for_url(url: str) -> str:
     return "https" if url.strip().lower().startswith("https://") else "other"
 
 
-def _clone_from_url(url: str, ref: str, dest: Path) -> str:
+def _clone_from_url(
+    url: str,
+    ref: str,
+    dest: Path,
+    clone_timeout: Optional[float] = None,
+) -> str:
     """用单个 URL 克隆 ref，返回 commit。
 
     两种 clone 都失败时抛 _CloneUnavailableError；普通 clone 已成功但 checkout
-    失败时抛普通 RuntimeError，让上层不要把 ref 错误误判为传输失败。
+    失败时抛普通 RuntimeError，让上层不要把 ref 错误误判为传输失败。任一
+    clone 超时时立即抛 _CloneUnavailableError，不再尝试同 URL 的另一种方式。
     """
     if dest.exists():
         _rmtree(dest)
-    clone = _run_git(["clone", "--depth", "1", "--branch", ref, url, str(dest)])
+    try:
+        clone = _run_git(
+            ["clone", "--depth", "1", "--branch", ref, url, str(dest)],
+            timeout=clone_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _CloneUnavailableError(
+            _git_timeout_error("克隆", clone_timeout or 0)
+        ) from exc
     if clone.returncode != 0:
         # ref 可能是 commit/tag，--branch 不适用：退回普通 clone 再切换。
         if dest.exists():
             _rmtree(dest)
-        fallback = _run_git(["clone", "--depth", "1", url, str(dest)])
+        try:
+            fallback = _run_git(
+                ["clone", "--depth", "1", url, str(dest)],
+                timeout=clone_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise _CloneUnavailableError(
+                _git_timeout_error("克隆", clone_timeout or 0)
+            ) from exc
         if fallback.returncode != 0:
             raise _CloneUnavailableError(_git_error(fallback, "克隆"))
         checkout = _run_git(["checkout", ref], cwd=dest)
@@ -175,7 +208,16 @@ def sync_repo(url: str, ref: str, dest: Path, ssh_url: Optional[str] = None) -> 
     dest.parent.mkdir(parents=True, exist_ok=True)
     fallback_url = (ssh_url or "").strip()
     try:
-        commit = _clone_from_url(url, ref, dest)
+        commit = _clone_from_url(
+            url,
+            ref,
+            dest,
+            (
+                HTTPS_CLONE_TIMEOUT_SECONDS
+                if url.strip().lower().startswith("https://")
+                else None
+            ),
+        )
     except _CloneUnavailableError as https_error:
         if not url.strip().lower().startswith("https://") or not fallback_url:
             raise
