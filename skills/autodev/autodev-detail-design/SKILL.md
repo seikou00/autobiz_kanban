@@ -38,10 +38,10 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled
 ```
 
-可查看动态节点缺失产物处理：
+可检查动态节点缺失产物处理：
 
 ```
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --plain
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --feature "${feature}" --plain
 ```
 
 读取输入：
