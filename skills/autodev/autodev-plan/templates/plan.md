@@ -1,7 +1,6 @@
 # 计划模板
 
-> 由 Plan 阶段生成，写入 `{FEATURE_DIR}/PLAN.md`。本文件只承载执行层任务、验证计划和覆盖矩阵；行为契约以 `{FEATURE_DIR}/specs/**/*.md` 为准，接口/数据/技术决策以 `{FEATURE_DIR}/design.md` 为准。
-
+> 由 Plan 阶段生成，写入 `{FEATURE_DIR}/PLAN.md`。
 ---
 
 ````markdown

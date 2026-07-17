@@ -7,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 PROTOCOL = SKILLS / "references" / "ask-user-question.md"
+DISCUSS_SKILL = SKILLS / "autobiz" / "autobiz-requirement-discuss" / "SKILL.md"
+PLAN_SKILL = SKILLS / "autodev" / "autodev-plan" / "SKILL.md"
 
 
 class RequestUserInputProtocolTest(unittest.TestCase):
@@ -21,8 +23,48 @@ class RequestUserInputProtocolTest(unittest.TestCase):
             "不要手工添加 `Other`",
             "`autoResolutionMs`",
             "文本降级",
+            "仍须提供 2–3 个互斥 `options`",
+            "禁止把“现在提供”“提供路径”“补充说明”",
+            "直接吸收并继续，不得再询问一次相同内容",
         ):
             self.assertIn(required_rule, content)
+
+    def test_discuss_routes_free_text_through_other_without_follow_up(self) -> None:
+        content = DISCUSS_SKILL.read_text(encoding="utf-8")
+
+        for required_rule in (
+            "如需补充其他问题，请直接在客户端自动提供的「其他」中填写问题内容",
+            "不得再次询问“请补充说明”",
+            "不得生成「现在提供」「提供路径」「补充说明」等空动作选项",
+            "自由文本补充类问题仍必须提供至少 2 个预设选项",
+            "同一轮不得再次追问该内容",
+        ):
+            self.assertIn(required_rule, content)
+
+        self.assertNotIn("**选项2**：补充其他问题", content)
+        self.assertNotIn("引导用户补充说明", content)
+
+    def test_plan_adjudication_gate_forbids_placeholder_options(self) -> None:
+        content = PLAN_SKILL.read_text(encoding="utf-8")
+
+        for required_rule in (
+            "裁定即消解",
+            "凡选中后条目仍处于待确认状态的选项都是非法选项",
+            "声称拥有 ≠ 提供",
+            "信息实体",
+            "暂停，拿到材料后继续",
+            "延后判定按语义不按字面",
+            "不存在「先假设 / 先按默认方案 / 先占位」后推进的出口",
+            "该出口已从选项闭集移除，不得以任何措辞重新引入",
+            "消解自查",
+            "禁止搬进裁定门",
+        ):
+            self.assertIn(required_rule, content)
+
+        self.assertNotIn("「以假设固化：<假设>」", content)
+
+        protocol = PROTOCOL.read_text(encoding="utf-8")
+        self.assertIn("逐条裁定环节禁止使用延后类预设选项", protocol)
 
     def test_every_usage_loads_the_shared_protocol(self) -> None:
         missing: list[str] = []

@@ -15,7 +15,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
 ## explore
-进入设计探索模式。未提供的上游产物根据缺失清单处理（如基于用户直供需求建立上下文），不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+进入设计探索模式。未提供的上游产物根据缺失清单处理，不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
 > 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 plan.json` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
@@ -113,7 +113,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
 
-- 读取上游产物原件、用户补充说明、已有 `design.md`、`PLAN.md`（如果存在）。
+- 读取上游产物原件、用户补充说明。
 - 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
 
@@ -133,7 +133,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 - 如果新增或修改 HTTP/API、函数入口、请求响应、错误码、权限、租户、审计、幂等、分页、异步行为，但接口形态还不准确，先进入 API Decisions 讨论，不要直接生成 PLAN。
 - 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据决策还不准确，先进入 Data Decisions 讨论，不要直接生成 PLAN。
-- 讨论时只提出会影响实现路径的关键问题，并给出当前建议、备选方案和影响面；不要把用户带进机械问卷。
+- 讨论时只提出会影响实现路径的关键问题，并给出当前建议、备选方案和影响面；不要机械化提问。
 - 已确认的决策沉淀为 `design.md` 中的 `已确认`；仍不确定但不影响实现路径的内容可标为 `待确认` 并进入风险；`待确认` 必须先和用户讨论清楚。
 - 如果仍有 `待确认` 且会影响接口形态、数据模型、权限/租户/审计、幂等、分页、异步、状态流、迁移或验收结果，不要结束探索进入 Plan 生成，直接和用户确认。
 
@@ -153,7 +153,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 约束：探索阶段可以提出“建议写入哪里”，但不要自动捕捉或落盘，除非用户明确确认进入 Plan 生成/更新。行为契约变更必须回到 `/autodev-specs`，不要在 Plan 阶段偷偷改写 specs。
 
 
-### 你不必做的事情
+### 你不要做的事情
 
 - 照本宣科
 - 每次都问同样的问题
@@ -177,7 +177,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - **进入 Plan 生成**："这些信息已经足够生成 Plan，要我继续吗？"
 - **补充既有计划**："这个决策会影响 design.md 的接口/数据决策和 PLAN.md 的任务拆分，要不要更新？"
 - **停在澄清结果**：用户已经得到判断，暂不生成文件。
-- **稍后继续**："我们可以之后从这些待确认项继续。"
 
 当判断探索已经足够进入 Plan 时，必须先给出简短探索结论，并询问用户是否结束探索、进入 Plan 生成/更新：
 
@@ -242,12 +241,10 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - **Context / 输入上下文**：引用 proposal 和 specs，说明当前代码现状和约束。
 - **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。
 - **API Decisions / 接口决策**：
-  - 不再生成独立接口契约文件。
   - 如本轮不涉及 HTTP/API，必须写 `x-auto-no-http-api: true` 并说明原因。
   - 如涉及 HTTP/API，用结构化表格记录 Method、Path/Entry、Request、Response、Errors、Auth/Tenant/Audit、Status。
   - 不得把未确认的鉴权、租户、审计字段写成硬约束；必须标为待确认。
 - **Data Decisions / 数据决策**：
-  - 不再生成独立 SQL 设计文件。
   - 如本轮不涉及数据库或持久化，必须写 `x-auto-no-sql: true` 并说明原因。
   - 如涉及数据变更，记录表/模型、字段、索引、迁移、回滚和状态。
   - specs 明确涉及数据但字段/类型/索引缺失时，必须回到用户追问或标为待确认；不得凭空发明字段。
@@ -262,7 +259,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
 - [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
 - [ ] Module/Dependency Decisions 已记录 MOD/DEP 决策，或明确说明无相关设计影响
-- [ ] 未确认项没有进入硬约束，已标注为待确认
+- [ ] 未确认项没有进入硬约束
 
 #### design.md 确认规则
 
@@ -287,12 +284,25 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 [摘录 DEP-xx 的依赖类别、生产/Test Adapter 策略与状态；无相关依赖时说明无]
 
 **待确认项**
-[所有 Status 为「待确认」的条目，逐条说明影响]
+[所有待确认条目：API-xx / DATA-xx / D-xx / MOD-xx / DEP-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」的行；逐条说明影响。]
 ```
 
-展示后的确认规则：
+展示后按以下两步确认，顺序不可颠倒：
 
-- **待确认项逐条裁定**：Status 为「待确认」的 API/Data/MOD/DEP 决策必须作为明确问题提给用户裁定，不得埋在表格里随整体确认默认通过；影响实现路径的 Module、Interface、Seam 或依赖策略未确认时不得进入 PLAN 生成。
+**第一步：待确认项逐条裁定**
+
+- 范围：API-xx / DATA-xx / D-xx / MOD-xx / DEP-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」的行；没有待确认条目时跳过本步，直接进入第二步。
+- 消解定义：裁定即消解。一个条目被消解 = design.md 对应行 Status/Type 回写「已确认」，**且**裁定产生的具体内容（采纳的方案、用户提供的链接/字段）已写进对应行或章节。每个预设选项选中后必须能立即达成消解或明确暂停推进；两者之外的选项非法。
+- 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与条目 ID 对应（如 `pending_r_01`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
+- 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前设计确认 (Recommended)」：采纳设计中已写出的方案；②「采纳备选：<方案>」：选项自身携带具体替代方案；③「需要调整」：用户将给出修改意见，吸收后更新章节、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 plan 阶段、不推进。
+- 信息缺口型条目（缺接口文档 url、字段定义、外部约定等）：`question` 中直接写「若现在能提供，请在『其他』中粘贴链接或具体内容」；预设选项只从「调整设计移除该依赖」「暂停，拿到材料后继续」中取。缺失材料只有三个出口：当场提供、移除依赖、暂停；用户在「其他」提供内容 → 内容写进 design.md → 回写「已确认」。共享协议第 3 节的「后续补充并继续」模板是探索/讨论阶段收集信息用的，这个阶段禁止搬进裁定门。
+- 回写：拿到裁定后立即回写 design.md 对应行——回写「已确认」的前提是信息实体落地：用户答复中给出的链接/字段/方案必须先写进对应行或章节。用户仅声称「我有 / 稍后给」而未提供实体时，该条**未消解**：追问一次索取内容，仍未提供则按「调整设计移除该依赖 / 暂停」重发裁定。不得有延后选择，后续阶段不会检查待确认；裁定改变设计内容时更新对应章节并重新展示变更部分。
+- 消解自查：全部裁定回写后、发起第二步之前，自查 design.md 六张表（API / Data / Technical / Module / Dependency / Risks）单元格无「待确认」、回写内容无 TBD/待补充/待提供/占位 等词、无对缺失材料的引用（「根据实际文档」「以实际接口为准」「编码阶段补充」等）；任一命中回到第一步。
+- 顺序硬约束：所有待确认条目都拿到用户裁定之前，禁止发起第二步的整体确认门。
+
+**第二步：整体确认门**
+
+- **进入前提**：影响实现路径的 Module、Interface、Seam 或依赖策略仍为待确认时，不得进入 PLAN 生成。
 - **发起阶段门**：按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `确认设计，进入 PLAN 生成 (Recommended)` / `需要调整设计` / `暂停，稍后继续`；这是阶段门，不设置 `autoResolutionMs`，必须等待明确答复。
 - **自由表达即退出结构化**：用户不点选项、直接给出修改意见时，当作普通文本吸收，更新 design.md 对应章节并重新展示变更部分，再择机重发确认门。
 
@@ -301,6 +311,10 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 只问「以上技术设计是否满足需求？」「是否可以继续？」这类未展示具体内容的笼统问题。
 - 以「内容已经写在 design.md 里」为由省略对话内展示。
 - 未拿到明确确认就开始生成 PLAN.md。
+- 把待确认项在展示块中逐条列出后，未逐条以 `request_user_input` 提问就直接发起整体确认门；展示不等于裁定。
+- 自行判断某待确认项「编码阶段参考接口文档即可」「不影响主路径」而跳过提问；「延后处理」不能出现。
+- 选项 label/description 含「待确认」「先占位」「后续补充」「稍后提供」「编码阶段再」「编码阶段根据实际文档补充」「实现时参考文档」「字段以实际接口为准」等延后语义——凡选中后条目仍处于待确认状态的选项都是非法选项。延后判定按语义不按字面。
+- 「已确认，我有 url/文档」这类仅声称拥有信息、不当场收集内容的选项，需要继续发起一次追问。
 
 ---
 
@@ -333,7 +347,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 按 `{PLUGIN_ROOT}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 
 完成条件：
-- [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘
+- [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入
 - [ ] PLAN.md 包含「任务 DAG」「任务总览」「任务详情」「Specs 行为覆盖」「规格与设计决策覆盖」
 - [ ] 每个任务都包含「做什么」「规格依据」「设计依据」「验证方法」「状态: 待做」
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
