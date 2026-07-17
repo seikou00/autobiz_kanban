@@ -302,7 +302,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 **第二步：整体确认门**
 
-- **进入前提**：影响实现路径的 Module、Interface、Seam 或依赖策略仍为待确认时，不得进入 PLAN 生成。
 - **发起阶段门**：按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `确认设计，进入 PLAN 生成 (Recommended)` / `需要调整设计` / `暂停，稍后继续`；这是阶段门，不设置 `autoResolutionMs`，必须等待明确答复。
 - **自由表达即退出结构化**：用户不点选项、直接给出修改意见时，当作普通文本吸收，更新 design.md 对应章节并重新展示变更部分，再择机重发确认门。
 
