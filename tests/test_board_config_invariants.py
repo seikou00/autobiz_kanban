@@ -411,6 +411,10 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertIn("featureId", grouping)
         self.assertEqual(len(grouping["groups"]), 1)
         self.assertIn("validationBoundary", grouping["groups"][0])
+        group_exception = grouping["matrixExceptionExample"]
+        self.assertEqual(group_exception["mergedScenarioRefs"], group_exception["specRefs"][1:])
+        self.assertIn("splitRationale", group_exception)
+        self.assertIn("validationBoundary", group_exception)
 
     def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
@@ -518,6 +522,9 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "SCN `<=12`",
             "SCN 数 `>12`",
             "mergedScenarioRefs",
+            "taskGroupMatrixExceptionExample",
+            "禁止看到 6-12 个 SCN 就为所有 group 自动补",
+            "禁止按连续 SCN 编号机械切块",
             "用户动作 + 公开 seam + 自动化验证边界",
             "只允许一次拆分",
             "不得输出 `v2`、`v3`",

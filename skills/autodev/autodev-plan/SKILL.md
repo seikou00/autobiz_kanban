@@ -251,13 +251,13 @@ python "${pluginPath}/hooks/plan_writer.py" add-task-contract
 
 writer 自动分组，调用方不指定 batch。`executionLane` 由 writer 根据 `uiRequired` 自动推导：`false=backend`、`true=frontend`，调用方不得自行维护该字段。`task-groups.json` 必须按 DAG 拓扑序排列全部 backend group，再排列全部 frontend group；frontend group 可以依赖更早的 backend group，backend group 不得依赖 frontend group。writer 以第一个 `specRefs` 中 `#` 前的文件路径作为主 capability；只有与紧邻前一批的主 capability 和 execution lane 都相同且该批少于 5 个任务时才合批，否则创建下一 `Bxxx`。因此即使最后一个 backend batch 未满，首个 frontend task 也必须新建 batch。不得伪造 batch ID，也不得通过调整 `specRefs` 顺序伪造分组结果。
 
-最终候选分组表完成后，先运行只读分组预检。该命令只校验拆分所需的完整路径级 `specRefs`、SCN/API/Page/UIX 计数、DAG/lane 顺序、`mergedScenarioRefs`、`splitRationale`、`validationBoundary` 和完整 Scenario 覆盖，不要求 goal、scope、AC、decisionIds 或完整 validation command：
+最终候选分组表完成后，先运行只读分组预检。`task-groups.json.matrixExceptionExample` 和 `add-task-contract.taskGroupMatrixExceptionExample` 是 6-12 个 SCN 共享同一验证闭环时的分组例外示例，只用于指导，不是 `groups[]` 的实际成员。该命令只校验拆分所需的完整路径级 `specRefs`、SCN/API/Page/UIX 计数、DAG/lane 顺序、`mergedScenarioRefs`、`splitRationale`、`validationBoundary` 和完整 Scenario 覆盖，不要求 goal、scope、AC、decisionIds 或完整 validation command：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${feature}" --group-file "${FEATURE_DIR}/.tmp/plan_writer/task-groups.json"
 ```
 
-分组预检失败时只能修改候选分组，不得创建 `tasks/Txxx.json`。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。分组预检成功后冻结连续 Task ID 和分组字段，再生成完整 task 文件；task 的 `title/deps/uiRequired/specRefs/mergedScenarioRefs/apiIds/uiRefs.pageRefs/uiRefs.interactionRefs/splitRationale` 必须与已通过的分组契约一致。
+分组预检失败时只能修改候选分组，不得创建 `tasks/Txxx.json`。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先证明这些 SCN 共享同一用户动作、公开 seam 和自动化验证闭环，否则按业务闭环继续拆分。分组预检成功后冻结连续 Task ID 和分组字段，再生成完整 task 文件；task 的 `title/deps/uiRequired/specRefs/mergedScenarioRefs/apiIds/uiRefs.pageRefs/uiRefs.interactionRefs/splitRationale` 必须与已通过的分组契约一致。
 
 复杂 task 跨平台使用独立 UTF-8 JSON 文件。全部 task 文件完成后先运行只读整组预检：
 
@@ -349,7 +349,7 @@ UI 任务投影规则：
 4. 只有共享同一验证闭环时才允许合并
    - 多个 SCN/API/PAGE/UIX 合并到一个 task，必须同时满足：同一触发动作、同一公开 seam、同一验证命令或同一组响应/页面断言、拆开会复制同一验证闭环、没有超过硬上限。
    - 任务超过软阈值时默认必须继续拆分；`splitRationale` 只允许用于已经按公开入口、用户动作、可观察结果和验证命令拆到最小闭环后，仍因同一请求、同一权限/状态矩阵或同一响应断言无法独立验证的少数例外。
-   - `task-input.json` 显式保留空 `mergedScenarioRefs` 字段；普通 task 保持空数组。单个 task 覆盖 SCN 数 `>5` 且 `<=12` 时，用 `add-task-contract.matrixExceptionExample` 覆盖模板中的 `specRefs`、`mergedScenarioRefs`、`acceptanceCriteria`、`validationCommands` 与 `splitRationale`：其集合必须与 `specRefs` 中所有完整路径级 SCN 完全相同；必须恰有一个 required 的 `behavior_test`、`integration_test` 或 `e2e_test` 覆盖全部 AC；`splitRationale` 必须说明共享请求/响应、权限或状态矩阵与同一验证闭环。`mergedScenarioRefs` 不得写范围、短引用或拼接 anchor。
+   - `task-input.json` 显式保留空 `mergedScenarioRefs` 字段；普通 task 保持空数组。单个 task 覆盖 SCN 数 `>5` 且 `<=12` 时，先用 `add-task-contract.taskGroupMatrixExceptionExample` 填写候选 group，再用 `add-task-contract.matrixExceptionExample` 覆盖 task 模板中的 `specRefs`、`mergedScenarioRefs`、`acceptanceCriteria`、`validationCommands` 与 `splitRationale`：其集合必须与 `specRefs` 中所有完整路径级 SCN 完全相同；必须恰有一个 required 的 `behavior_test`、`integration_test` 或 `e2e_test` 覆盖全部 AC；`splitRationale` 必须至少点名 3 个相关 SCN，并说明共享请求/响应、权限或状态矩阵与同一验证闭环。`mergedScenarioRefs` 不得写范围、短引用或拼接 anchor。
    - API/PAGE/UIX 超软阈值但未超硬上限时仍可用 `splitRationale`；单个 task 覆盖 `apiIds` 数 `>2`、`uiRefs.pageRefs` 数 `>1`、`uiRefs.interactionRefs` 数 `>3` 时，必须点名相关 API/PAGE/UIX ID，并说明为什么无法独立验证。
    - 标记 `可合并(附 splitRationale)` 前必须逐项确认：不同触发动作已拆开；不同公开 seam 已拆开；不同可观察结果已拆开；不同 validation command 已拆开。任一项未满足时不得标记可合并。
    - 合格示例：`SCN-001、SCN-004、SCN-007 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。`

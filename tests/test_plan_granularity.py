@@ -28,8 +28,8 @@ def _task_with_scenarios(count: int) -> dict:
             }
         ],
         "splitRationale": (
-            "同一查询请求返回完整字段矩阵，并由同一个响应断言验证，"
-            "拆开会复制同一验证闭环。"
+            "SCN-001、SCN-004、SCN-007 由同一查询请求返回完整字段矩阵，"
+            "并由同一个响应断言验证，拆开会复制同一验证闭环。"
         ),
     }
 
@@ -66,6 +66,37 @@ class PlanGranularityTests(unittest.TestCase):
 
         self.assertEqual(_reasons(task), [])
 
+    def test_grouping_preflight_reports_all_missing_matrix_exception_fields(self) -> None:
+        task = _task_with_scenarios(9)
+        task["mergedScenarioRefs"] = []
+        task.pop("splitRationale")
+
+        errors = validate_plan_task_grouping_item(task, task_id="T001")
+
+        self.assertEqual(
+            [item["reason"] for item in errors],
+            [
+                "missing_plan_task_merged_scenario_refs",
+                "missing_plan_task_split_rationale",
+            ],
+        )
+
+    def test_grouping_preflight_explains_incomplete_merged_scenario_refs(self) -> None:
+        task = _task_with_scenarios(9)
+        task["mergedScenarioRefs"] = task["specRefs"][1:-1]
+        task.pop("splitRationale")
+
+        errors = validate_plan_task_grouping_item(task, task_id="T001")
+
+        self.assertEqual(
+            [item["reason"] for item in errors],
+            [
+                "invalid_plan_task_merged_scenario_refs",
+                "missing_plan_task_split_rationale",
+            ],
+        )
+        self.assertIn("missingRefs=specs/capability/spec.md#SCN-009", errors[0]["detail"])
+
     def test_matrix_exception_rejects_incomplete_merged_scenario_refs(self) -> None:
         task = _task_with_scenarios(9)
         task["mergedScenarioRefs"] = task["specRefs"][1:-1]
@@ -90,7 +121,14 @@ class PlanGranularityTests(unittest.TestCase):
         task = _task_with_scenarios(13)
         task["mergedScenarioRefs"] = task["specRefs"][1:]
 
-        self.assertIn("oversized_plan_task_must_split", _reasons(task))
+        self.assertEqual(_reasons(task), ["oversized_plan_task_must_split"])
+
+    def test_matrix_exception_rejects_generic_rationale_without_scenario_ids(self) -> None:
+        task = _task_with_scenarios(9)
+        task["mergedScenarioRefs"] = task["specRefs"][1:]
+        task["splitRationale"] = "同一查询请求返回完整字段矩阵，并由同一个响应断言验证，拆开会复制同一验证闭环。"
+
+        self.assertIn("invalid_plan_task_split_rationale", _reasons(task))
 
     def test_rejects_scenario_range_or_concatenation_shorthand(self) -> None:
         for anchor in ("SCN-001~SCN-009", "SCN-001, SCN-002", "SCN-001SCN-006", "SCN-001到SCN-009"):

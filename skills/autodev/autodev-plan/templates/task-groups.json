@@ -14,5 +14,32 @@
       "apiIds": [],
       "validationBoundary": "[public seam plus one executable validation command or assertion]"
     }
-  ]
+  ],
+  "matrixExceptionExample": {
+    "when": "one group covers 6-12 scenarios that share one request/response or state-matrix validation loop",
+    "id": "T001",
+    "title": "[shared observable matrix behavior]",
+    "deps": [],
+    "uiRequired": false,
+    "specRefs": [
+      "specs/[capability]/spec.md#REQ-001",
+      "specs/[capability]/spec.md#SCN-001",
+      "specs/[capability]/spec.md#SCN-002",
+      "specs/[capability]/spec.md#SCN-003",
+      "specs/[capability]/spec.md#SCN-004",
+      "specs/[capability]/spec.md#SCN-005",
+      "specs/[capability]/spec.md#SCN-006"
+    ],
+    "mergedScenarioRefs": [
+      "specs/[capability]/spec.md#SCN-001",
+      "specs/[capability]/spec.md#SCN-002",
+      "specs/[capability]/spec.md#SCN-003",
+      "specs/[capability]/spec.md#SCN-004",
+      "specs/[capability]/spec.md#SCN-005",
+      "specs/[capability]/spec.md#SCN-006"
+    ],
+    "apiIds": [],
+    "validationBoundary": "one request returns the complete matrix and one executable assertion validates it",
+    "splitRationale": "SCN-001, SCN-003, and SCN-006 share the same request, response assertion, and validation loop, so they cannot be validated independently."
+  }
 }

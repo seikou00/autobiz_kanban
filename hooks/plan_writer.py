@@ -169,6 +169,13 @@ def _task_group_example() -> dict[str, Any]:
     return value
 
 
+def _task_group_matrix_exception_example() -> dict[str, Any]:
+    value = _task_group_example().get("matrixExceptionExample")
+    if not isinstance(value, dict):
+        raise RuntimeError("task_group_matrix_exception_example_must_be_object")
+    return value
+
+
 def _matrix_exception_example() -> dict[str, Any]:
     scenario_refs = [f"specs/[capability]/spec.md#SCN-{index:03d}" for index in range(1, 7)]
     return {
@@ -191,7 +198,10 @@ def _matrix_exception_example() -> dict[str, Any]:
                 "covers": ["AC-T001-01"],
             }
         ],
-        "splitRationale": "[one request/response or state matrix shares one validation loop]",
+        "splitRationale": (
+            "SCN-001, SCN-003, and SCN-006 share one request/response or state matrix "
+            "validation loop and cannot be validated independently."
+        ),
     }
 
 
@@ -1246,6 +1256,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "taskInputExample": _task_input_example(),
                     "taskGroupTemplate": TASK_GROUP_TEMPLATE_RELATIVE_PATH,
                     "taskGroupInputExample": _task_group_example(),
+                    "taskGroupMatrixExceptionExample": _task_group_matrix_exception_example(),
                     "recommendedInputMode": "task-directory",
                     "supportedInputModes": ["task-directory", "body-file", "body-stdin", "task-json", "cli-fields"],
                     "requiredTaskFields": [

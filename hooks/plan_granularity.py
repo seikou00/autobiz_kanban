@@ -60,6 +60,7 @@ PLAN_TASK_SPLIT_RATIONALE_VALIDATION_TERMS = (
     "same response assertion",
 )
 PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX = {
+    "SCN": 3,
     "API": 2,
     "PAGE": 2,
     "UIX": 3,
@@ -249,6 +250,7 @@ def validate_plan_task_grouping_item(task: dict[str, Any], *, task_id: str) -> l
     related_ids_by_prefix: dict[str, set[str]] = {}
     if len(scenario_refs) > PLAN_TASK_MAX_SCENARIOS:
         threshold_reasons.append(f"scenarios={len(scenario_refs)}")
+        related_ids_by_prefix["SCN"] = set(scenario_refs)
     if len(api_ids) > PLAN_TASK_MAX_APIS:
         threshold_reasons.append(f"apis={len(api_ids)}")
         related_ids_by_prefix["API"] = set(api_ids)
@@ -261,38 +263,42 @@ def validate_plan_task_grouping_item(task: dict[str, Any], *, task_id: str) -> l
 
     if not threshold_reasons:
         return []
+
+    errors: list[dict[str, str]] = []
     if len(scenario_refs) > PLAN_TASK_MAX_SCENARIOS:
-        if "mergedScenarioRefs" not in task:
-            return [
-                {
-                    "reason": "missing_plan_task_merged_scenario_refs",
-                    "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
-                }
-            ]
-        merged_refs = _normalized_merged_scenario_refs(task)
-        if merged_refs != scenario_refs:
-            return [
-                {
+        raw_merged_refs = task.get("mergedScenarioRefs")
+        if "mergedScenarioRefs" not in task or raw_merged_refs == []:
+            errors.append({
+                "reason": "missing_plan_task_merged_scenario_refs",
+                "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
+            })
+        else:
+            merged_refs = _normalized_merged_scenario_refs(task)
+            if merged_refs != scenario_refs:
+                actual_refs = merged_refs or set()
+                missing_refs = sorted(scenario_refs - actual_refs)
+                extra_refs = sorted(actual_refs - scenario_refs)
+                detail_parts = [f"task={task_id}", f"detail=scenarios={len(scenario_refs)}"]
+                if missing_refs:
+                    detail_parts.append(f"missingRefs={','.join(missing_refs)}")
+                if extra_refs:
+                    detail_parts.append(f"extraRefs={','.join(extra_refs)}")
+                errors.append({
                     "reason": "invalid_plan_task_merged_scenario_refs",
-                    "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
-                }
-            ]
+                    "detail": ";".join(detail_parts),
+                })
     rationale = task.get("splitRationale")
     if not isinstance(rationale, str) or not rationale.strip():
-        return [
-            {
-                "reason": "missing_plan_task_split_rationale",
-                "detail": f"task={task_id} detail={','.join(threshold_reasons)}",
-            }
-        ]
-    if _split_rationale_is_invalid(rationale, related_ids_by_prefix):
-        return [
-            {
-                "reason": "invalid_plan_task_split_rationale",
-                "detail": f"task={task_id} detail={','.join(threshold_reasons)}",
-            }
-        ]
-    return []
+        errors.append({
+            "reason": "missing_plan_task_split_rationale",
+            "detail": f"task={task_id} detail={','.join(threshold_reasons)}",
+        })
+    elif _split_rationale_is_invalid(rationale, related_ids_by_prefix):
+        errors.append({
+            "reason": "invalid_plan_task_split_rationale",
+            "detail": f"task={task_id} detail={','.join(threshold_reasons)}",
+        })
+    return errors
 
 
 def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -> list[dict[str, str]]:

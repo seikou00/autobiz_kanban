@@ -696,6 +696,10 @@ class JsonWriterTests(unittest.TestCase):
             "skills/autodev/autodev-plan/templates/task-groups.json",
         )
         self.assertIn("groups", contract["taskGroupInputExample"])
+        group_exception = contract["taskGroupMatrixExceptionExample"]
+        self.assertEqual(group_exception["mergedScenarioRefs"], group_exception["specRefs"][1:])
+        self.assertIn("splitRationale", group_exception)
+        self.assertIn("validationBoundary", group_exception)
         self.assertEqual(contract["validationKinds"], sorted(TASK_VALIDATION_KINDS))
         self.assertEqual(contract["batchValidationKinds"], sorted(BATCH_VALIDATION_KINDS))
         self.assertEqual(
@@ -1294,7 +1298,10 @@ class JsonWriterTests(unittest.TestCase):
                         "covers": acceptance_ids,
                     }
                 ],
-                "splitRationale": "同一查询请求返回字段矩阵，并由同一个响应断言验证，拆开会复制同一验证闭环。",
+                "splitRationale": (
+                    "SCN-001、SCN-004、SCN-009 由同一查询请求返回字段矩阵，"
+                    "并由同一个响应断言验证，拆开会复制同一验证闭环。"
+                ),
             }
 
             init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
