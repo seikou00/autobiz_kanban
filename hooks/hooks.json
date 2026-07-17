@@ -33,6 +33,17 @@
           "persistAfterInterrupt": true
         }
       ]
+    },
+    {
+      "matcher":"execute",
+      "hooks":[
+        {
+          "type": "command",
+          "command": "python hooks/performance_checker.py",
+          "timeout": 7200,
+          "persistAfterInterrupt": true
+        }
+      ]
     }
   ]
 }
