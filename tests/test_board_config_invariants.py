@@ -407,6 +407,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertEqual(template["apiIds"], [])
         self.assertEqual(template["dataIds"], [])
         self.assertEqual(template["mergedScenarioRefs"], [])
+        detail = json.loads((template_dir / "task-detail-input.json").read_text(encoding="utf-8"))
+        self.assertNotIn("id", detail)
+        self.assertNotIn("specRefs", detail)
+        self.assertNotIn("pages", detail["scope"])
+        self.assertNotIn("id", detail["acceptanceCriteria"][0])
+        self.assertNotIn("id", detail["validationCommands"][0])
         grouping = json.loads((template_dir / "task-groups.json").read_text(encoding="utf-8"))
         self.assertIn("featureId", grouping)
         self.assertEqual(len(grouping["groups"]), 1)
@@ -425,22 +431,26 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_plan_skill_defines_deterministic_task_writer_protocol(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "templates/task-input.json",
+            "templates/task-detail-input.json",
             "templates/task-groups.json",
             "add-task-contract",
-            "每次 Plan 会话生成 task 文件前只执行一次",
-            ".tmp/plan_writer/tasks/",
+            "每次 Plan 会话准备 Draft 前只执行一次",
+            ".tmp/plan_writer/draft/plan.json",
             ".tmp/plan_writer/task-groups.json",
             "preflight-task-groups",
-            "preflight-task-set",
-            "materialize-task-set",
+            "prepare-task-draft",
+            "set-draft-task-detail",
+            "preflight-task-draft",
+            "finalize-task-draft",
+            "rebuild-task-draft",
+            "task_group_changed_after_draft_created",
             "失败时不写任何正式产物",
             "禁止使用 `python -c`",
             "不得通过 validator 失败来探索 schema",
             "不得读取 writer 源码来发现参数或枚举值",
-            "required command 的 `covers` 并集覆盖全部 AC",
-            "scope.pages` 与 `uiRefs.pageRefs`",
-            "不得把缺失 SCN 任意追加到已有 task",
+            "required AC 覆盖校验",
+            "`scope.pages` 由 writer 从分组 UI refs 投影",
+            "不得把缺失 Scenario 添加到标题相近",
             "taskSetDigest",
         ]
         missing = [phrase for phrase in required if phrase not in content]
@@ -453,11 +463,11 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_plan_skill_keeps_ui_projection_generation_guidance(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "templates/task-input.json",
+            "templates/task-detail-input.json",
             "不得先自由生成再依赖 validator 反复修字段",
             "UI_CONTEXT.uiRequired=false",
             "UI_CONTEXT.uiRequired=true",
-            "仅在 `uiRequired:true` 时添加 `uiRefs`",
+            "UI_CONTEXT.uiRequired=true` 时，只为 UI capability 生成 `uiRequired=true`",
             "模板中的 API/Data/Decision ID 都是占位示例",
             "不要为了过校验强行编造",
             "空数组 `[]`",
@@ -510,7 +520,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "建立 Scenario 覆盖矩阵",
             "SCN / REQ / 用户动作或系统触发 / 可观察结果 / API / Data / Page / UIX / 验证命令或公开 seam",
             "候选任务分组表",
-            "不得边生成正式输入文件边重新拆分",
+            "不得边补 task detail 边重新拆分",
             "最终候选任务分组表",
             "连续 `T001`、`T002`、`T003`",
             "禁止 `T003a`",
@@ -544,12 +554,11 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "invalid_plan_task_split_rationale",
             "不得通过完整 task 的内容校验失败来探索如何拆分",
             "必须按 DAG 拓扑序编号",
-            "在创建任何 `Txxx.json` 前必须运行一次 `preflight-task-groups`",
-            "只在全部 `Txxx.json` 完成后运行一次 `preflight-task-set`",
-            "不得用 `stage_gate` 或完整 task 内容失败探索拆分",
+            "`preflight-task-groups` 成功后只运行一次 `prepare-task-draft`",
+            "不得创建独立 `Txxx.json`",
             "回 Scenario 覆盖矩阵定位遗漏并重新分组",
-            "运行一次 `materialize-task-set`",
-            "replace-task` / `remove-task",
+            "运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`",
+            "分组 digest 变化时运行 `rebuild-task-draft`",
             "对 finalized 计划不原地解封",
         ]
         missing = [phrase for phrase in required if phrase not in content]

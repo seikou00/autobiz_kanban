@@ -318,6 +318,34 @@ def _plan_task_body() -> dict:
     }
 
 
+def _draft_detail_body(task: dict | None = None) -> dict:
+    source = task or _plan_task_body()
+    scope = dict(source["scope"])
+    scope.pop("pages", None)
+    criteria = [
+        {"text": item["text"], "scenarioRefs": list(item["scenarioRefs"])}
+        for item in source["acceptanceCriteria"]
+    ]
+    commands = []
+    for item in source["validationCommands"]:
+        command = {key: value for key, value in item.items() if key not in {"id", "covers"}}
+        command["covers"] = list(range(1, len(criteria) + 1))
+        commands.append(command)
+    return {
+        "goal": source["goal"],
+        "scope": scope,
+        "implementationPoints": list(source["implementationPoints"]),
+        "acceptanceCriteria": criteria,
+        "nonGoals": list(source["nonGoals"]),
+        "designRefs": list(source["designRefs"]),
+        "dataIds": list(source["dataIds"]),
+        "decisionIds": list(source["decisionIds"]),
+        "validationCommands": commands,
+        "expectedFiles": list(source.get("expectedFiles", [])),
+        "blockers": list(source.get("blockers", [])),
+    }
+
+
 def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
     groups = []
     for task in tasks:
@@ -377,6 +405,361 @@ def _code_module(root: Path, *, with_pom: bool = True) -> tuple[Path, Path]:
 
 
 class JsonWriterTests(unittest.TestCase):
+    def test_plan_writer_builds_and_finalizes_draft_batches_without_task_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            self.assertFalse((feature_dir / "plan.json").exists())
+            draft_batch_path = feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
+            draft_task = json.loads(draft_batch_path.read_text(encoding="utf-8"))["tasks"][0]
+            self.assertEqual(draft_task["specRefs"], task["specRefs"])
+            self.assertEqual(draft_task["goal"], "")
+
+            detail_path = Path(tmp) / "T001-detail.json"
+            detail = _draft_detail_body(task)
+            for command in detail["validationCommands"]:
+                command.pop("cwd", None)
+                command.pop("covers", None)
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+            detailed = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+            self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+            draft_task = json.loads(draft_batch_path.read_text(encoding="utf-8"))["tasks"][0]
+            self.assertEqual(draft_task["acceptanceCriteria"][0]["id"], "AC-T001-01")
+            self.assertEqual(draft_task["validationCommands"][0]["id"], "VAL-T001-01")
+            self.assertEqual(draft_task["validationCommands"][0]["covers"], ["AC-T001-01"])
+            self.assertEqual(draft_task["validationCommands"][0]["cwd"], ".")
+
+            preflight = _run(
+                "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
+            finalized = _run(
+                "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(root["taskSetStatus"], "finalized")
+            self.assertTrue((feature_dir / "PLAN.md").is_file())
+
+    def test_plan_writer_prepare_draft_projects_backend_and_frontend_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir, second=True)
+            backend = _plan_task_body()
+            frontend = _plan_task_body()
+            frontend.update({"id": "T002", "title": "frontend", "deps": ["T001"], "uiRequired": True})
+            frontend["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            frontend["uiRefs"] = {
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": [],
+                "frontendRoute": "spec-driven-ui",
+            }
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [backend, frontend])
+
+            result = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            batches = json.loads(result.stdout)["draft"]["batches"]
+            self.assertEqual([item["executionLane"] for item in batches], ["backend", "frontend"])
+            self.assertEqual([item["taskIds"] for item in batches], [["T001"], ["T002"]])
+
+    def test_plan_writer_draft_rejects_group_owned_detail_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            self.assertEqual(_run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            ).returncode, 0)
+            detail = _draft_detail_body(task)
+            detail["specRefs"] = list(task["specRefs"])
+            detail_path = Path(tmp) / "detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("draft_task_group_owned_field_forbidden", result.stdout)
+            shown = _run(
+                "plan_writer.py", "show-task-draft", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(json.loads(shown.stdout)["draft"]["pendingTaskIds"], ["T001"])
+
+    def test_plan_writer_draft_rejects_writer_owned_nested_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            self.assertEqual(_run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            ).returncode, 0)
+
+            detail = _draft_detail_body(task)
+            detail["acceptanceCriteria"][0]["id"] = "AC-MANUAL"
+            detail_path = Path(tmp) / "detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+            acceptance_result = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+            self.assertNotEqual(acceptance_result.returncode, 0)
+            self.assertIn("draft_acceptance_id_writer_owned", acceptance_result.stdout)
+
+            detail = _draft_detail_body(task)
+            detail["validationCommands"][0]["id"] = "VAL-MANUAL"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+            validation_result = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+            self.assertNotEqual(validation_result.returncode, 0)
+            self.assertIn("draft_validation_id_writer_owned", validation_result.stdout)
+
+    def test_plan_writer_draft_rejects_direct_batch_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            self.assertEqual(_run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            ).returncode, 0)
+
+            batch_path = (
+                feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
+            )
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+            batch["tasks"][0]["title"] = "edited outside writer"
+            batch_path.write_text(json.dumps(batch), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "show-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("task_draft_digest_mismatch", result.stdout + result.stderr)
+
+    def test_plan_writer_imports_legacy_task_directory_into_ready_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            task_dir = Path(tmp) / "tasks"
+            task_dir.mkdir()
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+
+            result = _run(
+                "plan_writer.py", "import-task-directory", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout)["draft"]["readyTaskIds"], ["T001"])
+            self.assertFalse((feature_dir / "plan.json").exists())
+
+    def test_plan_writer_recovers_interrupted_draft_bundle_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            self.assertEqual(_run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            ).returncode, 0)
+            draft_dir = feature_dir / ".tmp" / "plan_writer" / "draft"
+            root = json.loads((draft_dir / "plan.json").read_text(encoding="utf-8"))
+            lock = json.loads((draft_dir / "lock.json").read_text(encoding="utf-8"))
+            batch = json.loads((draft_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8"))
+            transaction = {
+                "version": 1,
+                "featureId": "alpha",
+                "root": root,
+                "batchPlans": {"B001": batch},
+                "lock": lock,
+            }
+            (draft_dir / ".draft-write-transaction.json").write_text(json.dumps(transaction), encoding="utf-8")
+            (draft_dir / "lock.json").unlink()
+
+            result = _run(
+                "plan_writer.py", "show-task-draft", "--workspace", str(workspace), "--feature", "alpha",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((draft_dir / "lock.json").is_file())
+            self.assertFalse((draft_dir / ".draft-write-transaction.json").exists())
+
+    def test_plan_writer_draft_detects_group_changes_and_rebuilds_selectively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir, second=True)
+            first = _plan_task_body()
+            second = _plan_task_body()
+            second.update({"id": "T002", "title": "second", "deps": ["T001"]})
+            second["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            second["acceptanceCriteria"][0].update({
+                "id": "AC-T002-01", "scenarioRefs": ["specs/cap/spec.md#SCN-002"],
+            })
+            second["validationCommands"][0].update({"id": "VAL-T002-01", "covers": ["AC-T002-01"]})
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [first, second])
+            self.assertEqual(_run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            ).returncode, 0)
+            detail_path = Path(tmp) / "detail.json"
+            detail_path.write_text(json.dumps(_draft_detail_body(first)), encoding="utf-8")
+            self.assertEqual(_run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            ).returncode, 0)
+
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            group_data["groups"][1]["title"] = "changed second"
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+            stale = _run(
+                "plan_writer.py", "show-task-draft", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("task_group_changed_after_draft_created", stale.stdout)
+
+            rebuilt = _run(
+                "plan_writer.py", "rebuild-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+            self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+            payload = json.loads(rebuilt.stdout)
+            self.assertEqual(payload["preservedTaskIds"], ["T001"])
+            self.assertEqual(payload["resetTaskIds"], ["T002"])
+
+    def test_plan_writer_draft_rejects_invalid_detail_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            self.assertEqual(_run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            ).returncode, 0)
+            detail = _draft_detail_body(task)
+            detail["implementationPoints"] = [f"point {index}" for index in range(7)]
+            detail["acceptanceCriteria"][0]["scenarioRefs"] = ["specs/other/spec.md#SCN-999"]
+            detail_path = Path(tmp) / "detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("implementation_points_exceeds_limit", result.stdout)
+            self.assertIn("acceptance_scenario_not_in_group", result.stdout)
+            draft_batch = json.loads((
+                feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
+            ).read_text(encoding="utf-8"))
+            self.assertEqual(draft_batch["tasks"][0]["goal"], "")
+
+    def test_plan_writer_draft_requires_non_goals_for_ui_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            task["uiRequired"] = True
+            task["scope"]["pages"] = ["PAGE-001"]
+            task["uiRefs"] = {
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": [],
+                "frontendRoute": "spec-driven-ui",
+            }
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            self.assertEqual(_run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            ).returncode, 0)
+            detail = _draft_detail_body(task)
+            detail["nonGoals"] = []
+            detail_path = Path(tmp) / "detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("nonGoals_required_for_ui_or_api_task", result.stdout)
+
+    def test_plan_writer_draft_derives_workspace_root_pages_and_validation_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, module = _code_module(root)
+            task = _plan_task_body()
+            task["uiRequired"] = True
+            task["scope"]["pages"] = ["PAGE-001"]
+            task["uiRefs"] = {
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": [],
+                "frontendRoute": "spec-driven-ui",
+            }
+            task["nonGoals"] = ["no unrelated UI changes"]
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(module),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            detail = _draft_detail_body(task)
+            detail["scope"].pop("workspaceRoots", None)
+            detail["validationCommands"][0].pop("cwd", None)
+            detail_path = root / "detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            draft_batch = json.loads((
+                feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
+            ).read_text(encoding="utf-8"))
+            drafted = draft_batch["tasks"][0]
+            self.assertEqual(drafted["scope"]["workspaceRoots"], {"default": "backend/service"})
+            self.assertEqual(drafted["scope"]["pages"], ["PAGE-001"])
+            self.assertEqual(drafted["validationCommands"][0]["cwd"], "backend/service")
+
     def test_plan_writer_rejects_direct_batch_contract_edits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
@@ -835,12 +1218,21 @@ class JsonWriterTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         contract = payload["contract"]
         self.assertEqual(contract["taskTemplate"], "skills/autodev/autodev-plan/templates/task-input.json")
+        self.assertEqual(contract["taskTemplateStatus"], "deprecated_legacy_import_only")
         self.assertEqual(contract["taskInputExample"]["id"], "T001")
         self.assertIn("validationCommands", contract["taskInputExample"])
         self.assertIn("matrixExceptionExample", contract["taskInputExample"])
         self.assertEqual(contract["exampleOnlyTaskFields"], ["matrixExceptionExample"])
         self.assertNotIn("status", contract["taskInputExample"])
-        self.assertEqual(contract["recommendedInputMode"], "task-directory")
+        self.assertEqual(contract["recommendedInputMode"], "draft-batch")
+        self.assertEqual(
+            contract["taskDetailTemplate"],
+            "skills/autodev/autodev-plan/templates/task-detail-input.json",
+        )
+        self.assertNotIn("id", contract["taskDetailInputExample"]["acceptanceCriteria"][0])
+        self.assertNotIn("id", contract["taskDetailInputExample"]["validationCommands"][0])
+        self.assertIn("task-directory", contract["deprecatedInputModes"])
+        self.assertIn("import-task-directory", contract["legacyTaskDirectoryMigration"])
         self.assertEqual(
             contract["taskGroupTemplate"],
             "skills/autodev/autodev-plan/templates/task-groups.json",
@@ -907,14 +1299,10 @@ class JsonWriterTests(unittest.TestCase):
             contract["taskSetFinalization"],
             {
                 "groupingPreflightCommand": "preflight-task-groups --group-file <file>",
-                "command": (
-                    "materialize-task-set --group-file <file> --task-dir <directory> "
-                    "--code-workspace <path>"
-                ),
-                "preflightCommand": (
-                    "preflight-task-set --group-file <file> --task-dir <directory> "
-                    "--code-workspace <path>"
-                ),
+                "prepareCommand": "prepare-task-draft --group-file <file> --code-workspace <path>",
+                "detailCommand": "set-draft-task-detail --task-id <id> --body-stdin",
+                "preflightCommand": "preflight-task-draft",
+                "command": "finalize-task-draft",
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
                     "set-batch-validation-mode",
@@ -926,6 +1314,11 @@ class JsonWriterTests(unittest.TestCase):
             },
         )
         self.assertTrue(contract["collectingRepairs"]["atomic"])
+        self.assertTrue(contract["collectingRepairs"]["preserveUnchangedTaskDetails"])
+        self.assertFalse(contract["draftWorkflow"]["standaloneTaskFiles"])
+        self.assertEqual(contract["draftWorkflow"]["groupLock"], "groupingDigest")
+        self.assertIn("specRefs", contract["groupOwnedTaskFields"])
+        self.assertIn("validationCommands", contract["requiredTaskDetailFields"])
         self.assertEqual(contract["formalArtifacts"]["integrityField"], "taskSetDigest")
         self.assertFalse(contract["formalArtifacts"]["directEditingSupported"])
         self.assertIn("--batch-id", contract["forbiddenArguments"])

@@ -241,9 +241,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-input.json`。先把最终候选分组表写入 `${FEATURE_DIR}/.tmp/plan_writer/task-groups.json` 并通过分组预检；通过后才允许在 `${FEATURE_DIR}/.tmp/plan_writer/tasks/` 生成完整、连续编号的 `T001.json`、`T002.json`...。先生成全部 backend task，再生成全部 frontend task；正式产物尚不存在。两个模板分别是分组输入和 task 输入的唯一直接示例；根 `plan.json` 和 `plans/Bxxx/plan.json` 都是 writer-owned generated artifacts，调用方不得手写、套用或读取静态输出模板。
+生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先把最终候选分组表写入 `${FEATURE_DIR}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale` 的唯一事实源。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${FEATURE_DIR}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
-每次 Plan 会话生成 task 文件前只执行一次以下只读命令，并以其 JSON 输出获取模板路径、合法 validation kind、必填字段、AC 覆盖规则、整组预检和自动分组规则；后续 task 复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
+每次 Plan 会话准备 Draft 前只执行一次以下只读命令，并以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流；后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" add-task-contract
@@ -257,39 +257,48 @@ writer 自动分组，调用方不指定 batch。`executionLane` 由 writer 根�
 python "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${feature}" --group-file "${FEATURE_DIR}/.tmp/plan_writer/task-groups.json"
 ```
 
-分组预检失败时只能修改候选分组，不得创建 `tasks/Txxx.json`。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先证明这些 SCN 共享同一用户动作、公开 seam 和自动化验证闭环，否则按业务闭环继续拆分。分组预检成功后冻结连续 Task ID 和分组字段，再生成完整 task 文件；task 的 `title/deps/uiRequired/specRefs/mergedScenarioRefs/apiIds/uiRefs.pageRefs/uiRefs.interactionRefs/uiRefs.visualSourceRefs/uiRefs.frontendRoute/splitRationale` 必须与已通过的分组契约一致。
+分组预检失败时只能修改候选分组，不得准备 Draft。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先在候选分组表证明共享验证闭环，确认这些 SCN 共享同一用户动作、公开 seam 和自动化验证边界，否则按业务闭环继续拆分。
 
-复杂 task 跨平台使用独立 UTF-8 JSON 文件。全部 task 文件完成后先运行只读整组预检：
-
-```bash
-python "${pluginPath}/hooks/plan_writer.py" preflight-task-set --feature "${feature}" --group-file "${FEATURE_DIR}/.tmp/plan_writer/task-groups.json" --task-dir "${FEATURE_DIR}/.tmp/plan_writer/tasks" --code-workspace "<BUSINESS_MODULE>"
-```
-
-预检会同时校验全部 task 的结构、粒度、DAG、backend/frontend 顺序、自动批次投影和完整 Scenario 覆盖，但不写正式产物。失败时只修正临时 task 文件和候选任务分组表；`missing_plan_scenario_coverage` 必须返回 Scenario 覆盖矩阵重新分组，不得把缺失 SCN 任意追加到已有 task。预检通过后一次性落盘：
+分组预检成功后立即创建并锁定 Draft Batch；`prepare-task-draft` 会保存 `groupingDigest`，投影全部 group-owned 字段和自动 Batch，不需要也不接受 task 目录：
 
 ```bash
-python "${pluginPath}/hooks/plan_writer.py" materialize-task-set --feature "${feature}" --group-file "${FEATURE_DIR}/.tmp/plan_writer/task-groups.json" --task-dir "${FEATURE_DIR}/.tmp/plan_writer/tasks" --code-workspace "<BUSINESS_MODULE>"
+python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feature}" --group-file "${FEATURE_DIR}/.tmp/plan_writer/task-groups.json" --code-workspace "<BUSINESS_MODULE>"
 ```
 
-该命令一次生成 finalized 根计划和全部 backend/frontend 批次；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；确认重跑整个 Plan 时才使用 `--force`。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
+按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id` 和 `scope.pages` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages，并在未显式提供 cwd 时使用 `scope.workspaceRoots`。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样：
 
-每个 task 文件进入整组预检前必须已经包含完整 `validationCommands`：`kind` 来自 contract 的 task validation kinds，只允许 `behavior_test`、`integration_test`、`e2e_test`、`static_check`；每条 AC 的 ID 都存在，required command 的 `covers` 并集覆盖全部 AC。**TASK 禁止配置 compile/build/typecheck/lint**，Maven `test` 必须带 `-Dtest=` 或 `-Dit.test=` 目标，禁止裸 `mvn test`。UI task 还必须确保 `scope.pages` 与 `uiRefs.pageRefs` 集合一致。不得通过 validator 失败来探索 schema，不得以反复试错、读取 writer 源码或搜索常量的方式学习调用协议。
+```bash
+python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
+```
+
+不得直接编辑 Draft 根或 Batch JSON。需要查看进度时只运行 `show-task-draft`；它只返回 ready/pending Task ID 和 Batch 摘要。若分组表在 Draft 创建后改变，所有 Draft 命令返回 `task_group_changed_after_draft_created`；只能运行 `rebuild-task-draft --group-file <file>`，writer 仅保留 group projection 完全未变的 ready task 详情，重置其余 task，禁止逐字段同步旧 task。
+
+全部 task ready 后运行一次 Draft 全局预检，再原子发布正式 Bundle：
+
+```bash
+python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${feature}"
+python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
+```
+
+全局预检只负责跨 task Scenario 覆盖、DAG、backend/frontend 顺序、Batch 投影和设计覆盖；单 task 内容错误必须已在 `set-draft-task-detail` 当场阻断。finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
+
+每个 task detail 必须包含完整 `validationCommands`：`kind` 只允许 `behavior_test`、`integration_test`、`e2e_test`、`static_check`；`covers` 可以省略（默认覆盖全部 AC）或使用从 1 开始的 AC 序号。**TASK 禁止配置 compile/build/typecheck/lint**，Maven `test` 必须带 `-Dtest=` 或 `-Dit.test=`，禁止裸 `mvn test`。不得通过 validator 失败来探索 schema。
 
 所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。writer 会按 task 的主 `specRefs` capability 和 execution lane 归组，每批最多 5 个任务；任何 batch 都不得混合 backend/frontend task。任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖、backend 依赖 frontend 和跨批环。不得直接整份写入 root/batch 正式 JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks`、缺少 `taskSetStatus` / `executionLane` / `batchValidationProfiles`、任一批次缺少 `batchValidation`，或使用旧 batch strategy 时不迁移、不兼容。validator 会返回 `batch_validation_contract_requires_rebuild`，必须清理并重跑完整 Plan。
 
-`templates/task-input.json` 提供完整的非 UI task 输入示例。`status`、`evidenceIds`、`completionEvidenceIds`、`latestPassEvidenceId` 和 `completionPolicy` 由 writer 设置或覆盖，调用方不得在输入中维护。`UI_CONTEXT.uiRequired=false` 时保持 `uiRequired:false` 且不写 `uiRefs`；`UI_CONTEXT.uiRequired=true` 时仅在 `uiRequired:true` 时添加 `uiRefs`，其中必须包含 `pageRefs`、`interactionRefs`、`visualSourceRefs` 和 `frontendRoute`，并保证 `scope.pages` 与 `uiRefs.pageRefs` 一致。批次和项目级验证命令都使用 `argv`、`cwd`、`kind`、`required` 结构，通过对应 writer 接口写入；项目级验证只用于确有必要的跨 backend/frontend 或跨批次检查。不得先自由生成再依赖 validator 反复修字段。
+`templates/task-detail-input.json` 是唯一 task detail 示例，不包含 ID、标题、依赖、specRefs、apiIds、uiRefs 或 splitRationale。`status`、Evidence 字段和 completionPolicy 也由 writer 设置。`UI_CONTEXT.uiRequired` 与全部 UI refs 只写在分组表并由 writer 投影；task detail 的 scope 不写 pages。批次和项目级验证命令使用结构化 argv/cwd/kind/required；项目级验证只用于确有必要的跨 backend/frontend 或跨批次检查。不得先自由生成再依赖 validator 反复修字段。
 
-任务需要 `splitRationale` 时必须在首次生成对应 `Txxx.json` 时写入。不要等预检失败后才机械补说明；必须先在候选分组表证明共享验证闭环，再把同一说明写入 task 文件。
+任务需要 `splitRationale` 时必须在候选分组表首次定稿时写入；Draft task 由 writer 原样投影，不允许 detail 再维护。
 
-`preflight-task-set` 和 `materialize-task-set` 都会先重验 `task-groups.json`，再确认完整 task 没有改变已冻结分组，最后执行相同的内容结构、矩阵验证、DAG、批次投影与覆盖校验；粒度错误处理见下方「与 writer 的衔接」。
+旧 `preflight-task-set --task-dir` / `materialize-task-set --task-dir` 只保留兼容；已有未完成的旧 task 目录可一次性运行 `import-task-directory --group-file <file> --task-dir <directory> --code-workspace <path>` 导入 Draft，新 Plan 不得使用旧流程。
 
 `plan.json` 语义规则：
 
 - Task ID 使用 `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID。
-- 根 `plan.json` 必须包含 `taskSetStatus`、`taskSetDigest`、`batchPolicy.maxTasks=5`、`batchPolicy.strategy=spec_capability_execution_lane_topological`、`batches[]`、`activeBatchId`、`nextBatchId` 和 feature `status`。`materialize-task-set` 只写完整覆盖且 `finalized` 的任务集。每个 batch 索引和对应 batch plan 必须记录相同的 `executionLane`，引用唯一 `plans/Bxxx/plan.json`，task ID 在全部批次内全局唯一。`taskSetDigest` 保护 writer 生成的根索引和 task 契约；直接编辑正式 JSON 会被后续读取拒绝。
+- 根 `plan.json` 必须包含 `taskSetStatus`、`taskSetDigest`、`batchPolicy.maxTasks=5`、`batchPolicy.strategy=spec_capability_execution_lane_topological`、`batches[]`、`activeBatchId`、`nextBatchId` 和 feature `status`。`finalize-task-draft` 只写完整覆盖且 `finalized` 的任务集。每个 batch 索引和对应 batch plan 必须记录相同的 `executionLane`，引用唯一 `plans/Bxxx/plan.json`，task ID 在全部批次内全局唯一。`taskSetDigest` 保护 writer 生成的根索引和 task 契约；直接编辑正式 JSON 会被后续读取拒绝。
 - 只使用当前结构，不写 `version` / `taskDetailVersion` 字段。每个 batch task 必须写 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`completionPolicy: all_required_validations_pass`；发现带版本字段或根含 tasks 的 plan 时，不迁移、不兼容，清理后重新执行 Plan。
-- `goal` 写用户可观察结果；`scope.modules/entrypoints/pages/dataObjects` 写执行范围。`scope.workspaceRoots` 必须声明 Code workspace 相对 Git 根的位置：单仓库使用 `{"default":"后台服务/.../模块"}`，Git 根本身使用 `{"default":"."}`；多仓库按 `repoId` 分别声明。`scope.paths` 只写相对该 workspace 的路径，多仓库使用 `repoId:relative/path`，禁止再次包含 workspace 前缀。`validationCommands[].cwd` 保持 Git 根相对路径，必须等于或位于对应 `workspaceRoots` 之下。路径必须覆盖预计修改的全部分层和验证资产，涉及 domain、test、resources、迁移或配置时逐项列入，不得只列 controller/adapter 后依赖 runner 自动扩大范围。`preflight-task-set` / `materialize-task-set` 必须传同一个 `--code-workspace`，writer 会在落盘前验证 workspace、cwd 和 Maven/Gradle/Node 等 manifest；`implementationPoints` 写 2-6 条可执行要点。每条 `acceptanceCriteria` 必须是 `{id,text,scenarioRefs}`，ID 使用 `AC-T001-01`，其中 `scenarioRefs` 必须已出现在 task `specRefs`，避免 AC 与 SCN 双轨漂移。
-- `validationCommands` 必须结构化为 `{id,argv,cwd,kind,required,covers}`；ID 使用 `VAL-T001-01`，`argv` 不经 shell，`cwd` 为仓库内相对路径，`kind` 只能是 `behavior_test`、`integration_test`、`e2e_test`、`static_check`。所有 AC 必须由 required 命令覆盖。多命令任务按 `all_required_validations_pass` 完成，并保留全部成功/失败尝试历史。
+- `goal` 写用户可观察结果；`scope.modules/entrypoints/dataObjects` 写执行范围，`scope.pages` 由 writer 从分组 UI refs 投影。`scope.workspaceRoots` 必须声明 Code workspace 相对 Git 根的位置：单仓库使用 `{"default":"后台服务/.../模块"}`，Git 根本身使用 `{"default":"."}`；多仓库按 `repoId` 分别声明。`scope.paths` 只写相对该 workspace 的路径，多仓库使用 `repoId:relative/path`，禁止再次包含 workspace 前缀；涉及 domain、test、resources、迁移或配置时必须覆盖对应范围。`validationCommands[].cwd` 保持 Git 根相对路径，必须等于或位于对应 `workspaceRoots` 之下；省略时 writer 自动使用 workspace root。`prepare-task-draft` 保存 code workspace 并在每次详情写入时校验 manifest；`implementationPoints` 写 2-6 条。task detail 的 acceptance criterion 只写 `{text,scenarioRefs}`，scenarioRefs 必须属于分组 specRefs，ID 由 writer 生成。
+- task detail 的 `validationCommands` 写 `{argv,cwd?,kind,required,covers?}`；AC/VAL ID 由 writer 生成，`covers` 省略时覆盖全部 AC，也可写从 1 开始的 AC 序号。`argv` 不经 shell，`kind` 只能是 `behavior_test`、`integration_test`、`e2e_test`、`static_check`。所有 AC 必须由 required 命令覆盖。
 - 多仓库任务为每条 validation/project command 增加 `repo`，值为对应 Git 根目录名；未涉及多仓库时省略。多仓库路径在 evidence 中使用 `repoId:relative/path`，但所有 evidence 文件仍属于 feature 产物目录。
 - 顶层 `batchValidationProfiles` 按 lane 选择 `mode=task_covered|commands`。同一 Maven workspace 中每个 TASK 都有 required 的定向 `mvn test/verify/package/install` 时使用 `task_covered`，writer 自动投影 `coverageCommandIds` 且 commands 为空；存在 TASK 未覆盖的编译、构建、类型检查或 lint 风险时使用 `commands`，至少配置一条有增量价值的 required 命令。不得仅因 Batch 结束重复执行已被 TASK Maven 生命周期覆盖的 `mvn compile`。
 - 顶层 `projectValidationCommands` 使用 `PROJECT-VAL-001` 等 ID，只承载可选的跨 lane、跨批次或全项目集成检查，`kind` 仅允许 `integration_test/e2e_test/static_check`；按 `argv + cwd + repo` 归一化后不得与任何 batch profile 命令重复，也不能替代 TASK 的 AC 覆盖。没有这种检查时保持空数组，Code 可直接进入完成门禁。
@@ -341,7 +350,7 @@ UI 任务投影规则：
    - 不同用户动作、不同公开入口/API/页面/job/CLI、不同可观察结果、不同页面、不同数据模型/状态流/迁移风险、不同验证命令，默认拆成不同 task。
    - 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
    - 基础能力可以单独成 task，但必须服务于后续业务 vertical slice，并且 `validationCommands` 必须验证下游公开 seam。若只能验证工具类、DTO、Mapper 或内部函数，则并入第一个消费它的业务 task。
-   - 生成 `Txxx.json` 前，必须先输出最终候选任务分组表，不得边生成正式输入文件边重新拆分。草稿阶段可用标题或 `C001` 标识候选项；进入 writer 前的最终表必须把 taskId 一次性重排为连续 `T001`、`T002`、`T003`...，禁止 `T003a`、`T004b1` 这类临时编号。
+   - 准备 Draft Batch 前，必须先输出最终候选任务分组表，不得边补 task detail 边重新拆分。草稿阶段可用标题或 `C001` 标识候选项；进入 writer 前的最终表必须把 taskId 一次性重排为连续 `T001`、`T002`、`T003`...，禁止 `T003a`、`T004b1` 这类临时编号。
    - 最终分组表列：`候选 Task / 完整 specRefs 清单 / SCN 数 / API 数 / Page 数 / UIX 数 / implementationPoints 数 / validationCommands / deps / 拆分结论 / splitRationale 草稿`。
    - 先按 `用户动作 + 公开 seam + 自动化验证边界` 分组，再为每组分配候选 task；不得先按 capability、同一页面或同一模块合并。
    - `SCN 数` 必须从完整路径级 `specRefs` 展开后计数；不同 spec 文件里的同号 `SCN-001` 必须按不同场景分别计数。最终表不得用 `SCN-007~SCN-016`、`SCN-001SCN-003(menu)` 这类范围或拼接文本作为计数依据；每个 SCN 必须单独写为 `specs/...#SCN-xxx`。
@@ -350,7 +359,7 @@ UI 任务投影规则：
 4. 只有共享同一验证闭环时才允许合并
    - 多个 SCN/API/PAGE/UIX 合并到一个 task，必须同时满足：同一触发动作、同一公开 seam、同一验证命令或同一组响应/页面断言、拆开会复制同一验证闭环、没有超过硬上限。
    - 任务超过软阈值时默认必须继续拆分；`splitRationale` 只允许用于已经按公开入口、用户动作、可观察结果和验证命令拆到最小闭环后，仍因同一请求、同一权限/状态矩阵或同一响应断言无法独立验证的少数例外。
-   - `task-input.json` 显式保留空 `mergedScenarioRefs` 字段；普通 task 保持空数组。单个 task 覆盖 SCN 数 `>5` 且 `<=12` 时，先用 `add-task-contract.taskGroupMatrixExceptionExample` 填写候选 group，再用 `add-task-contract.matrixExceptionExample` 覆盖 task 模板中的 `specRefs`、`mergedScenarioRefs`、`acceptanceCriteria`、`validationCommands` 与 `splitRationale`：其集合必须与 `specRefs` 中所有完整路径级 SCN 完全相同；必须恰有一个 required 的 `behavior_test`、`integration_test` 或 `e2e_test` 覆盖全部 AC；`splitRationale` 必须至少点名 3 个相关 SCN，并说明共享请求/响应、权限或状态矩阵与同一验证闭环。`mergedScenarioRefs` 不得写范围、短引用或拼接 anchor。
+   - 普通 group 的 `mergedScenarioRefs` 保持空数组。单个 task 覆盖 SCN 数 `>5` 且 `<=12` 时，使用 `add-task-contract.taskGroupMatrixExceptionExample` 在候选 group 填写 `specRefs`、`mergedScenarioRefs` 与 `splitRationale`；writer 将三者原样投影到 Draft task。对应 detail 必须恰有一个 required 的 `behavior_test`、`integration_test` 或 `e2e_test` 覆盖全部 AC；`splitRationale` 至少点名 3 个相关 SCN，并说明共享请求/响应、权限或状态矩阵与同一验证闭环。
    - API/PAGE/UIX 超软阈值但未超硬上限时仍可用 `splitRationale`；单个 task 覆盖 `apiIds` 数 `>2`、`uiRefs.pageRefs` 数 `>1`、`uiRefs.interactionRefs` 数 `>3` 时，必须点名相关 API/PAGE/UIX ID，并说明为什么无法独立验证。
    - 标记 `可合并(附 splitRationale)` 前必须逐项确认：不同触发动作已拆开；不同公开 seam 已拆开；不同可观察结果已拆开；不同 validation command 已拆开。任一项未满足时不得标记可合并。
    - 合格示例：`SCN-001、SCN-004、SCN-007 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。`
@@ -362,9 +371,9 @@ UI 任务投影规则：
 
 5. 写入前两档计数预检
    - `拆分结论=通过` 的候选 task 必须满足：SCN `<=5`、apiIds `<=2`、pageRefs `<=1`、interactionRefs `<=3`、`implementationPoints` 为 2-6 条、至少 1 条可独立运行的 `validationCommands`。
-   - `拆分结论=可合并(附 splitRationale)` 的候选 task 必须满足：未超过硬上限（SCN `<=12`、apiIds `<=3`、pageRefs `<=2`、interactionRefs `<=4`）；至少一个维度超过软阈值；分组表已有完整 `splitRationale` 草稿；SCN 超软阈值时还必须有完整 `mergedScenarioRefs`；对应 task JSON 原样带上这些字段。
-   - 最终候选任务分组表不得包含 `拆分结论=需拆分` 的行；`拆分结论=需拆分`、超过任何硬上限、缺少 `splitRationale` 草稿或未完成最小闭环确认的候选 task，不得进入 task 输入目录。
-   - `task-groups.json` 的分组预检通过仅表示分组、粒度和覆盖关系合规；`preflight-task-set` 仍可能因内容结构校验失败（占位 ID、缺字段、UI_CONTEXT 不一致等）被拒绝。内容结构失败时修字段，不得再改变冻结的 task 分组。
+   - `拆分结论=可合并(附 splitRationale)` 的候选 task 必须满足：未超过硬上限（SCN `<=12`、apiIds `<=3`、pageRefs `<=2`、interactionRefs `<=4`）；至少一个维度超过软阈值；分组表已有完整 `splitRationale`；SCN 超软阈值时还必须有完整 `mergedScenarioRefs`。
+   - 最终候选任务分组表不得包含 `拆分结论=需拆分` 的行；超过硬上限、缺少 rationale 或未完成最小闭环确认的候选 task，不得进入 Draft。
+   - `task-groups.json` 的分组预检通过后由 `prepare-task-draft` 锁定 digest；内容结构错误由 `set-draft-task-detail` 当场拒绝。若确需改变分组，运行 `rebuild-task-draft`，不得手工同步 Draft Batch。
    - 一个候选组只允许一次拆分：若拆分后仍是同一公开 seam 和同一自动化验证边界，且 SCN `<=12`，使用矩阵例外；若超过 `12` 或存在多个独立用户动作、seam 或验证边界，停止并报告规格/规划冲突。不得输出 `v2`、`v3` 等重复分组表，也不得生成 `T012a`、`T012b1` 等临时 taskId。
 
 6. 写入前预检每个 task 内容
@@ -387,17 +396,19 @@ UI 任务投影规则：
 
 与 writer 的衔接：
 
-- 最终候选任务分组表必须先覆盖全部 Scenario，并按 `backend`、`frontend` 两个区段排序。必须先生成所有 backend task 文件，再生成所有 frontend task 文件；不得写完恰好 5 个 backend task 后把 B001 当成 Plan 完成，也不得把剩余 task 延迟到 Code 阶段生成。
-- 必须按 DAG 拓扑序编号：当前 task 的 `deps` 只能指向更早的 task。若预检报告依赖错误，修候选表和文件顺序，不要改粒度或补 `splitRationale`。
-- 在创建任何 `Txxx.json` 前必须运行一次 `preflight-task-groups`；只有成功后才能生成 task 文件。只在全部 `Txxx.json` 完成后运行一次 `preflight-task-set`。不得用 `stage_gate` 或完整 task 内容失败探索拆分；不得在每写 5 个 task 后提前 materialize。
+- 最终候选任务分组表必须覆盖全部 Scenario，并按 `backend`、`frontend` 两个区段排序。writer 一次创建全部 Draft Batch；不得把剩余 task 延迟到 Code 阶段。
+- 必须按 DAG 拓扑序编号：当前 task 的 `deps` 只能指向更早的 task。若分组预检报告依赖错误，只修候选表，不补 task detail。
+- `preflight-task-groups` 成功后只运行一次 `prepare-task-draft`。不得创建独立 `Txxx.json`，不得在每写 5 个 task 后提前 finalize。
 - 不得通过完整 task 的内容校验失败来探索如何拆分；拆分必须在覆盖矩阵、候选任务分组表和 `preflight-task-groups` 阶段完成。
 - 如果预检返回 `oversized_plan_task_must_split`，回分组表把该候选标为 `需拆分` 并重新切分；如果返回 `missing_plan_task_split_rationale` 或 `invalid_plan_task_split_rationale`，回分组表核对完整路径 SCN、验证闭环和 rationale，不反复试错正式产物。
 - 如果预检返回 `missing_plan_scenario_coverage`，必须回 Scenario 覆盖矩阵定位遗漏并重新分组。不得把缺失 Scenario 添加到标题相近、已有 API 或同一页面的 task，除非重新证明它们共享同一公开 seam 和验证闭环。
-- 预检成功后运行一次 `materialize-task-set`。该命令会重新执行同一组校验，写入全部批次并直接将 `taskSetStatus` 设为 `finalized`；未完整通过时正式根计划和批次均不存在。
-- `replace-task` / `remove-task` 只用于 collecting 状态的中断计划修复，并会重新计算全部批次；`remove-task` 在仍有依赖方时拒绝。对 finalized 计划不原地解封、不直接编辑 JSON，清理或使用明确的 `materialize-task-set --force` 重跑完整 Plan。
+- 每个 `set-draft-task-detail` 成功后该 task 才进入 ready；失败不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
+- 分组 digest 变化时运行 `rebuild-task-draft`；writer 保留分组投影未变化的 ready task，重置其余 task。不得修改 group 后继续向旧 Draft 写详情。
+- 全部 task ready 后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。
+- 对 finalized 计划不原地解封、不直接编辑 JSON；需要重做时清理正式产物并显式重建 Draft。
 - `validate --structure` 会复核已生成 bundle 的结构、完整性摘要和 Task 粒度，但不替代完整 Scenario 覆盖预检或 `dev.plan` 阶段门禁。
 
-materialize 成功后，必须为每个实际使用的 lane 选择一种批次收口模式。同一 Maven workspace 中每个 TASK 都有 required 的定向 Maven 生命周期测试，且没有多模块、特殊 profile、代码生成、打包或构建配置风险时，使用 `task_covered`：
+finalize 成功后，必须为每个实际使用的 lane 选择一种批次收口模式。同一 Maven workspace 中每个 TASK 都有 required 的定向 Maven 生命周期测试，且没有多模块、特殊 profile、代码生成、打包或构建配置风险时，使用 `task_covered`：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" set-batch-validation-mode --feature "${feature}" --lane backend --mode task_covered
@@ -435,8 +446,8 @@ python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --featu
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘，且从 `plan.json` 投影生成
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json` 文件已写入磁盘，`flowBlocking=false`
 - [ ] 根 `plan.json` 与各批次计划共同作为任务 DAG 机器事实源，状态投影一致
-- [ ] 每个实际使用的 backend/frontend lane 都配置了至少一条 required 批次验证命令；TASK 中没有 compile/build/typecheck/lint
-- [ ] 每个任务符合 `templates/task-input.json` 与 validator，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；writer 初始化状态为 `todo`，初始 evidence 为空
+- [ ] 每个实际使用的 backend/frontend lane 都已选择 `task_covered` 或 `commands`：前者完整覆盖该 lane 的 TASK 强验证，后者至少包含一条有增量价值的 required 批次命令；TASK 中没有 compile/build/typecheck/lint
+- [ ] 每个任务已通过 `set-draft-task-detail`，详情符合 `templates/task-detail-input.json`，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；writer 初始化状态为 `todo`，初始 evidence 为空
 - [ ] 冒烟案例符合 `templates/smoke_test_plan.json` 与 validator；每条 smoke 绑定真实 `taskId` 与单个 `SCN-xxx`，包含公开 seam、单个 vertical slice 与 `mockPolicy.externalOnly=true`；没有冒烟案例时写明 `skipReason`
 - [ ] 任务按用户可观察 vertical slice 拆分，不按代码层或文件层机械拆分；超过 15 个 task 时已检查是否误拆到代码步骤，没有为了压低任务数合并独立场景
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx），验证命令带具体目标而非裸 mvn test/npm test；但没有写成逐行代码、逐文件微任务或 commit 步骤

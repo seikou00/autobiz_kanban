@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
@@ -88,6 +89,49 @@ TASK_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-input.
 TASK_TEMPLATE_PATH = ROOT / TASK_TEMPLATE_RELATIVE_PATH
 TASK_GROUP_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-groups.json"
 TASK_GROUP_TEMPLATE_PATH = ROOT / TASK_GROUP_TEMPLATE_RELATIVE_PATH
+TASK_DETAIL_TEMPLATE_RELATIVE_PATH = "skills/autodev/autodev-plan/templates/task-detail-input.json"
+TASK_DETAIL_TEMPLATE_PATH = ROOT / TASK_DETAIL_TEMPLATE_RELATIVE_PATH
+DRAFT_RELATIVE_DIR = ".tmp/plan_writer/draft"
+DRAFT_LOCK_FILE = "lock.json"
+DRAFT_PLAN_FILE = "plan.json"
+DRAFT_TRANSACTION_FILE = ".draft-write-transaction.json"
+DRAFT_GROUP_OWNED_FIELDS = {
+    "id",
+    "title",
+    "deps",
+    "uiRequired",
+    "specRefs",
+    "mergedScenarioRefs",
+    "apiIds",
+    "uiRefs",
+    "splitRationale",
+    "validationBoundary",
+}
+DRAFT_DETAIL_FIELDS = {
+    "goal",
+    "scope",
+    "implementationPoints",
+    "acceptanceCriteria",
+    "nonGoals",
+    "designRefs",
+    "dataIds",
+    "decisionIds",
+    "validationCommands",
+    "expectedFiles",
+    "blockers",
+}
+DRAFT_REQUIRED_DETAIL_FIELDS = {
+    "goal",
+    "scope",
+    "implementationPoints",
+    "acceptanceCriteria",
+    "nonGoals",
+    "designRefs",
+    "dataIds",
+    "decisionIds",
+    "validationCommands",
+}
+DRAFT_SCOPE_FIELDS = {"modules", "entrypoints", "dataObjects", "workspaceRoots", "paths"}
 TASK_DETAIL_PATCH_FIELDS = {"goal", "implementationPoints", "acceptanceCriteria", "nonGoals", "blockers"}
 TASK_DETAIL_FORBIDDEN_FIELDS = {
     "id",
@@ -156,6 +200,26 @@ def _plan_write_transaction_path(workspace: Path, feature: str) -> Path:
     return artifact_path(workspace, feature, PLAN_WRITE_TRANSACTION_FILE)
 
 
+def _draft_dir(workspace: Path, feature: str) -> Path:
+    return artifact_path(workspace, feature, DRAFT_RELATIVE_DIR)
+
+
+def _draft_lock_path(workspace: Path, feature: str) -> Path:
+    return _draft_dir(workspace, feature) / DRAFT_LOCK_FILE
+
+
+def _draft_plan_path(workspace: Path, feature: str) -> Path:
+    return _draft_dir(workspace, feature) / DRAFT_PLAN_FILE
+
+
+def _draft_batch_plan_path(workspace: Path, feature: str, batch_id: str) -> Path:
+    return _draft_dir(workspace, feature) / "plans" / batch_id / "plan.json"
+
+
+def _draft_transaction_path(workspace: Path, feature: str) -> Path:
+    return _draft_dir(workspace, feature) / DRAFT_TRANSACTION_FILE
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -173,11 +237,13 @@ def _recover_plan_write_transaction_unlocked(workspace: Path, feature: str) -> W
         return fail("plan_write_transaction_invalid", "transaction must be an object", path=transaction_path)
     root = transaction.get("root")
     batch_plans = transaction.get("batchPlans")
+    plan_markdown = transaction.get("planMarkdown")
     if (
         transaction.get("version") != 1
         or transaction.get("featureId") != feature
         or not isinstance(root, dict)
         or not isinstance(batch_plans, dict)
+        or (plan_markdown is not None and not isinstance(plan_markdown, str))
         or not batch_plans
         or any(
             not isinstance(batch_id, str) or not isinstance(batch, dict)
@@ -194,6 +260,8 @@ def _recover_plan_write_transaction_unlocked(workspace: Path, feature: str) -> W
     for batch_id, batch in batch_plans.items():
         changed = atomic_write_json(batch_plan_path(feature_dir, batch_id), batch) or changed
     changed = atomic_write_json(_path(workspace, feature), root) or changed
+    if isinstance(plan_markdown, str):
+        changed = write_text(_md_path(workspace, feature), plan_markdown) or changed
     transaction_path.unlink(missing_ok=True)
     return WriterResult(ok=True, path=_path(workspace, feature), changed=changed)
 
@@ -222,6 +290,16 @@ def _task_group_example() -> dict[str, Any]:
         raise RuntimeError(f"task_group_template_unavailable:{exc}") from exc
     if not isinstance(value, dict):
         raise RuntimeError("task_group_template_must_be_object")
+    return value
+
+
+def _task_detail_input_example() -> dict[str, Any]:
+    try:
+        value = json.loads(TASK_DETAIL_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"task_detail_template_unavailable:{exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("task_detail_template_must_be_object")
     return value
 
 
@@ -787,7 +865,14 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     return root, projected
 
 
-def _write(workspace: Path, feature: str, data: dict[str, Any], *, allow_empty: bool = False) -> WriterResult:
+def _write(
+    workspace: Path,
+    feature: str,
+    data: dict[str, Any],
+    *,
+    allow_empty: bool = False,
+    plan_markdown: str | None = None,
+) -> WriterResult:
     path = _path(workspace, feature)
     errors = _task_set_validation_errors(data, allow_empty=allow_empty)
     if errors:
@@ -802,21 +887,395 @@ def _write(workspace: Path, feature: str, data: dict[str, Any], *, allow_empty: 
     transaction_path: Path | None = None
     if batch_plans:
         transaction_path = _plan_write_transaction_path(workspace, feature)
-        atomic_write_json(
-            transaction_path,
-            {
-                "version": 1,
-                "featureId": feature,
-                "root": root,
-                "batchPlans": batch_plans,
-            },
-        )
+        transaction = {
+            "version": 1,
+            "featureId": feature,
+            "root": root,
+            "batchPlans": batch_plans,
+        }
+        if plan_markdown is not None:
+            transaction["planMarkdown"] = plan_markdown
+        atomic_write_json(transaction_path, transaction)
     for batch_id, batch in batch_plans.items():
         changed = atomic_write_json(batch_plan_path(feature_dir, batch_id), batch) or changed
     changed = atomic_write_json(path, root) or changed
+    if plan_markdown is not None:
+        changed = write_text(_md_path(workspace, feature), plan_markdown) or changed
     if transaction_path is not None:
         transaction_path.unlink(missing_ok=True)
     return WriterResult(ok=True, path=path, changed=changed)
+
+
+def _replay_draft_transaction(workspace: Path, feature: str) -> bool:
+    transaction_path = _draft_transaction_path(workspace, feature)
+    if not transaction_path.is_file():
+        return False
+    transaction = load_json(transaction_path)
+    if not isinstance(transaction, dict):
+        raise PlanWriterInputError("draft_write_transaction_invalid", "transaction must be an object")
+    root = transaction.get("root")
+    batch_plans = transaction.get("batchPlans")
+    lock = transaction.get("lock")
+    if (
+        transaction.get("version") != 1
+        or transaction.get("featureId") != feature
+        or not isinstance(root, dict)
+        or not isinstance(batch_plans, dict)
+        or not isinstance(lock, dict)
+        or any(not isinstance(key, str) or not isinstance(value, dict) for key, value in batch_plans.items())
+    ):
+        raise PlanWriterInputError("draft_write_transaction_invalid", "transaction shape mismatch")
+    if root.get("taskSetDigest") != task_set_digest(root, batch_plans):
+        raise PlanWriterInputError("draft_write_transaction_invalid", "taskSetDigest mismatch")
+
+    referenced = set(batch_plans)
+    plans_dir = _draft_dir(workspace, feature) / "plans"
+    for batch_id, batch in batch_plans.items():
+        atomic_write_json(_draft_batch_plan_path(workspace, feature, batch_id), batch)
+    atomic_write_json(_draft_plan_path(workspace, feature), root)
+    atomic_write_json(_draft_lock_path(workspace, feature), lock)
+    if plans_dir.is_dir():
+        for old_plan in plans_dir.glob("B*/plan.json"):
+            if old_plan.parent.name not in referenced:
+                old_plan.unlink(missing_ok=True)
+                try:
+                    old_plan.parent.rmdir()
+                except OSError:
+                    pass
+    transaction_path.unlink(missing_ok=True)
+    return True
+
+
+def _write_draft_bundle(
+    workspace: Path,
+    feature: str,
+    data: dict[str, Any],
+    lock: dict[str, Any],
+) -> WriterResult:
+    root, batch_plans = _project_batches(data)
+    root["taskSetStatus"] = "collecting"
+    root["taskSetDigest"] = task_set_digest(root, batch_plans)
+    lock = {**lock, "updatedAt": _utc_now()}
+    atomic_write_json(
+        _draft_transaction_path(workspace, feature),
+        {
+            "version": 1,
+            "featureId": feature,
+            "root": root,
+            "batchPlans": batch_plans,
+            "lock": lock,
+        },
+    )
+    changed = _replay_draft_transaction(workspace, feature)
+    return WriterResult(ok=True, path=_draft_plan_path(workspace, feature), changed=changed)
+
+
+def _load_draft_bundle(workspace: Path, feature: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    _replay_draft_transaction(workspace, feature)
+    if not _draft_lock_path(workspace, feature).is_file() or not _draft_plan_path(workspace, feature).is_file():
+        raise PlanWriterInputError("task_draft_missing")
+    lock = load_json(_draft_lock_path(workspace, feature))
+    root = load_json(_draft_plan_path(workspace, feature))
+    if not isinstance(lock, dict) or not isinstance(root, dict):
+        raise PlanWriterInputError("task_draft_missing")
+    if lock.get("version") != 1 or lock.get("featureId") != feature:
+        raise PlanWriterInputError("task_draft_lock_invalid")
+    batch_plans: dict[str, dict[str, Any]] = {}
+    tasks: list[dict[str, Any]] = []
+    assignments: dict[str, str] = {}
+    for entry in root.get("batches", []):
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        batch_id = str(entry["id"])
+        batch_path = _draft_batch_plan_path(workspace, feature, batch_id)
+        if not batch_path.is_file():
+            raise PlanWriterInputError("task_draft_batch_missing", batch_id)
+        batch = load_json(batch_path)
+        if not isinstance(batch, dict):
+            raise PlanWriterInputError("task_draft_batch_missing", batch_id)
+        batch_plans[batch_id] = batch
+        for task in batch.get("tasks", []):
+            if isinstance(task, dict):
+                tasks.append(task)
+                if isinstance(task.get("id"), str):
+                    assignments[str(task["id"])] = batch_id
+    if root.get("taskSetDigest") != task_set_digest(root, batch_plans):
+        raise PlanWriterInputError("task_draft_digest_mismatch", "draft artifacts were modified outside plan_writer")
+    data = dict(root)
+    data["tasks"] = tasks
+    data["_batchAssignments"] = assignments
+    data["_batchPlans"] = batch_plans
+    return lock, data
+
+
+def _draft_group_data(lock: dict[str, Any], feature: str) -> dict[str, Any]:
+    group_file = lock.get("groupFile")
+    if not isinstance(group_file, str) or not group_file:
+        raise PlanWriterInputError("task_draft_group_file_missing")
+    data = _load_task_group_file(Path(group_file), feature)
+    actual = _task_group_digest(data)
+    expected = lock.get("groupingDigest")
+    if actual != expected:
+        raise PlanWriterInputError(
+            "task_group_changed_after_draft_created",
+            f"expected={expected};actual={actual};run=rebuild-task-draft",
+        )
+    return data
+
+
+def _draft_workspace_roots(code_workspaces: list[str] | None) -> dict[str, str]:
+    contexts = _code_workspace_contexts(code_workspaces)
+    if not contexts:
+        return {}
+    if len(contexts) == 1:
+        return {"default": str(contexts[0]["workspaceRoot"])}
+    return {str(item["repo"]): str(item["workspaceRoot"]) for item in contexts}
+
+
+def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str]) -> dict[str, Any]:
+    task_id = str(group.get("id"))
+    ui_required = group.get("uiRequired") is True
+    ui_refs = copy.deepcopy(group.get("uiRefs")) if isinstance(group.get("uiRefs"), dict) else None
+    task: dict[str, Any] = {
+        "id": task_id,
+        "title": group.get("title"),
+        "goal": "",
+        "status": "todo",
+        "deps": copy.deepcopy(group.get("deps", [])),
+        "uiRequired": ui_required,
+        "scope": {
+            "modules": [],
+            "entrypoints": [],
+            "pages": copy.deepcopy(ui_refs.get("pageRefs", [])) if ui_refs else [],
+            "dataObjects": [],
+            "workspaceRoots": copy.deepcopy(workspace_roots),
+            "paths": [],
+        },
+        "implementationPoints": [],
+        "acceptanceCriteria": [],
+        "nonGoals": [],
+        "specRefs": copy.deepcopy(group.get("specRefs", [])),
+        "mergedScenarioRefs": copy.deepcopy(group.get("mergedScenarioRefs", [])),
+        "designRefs": [],
+        "apiIds": copy.deepcopy(group.get("apiIds", [])),
+        "dataIds": [],
+        "decisionIds": [],
+        "validationCommands": [],
+        "expectedFiles": [],
+        "evidenceIds": [],
+        "completionPolicy": "all_required_validations_pass",
+        "completionEvidenceIds": [],
+        "latestPassEvidenceId": None,
+        "blockers": [],
+    }
+    if ui_refs is not None:
+        task["uiRefs"] = ui_refs
+    rationale = group.get("splitRationale")
+    if isinstance(rationale, str) and rationale.strip():
+        task["splitRationale"] = rationale
+    return task
+
+
+def _draft_detail_body(args: argparse.Namespace) -> dict[str, Any]:
+    if args.body_file:
+        return read_object_file(args.body_file)
+    if args.body_stdin:
+        return read_object_stdin()
+    if args.body_json:
+        value = parse_json_value(args.body_json)
+        if not isinstance(value, dict):
+            raise PlanWriterInputError("draft_task_detail_must_be_object")
+        return value
+    raise PlanWriterInputError("draft_task_detail_input_missing")
+
+
+def _draft_default_command_cwd(scope: dict[str, Any], command: dict[str, Any]) -> str:
+    workspace_roots = scope.get("workspaceRoots")
+    if not isinstance(workspace_roots, dict) or not workspace_roots:
+        return "."
+    default = workspace_roots.get("default")
+    if isinstance(default, str) and default:
+        return default
+    repo = command.get("repo")
+    value = workspace_roots.get(repo) if isinstance(repo, str) else None
+    if isinstance(value, str) and value:
+        return value
+    raise PlanWriterInputError("draft_validation_repo_required_for_multi_workspace")
+
+
+def _normalize_draft_task_detail(task: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(task.get("id"))
+    group_owned = sorted(set(detail) & DRAFT_GROUP_OWNED_FIELDS)
+    if group_owned:
+        raise PlanWriterInputError(
+            "draft_task_group_owned_field_forbidden",
+            f"task={task_id};fields={','.join(group_owned)}",
+        )
+    unknown = sorted(set(detail) - DRAFT_DETAIL_FIELDS)
+    if unknown:
+        raise PlanWriterInputError(
+            "draft_task_detail_field_unknown",
+            f"task={task_id};fields={','.join(unknown)}",
+        )
+    missing = sorted(field for field in DRAFT_REQUIRED_DETAIL_FIELDS if field not in detail)
+    if missing:
+        raise PlanWriterInputError(
+            "draft_task_detail_fields_missing",
+            f"task={task_id};fields={','.join(missing)}",
+        )
+
+    candidate = copy.deepcopy(task)
+    scope = detail.get("scope")
+    if not isinstance(scope, dict):
+        raise PlanWriterInputError("draft_task_scope_must_be_object", f"task={task_id}")
+    scope_unknown = sorted(set(scope) - DRAFT_SCOPE_FIELDS)
+    if scope_unknown:
+        reason = "draft_scope_pages_group_owned" if scope_unknown == ["pages"] else "draft_task_scope_field_unknown"
+        raise PlanWriterInputError(reason, f"task={task_id};fields={','.join(scope_unknown)}")
+    previous_scope = candidate.get("scope") if isinstance(candidate.get("scope"), dict) else {}
+    candidate["scope"] = {
+        "modules": copy.deepcopy(scope.get("modules", [])),
+        "entrypoints": copy.deepcopy(scope.get("entrypoints", [])),
+        "pages": copy.deepcopy(candidate.get("uiRefs", {}).get("pageRefs", []))
+        if isinstance(candidate.get("uiRefs"), dict)
+        else [],
+        "dataObjects": copy.deepcopy(scope.get("dataObjects", [])),
+        "workspaceRoots": copy.deepcopy(scope.get("workspaceRoots", previous_scope.get("workspaceRoots", {}))),
+        "paths": copy.deepcopy(scope.get("paths", [])),
+    }
+    if not candidate["scope"]["workspaceRoots"]:
+        candidate["scope"].pop("workspaceRoots")
+
+    raw_criteria = detail.get("acceptanceCriteria")
+    if not isinstance(raw_criteria, list):
+        raise PlanWriterInputError("draft_acceptance_criteria_must_be_array", f"task={task_id}")
+    criteria: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_criteria, start=1):
+        if not isinstance(raw, dict):
+            raise PlanWriterInputError("draft_acceptance_criterion_must_be_object", f"task={task_id};index={index}")
+        if "id" in raw:
+            raise PlanWriterInputError("draft_acceptance_id_writer_owned", f"task={task_id};index={index}")
+        unknown_fields = sorted(set(raw) - {"text", "scenarioRefs"})
+        if unknown_fields:
+            raise PlanWriterInputError(
+                "draft_acceptance_field_unknown",
+                f"task={task_id};index={index};fields={','.join(unknown_fields)}",
+            )
+        criteria.append({
+            "id": f"AC-{task_id}-{index:02d}",
+            "text": raw.get("text"),
+            "scenarioRefs": copy.deepcopy(raw.get("scenarioRefs", [])),
+        })
+    candidate["acceptanceCriteria"] = criteria
+    acceptance_ids = [item["id"] for item in criteria]
+
+    raw_commands = detail.get("validationCommands")
+    if not isinstance(raw_commands, list):
+        raise PlanWriterInputError("draft_validation_commands_must_be_array", f"task={task_id}")
+    commands: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_commands, start=1):
+        if not isinstance(raw, dict):
+            raise PlanWriterInputError("draft_validation_command_must_be_object", f"task={task_id};index={index}")
+        if "id" in raw:
+            raise PlanWriterInputError("draft_validation_id_writer_owned", f"task={task_id};index={index}")
+        unknown_fields = sorted(set(raw) - {"argv", "cwd", "kind", "required", "covers", "repo"})
+        if unknown_fields:
+            raise PlanWriterInputError(
+                "draft_validation_field_unknown",
+                f"task={task_id};index={index};fields={','.join(unknown_fields)}",
+            )
+        command = copy.deepcopy(raw)
+        command["id"] = f"VAL-{task_id}-{index:02d}"
+        command.setdefault("kind", "behavior_test")
+        command.setdefault("required", True)
+        raw_covers = command.get("covers")
+        if raw_covers is None:
+            command["covers"] = list(acceptance_ids)
+        elif isinstance(raw_covers, list):
+            covers: list[str] = []
+            for value in raw_covers:
+                if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= len(acceptance_ids):
+                    covers.append(acceptance_ids[value - 1])
+                elif isinstance(value, str) and value in acceptance_ids:
+                    covers.append(value)
+                else:
+                    raise PlanWriterInputError(
+                        "draft_validation_cover_invalid",
+                        f"task={task_id};command={index};cover={value}",
+                    )
+            command["covers"] = covers
+        else:
+            raise PlanWriterInputError("draft_validation_covers_must_be_array", f"task={task_id};index={index}")
+        command.setdefault("cwd", _draft_default_command_cwd(candidate["scope"], command))
+        commands.append(command)
+    candidate["validationCommands"] = commands
+
+    for field in (
+        "goal",
+        "implementationPoints",
+        "nonGoals",
+        "designRefs",
+        "dataIds",
+        "decisionIds",
+        "expectedFiles",
+        "blockers",
+    ):
+        candidate[field] = copy.deepcopy(detail.get(field, [] if field != "goal" else ""))
+    candidate["status"] = "todo"
+    candidate["evidenceIds"] = []
+    candidate["completionPolicy"] = "all_required_validations_pass"
+    candidate["completionEvidenceIds"] = []
+    candidate["latestPassEvidenceId"] = None
+    return candidate
+
+
+def _draft_acceptance_scope_errors(task: dict[str, Any]) -> list[dict[str, str]]:
+    task_id = str(task.get("id", "task"))
+    allowed = scenario_refs_from_spec_refs(
+        [item for item in task.get("specRefs", []) if isinstance(item, str)]
+    )
+    errors: list[dict[str, str]] = []
+    for index, criterion in enumerate(task.get("acceptanceCriteria", [])):
+        if not isinstance(criterion, dict):
+            continue
+        raw_refs = criterion.get("scenarioRefs")
+        if not isinstance(raw_refs, list):
+            continue
+        actual = scenario_refs_from_spec_refs([item for item in raw_refs if isinstance(item, str)])
+        if len(actual) != len(raw_refs):
+            errors.append({
+                "reason": "draft_acceptance_scenario_ref_invalid",
+                "detail": f"task={task_id};criterion={index + 1}",
+            })
+            continue
+        outside = sorted(actual - allowed)
+        if outside:
+            errors.append({
+                "reason": "acceptance_scenario_not_in_group",
+                "detail": f"task={task_id};criterion={index + 1};refs={','.join(outside)}",
+            })
+    return errors
+
+
+def _draft_task_validation_errors(
+    feature: str,
+    task: dict[str, Any],
+    code_workspaces: list[str] | None,
+) -> list[dict[str, str]]:
+    task_for_structure = copy.deepcopy(task)
+    task_for_structure["deps"] = []
+    raw_errors = validate_task_collection(feature, [task_for_structure], require_initial_status=True)
+    translated = {
+        f"{task.get('id')}.nonGoals_missing": f"{task.get('id')}.nonGoals_required_for_ui_or_api_task",
+        f"{task.get('id')}.implementationPoints_too_many": (
+            f"{task.get('id')}.implementation_points_exceeds_limit"
+        ),
+    }
+    errors = [{"reason": translated.get(reason, reason)} for reason in raw_errors]
+    errors.extend(_draft_acceptance_scope_errors(task))
+    errors.extend(validate_plan_task_granularity_item(task, task_id=str(task.get("id", "task"))))
+    errors.extend(_code_workspace_preflight_errors({"tasks": [task]}, code_workspaces))
+    return errors
 
 
 def _tasks(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1374,6 +1833,298 @@ def _task_set_summary(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _draft_summary(lock: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    task_ids = [str(task.get("id")) for task in _tasks(data)]
+    ready = {
+        item for item in lock.get("readyTaskIds", []) if isinstance(item, str)
+    }
+    summary = _task_set_summary(data)
+    return {
+        "status": lock.get("status"),
+        "groupingDigest": lock.get("groupingDigest"),
+        "taskCount": len(task_ids),
+        "readyTaskIds": [task_id for task_id in task_ids if task_id in ready],
+        "pendingTaskIds": [task_id for task_id in task_ids if task_id not in ready],
+        "batches": summary["batches"],
+    }
+
+
+def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    if _path(workspace, feature).is_file():
+        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
+    if _draft_lock_path(workspace, feature).is_file() and not args.force:
+        return render_result(fail(
+            "task_draft_already_exists",
+            "use rebuild-task-draft or pass --force to replace the draft",
+            path=_draft_plan_path(workspace, feature),
+        ))
+    group_file = Path(args.group_file).expanduser().resolve()
+    group_data = _load_task_group_file(group_file, feature)
+    errors = _task_group_preflight_errors(_path(workspace, feature).parent, group_data)
+    if errors:
+        return render_result(WriterResult(ok=False, path=group_file, errors=errors))
+    workspace_roots = _draft_workspace_roots(args.code_workspace)
+    data = _initial(feature)
+    data["tasks"] = [
+        _draft_task_skeleton(group, workspace_roots)
+        for group in _task_groups(group_data)
+    ]
+    data["taskSetStatus"] = "collecting"
+    data["_batchAssignments"] = {}
+    data["_batchPlans"] = {}
+    code_workspaces = [
+        str(Path(value).expanduser().resolve()) for value in args.code_workspace or []
+    ]
+    lock = {
+        "version": 1,
+        "featureId": feature,
+        "groupFile": str(group_file),
+        "groupingDigest": _task_group_digest(group_data),
+        "status": "collecting",
+        "readyTaskIds": [],
+        "codeWorkspaces": code_workspaces,
+        "createdAt": _utc_now(),
+    }
+    result = _write_draft_bundle(workspace, feature, data, lock)
+    return render_result(with_result_data(result, draft=_draft_summary(lock, data)))
+
+
+def _cmd_import_task_directory(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    if _path(workspace, feature).is_file():
+        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
+    if _draft_lock_path(workspace, feature).is_file() and not args.force:
+        return render_result(fail("task_draft_already_exists", path=_draft_plan_path(workspace, feature)))
+    group_file = Path(args.group_file).expanduser().resolve()
+    group_data = _load_task_group_file(group_file, feature)
+    data = _load_task_directory(Path(args.task_dir).expanduser().resolve(), feature)
+    errors = _task_set_preflight_errors(
+        _path(workspace, feature).parent,
+        data,
+        group_data,
+        args.code_workspace,
+    )
+    if errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=errors,
+        ))
+    code_workspaces = [
+        str(Path(value).expanduser().resolve()) for value in args.code_workspace or []
+    ]
+    task_ids = [str(task.get("id")) for task in _tasks(data)]
+    lock = {
+        "version": 1,
+        "featureId": feature,
+        "groupFile": str(group_file),
+        "groupingDigest": _task_group_digest(group_data),
+        "status": "ready",
+        "readyTaskIds": task_ids,
+        "codeWorkspaces": code_workspaces,
+        "createdAt": _utc_now(),
+        "importedFromTaskDirectory": str(Path(args.task_dir).expanduser().resolve()),
+    }
+    result = _write_draft_bundle(workspace, feature, data, lock)
+    return render_result(with_result_data(result, importedTaskIds=task_ids, draft=_draft_summary(lock, data)))
+
+
+def _cmd_set_draft_task_detail(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    lock, data = _load_draft_bundle(workspace, feature)
+    if lock.get("status") == "finalized":
+        return render_result(fail("task_draft_finalized", path=_draft_plan_path(workspace, feature)))
+    _draft_group_data(lock, feature)
+    task = _find_task(data, args.task_id)
+    candidate = _normalize_draft_task_detail(task, _draft_detail_body(args))
+    code_workspaces = [
+        item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)
+    ]
+    errors = _draft_task_validation_errors(feature, candidate, code_workspaces)
+    if errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=errors,
+        ))
+    task_items = _tasks(data)
+    task_items[task_items.index(task)] = candidate
+    ready = {
+        item for item in lock.get("readyTaskIds", []) if isinstance(item, str)
+    }
+    ready.add(args.task_id)
+    ordered_ids = [str(item.get("id")) for item in task_items]
+    lock["readyTaskIds"] = [task_id for task_id in ordered_ids if task_id in ready]
+    lock["status"] = "ready" if len(ready) == len(task_items) else "collecting"
+    result = _write_draft_bundle(workspace, feature, data, lock)
+    return render_result(with_result_data(
+        result,
+        taskId=args.task_id,
+        taskStatus="ready",
+        draft=_draft_summary(lock, data),
+    ))
+
+
+def _draft_preflight(
+    workspace: Path,
+    feature: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, str]]]:
+    lock, data = _load_draft_bundle(workspace, feature)
+    group_data = _draft_group_data(lock, feature)
+    task_ids = [str(task.get("id")) for task in _tasks(data)]
+    ready = {item for item in lock.get("readyTaskIds", []) if isinstance(item, str)}
+    pending = [task_id for task_id in task_ids if task_id not in ready]
+    if pending:
+        return lock, data, group_data, [{
+            "reason": "draft_task_not_ready",
+            "detail": f"taskIds={','.join(pending)}",
+        }]
+    code_workspaces = [
+        item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)
+    ]
+    return lock, data, group_data, _task_set_preflight_errors(
+        _path(workspace, feature).parent,
+        data,
+        group_data,
+        code_workspaces,
+    )
+
+
+def _cmd_preflight_task_draft(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    lock, data, _, errors = _draft_preflight(workspace, feature)
+    return render_result(WriterResult(
+        ok=not errors,
+        path=_draft_plan_path(workspace, feature),
+        errors=errors,
+        data={"draft": _draft_summary(lock, data)} if not errors else None,
+    ))
+
+
+def _cmd_show_task_draft(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    lock, data = _load_draft_bundle(workspace, feature)
+    _draft_group_data(lock, feature)
+    return render_result(WriterResult(
+        ok=True,
+        path=_draft_plan_path(workspace, feature),
+        data={"draft": _draft_summary(lock, data)},
+    ))
+
+
+def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    if _path(workspace, feature).is_file():
+        return render_result(fail("formal_plan_already_exists", path=_path(workspace, feature)))
+    old_lock, old_data = _load_draft_bundle(workspace, feature)
+    group_file = Path(args.group_file).expanduser().resolve()
+    group_data = _load_task_group_file(group_file, feature)
+    errors = _task_group_preflight_errors(_path(workspace, feature).parent, group_data)
+    if errors:
+        return render_result(WriterResult(ok=False, path=group_file, errors=errors))
+    code_workspaces = (
+        [str(Path(value).expanduser().resolve()) for value in args.code_workspace]
+        if args.code_workspace
+        else [item for item in old_lock.get("codeWorkspaces", []) if isinstance(item, str)]
+    )
+    old_code_workspaces = [
+        item for item in old_lock.get("codeWorkspaces", []) if isinstance(item, str)
+    ]
+    workspace_contract_changed = code_workspaces != old_code_workspaces
+    workspace_roots = _draft_workspace_roots(code_workspaces)
+    old_tasks = {
+        str(task.get("id")): task for task in _tasks(old_data) if isinstance(task.get("id"), str)
+    }
+    old_ready = {
+        item for item in old_lock.get("readyTaskIds", []) if isinstance(item, str)
+    }
+    tasks: list[dict[str, Any]] = []
+    preserved: list[str] = []
+    reset: list[str] = []
+    for group in _task_groups(group_data):
+        task_id = str(group.get("id"))
+        old_task = old_tasks.get(task_id)
+        if (
+            not workspace_contract_changed
+            and old_task is not None
+            and _task_group_projection(old_task) == _task_group_projection(group)
+        ):
+            tasks.append(copy.deepcopy(old_task))
+            if task_id in old_ready:
+                preserved.append(task_id)
+        else:
+            tasks.append(_draft_task_skeleton(group, workspace_roots))
+            reset.append(task_id)
+    data = _initial(feature)
+    data["tasks"] = tasks
+    data["taskSetStatus"] = "collecting"
+    lock = {
+        "version": 1,
+        "featureId": feature,
+        "groupFile": str(group_file),
+        "groupingDigest": _task_group_digest(group_data),
+        "status": "ready" if len(preserved) == len(tasks) else "collecting",
+        "readyTaskIds": preserved,
+        "codeWorkspaces": code_workspaces,
+        "createdAt": old_lock.get("createdAt") or _utc_now(),
+        "rebuiltAt": _utc_now(),
+    }
+    result = _write_draft_bundle(workspace, feature, data, lock)
+    return render_result(with_result_data(
+        result,
+        preservedTaskIds=preserved,
+        resetTaskIds=reset,
+        draft=_draft_summary(lock, data),
+    ))
+
+
+def _cmd_finalize_task_draft(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
+    if existing:
+        return render_result(existing)
+    lock, data, _, errors = _draft_preflight(workspace, feature)
+    if lock.get("status") == "finalized":
+        return render_result(fail("task_draft_finalized", path=_draft_plan_path(workspace, feature)))
+    if errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=errors,
+        ))
+    data["taskSetStatus"] = "finalized"
+    result = _write(
+        workspace,
+        feature,
+        data,
+        plan_markdown=_render_plan_md(data),
+    )
+    if result.ok:
+        if args.force:
+            referenced = {
+                str(entry.get("id"))
+                for entry in data.get("batches", [])
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            }
+            plans_dir = _path(workspace, feature).parent / "plans"
+            for old_plan in plans_dir.glob("B*/plan.json") if plans_dir.is_dir() else []:
+                if old_plan.parent.name not in referenced:
+                    old_plan.unlink(missing_ok=True)
+                    try:
+                        old_plan.parent.rmdir()
+                    except OSError:
+                        pass
+        lock["status"] = "finalized"
+        lock["finalizedAt"] = _utc_now()
+        atomic_write_json(_draft_lock_path(workspace, feature), lock)
+    return render_result(with_result_data(
+        result,
+        materialized=_task_set_summary(data),
+        draft=_draft_summary(lock, data),
+    ))
+
+
 def _cmd_preflight_task_set(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     group_data = _load_task_group_file(Path(args.group_file).resolve(), feature)
@@ -1498,12 +2249,20 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                 "contract": {
                     "taskTemplate": TASK_TEMPLATE_RELATIVE_PATH,
                     "taskInputExample": _task_input_example(),
+                    "taskTemplateStatus": "deprecated_legacy_import_only",
+                    "taskDetailTemplate": TASK_DETAIL_TEMPLATE_RELATIVE_PATH,
+                    "taskDetailInputExample": _task_detail_input_example(),
                     "taskGroupTemplate": TASK_GROUP_TEMPLATE_RELATIVE_PATH,
                     "taskGroupInputExample": _task_group_example(),
                     "taskGroupMatrixExceptionExample": _task_group_matrix_exception_example(),
                     "taskGroupUiRequiredExample": _task_group_ui_required_example(),
-                    "recommendedInputMode": "task-directory",
-                    "supportedInputModes": ["task-directory", "body-file", "body-stdin", "task-json", "cli-fields"],
+                    "recommendedInputMode": "draft-batch",
+                    "supportedInputModes": ["draft-batch", "body-file", "body-stdin", "body-json"],
+                    "deprecatedInputModes": ["task-directory", "task-json", "cli-fields"],
+                    "legacyTaskDirectoryMigration": (
+                        "import-task-directory --group-file <file> --task-dir <directory> "
+                        "--code-workspace <path>"
+                    ),
                     "requiredTaskFields": [
                         "title",
                         "goal",
@@ -1514,6 +2273,13 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     ],
                     "exampleOnlyTaskFields": ["matrixExceptionExample"],
                     "exampleOnlyTaskGroupFields": ["matrixExceptionExample", "uiRequiredExample"],
+                    "groupOwnedTaskFields": sorted(DRAFT_GROUP_OWNED_FIELDS),
+                    "requiredTaskDetailFields": sorted(DRAFT_REQUIRED_DETAIL_FIELDS),
+                    "writerOwnedDetailFields": {
+                        "acceptanceCriteria": ["id"],
+                        "validationCommands": ["id"],
+                        "scope": ["pages"],
+                    },
                     "validationKinds": sorted(TASK_VALIDATION_KINDS),
                     "batchValidationKinds": sorted(BATCH_VALIDATION_KINDS),
                     "validationCoverage": {
@@ -1544,14 +2310,12 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     },
                     "taskSetFinalization": {
                         "groupingPreflightCommand": "preflight-task-groups --group-file <file>",
-                        "command": (
-                            "materialize-task-set --group-file <file> --task-dir <directory> "
-                            "--code-workspace <path>"
+                        "prepareCommand": (
+                            "prepare-task-draft --group-file <file> --code-workspace <path>"
                         ),
-                        "preflightCommand": (
-                            "preflight-task-set --group-file <file> --task-dir <directory> "
-                            "--code-workspace <path>"
-                        ),
+                        "detailCommand": "set-draft-task-detail --task-id <id> --body-stdin",
+                        "preflightCommand": "preflight-task-draft",
+                        "command": "finalize-task-draft",
                         "coverage": "all_path_qualified_spec_scenarios",
                         "requiredBefore": [
                             "set-batch-validation-mode",
@@ -1562,18 +2326,31 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         ],
                     },
                     "collectingRepairs": {
-                        "replace": "replace-task --task-id <id> --body-file <file>",
-                        "remove": "remove-task --task-id <id>",
+                        "replace": "set-draft-task-detail --task-id <id> --body-stdin",
+                        "rebuild": "rebuild-task-draft --group-file <file>",
                         "atomic": True,
+                        "preserveUnchangedTaskDetails": True,
                     },
                     "formalArtifacts": {
                         "root": "plan.json",
                         "batches": "plans/Bxxx/plan.json",
+                        "draftRoot": f"{DRAFT_RELATIVE_DIR}/plan.json",
+                        "draftBatches": f"{DRAFT_RELATIVE_DIR}/plans/Bxxx/plan.json",
+                        "draftLock": f"{DRAFT_RELATIVE_DIR}/lock.json",
                         "ownership": "writer-owned",
                         "integrityField": "taskSetDigest",
                         "directEditingSupported": False,
                     },
                     "forbiddenArguments": ["--batch-id", "--spec-refs", "--design-refs", "--decision-ids"],
+                    "draftWorkflow": {
+                        "groupLock": "groupingDigest",
+                        "groupChangeError": "task_group_changed_after_draft_created",
+                        "detailWriteMode": "validate_then_atomic_replace",
+                        "standaloneTaskFiles": False,
+                        "acceptanceAndValidationIds": "writer_generated",
+                        "scopePagesSource": "uiRefs.pageRefs",
+                        "defaultValidationCwdSource": "scope.workspaceRoots",
+                    },
                     "uiRule": "scope.pages_must_equal_uiRefs.pageRefs_when_uiRequired",
                     "conditionalFields": {
                         "uiRefs": {
@@ -2623,6 +3400,48 @@ def main(argv: list[str] | None = None) -> int:
     remove_task = sub.add_parser("remove-task")
     _task_selector(remove_task)
     remove_task.set_defaults(func=_cmd_remove_task)
+
+    prepare_task_draft = sub.add_parser("prepare-task-draft")
+    _common(prepare_task_draft)
+    prepare_task_draft.add_argument("--group-file", required=True)
+    prepare_task_draft.add_argument("--code-workspace", action="append")
+    prepare_task_draft.add_argument("--force", action="store_true")
+    prepare_task_draft.set_defaults(func=_cmd_prepare_task_draft)
+
+    import_task_directory = sub.add_parser("import-task-directory")
+    _common(import_task_directory)
+    import_task_directory.add_argument("--group-file", required=True)
+    import_task_directory.add_argument("--task-dir", required=True)
+    import_task_directory.add_argument("--code-workspace", action="append")
+    import_task_directory.add_argument("--force", action="store_true")
+    import_task_directory.set_defaults(func=_cmd_import_task_directory)
+
+    draft_detail = sub.add_parser("set-draft-task-detail")
+    _task_selector(draft_detail)
+    draft_detail_input = draft_detail.add_mutually_exclusive_group(required=True)
+    draft_detail_input.add_argument("--body-file")
+    draft_detail_input.add_argument("--body-stdin", action="store_true")
+    draft_detail_input.add_argument("--body-json")
+    draft_detail.set_defaults(func=_cmd_set_draft_task_detail)
+
+    preflight_task_draft = sub.add_parser("preflight-task-draft")
+    _common(preflight_task_draft)
+    preflight_task_draft.set_defaults(func=_cmd_preflight_task_draft)
+
+    show_task_draft = sub.add_parser("show-task-draft")
+    _common(show_task_draft)
+    show_task_draft.set_defaults(func=_cmd_show_task_draft)
+
+    rebuild_task_draft = sub.add_parser("rebuild-task-draft")
+    _common(rebuild_task_draft)
+    rebuild_task_draft.add_argument("--group-file", required=True)
+    rebuild_task_draft.add_argument("--code-workspace", action="append")
+    rebuild_task_draft.set_defaults(func=_cmd_rebuild_task_draft)
+
+    finalize_task_draft = sub.add_parser("finalize-task-draft")
+    _common(finalize_task_draft)
+    finalize_task_draft.add_argument("--force", action="store_true")
+    finalize_task_draft.set_defaults(func=_cmd_finalize_task_draft)
 
     preflight_task_groups = sub.add_parser("preflight-task-groups")
     _common(preflight_task_groups)

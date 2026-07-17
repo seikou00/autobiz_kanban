@@ -424,6 +424,8 @@ cicd_done -> archived
 - 如果不涉及 HTTP/API，要写明 `x-auto-no-http-api: true`。
 - 如果不涉及数据库或持久化，要写明 `x-auto-no-sql: true`。
 - `PLAN.md` 应按业务闭环拆任务，不要拆成“新增 DTO”“修改 Controller”这类纯代码步骤。
+- Plan 先校验并锁定 `task-groups.json`，再由 writer 直接生成 Draft Batch；不再生成一套独立的 `.tmp/tasks/Txxx.json`。分组字段只维护一份，task 详情逐个写入 Draft，并在每次写入前立即校验。
+- 分组变化时使用 `rebuild-task-draft`，只保留分组投影未变化的 task 详情；全部 task ready 后通过 `preflight-task-draft` 和 `finalize-task-draft` 一次性发布正式计划。
 - 每个 TASK 只配置窄范围的行为、集成、E2E 或静态验证；Maven 测试必须指定测试目标。若同一 workspace 的 TASK 定向 Maven 生命周期已覆盖构建，Batch 使用 `task_covered` 自动收口；否则才配置有增量价值的编译、构建、类型检查或 lint 命令。
 - 项目级最终验证是可选项，只在确有跨前后端或跨批次检查时配置，不重复批次已经执行的编译命令。
 - 项目级最终验证只允许 integration/E2E/static check；命令、执行目录和仓库与 batch profile 相同时会被拒绝。
