@@ -1,6 +1,6 @@
 # autodev-plan 探索样例
 
-`/autodev-plan` explore 阶段的示范素材：ASCII 可视化模板 + 不同切入点的对话样例。按需查阅即可，核心探索姿态、结束门与约束仍在 `SKILL.md`。
+`/autodev-plan` explore 阶段的示范素材：ASCII 可视化模板 + 不同切入点的对话样例。按需查阅即可，核心探索姿态、结束条件与约束仍在 `SKILL.md`。
 
 ## 可视化模板
 
@@ -82,7 +82,7 @@
 用户：/autodev-plan --feature export-orders
       导出接口到底要不要支持异步
 
-你：[读取 proposal、specs、现有导出模块、已有 design.md/plan.json]
+你：[读取 proposal、specs、现有导出模块、已有 design.md/plan.md]
 
      当前 specs 只写了“用户可以导出订单”，没有说明数据量上限。
      代码里已有一个同步 CSV 导出，但超过 5 万行会超时。
@@ -92,7 +92,7 @@
      - 大数据量：异步任务 + 下载链接
      - 未确认：阈值、通知方式、文件保留时间
 
-     要不要按“先同步、标注异步为待确认风险”的方式生成 design.md 和 plan.json？
+     要不要按“先同步、标注异步为待确认风险”的方式生成 design.md 和 plan.md？
 ```
 
 **用户想要比较选项：**
@@ -119,5 +119,5 @@
      审计          易支持 ✓        需额外机制
      回滚          可记录 ✓        依赖发布流程
 
-     我倾向数据库方案，但会把字段、权限、审计作为待确认点进入 design.md/plan.json。
+     我倾向数据库方案，但会把字段、权限、审计作为待确认点进入 design.md/plan.md。
 ```

@@ -139,9 +139,9 @@
                   "extract": {
                     "degrade": "无 design 时基于现有代码模式细化方案，并记录设计基准缺失"
                   } },
-                { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
+                { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
                   "extract": {
-                    "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能只依赖 PLAN.md 推进详细设计"
+                    "degrade": "无 PLAN.md 时回到 /autodev-plan 重新生成，不能只依赖 design.md 推进详细设计"
                   } }
               ],
               "outputs": [

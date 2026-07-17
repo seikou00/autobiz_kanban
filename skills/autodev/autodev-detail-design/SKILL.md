@@ -22,11 +22,11 @@ version: v1.2.1702
 
 输出产物：
 
-- ${feature}/DETAIL_DESIGN.md
+- ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/DETAIL_DESIGN.md
 
 ## 准入与上下文
 
-确定 ${feature} 后，读取当前 Feature 快照判断是否已进入本动态节点：
+读取当前 Feature 快照判断是否已进入本动态节点：
 
 ```
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
@@ -38,7 +38,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled
 ```
 
-可查看动态节点契约：
+可查看动态节点缺失产物处理：
 
 ```
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --workflow-decision detail_design_before_code=enabled --plain
@@ -46,22 +46,22 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 
 读取输入：
 
-- 按读取proposal.md、specs/**/*.md、design.md、PLAN.md。
+- 按需读取proposal.md、specs/**/*.md、design.md、PLAN.md（如有）。
 - 与本 Feature 相关的现有业务代码、测试、配置和接口定义
 
-`required_inputs` 中任一产物缺失时停止并提示先完成对应上游阶段（本节点仅在标准链启用 detail_design 决策后插入，design.md/PLAN.md 均为必需）；本 skill 不补写上游产物。
+本 skill 不补写上游产物。
 
 ## 工作原则
 
 - **扎根代码现实。** 文件清单必须来自实际代码探索、PLAN.md 任务、design.md 决策和现有项目结构，不要凭空发明路径。
 - **比 PLAN 更具体，但仍不编码。** 可以写文件级改动说明、伪代码、流程图和调用链；不得直接改实现文件。
-- **保留不确定性。** 无法确认的文件路径、接口字段、权限、数据模型、状态流必须标为待确认，不要写成硬结论。
+- **保留不确定性。** 无法确认的文件路径、接口字段、权限、数据模型、状态流可以与用户确认，不要写成硬结论。
 - **面向读者。**DETAIL_DESIGN.md 是给用户和后续编码者读的，应清楚说明“为什么改这里、怎么改、怎么流转、怎么验证”。
-- **按动态节点推进流程。** 完成后必须调用 update_checkpoint.py 推进到 `detail_design_done`；若用户不需要详细设计，应在 `plan_done` 选择 skip 并直接进入 code，而不是进入本 skill。
+- **按动态节点推进流程。** 完成后必须调用 update_checkpoint.py 推进到 `detail_design_done`。
 
 ## 生成 DETAIL_DESIGN.md
 
-写入 ${feature}/DETAIL_DESIGN.md，建议结构如下：
+建议结构如下：
 
 ````
 # 详细设计: [Feature 名称]
@@ -140,8 +140,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --w
 ## 完成条件
 
 - `${feature}/DETAIL_DESIGN.md` 已写入。
-- 文件改动清单覆盖 `plan.json` 中所有待编码任务，或明确说明某任务无需文件改动。
-- 每个文件级改动都能追溯到 specs、design 或 plan.json。
+- 文件改动清单覆盖 `PLAN.md` 中所有待编码任务，或明确说明某任务无需文件改动。
+- 每个文件级改动都能追溯到 specs、design 或 PLAN.md。
 - 仍不确定的路径、字段、接口、权限、数据或状态流已标为待确认。
 - 已调用 `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_done`，且未修改业务代码。
 

@@ -53,10 +53,15 @@ class RequestUserInputProtocolTest(unittest.TestCase):
             "声称拥有 ≠ 提供",
             "信息实体",
             "暂停，拿到材料后继续",
+            "延后判定按语义不按字面",
+            "不存在「先假设 / 先按默认方案 / 先占位」后推进的出口",
+            "该出口已从选项闭集移除，不得以任何措辞重新引入",
             "消解自查",
             "禁止搬进裁定门",
         ):
             self.assertIn(required_rule, content)
+
+        self.assertNotIn("「以假设固化：<假设>」", content)
 
         protocol = PROTOCOL.read_text(encoding="utf-8")
         self.assertIn("逐条裁定环节禁止使用延后类预设选项", protocol)
