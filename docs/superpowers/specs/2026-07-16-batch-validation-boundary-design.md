@@ -49,7 +49,7 @@ Projected command IDs use `BATCH-B001-VAL-001` form so evidence remains unambigu
 
 Task `validationCommands` must not contain project-level command kinds (`compile`, `build`, `typecheck`, or `lint`). They continue to require behavior or integration coverage for every acceptance criterion. A compile-only task remains invalid.
 
-`projectValidationCommands` is optional. When present, it is reserved for checks that cross batch or frontend/backend boundaries and must not duplicate a batch profile command. When it is empty, all batch validations passing is sufficient to enter the final code-done gate.
+`projectValidationCommands` is optional. When present, it is reserved for integration, E2E, or static checks that cross batch or frontend/backend boundaries and must not duplicate a batch profile command by normalized `argv`, `cwd`, and repository. Compile/build/typecheck/lint remain batch-owned. When it is empty, all batch validations passing is sufficient to enter the final code-done gate.
 
 ### Batch state transition
 
@@ -84,6 +84,10 @@ If a changed path is shared or cannot be mapped unambiguously, revalidate all TA
 Revalidation evidence uses the normal TASK ID and `action = "validation"`, plus `attemptType = "batch_revalidation"`, `triggeredByBatchEvidenceIds`, and `supersedesEvidenceIds`. This keeps existing TASK completion checks while making the replacement chain explicit.
 
 A passing batch check that introduced remediation changes transitions to `revalidation_required`, not `passed`. After every affected TASK has new completion evidence, the runner executes the same batch run's complete command set once more. Only this final pass can set the batch to `passed`. A TASK revalidation that changes files makes the prior batch pass stale and follows the same loop. A TASK is invalidated only when its latest completion evidence predates the latest mutation affecting its scope, so an already revalidated TASK is not repeatedly reopened for the same repair.
+
+Batch attempts are crash-recoverable. The run publishes its active ID before executing commands, persists the attempt baseline, adopts evidence already appended for the same run/command, saves an `evidence_written` phase before plan mutation, and binds revalidation or terminal plan state idempotently. Multi-file plan projection writes publish a validated `.plan-write-transaction.json`; retry replays it before strict bundle validation and removes it only after every batch plan and the root projection are durable. Required command passes form the current pass pointer; optional command evidence remains append-only history but does not decide batch success.
+
+Successful TASK revalidation stores a runtime `completedRevalidation` pointer alongside the evidence fields. The final gate checks that triggering evidence is a passing validation from the owning batch, superseded evidence belongs to the same TASK, current completion evidence carries the exact linkage, and the ordering is trigger/superseded evidence before current completion before final batch pass.
 
 ### Code session and final checks
 

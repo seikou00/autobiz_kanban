@@ -38,6 +38,7 @@ from plan_json import (  # noqa: E402
     tasks,
     unfinished_tasks,
 )
+from task_run_integrity import task_run_integrity_error  # noqa: E402
 
 
 PASS_RESULTS = {"pass", "passed", "success", "ok", "PASS", "PASS_WITH_WARNINGS"}
@@ -302,6 +303,68 @@ def _check_completion(
         if feature_dir is not None:
             errors.extend(_check_task_run_state(feature_dir, task, completion_records))
 
+        completed_revalidation = task.get("completedRevalidation")
+        revalidation_records = [
+            record
+            for record in completion_records
+            if record.get("attemptType") == "batch_revalidation"
+        ]
+        if isinstance(completed_revalidation, dict):
+            expected_triggered = completed_revalidation.get("triggeredByBatchEvidenceIds")
+            expected_superseded = completed_revalidation.get("supersedesEvidenceIds")
+            expected_completion = completed_revalidation.get("completionEvidenceIds")
+            if completed_revalidation.get("attemptType") != "batch_revalidation":
+                errors.append(f"{task_id}.completed_revalidation_attempt_type_invalid")
+            if expected_completion != completion_ids:
+                errors.append(f"{task_id}.completed_revalidation_completion_pointer_mismatch")
+            if not isinstance(expected_triggered, list) or not expected_triggered:
+                errors.append(f"{task_id}.completed_revalidation_trigger_missing")
+                expected_triggered = []
+            if not isinstance(expected_superseded, list) or not expected_superseded:
+                errors.append(f"{task_id}.completed_revalidation_supersedes_missing")
+                expected_superseded = []
+            for record in completion_records:
+                evidence_id = str(record.get("evidenceId", ""))
+                if (
+                    record.get("attemptType") != "batch_revalidation"
+                    or record.get("triggeredByBatchEvidenceIds") != expected_triggered
+                    or record.get("supersedesEvidenceIds") != expected_superseded
+                ):
+                    errors.append(f"{task_id}.batch_revalidation_evidence_mismatch:{evidence_id}")
+            task_batch_map = plan.get("_bundleTaskBatches")
+            expected_batch_id = (
+                task_batch_map.get(task_id)
+                if isinstance(task_batch_map, dict)
+                else None
+            )
+            current_numbers = [_evidence_number(str(evidence_id)) for evidence_id in completion_ids]
+            for evidence_id in expected_triggered:
+                record = by_id.get(str(evidence_id))
+                if (
+                    not isinstance(record, dict)
+                    or record.get("action") != "batch_validation"
+                    or record.get("taskId") != "__batch__"
+                    or record.get("batchId") != expected_batch_id
+                    or not _validation_passed(record)
+                ):
+                    errors.append(f"{task_id}.batch_revalidation_trigger_invalid:{evidence_id}")
+                elif current_numbers and _evidence_number(str(evidence_id)) >= min(current_numbers):
+                    errors.append(f"{task_id}.batch_revalidation_trigger_not_older:{evidence_id}")
+            task_history = set(task.get("evidenceIds", [])) if isinstance(task.get("evidenceIds"), list) else set()
+            for evidence_id in expected_superseded:
+                record = by_id.get(str(evidence_id))
+                if (
+                    evidence_id not in task_history
+                    or not isinstance(record, dict)
+                    or record.get("taskId") != task_id
+                    or record.get("action") != "validation"
+                ):
+                    errors.append(f"{task_id}.batch_revalidation_superseded_invalid:{evidence_id}")
+                elif current_numbers and _evidence_number(str(evidence_id)) >= min(current_numbers):
+                    errors.append(f"{task_id}.batch_revalidation_superseded_not_older:{evidence_id}")
+        elif revalidation_records:
+            errors.append(f"{task_id}.completed_revalidation_pointer_missing")
+
         for command_id in sorted(required_command_ids - passed_command_ids):
             errors.append(f"{task_id}.missing_required_validation_pass:{command_id}")
         acceptance_ids = _task_acceptance_ids(task)
@@ -406,7 +469,12 @@ def _check_batch_completion(
                         errors.append(f"{batch_id}.batch_run_not_successful:{run_id}")
                     attempts = state.get("attempts")
                     latest_attempt = attempts[-1] if isinstance(attempts, list) and attempts else None
-                    if not isinstance(latest_attempt, dict) or latest_attempt.get("evidenceIds") != latest_ids:
+                    bound_attempt_ids = (
+                        latest_attempt.get("passingEvidenceIds", latest_attempt.get("evidenceIds"))
+                        if isinstance(latest_attempt, dict)
+                        else None
+                    )
+                    if bound_attempt_ids != latest_ids:
                         errors.append(f"{batch_id}.batch_run_evidence_not_bound:{run_id}")
     return errors
 
@@ -449,6 +517,9 @@ def _check_task_run_state(
         if not isinstance(state, dict):
             errors.append(f"{task_id}.invalid_task_run_state:{run_id}")
             continue
+        integrity_error = task_run_integrity_error(state)
+        if integrity_error is not None:
+            errors.append(f"{task_id}.{integrity_error}:{run_id}")
         if state.get("taskId") != task_id or state.get("runId") != run_id:
             errors.append(f"{task_id}.task_run_identity_mismatch:{run_id}")
         if state.get("status") != "done" or state.get("success") is not True:

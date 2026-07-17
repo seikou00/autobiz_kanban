@@ -206,9 +206,9 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "compile"],
+                        "argv": ["echo", "integration"],
                         "cwd": ".",
-                        "kind": "compile",
+                        "kind": "integration_test",
                         "required": True,
                     }
                 ],
@@ -364,6 +364,16 @@ def _run(
     )
 
 
+def _code_module(root: Path, *, with_pom: bool = True) -> tuple[Path, Path]:
+    repository = root / "code"
+    module = repository / "backend" / "service"
+    module.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+    if with_pom:
+        (module / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    return repository, module
+
+
 class JsonWriterTests(unittest.TestCase):
     def test_plan_writer_rejects_direct_batch_contract_edits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -506,6 +516,87 @@ class JsonWriterTests(unittest.TestCase):
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(root["taskSetStatus"], "finalized")
             self.assertEqual([item["executionLane"] for item in root["batches"]], ["backend", "frontend"])
+
+    def test_plan_writer_preflights_workspace_and_derives_batch_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, module = _code_module(root)
+            task_dir = root / "tasks"
+            task_dir.mkdir()
+            task = _plan_task_body()
+            task["scope"].update({
+                "workspaceRoots": {"default": "backend/service"},
+                "paths": ["src/main/java/example"],
+            })
+            task["validationCommands"][0].update({
+                "argv": ["mvn.cmd", "test", "-q"],
+                "cwd": "backend/service",
+            })
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+
+            missing_workspace = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+            )
+            self.assertNotEqual(missing_workspace.returncode, 0)
+            self.assertIn("code_workspace_preflight_required", missing_workspace.stdout)
+
+            preflight = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+                "--code-workspace", str(module),
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
+
+            materialized = _run(
+                "plan_writer.py", "materialize-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+                "--code-workspace", str(module),
+            )
+            self.assertEqual(materialized.returncode, 0, materialized.stdout + materialized.stderr)
+            batch_command = _run(
+                "plan_writer.py", "add-batch-validation-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend", "--command", "mvn.cmd compile -q",
+                "--kind", "compile", "--code-workspace", str(module),
+            )
+            self.assertEqual(batch_command.returncode, 0, batch_command.stdout + batch_command.stderr)
+            root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                root_plan["batchValidationProfiles"]["backend"]["commands"][0]["cwd"],
+                "backend/service",
+            )
+
+    def test_plan_writer_rejects_missing_validation_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, module = _code_module(root, with_pom=False)
+            task_dir = root / "tasks"
+            task_dir.mkdir()
+            task = _plan_task_body()
+            task["scope"].update({
+                "workspaceRoots": {"default": "backend/service"},
+                "paths": ["src/main/java/example"],
+            })
+            task["validationCommands"][0].update({
+                "argv": ["mvn.cmd", "test", "-q"],
+                "cwd": "backend/service",
+            })
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+
+            result = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+                "--code-workspace", str(module),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("validation_manifest_missing", result.stdout)
 
     def test_plan_writer_reports_required_split_before_task_content_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -703,13 +794,24 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["validationKinds"], sorted(TASK_VALIDATION_KINDS))
         self.assertEqual(contract["batchValidationKinds"], sorted(BATCH_VALIDATION_KINDS))
         self.assertEqual(
+            contract["projectValidationCommand"]["allowedKinds"],
+            ["e2e_test", "integration_test", "static_check"],
+        )
+        self.assertTrue(contract["projectValidationCommand"]["mustNotDuplicateBatchProfile"])
+        self.assertEqual(
             contract["batchValidationCommand"],
             {
-                "command": "add-batch-validation-command --lane <backend|frontend> --command <command>",
+                "command": (
+                    "add-batch-validation-command --lane <backend|frontend> --command <command> "
+                    "--code-workspace <path>"
+                ),
                 "requiredFields": ["argv", "cwd", "kind", "required"],
                 "requiredPerUsedLane": True,
+                "defaultCwd": "declared_workspace_root",
             },
         )
+        self.assertEqual(contract["workspaceContract"]["field"], "scope.workspaceRoots")
+        self.assertTrue(contract["workspaceContract"]["codeWorkspacePreflightRequired"])
         self.assertEqual(contract["batchAssignment"]["strategy"], BATCH_STRATEGY)
         self.assertEqual(contract["batchAssignment"]["maxTasks"], MAX_BATCH_TASKS)
         self.assertEqual(contract["batchAssignment"]["primaryCapabilitySource"], "first_spec_ref_file")
@@ -732,8 +834,14 @@ class JsonWriterTests(unittest.TestCase):
             contract["taskSetFinalization"],
             {
                 "groupingPreflightCommand": "preflight-task-groups --group-file <file>",
-                "command": "materialize-task-set --group-file <file> --task-dir <directory>",
-                "preflightCommand": "preflight-task-set --group-file <file> --task-dir <directory>",
+                "command": (
+                    "materialize-task-set --group-file <file> --task-dir <directory> "
+                    "--code-workspace <path>"
+                ),
+                "preflightCommand": (
+                    "preflight-task-set --group-file <file> --task-dir <directory> "
+                    "--code-workspace <path>"
+                ),
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
                     "add-batch-validation-command",
@@ -783,7 +891,11 @@ class JsonWriterTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["projectValidationCommand"],
-            {"requiredFields": ["id", "argv", "cwd", "kind", "required"]},
+            {
+                "requiredFields": ["id", "argv", "cwd", "kind", "required"],
+                "allowedKinds": ["e2e_test", "integration_test", "static_check"],
+                "mustNotDuplicateBatchProfile": True,
+            },
         )
         self.assertEqual(
             contract["writerOwnedGeneratedArtifacts"],

@@ -15,7 +15,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -50,6 +50,11 @@ BATCH_VALIDATION_KINDS = {
     "lint",
     "compile",
 }
+PROJECT_VALIDATION_KINDS = {
+    "integration_test",
+    "e2e_test",
+    "static_check",
+}
 VALIDATION_KINDS = TASK_VALIDATION_KINDS | BATCH_VALIDATION_KINDS
 MAX_BATCH_TASKS = 5
 BATCH_STRATEGY = "spec_capability_execution_lane_topological"
@@ -58,6 +63,7 @@ TASK_SET_STATUSES = {"collecting", "finalized"}
 FEATURE_STATUSES = {"todo", "in_progress", "awaiting_next_conversation", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
 BATCH_VALIDATION_STATUSES = {"pending", "running", "failed", "revalidation_required", "passed"}
+DEFAULT_WORKSPACE_ROOT = "default"
 
 TODO_STATUSES = {"todo", "pending", "not_started", "not-started", "待做", "未开始"}
 IN_PROGRESS_STATUSES = {"in_progress", "in-progress", "doing", "进行中"}
@@ -69,6 +75,7 @@ TASK_RUNTIME_FIELDS = {
     "completionEvidenceIds",
     "latestPassEvidenceId",
     "pendingRevalidation",
+    "completedRevalidation",
 }
 
 
@@ -112,6 +119,98 @@ def normalize_status(status: Any) -> str:
 
 def task_execution_lane(task: dict[str, Any]) -> str:
     return "frontend" if task.get("uiRequired") is True else "backend"
+
+
+def normalize_repository_relative_path(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw == ".":
+        return "."
+    slash_normalized = raw.replace("\\", "/")
+    posix_path = PurePosixPath(slash_normalized)
+    windows_path = PureWindowsPath(raw)
+    if (
+        not slash_normalized
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or ".." in posix_path.parts
+    ):
+        return None
+    normalized = slash_normalized.strip("/")
+    return posix_path.as_posix()
+
+
+def task_workspace_roots(task: dict[str, Any]) -> dict[str, str]:
+    scope = task.get("scope")
+    raw_roots = scope.get("workspaceRoots") if isinstance(scope, dict) else None
+    if not isinstance(raw_roots, dict):
+        return {}
+    roots: dict[str, str] = {}
+    for key, value in raw_roots.items():
+        normalized = normalize_repository_relative_path(value)
+        if isinstance(key, str) and normalized is not None:
+            roots[key] = normalized
+    return roots
+
+
+def repository_path_within_workspace(path: str, workspace_root: str) -> bool:
+    normalized_path = normalize_repository_relative_path(path)
+    normalized_root = normalize_repository_relative_path(workspace_root)
+    if normalized_path is None or normalized_root is None:
+        return False
+    if normalized_root == ".":
+        return True
+    return normalized_path == normalized_root or normalized_path.startswith(f"{normalized_root}/")
+
+
+def validation_command_manifest_names(command: dict[str, Any]) -> tuple[str, ...]:
+    argv = command.get("argv")
+    if not isinstance(argv, list) or not argv or not isinstance(argv[0], str):
+        return ()
+    executable = PureWindowsPath(argv[0]).name.lower()
+    if executable in {"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"}:
+        return ("pom.xml",)
+    if executable in {"gradle", "gradle.bat", "gradlew", "gradlew.bat"}:
+        return ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
+    if executable in {"npm", "npm.cmd", "npx", "npx.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"}:
+        return ("package.json",)
+    if executable == "cargo" or executable == "cargo.exe":
+        return ("Cargo.toml",)
+    if executable == "go" or executable == "go.exe":
+        return ("go.mod",)
+    return ()
+
+
+def _workspace_root_for_command(
+    command: dict[str, Any],
+    workspace_roots: dict[str, str],
+) -> tuple[str | None, str | None]:
+    if DEFAULT_WORKSPACE_ROOT in workspace_roots:
+        return DEFAULT_WORKSPACE_ROOT, workspace_roots[DEFAULT_WORKSPACE_ROOT]
+    repository = command.get("repo")
+    if not isinstance(repository, str):
+        return None, None
+    return repository, workspace_roots.get(repository)
+
+
+def _validate_command_workspace_root(
+    errors: list[str],
+    command: Any,
+    *,
+    context: str,
+    workspace_roots: dict[str, str],
+) -> None:
+    if not isinstance(command, dict) or not workspace_roots:
+        return
+    key, workspace_root = _workspace_root_for_command(command, workspace_roots)
+    if workspace_root is None:
+        errors.append(f"{context}.workspace_root_missing:{key or 'repo'}")
+        return
+    cwd = command.get("cwd")
+    if isinstance(cwd, str) and not repository_path_within_workspace(cwd, workspace_root):
+        errors.append(f"{context}.cwd_outside_workspace_root:{workspace_root}")
 
 
 def task_contract_sha256(task: dict[str, Any]) -> str:
@@ -515,6 +614,23 @@ def validate_batch_plan_data(
     if data.get("completedTaskCount") != completed_count:
         errors.append(f"{batch_id}.completedTaskCount_mismatch")
     _validate_batch_validation(errors, data, str(batch_id))
+    workspace_root_sets = [
+        task_workspace_roots(item)
+        for item in batch_tasks
+        if task_workspace_roots(item)
+    ]
+    workspace_roots = workspace_root_sets[0] if workspace_root_sets else {}
+    if any(item != workspace_roots for item in workspace_root_sets[1:]):
+        errors.append(f"{batch_id}.mixed_task_workspace_roots")
+    validation = data.get("batchValidation")
+    commands = validation.get("commands") if isinstance(validation, dict) else []
+    for index, command in enumerate(commands if isinstance(commands, list) else []):
+        _validate_command_workspace_root(
+            errors,
+            command,
+            context=f"{batch_id}.batchValidation.commands[{index}]",
+            workspace_roots=workspace_roots,
+        )
     _validate_string_list(errors, data, str(batch_id), "completionEvidenceIds", required=False, item_re=EVIDENCE_ID_RE)
     for field in ("startedAt", "completedAt"):
         value = data.get(field)
@@ -690,10 +806,8 @@ def _validate_batch_profiles(
     used_lanes: set[str],
 ) -> None:
     profiles = data.get("batchValidationProfiles")
-    if profiles is None and not require_initial_status:
-        return
     if not isinstance(profiles, dict):
-        errors.append("batchValidationProfiles_must_be_object")
+        errors.append("batch_validation_contract_requires_rebuild:batchValidationProfiles")
         return
     for lane, profile in profiles.items():
         if lane not in EXECUTION_LANES:
@@ -727,6 +841,7 @@ def _validate_batch_profiles(
 def _validate_batch_validation(errors: list[str], data: dict[str, Any], batch_id: str) -> None:
     validation = data.get("batchValidation")
     if validation is None:
+        errors.append(f"batch_validation_contract_requires_rebuild:{batch_id}.batchValidation")
         return
     if not isinstance(validation, dict):
         errors.append(f"{batch_id}.batchValidation_must_be_object")
@@ -773,6 +888,25 @@ def _validate_project_commands(
         errors.append("projectValidationCommands_must_be_array")
         return
     seen: set[str] = set()
+    profile_signatures: dict[tuple[tuple[str, ...], str, str | None], str] = {}
+    profiles = data.get("batchValidationProfiles")
+    if isinstance(profiles, dict):
+        for lane, profile in profiles.items():
+            profile_commands = profile.get("commands") if isinstance(profile, dict) else None
+            for command in profile_commands if isinstance(profile_commands, list) else []:
+                if not isinstance(command, dict):
+                    continue
+                argv = _string_list(command.get("argv"))
+                cwd = command.get("cwd")
+                repo = command.get("repo")
+                if argv and isinstance(cwd, str):
+                    profile_signatures[
+                        (
+                            tuple(argv),
+                            PurePosixPath(cwd).as_posix(),
+                            repo if isinstance(repo, str) else None,
+                        )
+                    ] = str(lane)
     for index, command in enumerate(commands):
         context = f"projectValidationCommands[{index}]"
         if not isinstance(command, dict):
@@ -791,7 +925,7 @@ def _validate_project_commands(
         cwd = command.get("cwd")
         if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
             errors.append(f"{context}.cwd_invalid")
-        if command.get("kind") not in {"compile", "typecheck", "lint", "static_check"}:
+        if command.get("kind") not in PROJECT_VALIDATION_KINDS:
             errors.append(f"{context}.kind_invalid")
         if not isinstance(command.get("required"), bool):
             errors.append(f"{context}.required_must_be_bool")
@@ -800,6 +934,15 @@ def _validate_project_commands(
             not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository)
         ):
             errors.append(f"{context}.repo_invalid")
+        if argv and isinstance(cwd, str):
+            signature = (
+                tuple(argv),
+                PurePosixPath(cwd).as_posix(),
+                repository if isinstance(repository, str) else None,
+            )
+            duplicate_lane = profile_signatures.get(signature)
+            if duplicate_lane is not None:
+                errors.append(f"{context}.duplicates_batch_profile:{duplicate_lane}")
     project_evidence_ids = _validate_string_list(
         errors,
         data,
@@ -829,6 +972,8 @@ def _validate_task_details(
 
     scope = task.get("scope")
     scope_pages: list[str] = []
+    scope_paths: list[str] = []
+    workspace_roots: dict[str, str] = {}
     if not isinstance(scope, dict):
         errors.append(f"{task_id}.scope_must_be_object")
     else:
@@ -840,14 +985,66 @@ def _validate_task_details(
                 errors.append(f"{task_id}.scope.{field}_must_be_string_array")
                 continue
             if field == "paths":
+                scope_paths = values
                 for value in values:
-                    if Path(value).is_absolute() or ".." in Path(value).parts:
+                    raw_path = value.partition(":")[2] if ":" in value else value
+                    if normalize_repository_relative_path(raw_path) is None:
                         errors.append(f"{task_id}.scope.paths_invalid:{value}")
             if field == "pages":
                 scope_pages = values
                 for value in values:
                     if not PAGE_ID_RE.fullmatch(value):
                         errors.append(f"{task_id}.scope.pages_invalid:{value}")
+
+        raw_workspace_roots = scope.get("workspaceRoots")
+        if scope_paths and not isinstance(raw_workspace_roots, dict):
+            errors.append(f"{task_id}.scope.workspaceRoots_missing")
+        elif raw_workspace_roots is not None:
+            if not isinstance(raw_workspace_roots, dict) or not raw_workspace_roots:
+                errors.append(f"{task_id}.scope.workspaceRoots_must_be_object")
+            else:
+                for key, value in raw_workspace_roots.items():
+                    if not isinstance(key, str) or (
+                        key != DEFAULT_WORKSPACE_ROOT and not REPOSITORY_ID_RE.fullmatch(key)
+                    ):
+                        errors.append(f"{task_id}.scope.workspaceRoots_key_invalid:{key}")
+                        continue
+                    normalized_root = normalize_repository_relative_path(value)
+                    if normalized_root is None:
+                        errors.append(f"{task_id}.scope.workspaceRoots_path_invalid:{value}")
+                    else:
+                        workspace_roots[key] = normalized_root
+                if DEFAULT_WORKSPACE_ROOT in workspace_roots and len(workspace_roots) != 1:
+                    errors.append(f"{task_id}.scope.workspaceRoots_default_must_be_single")
+
+        for value in scope_paths:
+            repository: str | None = None
+            relative = value
+            if DEFAULT_WORKSPACE_ROOT not in workspace_roots and workspace_roots:
+                repository, separator, relative = value.partition(":")
+                if not separator or repository not in workspace_roots:
+                    errors.append(f"{task_id}.scope.path_workspace_prefix_invalid:{value}")
+                    continue
+            elif ":" in value:
+                errors.append(f"{task_id}.scope.path_workspace_prefix_unexpected:{value}")
+                continue
+            workspace_root = workspace_roots.get(repository or DEFAULT_WORKSPACE_ROOT)
+            normalized_relative = normalize_repository_relative_path(relative)
+            if (
+                workspace_root
+                and workspace_root != "."
+                and normalized_relative is not None
+                and repository_path_within_workspace(normalized_relative, workspace_root)
+            ):
+                errors.append(f"{task_id}.scope.path_repeats_workspace_root:{value}")
+
+        for index, command in enumerate(task.get("validationCommands", [])):
+            _validate_command_workspace_root(
+                errors,
+                command,
+                context=f"{task_id}.validationCommands[{index}]",
+                workspace_roots=workspace_roots,
+            )
 
     implementation_points = _string_list(task.get("implementationPoints"))
     if implementation_points is None:

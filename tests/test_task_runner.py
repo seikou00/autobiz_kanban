@@ -17,6 +17,7 @@ from hooks.evidence_store import append_evidence  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done  # noqa: E402
 from hooks.plan_json import task_set_digest  # noqa: E402
 from hooks import evidence_integrity_gate as evidence_integrity_gate_module  # noqa: E402
+from hooks import plan_writer as plan_writer_module  # noqa: E402
 from hooks import task_runner as task_runner_module  # noqa: E402
 
 
@@ -42,6 +43,34 @@ def _read_batch(feature_dir: Path) -> dict:
 
 def _write_batch(feature_dir: Path, batch: dict) -> None:
     _batch_path(feature_dir).write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _bind_workspace_contract(
+    feature_dir: Path,
+    batch: dict,
+    workspace_roots: dict[str, str],
+    *,
+    cwd: str,
+    repo: str | None = None,
+) -> None:
+    for task in batch.get("tasks", []):
+        task.setdefault("scope", {})["workspaceRoots"] = dict(workspace_roots)
+        for command in task.get("validationCommands", []):
+            command["cwd"] = cwd
+            if repo is not None:
+                command["repo"] = repo
+    for command in batch.get("batchValidation", {}).get("commands", []):
+        command["cwd"] = cwd
+        if repo is not None:
+            command["repo"] = repo
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    lane = str(batch.get("executionLane", "backend"))
+    for command in root.get("batchValidationProfiles", {}).get(lane, {}).get("commands", []):
+        command["cwd"] = cwd
+        if repo is not None:
+            command["repo"] = repo
+    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _evidence(feature_dir: Path, evidence_id: str) -> dict:
@@ -170,7 +199,7 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
                 "id": "PROJECT-VAL-001",
                 "argv": [sys.executable, "-c", "print('project compile')"],
                 "cwd": ".",
-                "kind": "compile",
+                "kind": "integration_test",
                 "required": True,
             }
         ],
@@ -398,6 +427,307 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertEqual(json.loads(session.stdout)["action"], "run_project_check")
 
+    def test_optional_batch_failure_does_not_poison_code_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            optional_pass = {
+                "id": "BATCH-B001-VAL-002",
+                "argv": [sys.executable, "-c", "print('optional ok')"],
+                "cwd": ".",
+                "kind": "lint",
+                "required": False,
+            }
+            batch = _read_batch(feature_dir)
+            optional = {
+                "id": "BATCH-B001-VAL-003",
+                "argv": [sys.executable, "-c", "raise SystemExit(9)"],
+                "cwd": ".",
+                "kind": "lint",
+                "required": False,
+            }
+            batch["batchValidation"]["commands"].extend([optional_pass, optional])
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batchValidationProfiles"]["backend"]["commands"].extend(
+                [
+                    {key: value for key, value in command.items() if key != "id"}
+                    for command in (optional_pass, optional)
+                ]
+            )
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            checked = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            payload = json.loads(checked.stdout)
+            batch = _read_batch(feature_dir)
+            self.assertEqual(len(batch["batchValidation"]["evidenceIds"]), 3)
+            self.assertEqual(len(batch["batchValidation"]["latestPassEvidenceIds"]), 1)
+            self.assertEqual(
+                _evidence(feature_dir, batch["batchValidation"]["evidenceIds"][-1])["validation"]["result"],
+                "fail",
+            )
+            self.assertEqual(payload["requiredAction"], "batch_validation_passed")
+            project = _run(
+                "project-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
+            self.assertEqual(check_code_done(feature_dir), [])
+
+    def test_batch_check_adopts_evidence_after_append_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            real_append = task_runner_module.append_evidence
+
+            def append_then_crash(*args: object, **kwargs: object) -> dict:
+                real_append(*args, **kwargs)
+                raise RuntimeError("crash after batch evidence append")
+
+            with patch.object(task_runner_module, "append_evidence", side_effect=append_then_crash):
+                with self.assertRaisesRegex(RuntimeError, "crash after batch evidence append"):
+                    task_runner_module.run_batch_checks(workspace, "alpha", "B001", code)
+
+            run_path = next((feature_dir / ".batch-runs" / "B001").glob("*.json"))
+            session = task_runner_module.code_session(workspace, "alpha")
+            self.assertEqual(session["action"], "run_batch_check")
+            self.assertEqual(session["activeRunId"], run_path.stem)
+            success, state = task_runner_module.run_batch_checks(
+                workspace,
+                "alpha",
+                "B001",
+                code,
+                run_path.stem,
+            )
+
+            self.assertTrue(success)
+            self.assertEqual(state["status"], "done")
+            batch_records = [
+                record
+                for record in task_runner_module.read_records(feature_dir / "evidence" / "EVIDENCE.jsonl")
+                if record.get("action") == "batch_validation"
+            ]
+            self.assertEqual(len(batch_records), 1)
+
+    def test_batch_check_recovers_run_created_before_plan_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            with patch.object(
+                task_runner_module,
+                "start_batch_validation_run",
+                side_effect=RuntimeError("crash before batch plan binding"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "crash before batch plan binding"):
+                    task_runner_module.run_batch_checks(workspace, "alpha", "B001", code)
+
+            run_path = next((feature_dir / ".batch-runs" / "B001").glob("*.json"))
+            with self.assertRaisesRegex(
+                task_runner_module.TaskRunnerError,
+                f"active_batch_run_exists:{run_path.stem}",
+            ) as raised:
+                task_runner_module.run_batch_checks(workspace, "alpha", "B001", code)
+            self.assertEqual(raised.exception.details["requiredAction"], "retry_same_batch_run")
+            self.assertEqual(raised.exception.details["runId"], run_path.stem)
+
+            success, state = task_runner_module.run_batch_checks(
+                workspace,
+                "alpha",
+                "B001",
+                code,
+                run_path.stem,
+            )
+            self.assertTrue(success)
+            self.assertEqual(state["status"], "done")
+
+    def test_batch_check_recovers_after_terminal_plan_binding_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            real_bind = task_runner_module.record_batch_validation_attempt
+
+            def bind_then_crash(*args: object, **kwargs: object) -> object:
+                real_bind(*args, **kwargs)
+                raise RuntimeError("crash after terminal plan binding")
+
+            with patch.object(task_runner_module, "record_batch_validation_attempt", side_effect=bind_then_crash):
+                with self.assertRaisesRegex(RuntimeError, "crash after terminal plan binding"):
+                    task_runner_module.run_batch_checks(workspace, "alpha", "B001", code)
+
+            run_path = next((feature_dir / ".batch-runs" / "B001").glob("*.json"))
+            success, state = task_runner_module.run_batch_checks(
+                workspace,
+                "alpha",
+                "B001",
+                code,
+                run_path.stem,
+            )
+
+            self.assertTrue(success)
+            self.assertEqual(state["status"], "done")
+            project = _run(
+                "project-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
+            self.assertEqual(check_code_done(feature_dir), [])
+
+    def test_batch_check_recovers_interrupted_plan_bundle_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            real_atomic_write = plan_writer_module.atomic_write_json
+            root_writes = 0
+
+            def interrupt_terminal_root(path: Path, data: object) -> bool:
+                nonlocal root_writes
+                if path == feature_dir / "plan.json":
+                    root_writes += 1
+                    if root_writes == 2:
+                        raise RuntimeError("crash before terminal root projection")
+                return real_atomic_write(path, data)
+
+            with patch.object(
+                plan_writer_module,
+                "atomic_write_json",
+                side_effect=interrupt_terminal_root,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "crash before terminal root projection"):
+                    task_runner_module.run_batch_checks(workspace, "alpha", "B001", code)
+
+            transaction_path = feature_dir / ".plan-write-transaction.json"
+            self.assertTrue(transaction_path.is_file())
+            with self.assertRaisesRegex(ValueError, "root_status_projection_mismatch"):
+                task_runner_module.load_plan_bundle(feature_dir)
+            run_path = next((feature_dir / ".batch-runs" / "B001").glob("*.json"))
+            self.assertEqual(json.loads(run_path.read_text(encoding="utf-8"))["status"], "evidence_written")
+
+            success, state = task_runner_module.run_batch_checks(
+                workspace,
+                "alpha",
+                "B001",
+                code,
+                run_path.stem,
+            )
+
+            self.assertTrue(success)
+            self.assertEqual(state["status"], "done")
+            self.assertFalse(transaction_path.exists())
+            bundle = task_runner_module.load_plan_bundle(feature_dir)
+            self.assertEqual(bundle.batches["B001"]["batchValidation"]["status"], "passed")
+
+    def test_batch_check_recovers_after_revalidation_plan_binding_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            command = {
+                "id": "BATCH-B001-VAL-001",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; raise SystemExit(0 if Path('existing.txt').read_text().strip() == 'fixed' else 3)",
+                ],
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
+            }
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"]["commands"] = [command]
+            batch["tasks"][0]["scope"]["workspaceRoots"] = {"default": "."}
+            batch["tasks"][0]["scope"]["paths"] = ["existing.txt"]
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batchValidationProfiles"]["backend"]["commands"] = [
+                {key: value for key, value in command.items() if key != "id"}
+            ]
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            started = _start(workspace, code)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            success, failed_state = task_runner_module.run_batch_checks(workspace, "alpha", "B001", code)
+            self.assertFalse(success)
+            (code / "existing.txt").write_text("fixed\n", encoding="utf-8")
+            real_bind = task_runner_module.request_batch_revalidation
+
+            def bind_then_crash(*args: object, **kwargs: object) -> object:
+                real_bind(*args, **kwargs)
+                raise RuntimeError("crash after revalidation plan binding")
+
+            with patch.object(task_runner_module, "request_batch_revalidation", side_effect=bind_then_crash):
+                with self.assertRaisesRegex(RuntimeError, "crash after revalidation plan binding"):
+                    task_runner_module.run_batch_checks(
+                        workspace,
+                        "alpha",
+                        "B001",
+                        code,
+                        failed_state["runId"],
+                    )
+
+            success, recovered = task_runner_module.run_batch_checks(
+                workspace,
+                "alpha",
+                "B001",
+                code,
+                failed_state["runId"],
+            )
+
+            self.assertTrue(success)
+            self.assertEqual(recovered["status"], "revalidation_required")
+            current = _read_batch(feature_dir)["tasks"][0]
+            self.assertEqual(current["pendingRevalidation"]["supersedesEvidenceIds"], ["ev_0001"])
+
     def test_batch_check_retries_failed_commands_in_same_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -417,6 +747,7 @@ class TaskRunnerTest(unittest.TestCase):
             }
             batch = _read_batch(feature_dir)
             batch["batchValidation"]["commands"] = [command]
+            batch["tasks"][0]["scope"]["workspaceRoots"] = {"default": "."}
             batch["tasks"][0]["scope"]["paths"] = ["existing.txt"]
             _write_batch(feature_dir, batch)
             root_path = feature_dir / "plan.json"
@@ -478,6 +809,15 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(current_task["evidenceIds"], ["ev_0001", "ev_0004"])
             self.assertEqual(current_task["completionEvidenceIds"], ["ev_0004"])
             self.assertNotIn("pendingRevalidation", current_task)
+            self.assertEqual(
+                current_task["completedRevalidation"],
+                {
+                    "attemptType": "batch_revalidation",
+                    "triggeredByBatchEvidenceIds": ["ev_0003"],
+                    "supersedesEvidenceIds": ["ev_0001"],
+                    "completionEvidenceIds": ["ev_0004"],
+                },
+            )
             revalidation_evidence = _evidence(feature_dir, "ev_0004")
             self.assertEqual(revalidation_evidence["attemptType"], "batch_revalidation")
             self.assertEqual(revalidation_evidence["supersedesEvidenceIds"], ["ev_0001"])
@@ -499,6 +839,22 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(len(state["attempts"]), 3)
             self.assertEqual(len(state["evidenceIds"]), 3)
             self.assertEqual(_evidence(feature_dir, state["evidenceIds"][-1])["validation"]["result"], "pass")
+            project = _run(
+                "project-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
+            self.assertEqual(check_code_done(feature_dir), [])
+
+            forged_batch = _read_batch(feature_dir)
+            forged_batch["tasks"][0]["completedRevalidation"]["triggeredByBatchEvidenceIds"] = [
+                "ev_9999"
+            ]
+            _write_batch(feature_dir, forged_batch)
+            self.assertIn(
+                "T001.batch_revalidation_trigger_invalid:ev_9999",
+                check_code_done(feature_dir),
+            )
 
     def test_batch_repair_rejects_out_of_scope_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -519,6 +875,7 @@ class TaskRunnerTest(unittest.TestCase):
             }
             batch = _read_batch(feature_dir)
             batch["batchValidation"]["commands"] = [command]
+            batch["tasks"][0]["scope"]["workspaceRoots"] = {"default": "."}
             batch["tasks"][0]["scope"]["paths"] = ["src"]
             _write_batch(feature_dir, batch)
             root_path = feature_dir / "plan.json"
@@ -635,6 +992,12 @@ class TaskRunnerTest(unittest.TestCase):
             module = code / "backend" / "LF39.05_bccompliancemng"
             module.mkdir(parents=True)
             batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {"default": "backend/LF39.05_bccompliancemng"},
+                cwd="backend/LF39.05_bccompliancemng",
+            )
             batch["tasks"][0]["scope"]["paths"] = [
                 "src/main/java/example/application"
             ]
@@ -697,6 +1060,12 @@ class TaskRunnerTest(unittest.TestCase):
                 module = code / "backend" / "LF39.05_bccompliancemng"
                 module.mkdir(parents=True)
                 batch = _read_batch(feature_dir)
+                _bind_workspace_contract(
+                    feature_dir,
+                    batch,
+                    {"default": "backend/LF39.05_bccompliancemng"},
+                    cwd="backend/LF39.05_bccompliancemng",
+                )
                 batch["tasks"][0]["scope"]["paths"] = [
                     "src/main/java/example/application"
                 ]
@@ -744,6 +1113,12 @@ class TaskRunnerTest(unittest.TestCase):
             sibling = code / "backend" / "LF39.05_other"
             module.mkdir(parents=True)
             batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {"default": "backend/LF39.05_bccompliancemng"},
+                cwd="backend/LF39.05_bccompliancemng",
+            )
             batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
             _write_batch(feature_dir, batch)
             started = _run(
@@ -774,6 +1149,12 @@ class TaskRunnerTest(unittest.TestCase):
             module = code / "backend" / "LF39.05_bccompliancemng"
             module.mkdir(parents=True)
             batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {"default": "backend/LF39.05_bccompliancemng"},
+                cwd="backend/LF39.05_bccompliancemng",
+            )
             batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
             _write_batch(feature_dir, batch)
 
@@ -797,6 +1178,57 @@ class TaskRunnerTest(unittest.TestCase):
                 _evidence(feature_dir, "ev_0001")["changedFiles"],
                 ["backend/LF39.05_bccompliancemng/src/main/java/example/ProtocolCtrl.java"],
             )
+
+    def test_start_rejects_workspace_that_differs_from_plan_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            sibling = code / "backend" / "LF39.05_other"
+            module.mkdir(parents=True)
+            sibling.mkdir(parents=True)
+            batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {"default": "backend/LF39.05_bccompliancemng"},
+                cwd="backend/LF39.05_bccompliancemng",
+            )
+            batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
+            _write_batch(feature_dir, batch)
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(sibling),
+            )
+
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("code_workspace_contract_mismatch", started.stdout)
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
+
+    def test_start_rejects_missing_maven_manifest_before_run_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            module = code / "backend" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {"default": "backend/LF39.05_bccompliancemng"},
+                cwd="backend/LF39.05_bccompliancemng",
+            )
+            batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
+            batch["tasks"][0]["validationCommands"][0]["argv"] = ["mvn.cmd", "test", "-q"]
+            _write_batch(feature_dir, batch)
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("validation_manifest_missing:VAL-T001-01", started.stdout)
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
     def test_complete_rejects_different_requested_workspace_under_same_git_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -828,6 +1260,12 @@ class TaskRunnerTest(unittest.TestCase):
             module = code / "backend" / "LF39.05_bccompliancemng"
             module.mkdir(parents=True)
             batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {"default": "backend/LF39.05_bccompliancemng"},
+                cwd="backend/LF39.05_bccompliancemng",
+            )
             batch["tasks"][0]["scope"]["paths"] = [
                 "src/main/java/example/adapter/protocolctrl"
             ]
@@ -879,6 +1317,13 @@ class TaskRunnerTest(unittest.TestCase):
             _git(second, "add", "base.txt")
             _git(second, "commit", "-m", "initial")
             batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {code.name: ".", second.name: "."},
+                cwd=".",
+                repo=code.name,
+            )
             batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
             _write_batch(feature_dir, batch)
 
@@ -889,12 +1334,13 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(started.returncode, 0)
-            self.assertIn("scope_path_repository_prefix_required", started.stdout)
+            self.assertIn("scope.path_workspace_prefix_invalid", started.stdout)
 
     def test_start_rejects_absolute_scope_path_before_run_creation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["workspaceRoots"] = {"default": "."}
             batch["tasks"][0]["scope"]["paths"] = ["/src/main/java/example"]
             _write_batch(feature_dir, batch)
 
@@ -972,6 +1418,7 @@ class TaskRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["workspaceRoots"] = {"default": "."}
             batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
             _write_batch(feature_dir, batch)
             started = _start(workspace, code)
@@ -985,6 +1432,8 @@ class TaskRunnerTest(unittest.TestCase):
                 "resolvedScopePaths",
             ):
                 state.pop(field, None)
+            state["version"] = 1
+            state.pop("integritySha256", None)
             run_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
             source = code / "src" / "main" / "java" / "example" / "Legacy.java"
             source.parent.mkdir(parents=True)
@@ -1012,6 +1461,13 @@ class TaskRunnerTest(unittest.TestCase):
             _git(second, "add", "base.txt")
             _git(second, "commit", "-m", "initial")
             batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {code.name: ".", second.name: "."},
+                cwd=".",
+                repo=code.name,
+            )
             batch["tasks"][0]["scope"]["paths"] = [
                 f"{code.name}:src/main/java/example",
                 f"{second.name}:src/main/java/example",
@@ -1077,6 +1533,16 @@ class TaskRunnerTest(unittest.TestCase):
             first_module.mkdir(parents=True)
             second_module.mkdir(parents=True)
             batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {
+                    code.name: "services/compliance",
+                    second.name: "services/protocol",
+                },
+                cwd="services/compliance",
+                repo=code.name,
+            )
             batch["tasks"][0]["scope"]["paths"] = [
                 f"{code.name}:src/main/java/example",
                 f"{second.name}:src/main/java/example",
@@ -1791,6 +2257,7 @@ class TaskRunnerTest(unittest.TestCase):
             workspace, feature_dir, code = _workspace(Path(tmp))
             plan_path = _batch_path(feature_dir)
             plan = _read_batch(feature_dir)
+            plan["tasks"][0]["scope"]["workspaceRoots"] = {"default": "."}
             plan["tasks"][0]["scope"]["paths"] = ["src"]
             _write_batch(feature_dir, plan)
             started = _start(workspace, code)
@@ -1827,6 +2294,27 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("task_set_digest_mismatch", completed.stdout)
+            self.assertFalse((feature_dir / "evidence" / "EVIDENCE.jsonl").exists())
+
+    def test_complete_rejects_task_run_baseline_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            run_path = feature_dir / ".task-runs" / "T001" / f"{started['runId']}.json"
+            state = json.loads(run_path.read_text(encoding="utf-8"))
+            state["resolvedScopePaths"] = ["forged/path"]
+            run_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("task_run_integrity_mismatch", completed.stdout)
             self.assertFalse((feature_dir / "evidence" / "EVIDENCE.jsonl").exists())
 
     def test_complete_runs_all_required_validation_commands(self) -> None:
@@ -1943,6 +2431,8 @@ class TaskRunnerTest(unittest.TestCase):
                 }
             )
             state.pop("batchId", None)
+            state["version"] = 1
+            state.pop("integritySha256", None)
             run_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
             append_evidence(
                 feature_dir,
@@ -2235,11 +2725,11 @@ class TaskRunnerTest(unittest.TestCase):
 
             run_path = feature_dir / ".task-runs" / "T001" / f"{started['runId']}.json"
             state = json.loads(run_path.read_text(encoding="utf-8"))
-            state["changedFiles"] = ["forged.txt"]
+            state["snapshot"] = {"forged.txt": "0" * 64}
             run_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
             self.assertIn(
-                "T001.task_run_changed_files_mismatch:ev_0001",
+                f"T001.task_run_integrity_mismatch:{started['runId']}",
                 check_code_done(feature_dir),
             )
 
@@ -2299,7 +2789,7 @@ class TaskRunnerTest(unittest.TestCase):
                         "argv": [sys.executable, "-c", "print('project compile')"],
                         "command": "project compile",
                         "cwd": ".",
-                        "kind": "compile",
+                        "kind": "integration_test",
                         "required": True,
                         "exitCode": 0,
                         "result": "pass",

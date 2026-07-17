@@ -611,6 +611,9 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "同一个 run",
             "--no-code-change-why",
             "仓库根相对路径",
+            "integritySha256",
+            "task_run_integrity_mismatch",
+            "禁止直接编辑 `plan.json`",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -657,12 +660,14 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         plan_required = [
-            "`scope.paths` 以 Code 阶段传入的 `--code-workspace` 为基准",
+            "`scope.workspaceRoots` 必须声明 Code workspace",
+            "`scope.paths` 只写相对该 workspace 的路径",
+            "`validationCommands[].cwd` 保持 Git 根相对路径",
             "domain、test、resources",
             "`repoId:relative/path`",
         ]
         code_required = [
-            "`scope.paths` 以该请求路径为基准",
+            "必须与 task `scope.workspaceRoots` 声明的位置完全一致",
             "`scopePathBase=requested_code_workspace`",
             "`task_run_requested_workspace_mismatch`",
             "`correct_plan_scope_and_rebuild_task_baseline`",

@@ -128,9 +128,9 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
         "projectValidationCommands": [
             {
                 "id": "PROJECT-VAL-001",
-                "argv": ["echo", "compile"],
+                "argv": ["echo", "integration"],
                 "cwd": ".",
-                "kind": "compile",
+                "kind": "integration_test",
                 "required": True,
             }
         ],
@@ -228,6 +228,71 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_finalized_plan_requires_batch_validation_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            write_bundle(feature_dir, [[task("T001")]])
+
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root.pop("batchValidationProfiles")
+            write_plan_json(root_path, root)
+
+            with self.assertRaisesRegex(PlanJsonError, "batch_validation_contract_requires_rebuild"):
+                load_plan_bundle(feature_dir)
+
+            root["batchValidationProfiles"] = root_plan(batches=[])["batchValidationProfiles"]
+            write_plan_json(root_path, root)
+            batch_path = batch_plan_path(feature_dir, "B001")
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+            batch.pop("batchValidation")
+            write_plan_json(batch_path, batch)
+
+            with self.assertRaisesRegex(PlanJsonError, "batch_validation_contract_requires_rebuild"):
+                load_plan_bundle(feature_dir)
+
+    def test_project_validation_rejects_batch_kinds_and_profile_duplicates(self) -> None:
+        base = root_plan(batches=[batch_entry("B001", ["T001"])])
+        base["projectValidationCommands"][0]["kind"] = "compile"
+        errors = validate_plan_data(base)
+
+        self.assertIn("projectValidationCommands[0].kind_invalid", errors)
+
+        duplicate = root_plan(batches=[batch_entry("B001", ["T001"])])
+        duplicate["projectValidationCommands"] = [
+            {
+                "id": "PROJECT-VAL-001",
+                "argv": ["echo", "backend compile"],
+                "cwd": ".",
+                "kind": "static_check",
+                "required": True,
+            }
+        ]
+
+        self.assertIn(
+            "projectValidationCommands[0].duplicates_batch_profile:backend",
+            validate_plan_data(duplicate),
+        )
+
+        for profile_cwd, project_cwd in [(".", "./"), ("src", "src/")]:
+            with self.subTest(profile_cwd=profile_cwd, project_cwd=project_cwd):
+                equivalent = root_plan(batches=[batch_entry("B001", ["T001"])])
+                equivalent["batchValidationProfiles"]["backend"]["commands"][0]["cwd"] = profile_cwd
+                equivalent["projectValidationCommands"] = [
+                    {
+                        "id": "PROJECT-VAL-001",
+                        "argv": ["echo", "backend compile"],
+                        "cwd": project_cwd,
+                        "kind": "static_check",
+                        "required": True,
+                    }
+                ]
+                self.assertIn(
+                    "projectValidationCommands[0].duplicates_batch_profile:backend",
+                    validate_plan_data(equivalent),
+                )
+
     def test_batch_validation_pass_creates_handoff_after_tasks_are_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -265,6 +330,46 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(root["nextBatchId"], "B002")
             self.assertTrue((feature_dir / "BATCH_HANDOFF.json").is_file())
 
+    def test_batch_validation_retry_rebuilds_missing_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_bundle(feature_dir, [[task("T001")], [task("T002", deps=["T001"])]])
+            record_task_attempt(
+                workspace,
+                "alpha",
+                "T001",
+                ["ev_0001"],
+                completion_evidence_ids=["ev_0001"],
+                success=True,
+            )
+            first = record_batch_validation_attempt(
+                workspace,
+                "alpha",
+                "B001",
+                ["ev_0002"],
+                success=True,
+                run_id="batch_run_1",
+            )
+            handoff_path = feature_dir / "BATCH_HANDOFF.json"
+            self.assertTrue(first.ok)
+            handoff_path.unlink()
+
+            retried = record_batch_validation_attempt(
+                workspace,
+                "alpha",
+                "B001",
+                ["ev_0002"],
+                success=True,
+                run_id="batch_run_1",
+            )
+
+            self.assertTrue(retried.ok)
+            self.assertTrue(retried.changed)
+            self.assertEqual(retried.data["batchHandoff"]["nextBatchId"], "B002")
+            self.assertTrue(handoff_path.is_file())
+
     def test_batch_validation_failure_keeps_batch_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -296,6 +401,45 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(batch["batchValidation"]["evidenceIds"], ["ev_0002"])
             self.assertEqual(root["activeBatchId"], "B001")
             self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
+
+    def test_pending_revalidation_cannot_be_cleared_without_matching_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_bundle(feature_dir, [[task("T001")]])
+            first = record_task_attempt(
+                workspace,
+                "alpha",
+                "T001",
+                ["ev_0001"],
+                completion_evidence_ids=["ev_0001"],
+                success=True,
+            )
+            self.assertTrue(first.ok)
+            from hooks.plan_writer import request_batch_revalidation
+
+            reopened = request_batch_revalidation(
+                workspace,
+                "alpha",
+                "B001",
+                ["ev_0002"],
+                affected_task_ids=["T001"],
+                run_id="batch_run_1",
+            )
+            self.assertTrue(reopened.ok)
+
+            forged = record_task_attempt(
+                workspace,
+                "alpha",
+                "T001",
+                ["ev_0003"],
+                completion_evidence_ids=["ev_0003"],
+                success=True,
+            )
+
+            self.assertFalse(forged.ok)
+            self.assertEqual(forged.errors[0]["reason"], "batch_revalidation_metadata_mismatch")
 
     def test_plan_writer_projects_lane_batch_validation_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -363,6 +507,25 @@ class BatchedPlanContractTest(unittest.TestCase):
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
             self.assertIn("T001.validationCommands[1].kind_invalid", errors)
+
+    def test_bundle_rejects_batch_validation_cwd_outside_task_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            item = task("T001")
+            item["scope"].update({
+                "workspaceRoots": {"default": "backend/service"},
+                "paths": ["src/main/java/example"],
+            })
+            item["validationCommands"][0]["cwd"] = "backend/service"
+            write_bundle(feature_dir, [[item]])
+
+            _, errors = load_and_validate_plan(feature_dir / "plan.json")
+
+            self.assertIn(
+                "B001.batchValidation.commands[0].cwd_outside_workspace_root:backend/service",
+                errors,
+            )
 
     def test_initial_bundle_requires_profile_for_every_used_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

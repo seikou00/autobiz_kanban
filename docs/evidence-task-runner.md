@@ -52,7 +52,7 @@ python hooks/task_runner.py start --workspace "$ARTIFACT_WORKSPACE" --feature "$
   --task-id T001 --code-workspace "$BUSINESS_REPO"
 ```
 
-`--code-workspace` locates a repository and defines the base for task `scope.paths`. Git resolves a supplied module directory to the repository root, while start projects module-relative scope paths to Git-root-relative `resolvedScopePaths`. The start response records `scopePathBase=requested_code_workspace`, `requestedCodeWorkspaces`, `workspacePrefixes`, `resolvedScopePaths`, and the resolved `repositories[].path`. Snapshots still hash tracked and untracked, non-ignored file contents across the complete Git root. Complete, abort, and resume must receive the same requested module paths; changing only the module under the same Git root fails with `task_run_requested_workspace_mismatch`. Staging or unstaging a file does not change its content hash and therefore does not create a task-run delta.
+`--code-workspace` locates a repository and must match the module recorded in task `scope.workspaceRoots`. Git resolves a supplied module directory to the repository root, while start projects workspace-relative `scope.paths` to Git-root-relative `resolvedScopePaths`; a scope path that repeats the workspace prefix is rejected during Plan preflight. Task and batch validation `cwd` values remain Git-root-relative and must stay inside the declared workspace root. Plan preflight and runner start verify the command directory plus known manifests such as `pom.xml`, Gradle build files, `package.json`, `Cargo.toml`, and `go.mod`. The start response records `scopePathBase=requested_code_workspace`, `requestedCodeWorkspaces`, `workspacePrefixes`, `resolvedScopePaths`, and the resolved `repositories[].path`. It also seals the task contract, workspace projection, and initial Git snapshot in `integritySha256`; direct edits to those run fields fail with `task_run_integrity_mismatch`. Snapshots hash tracked and untracked, non-ignored file contents across the complete Git root. Complete, abort, and resume must receive the same requested module paths; changing only the module under the same Git root fails with `task_run_requested_workspace_mismatch`. Staging or unstaging a file does not change its content hash and therefore does not create a task-run delta.
 
 Complete after implementation. Validation commands come from `plan.json`; command text, output, exit code, and changed files are not accepted from the caller:
 
@@ -100,9 +100,11 @@ python hooks/task_runner.py batch-check --workspace "$ARTIFACT_WORKSPACE" \
   --feature "$FEATURE" --batch-id B001 --code-workspace "$BUSINESS_REPO"
 ```
 
-The first call creates a batch run. On `fix_batch_and_retry_same_run`, fix only paths covered by the batch task scopes and retry with the returned `--run-id`. Attempts and `action=batch_validation` evidence are append-only. A validation command that modifies Git-visible files is rejected.
+The first call creates a batch run and publishes its active run ID before executing commands. On `fix_batch_and_retry_same_run`, fix only paths covered by the batch task scopes and retry with the returned `--run-id`. Attempts and `action=batch_validation` evidence are append-only. A validation command that modifies Git-visible files is rejected.
 
-If remediation changes task-owned files, the passing attempt requests task revalidation. Historical task evidence remains immutable, while the affected tasks lose only their current completion pointers and return to `todo`. Their next successful task evidence records `attemptType=batch_revalidation`, the triggering batch evidence IDs, and superseded completion evidence IDs. Ambiguous or shared scope revalidates the whole batch; an out-of-scope remediation is rejected. After task revalidation, the same batch run must pass one final batch-check before handoff.
+Each attempt persists its workspace baseline before command execution, adopts already-streamed evidence after interruption, writes `status=evidence_written` before mutating the plan, and binds the plan idempotently. A crash after evidence append, revalidation binding, or terminal binding resumes with the same run ID without duplicating completed command evidence. Required passing command evidence forms `latestPassEvidenceIds`; optional pass/fail records remain in full history but do not decide batch success.
+
+If remediation changes task-owned files, the passing attempt requests task revalidation. Historical task evidence remains immutable, while the affected tasks lose only their current completion pointers and return to `todo`. Their next successful task evidence records `attemptType=batch_revalidation`, the triggering batch evidence IDs, and superseded completion evidence IDs; the task also retains a `completedRevalidation` runtime pointer so code-done can audit exact ownership and ordering. Ambiguous or shared scope revalidates the whole batch; an out-of-scope remediation is rejected. After task revalidation, the same batch run must pass one final batch-check before handoff.
 
 ## Multiple Repositories
 
@@ -112,7 +114,7 @@ All evidence remains in the single feature artifact directory, never in particip
 
 ## Optional Project Check And Gate
 
-Cross-lane or cross-batch project checks are optional and separate from both task acceptance and batch validation:
+Cross-lane or cross-batch project checks are optional and separate from both task acceptance and batch validation. Their kinds are limited to integration, E2E, and static checks, and their normalized command/workspace/repository identity must not duplicate a batch profile:
 
 ```bash
 python hooks/task_runner.py project-check --workspace "$ARTIFACT_WORKSPACE" \

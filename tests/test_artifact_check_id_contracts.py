@@ -58,9 +58,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         data["projectValidationCommands"] = [
             {
                 "id": "PROJECT-VAL-001",
-                "argv": ["echo", "compile"],
+                "argv": ["echo", "integration"],
                 "cwd": ".",
-                "kind": "compile",
+                "kind": "integration_test",
                 "required": True,
             }
         ]
@@ -262,9 +262,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "compile"],
+                        "argv": ["echo", "integration"],
                         "cwd": ".",
-                        "kind": "compile",
+                        "kind": "integration_test",
                         "required": True,
                     }
                 ],
@@ -419,9 +419,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "compile"],
+                        "argv": ["echo", "integration"],
                         "cwd": ".",
-                        "kind": "compile",
+                        "kind": "integration_test",
                         "required": True,
                     }
                 ],

@@ -130,7 +130,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                         "id": "PROJECT-VAL-001",
                         "argv": ["echo", "project ok"],
                         "cwd": ".",
-                        "kind": "compile",
+                        "kind": "integration_test",
                         "required": True,
                     }
                 ],
@@ -375,7 +375,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                 "argv": ["echo", "project ok"],
                 "command": "echo project ok",
                 "cwd": ".",
-                "kind": "compile",
+                "kind": "integration_test",
                 "required": True,
                 "exitCode": 0,
                 "result": "pass",
@@ -813,9 +813,9 @@ class StateIntegrationTests(unittest.TestCase):
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "compile"],
+                        "argv": ["echo", "integration"],
                         "cwd": ".",
-                        "kind": "compile",
+                        "kind": "integration_test",
                         "required": True,
                     }
                 ],

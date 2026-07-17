@@ -9,6 +9,9 @@
     "entrypoints": [],
     "pages": [],
     "dataObjects": [],
+    "workspaceRoots": {
+      "default": "."
+    },
     "paths": []
   },
   "implementationPoints": [

@@ -418,3 +418,12 @@ Expected: no output and exit code 0.
 git add skills/autodev/autodev-plan/SKILL.md skills/autodev/autodev-code/SKILL.md docs/evidence-task-runner.md AUTOBIZDEVOPS_新手使用说明.md tests/test_skill_artifact_drift.py tests/test_inspect_skill_contract_plain.py
 git commit -m "docs: move compile validation to batch boundary"
 ```
+
+## Review Hardening Addendum
+
+- Persist batch attempts as `validation_running -> evidence_written -> plan bound`, adopt streamed command evidence on retry, and make terminal and revalidation plan binding idempotent.
+- Publish `activeRunId` before the first command so `code-session` can recover an interrupted run.
+- Keep all optional command evidence in history, but bind only required passing evidence as the current batch pass pointer.
+- Restrict optional project checks to `integration_test`, `e2e_test`, and `static_check`; reject commands duplicating a batch profile by `argv + cwd + repo`.
+- Reject finalized plans missing `batchValidationProfiles` or projected `batchValidation` with `batch_validation_contract_requires_rebuild`.
+- Preserve `completedRevalidation` runtime linkage and verify trigger, superseded, current completion, ownership, and evidence ordering at code-done.

@@ -183,8 +183,8 @@ python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-
 ```
 
 保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `recover` / `abort` 处理原 run。
-`--code-workspace` 同时是 Git 仓库定位入口和 task scope 基准：即使传模块子目录，runner 也会解析并快照整个 Git 根，但 `scope.paths` 以该请求路径为基准。start 会保存 `scopePathBase=requested_code_workspace`、`workspacePrefixes` 和 `resolvedScopePaths`，输出中的 `requestedCodeWorkspaces` 与 `repositories[].path` 分别表示请求路径和解析后的仓库根。complete / abort / resume 必须继续传相同请求路径；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。
-`start` 会固化当前 task 契约哈希。run 活动期间不得修改该 task 的 goal/scope/AC/validationCommands 等计划字段；确需修 Plan 时先 abort，再修正并重新 start。Plan 的全部读改写由 feature 产物目录内 `.plan.lock` 串行化，禁止绕开 writer 直接覆写。
+`--code-workspace` 同时是 Git 仓库定位入口和 task scope 基准，必须与 task `scope.workspaceRoots` 声明的位置完全一致：即使传模块子目录，runner 也会解析并快照整个 Git 根，但 `scope.paths` 只相对该模块。start 会先验证 workspace 绑定、validation `cwd` 目录和 Maven/Gradle/Node 等 manifest，再保存 `scopePathBase=requested_code_workspace`、`workspacePrefixes` 和 `resolvedScopePaths`；任一前置校验失败时尚未创建 run，不得先写代码再重试。complete / abort / resume 必须继续传相同请求路径；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，包含未跟踪且未忽略文件；`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。
+`start` 会固化当前 task 契约哈希，并对请求 workspace、scope 投影和初始 Git 快照写入 `integritySha256`。run 活动期间不得修改该 task 的 goal/scope/AC/validationCommands 等计划字段，也禁止直接编辑 `plan.json`、批次 `plan.json` 或 `.task-runs/**/*.json`、手工重算 digest/hash；否则 runner 返回 `task_run_integrity_mismatch` 或计划完整性错误。确需修 Plan 时按下方 scope 回流协议保存 patch、force abort、由 Plan writer 整体重建契约和基线后再应用 patch。
 
 任务跨多个业务仓库时，按稳定顺序重复传入 `--code-workspace`。Plan 中每条 validation command 必须用 `repo` 指明 Git 根目录名；changed/supporting 路径使用 `repoId:relative/path`。无论单仓或多仓，`evidence/` 与 `.task-runs/` 只能写入 feature 产物目录，禁止写入任一业务仓库。
 2. 读唯一 `plan.json` 中的结构化执行契约。必须先运行任务上下文解析脚本：
@@ -208,7 +208,7 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
 `fresh/reusable_with_changes 时禁止无边界全仓探索`：不得重新运行无范围全仓 `rg`、递归目录 listing 或框架发现。缓存只能通过 `code_exploration_writer.py` 修改，禁止直接编辑 `cache/code-exploration/**/*.json`。共享路径只更新当前 executionLane；另一 lane 在后续 inspect 时独立判定。runner 能返回 machine policy，但宿主未提供工具调用遥测，无法独立证明 Agent 执行过多少次搜索，这是协议层约束。
 
 必须读取当前 task 的 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `goal` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
-3. 改代码前按 `explorationPolicy` 进行首次有界探索或缓存定点复核；先识别或复用项目分层、命名、错误处理、校验、日志、测试风格，形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
+3. 改代码前按 `explorationPolicy` 进行首次有界探索或缓存定点复核；先识别或复用项目分层、命名、错误处理、校验、日志、测试风格，并读取测试插件/provider 版本（例如 Maven Surefire 与 JUnit 4/5 兼容性）、Spring 测试启动入口和现有可运行测试，形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。不得在测试失败后才猜测框架版本；计划为 `integration_test` 时不得为了通过验证降级成只 mock service 的 controller 单元测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
 4. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的范围；不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
@@ -250,8 +250,10 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 ```
 
 - 返回 `requiredAction=fix_batch_and_retry_same_run` 时，保留返回的 `runId`，只在当前批次 TASK scope 并集内修复问题，然后用完全相同的 workspace 和 `--run-id "<RUN_ID>"` 重跑 `batch-check`。批次失败 evidence 只追加，不覆盖；不得新建 run 隐藏失败历史。验证命令若修改 Git 可见文件会被拒绝。
+- runner 在首条命令前把 `activeRunId` 投影到 plan；命令 evidence 全部写完后先保存 `status=evidence_written`，再幂等绑定 plan。进程在 evidence append、TASK 重验证请求或最终批次绑定后中断时，重新调用 `code-session` 取得原 `activeRunId`，再以同一 `--run-id` 执行 `batch-check`；runner 会采用已写入 stream 的 evidence，不重复执行已完成命令。
+- required 命令决定批次成败及 `latestPassEvidenceIds`；optional 成功或 optional 失败 evidence 都只追加到批次历史和 run attempt，不得让 optional 失败阻断 code-done，也不得把 optional 记录伪装为 required latest pass。
 - 修复路径不命中任何当前批次 TASK scope 时返回 `batch_fix_out_of_scope`，必须停止并回流 Plan；只命中一个 TASK 时仅重验证该 TASK，命中多个或共享/歧义范围时重验证整批 TASK。
-- 修复后的 batch-check 返回 `requiredAction=revalidate_affected_tasks` 时，原 TASK evidence 历史继续保留，但受影响 TASK 的当前 `completionEvidenceIds` / `latestPassEvidenceId` 被清空并回到 `todo`。逐个按正常 start/context/complete 协议重跑；新 evidence 必须包含 `attemptType=batch_revalidation`、`triggeredByBatchEvidenceIds` 和 `supersedesEvidenceIds`。全部受影响 TASK 再次完成后，使用同一个 batch run ID 再跑最终 batch-check；在这次最终检查通过前不得 handoff。
+- 修复后的 batch-check 返回 `requiredAction=revalidate_affected_tasks` 时，原 TASK evidence 历史继续保留，但受影响 TASK 的当前 `completionEvidenceIds` / `latestPassEvidenceId` 被清空并回到 `todo`。逐个按正常 start/context/complete 协议重跑；新 evidence 必须包含 `attemptType=batch_revalidation`、`triggeredByBatchEvidenceIds` 和 `supersedesEvidenceIds`，writer 还会保存 `completedRevalidation` 当前指针。code-done 会核对触发 batch、被替代 TASK evidence、当前 completion evidence 及先后顺序，缺失或伪造任一关联都会失败。全部受影响 TASK 再次完成后，使用同一个 batch run ID 再跑最终 batch-check；在这次最终检查通过前不得 handoff。
 - batch-check 直接通过且没有批次修复，或重验证后的最终 batch-check 通过时，runner 才把批次置为完成。非末批会返回 `stop_and_open_new_conversation` 与 `batchHandoff`；末批则进入可选项目检查或完成门禁。
 
 若 `batch-check` 返回 `requiredAction=stop_and_open_new_conversation`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 smoke/project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。
@@ -273,7 +275,7 @@ python "${pluginPath}/hooks/run_advisory_smoke.py" --feature "${feature}"
 
 ###  全部任务完成后的验证
 
-只有 Code 会话入口返回 `run_project_check`，即全部批次验证通过且根 plan 配置了非空 `projectValidationCommands` 后，才通过 runner 跑额外的跨 lane/跨批次项目检查。提前执行会被拒绝；项目检查单独写 `action=project_check` evidence，不参与任一 TASK 的验收覆盖。未配置项目检查时入口直接返回 `code_done_ready`，不要求伪造一轮最终编译：
+只有 Code 会话入口返回 `run_project_check`，即全部批次验证通过且根 plan 配置了非空 `projectValidationCommands` 后，才通过 runner 跑额外的跨 lane/跨批次项目检查。其 kind 只允许 `integration_test/e2e_test/static_check`，不得重复 batch profile 的 `argv + cwd + repo`；提前执行会被拒绝。项目检查单独写 `action=project_check` evidence，不参与任一 TASK 的验收覆盖。未配置项目检查时入口直接返回 `code_done_ready`，不要求伪造一轮最终编译：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" project-check --feature "${feature}" --code-workspace "<BUSINESS_REPO>"

@@ -426,6 +426,7 @@ cicd_done -> archived
 - `PLAN.md` 应按业务闭环拆任务，不要拆成“新增 DTO”“修改 Controller”这类纯代码步骤。
 - 每个 TASK 只配置窄范围的行为、集成、E2E 或静态验证；编译、构建、类型检查和 lint 按 backend/frontend lane 配成批次验证，每个实际使用的 lane 至少一条 required 命令。
 - 项目级最终验证是可选项，只在确有跨前后端或跨批次检查时配置，不重复批次已经执行的编译命令。
+- 项目级最终验证只允许 integration/E2E/static check；命令、执行目录和仓库与 batch profile 相同时会被拒绝。
 ### 9.6 Dev: 可选详细设计
 技能：`/autodev-detail-design`
 触发时机：
@@ -450,6 +451,7 @@ cicd_done -> archived
 - 每次只处理一个任务，完成时运行该任务的行为/集成验证，再进入下一个任务；不在每个 TASK 后重复编译。
 - 当前 batch 的 TASK 全部完成后，再统一执行一次该 lane 的编译/构建/typecheck/lint。失败时在同一个 batch run 修复并重跑。
 - 批次修复若改到 TASK 范围，旧 evidence 历史保留，但受影响 TASK 必须重新验证并追加新 evidence；随后还要再跑一次最终 batch 验证，全部通过后才能进入下一批。
+- batch-check 中断时通过 `code-session` 取回原 `activeRunId` 并用同一个 run 重试；已写入的命令 evidence 会被恢复采用。optional 命令失败会保留历史，但不会让 required 已通过的批次失败。
 - 不要为了通过验证削弱校验、安全检查、日志或错误处理。
 ### 9.8 Dev: 独立需求评审
 技能：`/autodev-reviewer`

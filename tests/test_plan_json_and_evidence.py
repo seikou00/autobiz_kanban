@@ -51,7 +51,7 @@ def valid_plan(
                 "id": "PROJECT-VAL-001",
                 "argv": ["echo", "compile ok"],
                 "cwd": ".",
-                "kind": "compile",
+                "kind": "integration_test",
                 "required": True,
             }
         ],
@@ -119,6 +119,18 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
             "activeBatchId": None if all_done else "B001",
             "nextBatchId": None,
             "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+            "batchValidationProfiles": {
+                execution_lane: {
+                    "commands": [
+                        {
+                            "argv": ["echo", f"{execution_lane} compile"],
+                            "cwd": ".",
+                            "kind": "compile",
+                            "required": True,
+                        }
+                    ]
+                }
+            },
             "batches": [
                 {
                     "id": "B001",
@@ -151,6 +163,22 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 for item in task_items
                 for evidence_id in item.get("completionEvidenceIds", [])
             ],
+            "batchValidation": {
+                "profile": execution_lane,
+                "status": "passed" if all_done else "pending",
+                "commands": [
+                    {
+                        "id": "BATCH-B001-VAL-001",
+                        "argv": ["echo", f"{execution_lane} compile"],
+                        "cwd": ".",
+                        "kind": "compile",
+                        "required": True,
+                    }
+                ],
+                "evidenceIds": [],
+                "latestPassEvidenceIds": [],
+                "activeRunId": None,
+            },
             "startedAt": None,
             "completedAt": "2026-07-10T00:00:00Z" if all_done else None,
             "tasks": task_items,
@@ -250,6 +278,40 @@ class PlanJsonTest(unittest.TestCase):
 
         self.assertIn(
             "T001.acceptanceCriteria_uncovered:AC-T001-01",
+            validate_test_tasks(plan),
+        )
+
+    def test_plan_requires_workspace_roots_for_nonempty_scope_paths(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        plan["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
+
+        self.assertIn("T001.scope.workspaceRoots_missing", validate_test_tasks(plan))
+
+    def test_plan_rejects_scope_path_that_repeats_workspace_root(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["scope"].update({
+            "workspaceRoots": {"default": "backend/service"},
+            "paths": ["backend/service/src/main/java/example"],
+        })
+        task["validationCommands"][0]["cwd"] = "backend/service"
+
+        self.assertIn(
+            "T001.scope.path_repeats_workspace_root:backend/service/src/main/java/example",
+            validate_test_tasks(plan),
+        )
+
+    def test_plan_rejects_task_validation_cwd_outside_workspace_root(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["scope"].update({
+            "workspaceRoots": {"default": "backend/service"},
+            "paths": ["src/main/java/example"],
+        })
+        task["validationCommands"][0]["cwd"] = "."
+
+        self.assertIn(
+            "T001.validationCommands[0].cwd_outside_workspace_root:backend/service",
             validate_test_tasks(plan),
         )
 

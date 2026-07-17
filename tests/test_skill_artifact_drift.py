@@ -90,6 +90,10 @@ class SkillArtifactDriftTests(unittest.TestCase):
         self.assertIn("requiredAction=run_batch_check", code_skill)
         self.assertIn("fix_batch_and_retry_same_run", code_skill)
         self.assertIn("attemptType=batch_revalidation", code_skill)
+        self.assertIn("batch_validation_contract_requires_rebuild", plan_skill)
+        self.assertIn("integration_test/e2e_test/static_check", plan_skill)
+        self.assertIn("status=evidence_written", code_skill)
+        self.assertIn("optional 失败 evidence", code_skill)
 
 
 if __name__ == "__main__":

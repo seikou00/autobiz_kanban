@@ -81,6 +81,18 @@ class EvidenceAuditTest(unittest.TestCase):
                         "activeBatchId": None,
                         "nextBatchId": "B002",
                         "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
+                        "batchValidationProfiles": {
+                            "backend": {
+                                "commands": [
+                                    {
+                                        "argv": ["echo", "backend compile"],
+                                        "cwd": ".",
+                                        "kind": "compile",
+                                        "required": True,
+                                    }
+                                ]
+                            }
+                        },
                         "batches": [
                             {
                                 "id": "B001",
@@ -130,6 +142,22 @@ class EvidenceAuditTest(unittest.TestCase):
                             "taskCount": 1,
                             "completedTaskCount": completed_count,
                             "completionEvidenceIds": [],
+                            "batchValidation": {
+                                "profile": "backend",
+                                "status": "passed" if status == "done" else "pending",
+                                "commands": [
+                                    {
+                                        "id": f"BATCH-{batch_id}-VAL-001",
+                                        "argv": ["echo", "backend compile"],
+                                        "cwd": ".",
+                                        "kind": "compile",
+                                        "required": True,
+                                    }
+                                ],
+                                "evidenceIds": [],
+                                "latestPassEvidenceIds": [],
+                                "activeRunId": None,
+                            },
                             "startedAt": None,
                             "completedAt": completed_at,
                             "tasks": [batch_task],
