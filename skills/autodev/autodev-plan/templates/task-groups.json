@@ -15,6 +15,32 @@
       "validationBoundary": "[public seam plus one executable validation command or assertion]"
     }
   ],
+  "uiRequiredExample": {
+    "when": "the group implements a UI_CONTEXT page or interaction; copy real IDs and route from UI_CONTEXT.json",
+    "id": "T001",
+    "title": "[single observable UI behavior]",
+    "deps": [],
+    "uiRequired": true,
+    "specRefs": [
+      "specs/[ui-capability]/spec.md#REQ-001",
+      "specs/[ui-capability]/spec.md#SCN-001"
+    ],
+    "mergedScenarioRefs": [],
+    "apiIds": [],
+    "uiRefs": {
+      "pageRefs": [
+        "PAGE-001"
+      ],
+      "interactionRefs": [
+        "UIX-001"
+      ],
+      "visualSourceRefs": [
+        "VIS-001"
+      ],
+      "frontendRoute": "absolute-html"
+    },
+    "validationBoundary": "one executable UI test validates the referenced page behavior against its required visual source"
+  },
   "matrixExceptionExample": {
     "when": "one group covers 6-12 scenarios that share one request/response or state-matrix validation loop",
     "id": "T001",

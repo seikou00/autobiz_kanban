@@ -44,14 +44,17 @@ from hooks.plan_json import (  # noqa: E402
     BATCH_VALIDATION_KINDS,
     BATCH_STRATEGY,
     EXECUTION_LANES,
+    FRONTEND_ROUTES,
     MAX_BATCH_TASKS,
     PROJECT_VALIDATION_KINDS,
     TASK_VALIDATION_KINDS,
+    VISUAL_SOURCE_ID_RE,
     batch_plan_path,
     load_plan_bundle,
     normalize_status,
     task_execution_lane,
     task_contract_sha256,
+    task_covered_command_ids,
     task_set_digest,
     task_workspace_roots,
     validation_command_manifest_names,
@@ -226,6 +229,13 @@ def _task_group_matrix_exception_example() -> dict[str, Any]:
     value = _task_group_example().get("matrixExceptionExample")
     if not isinstance(value, dict):
         raise RuntimeError("task_group_matrix_exception_example_must_be_object")
+    return value
+
+
+def _task_group_ui_required_example() -> dict[str, Any]:
+    value = _task_group_example().get("uiRequiredExample")
+    if not isinstance(value, dict):
+        raise RuntimeError("task_group_ui_required_example_must_be_object")
     return value
 
 
@@ -458,6 +468,21 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
                 required=False,
                 item_re=TASK_GROUP_INTERACTION_ID_RE,
             )
+            _group_string_list(
+                errors,
+                ui_refs,
+                task_id,
+                "visualSourceRefs",
+                required=False,
+                item_re=VISUAL_SOURCE_ID_RE,
+            )
+            frontend_route = ui_refs.get("frontendRoute")
+            if frontend_route is None and ui_required:
+                errors.append({"reason": f"{task_id}.frontendRoute_missing"})
+            elif frontend_route is not None and (
+                not isinstance(frontend_route, str) or frontend_route not in FRONTEND_ROUTES
+            ):
+                errors.append({"reason": f"{task_id}.frontendRoute_invalid"})
 
         validation_boundary = raw_group.get("validationBoundary")
         if not isinstance(validation_boundary, str) or len(validation_boundary.strip()) < 10:
@@ -510,6 +535,10 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         "interactionRefs": (
             ui_refs.get("interactionRefs") if isinstance(ui_refs.get("interactionRefs"), list) else []
         ),
+        "visualSourceRefs": (
+            ui_refs.get("visualSourceRefs") if isinstance(ui_refs.get("visualSourceRefs"), list) else []
+        ),
+        "frontendRoute": ui_refs.get("frontendRoute"),
         "splitRationale": item.get("splitRationale") or None,
     }
 
@@ -653,6 +682,11 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         profiles = root.get("batchValidationProfiles")
         profile = profiles.get(execution_lane) if isinstance(profiles, dict) else None
         profile_commands = profile.get("commands") if isinstance(profile, dict) else []
+        profile_mode = (
+            profile.get("mode", "commands" if profile_commands else None)
+            if isinstance(profile, dict)
+            else "commands"
+        )
         effective_commands = [
             {**command, "id": f"BATCH-{batch_id}-VAL-{command_index:03d}"}
             for command_index, command in enumerate(profile_commands, start=1)
@@ -660,16 +694,26 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         ]
         previous_validation = previous.get("batchValidation")
         previous_validation = previous_validation if isinstance(previous_validation, dict) else {}
-        commands_unchanged = previous_validation.get("commands") == effective_commands
+        coverage_command_ids = (
+            task_covered_command_ids(batch_tasks) if profile_mode == "task_covered" else []
+        )
+        contract_unchanged = (
+            previous_validation.get("mode", "commands" if previous_validation.get("commands") else None)
+            == profile_mode
+            and previous_validation.get("coverageCommandIds", []) == coverage_command_ids
+            and previous_validation.get("commands") == effective_commands
+        )
         batch_validation = {
+            "mode": profile_mode,
             "profile": execution_lane,
-            "status": previous_validation.get("status", "pending") if commands_unchanged else "pending",
+            "status": previous_validation.get("status", "pending") if contract_unchanged else "pending",
+            "coverageCommandIds": coverage_command_ids,
             "commands": effective_commands,
-            "evidenceIds": list(previous_validation.get("evidenceIds", [])) if commands_unchanged else [],
+            "evidenceIds": list(previous_validation.get("evidenceIds", [])) if contract_unchanged else [],
             "latestPassEvidenceIds": (
-                list(previous_validation.get("latestPassEvidenceIds", [])) if commands_unchanged else []
+                list(previous_validation.get("latestPassEvidenceIds", [])) if contract_unchanged else []
             ),
-            "activeRunId": previous_validation.get("activeRunId") if commands_unchanged else None,
+            "activeRunId": previous_validation.get("activeRunId") if contract_unchanged else None,
         }
         status = _batch_status(batch_tasks, batch_validation)
         projected[batch_id] = {
@@ -1457,6 +1501,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "taskGroupTemplate": TASK_GROUP_TEMPLATE_RELATIVE_PATH,
                     "taskGroupInputExample": _task_group_example(),
                     "taskGroupMatrixExceptionExample": _task_group_matrix_exception_example(),
+                    "taskGroupUiRequiredExample": _task_group_ui_required_example(),
                     "recommendedInputMode": "task-directory",
                     "supportedInputModes": ["task-directory", "body-file", "body-stdin", "task-json", "cli-fields"],
                     "requiredTaskFields": [
@@ -1468,6 +1513,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "validationCommands",
                     ],
                     "exampleOnlyTaskFields": ["matrixExceptionExample"],
+                    "exampleOnlyTaskGroupFields": ["matrixExceptionExample", "uiRequiredExample"],
                     "validationKinds": sorted(TASK_VALIDATION_KINDS),
                     "batchValidationKinds": sorted(BATCH_VALIDATION_KINDS),
                     "validationCoverage": {
@@ -1508,6 +1554,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         ),
                         "coverage": "all_path_qualified_spec_scenarios",
                         "requiredBefore": [
+                            "set-batch-validation-mode",
                             "add-batch-validation-command",
                             "add-project-validation-command",
                             "render-md",
@@ -1561,8 +1608,17 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                             "--command <command> --code-workspace <path>"
                         ),
                         "requiredFields": ["argv", "cwd", "kind", "required"],
-                        "requiredPerUsedLane": True,
+                        "requiredPerUsedLane": "commands_mode_only",
                         "defaultCwd": "declared_workspace_root",
+                    },
+                    "batchValidationMode": {
+                        "command": (
+                            "set-batch-validation-mode --lane <backend|frontend> "
+                            "--mode <task_covered|commands>"
+                        ),
+                        "taskCoveredRequirements": (
+                            "one required targeted Maven lifecycle command per task in one workspace"
+                        ),
                     },
                     "writerOwnedGeneratedArtifacts": {
                         "rootPlan": "plan.json",
@@ -1784,12 +1840,32 @@ def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
     if not isinstance(profiles, dict):
         profiles = {}
         data["batchValidationProfiles"] = profiles
-    profile = profiles.setdefault(args.lane, {"commands": []})
+    profile = profiles.setdefault(args.lane, {"mode": "commands", "commands": []})
+    profile["mode"] = "commands"
     commands = profile.setdefault("commands", [])
     if not isinstance(commands, list):
         commands = []
         profile["commands"] = commands
     commands.append(command)
+    return render_result(_write(workspace, feature, data))
+
+
+def _cmd_set_batch_validation_mode(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load(workspace, feature)
+    lane_tasks = [task for task in _tasks(data) if task_execution_lane(task) == args.lane]
+    if not lane_tasks:
+        return render_result(fail("batch_validation_lane_unused", args.lane, path=_path(workspace, feature)))
+    profiles = data.setdefault("batchValidationProfiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+        data["batchValidationProfiles"] = profiles
+    profile = profiles.setdefault(args.lane, {"mode": args.mode, "commands": []})
+    profile["mode"] = args.mode
+    if args.mode == "task_covered":
+        profile["commands"] = []
+    else:
+        profile.setdefault("commands", [])
     return render_result(_write(workspace, feature, data))
 
 
@@ -1918,9 +1994,11 @@ def record_task_attempt(
         if batch_completed:
             batch_plans = data.get("_batchPlans")
             batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+            validation: dict[str, Any] | None = None
             if isinstance(batch_plan, dict):
-                validation = batch_plan.get("batchValidation")
-                if isinstance(validation, dict):
+                raw_validation = batch_plan.get("batchValidation")
+                if isinstance(raw_validation, dict):
+                    validation = raw_validation
                     validation["status"] = "pending"
             data["status"] = "in_progress"
             data["activeBatchId"] = batch_id
@@ -1928,6 +2006,11 @@ def record_task_attempt(
                 "requiredAction": "run_batch_check",
                 "activeBatchId": batch_id,
                 "batchValidationStatus": "pending",
+                "mode": (
+                    validation.get("mode", "commands" if validation.get("commands") else None)
+                    if isinstance(validation, dict)
+                    else None
+                ),
             }
         elif success:
             tasks_by_id = {
@@ -2074,6 +2157,7 @@ def record_batch_validation_attempt(
     success: bool,
     run_id: str,
     passing_evidence_ids: list[str] | None = None,
+    expected_mode: str = "commands",
 ) -> WriterResult:
     """Bind one batch validation attempt and advance only after a passing gate."""
 
@@ -2098,6 +2182,13 @@ def record_batch_validation_attempt(
         validation = batch_plan.get("batchValidation")
         if not isinstance(validation, dict):
             return fail("batch_validation_contract_missing", batch_id, path=_path(workspace, feature))
+        actual_mode = validation.get("mode", "commands" if validation.get("commands") else None)
+        if actual_mode != expected_mode:
+            return fail(
+                "batch_validation_mode_mismatch",
+                f"expected={expected_mode};actual={actual_mode}",
+                path=_path(workspace, feature),
+            )
         history = validation.get("evidenceIds")
         history = history if isinstance(history, list) else []
         passing_ids = list(passing_evidence_ids if passing_evidence_ids is not None else evidence_ids)
@@ -2173,6 +2264,28 @@ def record_batch_validation_attempt(
                 atomic_write_json(_handoff_path(workspace, feature), handoff)
                 result = with_result_data(result, batchHandoff=handoff)
         return result
+
+
+def record_task_covered_batch(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    evidence_id: str,
+    *,
+    run_id: str,
+) -> WriterResult:
+    """Close a task-covered batch using one aggregate closure evidence record."""
+
+    return record_batch_validation_attempt(
+        workspace,
+        feature,
+        batch_id,
+        [evidence_id],
+        success=True,
+        run_id=run_id,
+        passing_evidence_ids=[evidence_id],
+        expected_mode="task_covered",
+    )
 
 
 def request_batch_revalidation(
@@ -2629,6 +2742,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     batch_validation.add_argument("--optional", action="store_true")
     batch_validation.set_defaults(func=_cmd_add_batch_validation_command)
+
+    batch_validation_mode = sub.add_parser("set-batch-validation-mode")
+    _common(batch_validation_mode)
+    batch_validation_mode.add_argument("--lane", choices=sorted(EXECUTION_LANES), required=True)
+    batch_validation_mode.add_argument("--mode", choices=["commands", "task_covered"], required=True)
+    batch_validation_mode.set_defaults(func=_cmd_set_batch_validation_mode)
 
     project_validation = sub.add_parser("add-project-validation-command")
     _common(project_validation)

@@ -338,6 +338,8 @@ def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
             group["uiRefs"] = {
                 "pageRefs": list(ui_refs.get("pageRefs", [])),
                 "interactionRefs": list(ui_refs.get("interactionRefs", [])),
+                "visualSourceRefs": list(ui_refs.get("visualSourceRefs", [])),
+                "frontendRoute": ui_refs.get("frontendRoute"),
             }
         groups.append(group)
     path.write_text(
@@ -531,7 +533,7 @@ class JsonWriterTests(unittest.TestCase):
                 "paths": ["src/main/java/example"],
             })
             task["validationCommands"][0].update({
-                "argv": ["mvn.cmd", "test", "-q"],
+                "argv": ["mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
                 "cwd": "backend/service",
             })
             (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
@@ -583,7 +585,7 @@ class JsonWriterTests(unittest.TestCase):
                 "paths": ["src/main/java/example"],
             })
             task["validationCommands"][0].update({
-                "argv": ["mvn.cmd", "test", "-q"],
+                "argv": ["mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
                 "cwd": "backend/service",
             })
             (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
@@ -643,6 +645,63 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("task_group_contract_mismatch", result.stdout)
             self.assertIn("fields=title", result.stdout)
+
+    def test_plan_writer_grouping_requires_complete_ui_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            task["uiRequired"] = True
+            task["uiRefs"] = {
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": ["VIS-001"],
+                "frontendRoute": "absolute-html",
+            }
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            del group_data["groups"][0]["uiRefs"]["visualSourceRefs"]
+            del group_data["groups"][0]["uiRefs"]["frontendRoute"]
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "preflight-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("T001.visualSourceRefs_must_be_string_array", result.stdout)
+            self.assertIn("T001.frontendRoute_missing", result.stdout)
+
+    def test_plan_writer_freezes_all_ui_refs_after_grouping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task_dir = Path(tmp) / "tasks"
+            task_dir.mkdir()
+            task = _plan_task_body()
+            task["uiRequired"] = True
+            task["scope"]["pages"] = ["PAGE-001"]
+            task["uiRefs"] = {
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": ["VIS-001"],
+                "frontendRoute": "absolute-html",
+            }
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            task["uiRefs"]["visualSourceRefs"] = ["VIS-002"]
+            task["uiRefs"]["frontendRoute"] = "standard-html"
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("task_group_contract_mismatch", result.stdout)
+            self.assertIn("visualSourceRefs", result.stdout)
+            self.assertIn("frontendRoute", result.stdout)
 
     def test_plan_writer_preflight_returns_missing_coverage_to_matrix_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -787,6 +846,16 @@ class JsonWriterTests(unittest.TestCase):
             "skills/autodev/autodev-plan/templates/task-groups.json",
         )
         self.assertIn("groups", contract["taskGroupInputExample"])
+        group_ui_example = contract["taskGroupUiRequiredExample"]
+        self.assertTrue(group_ui_example["uiRequired"])
+        self.assertEqual(
+            list(group_ui_example["uiRefs"]),
+            ["pageRefs", "interactionRefs", "visualSourceRefs", "frontendRoute"],
+        )
+        self.assertEqual(
+            contract["exampleOnlyTaskGroupFields"],
+            ["matrixExceptionExample", "uiRequiredExample"],
+        )
         group_exception = contract["taskGroupMatrixExceptionExample"]
         self.assertEqual(group_exception["mergedScenarioRefs"], group_exception["specRefs"][1:])
         self.assertIn("splitRationale", group_exception)
@@ -806,9 +875,13 @@ class JsonWriterTests(unittest.TestCase):
                     "--code-workspace <path>"
                 ),
                 "requiredFields": ["argv", "cwd", "kind", "required"],
-                "requiredPerUsedLane": True,
+                "requiredPerUsedLane": "commands_mode_only",
                 "defaultCwd": "declared_workspace_root",
             },
+        )
+        self.assertEqual(
+            contract["batchValidationMode"]["command"],
+            "set-batch-validation-mode --lane <backend|frontend> --mode <task_covered|commands>",
         )
         self.assertEqual(contract["workspaceContract"]["field"], "scope.workspaceRoots")
         self.assertTrue(contract["workspaceContract"]["codeWorkspacePreflightRequired"])
@@ -844,6 +917,7 @@ class JsonWriterTests(unittest.TestCase):
                 ),
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
+                    "set-batch-validation-mode",
                     "add-batch-validation-command",
                     "add-project-validation-command",
                     "render-md",

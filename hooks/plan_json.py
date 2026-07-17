@@ -50,6 +50,7 @@ BATCH_VALIDATION_KINDS = {
     "lint",
     "compile",
 }
+BATCH_VALIDATION_MODES = {"commands", "task_covered"}
 PROJECT_VALIDATION_KINDS = {
     "integration_test",
     "e2e_test",
@@ -227,6 +228,13 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
         batch_id = str(raw_entry.get("id", ""))
         batch = batch_data.get(batch_id, {})
         batch_tasks = tasks(batch) if isinstance(batch, dict) else []
+        validation = batch.get("batchValidation") if isinstance(batch, dict) else None
+        validation = validation if isinstance(validation, dict) else None
+        validation_mode = (
+            validation.get("mode", "commands" if validation.get("commands") else None)
+            if validation is not None
+            else None
+        )
         entries.append({
             "id": batch_id,
             "path": raw_entry.get("path"),
@@ -237,10 +245,14 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
             "taskIds": raw_entry.get("taskIds"),
             "batchTitle": batch.get("title") if isinstance(batch, dict) else None,
             "batchExecutionLane": batch.get("executionLane") if isinstance(batch, dict) else None,
-            "batchValidationCommands": (
-                batch.get("batchValidation", {}).get("commands")
-                if isinstance(batch, dict) and isinstance(batch.get("batchValidation"), dict)
-                else None
+            "batchValidationCommands": validation.get("commands") if validation is not None else None,
+            **(
+                {
+                    "batchValidationMode": "task_covered",
+                    "batchValidationCoverageCommandIds": validation.get("coverageCommandIds"),
+                }
+                if validation_mode == "task_covered"
+                else {}
             ),
             "tasks": [
                 {"id": task.get("id"), "contractSha256": task_contract_sha256(task)}
@@ -261,6 +273,74 @@ def _string_list(value: Any) -> list[str] | None:
         stripped = item.strip()
         if stripped:
             result.append(stripped)
+    return result
+
+
+def _command_executable(argv: list[str]) -> str:
+    return PurePosixPath(argv[0].replace("\\", "/")).name.lower() if argv else ""
+
+
+def _maven_goals(argv: list[str]) -> set[str]:
+    return {
+        item.lower().rsplit(":", 1)[-1]
+        for item in argv[1:]
+        if item and not item.startswith("-")
+    }
+
+
+def task_command_provides_maven_lifecycle_coverage(command: Any) -> bool:
+    """Return whether a required task command compiles code and runs scoped tests."""
+
+    if not isinstance(command, dict) or command.get("required") is not True:
+        return False
+    argv = _string_list(command.get("argv"))
+    if not argv or _command_executable(argv) not in {"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"}:
+        return False
+    lowered = [item.lower() for item in argv]
+    if any(
+        item in {"-dskiptests", "-dmaven.test.skip=true", "-dskipits"}
+        or item.startswith("-dskiptests=")
+        or item.startswith("-dmaven.test.skip=")
+        or item.startswith("-dskipits=")
+        for item in lowered
+    ):
+        return False
+    if any(
+        item in {"-pl", "--projects", "-f", "--file", "--activate-profiles"}
+        or item.startswith("-pl=")
+        or item.startswith("--projects=")
+        or item.startswith("--file=")
+        for item in lowered
+    ) or any(item.startswith("-P") for item in argv):
+        return False
+    goals = _maven_goals(argv)
+    if not goals.intersection({"test", "integration-test", "verify", "package", "install"}):
+        return False
+    if not any(
+        item.startswith("-dtest=") or item.startswith("-dit.test=")
+        for item in lowered
+    ):
+        return False
+    return command.get("kind") in {"behavior_test", "integration_test", "e2e_test"}
+
+
+def task_covered_command_ids(batch_tasks: list[dict[str, Any]]) -> list[str]:
+    """Select one deterministic Maven lifecycle coverage command per task."""
+
+    result: list[str] = []
+    for task in batch_tasks:
+        command_id = next(
+            (
+                str(command.get("id"))
+                for command in task.get("validationCommands", [])
+                if task_command_provides_maven_lifecycle_coverage(command)
+                and isinstance(command.get("id"), str)
+            ),
+            None,
+        )
+        if command_id is None:
+            return []
+        result.append(command_id)
     return result
 
 
@@ -751,6 +831,23 @@ def _validate_validation_command(
     kind = command.get("kind")
     if kind not in TASK_VALIDATION_KINDS:
         errors.append(f"{context}.kind_invalid")
+    if argv:
+        executable = _command_executable(argv)
+        goals = _maven_goals(argv) if executable in {"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"} else set()
+        lowered = [item.lower() for item in argv]
+        if "compile" in goals and not goals.intersection(
+            {"test", "integration-test", "verify", "package", "install"}
+        ):
+            errors.append(f"{context}.batch_owned_command")
+        if "test" in goals and not any(
+            item.startswith("-dtest=") or item.startswith("-dit.test=")
+            for item in lowered
+        ):
+            errors.append(f"{context}.maven_test_selector_missing")
+        if executable in {"npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"} and any(
+            item.lower() in {"build", "typecheck", "lint"} for item in argv[1:]
+        ):
+            errors.append(f"{context}.batch_owned_command")
     if not isinstance(command.get("required"), bool):
         errors.append(f"{context}.required_must_be_bool")
     repository = command.get("repo")
@@ -820,6 +917,11 @@ def _validate_batch_profiles(
         if not isinstance(commands, list):
             errors.append(f"batchValidationProfiles.{lane}.commands_must_be_array")
             continue
+        mode = profile.get("mode", "commands" if commands else None)
+        if mode not in BATCH_VALIDATION_MODES:
+            errors.append(f"batchValidationProfiles.{lane}.mode_invalid")
+        elif mode == "task_covered" and commands:
+            errors.append(f"batchValidationProfiles.{lane}.task_covered_commands_must_be_empty")
         for index, command in enumerate(commands):
             _validate_batch_command(
                 errors,
@@ -831,10 +933,17 @@ def _validate_batch_profiles(
         for lane in sorted(used_lanes):
             profile = profiles.get(lane)
             commands = profile.get("commands") if isinstance(profile, dict) else None
-            if not isinstance(commands, list) or not any(
-                isinstance(command, dict) and command.get("required") is True
-                for command in commands
-            ):
+            mode = (
+                profile.get("mode", "commands" if commands else None)
+                if isinstance(profile, dict)
+                else None
+            )
+            configured = mode == "task_covered" or (
+                mode == "commands"
+                and isinstance(commands, list)
+                and any(isinstance(command, dict) and command.get("required") is True for command in commands)
+            )
+            if not configured:
                 errors.append(f"batchValidationProfiles_missing_lane:{lane}")
 
 
@@ -848,9 +957,12 @@ def _validate_batch_validation(errors: list[str], data: dict[str, Any], batch_id
         return
     if validation.get("profile") != data.get("executionLane"):
         errors.append(f"{batch_id}.batchValidation.profile_mismatch")
+    commands = validation.get("commands")
+    mode = validation.get("mode", "commands" if commands else None)
+    if mode not in BATCH_VALIDATION_MODES:
+        errors.append(f"{batch_id}.batchValidation.mode_invalid")
     if validation.get("status") not in BATCH_VALIDATION_STATUSES:
         errors.append(f"{batch_id}.batchValidation.status_invalid")
-    commands = validation.get("commands")
     if not isinstance(commands, list):
         errors.append(f"{batch_id}.batchValidation.commands_must_be_array")
     else:
@@ -863,6 +975,31 @@ def _validate_batch_validation(errors: list[str], data: dict[str, Any], batch_id
                 if command_id in seen:
                     errors.append(f"{batch_id}.batchValidation.commands_duplicate:{command_id}")
                 seen.add(command_id)
+    raw_coverage_ids = validation.get("coverageCommandIds", [])
+    coverage_ids = _string_list(raw_coverage_ids)
+    if coverage_ids is None:
+        errors.append(f"{batch_id}.coverageCommandIds_must_be_string_array")
+        coverage_ids = []
+    for command_id in coverage_ids:
+        if not VALIDATION_ID_RE.fullmatch(command_id):
+            errors.append(f"{batch_id}.coverageCommandIds_invalid:{command_id}")
+    if mode == "task_covered" and not coverage_ids:
+        errors.append(f"{batch_id}.coverageCommandIds_missing")
+    if mode == "commands" and coverage_ids:
+        errors.append(f"{batch_id}.batchValidation.commands_mode_coverage_must_be_empty")
+    if mode == "task_covered":
+        if commands:
+            errors.append(f"{batch_id}.batchValidation.task_covered_commands_must_be_empty")
+        workspace_root_sets = [task_workspace_roots(item) for item in tasks(data) if task_workspace_roots(item)]
+        if len(workspace_root_sets) != len(tasks(data)) or any(len(item) != 1 for item in workspace_root_sets):
+            errors.append(f"{batch_id}.batchValidation.task_covered_requires_single_workspace")
+        expected_ids = task_covered_command_ids(tasks(data))
+        if not expected_ids:
+            errors.append(f"{batch_id}.batchValidation.task_coverage_missing")
+        elif coverage_ids != expected_ids:
+            errors.append(f"{batch_id}.batchValidation.coverageCommandIds_mismatch")
+        if validation.get("activeRunId") is not None:
+            errors.append(f"{batch_id}.batchValidation.task_covered_active_run_forbidden")
     _validate_string_list(errors, validation, batch_id, "evidenceIds", required=False, item_re=EVIDENCE_ID_RE)
     _validate_string_list(
         errors,
@@ -1204,6 +1341,15 @@ def _bundle_consistency_errors(
             errors.append(f"{batch_id}.mixed_execution_lanes")
         elif task_lanes and batch_lane not in task_lanes:
             errors.append(f"{batch_id}.executionLane_task_mismatch")
+        profiles = root.get("batchValidationProfiles")
+        profile = profiles.get(str(batch_lane)) if isinstance(profiles, dict) else None
+        validation = data.get("batchValidation")
+        if isinstance(profile, dict) and isinstance(validation, dict):
+            profile_commands = profile.get("commands")
+            profile_mode = profile.get("mode", "commands" if profile_commands else None)
+            validation_mode = validation.get("mode", "commands" if validation.get("commands") else None)
+            if profile_mode != validation_mode:
+                errors.append(f"{batch_id}.batchValidation.mode_projection_mismatch")
 
         declared_batch_deps = set(entry.get("deps") or [])
         for dep_batch in declared_batch_deps:

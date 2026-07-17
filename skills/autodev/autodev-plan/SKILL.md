@@ -251,13 +251,13 @@ python "${pluginPath}/hooks/plan_writer.py" add-task-contract
 
 writer 自动分组，调用方不指定 batch。`executionLane` 由 writer 根据 `uiRequired` 自动推导：`false=backend`、`true=frontend`，调用方不得自行维护该字段。`task-groups.json` 必须按 DAG 拓扑序排列全部 backend group，再排列全部 frontend group；frontend group 可以依赖更早的 backend group，backend group 不得依赖 frontend group。writer 以第一个 `specRefs` 中 `#` 前的文件路径作为主 capability；只有与紧邻前一批的主 capability 和 execution lane 都相同且该批少于 5 个任务时才合批，否则创建下一 `Bxxx`。因此即使最后一个 backend batch 未满，首个 frontend task 也必须新建 batch。不得伪造 batch ID，也不得通过调整 `specRefs` 顺序伪造分组结果。
 
-最终候选分组表完成后，先运行只读分组预检。`task-groups.json.matrixExceptionExample` 和 `add-task-contract.taskGroupMatrixExceptionExample` 是 6-12 个 SCN 共享同一验证闭环时的分组例外示例，只用于指导，不是 `groups[]` 的实际成员。该命令只校验拆分所需的完整路径级 `specRefs`、SCN/API/Page/UIX 计数、DAG/lane 顺序、`mergedScenarioRefs`、`splitRationale`、`validationBoundary` 和完整 Scenario 覆盖，不要求 goal、scope、AC、decisionIds 或完整 validation command：
+最终候选分组表完成后，先运行只读分组预检。`task-groups.json.uiRequiredExample` / `add-task-contract.taskGroupUiRequiredExample` 是 `uiRequired:true` 的完整分组示例，`task-groups.json.matrixExceptionExample` / `add-task-contract.taskGroupMatrixExceptionExample` 是 6-12 个 SCN 共享同一验证闭环时的分组例外示例；两者都只用于指导，不是 `groups[]` 的实际成员。该命令只校验拆分所需的完整路径级 `specRefs`、SCN/API/Page/UIX/VIS/route、DAG/lane 顺序、`mergedScenarioRefs`、`splitRationale`、`validationBoundary` 和完整 Scenario 覆盖，不要求 goal、scope、AC、decisionIds 或完整 validation command：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${feature}" --group-file "${FEATURE_DIR}/.tmp/plan_writer/task-groups.json"
 ```
 
-分组预检失败时只能修改候选分组，不得创建 `tasks/Txxx.json`。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先证明这些 SCN 共享同一用户动作、公开 seam 和自动化验证闭环，否则按业务闭环继续拆分。分组预检成功后冻结连续 Task ID 和分组字段，再生成完整 task 文件；task 的 `title/deps/uiRequired/specRefs/mergedScenarioRefs/apiIds/uiRefs.pageRefs/uiRefs.interactionRefs/splitRationale` 必须与已通过的分组契约一致。
+分组预检失败时只能修改候选分组，不得创建 `tasks/Txxx.json`。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先证明这些 SCN 共享同一用户动作、公开 seam 和自动化验证闭环，否则按业务闭环继续拆分。分组预检成功后冻结连续 Task ID 和分组字段，再生成完整 task 文件；task 的 `title/deps/uiRequired/specRefs/mergedScenarioRefs/apiIds/uiRefs.pageRefs/uiRefs.interactionRefs/uiRefs.visualSourceRefs/uiRefs.frontendRoute/splitRationale` 必须与已通过的分组契约一致。
 
 复杂 task 跨平台使用独立 UTF-8 JSON 文件。全部 task 文件完成后先运行只读整组预检：
 
@@ -273,7 +273,7 @@ python "${pluginPath}/hooks/plan_writer.py" materialize-task-set --feature "${fe
 
 该命令一次生成 finalized 根计划和全部 backend/frontend 批次；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；确认重跑整个 Plan 时才使用 `--force`。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
 
-每个 task 文件进入整组预检前必须已经包含完整 `validationCommands`：`kind` 来自 contract 的 task validation kinds，只允许 `behavior_test`、`integration_test`、`e2e_test`、`static_check`；每条 AC 的 ID 都存在，required command 的 `covers` 并集覆盖全部 AC。**TASK 禁止配置 compile/build/typecheck/lint**，这些命令归 lane 级批次验证。UI task 还必须确保 `scope.pages` 与 `uiRefs.pageRefs` 集合一致。不得通过 validator 失败来探索 schema，不得以反复试错、读取 writer 源码或搜索常量的方式学习调用协议。
+每个 task 文件进入整组预检前必须已经包含完整 `validationCommands`：`kind` 来自 contract 的 task validation kinds，只允许 `behavior_test`、`integration_test`、`e2e_test`、`static_check`；每条 AC 的 ID 都存在，required command 的 `covers` 并集覆盖全部 AC。**TASK 禁止配置 compile/build/typecheck/lint**，Maven `test` 必须带 `-Dtest=` 或 `-Dit.test=` 目标，禁止裸 `mvn test`。UI task 还必须确保 `scope.pages` 与 `uiRefs.pageRefs` 集合一致。不得通过 validator 失败来探索 schema，不得以反复试错、读取 writer 源码或搜索常量的方式学习调用协议。
 
 所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。writer 会按 task 的主 `specRefs` capability 和 execution lane 归组，每批最多 5 个任务；任何 batch 都不得混合 backend/frontend task。任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖、backend 依赖 frontend 和跨批环。不得直接整份写入 root/batch 正式 JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks`、缺少 `taskSetStatus` / `executionLane` / `batchValidationProfiles`、任一批次缺少 `batchValidation`，或使用旧 batch strategy 时不迁移、不兼容。validator 会返回 `batch_validation_contract_requires_rebuild`，必须清理并重跑完整 Plan。
 
@@ -291,13 +291,13 @@ python "${pluginPath}/hooks/plan_writer.py" materialize-task-set --feature "${fe
 - `goal` 写用户可观察结果；`scope.modules/entrypoints/pages/dataObjects` 写执行范围。`scope.workspaceRoots` 必须声明 Code workspace 相对 Git 根的位置：单仓库使用 `{"default":"后台服务/.../模块"}`，Git 根本身使用 `{"default":"."}`；多仓库按 `repoId` 分别声明。`scope.paths` 只写相对该 workspace 的路径，多仓库使用 `repoId:relative/path`，禁止再次包含 workspace 前缀。`validationCommands[].cwd` 保持 Git 根相对路径，必须等于或位于对应 `workspaceRoots` 之下。路径必须覆盖预计修改的全部分层和验证资产，涉及 domain、test、resources、迁移或配置时逐项列入，不得只列 controller/adapter 后依赖 runner 自动扩大范围。`preflight-task-set` / `materialize-task-set` 必须传同一个 `--code-workspace`，writer 会在落盘前验证 workspace、cwd 和 Maven/Gradle/Node 等 manifest；`implementationPoints` 写 2-6 条可执行要点。每条 `acceptanceCriteria` 必须是 `{id,text,scenarioRefs}`，ID 使用 `AC-T001-01`，其中 `scenarioRefs` 必须已出现在 task `specRefs`，避免 AC 与 SCN 双轨漂移。
 - `validationCommands` 必须结构化为 `{id,argv,cwd,kind,required,covers}`；ID 使用 `VAL-T001-01`，`argv` 不经 shell，`cwd` 为仓库内相对路径，`kind` 只能是 `behavior_test`、`integration_test`、`e2e_test`、`static_check`。所有 AC 必须由 required 命令覆盖。多命令任务按 `all_required_validations_pass` 完成，并保留全部成功/失败尝试历史。
 - 多仓库任务为每条 validation/project command 增加 `repo`，值为对应 Git 根目录名；未涉及多仓库时省略。多仓库路径在 evidence 中使用 `repoId:relative/path`，但所有 evidence 文件仍属于 feature 产物目录。
-- 顶层 `batchValidationProfiles` 按 `backend` / `frontend` lane 配置 `compile`、`build`、`typecheck`、`lint`；每个实际使用的 lane 至少有一条 required 命令。writer 将 profile 投影到每个同 lane batch，生成稳定的 `BATCH-B001-VAL-001` 类 ID；Code 在该批全部 TASK 完成后执行一次 `task_runner batch-check`。
+- 顶层 `batchValidationProfiles` 按 lane 选择 `mode=task_covered|commands`。同一 Maven workspace 中每个 TASK 都有 required 的定向 `mvn test/verify/package/install` 时使用 `task_covered`，writer 自动投影 `coverageCommandIds` 且 commands 为空；存在 TASK 未覆盖的编译、构建、类型检查或 lint 风险时使用 `commands`，至少配置一条有增量价值的 required 命令。不得仅因 Batch 结束重复执行已被 TASK Maven 生命周期覆盖的 `mvn compile`。
 - 顶层 `projectValidationCommands` 使用 `PROJECT-VAL-001` 等 ID，只承载可选的跨 lane、跨批次或全项目集成检查，`kind` 仅允许 `integration_test/e2e_test/static_check`；按 `argv + cwd + repo` 归一化后不得与任何 batch profile 命令重复，也不能替代 TASK 的 AC 覆盖。没有这种检查时保持空数组，Code 可直接进入完成门禁。
 - Plan 阶段所有任务初始状态为 `todo`，`evidenceIds` / `completionEvidenceIds` 为空，`latestPassEvidenceId` 为 null；顶层 `projectCheckEvidenceIds` 为空，`latestProjectCheckEvidenceId` 为 null。以上运行字段只由 task runner 更新。
 - Plan 初始激活 `B001`；根、批次和 task 都必须记录状态。非末批完成后根状态会成为 `awaiting_next_conversation`，Code 必须停止当前对话；新对话通过 `task_runner.py code-session` 检查并自动激活下一批。
 - 每个任务必须追溯到真实 specs 与 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的决策。模板中的 API/Data/Decision ID 都是占位示例，必须替换成真实 ID。任务不涉及接口或数据变更时，不要为了过校验强行编造 `API-*` / `DATA-*`：`plan.json.apiIds` / `dataIds` 写空数组 `[]`，`PLAN.md` 的 `api_id` / `data_id` 写 `无` 或 `-`。如果 `design.md` 中存在 API/Data 决策，则这些决策必须被至少一个真正相关的任务覆盖；只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
 - `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
-- `validationCommands` 是 task 级强门禁，必须窄、快、可直接执行并由退出码/断言判读；不能确定真实文件时不要凭空填写 `expectedFiles`。TASK 只做 behavior/integration/e2e/static 验证，compile/build/typecheck/lint 统一放到批次验证 profile。
+- `validationCommands` 是 task 级强门禁，必须窄、快、可直接执行并由退出码/断言判读；不能确定真实文件时不要凭空填写 `expectedFiles`。TASK 只做 behavior/integration/e2e/static 验证。compile/build/typecheck/lint 只有在补充 TASK 验证盲区时才进入 `commands` 批次 profile；TASK 已覆盖时选择 `task_covered`。
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
@@ -315,6 +315,7 @@ UI 任务投影规则：
 - `UI_CONTEXT.uiRequired=true` 但缺少带 `REQ/SCN specRefs` 的 UI capability 时，不生成 UI 任务，回到 `/autodev-specs` 补齐 UI 场景分母。
 - `UI_CONTEXT.uiRequired=true` 时，只为 UI capability 生成 `uiRequired=true` 的任务，并补齐 `uiRefs.pageRefs`、`uiRefs.interactionRefs`、`uiRefs.visualSourceRefs` 和 `uiRefs.frontendRoute`。
 - UI feature 下，`uiRequired` 不是 `true` 的任务必须显式写 `uiRequired:false`，且不得带非空 `uiRefs`；纯后端支撑任务只保留业务/设计/验证依据。
+- 仅配置后端菜单、权限或菜单数据且不修改前端页面/路由实现的任务保持 `uiRequired:false`，不得为通过分组预检虚构 PAGE/UIX。真正修改前端菜单路由或页面入口时才标记 `uiRequired:true`，并引用该入口实际导航到的 PAGE、相关 UIX、VIS 和 route。
 - UI task 的 `scope.pages` 必须与 `uiRefs.pageRefs` 集合一致；非 UI task 的 `scope.pages` 必须为空数组。
 - `UI_CONTEXT.uiRequired=false` 时，不生成 UI task；纯后端任务不得夹带前端实现。
 - `uiRefs.frontendRoute` 取值为 `none`、`spec-driven-ui`、`absolute-html`、`standard-html` 或 `missing-html`。有 UI 但无 HTML/设计稿时使用 `spec-driven-ui`，不要伪造 HTML 输入。
@@ -396,14 +397,20 @@ UI 任务投影规则：
 - `replace-task` / `remove-task` 只用于 collecting 状态的中断计划修复，并会重新计算全部批次；`remove-task` 在仍有依赖方时拒绝。对 finalized 计划不原地解封、不直接编辑 JSON，清理或使用明确的 `materialize-task-set --force` 重跑完整 Plan。
 - `validate --structure` 会复核已生成 bundle 的结构、完整性摘要和 Task 粒度，但不替代完整 Scenario 覆盖预检或 `dev.plan` 阶段门禁。
 
-materialize 成功后，必须为任务集中每个实际使用的 lane 通过 writer 添加至少一条 required 批次验证命令；同一 lane 的 profile 自动投影到该 lane 的全部 batch：
+materialize 成功后，必须为每个实际使用的 lane 选择一种批次收口模式。同一 Maven workspace 中每个 TASK 都有 required 的定向 Maven 生命周期测试，且没有多模块、特殊 profile、代码生成、打包或构建配置风险时，使用 `task_covered`：
+
+```bash
+python "${pluginPath}/hooks/plan_writer.py" set-batch-validation-mode --feature "${feature}" --lane backend --mode task_covered
+```
+
+否则只添加能够覆盖 TASK 盲区的 required 批次命令；添加命令会把该 lane 切换为 `commands`：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --feature "${feature}" --lane backend --command "<BACKEND_COMPILE_OR_BUILD>" --kind compile --code-workspace "<BACKEND_MODULE>"
 python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --feature "${feature}" --lane frontend --command "<FRONTEND_BUILD_OR_TYPECHECK>" --kind build --code-workspace "<FRONTEND_MODULE>"
 ```
 
-只为实际存在的 lane 添加命令，`kind` 使用 `compile`、`build`、`typecheck`、`lint` 之一。未显式传 `--cwd` 时 writer 使用该 lane task 声明的 workspace 根，不再默认为 Git 根 `.`；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。确有跨 lane/跨批次集成检查时，再用 `add-project-validation-command --kind integration_test|e2e_test|static_check` 添加可选的最终检查；不得把 batch 已覆盖的 `argv + cwd + repo` 命令重复放入项目级检查。随后生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json`。必须先完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json`，再通过 `smoke_plan_writer.py init/add-test/set-*` 增量写入，不得先自由生成再依赖 validator 反复修字段。
+`task_covered` 必须由 writer 识别并完整覆盖该 lane 每个 Batch 的 TASK；无法证明时命令失败，必须改用 `commands`，不得强行修改 coverage ID。命令模式的 `kind` 使用 `compile`、`build`、`typecheck`、`lint` 之一。未显式传 `--cwd` 时 writer 使用该 lane task 声明的 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。确有跨 lane/跨批次集成检查时，再用 `add-project-validation-command --kind integration_test|e2e_test|static_check` 添加可选最终检查。随后生成 `SMOKE_TEST_PLAN.json`。
 
 `SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 与 TDD 的克制粒度：每个案例只描述一个站在公开 seam 上的 vertical slice，必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码，不批量设计覆盖想象行为的测试矩阵。
 

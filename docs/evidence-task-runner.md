@@ -72,7 +72,7 @@ python hooks/task_runner.py complete --workspace "$ARTIFACT_WORKSPACE" --feature
 
 This mode requires an empty snapshot diff, a real supporting file, and a required behavior/integration/E2E/static validation. Compile, typecheck, or lint alone cannot complete a no-change task.
 
-Task `validationCommands` accept only behavior, integration, E2E, or static checks. Compile, build, typecheck, and lint belong to the lane-specific batch profile and never run once per task.
+Task `validationCommands` accept only behavior, integration, E2E, or static checks. Maven `test` commands must select a test with `-Dtest=` or `-Dit.test=`. Compile, build, typecheck, and lint never run once per task, and agents must not invoke batch-owned commands manually during a task.
 
 `--supporting-file` is relative to the resolved Git root; prefix it with `repoId:` for a multi-repository run. Verified-existing mode is only for behavior that existed before start. It is not a recovery mechanism for implementation files absorbed into a replacement run's baseline, and the runner rejects conflicts found in earlier aborted runs.
 
@@ -93,14 +93,16 @@ If validation fails, fail evidence and its log are still written, while the task
 
 ## Batch Validation And Revalidation
 
-After every task in the active batch is done, run the lane-specific compile/build/typecheck/lint profile once:
+Batch validation has two modes. `task_covered` is valid when every task in the batch has a required, targeted Maven lifecycle command in one workspace. Completing the final task appends one `action=batch_closure` record that points to the current task evidence, marks the batch passed, and creates no batch run or shell command.
+
+Use `commands` only when compile/build/typecheck/lint adds coverage not provided by task validation. After every task in such a batch is done, run the profile once:
 
 ```bash
 python hooks/task_runner.py batch-check --workspace "$ARTIFACT_WORKSPACE" \
   --feature "$FEATURE" --batch-id B001 --code-workspace "$BUSINESS_REPO"
 ```
 
-The first call creates a batch run and publishes its active run ID before executing commands. On `fix_batch_and_retry_same_run`, fix only paths covered by the batch task scopes and retry with the returned `--run-id`. Attempts and `action=batch_validation` evidence are append-only. A validation command that modifies Git-visible files is rejected.
+The first call creates a batch run and publishes its active run ID before executing commands. `batch-check` rejects `task_covered` batches. On `fix_batch_and_retry_same_run`, fix only paths covered by the batch task scopes and retry with the returned `--run-id`. Attempts and `action=batch_validation` evidence are append-only. A validation command that modifies Git-visible files is rejected.
 
 Each attempt persists its workspace baseline before command execution, adopts already-streamed evidence after interruption, writes `status=evidence_written` before mutating the plan, and binds the plan idempotently. A crash after evidence append, revalidation binding, or terminal binding resumes with the same run ID without duplicating completed command evidence. Required passing command evidence forms `latestPassEvidenceIds`; optional pass/fail records remain in full history but do not decide batch success.
 

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run compile/build/typecheck/lint once per backend or frontend batch while preserving per-TASK behavior validation and append-only evidence.
+**Goal:** Preserve per-TASK behavior validation and append-only evidence while running batch quality commands only when they add coverage beyond current TASK lifecycle evidence.
 
 **Architecture:** `plan_writer.py` owns lane validation profiles and projects an immutable effective command set into every batch. `task_runner.py` adds a resumable batch run beside existing task runs; a batch cannot hand off until its latest command pass is newer than current TASK completion evidence. Batch repair changes are separate evidence and selectively trigger normal TASK revalidation runs.
 
@@ -427,3 +427,5 @@ git commit -m "docs: move compile validation to batch boundary"
 - Restrict optional project checks to `integration_test`, `e2e_test`, and `static_check`; reject commands duplicating a batch profile by `argv + cwd + repo`.
 - Reject finalized plans missing `batchValidationProfiles` or projected `batchValidation` with `batch_validation_contract_requires_rebuild`.
 - Preserve `completedRevalidation` runtime linkage and verify trigger, superseded, current completion, ownership, and evidence ordering at code-done.
+- Support `task_covered` profiles for same-workspace targeted Maven lifecycle validation. Final TASK completion writes `batch_closure` evidence and skips redundant batch compilation; `commands` mode retains the resumable batch-check path.
+- Reject bare Maven task tests, disguised batch-owned commands, and manual batch command execution in the Code protocol.

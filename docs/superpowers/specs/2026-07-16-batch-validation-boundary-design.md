@@ -17,7 +17,7 @@ The plan writer accepts batch validation profiles for the execution lanes presen
 - `backend`: compile, build, typecheck, and lint commands for backend repositories.
 - `frontend`: compile, build, typecheck, and lint commands for frontend repositories.
 
-Every lane used by a batch must have a non-empty profile with at least one required command. An unused lane profile may be absent.
+Every lane used by a batch must select `mode=commands` or `mode=task_covered`. Command mode has at least one required command. Task-covered mode has no batch commands and is allowed only when every task supplies a recognized required targeted Maven lifecycle command in the same workspace.
 
 Each projected batch records the effective command snapshot for its `executionLane`. The profile and projected commands are included in the plan digest so changing a command requires rebuilding the plan contract.
 
@@ -26,8 +26,8 @@ The root and projected batch shapes are:
 ```json
 {
   "batchValidationProfiles": {
-    "backend": {"commands": []},
-    "frontend": {"commands": []}
+    "backend": {"mode": "task_covered", "commands": []},
+    "frontend": {"mode": "commands", "commands": []}
   }
 }
 ```
@@ -35,8 +35,10 @@ The root and projected batch shapes are:
 ```json
 {
   "batchValidation": {
+    "mode": "task_covered",
     "profile": "backend",
     "status": "pending",
+    "coverageCommandIds": ["VAL-T001-01"],
     "commands": [],
     "evidenceIds": [],
     "latestPassEvidenceIds": [],
@@ -53,7 +55,7 @@ Task `validationCommands` must not contain project-level command kinds (`compile
 
 ### Batch state transition
 
-Completing the final TASK in an active batch marks that TASK done but leaves the batch active with `batchValidation.status = pending`. The runner returns `requiredAction=run_batch_check`; it must not create a handoff yet.
+Completing the final TASK in command mode leaves the batch active and returns `requiredAction=run_batch_check`. In task-covered mode, the same completion appends a `batch_closure` record after all current task evidence, binds it as the batch pass pointer, and advances directly to handoff/project-check/code-done without a batch run.
 
 `batch-check` creates a batch validation run under the feature artifact directory, captures repository snapshots, and executes every command in the batch profile. It records one append-only `batch_validation` evidence record per command and binds the evidence IDs to the batch.
 
@@ -68,6 +70,7 @@ The batch run baseline is captured before the first batch check, after all TASK 
 Evidence is append-only. Existing TASK evidence is never edited or deleted.
 
 - A TASK run records the delta from its own `start` snapshot in its normal `validation` evidence. This remains the historical record of that TASK implementation.
+- A task-covered batch records one command-free `batch_closure` evidence item containing exact coverage command IDs and source task evidence IDs.
 - A batch run records the delta from the post-TASK batch baseline in `batch_validation` evidence. It records compile repair changes separately and does not claim TASK acceptance coverage.
 - Batch records use `taskId = "__batch__"` plus an explicit `batchId`; integrity checks must recognize this non-TASK evidence owner.
 - The batch's `batchValidationEvidenceIds` retain every command attempt. The latest passing attempt is the one that permits handoff.
@@ -91,7 +94,7 @@ Successful TASK revalidation stores a runtime `completedRevalidation` pointer al
 
 ### Code session and final checks
 
-`code-session` returns the active batch while TASKs or required revalidations remain. After the final TASK, it returns the batch-check action instead of opening the next conversation. After batch validation passes, the existing `stop_and_open_new_conversation` handoff behavior is preserved.
+`code-session` returns the active batch while TASKs or required revalidations remain. After the final TASK, command mode returns batch-check; task-covered mode normally closes inside `complete`, while an interrupted closure returns `recover_task_covered_batch`. After either mode passes, the existing handoff behavior is preserved.
 
 After all batches pass, `code-session` runs `project-check` only when `projectValidationCommands` is non-empty. `code_done` requires the latest passing project check in that case; otherwise it accepts the latest passing batch validations and all TASK completion evidence.
 

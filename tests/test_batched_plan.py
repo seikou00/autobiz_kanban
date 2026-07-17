@@ -22,6 +22,7 @@ from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
     load_and_validate_plan,
     load_plan_bundle,
+    task_set_digest,
     validate_plan_data,
     write_plan_json,
 )
@@ -228,6 +229,17 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_explicit_commands_mode_preserves_legacy_task_set_digest(self) -> None:
+        root = root_plan(batches=[batch_entry("B001", ["T001"])])
+        batch = batch_plan("B001", [task("T001")])
+        legacy_digest = task_set_digest(root, {"B001": batch})
+
+        root["batchValidationProfiles"]["backend"]["mode"] = "commands"
+        batch["batchValidation"]["mode"] = "commands"
+        batch["batchValidation"]["coverageCommandIds"] = []
+
+        self.assertEqual(task_set_digest(root, {"B001": batch}), legacy_digest)
+
     def test_finalized_plan_requires_batch_validation_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
@@ -487,6 +499,58 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(batch["batchValidation"]["commands"][0]["id"], "BATCH-B001-VAL-001")
             self.assertEqual(batch["batchValidation"]["status"], "pending")
 
+    def test_plan_writer_projects_task_covered_batch_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_plan_state(workspace)
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "hooks" / "plan_writer.py"),
+                        *args,
+                        "--workspace",
+                        str(workspace),
+                        "--feature",
+                        "alpha",
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            item = task("T001")
+            item["scope"].update({"workspaceRoots": {"default": "."}, "paths": ["src"]})
+            item["validationCommands"][0].update({
+                "argv": ["mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
+                "kind": "integration_test",
+            })
+            self.assertEqual(writer("init").returncode, 0)
+            body = Path(tmp) / "T001.json"
+            body.write_text(json.dumps(item), encoding="utf-8")
+            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+
+            configured = writer(
+                "set-batch-validation-mode",
+                "--lane",
+                "backend",
+                "--mode",
+                "task_covered",
+            )
+
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
+            self.assertEqual(root["batchValidationProfiles"]["backend"]["mode"], "task_covered")
+            self.assertEqual(root["batchValidationProfiles"]["backend"]["commands"], [])
+            self.assertEqual(batch["batchValidation"]["mode"], "task_covered")
+            self.assertEqual(batch["batchValidation"]["coverageCommandIds"], ["VAL-T001-01"])
+            self.assertEqual(batch["batchValidation"]["commands"], [])
+
     def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
@@ -507,6 +571,24 @@ class BatchedPlanContractTest(unittest.TestCase):
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
             self.assertIn("T001.validationCommands[1].kind_invalid", errors)
+
+    def test_bundle_rejects_disguised_compile_and_unscoped_maven_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            item = task("T001")
+            item["validationCommands"][0].update({
+                "argv": ["mvn.cmd", "compile", "-q"],
+                "kind": "integration_test",
+            })
+            write_bundle(feature_dir, [[item]])
+            _, compile_errors = load_and_validate_plan(feature_dir / "plan.json")
+            self.assertIn("T001.validationCommands[0].batch_owned_command", compile_errors)
+
+            item["validationCommands"][0]["argv"] = ["mvn.cmd", "test", "-q"]
+            write_bundle(feature_dir, [[item]])
+            _, test_errors = load_and_validate_plan(feature_dir / "plan.json")
+            self.assertIn("T001.validationCommands[0].maven_test_selector_missing", test_errors)
 
     def test_bundle_rejects_batch_validation_cwd_outside_task_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

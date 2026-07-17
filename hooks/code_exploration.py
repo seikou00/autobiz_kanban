@@ -549,6 +549,24 @@ def collect_trusted_evolution(
         new_ids = [item for item in latest_pass_ids if item not in covered_evidence]
         if not new_ids:
             continue
+        mode = validation.get("mode", "commands" if validation.get("commands") else None)
+        if mode == "task_covered":
+            for evidence_id in new_ids:
+                record = evidence_by_id.get(evidence_id)
+                coverage = record.get("coverage") if isinstance(record, dict) else None
+                if (
+                    not isinstance(record, dict)
+                    or record.get("action") != "batch_closure"
+                    or record.get("batchId") != batch_id
+                    or record.get("taskId") != "__batch__"
+                    or not isinstance(coverage, dict)
+                    or coverage.get("mode") != "task_covered"
+                    or coverage.get("result") != "pass"
+                ):
+                    untrusted.append(f"batch_closure_evidence_invalid:{evidence_id}")
+                    continue
+                evidence_ids.append(evidence_id)
+            continue
         batch_valid = True
         run_ids: set[str] = set()
         batch_records: list[tuple[str, dict[str, Any]]] = []

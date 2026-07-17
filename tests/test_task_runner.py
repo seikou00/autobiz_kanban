@@ -274,6 +274,32 @@ def _check_batch(workspace: Path, code: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def _configure_task_covered(feature_dir: Path, code: Path) -> None:
+    (code / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    wrapper = code / "mvnw"
+    wrapper.write_text("#!/bin/sh\necho targeted validation\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    batch = _read_batch(feature_dir)
+    task = batch["tasks"][0]
+    task["scope"].update({"workspaceRoots": {"default": "."}, "paths": ["existing.txt"]})
+    task["validationCommands"][0].update({
+        "argv": ["./mvnw", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
+        "kind": "integration_test",
+    })
+    batch["batchValidation"].update({
+        "mode": "task_covered",
+        "coverageCommandIds": ["VAL-T001-01"],
+        "commands": [],
+        "activeRunId": None,
+    })
+    _write_batch(feature_dir, batch)
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["batchValidationProfiles"]["backend"] = {"mode": "task_covered", "commands": []}
+    root["projectValidationCommands"] = []
+    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 class TaskRunnerTest(unittest.TestCase):
     def test_code_done_rejects_missing_batch_validation_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -986,6 +1012,52 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(session.returncode, 0, session.stdout + session.stderr)
             self.assertEqual(json.loads(session.stdout)["action"], "run_batch_check")
 
+    def test_task_covered_batch_closes_without_running_batch_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_task_covered(feature_dir, code)
+            started = _start(workspace, code)
+
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+                "--no-code-change-why", "existing behavior is sufficient",
+                "--supporting-file", "existing.txt",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertEqual(payload["requiredAction"], "code_done_ready")
+            self.assertFalse(payload["stopAfterBatch"])
+            batch = _read_batch(feature_dir)
+            self.assertEqual(batch["status"], "done")
+            self.assertEqual(batch["batchValidation"]["status"], "passed")
+            self.assertEqual(batch["batchValidation"]["commands"], [])
+            self.assertFalse((feature_dir / ".batch-runs").exists())
+            records = [
+                json.loads(line)
+                for line in (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([record["action"] for record in records], ["validation", "batch_closure"])
+            self.assertEqual(records[-1]["coverage"]["sourceEvidenceIds"], ["ev_0001"])
+            self.assertEqual(check_code_done(feature_dir), [])
+
+            checked = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(checked.returncode, 0)
+            self.assertIn("batch_check_not_required:B001:task_covered", checked.stdout)
+
+            forged = _read_batch(feature_dir)
+            forged["batchValidation"]["latestPassEvidenceIds"] = ["ev_0001"]
+            _write_batch(feature_dir, forged)
+            self.assertIn(
+                "B001.invalid_task_covered_closure:ev_0001",
+                check_code_done(feature_dir),
+            )
+
     def test_complete_classifies_new_untracked_test_as_transient_validation_asset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -1218,7 +1290,9 @@ class TaskRunnerTest(unittest.TestCase):
                 cwd="backend/LF39.05_bccompliancemng",
             )
             batch["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]
-            batch["tasks"][0]["validationCommands"][0]["argv"] = ["mvn.cmd", "test", "-q"]
+            batch["tasks"][0]["validationCommands"][0]["argv"] = [
+                "mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"
+            ]
             _write_batch(feature_dir, batch)
 
             started = _run(

@@ -134,7 +134,7 @@ HTML 分流规则：
 CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
-识别规则：按项目 manifest 的单/多模块入口生成；`path` 用模块目录绝对路径，`compile_command` 以该目录为 cwd 执行（命令本身不要再写 `cd`）；无法确定时停止并询问用户，不得开始编码。
+准入只验证 Plan 声明的 workspace、validation cwd 与项目 manifest 是否匹配，不执行编译命令。批次质量模式和命令以 `batchValidation.mode` / `batchValidation.commands` 为唯一事实源。
 
 ## 写入 checkpoint
 
@@ -159,6 +159,7 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_check`：当前批次 TASK 已全部完成，执行下方「批次验证与重验证」，不得直接 handoff 或进入项目检查。
+- `recover_task_covered_batch`：最后一个 TASK evidence 已写入但批次收口尚未绑定；inspect 并 recover 最后一个 TASK run，不得改跑 batch-check。
 - `run_project_check`：所有批次验证已完成且配置了额外项目检查，跳过 Task 队列，执行「全部任务完成后的验证」。
 - `code_done_ready`：批次和项目级最终校验都已完成，不重复执行 Task 或 project-check，继续 Code 完成门禁。
 
@@ -214,6 +215,7 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的范围；不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 任务需要写 / 改测试时，遵循 `${pluginPath}/skills/references/test-quality.md`：站在 seam 上验证、期望值来自独立事实源（勿同义反复）、mock 只在系统边界。
    - 只为本轮实现验证而临时创建、任务完成后不提交的测试文件，必须保持未跟踪且未暂存，不得 `git add`。runner 仅将同时满足“本轮新建、位于请求 workspace 下的 `src/test`、`test`、`tests` 测试根、complete 时仍未跟踪且未暂存”的文件归入 `transientValidationFiles`；这些文件仍参与验证，但不进入正式 `changedFiles`，也不触发 task scope 越界。已跟踪、已暂存或 start 前已存在的测试文件仍是正式代码变更，必须由 Plan scope 覆盖，不得借临时测试规则绕过审计。
+   - TASK 实现期间不得手工执行 `compile/build/typecheck/lint`，也不得执行与当前 `batchValidation.commands` 等价的命令。TASK 自检只使用计划内的定向验证并交给 `task_runner complete`；`mvn test -Dtest=...` 自身经过 compile/testCompile 属于正常测试生命周期。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 6. 任务完成必须只走 `task_runner complete`。runner 从 active batch 读取并执行全部 `validationCommands`，采集真实 stdout/stderr 与退出码，依据 start 快照计算 changedFiles/fileChanges，写 `EVIDENCE.jsonl`、`ev_XXXX.log`、`EVIDENCE.index.json`，再绑定 batch task 并投影 batch/root 状态；不得手工调用 `evidence_store.py append`、`plan_writer.py add-evidence-id` 或 `set-status done` 代替：
 
@@ -241,9 +243,11 @@ python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --ta
 
 若最后一个 TASK 的 `complete` 返回 `requiredAction=run_batch_check` 和 `batchCheck`，TASK 队列已经完成，但当前批次尚未完成。必须立即进入「批次验证与重验证」，不得提前生成 handoff、运行 project-check 或结束当前批次。
 
+若 `batchValidation.mode=task_covered`，最后一个 TASK 的 `complete` 会在当前 TASK evidence 后追加 `action=batch_closure`，引用 `coverageCommandIds` 对应的当前 TASK evidence，不创建 `.batch-runs`、不执行额外命令，并直接返回 `stop_and_open_new_conversation`、`run_project_check` 或 `code_done_ready`。必须按该返回动作继续；不得再调用 batch-check。
+
 ### 批次验证与重验证
 
-第一次执行当前批次验证时不传 run ID；runner 创建 `.batch-runs/<BATCH_ID>/<RUN_ID>.json`，按该 lane 的 `batchValidation.commands` 运行 compile/build/typecheck/lint，并分别写入 `action=batch_validation` evidence：
+本节只适用于 `batchValidation.mode=commands`。第一次执行当前批次验证时不传 run ID；runner 创建 `.batch-runs/<BATCH_ID>/<RUN_ID>.json`，按该 lane 的 `batchValidation.commands` 运行真正补充 TASK 盲区的 compile/build/typecheck/lint，并分别写入 `action=batch_validation` evidence：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -269,7 +273,7 @@ python "${pluginPath}/hooks/run_advisory_smoke.py" --feature "${feature}"
 
 若 `run_advisory_smoke.py` 在执行前置检查阶段返回非 0（例如 `sourcePath` 对应测试源码不存在、测试条目非法、命令缺失、sourcePath 已被 Git 跟踪或未被 Git ignore 命中），这表示 Code 阶段尚未按 `SMOKE_TEST_PLAN.json` 补齐本地冒烟测试资产；必须先补齐测试源码/修正计划/更新 `.git/info/exclude` 后重跑。只有冒烟命令已经实际执行后的 PASS/FAIL/BLOCKED/SKIPPED 结果才属于不阻断流转的旁路风险信号。
 
-策略边界：batch task 的 `validationCommands`、批次 `batchValidation.commands`、`action=validation` / `action=batch_validation` evidence 与 `code_done_gate` 都是强门禁；`SMOKE_TEST_PLAN.json` / `SMOKE_RESULT.json` 只表达旁路冒烟风险。
+策略边界：TASK `validationCommands`、`task_covered` 的 `action=batch_closure`、命令模式的 `batchValidation.commands` / `action=batch_validation` evidence 与 `code_done_gate` 都是强门禁；`SMOKE_TEST_PLAN.json` / `SMOKE_RESULT.json` 只表达旁路冒烟风险。
 
 > 一致性：任务的依据在对应上游产物里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 

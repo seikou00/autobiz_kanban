@@ -237,6 +237,19 @@ def validate_record(record: dict[str, Any]) -> list[str]:
             output_tail_path = validation.get("outputTailPath")
             if result == "fail" and (not isinstance(output_tail_path, str) or not output_tail_path.strip()):
                 errors.append("validation.outputTailPath_missing")
+    if record.get("action") == "batch_closure":
+        coverage = record.get("coverage")
+        if record.get("taskId") != "__batch__" or not isinstance(record.get("batchId"), str):
+            errors.append("batch_closure_identity_invalid")
+        if not isinstance(coverage, dict):
+            errors.append("batch_closure.coverage_missing")
+        else:
+            if coverage.get("mode") != "task_covered" or coverage.get("result") != "pass":
+                errors.append("batch_closure.coverage_invalid")
+            if not _string_list(coverage.get("commandIds")) or not coverage.get("commandIds"):
+                errors.append("batch_closure.commandIds_missing")
+            if not _string_list(coverage.get("sourceEvidenceIds")) or not coverage.get("sourceEvidenceIds"):
+                errors.append("batch_closure.sourceEvidenceIds_missing")
     if record.get("action") == "smoke":
         smoke = record.get("smoke")
         if not isinstance(smoke, dict):
@@ -686,7 +699,12 @@ def _cmd_append(args: argparse.Namespace) -> int:
         record["validation"] = validation
     if not record.get("action") and (args.command or args.exit_code is not None):
         record["action"] = "validation"
-    if record.get("skill") == "autodev-code" and record.get("action") in {"validation", "project_check"}:
+    if record.get("skill") == "autodev-code" and record.get("action") in {
+        "validation",
+        "batch_validation",
+        "batch_closure",
+        "project_check",
+    }:
         print("code_validation_requires_task_runner", file=sys.stderr)
         return 1
     tail = Path(args.output_tail).read_text(encoding="utf-8", errors="ignore") if args.output_tail else None

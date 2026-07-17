@@ -185,6 +185,59 @@ class CacheClassificationTest(unittest.TestCase):
             self.assertEqual(trusted.evidence_ids, (evidence["evidenceId"],))
             self.assertEqual(trusted.latest_files, {"existing.txt": "new"})
 
+    def test_task_covered_closure_is_trusted_without_batch_run(self) -> None:
+        from hooks.code_exploration import collect_trusted_evolution
+        from hooks.evidence_store import append_evidence
+        from hooks.plan_json import PlanBundle
+
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            closure = append_evidence(
+                feature_dir,
+                {
+                    "featureId": "alpha",
+                    "checkpoint": "code_in_progress",
+                    "nodeId": "dev.code",
+                    "skill": "autodev-code",
+                    "taskId": "__batch__",
+                    "batchId": "B001",
+                    "action": "batch_closure",
+                    "runId": "task-run-1",
+                    "summary": "covered by task evidence",
+                    "coverage": {
+                        "mode": "task_covered",
+                        "commandIds": ["VAL-T001-01"],
+                        "sourceEvidenceIds": ["ev_0000"],
+                        "result": "pass",
+                    },
+                },
+            )
+            task = {"id": "T001", "status": "done", "completionEvidenceIds": []}
+            bundle = PlanBundle(
+                root={"batches": [{"id": "B001"}]},
+                batches={
+                    "B001": {
+                        "batchId": "B001",
+                        "tasks": [task],
+                        "batchValidation": {
+                            "mode": "task_covered",
+                            "status": "passed",
+                            "commands": [],
+                            "latestPassEvidenceIds": [closure["evidenceId"]],
+                        },
+                    }
+                },
+                tasks=[task],
+                task_batches={"T001": "B001"},
+            )
+
+            trusted = collect_trusted_evolution(feature_dir, bundle, None, "code")
+
+            self.assertEqual(trusted.evidence_ids, (closure["evidenceId"],))
+            self.assertEqual(trusted.untrusted_reasons, ())
+            self.assertIsNone(trusted.latest_files)
+
     def _snapshot(
         self,
         *,

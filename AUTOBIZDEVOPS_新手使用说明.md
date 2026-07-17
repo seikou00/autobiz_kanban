@@ -424,7 +424,7 @@ cicd_done -> archived
 - 如果不涉及 HTTP/API，要写明 `x-auto-no-http-api: true`。
 - 如果不涉及数据库或持久化，要写明 `x-auto-no-sql: true`。
 - `PLAN.md` 应按业务闭环拆任务，不要拆成“新增 DTO”“修改 Controller”这类纯代码步骤。
-- 每个 TASK 只配置窄范围的行为、集成、E2E 或静态验证；编译、构建、类型检查和 lint 按 backend/frontend lane 配成批次验证，每个实际使用的 lane 至少一条 required 命令。
+- 每个 TASK 只配置窄范围的行为、集成、E2E 或静态验证；Maven 测试必须指定测试目标。若同一 workspace 的 TASK 定向 Maven 生命周期已覆盖构建，Batch 使用 `task_covered` 自动收口；否则才配置有增量价值的编译、构建、类型检查或 lint 命令。
 - 项目级最终验证是可选项，只在确有跨前后端或跨批次检查时配置，不重复批次已经执行的编译命令。
 - 项目级最终验证只允许 integration/E2E/static check；命令、执行目录和仓库与 batch profile 相同时会被拒绝。
 ### 9.6 Dev: 可选详细设计
@@ -449,7 +449,8 @@ cicd_done -> archived
 - 代码阶段不能偷偷修改 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`。
 - 如果发现规格或设计冲突，应停止并回流到 Specs 或 Plan。
 - 每次只处理一个任务，完成时运行该任务的行为/集成验证，再进入下一个任务；不在每个 TASK 后重复编译。
-- 当前 batch 的 TASK 全部完成后，再统一执行一次该 lane 的编译/构建/typecheck/lint。失败时在同一个 batch run 修复并重跑。
+- 当前 Batch 使用 `task_covered` 时，最后一个 TASK 后只生成批次收口 evidence，不重复编译；使用 `commands` 时才统一执行一次补充性的编译/构建/typecheck/lint，失败后在同一个 batch run 修复并重跑。
+- TASK 实现期间不得手工提前运行 Batch 命令；定向 `mvn test -Dtest=...` 自身包含必要的 Maven 编译生命周期。
 - 批次修复若改到 TASK 范围，旧 evidence 历史保留，但受影响 TASK 必须重新验证并追加新 evidence；随后还要再跑一次最终 batch 验证，全部通过后才能进入下一批。
 - batch-check 中断时通过 `code-session` 取回原 `activeRunId` 并用同一个 run 重试；已写入的命令 evidence 会被恢复采用。optional 命令失败会保留历史，但不会让 required 已通过的批次失败。
 - 不要为了通过验证削弱校验、安全检查、日志或错误处理。

@@ -38,6 +38,7 @@ from hooks.plan_writer import (  # noqa: E402
     activate_batch as activate_plan_batch,
     record_batch_validation_attempt,
     record_project_check_attempt,
+    record_task_covered_batch,
     record_task_attempt,
     recover_plan_write_transaction,
     request_batch_revalidation,
@@ -1179,6 +1180,18 @@ def _complete_task_unlocked(
         state["batchContinuation"] = result.data["batchContinuation"]
     if isinstance(result.data, dict) and isinstance(result.data.get("batchCheck"), dict):
         state["batchCheck"] = result.data["batchCheck"]
+    batch_check = state.get("batchCheck")
+    if success and isinstance(batch_check, dict) and batch_check.get("mode") == "task_covered":
+        closure = _close_task_covered_batch(
+            workspace,
+            feature,
+            str(batch_check.get("activeBatchId")),
+            run_id,
+        )
+        state["batchCheck"] = closure
+        state["batchClosureEvidenceId"] = closure["closureEvidenceId"]
+        if isinstance(closure.get("batchHandoff"), dict):
+            state["batchHandoff"] = closure["batchHandoff"]
     state["status"] = "done" if success else "failed"
     _save_run(path, state)
     return success, state
@@ -1187,6 +1200,133 @@ def _complete_task_unlocked(
 def _batch_commands_sha256(commands: list[dict[str, Any]]) -> str:
     content = json.dumps(commands, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(content).hexdigest()
+
+
+def _task_covered_closure_record(
+    *,
+    feature: str,
+    batch_id: str,
+    run_id: str,
+    coverage_command_ids: list[str],
+    source_evidence_ids: list[str],
+) -> dict[str, Any]:
+    return {
+        "featureId": feature,
+        "checkpoint": "code_in_progress",
+        "nodeId": "dev.code",
+        "skill": "autodev-code",
+        "taskId": "__batch__",
+        "batchId": batch_id,
+        "action": "batch_closure",
+        "runId": run_id,
+        "summary": f"{batch_id} covered by current task validation evidence",
+        "specRefs": [],
+        "designRefs": [],
+        "changedFiles": [],
+        "coverage": {
+            "mode": "task_covered",
+            "commandIds": coverage_command_ids,
+            "sourceEvidenceIds": source_evidence_ids,
+            "result": "pass",
+        },
+    }
+
+
+def _close_task_covered_batch(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    feature_dir = _feature_dir(workspace, feature)
+    bundle = load_plan_bundle(feature_dir)
+    batch = bundle.batches.get(batch_id)
+    if not isinstance(batch, dict):
+        raise TaskRunnerError(f"batch_not_found:{batch_id}")
+    validation = batch.get("batchValidation")
+    if not isinstance(validation, dict) or validation.get("mode") != "task_covered":
+        raise TaskRunnerError(f"batch_validation_mode_mismatch:{batch_id}")
+    coverage_command_ids = [
+        item for item in validation.get("coverageCommandIds", []) if isinstance(item, str)
+    ]
+    records = read_records(stream_path(feature_dir))
+    by_id = {
+        str(record.get("evidenceId")): record
+        for record in records
+        if isinstance(record.get("evidenceId"), str)
+    }
+    source_by_command: dict[str, str] = {}
+    for task in batch.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        for evidence_id in task.get("completionEvidenceIds", []):
+            record = by_id.get(str(evidence_id))
+            command = record.get("validation") if isinstance(record, dict) else None
+            command_id = command.get("commandId") if isinstance(command, dict) else None
+            if command_id in coverage_command_ids and isinstance(evidence_id, str):
+                source_by_command[str(command_id)] = evidence_id
+    missing = [command_id for command_id in coverage_command_ids if command_id not in source_by_command]
+    if missing:
+        raise TaskRunnerError("task_covered_evidence_missing:" + ",".join(missing))
+    source_evidence_ids = [source_by_command[command_id] for command_id in coverage_command_ids]
+    existing = next(
+        (
+            record
+            for record in records
+            if record.get("action") == "batch_closure"
+            and record.get("taskId") == "__batch__"
+            and record.get("batchId") == batch_id
+            and record.get("runId") == run_id
+        ),
+        None,
+    )
+    if existing is None:
+        evidence = append_evidence(
+            feature_dir,
+            _task_covered_closure_record(
+                feature=feature,
+                batch_id=batch_id,
+                run_id=run_id,
+                coverage_command_ids=coverage_command_ids,
+                source_evidence_ids=source_evidence_ids,
+            ),
+        )
+    else:
+        coverage = existing.get("coverage")
+        if not isinstance(coverage, dict) or coverage.get("commandIds") != coverage_command_ids or coverage.get(
+            "sourceEvidenceIds"
+        ) != source_evidence_ids:
+            raise TaskRunnerError(f"batch_closure_evidence_mismatch:{batch_id}")
+        evidence = existing
+    evidence_id = evidence.get("evidenceId")
+    if not isinstance(evidence_id, str):
+        raise TaskRunnerError(f"batch_closure_evidence_invalid:{batch_id}")
+    result = record_task_covered_batch(
+        workspace,
+        feature,
+        batch_id,
+        evidence_id,
+        run_id=run_id,
+    )
+    if not result.ok:
+        raise TaskRunnerError("batch_closure_plan_binding_failed")
+    handoff = result.data.get("batchHandoff") if isinstance(result.data, dict) else None
+    refreshed = load_plan_bundle(feature_dir)
+    project_commands = refreshed.root.get("projectValidationCommands")
+    required_action = (
+        handoff.get("requiredAction")
+        if isinstance(handoff, dict)
+        else "run_project_check"
+        if isinstance(project_commands, list) and project_commands
+        else "code_done_ready"
+    )
+    return {
+        "mode": "task_covered",
+        "requiredAction": required_action,
+        "activeBatchId": None,
+        "closureEvidenceId": evidence_id,
+        **({"batchHandoff": handoff} if isinstance(handoff, dict) else {}),
+    }
 
 
 def _record_for_batch_command(
@@ -1524,6 +1664,9 @@ def _run_batch_checks_unlocked(
     validation = batch.get("batchValidation")
     if not isinstance(validation, dict):
         raise TaskRunnerError(f"batch_validation_contract_missing:{batch_id}")
+    mode = validation.get("mode", "commands" if validation.get("commands") else None)
+    if mode != "commands":
+        raise TaskRunnerError(f"batch_check_not_required:{batch_id}:{mode}")
     commands = [item for item in validation.get("commands", []) if isinstance(item, dict)]
     if not commands or not any(command.get("required") is True for command in commands):
         raise TaskRunnerError(f"batch_validation_commands_missing:{batch_id}")
@@ -2243,6 +2386,19 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
         )
         batch_validation = batch_plan.get("batchValidation") if isinstance(batch_plan, dict) else None
         if all_tasks_done and isinstance(batch_validation, dict) and batch_validation.get("status") != "passed":
+            mode = batch_validation.get("mode", "commands" if batch_validation.get("commands") else None)
+            if mode == "task_covered":
+                return {
+                    "action": "recover_task_covered_batch",
+                    "activeBatchId": active_batch_id,
+                    "executionLane": execution_lane,
+                    "batchValidationStatus": batch_validation.get("status"),
+                    "activatedFromHandoff": activated_from_handoff,
+                    "userMessage": (
+                        f"批次 {active_batch_id} 的 TASK 已完成但收口未绑定；"
+                        "请 inspect 并 recover 最后一个 TASK run。"
+                    ),
+                }
             return {
                 "action": "run_batch_check",
                 "activeBatchId": active_batch_id,

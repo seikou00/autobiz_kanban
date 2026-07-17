@@ -411,6 +411,12 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertIn("featureId", grouping)
         self.assertEqual(len(grouping["groups"]), 1)
         self.assertIn("validationBoundary", grouping["groups"][0])
+        group_ui_example = grouping["uiRequiredExample"]
+        self.assertTrue(group_ui_example["uiRequired"])
+        self.assertEqual(
+            list(group_ui_example["uiRefs"]),
+            ["pageRefs", "interactionRefs", "visualSourceRefs", "frontendRoute"],
+        )
         group_exception = grouping["matrixExceptionExample"]
         self.assertEqual(group_exception["mergedScenarioRefs"], group_exception["specRefs"][1:])
         self.assertIn("splitRationale", group_exception)
@@ -523,6 +529,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "SCN 数 `>12`",
             "mergedScenarioRefs",
             "taskGroupMatrixExceptionExample",
+            "uiRequiredExample",
             "禁止看到 6-12 个 SCN 就为所有 group 自动补",
             "禁止按连续 SCN 编号机械切块",
             "用户动作 + 公开 seam + 自动化验证边界",
