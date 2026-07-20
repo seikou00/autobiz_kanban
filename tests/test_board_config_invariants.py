@@ -380,6 +380,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "goal",
             "deps",
             "uiRequired",
+            "workspaceRef",
             "scope",
             "implementationPoints",
             "acceptanceCriteria",
@@ -423,6 +424,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertIn("featureId", grouping)
         self.assertEqual(len(grouping["groups"]), 1)
         self.assertIn("validationBoundary", grouping["groups"][0])
+        self.assertIn("workspaceRef", grouping["groups"][0])
         group_ui_example = grouping["uiRequiredExample"]
         self.assertTrue(group_ui_example["uiRequired"])
         self.assertEqual(
@@ -450,6 +452,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "finalize-task-draft",
             "rebuild-task-draft",
             "task_group_changed_after_draft_created",
+            "workspaceRef",
             "失败时不写任何正式产物",
             "禁止使用 `python -c`",
             "不得通过 validator 失败来探索 schema",

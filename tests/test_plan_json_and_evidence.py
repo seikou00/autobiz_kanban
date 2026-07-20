@@ -64,6 +64,7 @@ def valid_plan(
                 "goal": "deliver one observable behavior",
                 "status": status,
                 "deps": [],
+                "workspaceRef": "default",
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update the behavior", "cover the boundary"],
                 "acceptanceCriteria": [
@@ -381,6 +382,7 @@ class PlanJsonTest(unittest.TestCase):
                 "goal": "deliver two observable behavior",
                 "status": "done",
                 "deps": ["T003"],
+                "workspaceRef": "default",
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update the behavior", "cover the boundary"],
                 "acceptanceCriteria": ["the behavior is observable"],
@@ -473,6 +475,14 @@ class PlanJsonTest(unittest.TestCase):
 
             self.assertIn("T001.validationBoundary_missing_or_too_short", errors)
 
+    def test_every_task_requires_workspace_ref(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        plan["tasks"][0].pop("workspaceRef")
+
+        errors = validate_test_tasks(plan, require_initial_status=True)
+
+        self.assertIn("T001.workspaceRef_missing_or_invalid", errors)
+
     def test_non_goals_reject_blank_items(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         plan["tasks"][0]["nonGoals"] = ["keep scope", "   "]
@@ -480,6 +490,20 @@ class PlanJsonTest(unittest.TestCase):
         errors = validate_test_tasks(plan, require_initial_status=True)
 
         self.assertIn("T001.nonGoals_empty_item", errors)
+
+    def test_task_cannot_bind_multiple_workspace_roots(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["workspaceRef"] = "backend-repo"
+        task["scope"]["workspaceRoots"] = {
+            "backend-repo": ".",
+            "frontend-repo": ".",
+        }
+        task["validationCommands"][0]["repo"] = "backend-repo"
+
+        errors = validate_test_tasks(plan, require_initial_status=True)
+
+        self.assertIn("T001.scope.workspaceRoots_multiple_forbidden", errors)
 
 class EvidenceStoreTest(unittest.TestCase):
     def test_append_rejects_caller_supplied_evidence_id(self) -> None:

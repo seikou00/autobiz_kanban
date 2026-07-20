@@ -162,6 +162,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "status": "todo",
         "deps": [],
         "uiRequired": False,
+        "workspaceRef": "default",
         "scope": {"modules": ["src"], "entrypoints": ["API-001"], "pages": [], "dataObjects": ["DATA-001"]},
         "implementationPoints": ["update behavior", "cover boundary"],
         "acceptanceCriteria": [{"id": "AC-T001-01", "text": "behavior is observable", "scenarioRefs": ["specs/cap/spec.md#SCN-001"]}],
@@ -290,6 +291,7 @@ def _plan_task_body() -> dict:
         "goal": "deliver behavior",
         "deps": [],
         "uiRequired": False,
+        "workspaceRef": "default",
         "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
         "implementationPoints": ["update behavior", "cover boundary"],
         "acceptanceCriteria": [
@@ -356,6 +358,7 @@ def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
             "title": task["title"],
             "deps": list(task.get("deps", [])),
             "uiRequired": task.get("uiRequired") is True,
+            "workspaceRef": task.get("workspaceRef", "default"),
             "specRefs": list(task.get("specRefs", [])),
             "mergedScenarioRefs": list(task.get("mergedScenarioRefs", [])),
             "apiIds": list(task.get("apiIds", [])),
@@ -409,7 +412,191 @@ def _code_module(root: Path, *, with_pom: bool = True) -> tuple[Path, Path]:
     return repository, module
 
 
+def _named_code_workspace(
+    root: Path,
+    name: str,
+    *,
+    module: str = ".",
+    manifest: str | None = None,
+) -> tuple[Path, Path]:
+    repository = root / name
+    workspace = repository if module == "." else repository / module
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
+    if manifest:
+        (workspace / manifest).write_text("{}\n" if manifest == "package.json" else "<project/>\n", encoding="utf-8")
+    return repository, workspace
+
+
 class JsonWriterTests(unittest.TestCase):
+    def test_plan_writer_binds_each_task_to_one_of_multiple_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir, second=True)
+            _, backend_module = _named_code_workspace(
+                root,
+                "backend-repo",
+                module="backend/service",
+                manifest="pom.xml",
+            )
+            frontend_repo, _ = _named_code_workspace(
+                root,
+                "frontend-repo",
+                manifest="package.json",
+            )
+            backend = _plan_task_body()
+            backend["workspaceRef"] = "backend-repo"
+            frontend = _plan_task_body()
+            frontend.update({
+                "id": "T002",
+                "title": "frontend",
+                "deps": ["T001"],
+                "uiRequired": True,
+                "workspaceRef": "frontend-repo",
+            })
+            frontend["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            frontend["acceptanceCriteria"][0].update({
+                "id": "AC-T002-01",
+                "scenarioRefs": ["specs/cap/spec.md#SCN-002"],
+            })
+            frontend["validationCommands"][0].update({
+                "id": "VAL-T002-01",
+                "covers": ["AC-T002-01"],
+            })
+            frontend["uiRefs"] = {
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": [],
+                "frontendRoute": "spec-driven-ui",
+            }
+            group_file = _write_task_groups(root / "task-groups.json", [backend, frontend])
+
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(backend_module),
+                "--code-workspace", str(frontend_repo),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+
+            backend_detail = _draft_detail_body(backend)
+            backend_detail["validationCommands"][0].update({
+                "argv": ["mvn", "test", "-Dtest=TargetTest"],
+            })
+            backend_detail["validationCommands"][0].pop("cwd", None)
+            backend_path = root / "backend-detail.json"
+            backend_path.write_text(json.dumps(backend_detail), encoding="utf-8")
+            backend_result = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(backend_path),
+            )
+            self.assertEqual(backend_result.returncode, 0, backend_result.stdout + backend_result.stderr)
+
+            frontend_detail = _draft_detail_body(frontend)
+            frontend_detail["validationCommands"][0].update({"argv": ["npm", "test"]})
+            frontend_detail["validationCommands"][0].pop("cwd", None)
+            frontend_path = root / "frontend-detail.json"
+            frontend_path.write_text(json.dumps(frontend_detail), encoding="utf-8")
+            frontend_result = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T002", "--body-file", str(frontend_path),
+            )
+            self.assertEqual(frontend_result.returncode, 0, frontend_result.stdout + frontend_result.stderr)
+
+            draft_dir = feature_dir / ".tmp" / "plan_writer" / "draft" / "plans"
+            backend_task = json.loads((draft_dir / "B001" / "plan.json").read_text())["tasks"][0]
+            frontend_task = json.loads((draft_dir / "B002" / "plan.json").read_text())["tasks"][0]
+            self.assertEqual(backend_task["workspaceRef"], "backend-repo")
+            self.assertEqual(backend_task["scope"]["workspaceRoots"], {"backend-repo": "backend/service"})
+            self.assertEqual(backend_task["validationCommands"][0]["repo"], "backend-repo")
+            self.assertEqual(backend_task["validationCommands"][0]["cwd"], "backend/service")
+            self.assertEqual(frontend_task["workspaceRef"], "frontend-repo")
+            self.assertEqual(frontend_task["scope"]["workspaceRoots"], {"frontend-repo": "."})
+            self.assertEqual(frontend_task["validationCommands"][0]["repo"], "frontend-repo")
+            self.assertEqual(frontend_task["validationCommands"][0]["cwd"], ".")
+
+    def test_plan_writer_rejects_unknown_task_workspace_ref_before_draft_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, backend = _named_code_workspace(root, "backend-repo")
+            task = _plan_task_body()
+            task["workspaceRef"] = "frontend-repo"
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+
+            result = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(backend),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("task_group_workspace_ref_not_found", result.stdout + result.stderr)
+            self.assertFalse((feature_dir / ".tmp" / "plan_writer" / "draft" / "lock.json").exists())
+
+    def test_plan_writer_rebuild_resets_only_tasks_bound_to_changed_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir, second=True)
+            backend_repo, _ = _named_code_workspace(root, "backend-repo")
+            frontend_repo, _ = _named_code_workspace(root, "frontend-repo")
+            _, replacement_frontend = _named_code_workspace(
+                root / "replacement",
+                "frontend-repo",
+            )
+            backend = _plan_task_body()
+            backend["workspaceRef"] = "backend-repo"
+            frontend = _plan_task_body()
+            frontend.update({
+                "id": "T002",
+                "title": "frontend repository task",
+                "deps": ["T001"],
+                "workspaceRef": "frontend-repo",
+            })
+            frontend["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            frontend["acceptanceCriteria"][0].update({
+                "id": "AC-T002-01",
+                "scenarioRefs": ["specs/cap/spec.md#SCN-002"],
+            })
+            frontend["validationCommands"][0].update({
+                "id": "VAL-T002-01",
+                "covers": ["AC-T002-01"],
+            })
+            group_file = _write_task_groups(root / "task-groups.json", [backend, frontend])
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(backend_repo),
+                "--code-workspace", str(frontend_repo),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            for task in (backend, frontend):
+                detail = _draft_detail_body(task)
+                detail["validationCommands"][0].pop("cwd", None)
+                detail_path = root / f"{task['id']}-detail.json"
+                detail_path.write_text(json.dumps(detail), encoding="utf-8")
+                result = _run(
+                    "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                    "--feature", "alpha", "--task-id", task["id"], "--body-file", str(detail_path),
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            rebuilt = _run(
+                "plan_writer.py", "rebuild-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(backend_repo),
+                "--code-workspace", str(replacement_frontend),
+            )
+
+            self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+            payload = json.loads(rebuilt.stdout)
+            self.assertEqual(payload["preservedTaskIds"], ["T001"])
+            self.assertEqual(payload["resetTaskIds"], ["T002"])
+            self.assertEqual(payload["draft"]["readyTaskIds"], ["T001"])
+
     def test_plan_writer_prepare_draft_requires_code_workspace_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
@@ -501,6 +688,110 @@ class JsonWriterTests(unittest.TestCase):
             batches = json.loads(result.stdout)["draft"]["batches"]
             self.assertEqual([item["executionLane"] for item in batches], ["backend", "frontend"])
             self.assertEqual([item["taskIds"] for item in batches], [["T001"], ["T002"]])
+
+    def test_plan_writer_splits_same_lane_repositories_and_routes_batch_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir, second=True)
+            backend_a, _ = _named_code_workspace(root, "backend-a", manifest="pom.xml")
+            backend_b, _ = _named_code_workspace(root, "backend-b", manifest="pom.xml")
+            first = _plan_task_body()
+            first["workspaceRef"] = "backend-a"
+            second = _plan_task_body()
+            second.update({
+                "id": "T002",
+                "title": "second backend repository",
+                "deps": ["T001"],
+                "workspaceRef": "backend-b",
+            })
+            second["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            second["acceptanceCriteria"][0].update({
+                "id": "AC-T002-01",
+                "scenarioRefs": ["specs/cap/spec.md#SCN-002"],
+            })
+            second["validationCommands"][0].update({
+                "id": "VAL-T002-01",
+                "covers": ["AC-T002-01"],
+            })
+            group_file = _write_task_groups(root / "task-groups.json", [first, second])
+
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(backend_a),
+                "--code-workspace", str(backend_b),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            self.assertEqual(
+                [item["taskIds"] for item in json.loads(prepared.stdout)["draft"]["batches"]],
+                [["T001"], ["T002"]],
+            )
+            for task in (first, second):
+                detail = _draft_detail_body(task)
+                detail["validationCommands"][0].pop("cwd", None)
+                detail_path = root / f"{task['id']}-detail.json"
+                detail_path.write_text(json.dumps(detail), encoding="utf-8")
+                detailed = _run(
+                    "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                    "--feature", "alpha", "--task-id", task["id"],
+                    "--body-file", str(detail_path),
+                )
+                self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+            finalized = _run(
+                "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+
+            missing_repo = _run(
+                "plan_writer.py", "add-batch-validation-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend", "--command", "mvn compile -q",
+                "--kind", "compile", "--code-workspace", str(backend_a),
+            )
+            self.assertNotEqual(missing_repo.returncode, 0)
+            self.assertIn("batch_validation_repository_required", missing_repo.stdout)
+            for index, (repository, code_workspace) in enumerate(
+                (("backend-a", backend_a), ("backend-b", backend_b))
+            ):
+                added = _run(
+                    "plan_writer.py", "add-batch-validation-command", "--workspace", str(workspace),
+                    "--feature", "alpha", "--lane", "backend", "--repo", repository,
+                    "--command", "mvn compile -q", "--kind", "compile",
+                    "--code-workspace", str(code_workspace),
+                )
+                self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+                if index == 0:
+                    incomplete = _run(
+                        "plan_writer.py", "validate", "--workspace", str(workspace),
+                        "--feature", "alpha", "--initial",
+                    )
+                    self.assertNotEqual(incomplete.returncode, 0)
+                    self.assertIn(
+                        "B002.batchValidation.required_command_missing",
+                        incomplete.stdout,
+                    )
+
+            initial = _run(
+                "plan_writer.py", "validate", "--workspace", str(workspace),
+                "--feature", "alpha", "--initial",
+            )
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+
+            first_batch = json.loads(
+                (feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8")
+            )
+            second_batch = json.loads(
+                (feature_dir / "plans" / "B002" / "plan.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [command.get("repo") for command in first_batch["batchValidation"]["commands"]],
+                ["backend-a"],
+            )
+            self.assertEqual(
+                [command.get("repo") for command in second_batch["batchValidation"]["commands"]],
+                ["backend-b"],
+            )
 
     def test_plan_writer_draft_rejects_group_owned_detail_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -788,6 +1079,27 @@ class JsonWriterTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("T001.validationBoundary_missing_or_too_short", result.stdout)
+            self.assertFalse((feature_dir / "plan.json").exists())
+
+    def test_plan_writer_group_requires_workspace_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            group_file = _write_task_groups(
+                Path(tmp) / "task-groups.json",
+                [_plan_task_body()],
+            )
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            group_data["groups"][0].pop("workspaceRef")
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "preflight-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("T001.workspaceRef_invalid", result.stdout)
             self.assertFalse((feature_dir / "plan.json").exists())
 
     def test_plan_writer_draft_derives_workspace_root_pages_and_validation_cwd(self) -> None:
@@ -1362,11 +1674,12 @@ class JsonWriterTests(unittest.TestCase):
             contract["batchValidationCommand"],
             {
                 "command": (
-                    "add-batch-validation-command --lane <backend|frontend> --command <command> "
-                    "--code-workspace <path>"
+                    "add-batch-validation-command --lane <backend|frontend> "
+                    "[--repo <workspaceRef>] --command <command> --code-workspace <path>"
                 ),
                 "requiredFields": ["argv", "cwd", "kind", "required"],
-                "requiredPerUsedLane": "commands_mode_only",
+                "requiredPerUsedWorkspaceInLane": "commands_mode_only",
+                "repoRequiredWhenLaneUsesMultipleWorkspaces": True,
                 "defaultCwd": "declared_workspace_root",
             },
         )
@@ -1375,11 +1688,19 @@ class JsonWriterTests(unittest.TestCase):
             "set-batch-validation-mode --lane <backend|frontend> --mode <task_covered|commands>",
         )
         self.assertEqual(contract["workspaceContract"]["field"], "scope.workspaceRoots")
+        self.assertEqual(contract["workspaceContract"]["taskBindingField"], "workspaceRef")
+        self.assertEqual(contract["workspaceContract"]["maxWorkspaceRefsPerTask"], 1)
+        self.assertFalse(contract["workspaceContract"]["crossRepositoryTaskSupported"])
+        self.assertTrue(contract["workspaceContract"]["codeWorkspaceArgumentRepeatable"])
         self.assertEqual(
             contract["workspaceContract"]["source"],
             "prepare-task-draft --code-workspace",
         )
         self.assertTrue(contract["workspaceContract"]["codeWorkspacePreflightRequired"])
+        self.assertEqual(
+            contract["fieldRules"]["workspaceRef"],
+            {"required": True, "type": "repository_id", "source": "task_group"},
+        )
         self.assertEqual(
             contract["fieldRules"]["validationBoundary"],
             {
@@ -1407,7 +1728,7 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["batchAssignment"]["executionLaneOrder"], ["backend", "frontend"])
         self.assertEqual(
             contract["batchAssignment"]["appendRule"],
-            "same_primary_capability_and_execution_lane_as_immediately_preceding_batch_and_not_full",
+            "same_primary_capability_execution_lane_and_workspace_as_immediately_preceding_batch_and_not_full",
         )
         self.assertFalse(contract["batchAssignment"]["manualBatchIdSupported"])
         self.assertIn("taskSetFinalization", contract)
@@ -1442,6 +1763,7 @@ class JsonWriterTests(unittest.TestCase):
             ["pages", "workspaceRoots"],
         )
         self.assertIn("specRefs", contract["groupOwnedTaskFields"])
+        self.assertIn("workspaceRef", contract["requiredTaskGroupFields"])
         self.assertIn("validationCommands", contract["requiredTaskDetailFields"])
         self.assertEqual(contract["formalArtifacts"]["integrityField"], "taskSetDigest")
         self.assertFalse(contract["formalArtifacts"]["directEditingSupported"])

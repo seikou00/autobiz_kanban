@@ -157,6 +157,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                                 "scenarioRefs": ["specs/capability/spec.md#SCN-001"],
                             }
                         ],
+                        "workspaceRef": "default",
                         "validationBoundary": "public behavior seam validated by the task command",
                         "nonGoals": ["do not change unrelated behavior"],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
@@ -838,6 +839,7 @@ class StateIntegrationTests(unittest.TestCase):
                                 "scenarioRefs": ["#SCN-001"],
                             }
                         ],
+                        "workspaceRef": "default",
                         "validationBoundary": "public behavior seam validated by the task command",
                         "nonGoals": ["do not change unrelated behavior"],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
@@ -877,6 +879,7 @@ class StateIntegrationTests(unittest.TestCase):
                                 "scenarioRefs": ["#SCN-001"],
                             }
                         ],
+                        "workspaceRef": "default",
                         "validationBoundary": "public behavior seam validated by the task command",
                         "nonGoals": ["do not change unrelated behavior"],
                         "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],

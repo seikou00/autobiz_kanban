@@ -48,6 +48,7 @@ from hooks.plan_json import (  # noqa: E402
     FRONTEND_ROUTES,
     MAX_BATCH_TASKS,
     PROJECT_VALIDATION_KINDS,
+    REPOSITORY_ID_RE,
     TASK_VALIDATION_KINDS,
     VISUAL_SOURCE_ID_RE,
     batch_plan_path,
@@ -107,6 +108,7 @@ DRAFT_GROUP_OWNED_FIELDS = {
     "uiRefs",
     "splitRationale",
     "validationBoundary",
+    "workspaceRef",
 }
 DRAFT_DETAIL_FIELDS = {
     "goal",
@@ -575,6 +577,9 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
         validation_boundary = raw_group.get("validationBoundary")
         if not isinstance(validation_boundary, str) or len(validation_boundary.strip()) < 10:
             errors.append({"reason": f"{task_id}.validationBoundary_missing_or_too_short"})
+        workspace_ref = raw_group.get("workspaceRef")
+        if not isinstance(workspace_ref, str) or not REPOSITORY_ID_RE.fullmatch(workspace_ref):
+            errors.append({"reason": f"{task_id}.workspaceRef_invalid"})
         prior_ids.add(task_id)
     return errors
 
@@ -628,6 +633,7 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "frontendRoute": ui_refs.get("frontendRoute"),
         "validationBoundary": item.get("validationBoundary"),
+        "workspaceRef": item.get("workspaceRef"),
         "splitRationale": item.get("splitRationale") or None,
     }
 
@@ -710,6 +716,27 @@ def _batch_status(
     return "todo"
 
 
+def _batch_workspace_contract(task: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    roots = task_workspace_roots(task)
+    workspace_ref = task.get("workspaceRef")
+    if not roots and isinstance(workspace_ref, str) and workspace_ref:
+        roots = {workspace_ref: "."}
+    return tuple(sorted(roots.items()))
+
+
+def _batch_profile_command_matches_workspace(
+    command: dict[str, Any],
+    workspace_contract: tuple[tuple[str, str], ...],
+) -> bool:
+    if len(workspace_contract) != 1:
+        return False
+    repository = workspace_contract[0][0]
+    command_repository = command.get("repo")
+    if repository == "default":
+        return command_repository in {None, "default"}
+    return command_repository == repository
+
+
 def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     tasks_view = _tasks(data)
     assignments = dict(data.get("_batchAssignments") or {})
@@ -717,6 +744,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     groups: dict[str, list[dict[str, Any]]] = {}
     spec_roots: dict[str, str] = {}
     execution_lanes: dict[str, str] = {}
+    workspace_contracts: dict[str, tuple[tuple[str, str], ...]] = {}
     existing_ids = {
         str(entry.get("id"))
         for entry in data.get("batches", [])
@@ -729,11 +757,13 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         if batch_id is None:
             primary = _primary_spec_root(task)
             execution_lane = task_execution_lane(task)
+            workspace_contract = _batch_workspace_contract(task)
             last_batch = sorted(groups)[-1] if groups else None
             can_append_to_last = bool(
                 last_batch
                 and spec_roots.get(str(last_batch)) == primary
                 and execution_lanes.get(str(last_batch)) == execution_lane
+                and workspace_contracts.get(str(last_batch)) == workspace_contract
                 and len(groups[str(last_batch)]) < MAX_BATCH_TASKS
             )
             batch_id = str(last_batch) if can_append_to_last else _next_batch_id(used_ids)
@@ -749,6 +779,10 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         group.append(task)
         spec_roots.setdefault(batch_id, _primary_spec_root(task))
         execution_lanes.setdefault(batch_id, task_execution_lane(task))
+        workspace_contracts.setdefault(
+            batch_id,
+            _batch_workspace_contract(task),
+        )
 
     ordered_ids = sorted(groups)
     root = {
@@ -779,16 +813,24 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         title = str(previous.get("title") or Path(spec_root).parent.name or batch_id)
         profiles = root.get("batchValidationProfiles")
         profile = profiles.get(execution_lane) if isinstance(profiles, dict) else None
-        profile_commands = profile.get("commands") if isinstance(profile, dict) else []
+        all_profile_commands = profile.get("commands") if isinstance(profile, dict) else []
+        if not isinstance(all_profile_commands, list):
+            all_profile_commands = []
         profile_mode = (
-            profile.get("mode", "commands" if profile_commands else None)
+            profile.get("mode", "commands" if all_profile_commands else None)
             if isinstance(profile, dict)
             else "commands"
         )
+        workspace_contract = workspace_contracts[batch_id]
+        profile_commands = [
+            command
+            for command in all_profile_commands
+            if isinstance(command, dict)
+            and _batch_profile_command_matches_workspace(command, workspace_contract)
+        ]
         effective_commands = [
             {**command, "id": f"BATCH-{batch_id}-VAL-{command_index:03d}"}
             for command_index, command in enumerate(profile_commands, start=1)
-            if isinstance(command, dict)
         ]
         previous_validation = previous.get("batchValidation")
         previous_validation = previous_validation if isinstance(previous_validation, dict) else {}
@@ -1097,13 +1139,44 @@ def _draft_group_data(lock: dict[str, Any], feature: str) -> dict[str, Any]:
     return data
 
 
-def _draft_workspace_roots(code_workspaces: list[str] | None) -> dict[str, str]:
-    contexts = _code_workspace_contexts(code_workspaces)
-    if not contexts:
-        return {}
-    if len(contexts) == 1:
-        return {"default": str(contexts[0]["workspaceRoot"])}
-    return {str(item["repo"]): str(item["workspaceRoot"]) for item in contexts}
+def _workspace_context_for_group(
+    group: dict[str, Any],
+    contexts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    task_id = str(group.get("id", "task"))
+    workspace_ref = group.get("workspaceRef")
+    if workspace_ref == "default" and len(contexts) == 1:
+        return contexts[0]
+    matches = [item for item in contexts if item.get("repo") == workspace_ref]
+    if len(matches) != 1:
+        raise PlanWriterInputError(
+            "task_group_workspace_ref_not_found",
+            f"task={task_id};workspaceRef={workspace_ref};available={','.join(str(item.get('repo')) for item in contexts)}",
+        )
+    return matches[0]
+
+
+def _draft_task_workspace_roots(
+    group: dict[str, Any],
+    contexts: list[dict[str, Any]],
+) -> dict[str, str]:
+    context = _workspace_context_for_group(group, contexts)
+    workspace_ref = str(group.get("workspaceRef"))
+    key = "default" if workspace_ref == "default" else str(context["repo"])
+    return {key: str(context["workspaceRoot"])}
+
+
+def _draft_task_workspace_contract(
+    group: dict[str, Any],
+    contexts: list[dict[str, Any]],
+) -> tuple[str, str, str, str]:
+    context = _workspace_context_for_group(group, contexts)
+    return (
+        str(context["repo"]),
+        str(context["gitRoot"]),
+        str(context["workspaceRoot"]),
+        str(context["requestedPath"]),
+    )
 
 
 def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str]) -> dict[str, Any]:
@@ -1128,6 +1201,7 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         "implementationPoints": [],
         "acceptanceCriteria": [],
         "validationBoundary": group.get("validationBoundary"),
+        "workspaceRef": group.get("workspaceRef"),
         "nonGoals": [],
         "specRefs": copy.deepcopy(group.get("specRefs", [])),
         "mergedScenarioRefs": copy.deepcopy(group.get("mergedScenarioRefs", [])),
@@ -1272,6 +1346,14 @@ def _normalize_draft_task_detail(task: dict[str, Any], detail: dict[str, Any]) -
         command["id"] = f"VAL-{task_id}-{index:02d}"
         command.setdefault("kind", "behavior_test")
         command.setdefault("required", True)
+        workspace_roots = candidate["scope"].get("workspaceRoots", {})
+        if (
+            isinstance(workspace_roots, dict)
+            and "default" not in workspace_roots
+            and len(workspace_roots) == 1
+            and "repo" not in command
+        ):
+            command["repo"] = next(iter(workspace_roots))
         raw_covers = command.get("covers")
         if raw_covers is None:
             command["covers"] = list(acceptance_ids)
@@ -1528,6 +1610,7 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
         "status": args.status,
         "deps": _split_values(args.dep),
         "uiRequired": ui_required,
+        "workspaceRef": "default",
         "scope": {
             "modules": _split_values(args.module),
             "entrypoints": _split_values(args.entrypoint),
@@ -1691,6 +1774,7 @@ def _normalize_task_body(
     task["status"] = "todo"
     task.setdefault("deps", [])
     task.setdefault("uiRequired", False)
+    task.setdefault("workspaceRef", "default")
     task.setdefault("scope", {"modules": [], "entrypoints": [], "pages": [], "dataObjects": [], "paths": []})
     if isinstance(task.get("scope"), dict):
         task["scope"].setdefault("paths", [])
@@ -1795,6 +1879,7 @@ def _task_group_summary(data: dict[str, Any]) -> dict[str, Any]:
             {
                 "id": group.get("id"),
                 "executionLane": "frontend" if group.get("uiRequired") is True else "backend",
+                "workspaceRef": group.get("workspaceRef"),
                 "scenarioCount": len(
                     scenario_refs_from_spec_refs(
                         [item for item in group.get("specRefs", []) if isinstance(item, str)]
@@ -1823,6 +1908,18 @@ def _code_workspace_contexts(values: list[str] | None) -> list[dict[str, Any]]:
         key = (git_root.name, workspace_root)
         if key in seen:
             continue
+        existing = next(
+            (item for item in contexts if item.get("repo") == git_root.name),
+            None,
+        )
+        if existing is not None:
+            raise PlanWriterInputError(
+                "code_workspace_repository_id_duplicate",
+                (
+                    f"repo={git_root.name};first={existing.get('requestedPath')};"
+                    f"second={requested};use_distinct_git_root_directory_names"
+                ),
+            )
         contexts.append({
             "repo": git_root.name,
             "gitRoot": git_root,
@@ -1990,10 +2087,13 @@ def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
     errors = _task_group_preflight_errors(_path(workspace, feature).parent, group_data)
     if errors:
         return render_result(WriterResult(ok=False, path=group_file, errors=errors))
-    workspace_roots = _draft_workspace_roots(args.code_workspace)
+    workspace_contexts = _code_workspace_contexts(args.code_workspace)
     data = _initial(feature)
     data["tasks"] = [
-        _draft_task_skeleton(group, workspace_roots)
+        _draft_task_skeleton(
+            group,
+            _draft_task_workspace_roots(group, workspace_contexts),
+        )
         for group in _task_groups(group_data)
     ]
     data["taskSetStatus"] = "collecting"
@@ -2161,10 +2261,15 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
             path=_draft_plan_path(workspace, feature),
         ))
     old_code_workspaces = [
-        item for item in old_lock.get("codeWorkspaces", []) if isinstance(item, str)
+        item for item in old_lock.get("codeWorkspaces", []) if isinstance(item, str) and item
     ]
-    workspace_contract_changed = code_workspaces != old_code_workspaces
-    workspace_roots = _draft_workspace_roots(code_workspaces)
+    legacy_workspace_contract_missing = not old_code_workspaces
+    old_workspace_contexts = (
+        _code_workspace_contexts(old_code_workspaces)
+        if old_code_workspaces
+        else []
+    )
+    workspace_contexts = _code_workspace_contexts(code_workspaces)
     old_tasks = {
         str(task.get("id")): task for task in _tasks(old_data) if isinstance(task.get("id"), str)
     }
@@ -2177,10 +2282,21 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
     for group in _task_groups(group_data):
         task_id = str(group.get("id"))
         old_task = old_tasks.get(task_id)
+        workspace_roots = _draft_task_workspace_roots(group, workspace_contexts)
+        workspace_contract_unchanged = False
+        if not legacy_workspace_contract_missing:
+            try:
+                workspace_contract_unchanged = (
+                    _draft_task_workspace_contract(group, old_workspace_contexts)
+                    == _draft_task_workspace_contract(group, workspace_contexts)
+                )
+            except PlanWriterInputError:
+                workspace_contract_unchanged = False
         if (
-            not workspace_contract_changed
+            workspace_contract_unchanged
             and old_task is not None
             and _task_group_projection(old_task) == _task_group_projection(group)
+            and task_workspace_roots(old_task) == workspace_roots
         ):
             tasks.append(copy.deepcopy(old_task))
             if task_id in old_ready:
@@ -2401,6 +2517,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "specRefs",
                         "implementationPoints",
                         "acceptanceCriteria",
+                        "workspaceRef",
                         "validationBoundary",
                         "nonGoals",
                         "validationCommands",
@@ -2414,6 +2531,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "mergedScenarioRefs",
                         "apiIds",
                         "validationBoundary",
+                        "workspaceRef",
                     ],
                     "exampleOnlyTaskFields": ["matrixExceptionExample"],
                     "exampleOnlyTaskGroupFields": ["matrixExceptionExample", "uiRequiredExample"],
@@ -2425,6 +2543,11 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "scope": ["pages", "workspaceRoots"],
                     },
                     "fieldRules": {
+                        "workspaceRef": {
+                            "required": True,
+                            "type": "repository_id",
+                            "source": "task_group",
+                        },
                         "validationBoundary": {
                             "required": True,
                             "type": "non_empty_string",
@@ -2456,6 +2579,12 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "workspaceContract": {
                         "field": "scope.workspaceRoots",
                         "source": "prepare-task-draft --code-workspace",
+                        "taskBindingField": "workspaceRef",
+                        "multiRepositoryRequiresTaskBinding": True,
+                        "maxWorkspaceRefsPerTask": 1,
+                        "crossRepositoryTaskSupported": False,
+                        "codeWorkspaceArgumentRepeatable": True,
+                        "repositoryIdSource": "git_root_directory_name",
                         "singleRepositoryExample": {"default": "path/from/git-root/to/code-workspace"},
                         "multiRepositoryExample": {"repo-id": "path/from/git-root/to/code-workspace"},
                         "scopePathsBase": "declared_code_workspace",
@@ -2474,7 +2603,10 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                             "uiRequired_true": "frontend",
                         },
                         "executionLaneOrder": ["backend", "frontend"],
-                        "appendRule": "same_primary_capability_and_execution_lane_as_immediately_preceding_batch_and_not_full",
+                        "appendRule": (
+                            "same_primary_capability_execution_lane_and_workspace_as_"
+                            "immediately_preceding_batch_and_not_full"
+                        ),
                     },
                     "taskSetFinalization": {
                         "groupingPreflightCommand": "preflight-task-groups --group-file <file>",
@@ -2551,10 +2683,12 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "batchValidationCommand": {
                         "command": (
                             "add-batch-validation-command --lane <backend|frontend> "
-                            "--command <command> --code-workspace <path>"
+                            "[--repo <workspaceRef>] --command <command> "
+                            "--code-workspace <path>"
                         ),
                         "requiredFields": ["argv", "cwd", "kind", "required"],
-                        "requiredPerUsedLane": "commands_mode_only",
+                        "requiredPerUsedWorkspaceInLane": "commands_mode_only",
+                        "repoRequiredWhenLaneUsesMultipleWorkspaces": True,
                         "defaultCwd": "declared_workspace_root",
                     },
                     "batchValidationMode": {
@@ -2719,15 +2853,23 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
         task["validationCommands"] = commands
     criteria = task.get("acceptanceCriteria") if isinstance(task.get("acceptanceCriteria"), list) else []
     covers = [item.get("id") for item in criteria if isinstance(item, dict) and isinstance(item.get("id"), str)]
+    workspace_roots = task_workspace_roots(task)
+    repository = args.repo
+    cwd = args.cwd
+    if len(workspace_roots) == 1 and "default" not in workspace_roots:
+        task_repository, task_workspace_root = next(iter(workspace_roots.items()))
+        repository = repository or task_repository
+        if cwd == ".":
+            cwd = task_workspace_root
     commands.append(
         {
             "id": args.command_id or f"VAL-{args.task_id}-{len(commands) + 1:02d}",
             "argv": shlex.split(args.command),
-            "cwd": args.cwd,
+            "cwd": cwd,
             "kind": args.kind,
             "required": not args.optional,
             "covers": args.covers if args.covers is not None else covers,
-            **({"repo": args.repo} if args.repo else {}),
+            **({"repo": repository} if repository else {}),
         }
     )
     return render_result(_write(workspace, feature, data))
@@ -2736,33 +2878,65 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
 def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     data = _load(workspace, feature)
-    lane_workspace_roots = {
-        tuple(sorted(task_workspace_roots(task).items()))
+    lane_workspace_contracts = {
+        _batch_workspace_contract(task)
         for task in _tasks(data)
-        if task_execution_lane(task) == args.lane and task_workspace_roots(task)
+        if task_execution_lane(task) == args.lane
     }
-    if len(lane_workspace_roots) > 1:
+    if any(len(contract) != 1 for contract in lane_workspace_contracts):
         return render_result(fail(
-            "batch_validation_profile_crosses_workspaces",
+            "batch_validation_task_workspace_invalid",
             args.lane,
             path=_path(workspace, feature),
         ))
-    workspace_roots = dict(next(iter(lane_workspace_roots))) if lane_workspace_roots else {}
-    root_key = "default" if "default" in workspace_roots else args.repo
-    if workspace_roots and not isinstance(root_key, str):
+    if not lane_workspace_contracts:
+        return render_result(fail(
+            "batch_validation_lane_unused",
+            args.lane,
+            path=_path(workspace, feature),
+        ))
+    contracts_by_repository = {
+        contract[0][0]: contract for contract in lane_workspace_contracts
+    }
+    if len(contracts_by_repository) != len(lane_workspace_contracts):
+        return render_result(fail(
+            "batch_validation_repository_workspace_ambiguous",
+            args.lane,
+            path=_path(workspace, feature),
+        ))
+    if len(lane_workspace_contracts) > 1 and not args.repo:
         return render_result(fail(
             "batch_validation_repository_required",
             args.lane,
             path=_path(workspace, feature),
         ))
+    selected_repository = args.repo
+    if selected_repository is None:
+        selected_repository = next(iter(contracts_by_repository))
+    selected_contract = contracts_by_repository.get(selected_repository)
+    if selected_contract is None:
+        return render_result(fail(
+            "batch_validation_repository_unknown",
+            f"lane={args.lane};repo={selected_repository};available={','.join(sorted(contracts_by_repository))}",
+            path=_path(workspace, feature),
+        ))
+    workspace_roots = dict(selected_contract)
+    root_key = selected_contract[0][0]
+    command_repository = None if root_key == "default" else root_key
+    workspace_preflight_required = any(
+        task_execution_lane(task) == args.lane
+        and _batch_workspace_contract(task) == selected_contract
+        and bool(task_workspace_roots(task))
+        for task in _tasks(data)
+    )
     command = {
         "argv": shlex.split(args.command),
-        "cwd": args.cwd or workspace_roots.get(str(root_key), "."),
+        "cwd": args.cwd or workspace_roots[root_key],
         "kind": args.kind,
         "required": not args.optional,
-        **({"repo": args.repo} if args.repo else {}),
+        **({"repo": command_repository} if command_repository else {}),
     }
-    if workspace_roots:
+    if workspace_preflight_required:
         if not args.code_workspace:
             return render_result(fail(
                 "code_workspace_preflight_required",
@@ -3744,6 +3918,7 @@ def _render_plan_md(data: dict[str, Any]) -> str:
                 f"- decision_id: {_fmt(task.get('decisionIds'))}",
                 f"- 涉及范围: modules={_fmt(task.get('scope', {}).get('modules') if isinstance(task.get('scope'), dict) else [])}; entrypoints={_fmt(task.get('scope', {}).get('entrypoints') if isinstance(task.get('scope'), dict) else [])}; pages={_fmt(task.get('scope', {}).get('pages') if isinstance(task.get('scope'), dict) else [])}",
                 f"- 验证边界: {task.get('validationBoundary', '')}",
+                f"- 代码工作区: {task.get('workspaceRef', '')}",
                 "- 执行要点:",
             ]
         )

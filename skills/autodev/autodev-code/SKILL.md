@@ -184,21 +184,23 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 在修改业务代码前必须启动任务运行并保存 Git 快照：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
+python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"
 ```
 
 保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `recover` / `abort` 处理原 run。
-`--code-workspace` 同时是 Git 仓库定位入口和 task scope 基准，必须与 task `scope.workspaceRoots` 声明的位置完全一致：即使传模块子目录，runner 也会解析并快照整个 Git 根，但 `scope.paths` 只相对该模块。start 会先验证 workspace 绑定、validation `cwd` 目录和 Maven/Gradle/Node 等 manifest，再保存 `scopePathBase=requested_code_workspace`、`workspacePrefixes` 和 `resolvedScopePaths`；任一前置校验失败时尚未创建 run，不得先写代码再重试。scope 声明有误时按 runner 的 `correct_plan_scope_and_rebuild_task_baseline` 动作回流 Plan。`finish-implementation` / `abort` / `resume` 必须继续传相同请求路径并保持同一个 run；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，包含未跟踪且未忽略文件；`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。
+`--code-workspace` 同时是 Git 仓库定位入口和 task scope 基准，必须选择 task `workspaceRef` 指向的实际仓库；请求路径必须与 task `scope.workspaceRoots` 声明的位置完全一致。前端 TASK 不得传后端仓库，后端 TASK 也不得传前端仓库。即使传模块子目录，runner 也会解析并快照整个 Git 根，但 `scope.paths` 只相对该模块。start 会先验证 workspace 绑定、validation `repo/cwd` 目录和 Maven/Gradle/Node 等 manifest，再保存 `scopePathBase=requested_code_workspace`、`workspacePrefixes` 和 `resolvedScopePaths`；任一前置校验失败时尚未创建 run，不得先写代码再重试。scope 声明有误时按 runner 的 `correct_plan_scope_and_rebuild_task_baseline` 动作回流 Plan。`finish-implementation` / `abort` / `resume` 必须继续传相同请求路径并保持同一个 run；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，包含未跟踪且未忽略文件；`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。
 `start` 会固化当前 task 契约哈希，并对请求 workspace、scope 投影和初始 Git 快照写入 `integritySha256`。run 活动期间不得修改该 task 的 goal/scope/AC/validationCommands 等计划字段，也禁止直接编辑 `plan.json`、批次 `plan.json` 或 `.task-runs/**/*.json`、手工重算 digest/hash；否则 runner 返回 `task_run_integrity_mismatch` 或计划完整性错误。确需修 Plan 时按下方 scope 回流协议保存 patch、force abort、由 Plan writer 整体重建契约和基线后再应用 patch。
 
-任务跨多个业务仓库时，按稳定顺序重复传入 `--code-workspace`。Plan 中每条 validation command 必须用 `repo` 指明 Git 根目录名；changed/supporting 路径使用 `repoId:relative/path`。无论单仓或多仓，`evidence/` 与 `.task-runs/` 只能写入 feature 产物目录，禁止写入任一业务仓库。
+每个 TASK 必须且只能绑定一个 `workspaceRef`；只向 runner 传该 TASK 的 workspace，禁止对 TASK start/finish/validate 重复传入其他仓库。若一个需求闭环需要修改多个业务仓库，Plan 必须拆成多个 TASK 并用 deps 串联；跨仓库集成检查只能放在 `projectValidationCommands`。Plan 中具名 workspace 的 validation command 必须用 `repo` 指明 Git 根目录名；changed/supporting 路径使用 `repoId:relative/path`。无论涉及多少仓库，`evidence/` 与 `.task-runs/` 只能写入 feature 产物目录，禁止写入任一业务仓库。
+
+Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后端不会进入同一 Batch，同一 lane 的不同仓库也不会进入同一 Batch。启动批次验证、逐 TASK 验证和 `batch-check` 时只传该 Batch 的唯一 workspace。
 2. 读唯一 `plan.json` 中的结构化执行契约。必须先运行任务上下文解析脚本：
 
 ```bash
 python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches` 和 `explorationPolicy`。多仓库任务按稳定顺序重复传入 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
+该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches` 和 `explorationPolicy`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
 
 必须按每个仓库的缓存状态执行，不能只看总体最严 policy 后忽略其他仓库：
 
@@ -212,7 +214,7 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
 
 `fresh/reusable_with_changes 时禁止无边界全仓探索`：不得重新运行无范围全仓 `rg`、递归目录 listing 或框架发现。缓存只能通过 `code_exploration_writer.py` 修改，禁止直接编辑 `cache/code-exploration/**/*.json`。共享路径只更新当前 executionLane；另一 lane 在后续 inspect 时独立判定。runner 能返回 machine policy，但宿主未提供工具调用遥测，无法独立证明 Agent 执行过多少次搜索，这是协议层约束。
 
-必须读取当前 task 的 `goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `goal` / `scope` / `validationBoundary` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
+必须读取当前 task 的 `workspaceRef`、`goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `workspaceRef` / `goal` / `scope` / `validationBoundary` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
 3. 改代码前按 `explorationPolicy` 进行首次有界探索或缓存定点复核；先识别或复用项目分层、命名、错误处理、校验、日志、测试风格，并读取测试插件/provider 版本（例如 Maven Surefire 与 JUnit 4/5 兼容性）、Spring 测试启动入口和现有可运行测试，形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。不得在测试失败后才猜测框架版本；计划为 `integration_test` 时不得为了通过验证降级成只 mock service 的 controller 单元测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
 4. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。

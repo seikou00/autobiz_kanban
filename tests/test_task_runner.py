@@ -106,6 +106,7 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
         "status": "todo",
         "deps": deps or [],
         "uiRequired": False,
+        "workspaceRef": "default",
         "scope": {"modules": [], "entrypoints": [], "pages": [], "dataObjects": []},
         "implementationPoints": ["update behavior", "cover boundary"],
         "acceptanceCriteria": [
@@ -1963,7 +1964,7 @@ class TaskRunnerTest(unittest.TestCase):
                 ],
             )
 
-    def test_multi_repository_scope_requires_repository_prefix(self) -> None:
+    def test_multi_repository_task_contract_is_rejected_before_scope_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, code = _workspace(root)
@@ -1994,7 +1995,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(started.returncode, 0)
-            self.assertIn("scope.path_workspace_prefix_invalid", started.stdout)
+            self.assertIn("scope.workspaceRoots_multiple_forbidden", started.stdout)
 
     def test_start_rejects_absolute_scope_path_before_run_creation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2107,7 +2108,7 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
-    def test_multi_repository_prefixed_scope_matches_changed_repository(self) -> None:
+    def test_task_cannot_span_multiple_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, code = _workspace(root)
@@ -2134,30 +2135,16 @@ class TaskRunnerTest(unittest.TestCase):
             ]
             batch["tasks"][0]["validationCommands"][0]["repo"] = code.name
             _write_batch(feature_dir, batch)
-            source = second / "src" / "main" / "java" / "example" / "Service.java"
-
             started = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
                 "--code-workspace", str(second),
             )
-            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-            source.parent.mkdir(parents=True)
-            source.write_text("interface Service {}\n", encoding="utf-8")
-            completed = _run(
-                "complete", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--code-workspace", str(second),
-                "--run-id", json.loads(started.stdout)["runId"],
-            )
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("scope.workspaceRoots_multiple_forbidden", started.stdout)
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            self.assertEqual(
-                _evidence(feature_dir, "ev_0001")["changedFiles"],
-                ["secondary:src/main/java/example/Service.java"],
-            )
-
-    def test_start_rejects_two_scope_bases_for_same_git_root(self) -> None:
+    def test_start_rejects_two_scope_bases_as_multiple_task_workspaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             first = code / "backend" / "first"
@@ -2172,10 +2159,10 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(started.returncode, 0)
-            self.assertIn("ambiguous_code_workspace_base", started.stdout)
+            self.assertIn("task_requires_single_code_workspace", started.stdout)
             self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
-    def test_multi_repository_scope_resolves_each_requested_module(self) -> None:
+    def test_task_cannot_bind_modules_from_multiple_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, code = _workspace(root)
@@ -2215,27 +2202,9 @@ class TaskRunnerTest(unittest.TestCase):
                 "--task-id", "T001", "--code-workspace", str(first_module),
                 "--code-workspace", str(second_module),
             )
-            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-            payload = json.loads(started.stdout)
-            self.assertEqual(
-                payload["resolvedScopePaths"],
-                [
-                    "code:services/compliance/src/main/java/example",
-                    "secondary:services/protocol/src/main/java/example",
-                ],
-            )
-            source = second_module / "src" / "main" / "java" / "example" / "Service.java"
-            source.parent.mkdir(parents=True)
-            source.write_text("interface Service {}\n", encoding="utf-8")
-
-            completed = _run(
-                "complete", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(first_module),
-                "--code-workspace", str(second_module),
-                "--run-id", payload["runId"],
-            )
-
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("scope.workspaceRoots_multiple_forbidden", started.stdout)
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
     def test_start_rejects_unignored_runtime_artifact_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2592,7 +2561,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(ready.returncode, 0, ready.stdout + ready.stderr)
             self.assertEqual(json.loads(ready.stdout)["action"], "code_done_ready")
 
-    def test_multiple_repositories_are_snapshotted_but_artifacts_stay_in_feature_dir(self) -> None:
+    def test_task_start_rejects_multiple_requested_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, code = _workspace(root)
@@ -2619,23 +2588,11 @@ class TaskRunnerTest(unittest.TestCase):
                 "--task-id", "T001", "--code-workspace", str(code),
                 "--code-workspace", str(second),
             )
-            self.assertEqual(started_result.returncode, 0, started_result.stdout + started_result.stderr)
-            started = json.loads(started_result.stdout)
-            (second / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-
-            completed = _run(
-                "complete", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--run-id", started["runId"],
-                "--code-workspace", str(code), "--code-workspace", str(second),
-            )
-
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            evidence = _evidence(feature_dir, "ev_0001")
-            self.assertEqual(evidence["changedFiles"], ["secondary:implemented.txt"])
-            self.assertEqual(evidence["fileChanges"][0]["repository"], "secondary")
+            self.assertNotEqual(started_result.returncode, 0)
+            self.assertIn("task_requires_single_code_workspace", started_result.stdout)
             self.assertFalse((code / ".autobizdevops").exists())
             self.assertFalse((second / ".autobizdevops").exists())
-            self.assertTrue((feature_dir / "evidence" / "EVIDENCE.jsonl").is_file())
+            self.assertFalse((feature_dir / "evidence" / "EVIDENCE.jsonl").is_file())
 
     def test_start_rejects_another_active_task_run_in_same_feature(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

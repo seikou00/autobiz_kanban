@@ -47,6 +47,7 @@ def task(
         "status": status,
         "deps": deps or [],
         "uiRequired": ui_required,
+        "workspaceRef": "default",
         "scope": {
             "modules": ["src"],
             "entrypoints": [],

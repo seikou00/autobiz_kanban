@@ -279,6 +279,28 @@ def _assert_workspace_roots_match(
         )
 
 
+def _assert_workspace_ref_matches(
+    workspace_ref: Any,
+    contexts: list[dict[str, str]],
+    *,
+    contract_name: str,
+) -> None:
+    if len(contexts) != 1:
+        raise TaskRunnerError(
+            "task_workspace_ref_requires_single_repository",
+            contract=contract_name,
+            workspaceRef=workspace_ref,
+        )
+    actual = contexts[0].get("repository")
+    if workspace_ref != "default" and workspace_ref != actual:
+        raise TaskRunnerError(
+            "task_workspace_ref_mismatch",
+            contract=contract_name,
+            workspaceRef=workspace_ref,
+            actualRepository=actual,
+        )
+
+
 def _assert_validation_command_workspaces(
     commands: list[dict[str, Any]],
     workspace_roots: dict[str, str],
@@ -593,10 +615,18 @@ def _start_task_unlocked(
     requested_workspaces = (
         [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
     )
+    if len(requested_workspaces) != 1:
+        raise TaskRunnerError(
+            "task_requires_single_code_workspace",
+            taskId=task_id,
+            workspaceRef=task.get("workspaceRef"),
+            requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
+        )
     repositories = _resolve_repositories(requested_workspaces)
     _assert_runtime_artifacts_ignored(repositories)
     scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
     workspace_roots = task_workspace_roots(task)
+    _assert_workspace_ref_matches(task.get("workspaceRef"), scope_workspaces, contract_name=task_id)
     _assert_workspace_roots_match(workspace_roots, scope_workspaces, contract_name=task_id)
     _assert_validation_command_workspaces(
         [item for item in task.get("validationCommands", []) if isinstance(item, dict)],
@@ -1039,6 +1069,13 @@ def _finish_implementation_unlocked(
     if state.get("batchId") not in {None, batch_id}:
         raise TaskRunnerError(f"task_batch_changed_after_start:{task_id}")
     requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    if len(requested_workspaces) != 1:
+        raise TaskRunnerError(
+            "task_requires_single_code_workspace",
+            taskId=task_id,
+            workspaceRef=task.get("workspaceRef"),
+            requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
+        )
     repositories = _resolve_repositories(requested_workspaces)
     _assert_repositories_match(state, repositories)
     _assert_requested_workspaces_match(state, requested_workspaces, repositories)
@@ -1540,13 +1577,24 @@ def _start_deferred_task_validation_unlocked(
     if _active_feature_runs(feature_dir):
         raise TaskRunnerError("active_task_run_blocks_batch_task_validation")
     requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    if len(requested_workspaces) != 1:
+        raise TaskRunnerError(
+            "batch_task_validation_requires_single_code_workspace",
+            batchId=batch_id,
+            requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
+        )
     repositories = _resolve_repositories(requested_workspaces)
     _assert_runtime_artifacts_ignored(repositories)
+    scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
     for task in batch.get("tasks", []):
         if not isinstance(task, dict):
             continue
         workspace_roots = task_workspace_roots(task)
-        scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
+        _assert_workspace_ref_matches(
+            task.get("workspaceRef"),
+            scope_workspaces,
+            contract_name=str(task.get("id")),
+        )
         _assert_workspace_roots_match(
             workspace_roots,
             scope_workspaces,
@@ -1749,8 +1797,16 @@ def _validate_deferred_task_unlocked(
     if expected_contract != task_contract_sha256(task):
         raise TaskRunnerError(f"task_contract_changed_after_validation_start:{task_id}")
     requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    if len(requested_workspaces) != 1:
+        raise TaskRunnerError(
+            "batch_task_validation_requires_single_code_workspace",
+            batchId=batch_id,
+            requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
+        )
     repositories = _resolve_repositories(requested_workspaces)
     _assert_repositories_match(state, repositories)
+    scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
+    _assert_workspace_ref_matches(task.get("workspaceRef"), scope_workspaces, contract_name=task_id)
     if [str(workspace_path.resolve()) for workspace_path in requested_workspaces] != state.get(
         "requestedCodeWorkspaces"
     ):
@@ -2452,6 +2508,12 @@ def _run_batch_checks_unlocked(
     commands_sha256 = _batch_commands_sha256(commands)
 
     requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    if len(requested_workspaces) != 1:
+        raise TaskRunnerError(
+            "batch_check_requires_single_code_workspace",
+            batchId=batch_id,
+            requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
+        )
     repositories = _resolve_repositories(requested_workspaces)
     _assert_runtime_artifacts_ignored(repositories)
     scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
@@ -2470,6 +2532,13 @@ def _run_batch_checks_unlocked(
         scope_workspaces,
         contract_name=batch_id,
     )
+    for task in batch.get("tasks", []):
+        if isinstance(task, dict):
+            _assert_workspace_ref_matches(
+                task.get("workspaceRef"),
+                scope_workspaces,
+                contract_name=str(task.get("id")),
+            )
     _assert_validation_command_workspaces(
         commands,
         batch_workspace_roots,

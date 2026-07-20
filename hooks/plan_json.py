@@ -776,12 +776,30 @@ def validate_batch_plan_data(
         for item in batch_tasks
         if task_workspace_roots(item)
     ]
+    workspace_refs = {
+        item.get("workspaceRef")
+        for item in batch_tasks
+        if isinstance(item.get("workspaceRef"), str)
+    }
+    if len(workspace_refs) > 1:
+        errors.append(f"{batch_id}.mixed_task_workspace_refs")
     workspace_roots = workspace_root_sets[0] if workspace_root_sets else {}
     if any(item != workspace_roots for item in workspace_root_sets[1:]):
         errors.append(f"{batch_id}.mixed_task_workspace_roots")
     validation = data.get("batchValidation")
     commands = validation.get("commands") if isinstance(validation, dict) else []
-    for index, command in enumerate(commands if isinstance(commands, list) else []):
+    mode = (
+        validation.get("mode", "commands" if commands else None)
+        if isinstance(validation, dict)
+        else None
+    )
+    batch_commands = commands if isinstance(commands, list) else []
+    if require_initial_status and mode == "commands" and not any(
+        isinstance(command, dict) and command.get("required") is True
+        for command in batch_commands
+    ):
+        errors.append(f"{batch_id}.batchValidation.required_command_missing")
+    for index, command in enumerate(batch_commands):
         _validate_command_workspace_root(
             errors,
             command,
@@ -1337,6 +1355,8 @@ def _validate_task_details(
                         workspace_roots[key] = normalized_root
                 if DEFAULT_WORKSPACE_ROOT in workspace_roots and len(workspace_roots) != 1:
                     errors.append(f"{task_id}.scope.workspaceRoots_default_must_be_single")
+                if len(workspace_roots) > 1:
+                    errors.append(f"{task_id}.scope.workspaceRoots_multiple_forbidden")
 
         for value in scope_paths:
             repository: str | None = None
@@ -1366,6 +1386,14 @@ def _validate_task_details(
                 context=f"{task_id}.validationCommands[{index}]",
                 workspace_roots=workspace_roots,
             )
+
+    workspace_ref = task.get("workspaceRef")
+    if not isinstance(workspace_ref, str) or not REPOSITORY_ID_RE.fullmatch(workspace_ref):
+        errors.append(f"{task_id}.workspaceRef_missing_or_invalid")
+    elif workspace_roots:
+        expected_key = DEFAULT_WORKSPACE_ROOT if workspace_ref == DEFAULT_WORKSPACE_ROOT else workspace_ref
+        if expected_key not in workspace_roots:
+            errors.append(f"{task_id}.workspaceRef_not_in_workspaceRoots:{workspace_ref}")
 
     implementation_points = _string_list(task.get("implementationPoints"))
     if implementation_points is None:

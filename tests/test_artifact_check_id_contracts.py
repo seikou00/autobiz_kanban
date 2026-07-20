@@ -95,6 +95,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "validationBoundary",
                 "public behavior seam validated by the task command",
             )
+            task.setdefault("workspaceRef", "default")
             task.setdefault("nonGoals", ["do not change unrelated behavior"])
             task["completionPolicy"] = "all_required_validations_pass"
             task["validationCommands"] = [
@@ -295,6 +296,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                                 "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
                             }
                         ],
+                        "workspaceRef": "default",
                         "validationBoundary": "public behavior seam validated by the task command",
                         "nonGoals": ["do not change unrelated behavior"],
                         **(
@@ -392,6 +394,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "scenarioRefs": scenario_refs,
                 }
             ],
+            "workspaceRef": "default",
             "validationBoundary": "public behavior seam validated by the task command",
             "nonGoals": ["do not change unrelated behavior"],
             "specRefs": effective_spec_refs,

@@ -4,6 +4,7 @@
   "goal": "[observable outcome]",
   "deps": [],
   "uiRequired": false,
+  "workspaceRef": "default",
   "scope": {
     "modules": ["[module]"],
     "entrypoints": [],

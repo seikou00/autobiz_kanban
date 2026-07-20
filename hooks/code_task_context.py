@@ -298,6 +298,7 @@ def build_context(
         "taskContract": {
             "goal": task.get("goal"),
             "scope": task.get("scope"),
+            "workspaceRef": task.get("workspaceRef"),
             "implementationPoints": task.get("implementationPoints"),
             "acceptanceCriteria": task.get("acceptanceCriteria"),
             "validationBoundary": task.get("validationBoundary"),

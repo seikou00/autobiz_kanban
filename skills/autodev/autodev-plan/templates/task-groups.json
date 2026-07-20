@@ -6,6 +6,7 @@
       "title": "[single observable behavior]",
       "deps": [],
       "uiRequired": false,
+      "workspaceRef": "[backend-repository-id]",
       "specRefs": [
         "specs/[capability]/spec.md#REQ-001",
         "specs/[capability]/spec.md#SCN-001"
@@ -21,6 +22,7 @@
     "title": "[single observable UI behavior]",
     "deps": [],
     "uiRequired": true,
+    "workspaceRef": "[frontend-repository-id]",
     "specRefs": [
       "specs/[ui-capability]/spec.md#REQ-001",
       "specs/[ui-capability]/spec.md#SCN-001"
@@ -47,6 +49,7 @@
     "title": "[shared observable matrix behavior]",
     "deps": [],
     "uiRequired": false,
+    "workspaceRef": "[backend-repository-id]",
     "specRefs": [
       "specs/[capability]/spec.md#REQ-001",
       "specs/[capability]/spec.md#SCN-001",

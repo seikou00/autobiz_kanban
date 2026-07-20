@@ -5,7 +5,7 @@
 ## 稳定 ID 规范
 
 - Task ID 统一使用 `T001`、`T002` ...，并写在任务标题和任务表格中。
-- Task 必须列出 `specRefs`、`api_id`、`data_id`、`decision_id`、`evidenceIds`；对应的 `plan.json` 需同步保存 `deps`、`status`、`goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`validationCommands`。
+- Task 必须列出 `workspaceRef`、`specRefs`、`api_id`、`data_id`、`decision_id`、`evidenceIds`；对应的 `plan.json` 需同步保存 `deps`、`status`、`goal`、`workspaceRef`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`validationCommands`。
 - `specRefs` 使用 `specs/<capability>/spec.md#REQ-001` / `#SCN-001`。
 - `api_id`、`data_id`、`decision_id` 分别写成独立字段；每个字段都可以写多个 ID，多个值用 `/` 或 `,` 分隔。
 - 单个任务不涉及接口或数据变更时，对应字段写 `无` 或 `-`，不要为对应类型伪造 `API-*` / `DATA-*`；对应 `plan.json.apiIds` / `dataIds` 写空数组 `[]`，不要写字符串 `"-"`。
@@ -88,6 +88,7 @@ graph TD
 - **decision_id:** [D-001 / D-002]
 - **设计依据:** [design.md#API-001 / #DATA-001 / #D-001；若 design.md 标记无 API/无 SQL，则省略对应 API/DATA 引用；也可作为摘要保留 design.md]
 - **证据依据:** [ev_0001, ev_0002]
+- **代码工作区:** [来自 plan.json.workspaceRef]
 - **涉及范围:** [来自 plan.json.scope；列出 modules / entrypoints / pages / dataObjects，钉到真实路径/入口/表名；确实无法定位时写“要在 X 中定位的现有范围”，不要写“相关服务/相关模块”这类空话]
 - **验证边界:** [来自 plan.json.validationBoundary；写公开 seam 与对应的一条可执行校验或断言]
 - **执行要点:** [来自 plan.json.implementationPoints]
@@ -111,6 +112,7 @@ graph TD
 - **decision_id:** [D-002 / D-003]
 - **设计依据:** [design.md#API-002 / #DATA-002 / #D-002；若 design.md 标记无 API/无 SQL，则省略对应 API/DATA 引用；也可作为摘要保留 design.md]
 - **证据依据:** [ev_0003]
+- **代码工作区:** [来自 plan.json.workspaceRef]
 - **涉及范围:** [来自 plan.json.scope；模块、入口、服务、模型、配置、测试等方向]
 - **验证边界:** [来自 plan.json.validationBoundary；写公开 seam 与对应的一条可执行校验或断言]
 - **执行要点:** [来自 plan.json.implementationPoints]

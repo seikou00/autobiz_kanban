@@ -241,7 +241,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先把最终候选分组表写入 `${FEATURE_DIR}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${FEATURE_DIR}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
+生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${FEATURE_DIR}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${FEATURE_DIR}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
 每次 Plan 会话准备 Draft 前只执行一次以下只读命令，并以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流；后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
@@ -262,16 +262,16 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${f
 分组预检成功后立即创建并锁定 Draft Batch；`prepare-task-draft` 会保存 `groupingDigest`，投影全部 group-owned 字段和自动 Batch，不需要也不接受 task 目录：
 
 ```bash
-python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feature}" --group-file "${FEATURE_DIR}/.tmp/plan_writer/task-groups.json" --code-workspace "<BUSINESS_MODULE>"
+python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feature}" --group-file "${FEATURE_DIR}/.tmp/plan_writer/task-groups.json" --code-workspace "<BACKEND_MODULE>" --code-workspace "<FRONTEND_MODULE>"
 ```
 
-按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、从 `prepare-task-draft --code-workspace` 投影 workspaceRoots，并在未显式提供 cwd 时使用该 workspace root。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样：
+按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
 ```
 
-不得直接编辑 Draft 根或 Batch JSON。需要查看进度时只运行 `show-task-draft`；它只返回 ready/pending Task ID 和 Batch 摘要。若分组表在 Draft 创建后改变，所有 Draft 命令返回 `task_group_changed_after_draft_created`；只能运行 `rebuild-task-draft --group-file <file>`，writer 仅保留 group projection 完全未变的 ready task 详情，重置其余 task，禁止逐字段同步旧 task。若旧 Draft 缺少 code workspace，修改单个 task detail 无法修复，必须运行 `rebuild-task-draft --group-file <file> --code-workspace <path>`；workspace 变化会重置 task detail 并重新校验。
+不得直接编辑 Draft 根或 Batch JSON。需要查看进度时只运行 `show-task-draft`；它只返回 ready/pending Task ID 和 Batch 摘要。若分组表在 Draft 创建后改变，所有 Draft 命令返回 `task_group_changed_after_draft_created`；只能运行 `rebuild-task-draft --group-file <file>`，writer 仅保留 group projection 与该 TASK workspace contract 都未变化的 ready task 详情，只重置受影响 task，禁止逐字段同步旧 task。若旧 Draft 缺少 code workspace，修改单个 task detail 无法修复，必须运行 `rebuild-task-draft --group-file <file> --code-workspace <path>`；重复参数可登记多个仓库。
 
 全部 task ready 后运行一次 Draft 全局预检，再原子发布正式 Bundle：
 
@@ -296,10 +296,10 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 
 - Task ID 使用 `T001`、`T002` ...，不跳号、不复用已删除或已完成任务 ID。
 - 根 `plan.json` 必须包含 `taskSetStatus`、`taskSetDigest`、`batchPolicy.maxTasks=5`、`batchPolicy.strategy=spec_capability_execution_lane_topological`、`batches[]`、`activeBatchId`、`nextBatchId` 和 feature `status`。`finalize-task-draft` 只写完整覆盖且 `finalized` 的任务集。每个 batch 索引和对应 batch plan 必须记录相同的 `executionLane`，引用唯一 `plans/Bxxx/plan.json`，task ID 在全部批次内全局唯一。`taskSetDigest` 保护 writer 生成的根索引和 task 契约；直接编辑正式 JSON 会被后续读取拒绝。
-- 只使用当前结构，不写 `version` / `taskDetailVersion` 字段。每个 batch task 必须写 `goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`completionPolicy: all_required_validations_pass`；`validationBoundary` 必须描述公开 seam 与可执行校验边界，`nonGoals` 对所有任务都必须至少包含一条具体、非空内容，数组中不得混入空白项。发现带版本字段或根含 tasks 的 plan 时，不迁移、不兼容，清理后重新执行 Plan。
-- `goal` 写用户可观察结果；`scope.modules/entrypoints/dataObjects` 写执行范围，`scope.pages` 由 writer 从分组 UI refs 投影。`scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生：单仓库使用 `{"default":"后台服务/.../模块"}`，Git 根本身使用 `{"default":"."}`；多仓库按 `repoId` 分别声明，task detail 不得自行维护。`scope.paths` 只写相对该 workspace 的路径，多仓库使用 `repoId:relative/path`，禁止再次包含 workspace 前缀；涉及 domain、test、resources、迁移或配置时必须覆盖对应范围。`validationCommands[].cwd` 保持 Git 根相对路径，必须等于或位于对应 `workspaceRoots` 之下；省略时 writer 自动使用 workspace root。`prepare-task-draft` 必须提供至少一个真实 code workspace，并在写入任何 Draft 前验证其 Git 根；writer 在每次详情写入时继续校验 cwd 和 manifest。`implementationPoints` 写 2-6 条。task detail 的 acceptance criterion 只写 `{text,scenarioRefs}`，scenarioRefs 必须属于分组 specRefs，ID 由 writer 生成。
+- 只使用当前结构，不写 `version` / `taskDetailVersion` 字段。每个 batch task 必须写唯一 `workspaceRef` 以及 `goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`completionPolicy: all_required_validations_pass`；`scope.workspaceRoots` 只能包含该 workspaceRef 对应的一项，单 TASK 多 root 直接拒绝。`validationBoundary` 必须描述公开 seam 与可执行校验边界，`nonGoals` 对所有任务都必须至少包含一条具体、非空内容，数组中不得混入空白项。发现带版本字段或根含 tasks 的 plan 时，不迁移、不兼容，清理后重新执行 Plan。
+- `goal` 写用户可观察结果；`scope.modules/entrypoints/dataObjects` 写执行范围，`scope.pages` 由 writer 从分组 UI refs 投影。每个 Task 必须保存 group 投影的 `workspaceRef`。`scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生，再按 `workspaceRef` 选择唯一仓库：单仓库 `workspaceRef=default` 时使用 `{"default":"后台服务/.../模块"}`；多仓库只写当前 TASK 的 `{repoId: workspaceRoot}`，task detail 不得自行维护。`scope.paths` 只写相对该 workspace 的路径；具名 repo 使用 `repoId:relative/path`，禁止再次包含 workspace 前缀；涉及 domain、test、resources、迁移或配置时必须覆盖对应范围。`validationCommands[].cwd` 保持 Git 根相对路径，必须等于或位于该 TASK 的 workspace root 下；省略时 writer 自动补 repo 与 workspace root。`prepare-task-draft` 必须提供全部真实 code workspace，并在写入任何 Draft 前验证 Git 根、`workspaceRef`、cwd 和 manifest。`implementationPoints` 写 2-6 条；超过 6 条时必须合并同一实现动作或拆 Task，不得机械删除覆盖点。task detail 的 acceptance criterion 只写 `{text,scenarioRefs}`，scenarioRefs 必须属于分组 specRefs，ID 由 writer 生成。
 - task detail 的 `validationCommands` 写 `{argv,cwd?,kind,required,covers?}`；AC/VAL ID 由 writer 生成，`covers` 省略时覆盖全部 AC，也可写从 1 开始的 AC 序号。`argv` 不经 shell，`kind` 只能是 `behavior_test`、`integration_test`、`e2e_test`、`static_check`。所有 AC 必须由 required 命令覆盖。
-- 多仓库任务为每条 validation/project command 增加 `repo`，值为对应 Git 根目录名；未涉及多仓库时省略。多仓库路径在 evidence 中使用 `repoId:relative/path`，但所有 evidence 文件仍属于 feature 产物目录。
+- 多仓库计划中，每个 TASK validation command 的 `repo` 必须等于该 TASK 唯一 `workspaceRef`；project command 则按实际执行仓库填写 `repo`。具名仓库路径在 evidence 中使用 `repoId:relative/path`，但所有 evidence 文件仍属于 feature 产物目录。
 - 顶层 `batchValidationProfiles` 按 lane 选择 `mode=task_covered|commands`。同一 Maven workspace 中每个 TASK 都有 required 的定向 `mvn test/verify/package/install` 时使用 `task_covered`，writer 自动投影 `coverageCommandIds` 且 commands 为空；存在 TASK 未覆盖的编译、构建、类型检查或 lint 风险时使用 `commands`，至少配置一条有增量价值的 required 命令。不得仅因 Batch 结束重复执行已被 TASK Maven 生命周期覆盖的 `mvn compile`。
 - 顶层 `projectValidationCommands` 使用 `PROJECT-VAL-001` 等 ID，只承载可选的跨 lane、跨批次或全项目集成检查，`kind` 仅允许 `integration_test/e2e_test/static_check`；按 `argv + cwd + repo` 归一化后不得与任何 batch profile 命令重复，也不能替代 TASK 的 AC 覆盖。没有这种检查时保持空数组，Code 可直接进入完成门禁。
 - Plan 阶段所有任务初始状态为 `todo`，`evidenceIds` / `completionEvidenceIds` 为空，`latestPassEvidenceId` 为 null；顶层 `projectCheckEvidenceIds` 为空，`latestProjectCheckEvidenceId` 为 null。以上运行字段只由 task runner 更新。
@@ -311,7 +311,7 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
 - 必须在 `plan.json` 对应任务或风险字段中记录用户补充说明 / 技术细节； `PLAN.md`同步新增或更新「用户补充说明 / 技术细节」章节。
-- `PLAN.md` 必须从 `plan.json` 投影，任务 id / deps / status / specRefs / designRefs / validationCommands / evidenceIds 不能漂移；任务的「做什么」「涉及范围」「执行要点」「验收标准」「不做什么」只能来自 `goal` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals`，不得在 `PLAN.md` 独写机器事实源没有的内容。
+- `PLAN.md` 必须从 `plan.json` 投影，任务 id / deps / status / workspaceRef / specRefs / designRefs / validationCommands / evidenceIds 不能漂移；任务的「做什么」「代码工作区」「涉及范围」「执行要点」「验收标准」「不做什么」只能来自 `goal` / `workspaceRef` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals`，不得在 `PLAN.md` 独写机器事实源没有的内容。
 - 用户明确确认的内容，标记为「已确认」。
 - 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
@@ -396,7 +396,7 @@ UI 任务投影规则：
 
 与 writer 的衔接：
 
-- 最终候选任务分组表必须覆盖全部 Scenario，并按 `backend`、`frontend` 两个区段排序。writer 一次创建全部 Draft Batch；不得把剩余 task 延迟到 Code 阶段。
+- 最终候选任务分组表必须覆盖全部 Scenario，并按 `backend`、`frontend` 两个区段排序。writer 一次创建全部 Draft Batch；不得把剩余 task 延迟到 Code 阶段。Batch 只能包含同一 lane 且同一 `workspaceRef` 的 TASK：前后端绝不共用 Batch，同为 backend/frontend 但仓库不同也必须拆成不同 Batch。
 - 必须按 DAG 拓扑序编号：当前 task 的 `deps` 只能指向更早的 task。若分组预检报告依赖错误，只修候选表，不补 task detail。
 - `preflight-task-groups` 成功后只运行一次 `prepare-task-draft`，并且必须带真实的 `--code-workspace`。缺少 workspace 时必须先确定业务代码目录，不得创建无 workspace 的 Draft；不得创建独立 `Txxx.json`，不得在每写 5 个 task 后提前 finalize。
 - 不得通过完整 task 的内容校验失败来探索如何拆分；拆分必须在覆盖矩阵、候选任务分组表和 `preflight-task-groups` 阶段完成。
@@ -421,7 +421,7 @@ python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --featu
 python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --feature "${feature}" --lane frontend --command "<FRONTEND_BUILD_OR_TYPECHECK>" --kind build --code-workspace "<FRONTEND_MODULE>"
 ```
 
-`task_covered` 必须由 writer 识别并完整覆盖该 lane 每个 Batch 的 TASK；无法证明时命令失败，必须改用 `commands`，不得强行修改 coverage ID。命令模式的 `kind` 使用 `compile`、`build`、`typecheck`、`lint` 之一。未显式传 `--cwd` 时 writer 使用该 lane task 声明的 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。确有跨 lane/跨批次集成检查时，再用 `add-project-validation-command --kind integration_test|e2e_test|static_check` 添加可选最终检查。随后生成 `SMOKE_TEST_PLAN.json`。
+`task_covered` 必须由 writer 识别并完整覆盖该 lane 每个 Batch 的 TASK；无法证明时命令失败，必须改用 `commands`，不得强行修改 coverage ID。命令模式的 `kind` 使用 `compile`、`build`、`typecheck`、`lint` 之一。同一 lane 只使用一个 workspace 时 writer 可自动选择；同一 lane 使用多个仓库时，必须为每个 workspace 分别添加 required 命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。确有跨 lane/跨批次集成检查时，再用 `add-project-validation-command --kind integration_test|e2e_test|static_check` 添加可选最终检查。随后生成 `SMOKE_TEST_PLAN.json`。
 
 `SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 与 TDD 的克制粒度：每个案例只描述一个站在公开 seam 上的 vertical slice，必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码，不批量设计覆盖想象行为的测试矩阵。
 
