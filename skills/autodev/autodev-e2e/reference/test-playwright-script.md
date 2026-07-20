@@ -1,18 +1,15 @@
 # AUTODEV-E2E 端到端测试资产生成参考
 
-本文件只服务于 [SKILL.md](../../get-shit-done/SKILL.md) 的 `step5`：把结构化 E2E 用例落成可执行资产。
-
 ## 目标
 
 - 优先复用项目现有的 Playwright 测试结构
 - 只补齐执行目标用例所需的最小资产
-- 产出的资产应能被 `SKILL.md` 的 `step7` 直接执行
 
 本文件不定义用例生成、测试执行或结果判定规则。
 
 ## 输入优先级
 
-1. `step4` 产出的结构化 E2E 用例
+1. 产出的结构化 E2E 用例
 2. 与该 feature 相关的前端页面、路由、弹窗和组件
 3. 与该 feature 相关的 specs 行为契约、Spring Boot controller、DTO、权限规则和 design.md 接口决策
 4. 环境说明、测试账号、seed 数据和依赖服务
@@ -174,4 +171,4 @@ spec 应包含：
 - 范围最小且与当前 feature 直接相关
 - config、fixture/helper、page object、spec 分层清晰
 - 能追溯到场景 ID 或验收标准
-- 失败时可诊断，但默认不提交二进制产物
+- 失败时可诊断
