@@ -158,8 +158,12 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 该命令只读取根计划和批次摘要；若根计划处于 `awaiting_next_conversation`，它会校验并消费 `BATCH_HANDOFF.json`，自动激活 `nextBatchId`，无需用户提供 batch ID。必须严格按返回的 `action` 分支：
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
-- `run_batch_check`：当前批次 TASK 已全部完成，执行下方「批次验证与重验证」，不得直接 handoff 或进入项目检查。
-- `recover_task_covered_batch`：最后一个 TASK evidence 已写入但批次收口尚未绑定；inspect 并 recover 最后一个 TASK run，不得改跑 batch-check。
+- `run_batch_task_validation`：当前批次所有 TASK 实现均已收口为 `implemented`；创建 deferred validation run，并启动一个批次级只验证子代理，由它串行运行该批全部 TASK 与 batch 校验命令。
+- `resume_batch_task_validation` / `recover_batch_task_validation_closure`：把返回的原 `activeRunId/currentTaskId` 和完整批次验证上下文交给一个批次级只验证子代理恢复，不得创建新实现 run 或跳到其他 TASK。
+- `fix_or_retry_task_validation`：源码未变化时创建新的 task-validation run 从失败 TASK 重试；需要修改源码时先执行 `start-validation-repair`。
+- `run_batch_check_in_validation_subagent`：deferred 批次的 TASK 已全部验证通过；把返回的 `validationContext` 交给一个批次级只验证子代理，由它执行下方「批次验证与重验证」，不得由主 agent 接管。
+- `run_batch_check`：仅用于未启用 deferred policy 的旧计划；当前批次 TASK 已全部完成，执行下方「批次验证与重验证」。
+- `recover_task_covered_batch`：仅用于未启用 deferred policy 的旧计划；最后一个 TASK evidence 已写入但批次收口尚未绑定时，inspect 并 recover 原 TASK run。
 - `run_project_check`：所有批次验证已完成且配置了额外项目检查，跳过 Task 队列，执行「全部任务完成后的验证」。
 - `code_done_ready`：批次和项目级最终校验都已完成，不重复执行 Task 或 project-check，继续 Code 完成门禁。
 
@@ -167,7 +171,7 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 
 ### 建立执行上下文与任务队列
 
-- 只读取根 `plan.json` 的批次摘要和 `activeBatchId` 对应的一个 `plans/Bxxx/plan.json`，不得把其他批次完整 task 契约加载进当前对话。使用 `write_todos` 映射当前批次任务，状态用待做 / 进行中 / 完成 / 失败；每次只置一个任务为进行中。根 plan 含 `tasks` 或缺少批次时回流 `/autodev-plan` 重建。
+- 只读取根 `plan.json` 的批次摘要和 `activeBatchId` 对应的一个 `plans/Bxxx/plan.json`，不得把其他批次完整 task 契约加载进当前对话。使用 `write_todos` 映射当前批次任务，状态用待做 / 进行中 / 实现已就绪 / 完成 / 失败；每次只置一个任务为进行中。根 plan 含 `tasks` 或缺少批次时回流 `/autodev-plan` 重建。
 
 ###  选择下一个任务
 
@@ -184,7 +188,7 @@ python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-
 ```
 
 保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `recover` / `abort` 处理原 run。
-`--code-workspace` 同时是 Git 仓库定位入口和 task scope 基准，必须与 task `scope.workspaceRoots` 声明的位置完全一致：即使传模块子目录，runner 也会解析并快照整个 Git 根，但 `scope.paths` 只相对该模块。start 会先验证 workspace 绑定、validation `cwd` 目录和 Maven/Gradle/Node 等 manifest，再保存 `scopePathBase=requested_code_workspace`、`workspacePrefixes` 和 `resolvedScopePaths`；任一前置校验失败时尚未创建 run，不得先写代码再重试。complete / abort / resume 必须继续传相同请求路径；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，包含未跟踪且未忽略文件；`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。
+`--code-workspace` 同时是 Git 仓库定位入口和 task scope 基准，必须与 task `scope.workspaceRoots` 声明的位置完全一致：即使传模块子目录，runner 也会解析并快照整个 Git 根，但 `scope.paths` 只相对该模块。start 会先验证 workspace 绑定、validation `cwd` 目录和 Maven/Gradle/Node 等 manifest，再保存 `scopePathBase=requested_code_workspace`、`workspacePrefixes` 和 `resolvedScopePaths`；任一前置校验失败时尚未创建 run，不得先写代码再重试。scope 声明有误时按 runner 的 `correct_plan_scope_and_rebuild_task_baseline` 动作回流 Plan。`finish-implementation` / `abort` / `resume` 必须继续传相同请求路径并保持同一个 run；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，包含未跟踪且未忽略文件；`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。
 `start` 会固化当前 task 契约哈希，并对请求 workspace、scope 投影和初始 Git 快照写入 `integritySha256`。run 活动期间不得修改该 task 的 goal/scope/AC/validationCommands 等计划字段，也禁止直接编辑 `plan.json`、批次 `plan.json` 或 `.task-runs/**/*.json`、手工重算 digest/hash；否则 runner 返回 `task_run_integrity_mismatch` 或计划完整性错误。确需修 Plan 时按下方 scope 回流协议保存 patch、force abort、由 Plan writer 整体重建契约和基线后再应用 patch。
 
 任务跨多个业务仓库时，按稳定顺序重复传入 `--code-workspace`。Plan 中每条 validation command 必须用 `repo` 指明 Git 根目录名；changed/supporting 路径使用 `repoId:relative/path`。无论单仓或多仓，`evidence/` 与 `.task-runs/` 只能写入 feature 产物目录，禁止写入任一业务仓库。
@@ -202,28 +206,30 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
 
 - `missing` / `stale`（`full_bounded_explore`、`requiresRecord=true`）：读取 `staleReasons` / `criticalHits`，完成一次有界探索；先读取 `code_exploration_writer.py contract`，并确认业务仓内存在的 `.autobizdevops/`、`.cmbdevclaw/` 等运行期目录已被 Git ignore，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `record --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 写入完整 findings。重新运行 `code_task_context.py`，对应仓库必须成为 `fresh` 后才能改业务代码。`headCommit` 变化即使文件哈希相同也按 `stale` 处理，这是避免 rebase/merge 后误复用的保守失效策略。
 - `fresh`（`task_scope_only`）：直接使用缓存 findings，只定点读取当前 Task scope / entrypoint 涉及文件；不得重复探测项目框架、模块布局和测试运行器。
-- `fresh_with_trusted_changes`（`task_scope_only`）：completion evidence 已解释本次仓库变化，且缓存与当前 Task 属于同一 active batch；只定点读取当前 Task scope / entrypoint，不执行 `record` 或 `patch`。这是批次内的 `deferredCacheUpdate`，变化会在批次边界统一吸收。
+- `fresh_with_trusted_changes`（`task_scope_only`）：implementation evidence 已解释本次仓库变化，且缓存与当前 Task 属于同一 active batch；只定点读取当前 Task scope / entrypoint，不执行 `record` 或 `patch`。这是批次内的 `deferredCacheUpdate`，变化会在批次边界统一吸收。
 - `reusable_with_changes`（`targeted_reread`、`requiresPatch=true`）：只读取 `changedPaths + 1-hop 依赖 + 当前 Task scope`，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `patch --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 确认；即使事实未变化，也必须传完整 `reviewedPaths` 和空 `findingUpdates`。`findingUpdates` 对每个字段采用整类替换语义，不得只传该列表的一部分；writer 会在合并后重新校验完整 findings。重新运行 context，成为 `fresh` 后才能改业务代码。
 - 同一 active batch 内，普通且已被 evidence 解释的源文件变化不要求每个 Task 都 patch；进入下一批次时再统一 patch。即使仍在同一批次，命中 `shared/integration` 路径也必须立即 targeted reread/patch；构建配置、迁移/schema、HEAD 变化或无法由 evidence 解释的路径仍进入 `stale`，重新做有界 `record`。`transientValidationFiles` 不参与探索差异，但同一路径后续成为正式变更时必须重新纳入。
 
 `fresh/reusable_with_changes 时禁止无边界全仓探索`：不得重新运行无范围全仓 `rg`、递归目录 listing 或框架发现。缓存只能通过 `code_exploration_writer.py` 修改，禁止直接编辑 `cache/code-exploration/**/*.json`。共享路径只更新当前 executionLane；另一 lane 在后续 inspect 时独立判定。runner 能返回 machine policy，但宿主未提供工具调用遥测，无法独立证明 Agent 执行过多少次搜索，这是协议层约束。
 
-必须读取当前 task 的 `goal`、`scope`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `goal` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
+必须读取当前 task 的 `goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `goal` / `scope` / `validationBoundary` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
 3. 改代码前按 `explorationPolicy` 进行首次有界探索或缓存定点复核；先识别或复用项目分层、命名、错误处理、校验、日志、测试风格，并读取测试插件/provider 版本（例如 Maven Surefire 与 JUnit 4/5 兼容性）、Spring 测试启动入口和现有可运行测试，形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。不得在测试失败后才猜测框架版本；计划为 `integration_test` 时不得为了通过验证降级成只 mock service 的 controller 单元测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
 4. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的范围；不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 任务需要写 / 改测试时，遵循 `${pluginPath}/skills/references/test-quality.md`：站在 seam 上验证、期望值来自独立事实源（勿同义反复）、mock 只在系统边界。
-   - 只为本轮实现验证而临时创建、任务完成后不提交的测试文件，必须保持未跟踪且未暂存，不得 `git add`。runner 仅将同时满足“本轮新建、位于请求 workspace 下的 `src/test`、`test`、`tests` 测试根、complete 时仍未跟踪且未暂存”的文件归入 `transientValidationFiles`；这些文件仍参与验证，但不进入正式 `changedFiles`，也不触发 task scope 越界。已跟踪、已暂存或 start 前已存在的测试文件仍是正式代码变更，必须由 Plan scope 覆盖，不得借临时测试规则绕过审计。
-   - TASK 实现期间不得手工执行 `compile/build/typecheck/lint`，也不得执行与当前 `batchValidation.commands` 等价的命令。TASK 自检只使用计划内的定向验证并交给 `task_runner complete`；`mvn test -Dtest=...` 自身经过 compile/testCompile 属于正常测试生命周期。
+   - 只为本轮实现验证而临时创建、任务完成后不提交的测试文件，必须保持未跟踪且未暂存，不得 `git add`。runner 仅将同时满足“本轮新建、位于请求 workspace 下的 `src/test`、`test`、`tests` 测试根、`finish-implementation` 时仍未跟踪且未暂存”的文件归入 `transientValidationFiles`；这些文件保留到批次 TASK 验证结束，但不进入正式 `changedFiles`。已跟踪、已暂存或 start 前已存在的测试文件仍是正式代码变更。
+   - TASK 实现期间不得手工执行 `validationCommands`，也不得执行 compile/build/typecheck/lint 或当前 `batchValidation.commands`。所有 TASK 命令统一在批次实现结束后由独立验证子代理通过 runner 执行。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
-6. 任务完成必须只走 `task_runner complete`。runner 从 active batch 读取并执行全部 `validationCommands`，采集真实 stdout/stderr 与退出码，依据 start 快照计算 changedFiles/fileChanges，写 `EVIDENCE.jsonl`、`ev_XXXX.log`、`EVIDENCE.index.json`，再绑定 batch task 并投影 batch/root 状态；不得手工调用 `evidence_store.py append`、`plan_writer.py add-evidence-id` 或 `set-status done` 代替：
+6. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不运行 `validationCommands`，不写 `completionEvidenceIds`，也不把 TASK 置为 done。deferred 计划调用旧 `complete` 会被明确拒绝：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
+python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-若 `complete` 返回 `requiredAction=fix_workspace_and_retry_same_run`，说明变更位于请求 workspace 外，先清理或正确 ignore 报告的越界运行产物，然后使用同一个 runId 重试同一个 run。若返回 `correct_plan_scope_and_rebuild_task_baseline`，说明文件位于请求 workspace 内但 Plan 漏列 domain/test/resources 等真实实现范围；不得直接编辑 active task 合同，必须保存 patch、按有审计原因的 force abort 回流 Plan、恢复任务前文件、以修正后的完整 scope 新 start 后重新应用 patch。不得仅靠 abort 后重新 start，否则已完成实现会进入新基线。普通 `abort` 在检测到未记录文件变更时会拒绝执行；只有明确放弃这些变更时才能同时传 `--force-with-changes --abort-why "<REASON>"`。若无 evidence 且合同未变化的原 run 已被误 abort，先结束较新的活动 run，再恢复原始快照：
+若返回 scope/workspace 错误，仍按原 run 修正或回流 Plan，不得重新 start 掩盖基线。`implemented` 是实现终态，不等于业务完成；同批后继 TASK 可以依赖它，跨批依赖、handoff、project-check 和 code-done 只接受 `done`。
+
+实现 Evidence 尚未落盘时发生进程中断，才使用原 runId 恢复：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task-id "<TASK_ID>" --run-id "<ORIGINAL_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -232,22 +238,46 @@ python "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task
 确实没有文件变更时，不得伪造 changedFiles，也不得把空 diff 当遗漏。必须说明原因并提供至少一个仓库内已有实现/测试文件；该任务还必须有 required 的行为、集成、E2E 或静态验证，compile/build/typecheck/lint 只属于批次验证，不能配置在 TASK：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" complete --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
+python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
 ```
 
 `--supporting-file` 必须是仓库根相对路径；多仓库时使用 `repoId:relative/path`。`--no-code-change-why` 只用于 start 前已经存在且经行为验证确认满足契约的实现，不得用它绕过误 abort、重启 run 或 staging 操作造成的空 diff；runner 会拒绝与历史 aborted run 变更冲突的 no-code claim。
 
-验证失败仍会写 `result=fail` evidence 和真实 log，但任务状态为 `failed`，不得完成。写 evidence 后异常中断时使用同参数执行 `recover`，runner 会从 `.task-runs/<TASK_ID>/<RUN_ID>.json` 续跑或只补 plan 绑定，且不会重复已有命令 evidence。结构化记录只存在 `EVIDENCE.jsonl`；`ev_XXXX.log` 只保存脱敏后的真实命令输出，即使命令无输出也必须存在零字节 log。不得新建 `ev_XXXX.json` sidecar；查看单条记录使用 `evidence_store.py show --evidence-id ev_XXXX`。日志错绑、缺失或哈希不一致会被拒绝。`ev_XXXX` 按全流自动递增，任何流/index/log 被重写或重排都必须停止并恢复。
+`finish-implementation` 成功后，把该 TASK 在 `write_todos` 标记为“实现已就绪/待验证”，不是完成；返回 `continue_active_batch`、`continueCurrentBatch=true` 和 `nextTaskId` 时，同批仍有可执行任务时禁止询问用户是否继续，立即进入下一个 Task。最后一个 TASK 返回 `run_batch_task_validation` 后立即进入下方流程。
 
-若 `complete` 成功并返回 `requiredAction=continue_active_batch`、`continueCurrentBatch=true` 和 `nextTaskId`，说明当前 Task 已完成且活动批次还有依赖已满足的任务。必须将当前 Task 在 `write_todos` 中置为完成、将 `nextTaskId` 置为进行中，并立即进入下一个 Task 的 start/context/实现/complete 协议；同批续跑不得再次调用 `code-session`。同批仍有可执行任务时禁止询问用户是否继续，也不得先输出阶段性完成总结后结束回复；只有遇到真实阻断、Task 失败或 runner 明确要求停止时才能结束当前批次执行循环。
+### 独立子代理执行批次全部校验
 
-若最后一个 TASK 的 `complete` 返回 `requiredAction=run_batch_check` 和 `batchCheck`，TASK 队列已经完成，但当前批次尚未完成。必须立即进入「批次验证与重验证」，不得提前生成 handoff、运行 project-check 或结束当前批次。
+主 agent 先创建验证 run：
 
-若 `batchValidation.mode=task_covered`，最后一个 TASK 的 `complete` 会在当前 TASK evidence 后追加 `action=batch_closure`，引用 `coverageCommandIds` 对应的当前 TASK evidence，不创建 `.batch-runs`、不执行额外命令，并直接返回 `stop_and_open_new_conversation`、`run_project_check` 或 `code_done_ready`。必须按该返回动作继续；不得再调用 batch-check。
+```bash
+python "${pluginPath}/hooks/task_runner.py" start-batch-task-validation --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
+```
+
+保存输出的完整 `validationContext`，其中必须包含 `featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256`。主 agent 只启动一个全新的批次验证子代理，并把该对象原样放入启动 prompt；不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能按 `currentTaskId` 串行调用：
+
+```bash
+python "${pluginPath}/hooks/task_runner.py" validate-batch-task --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<CURRENT_TASK_ID>" --run-id "<VALIDATION_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
+```
+
+runner 按计划顺序执行该 TASK 全部命令，验证前后都校验同一 `batchSnapshotSha256`，并写 `validationTarget=batch_final_snapshot` Evidence。返回 `requiredAction=continue_batch_validation_subagent` 和新的 `currentTaskId` 时，同一个子代理继续下一个 TASK；禁止主 agent 接管命令或并行启动其他验证子代理。
+
+最后一个 TASK 通过且返回 `requiredAction=run_batch_check_in_validation_subagent` 时，仍由同一个子代理执行批次级 compile/build/typecheck/lint：
+
+```bash
+python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
+```
+
+只有该子代理拿到 `stop_and_open_new_conversation`、`code_done_ready` 或 `run_project_check`，才把最终结果交回主 agent 并结束。这样 TASK 与 batch 两层所有强校验命令都由同一个独立子代理运行。
+
+`taskValidation.status=running` 期间工作区处于硬冻结：runner 拒绝启动/收口实现任务，Plan Writer 拒绝写计划或渲染产物，Evidence Store 拒绝 validation runner 之外的任何追加。子代理不能通过直接调用其他 writer 绕过冻结。
+
+子代理/进程中断时使用同一 runId 和 currentTaskId 恢复，已写 Evidence 的命令不会重复。required 验证失败后停止队列：工作区未变化时重新执行 `start-batch-task-validation` 创建新 run，从失败 TASK 重试；需要修改源码时执行 `start-validation-repair --task-id <FAILED_TASK_ID>`，修复后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
+
+全部 TASK 验证通过后才把 TASK 置 done。`task_covered` 此时生成 `batch_closure`；`commands` 模式返回 `requiredAction=run_batch_check_in_validation_subagent`，由同一个子代理继续下方额外质量门禁。
 
 ### 批次验证与重验证
 
-本节只适用于 `batchValidation.mode=commands`。第一次执行当前批次验证时不传 run ID；runner 创建 `.batch-runs/<BATCH_ID>/<RUN_ID>.json`，按该 lane 的 `batchValidation.commands` 运行真正补充 TASK 盲区的 compile/build/typecheck/lint，并分别写入 `action=batch_validation` evidence：
+本节只适用于 `batchValidation.mode=commands`。deferred policy 下只能由上方已经启动的批次验证子代理执行；主 agent 不得接管。第一次执行当前批次验证时不传 run ID；runner 创建 `.batch-runs/<BATCH_ID>/<RUN_ID>.json`，按该 lane 的 `batchValidation.commands` 运行真正补充 TASK 盲区的 compile/build/typecheck/lint，并分别写入 `action=batch_validation` evidence：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -256,8 +286,8 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 - 返回 `requiredAction=fix_batch_and_retry_same_run` 时，保留返回的 `runId`，只在当前批次 TASK scope 并集内修复问题，然后用完全相同的 workspace 和 `--run-id "<RUN_ID>"` 重跑 `batch-check`。批次失败 evidence 只追加，不覆盖；不得新建 run 隐藏失败历史。验证命令若修改 Git 可见文件会被拒绝。
 - runner 在首条命令前把 `activeRunId` 投影到 plan；命令 evidence 全部写完后先保存 `status=evidence_written`，再幂等绑定 plan。进程在 evidence append、TASK 重验证请求或最终批次绑定后中断时，重新调用 `code-session` 取得原 `activeRunId`，再以同一 `--run-id` 执行 `batch-check`；runner 会采用已写入 stream 的 evidence，不重复执行已完成命令。
 - required 命令决定批次成败及 `latestPassEvidenceIds`；optional 成功或 optional 失败 evidence 都只追加到批次历史和 run attempt，不得让 optional 失败阻断 code-done，也不得把 optional 记录伪装为 required latest pass。
-- 修复路径不命中任何当前批次 TASK scope 时返回 `batch_fix_out_of_scope`，必须停止并回流 Plan；只命中一个 TASK 时仅重验证该 TASK，命中多个或共享/歧义范围时重验证整批 TASK。
-- 修复后的 batch-check 返回 `requiredAction=revalidate_affected_tasks` 时，原 TASK evidence 历史继续保留，但受影响 TASK 的当前 `completionEvidenceIds` / `latestPassEvidenceId` 被清空并回到 `todo`。逐个按正常 start/context/complete 协议重跑；新 evidence 必须包含 `attemptType=batch_revalidation`、`triggeredByBatchEvidenceIds` 和 `supersedesEvidenceIds`，writer 还会保存 `completedRevalidation` 当前指针。code-done 会核对触发 batch、被替代 TASK evidence、当前 completion evidence 及先后顺序，缺失或伪造任一关联都会失败。全部受影响 TASK 再次完成后，使用同一个 batch run ID 再跑最终 batch-check；在这次最终检查通过前不得 handoff。
+- 修复路径不命中任何当前批次 TASK scope 时返回 `batch_fix_out_of_scope`，必须停止并回流 Plan。deferred policy 下任何源码修复都会改变批次最终快照，因此无论命中一个还是多个 TASK，都清空整批当前 completion 指针并按稳定顺序重验全部 TASK；scope 归因仅用于选择由哪个 TASK 进入修复实现。
+- 修复后的 batch-check 返回 `requiredAction=run_batch_task_validation` 时，保留原 batch run ID，整批 TASK 当前 validation completion 指针失效；创建新的 deferred task-validation run，启动一个新的批次级验证子代理串行重验全部 TASK。全部通过后仍由该子代理使用原 batch run ID 再跑最终 batch-check。`pendingRevalidation` 只保存触发和被替代 Evidence 关联，不再启动另一套 `start/complete` 重验。
 - batch-check 直接通过且没有批次修复，或重验证后的最终 batch-check 通过时，runner 才把批次置为完成。非末批会返回 `stop_and_open_new_conversation` 与 `batchHandoff`；末批则进入可选项目检查或完成门禁。
 
 若 `batch-check` 返回 `requiredAction=stop_and_open_new_conversation`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 smoke/project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。
@@ -314,9 +344,9 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ## 完成条件
 
 - 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
-- 所有任务由 task runner 完成；required validation 全部通过；`checkedCriteria` 并集覆盖全部 AC；完成 evidence 与命令、runId、快照 changedFiles 一致。旧结构 plan 必须重跑 Plan，不提供兼容完成路径。
+- 所有任务都有 `action=implementation` evidence，且批次最终快照上的 required TASK validation 全部通过；`checkedCriteria` 并集覆盖全部 AC；completion evidence 与命令、validation runId、`batchSnapshotSha256`、当前 implementation revision/pointer 一致。未启用 deferred policy 的旧计划只走旧 runner 路径，不允许两种模式混跑。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 task/batch/project validation evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
-- 每个批次最多 5 个任务；该批全部 TASK 完成后批次验证已通过，存在批次修复时受影响 TASK 已产生 `attemptType=batch_revalidation` 的新完成 evidence，且随后最终 batch-check 再次通过；非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
+- 每个批次最多 5 个任务；该批 `taskValidation.status=passed` 后额外批次质量门禁已通过。存在批次修复时整批 TASK completion 指针先失效，再产生 `attemptType=batch_revalidation` 的新完成 evidence，随后原 batch-check run 再次通过；非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
 - 若 `SMOKE_TEST_PLAN.json`存在：已按计划生成/补齐冒烟测试源码并确认其被目标项目 Git 忽略，已运行 `run_advisory_smoke.py`；`SMOKE_RESULT.json` 已写入。`SMOKE_RESULT.json.verdict` 为 `FAIL` / `BLOCKED` / `SKIPPED` 时，记录为风险但不阻断本阶段流转。
 - 必要验证通过；每批最新 batch-check 晚于该批当前 TASK 完成 evidence，且所有 required 项通过；配置了项目检查时，最新 `project-check` 还必须晚于全部当前 TASK/batch evidence（`code_done` 会再次校验 plan/evidence/run 闭环）。
 - HTML 分支或前端源码变更已完成统一前端回检，或用户明确跳过；仍有 `must-fix` / 执行异常时不得推进 `code_done`。

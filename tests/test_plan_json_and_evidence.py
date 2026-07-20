@@ -73,7 +73,8 @@ def valid_plan(
                         "scenarioRefs": ["specs/capability/spec.md#SCN-001"],
                     }
                 ],
-                "nonGoals": [],
+                "validationBoundary": "public behavior seam validated by the task command",
+                "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                 "designRefs": ["design.md#D-001"],
                 "apiIds": [],
@@ -383,7 +384,8 @@ class PlanJsonTest(unittest.TestCase):
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update the behavior", "cover the boundary"],
                 "acceptanceCriteria": ["the behavior is observable"],
-                "nonGoals": [],
+                "validationBoundary": "public behavior seam validated by the task command",
+                "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
                 "designRefs": ["design.md#D-001"],
                 "apiIds": [],
@@ -449,15 +451,35 @@ class PlanJsonTest(unittest.TestCase):
         self.assertIn("T001.uiRefs.visualSourceRefs_missing", errors)
         self.assertIn("T001.uiRefs.frontendRoute_missing", errors)
 
-    def test_api_task_requires_non_goals_in_detail_schema(self) -> None:
+    def test_every_task_requires_non_goals_in_detail_schema(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         task = plan["tasks"][0]
-        task["apiIds"] = ["API-001"]
         task["nonGoals"] = []
 
         errors = validate_test_tasks(plan, require_initial_status=True)
 
         self.assertIn("T001.nonGoals_missing", errors)
+
+    def test_every_task_requires_non_empty_validation_boundary(self) -> None:
+        for boundary in (None, "   ", "too short"):
+            plan = valid_plan(status="todo", evidence_ids=[])
+            task = plan["tasks"][0]
+            if boundary is None:
+                task.pop("validationBoundary", None)
+            else:
+                task["validationBoundary"] = boundary
+
+            errors = validate_test_tasks(plan, require_initial_status=True)
+
+            self.assertIn("T001.validationBoundary_missing_or_too_short", errors)
+
+    def test_non_goals_reject_blank_items(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        plan["tasks"][0]["nonGoals"] = ["keep scope", "   "]
+
+        errors = validate_test_tasks(plan, require_initial_status=True)
+
+        self.assertIn("T001.nonGoals_empty_item", errors)
 
 class EvidenceStoreTest(unittest.TestCase):
     def test_append_rejects_caller_supplied_evidence_id(self) -> None:

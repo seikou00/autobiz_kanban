@@ -61,7 +61,8 @@ def task(
                 "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
             }
         ],
-        "nonGoals": [],
+        "validationBoundary": "public behavior seam validated by the task command",
+        "nonGoals": ["do not change unrelated behavior"],
         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
         "designRefs": ["design.md#D-001"],
         "apiIds": [],
@@ -238,6 +239,24 @@ class BatchedPlanContractTest(unittest.TestCase):
         batch["batchValidation"]["mode"] = "commands"
         batch["batchValidation"]["coverageCommandIds"] = []
 
+        self.assertEqual(task_set_digest(root, {"B001": batch}), legacy_digest)
+
+    def test_task_validation_policy_versions_digest_without_changing_legacy_payload(self) -> None:
+        root = root_plan(batches=[batch_entry("B001", ["T001"])])
+        batch = batch_plan("B001", [task("T001")])
+        legacy_digest = task_set_digest(root, {"B001": batch})
+
+        root["taskValidationPolicy"] = {
+            "mode": "deferred_batch",
+            "orchestration": "single_batch_subagent",
+            "failStrategy": "fail_fast",
+            "maxConcurrency": 1,
+            "agentScope": "task_and_batch_validation_commands",
+        }
+        deferred_digest = task_set_digest(root, {"B001": batch})
+
+        self.assertNotEqual(deferred_digest, legacy_digest)
+        root.pop("taskValidationPolicy")
         self.assertEqual(task_set_digest(root, {"B001": batch}), legacy_digest)
 
     def test_finalized_plan_requires_batch_validation_contract(self) -> None:

@@ -91,7 +91,11 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "scenarioRefs": scenario_refs,
                 }
             ]
-            task.setdefault("nonGoals", ["do not change unrelated behavior"] if task.get("apiIds") or task.get("uiRequired") else [])
+            task.setdefault(
+                "validationBoundary",
+                "public behavior seam validated by the task command",
+            )
+            task.setdefault("nonGoals", ["do not change unrelated behavior"])
             task["completionPolicy"] = "all_required_validations_pass"
             task["validationCommands"] = [
                 {
@@ -291,6 +295,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                                 "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
                             }
                         ],
+                        "validationBoundary": "public behavior seam validated by the task command",
                         "nonGoals": ["do not change unrelated behavior"],
                         **(
                             {
@@ -387,7 +392,8 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "scenarioRefs": scenario_refs,
                 }
             ],
-            "nonGoals": ["do not change unrelated behavior"] if api_ids else [],
+            "validationBoundary": "public behavior seam validated by the task command",
+            "nonGoals": ["do not change unrelated behavior"],
             "specRefs": effective_spec_refs,
             "designRefs": design_refs or ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
             "apiIds": [] if api_ids is None else api_ids,

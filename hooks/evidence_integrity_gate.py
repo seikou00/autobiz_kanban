@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -30,6 +31,7 @@ from evidence_store import (  # noqa: E402
 from evidence_kernel import check_record_artifacts  # noqa: E402
 from plan_json import (  # noqa: E402
     blocked_tasks,
+    deferred_task_validation_enabled,
     failed_tasks,
     load_and_validate_plan,
     plan_json_path,
@@ -244,6 +246,7 @@ def _check_completion(
         for record in records
         if isinstance(record.get("evidenceId"), str)
     }
+    deferred = deferred_task_validation_enabled(plan)
     for task in tasks(plan):
         task_id = str(task.get("id", ""))
         if isinstance(task.get("pendingRevalidation"), dict):
@@ -264,6 +267,22 @@ def _check_completion(
         passed_command_ids: set[str] = set()
         covered_criteria: set[str] = set()
         completion_records: list[dict[str, Any]] = []
+        if deferred:
+            implementation_ids = task.get("implementationEvidenceIds")
+            implementation_ids = implementation_ids if isinstance(implementation_ids, list) else []
+            latest_implementation = task.get("latestImplementationEvidenceId")
+            if not implementation_ids:
+                errors.append(f"{task_id}.implementation_evidence_missing")
+            if latest_implementation not in implementation_ids:
+                errors.append(f"{task_id}.latest_implementation_evidence_invalid")
+            for evidence_id in implementation_ids:
+                implementation_record = by_id.get(str(evidence_id))
+                if (
+                    not isinstance(implementation_record, dict)
+                    or implementation_record.get("action") != "implementation"
+                    or implementation_record.get("taskId") != task_id
+                ):
+                    errors.append(f"{task_id}.implementation_evidence_invalid:{evidence_id}")
         for evidence_id in completion_ids:
             record = by_id.get(str(evidence_id))
             if record is None:
@@ -279,6 +298,31 @@ def _check_completion(
                 errors.append(f"{task_id}.completion_evidence_requires_detail_v2:{evidence_id}")
                 continue
             completion_records.append(record)
+            if deferred:
+                task_batch_map = plan.get("_bundleTaskBatches")
+                batch_id = (
+                    task_batch_map.get(task_id) if isinstance(task_batch_map, dict) else None
+                )
+                batch = (
+                    plan.get("_bundleBatches", {}).get(batch_id)
+                    if isinstance(plan.get("_bundleBatches"), dict)
+                    else None
+                )
+                task_validation = batch.get("taskValidation") if isinstance(batch, dict) else None
+                if record.get("validationTarget") != "batch_final_snapshot":
+                    errors.append(f"{task_id}.validation_target_invalid:{evidence_id}")
+                if record.get("batchId") != batch_id:
+                    errors.append(f"{task_id}.validation_batch_mismatch:{evidence_id}")
+                if (
+                    not isinstance(task_validation, dict)
+                    or record.get("batchSnapshotSha256")
+                    != task_validation.get("batchSnapshotSha256")
+                ):
+                    errors.append(f"{task_id}.validation_snapshot_mismatch:{evidence_id}")
+                if record.get("implementationRevision") != task.get("implementationRevision"):
+                    errors.append(f"{task_id}.validation_revision_mismatch:{evidence_id}")
+                if record.get("latestImplementationEvidenceId") != task.get("latestImplementationEvidenceId"):
+                    errors.append(f"{task_id}.validation_implementation_pointer_mismatch:{evidence_id}")
             validation = record.get("validation")
             if not isinstance(validation, dict):
                 continue
@@ -303,8 +347,29 @@ def _check_completion(
                     )
                 covered_criteria.update(item for item in checked if isinstance(item, str))
 
+        if deferred and completion_records:
+            latest_implementation = task.get("latestImplementationEvidenceId")
+            if isinstance(latest_implementation, str):
+                implementation_number = _evidence_number(latest_implementation)
+                validation_numbers = [
+                    _evidence_number(str(record.get("evidenceId", "")))
+                    for record in completion_records
+                ]
+                if validation_numbers and implementation_number >= min(validation_numbers):
+                    errors.append(f"{task_id}.validation_evidence_not_newer_than_implementation")
+
         if feature_dir is not None:
-            errors.extend(_check_task_run_state(feature_dir, task, completion_records))
+            if deferred:
+                errors.extend(
+                    _check_deferred_task_validation_run_state(
+                        feature_dir,
+                        plan,
+                        task,
+                        completion_records,
+                    )
+                )
+            else:
+                errors.extend(_check_task_run_state(feature_dir, task, completion_records))
 
         completed_revalidation = task.get("completedRevalidation")
         revalidation_records = [
@@ -379,6 +444,81 @@ def _check_completion(
     return errors
 
 
+def _deferred_validation_run_integrity_sha256(state: dict[str, Any]) -> str:
+    fields = (
+        "version",
+        "runId",
+        "featureId",
+        "batchId",
+        "taskOrder",
+        "taskContractSha256ByTask",
+        "requestedCodeWorkspaces",
+        "repositories",
+        "batchSnapshotSha256",
+        "startedAt",
+    )
+    content = json.dumps(
+        {field: state.get(field) for field in fields},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(content).hexdigest()
+
+
+def _check_deferred_task_validation_run_state(
+    feature_dir: Path,
+    plan: dict[str, Any],
+    task: dict[str, Any],
+    completion_records: list[dict[str, Any]],
+) -> list[str]:
+    task_id = str(task.get("id", ""))
+    run_ids = {
+        str(record.get("runId"))
+        for record in completion_records
+        if isinstance(record.get("runId"), str)
+    }
+    if len(run_ids) != 1:
+        return [
+            f"{task_id}.deferred_validation_run_count_invalid:"
+            + ",".join(sorted(run_ids))
+        ]
+    run_id = next(iter(run_ids))
+    task_batches = plan.get("_bundleTaskBatches")
+    batch_id = task_batches.get(task_id) if isinstance(task_batches, dict) else None
+    if not isinstance(batch_id, str):
+        return [f"{task_id}.deferred_validation_batch_missing"]
+    path = feature_dir / ".batch-task-validation-runs" / batch_id / f"{run_id}.json"
+    if not path.is_file():
+        return [f"{task_id}.deferred_validation_run_missing:{run_id}"]
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [f"{task_id}.deferred_validation_run_invalid:{run_id}"]
+    if not isinstance(state, dict):
+        return [f"{task_id}.deferred_validation_run_invalid:{run_id}"]
+    errors: list[str] = []
+    if state.get("integritySha256") != _deferred_validation_run_integrity_sha256(state):
+        errors.append(f"{task_id}.deferred_validation_run_integrity_mismatch:{run_id}")
+    if state.get("status") not in {"done", "failed"}:
+        errors.append(f"{task_id}.deferred_validation_run_not_terminal:{run_id}")
+    if task_id not in state.get("completedTaskIds", []):
+        errors.append(f"{task_id}.deferred_validation_task_not_completed:{run_id}")
+    expected_contracts = state.get("taskContractSha256ByTask")
+    if (
+        not isinstance(expected_contracts, dict)
+        or expected_contracts.get(task_id) != task_contract_sha256(task)
+    ):
+        errors.append(f"{task_id}.deferred_validation_contract_mismatch:{run_id}")
+    for record in completion_records:
+        if record.get("batchSnapshotSha256") != state.get("batchSnapshotSha256"):
+            errors.append(
+                f"{task_id}.deferred_validation_evidence_snapshot_mismatch:"
+                f"{record.get('evidenceId')}"
+            )
+    return errors
+
+
 def _check_batch_completion(
     plan: dict[str, Any],
     by_id: dict[str, dict[str, Any]],
@@ -392,6 +532,34 @@ def _check_batch_completion(
     for batch_id, batch in batch_plans.items():
         if not isinstance(batch, dict):
             continue
+        if deferred_task_validation_enabled(plan):
+            task_validation = batch.get("taskValidation")
+            if not isinstance(task_validation, dict):
+                errors.append(f"{batch_id}.task_validation_contract_missing")
+            else:
+                if task_validation.get("status") != "passed":
+                    errors.append(f"{batch_id}.task_validation_not_passed")
+                expected_task_ids = [
+                    str(task.get("id"))
+                    for task in batch.get("tasks", [])
+                    if isinstance(task, dict)
+                ]
+                if task_validation.get("completedTaskIds") != expected_task_ids:
+                    errors.append(f"{batch_id}.task_validation_completion_mismatch")
+                latest_by_task = task_validation.get("latestPassEvidenceByTask")
+                if not isinstance(latest_by_task, dict) or any(
+                    latest_by_task.get(task_id)
+                    != next(
+                        (
+                            task.get("completionEvidenceIds")
+                            for task in batch.get("tasks", [])
+                            if isinstance(task, dict) and task.get("id") == task_id
+                        ),
+                        None,
+                    )
+                    for task_id in expected_task_ids
+                ):
+                    errors.append(f"{batch_id}.task_validation_evidence_projection_mismatch")
         validation = batch.get("batchValidation")
         if not isinstance(validation, dict):
             errors.append(f"{batch_id}.batch_validation_contract_missing")

@@ -25,7 +25,10 @@
       "scenarioRefs": ["specs/[capability]/spec.md#SCN-001"]
     }
   ],
-  "nonGoals": [],
+  "validationBoundary": "[public seam plus one executable validation command or assertion]",
+  "nonGoals": [
+    "[explicit adjacent behavior or scope that this task will not change]"
+  ],
   "specRefs": [
     "specs/[capability]/spec.md#REQ-001",
     "specs/[capability]/spec.md#SCN-001"

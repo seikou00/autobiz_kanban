@@ -51,6 +51,11 @@ BATCH_VALIDATION_KINDS = {
     "compile",
 }
 BATCH_VALIDATION_MODES = {"commands", "task_covered"}
+TASK_VALIDATION_POLICY_MODES = {"deferred_batch"}
+TASK_VALIDATION_ORCHESTRATIONS = {"single_batch_subagent"}
+TASK_VALIDATION_FAIL_STRATEGIES = {"fail_fast"}
+TASK_VALIDATION_AGENT_SCOPES = {"task_and_batch_validation_commands"}
+TASK_VALIDATION_STATUSES = {"pending", "ready", "running", "failed", "passed", "invalidated"}
 PROJECT_VALIDATION_KINDS = {
     "integration_test",
     "e2e_test",
@@ -68,11 +73,17 @@ DEFAULT_WORKSPACE_ROOT = "default"
 
 TODO_STATUSES = {"todo", "pending", "not_started", "not-started", "待做", "未开始"}
 IN_PROGRESS_STATUSES = {"in_progress", "in-progress", "doing", "进行中"}
+IMPLEMENTED_STATUSES = {"implemented", "awaiting_validation", "awaiting-validation", "待验证"}
+VALIDATING_STATUSES = {"validating", "验证中"}
 DONE_STATUSES = {"done", "completed", "complete", "pass", "passed", "完成", "已完成"}
 FAILED_STATUSES = {"failed", "fail", "blocked", "失败", "阻断"}
 TASK_RUNTIME_FIELDS = {
     "status",
     "evidenceIds",
+    "implementationEvidenceIds",
+    "latestImplementationEvidenceId",
+    "validationEvidenceIds",
+    "implementationRevision",
     "completionEvidenceIds",
     "latestPassEvidenceId",
     "pendingRevalidation",
@@ -111,6 +122,10 @@ def normalize_status(status: Any) -> str:
         return "todo"
     if raw in IN_PROGRESS_STATUSES or lowered in IN_PROGRESS_STATUSES:
         return "in_progress"
+    if raw in IMPLEMENTED_STATUSES or lowered in IMPLEMENTED_STATUSES:
+        return "implemented"
+    if raw in VALIDATING_STATUSES or lowered in VALIDATING_STATUSES:
+        return "validating"
     if raw in DONE_STATUSES or lowered in DONE_STATUSES:
         return "done"
     if raw in FAILED_STATUSES or lowered in FAILED_STATUSES:
@@ -120,6 +135,11 @@ def normalize_status(status: Any) -> str:
 
 def task_execution_lane(task: dict[str, Any]) -> str:
     return "frontend" if task.get("uiRequired") is True else "backend"
+
+
+def deferred_task_validation_enabled(data: dict[str, Any]) -> bool:
+    policy = data.get("taskValidationPolicy")
+    return isinstance(policy, dict) and policy.get("mode") == "deferred_batch"
 
 
 def normalize_repository_relative_path(value: Any) -> str | None:
@@ -259,7 +279,18 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
                 for task in batch_tasks
             ],
         })
-    content = json.dumps(entries, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload: Any = entries
+    if root.get("taskValidationPolicy") is not None:
+        payload = {
+            "taskValidationPolicy": root.get("taskValidationPolicy"),
+            "entries": entries,
+        }
+    content = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return hashlib.sha256(content).hexdigest()
 
 
@@ -454,6 +485,36 @@ def _validate_tasks_container(
         )
         if require_all_done and not evidence_ids:
             errors.append(f"{task_id}.evidenceIds_missing")
+        implementation_ids = _validate_string_list(
+            errors,
+            raw_task,
+            task_id,
+            "implementationEvidenceIds",
+            required=False,
+            item_re=EVIDENCE_ID_RE,
+        ) if "implementationEvidenceIds" in raw_task else []
+        validation_ids = _validate_string_list(
+            errors,
+            raw_task,
+            task_id,
+            "validationEvidenceIds",
+            required=False,
+            item_re=EVIDENCE_ID_RE,
+        ) if "validationEvidenceIds" in raw_task else []
+        for evidence_id in [*implementation_ids, *validation_ids]:
+            if evidence_id not in evidence_ids:
+                errors.append(f"{task_id}.runtimeEvidenceId_not_in_evidenceIds:{evidence_id}")
+        latest_implementation = raw_task.get("latestImplementationEvidenceId")
+        if (
+            (implementation_ids and latest_implementation != implementation_ids[-1])
+            or (not implementation_ids and latest_implementation is not None)
+        ):
+            errors.append(f"{task_id}.latestImplementationEvidenceId_invalid")
+        revision = raw_task.get("implementationRevision")
+        if revision is not None and (not isinstance(revision, int) or isinstance(revision, bool) or revision < 0):
+            errors.append(f"{task_id}.implementationRevision_invalid")
+        elif revision is not None and revision != len(implementation_ids):
+            errors.append(f"{task_id}.implementationRevision_evidence_mismatch")
         completion_evidence_ids = _validate_string_list(
             errors,
             raw_task,
@@ -588,6 +649,7 @@ def validate_plan_data(
             errors.append(f"plan_json_batchPolicy_maxTasks_must_be:{MAX_BATCH_TASKS}")
         if policy.get("strategy") != BATCH_STRATEGY:
             errors.append(f"plan_json_batchPolicy_strategy_must_be:{BATCH_STRATEGY}")
+    _validate_task_validation_policy(errors, data)
 
     raw_batches = data.get("batches")
     batch_ids: list[str] = []
@@ -694,6 +756,21 @@ def validate_batch_plan_data(
     if data.get("completedTaskCount") != completed_count:
         errors.append(f"{batch_id}.completedTaskCount_mismatch")
     _validate_batch_validation(errors, data, str(batch_id))
+    if "taskValidation" in data:
+        _validate_task_validation(errors, data, str(batch_id))
+        task_validation = data.get("taskValidation")
+        if isinstance(task_validation, dict):
+            if require_initial_status and task_validation.get("status") != "pending":
+                errors.append(f"{batch_id}.taskValidation.status_not_initial")
+            if require_initial_status and (
+                task_validation.get("completedTaskIds")
+                or task_validation.get("evidenceIds")
+                or task_validation.get("latestPassEvidenceByTask")
+                or task_validation.get("activeRunId") is not None
+            ):
+                errors.append(f"{batch_id}.taskValidation.runtime_not_initial")
+            if require_all_done and task_validation.get("status") != "passed":
+                errors.append(f"{batch_id}.taskValidation.status_not_passed")
     workspace_root_sets = [
         task_workspace_roots(item)
         for item in batch_tasks
@@ -1014,6 +1091,113 @@ def _validate_batch_validation(errors: list[str], data: dict[str, Any], batch_id
         errors.append(f"{batch_id}.batchValidation.activeRunId_invalid")
 
 
+def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) -> None:
+    policy = data.get("taskValidationPolicy")
+    if policy is None:
+        return
+    if not isinstance(policy, dict):
+        errors.append("taskValidationPolicy_must_be_object")
+        return
+    if policy.get("mode") not in TASK_VALIDATION_POLICY_MODES:
+        errors.append("taskValidationPolicy.mode_invalid")
+    if policy.get("orchestration") not in TASK_VALIDATION_ORCHESTRATIONS:
+        errors.append("taskValidationPolicy.orchestration_invalid")
+    if policy.get("failStrategy") not in TASK_VALIDATION_FAIL_STRATEGIES:
+        errors.append("taskValidationPolicy.failStrategy_invalid")
+    if policy.get("maxConcurrency") != 1:
+        errors.append("taskValidationPolicy.maxConcurrency_must_be_1")
+    if policy.get("agentScope") not in TASK_VALIDATION_AGENT_SCOPES:
+        errors.append("taskValidationPolicy.agentScope_invalid")
+
+
+def _validate_task_validation(errors: list[str], data: dict[str, Any], batch_id: str) -> None:
+    validation = data.get("taskValidation")
+    if validation is None:
+        errors.append(f"{batch_id}.taskValidation_missing")
+        return
+    if not isinstance(validation, dict):
+        errors.append(f"{batch_id}.taskValidation_must_be_object")
+        return
+    if validation.get("mode") != "deferred_sequential":
+        errors.append(f"{batch_id}.taskValidation.mode_invalid")
+    if validation.get("status") not in TASK_VALIDATION_STATUSES:
+        errors.append(f"{batch_id}.taskValidation.status_invalid")
+    task_order = _string_list(validation.get("taskOrder"))
+    actual_order = [str(task.get("id")) for task in tasks(data)]
+    if task_order is None:
+        errors.append(f"{batch_id}.taskValidation.taskOrder_must_be_string_array")
+    elif task_order != actual_order:
+        errors.append(f"{batch_id}.taskValidation.taskOrder_mismatch")
+    completed = _string_list(validation.get("completedTaskIds"))
+    if completed is None:
+        errors.append(f"{batch_id}.taskValidation.completedTaskIds_must_be_string_array")
+    elif any(task_id not in actual_order for task_id in completed):
+        errors.append(f"{batch_id}.taskValidation.completedTaskIds_unknown")
+    elif len(set(completed)) != len(completed) or completed != actual_order[: len(completed)]:
+        errors.append(f"{batch_id}.taskValidation.completedTaskIds_not_ordered_prefix")
+    _validate_string_list(
+        errors,
+        validation,
+        batch_id,
+        "evidenceIds",
+        required=False,
+        item_re=EVIDENCE_ID_RE,
+    )
+    latest = validation.get("latestPassEvidenceByTask")
+    if not isinstance(latest, dict):
+        errors.append(f"{batch_id}.taskValidation.latestPassEvidenceByTask_must_be_object")
+    else:
+        for task_id, evidence_ids in latest.items():
+            if task_id not in actual_order or _string_list(evidence_ids) is None:
+                errors.append(f"{batch_id}.taskValidation.latestPassEvidenceByTask_invalid:{task_id}")
+                continue
+            if any(not EVIDENCE_ID_RE.fullmatch(item) for item in evidence_ids):
+                errors.append(f"{batch_id}.taskValidation.latestPassEvidenceByTask_invalid:{task_id}")
+    for field in ("activeRunId", "lastRunId", "currentTaskId", "batchSnapshotSha256"):
+        value = validation.get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            errors.append(f"{batch_id}.taskValidation.{field}_invalid")
+    current = validation.get("currentTaskId")
+    if isinstance(current, str) and current not in actual_order:
+        errors.append(f"{batch_id}.taskValidation.currentTaskId_unknown:{current}")
+    contracts = validation.get("taskContractSha256ByTask")
+    expected_contracts = {
+        str(task.get("id")): task_contract_sha256(task)
+        for task in tasks(data)
+        if isinstance(task, dict) and isinstance(task.get("id"), str)
+    }
+    if contracts != expected_contracts:
+        errors.append(f"{batch_id}.taskValidation.taskContractSha256ByTask_mismatch")
+    snapshot = validation.get("batchSnapshotSha256")
+    if snapshot is not None and (
+        not isinstance(snapshot, str) or not TASK_SET_DIGEST_RE.fullmatch(snapshot)
+    ):
+        errors.append(f"{batch_id}.taskValidation.batchSnapshotSha256_invalid")
+    status = validation.get("status")
+    if status == "running" and (
+        not isinstance(validation.get("activeRunId"), str)
+        or not isinstance(current, str)
+        or not isinstance(snapshot, str)
+    ):
+        errors.append(f"{batch_id}.taskValidation.running_state_incomplete")
+    if status == "failed" and (
+        validation.get("activeRunId") is not None
+        or not isinstance(validation.get("lastRunId"), str)
+        or not isinstance(current, str)
+        or not isinstance(snapshot, str)
+    ):
+        errors.append(f"{batch_id}.taskValidation.failed_state_incomplete")
+    if status == "passed" and completed != actual_order:
+        errors.append(f"{batch_id}.taskValidation.passed_without_all_tasks")
+    if status == "passed" and (
+        validation.get("activeRunId") is not None
+        or not isinstance(validation.get("lastRunId"), str)
+        or current is not None
+        or not isinstance(snapshot, str)
+    ):
+        errors.append(f"{batch_id}.taskValidation.passed_state_incomplete")
+
+
 def _validate_project_commands(
     errors: list[str],
     data: dict[str, Any],
@@ -1195,16 +1379,20 @@ def _validate_task_details(
     if task.get("completionPolicy") not in COMPLETION_POLICIES:
         errors.append(f"{task_id}.completionPolicy_invalid")
 
+    validation_boundary = task.get("validationBoundary")
+    if not isinstance(validation_boundary, str) or len(validation_boundary.strip()) < 10:
+        errors.append(f"{task_id}.validationBoundary_missing_or_too_short")
+
+    raw_non_goals = task.get("nonGoals")
     non_goals = _string_list(task.get("nonGoals"))
     if non_goals is None:
         errors.append(f"{task_id}.nonGoals_must_be_string_array")
-        non_goals = []
-
-    api_ids = _string_list(task.get("apiIds")) or []
-    ui_required = task.get("uiRequired") is True
-    if (ui_required or api_ids) and not non_goals:
+    elif not non_goals:
         errors.append(f"{task_id}.nonGoals_missing")
+    elif isinstance(raw_non_goals, list) and len(non_goals) != len(raw_non_goals):
+        errors.append(f"{task_id}.nonGoals_empty_item")
 
+    ui_required = task.get("uiRequired") is True
     ui_refs = task.get("uiRefs")
     page_refs: list[str] = []
     if isinstance(ui_refs, dict):
@@ -1350,6 +1538,11 @@ def _bundle_consistency_errors(
             validation_mode = validation.get("mode", "commands" if validation.get("commands") else None)
             if profile_mode != validation_mode:
                 errors.append(f"{batch_id}.batchValidation.mode_projection_mismatch")
+        if deferred_task_validation_enabled(root):
+            if "taskValidation" not in data:
+                errors.append(f"{batch_id}.taskValidation_missing")
+        elif "taskValidation" in data:
+            errors.append(f"{batch_id}.unexpected_taskValidation_for_legacy_plan")
 
         declared_batch_deps = set(entry.get("deps") or [])
         for dep_batch in declared_batch_deps:

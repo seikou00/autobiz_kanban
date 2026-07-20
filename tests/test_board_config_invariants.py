@@ -383,6 +383,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "scope",
             "implementationPoints",
             "acceptanceCriteria",
+            "validationBoundary",
             "nonGoals",
             "specRefs",
             "designRefs",
@@ -404,6 +405,9 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             self.assertNotIn(writer_owned_field, template)
         self.assertFalse(template["uiRequired"])
         self.assertNotIn("uiRefs", template)
+        self.assertTrue(template["nonGoals"])
+        self.assertIsInstance(template["validationBoundary"], str)
+        self.assertGreaterEqual(len(template["validationBoundary"].strip()), 10)
         self.assertEqual(template["apiIds"], [])
         self.assertEqual(template["dataIds"], [])
         self.assertEqual(template["mergedScenarioRefs"], [])
@@ -411,6 +415,8 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertNotIn("id", detail)
         self.assertNotIn("specRefs", detail)
         self.assertNotIn("pages", detail["scope"])
+        self.assertNotIn("workspaceRoots", detail["scope"])
+        self.assertTrue(detail["nonGoals"])
         self.assertNotIn("id", detail["acceptanceCriteria"][0])
         self.assertNotIn("id", detail["validationCommands"][0])
         grouping = json.loads((template_dir / "task-groups.json").read_text(encoding="utf-8"))
@@ -676,7 +682,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         plan_required = [
-            "`scope.workspaceRoots` 必须声明 Code workspace",
+            "`scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生",
             "`scope.paths` 只写相对该 workspace 的路径",
             "`validationCommands[].cwd` 保持 Git 根相对路径",
             "domain、test、resources",

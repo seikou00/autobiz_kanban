@@ -165,6 +165,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "scope": {"modules": ["src"], "entrypoints": ["API-001"], "pages": [], "dataObjects": ["DATA-001"]},
         "implementationPoints": ["update behavior", "cover boundary"],
         "acceptanceCriteria": [{"id": "AC-T001-01", "text": "behavior is observable", "scenarioRefs": ["specs/cap/spec.md#SCN-001"]}],
+        "validationBoundary": "public behavior seam validated by the task command",
         "nonGoals": ["do not change unrelated behavior"],
         "specRefs": spec_refs,
         "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
@@ -298,7 +299,8 @@ def _plan_task_body() -> dict:
                 "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
             }
         ],
-        "nonGoals": [],
+        "validationBoundary": "public behavior seam validated by the task command",
+        "nonGoals": ["do not change unrelated behavior"],
         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
         "designRefs": ["design.md#D-001"],
         "apiIds": [],
@@ -357,7 +359,10 @@ def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
             "specRefs": list(task.get("specRefs", [])),
             "mergedScenarioRefs": list(task.get("mergedScenarioRefs", [])),
             "apiIds": list(task.get("apiIds", [])),
-            "validationBoundary": "public behavior seam validated by one executable command",
+            "validationBoundary": task.get(
+                "validationBoundary",
+                "public behavior seam validated by one executable command",
+            ),
         }
         if task.get("splitRationale"):
             group["splitRationale"] = task["splitRationale"]
@@ -405,6 +410,21 @@ def _code_module(root: Path, *, with_pom: bool = True) -> tuple[Path, Path]:
 
 
 class JsonWriterTests(unittest.TestCase):
+    def test_plan_writer_prepare_draft_requires_code_workspace_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [_plan_task_body()])
+
+            result = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--code-workspace", result.stderr)
+            self.assertFalse((feature_dir / ".tmp" / "plan_writer" / "draft" / "lock.json").exists())
+
     def test_plan_writer_builds_and_finalizes_draft_batches_without_task_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
@@ -415,6 +435,7 @@ class JsonWriterTests(unittest.TestCase):
             prepared = _run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             )
             self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
             self.assertFalse((feature_dir / "plan.json").exists())
@@ -473,6 +494,7 @@ class JsonWriterTests(unittest.TestCase):
             result = _run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -489,6 +511,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(_run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             ).returncode, 0)
             detail = _draft_detail_body(task)
             detail["specRefs"] = list(task["specRefs"])
@@ -516,6 +539,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(_run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             ).returncode, 0)
 
             detail = _draft_detail_body(task)
@@ -548,6 +572,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(_run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             ).returncode, 0)
 
             batch_path = (
@@ -577,6 +602,7 @@ class JsonWriterTests(unittest.TestCase):
             result = _run(
                 "plan_writer.py", "import-task-directory", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+                "--code-workspace", str(ROOT),
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -592,6 +618,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(_run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             ).returncode, 0)
             draft_dir = feature_dir / ".tmp" / "plan_writer" / "draft"
             root = json.loads((draft_dir / "plan.json").read_text(encoding="utf-8"))
@@ -631,6 +658,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(_run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             ).returncode, 0)
             detail_path = Path(tmp) / "detail.json"
             detail_path.write_text(json.dumps(_draft_detail_body(first)), encoding="utf-8")
@@ -657,6 +685,37 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(payload["preservedTaskIds"], ["T001"])
             self.assertEqual(payload["resetTaskIds"], ["T002"])
 
+    def test_plan_writer_rebuild_repairs_legacy_draft_without_code_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [_plan_task_body()])
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            lock_path = feature_dir / ".tmp" / "plan_writer" / "draft" / "lock.json"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["codeWorkspaces"] = []
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+            missing = _run(
+                "plan_writer.py", "rebuild-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("code_workspace_required_for_rebuild", missing.stdout)
+
+            repaired = _run(
+                "plan_writer.py", "rebuild-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+            self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+            self.assertEqual(json.loads(repaired.stdout)["resetTaskIds"], ["T001"])
+
     def test_plan_writer_draft_rejects_invalid_detail_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
@@ -666,6 +725,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(_run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             ).returncode, 0)
             detail = _draft_detail_body(task)
             detail["implementationPoints"] = [f"point {index}" for index in range(7)]
@@ -686,23 +746,16 @@ class JsonWriterTests(unittest.TestCase):
             ).read_text(encoding="utf-8"))
             self.assertEqual(draft_batch["tasks"][0]["goal"], "")
 
-    def test_plan_writer_draft_requires_non_goals_for_ui_task(self) -> None:
+    def test_plan_writer_draft_requires_non_goals_for_every_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
             task = _plan_task_body()
-            task["uiRequired"] = True
-            task["scope"]["pages"] = ["PAGE-001"]
-            task["uiRefs"] = {
-                "pageRefs": ["PAGE-001"],
-                "interactionRefs": ["UIX-001"],
-                "visualSourceRefs": [],
-                "frontendRoute": "spec-driven-ui",
-            }
             group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
             self.assertEqual(_run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
             ).returncode, 0)
             detail = _draft_detail_body(task)
             detail["nonGoals"] = []
@@ -715,7 +768,27 @@ class JsonWriterTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("nonGoals_required_for_ui_or_api_task", result.stdout)
+            self.assertIn("T001.nonGoals_missing", result.stdout)
+
+    def test_plan_writer_group_requires_validation_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            group_data["groups"][0]["validationBoundary"] = "  "
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("T001.validationBoundary_missing_or_too_short", result.stdout)
+            self.assertFalse((feature_dir / "plan.json").exists())
 
     def test_plan_writer_draft_derives_workspace_root_pages_and_validation_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -741,7 +814,17 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
             detail = _draft_detail_body(task)
-            detail["scope"].pop("workspaceRoots", None)
+            detail["scope"]["workspaceRoots"] = {"default": "wrong"}
+            detail_path = root / "invalid-detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+            rejected = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("draft_scope_workspace_roots_writer_owned", rejected.stdout)
+
+            detail = _draft_detail_body(task)
             detail["validationCommands"][0].pop("cwd", None)
             detail_path = root / "detail.json"
             detail_path.write_text(json.dumps(detail), encoding="utf-8")
@@ -758,6 +841,7 @@ class JsonWriterTests(unittest.TestCase):
             drafted = draft_batch["tasks"][0]
             self.assertEqual(drafted["scope"]["workspaceRoots"], {"default": "backend/service"})
             self.assertEqual(drafted["scope"]["pages"], ["PAGE-001"])
+            self.assertEqual(drafted["validationBoundary"], task["validationBoundary"])
             self.assertEqual(drafted["validationCommands"][0]["cwd"], "backend/service")
 
     def test_plan_writer_rejects_direct_batch_contract_edits(self) -> None:
@@ -1223,12 +1307,27 @@ class JsonWriterTests(unittest.TestCase):
         self.assertIn("validationCommands", contract["taskInputExample"])
         self.assertIn("matrixExceptionExample", contract["taskInputExample"])
         self.assertEqual(contract["exampleOnlyTaskFields"], ["matrixExceptionExample"])
+        self.assertEqual(
+            contract["taskValidationPolicy"],
+            {
+                "mode": "deferred_batch",
+                "orchestration": "single_batch_subagent",
+                "failStrategy": "fail_fast",
+                "maxConcurrency": 1,
+                "agentScope": "task_and_batch_validation_commands",
+                "taskCommandTiming": "after_all_batch_tasks_implemented",
+                "batchCommandTiming": "after_all_task_commands_pass",
+                "validationTarget": "batch_final_snapshot",
+            },
+        )
         self.assertNotIn("status", contract["taskInputExample"])
         self.assertEqual(contract["recommendedInputMode"], "draft-batch")
         self.assertEqual(
             contract["taskDetailTemplate"],
             "skills/autodev/autodev-plan/templates/task-detail-input.json",
         )
+        self.assertNotIn("workspaceRoots", contract["taskDetailInputExample"]["scope"])
+        self.assertTrue(contract["taskDetailInputExample"]["nonGoals"])
         self.assertNotIn("id", contract["taskDetailInputExample"]["acceptanceCriteria"][0])
         self.assertNotIn("id", contract["taskDetailInputExample"]["validationCommands"][0])
         self.assertIn("task-directory", contract["deprecatedInputModes"])
@@ -1276,7 +1375,24 @@ class JsonWriterTests(unittest.TestCase):
             "set-batch-validation-mode --lane <backend|frontend> --mode <task_covered|commands>",
         )
         self.assertEqual(contract["workspaceContract"]["field"], "scope.workspaceRoots")
+        self.assertEqual(
+            contract["workspaceContract"]["source"],
+            "prepare-task-draft --code-workspace",
+        )
         self.assertTrue(contract["workspaceContract"]["codeWorkspacePreflightRequired"])
+        self.assertEqual(
+            contract["fieldRules"]["validationBoundary"],
+            {
+                "required": True,
+                "type": "non_empty_string",
+                "minLength": 10,
+                "source": "task_group",
+            },
+        )
+        self.assertEqual(
+            contract["fieldRules"]["nonGoals"],
+            {"required": True, "minItems": 1, "items": "non_empty_string"},
+        )
         self.assertEqual(contract["batchAssignment"]["strategy"], BATCH_STRATEGY)
         self.assertEqual(contract["batchAssignment"]["maxTasks"], MAX_BATCH_TASKS)
         self.assertEqual(contract["batchAssignment"]["primaryCapabilitySource"], "first_spec_ref_file")
@@ -1317,6 +1433,14 @@ class JsonWriterTests(unittest.TestCase):
         self.assertTrue(contract["collectingRepairs"]["preserveUnchangedTaskDetails"])
         self.assertFalse(contract["draftWorkflow"]["standaloneTaskFiles"])
         self.assertEqual(contract["draftWorkflow"]["groupLock"], "groupingDigest")
+        self.assertEqual(
+            contract["draftWorkflow"]["scopeWorkspaceRootsSource"],
+            "prepare-task-draft --code-workspace",
+        )
+        self.assertEqual(
+            contract["writerOwnedDetailFields"]["scope"],
+            ["pages", "workspaceRoots"],
+        )
         self.assertIn("specRefs", contract["groupOwnedTaskFields"])
         self.assertIn("validationCommands", contract["requiredTaskDetailFields"])
         self.assertEqual(contract["formalArtifacts"]["integrityField"], "taskSetDigest")
@@ -1585,7 +1709,8 @@ class JsonWriterTests(unittest.TestCase):
                         "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                         "implementationPoints": ["update behavior", "cover boundary"],
                         "acceptanceCriteria": ["behavior is observable"],
-                        "nonGoals": [],
+                        "validationBoundary": "public behavior seam validated by the task command",
+                        "nonGoals": ["do not change unrelated behavior"],
                         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
                         "designRefs": ["design.md#D-001"],
                         "apiIds": [],
@@ -1635,6 +1760,8 @@ class JsonWriterTests(unittest.TestCase):
                 "cover boundary",
                 "--acceptance-criterion",
                 "behavior is observable",
+                "--non-goal",
+                "do not change unrelated behavior",
                 "--spec-ref",
                 "specs/cap/spec.md#REQ-001",
                 "--spec-ref",
@@ -1672,7 +1799,7 @@ class JsonWriterTests(unittest.TestCase):
                         "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                         "implementationPoints": ["update behavior", "cover boundary"],
                         "acceptanceCriteria": ["behavior is observable"],
-                        "nonGoals": [],
+                        "nonGoals": ["do not change unrelated behavior"],
                         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
                         "designRefs": ["design.md#D-001"],
                         "apiIds": [],
@@ -1717,7 +1844,8 @@ class JsonWriterTests(unittest.TestCase):
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update behavior", "cover boundary"],
                 "acceptanceCriteria": ["behavior is observable"],
-                "nonGoals": [],
+                "validationBoundary": "public behavior seam validated by the task command",
+                "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
                 "designRefs": ["design.md#D-001"],
                 "apiIds": [],
@@ -1760,7 +1888,8 @@ class JsonWriterTests(unittest.TestCase):
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update behavior", "cover boundary"],
                 "acceptanceCriteria": ["behavior is observable"],
-                "nonGoals": [],
+                "validationBoundary": "public behavior seam validated by the task command",
+                "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
                 "designRefs": ["design.md#D-001"],
                 "validationCommands": [{"command": "echo ok"}],
@@ -1815,7 +1944,8 @@ class JsonWriterTests(unittest.TestCase):
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update behavior", "cover boundary"],
                 "acceptanceCriteria": ["behavior is observable"],
-                "nonGoals": [],
+                "validationBoundary": "public behavior seam validated by the task command",
+                "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": [
                     "specs/cap/spec.md#REQ-001",
                     *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 14)],
@@ -1860,6 +1990,7 @@ class JsonWriterTests(unittest.TestCase):
                     {"id": acceptance_id, "text": "matrix value is observable", "scenarioRefs": [scenario_ref]}
                     for acceptance_id, scenario_ref in zip(acceptance_ids, scenario_refs)
                 ],
+                "validationBoundary": "query response matrix seam validated by the task command",
                 "nonGoals": ["do not add another query seam"],
                 "specRefs": ["specs/cap/spec.md#REQ-001", *scenario_refs],
                 "mergedScenarioRefs": scenario_refs,
@@ -1910,7 +2041,8 @@ class JsonWriterTests(unittest.TestCase):
                     "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                     "implementationPoints": ["validate references", "reject shorthand"],
                     "acceptanceCriteria": ["reference validation is observable"],
-                    "nonGoals": [],
+                    "validationBoundary": "scenario reference seam validated before task creation",
+                    "nonGoals": ["do not change unrelated behavior"],
                     "specRefs": ["specs/cap/spec.md#REQ-001", f"specs/cap/spec.md#{anchor}"],
                     "designRefs": ["design.md#D-001"],
                     "apiIds": [],
@@ -1946,7 +2078,8 @@ class JsonWriterTests(unittest.TestCase):
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update behavior", "cover boundary"],
                 "acceptanceCriteria": ["behavior is observable"],
-                "nonGoals": [],
+                "validationBoundary": "public behavior seam validated by the task command",
+                "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": [
                     "specs/cap/spec.md#REQ-001",
                     *[f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 7)],
@@ -2038,7 +2171,8 @@ class JsonWriterTests(unittest.TestCase):
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update behavior", "cover boundary"],
                 "acceptanceCriteria": ["behavior is observable"],
-                "nonGoals": [],
+                "validationBoundary": "public behavior seam validated by the task command",
+                "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": [
                     "specs/cap1/spec.md#REQ-001",
                     *[f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)],
@@ -2082,7 +2216,8 @@ class JsonWriterTests(unittest.TestCase):
                 "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
                 "implementationPoints": ["update behavior", "cover boundary"],
                 "acceptanceCriteria": ["behavior is observable"],
-                "nonGoals": [],
+                "validationBoundary": "public behavior seam validated by the task command",
+                "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": [
                     "specs/cap1/spec.md#REQ-001",
                     *[f"specs/cap{index}/spec.md#SCN-001" for index in range(1, 7)],

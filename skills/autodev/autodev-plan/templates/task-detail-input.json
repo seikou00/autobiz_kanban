@@ -4,9 +4,6 @@
     "modules": ["[module]"],
     "entrypoints": [],
     "dataObjects": [],
-    "workspaceRoots": {
-      "default": "."
-    },
     "paths": []
   },
   "implementationPoints": [
@@ -19,7 +16,9 @@
       "scenarioRefs": ["specs/[capability]/spec.md#SCN-001"]
     }
   ],
-  "nonGoals": [],
+  "nonGoals": [
+    "[explicit adjacent behavior or scope that this task will not change]"
+  ],
   "designRefs": ["design.md#D-001"],
   "dataIds": [],
   "decisionIds": ["D-001"],

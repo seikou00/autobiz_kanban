@@ -300,6 +300,7 @@ def build_context(
             "scope": task.get("scope"),
             "implementationPoints": task.get("implementationPoints"),
             "acceptanceCriteria": task.get("acceptanceCriteria"),
+            "validationBoundary": task.get("validationBoundary"),
             "nonGoals": task.get("nonGoals"),
             "splitRationale": task.get("splitRationale", ""),
             "validationCommands": task.get("validationCommands"),
