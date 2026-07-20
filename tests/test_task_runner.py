@@ -1469,7 +1469,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
             self.assertEqual(check_code_done(feature_dir), [])
 
-    def test_batch_repair_rejects_out_of_scope_change(self) -> None:
+    def test_batch_repair_revalidates_same_workspace_changes_without_scope_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             command = {
@@ -1519,8 +1519,82 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", failed_payload["runId"],
             )
 
+            self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+            payload = json.loads(retried.stdout)
+            self.assertEqual(payload["requiredAction"], "revalidate_affected_tasks")
+            self.assertEqual(payload["affectedTaskIds"], ["T001"])
+
+    def test_batch_repair_rejects_change_outside_requested_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            module = code / "backend" / "module"
+            module.mkdir(parents=True)
+            (module / "existing.txt").write_text("original\n", encoding="utf-8")
+            _git(code, "add", "backend/module/existing.txt")
+            _git(code, "commit", "-m", "add module baseline")
+            command = {
+                "id": "BATCH-B001-VAL-001",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "raise SystemExit(0 if Path('existing.txt').read_text().strip() == 'fixed' else 3)"
+                    ),
+                ],
+                "cwd": "backend/module",
+                "kind": "compile",
+                "required": True,
+            }
+            batch = _read_batch(feature_dir)
+            _bind_workspace_contract(
+                feature_dir,
+                batch,
+                {"default": "backend/module"},
+                cwd="backend/module",
+            )
+            batch["tasks"][0]["scope"]["paths"] = ["src"]
+            batch["batchValidation"]["commands"] = [command]
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batchValidationProfiles"]["backend"]["commands"] = [
+                {key: value for key, value in command.items() if key != "id"}
+            ]
+            root_path.write_text(
+                json.dumps(root, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            completed = _run(
+                "complete", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(module),
+                "--run-id", json.loads(started.stdout)["runId"],
+                "--no-code-change-why", "existing implementation is sufficient",
+                "--supporting-file", "backend/module/existing.txt",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            failed = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(module),
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            failed_payload = json.loads(failed.stdout)
+            (code / "outside.txt").write_text("outside\n", encoding="utf-8")
+
+            retried = _run(
+                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(module),
+                "--run-id", failed_payload["runId"],
+            )
             self.assertNotEqual(retried.returncode, 0)
-            self.assertIn("batch_fix_out_of_scope:existing.txt", retried.stdout)
+            self.assertIn("batch_fix_outside_workspace:outside.txt", retried.stdout)
 
     def test_batch_check_rejects_validation_that_mutates_git_visible_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1712,7 +1786,7 @@ class TaskRunnerTest(unittest.TestCase):
                 ),
             )
 
-    def test_complete_keeps_staged_existing_and_tracked_tests_in_formal_scope(self) -> None:
+    def test_complete_records_tests_even_when_scope_paths_omit_them(self) -> None:
         for test_state in ("staged", "preexisting_untracked", "tracked"):
             with self.subTest(test_state=test_state), tempfile.TemporaryDirectory() as tmp:
                 workspace, feature_dir, code = _workspace(Path(tmp))
@@ -1761,9 +1835,14 @@ class TaskRunnerTest(unittest.TestCase):
                     "--run-id", json.loads(started.stdout)["runId"],
                 )
 
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertIn("out_of_scope_changes_detected", completed.stdout)
-                self.assertIn("src/test/java/example/application/AppTest.java", completed.stdout)
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                self.assertEqual(
+                    _evidence(feature_dir, "ev_0001")["changedFiles"],
+                    [
+                        "backend/LF39.05_bccompliancemng/"
+                        "src/test/java/example/application/AppTest.java"
+                    ],
+                )
 
     def test_complete_keeps_tests_outside_requested_workspace_in_formal_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1915,7 +1994,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("task_run_requested_workspace_mismatch", completed.stdout)
 
-    def test_module_change_missing_from_scope_requires_plan_correction(self) -> None:
+    def test_module_change_missing_from_scope_is_recorded_without_plan_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             module = code / "backend" / "LF39.05_bccompliancemng"
@@ -1946,21 +2025,12 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", json.loads(started.stdout)["runId"],
             )
 
-            payload = json.loads(completed.stdout)
-            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertEqual(
-                payload["requiredAction"],
-                "correct_plan_scope_and_rebuild_task_baseline",
-            )
-            self.assertEqual(
-                payload["declaredScopePaths"],
-                ["src/main/java/example/adapter/protocolctrl"],
-            )
-            self.assertEqual(
-                payload["resolvedScopePaths"],
+                _evidence(feature_dir, "ev_0001")["changedFiles"],
                 [
                     "backend/LF39.05_bccompliancemng/"
-                    "src/main/java/example/adapter/protocolctrl"
+                    "src/main/java/example/domain/Service.java"
                 ],
             )
 
@@ -2424,7 +2494,11 @@ class TaskRunnerTest(unittest.TestCase):
 
     def test_verified_existing_rejects_changes_from_prior_aborted_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, code = _workspace(Path(tmp))
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["scope"]["workspaceRoots"] = {"default": "."}
+            batch["tasks"][0]["scope"]["paths"] = ["unrelated-planned-path"]
+            _write_batch(feature_dir, batch)
             original = _start(workspace, code)
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
 
@@ -2912,7 +2986,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(evidence["fileChanges"][0]["fromPath"], "existing.txt")
             self.assertEqual(evidence["fileChanges"][0]["path"], "renamed.txt")
 
-    def test_complete_rejects_changes_outside_declared_scope(self) -> None:
+    def test_complete_records_changes_outside_advisory_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             plan_path = _batch_path(feature_dir)
@@ -2929,12 +3003,8 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", started["runId"],
             )
 
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("out_of_scope_changes_detected:outside.txt", completed.stdout)
-            self.assertEqual(
-                json.loads(completed.stdout)["requiredAction"],
-                "fix_workspace_and_retry_same_run",
-            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(_evidence(feature_dir, "ev_0001")["changedFiles"], ["outside.txt"])
 
     def test_complete_rejects_task_contract_changed_after_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -686,7 +686,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         plan_required = [
             "`scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生",
-            "`scope.paths` 只写相对该 workspace 的路径",
+            "`scope.paths` 只写相对该 workspace 的提示性路径",
             "`validationCommands[].cwd` 保持 Git 根相对路径",
             "domain、test、resources",
             "`repoId:relative/path`",
@@ -695,7 +695,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "必须与 task `scope.workspaceRoots` 声明的位置完全一致",
             "`scopePathBase=requested_code_workspace`",
             "`task_run_requested_workspace_mismatch`",
-            "`correct_plan_scope_and_rebuild_task_baseline`",
+            "DTO/domain/test/resources/迁移/配置等同 workspace 文件无需补 scope 或重建 digest",
         ]
         missing = [phrase for phrase in plan_required if phrase not in plan]
         missing.extend(phrase for phrase in code_required if phrase not in code)

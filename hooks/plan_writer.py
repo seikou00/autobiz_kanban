@@ -2588,6 +2588,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "singleRepositoryExample": {"default": "path/from/git-root/to/code-workspace"},
                         "multiRepositoryExample": {"repo-id": "path/from/git-root/to/code-workspace"},
                         "scopePathsBase": "declared_code_workspace",
+                        "scopePathsMode": "advisory_change_hint",
                         "validationCwdBase": "git_root",
                         "codeWorkspacePreflightRequired": True,
                         "forbidRepeatedWorkspacePrefixInScopePaths": True,
@@ -2596,6 +2597,10 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "strategy": BATCH_STRATEGY,
                         "maxTasks": MAX_BATCH_TASKS,
                         "manualBatchIdSupported": False,
+                        "executionOrder": "root_batch_order_then_task_order",
+                        "batchConcurrency": 1,
+                        "taskConcurrency": 1,
+                        "requiresNewConversationBetweenBatches": True,
                         "primaryCapabilitySource": "first_spec_ref_file",
                         "executionLaneSource": "uiRequired",
                         "executionLaneMapping": {

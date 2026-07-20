@@ -1155,28 +1155,22 @@ def _finish_implementation_unlocked(
         run_id,
     )
     cumulative_file_changes = _merge_file_changes(historical_file_changes, file_changes)
-    declared_scope_paths, scope_paths = _run_scope_paths(state, task)
-    if scope_paths:
-        outside = [
-            changed_path
-            for change in cumulative_file_changes
-            for changed_path in (change.get("path"), change.get("fromPath"))
-            if isinstance(changed_path, str) and not _path_in_scope(changed_path, scope_paths)
-        ]
-        if outside:
-            required_action = (
-                "correct_plan_scope_and_rebuild_task_baseline"
-                if _paths_within_requested_workspaces(outside, state)
-                else "fix_workspace_and_retry_same_run"
-            )
-            raise TaskRunnerError(
-                "out_of_scope_changes_detected:" + ",".join(sorted(set(outside))),
-                requiredAction=required_action,
-                runId=run_id,
-                changedFiles=_changed_files(cumulative_file_changes),
-                declaredScopePaths=declared_scope_paths,
-                resolvedScopePaths=scope_paths,
-            )
+    _, scope_paths = _run_scope_paths(state, task)
+    outside_workspace = [
+        changed_path
+        for change in cumulative_file_changes
+        for changed_path in (change.get("path"), change.get("fromPath"))
+        if isinstance(changed_path, str)
+        and not _paths_within_requested_workspaces([changed_path], state)
+    ]
+    if outside_workspace:
+        raise TaskRunnerError(
+            "out_of_scope_changes_detected:" + ",".join(sorted(set(outside_workspace))),
+            requiredAction="fix_workspace_and_retry_same_run",
+            runId=run_id,
+            changedFiles=_changed_files(cumulative_file_changes),
+            resolvedScopePaths=scope_paths,
+        )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
     if cumulative_file_changes:
         if no_code_change_why or normalized_supporting:
@@ -1186,7 +1180,7 @@ def _finish_implementation_unlocked(
                     task,
                     run_id,
                     repositories,
-                    scope_paths,
+                    state,
                 )
                 if conflict:
                     prior_run_id, prior_changed_files = conflict
@@ -1207,7 +1201,7 @@ def _finish_implementation_unlocked(
             task,
             run_id,
             repositories,
-            scope_paths,
+            state,
         )
         if conflict:
             prior_run_id, prior_changed_files = conflict
@@ -1365,30 +1359,24 @@ def _complete_task_unlocked(
         run_id,
     )
     cumulative_file_changes = _merge_file_changes(historical_file_changes, file_changes)
-    declared_scope_paths, scope_paths = _run_scope_paths(state, task)
-    if scope_paths:
-        outside = [
-            path
-            for change in cumulative_file_changes
-            for path in (change.get("path"), change.get("fromPath"))
-            if isinstance(path, str) and not _path_in_scope(path, scope_paths)
-        ]
-        if outside:
-            required_action = (
-                "correct_plan_scope_and_rebuild_task_baseline"
-                if _paths_within_requested_workspaces(outside, state)
-                else "fix_workspace_and_retry_same_run"
-            )
-            raise TaskRunnerError(
-                "out_of_scope_changes_detected:" + ",".join(sorted(set(outside))),
-                requiredAction=required_action,
-                runId=run_id,
-                changedFiles=_changed_files(cumulative_file_changes),
-                declaredScopePaths=declared_scope_paths,
-                resolvedScopePaths=scope_paths,
-                requestedCodeWorkspaces=state.get("requestedCodeWorkspaces", []),
-                resolvedGitRoots=[str(item) for item in repositories.values()],
-            )
+    _, scope_paths = _run_scope_paths(state, task)
+    outside_workspace = [
+        changed_path
+        for change in cumulative_file_changes
+        for changed_path in (change.get("path"), change.get("fromPath"))
+        if isinstance(changed_path, str)
+        and not _paths_within_requested_workspaces([changed_path], state)
+    ]
+    if outside_workspace:
+        raise TaskRunnerError(
+            "out_of_scope_changes_detected:" + ",".join(sorted(set(outside_workspace))),
+            requiredAction="fix_workspace_and_retry_same_run",
+            runId=run_id,
+            changedFiles=_changed_files(cumulative_file_changes),
+            resolvedScopePaths=scope_paths,
+            requestedCodeWorkspaces=state.get("requestedCodeWorkspaces", []),
+            resolvedGitRoots=[str(item) for item in repositories.values()],
+        )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
     if cumulative_file_changes:
         if no_code_change_why or normalized_supporting:
@@ -1398,7 +1386,7 @@ def _complete_task_unlocked(
                     task,
                     run_id,
                     repositories,
-                    scope_paths,
+                    state,
                 )
                 if conflict:
                     prior_run_id, prior_changed_files = conflict
@@ -1419,7 +1407,7 @@ def _complete_task_unlocked(
             task,
             run_id,
             repositories,
-            scope_paths,
+            state,
         )
         if conflict:
             prior_run_id, prior_changed_files = conflict
@@ -2325,38 +2313,27 @@ def _affected_tasks_for_batch_changes(
     if not changed_paths:
         return []
     scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
-    task_scopes: dict[str, list[str]] = {}
+    if not _paths_within_workspace_contexts(changed_paths, scope_workspaces):
+        outside = [
+            path
+            for path in changed_paths
+            if not _paths_within_workspace_contexts([path], scope_workspaces)
+        ]
+        raise TaskRunnerError(
+            "batch_fix_outside_workspace:" + ",".join(sorted(set(outside))),
+            requiredAction="fix_workspace_and_retry_same_batch_run",
+            changedFiles=changed_paths,
+        )
     batch_task_ids: list[str] = []
     for task in batch.get("tasks", []):
         if not isinstance(task, dict) or not isinstance(task.get("id"), str):
             continue
         task_id = str(task["id"])
         batch_task_ids.append(task_id)
-        _, resolved = _resolved_scope_paths(task, scope_workspaces)
-        task_scopes[task_id] = resolved
-
-    affected: set[str] = set()
-    ambiguous = False
-    outside: list[str] = []
-    for changed_path in changed_paths:
-        matches = {
-            task_id
-            for task_id, scope_paths in task_scopes.items()
-            if _path_in_scope(changed_path, scope_paths)
-        }
-        if not matches:
-            outside.append(changed_path)
-        elif len(matches) > 1:
-            ambiguous = True
-        else:
-            affected.update(matches)
-    if outside:
-        raise TaskRunnerError(
-            "batch_fix_out_of_scope:" + ",".join(sorted(outside)),
-            requiredAction="correct_plan_scope_and_retry_same_batch_run",
-            changedFiles=changed_paths,
-        )
-    return sorted(batch_task_ids if ambiguous else affected)
+    # A batch is validated against one final workspace snapshot. Without a
+    # hard path allowlist, any repair change can affect the whole batch and
+    # must conservatively trigger full TASK revalidation.
+    return batch_task_ids
 
 
 def _load_batch_run(feature_dir: Path, batch_id: str, run_id: str) -> tuple[Path, dict[str, Any]]:
@@ -2883,17 +2860,6 @@ def run_batch_checks(
         return _run_batch_checks_unlocked(workspace, feature, batch_id, code_workspace, run_id)
 
 
-def _path_in_scope(path: str, scope_paths: list[Any]) -> bool:
-    candidate = PurePosixPath(path)
-    for raw in scope_paths:
-        if not isinstance(raw, str) or not raw:
-            continue
-        scope = PurePosixPath(raw)
-        if candidate == scope or scope in candidate.parents:
-            return True
-    return False
-
-
 def _run_scope_paths(
     state: dict[str, Any],
     task: dict[str, Any],
@@ -2917,8 +2883,9 @@ def _run_scope_paths(
     return stored_declared, stored_resolved
 
 
-def _paths_within_requested_workspaces(paths: list[str], state: dict[str, Any]) -> bool:
-    contexts = state.get("scopeWorkspaces")
+def _paths_within_workspace_contexts(
+    paths: list[str], contexts: list[dict[str, str]] | Any,
+) -> bool:
     if not isinstance(contexts, list) or not contexts:
         return False
     by_repository = {
@@ -2934,16 +2901,14 @@ def _paths_within_requested_workspaces(paths: list[str], state: dict[str, Any]) 
             repository_id, separator, relative = raw.partition(":")
             if not separator or repository_id not in by_repository:
                 return False
-        context = (
-            by_repository.get(repository_id)
-            if repository_id is not None
-            else contexts[0]
-        )
+        context = by_repository.get(repository_id) if repository_id is not None else contexts[0]
         if not isinstance(context, dict):
             return False
         prefix = context.get("workspacePrefix")
-        if not isinstance(prefix, str) or not prefix:
+        if not isinstance(prefix, str):
             return False
+        if not prefix:
+            continue
         candidate = PurePosixPath(relative)
         workspace = PurePosixPath(prefix)
         if candidate != workspace and workspace not in candidate.parents:
@@ -2951,12 +2916,21 @@ def _paths_within_requested_workspaces(paths: list[str], state: dict[str, Any]) 
     return True
 
 
+def _paths_within_requested_workspaces(paths: list[str], state: dict[str, Any]) -> bool:
+    # Legacy runs were rooted at the complete Git repository and did not
+    # persist workspace contexts. Preserve that contract while new runs keep
+    # the requested module boundary hard.
+    if state.get("scopePathBase") != "requested_code_workspace":
+        return True
+    return _paths_within_workspace_contexts(paths, state.get("scopeWorkspaces"))
+
+
 def _prior_aborted_run_conflict(
     feature_dir: Path,
     task: dict[str, Any],
     current_run_id: str,
     repositories: RepositoryMap,
-    scope_paths: list[str],
+    current_state: dict[str, Any],
 ) -> tuple[str, list[str]] | None:
     for path in sorted(_runs_dir(feature_dir, str(task.get("id"))).glob("*.json")):
         try:
@@ -2980,7 +2954,8 @@ def _prior_aborted_run_conflict(
         relevant = [
             item
             for item in changed
-            if isinstance(item, str) and (not scope_paths or _path_in_scope(item, scope_paths))
+            if isinstance(item, str)
+            and _paths_within_requested_workspaces([item], current_state)
         ]
         if relevant:
             return str(prior.get("runId")), sorted(set(relevant))

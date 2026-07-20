@@ -1696,6 +1696,7 @@ class JsonWriterTests(unittest.TestCase):
             contract["workspaceContract"]["source"],
             "prepare-task-draft --code-workspace",
         )
+        self.assertEqual(contract["workspaceContract"]["scopePathsMode"], "advisory_change_hint")
         self.assertTrue(contract["workspaceContract"]["codeWorkspacePreflightRequired"])
         self.assertEqual(
             contract["fieldRules"]["workspaceRef"],
@@ -1720,6 +1721,13 @@ class JsonWriterTests(unittest.TestCase):
         self.assertIn("executionLaneSource", contract["batchAssignment"])
         self.assertIn("executionLaneMapping", contract["batchAssignment"])
         self.assertIn("executionLaneOrder", contract["batchAssignment"])
+        self.assertEqual(
+            contract["batchAssignment"]["executionOrder"],
+            "root_batch_order_then_task_order",
+        )
+        self.assertEqual(contract["batchAssignment"]["batchConcurrency"], 1)
+        self.assertEqual(contract["batchAssignment"]["taskConcurrency"], 1)
+        self.assertTrue(contract["batchAssignment"]["requiresNewConversationBetweenBatches"])
         self.assertEqual(contract["batchAssignment"]["executionLaneSource"], "uiRequired")
         self.assertEqual(
             contract["batchAssignment"]["executionLaneMapping"],
