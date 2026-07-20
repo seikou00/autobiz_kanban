@@ -446,6 +446,65 @@ def _changed_files(file_changes: list[dict[str, str]]) -> list[str]:
     )
 
 
+def _merge_file_changes(
+    *change_sets: list[dict[str, str]] | None,
+) -> list[dict[str, str]]:
+    """Keep a stable, de-duplicated history of changes across task runs."""
+
+    merged: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for change_set in change_sets:
+        if not isinstance(change_set, list):
+            continue
+        for change in change_set:
+            if not isinstance(change, dict):
+                continue
+            normalized = {
+                str(key): value
+                for key, value in change.items()
+                if isinstance(value, str)
+            }
+            if not normalized:
+                continue
+            key = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(normalized)
+    return merged
+
+
+def _historical_task_file_changes(
+    feature_dir: Path,
+    task_id: str,
+    current_run_id: str,
+) -> list[dict[str, str]]:
+    """Read implementation changes from prior runs, including forced aborts."""
+
+    run_dir = _runs_dir(feature_dir, task_id)
+    if not run_dir.is_dir():
+        return []
+    historical: list[dict[str, str]] = []
+    for run_path in sorted(run_dir.glob("*.json")):
+        if run_path.stem == current_run_id:
+            continue
+        try:
+            state = json.loads(run_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TaskRunnerError(f"invalid_historical_task_run:{run_path.name}") from exc
+        if not isinstance(state, dict) or state.get("taskId") != task_id:
+            continue
+        abort_changes = state.get("fileChangesAtAbort")
+        run_changes = state.get("fileChanges")
+        historical.extend(
+            _merge_file_changes(
+                abort_changes if isinstance(abort_changes, list) else None,
+                run_changes if isinstance(run_changes, list) else None,
+            )
+        )
+    return _merge_file_changes(historical)
+
+
 def _repository_changes(
     state: dict[str, Any],
     repositories: RepositoryMap,
@@ -1090,11 +1149,17 @@ def _finish_implementation_unlocked(
         file_changes,
         final_repositories,
     )
+    historical_file_changes = _historical_task_file_changes(
+        feature_dir,
+        task_id,
+        run_id,
+    )
+    cumulative_file_changes = _merge_file_changes(historical_file_changes, file_changes)
     declared_scope_paths, scope_paths = _run_scope_paths(state, task)
     if scope_paths:
         outside = [
             changed_path
-            for change in file_changes
+            for change in cumulative_file_changes
             for changed_path in (change.get("path"), change.get("fromPath"))
             if isinstance(changed_path, str) and not _path_in_scope(changed_path, scope_paths)
         ]
@@ -1108,13 +1173,30 @@ def _finish_implementation_unlocked(
                 "out_of_scope_changes_detected:" + ",".join(sorted(set(outside))),
                 requiredAction=required_action,
                 runId=run_id,
-                changedFiles=_changed_files(file_changes),
+                changedFiles=_changed_files(cumulative_file_changes),
                 declaredScopePaths=declared_scope_paths,
                 resolvedScopePaths=scope_paths,
             )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
-    if file_changes:
+    if cumulative_file_changes:
         if no_code_change_why or normalized_supporting:
+            if not file_changes and no_code_change_why:
+                conflict = _prior_aborted_run_conflict(
+                    feature_dir,
+                    task,
+                    run_id,
+                    repositories,
+                    scope_paths,
+                )
+                if conflict:
+                    prior_run_id, prior_changed_files = conflict
+                    raise TaskRunnerError(
+                        f"verified_existing_conflicts_with_prior_run_changes:{prior_run_id}:"
+                        + ",".join(prior_changed_files),
+                        requiredAction="resume_original_run_or_rebuild_baseline",
+                        priorRunId=prior_run_id,
+                        changedFiles=prior_changed_files,
+                    )
             raise TaskRunnerError("no_code_change_claim_conflicts_with_snapshot")
         completion_mode = "implemented"
     else:
@@ -1147,8 +1229,8 @@ def _finish_implementation_unlocked(
     state.update({
         "status": "implementation_recording",
         "completionMode": completion_mode,
-        "changedFiles": _changed_files(file_changes),
-        "fileChanges": file_changes,
+        "changedFiles": _changed_files(cumulative_file_changes),
+        "fileChanges": cumulative_file_changes,
         "transientValidationFiles": transient_validation_files,
         "finalSnapshot": final_repositories[0]["snapshot"],
         "finalRepositories": final_repositories,
@@ -1177,7 +1259,7 @@ def _finish_implementation_unlocked(
                     task=task,
                     run_id=run_id,
                     completion_mode=completion_mode,
-                    file_changes=file_changes,
+                    file_changes=cumulative_file_changes,
                     transient_validation_files=transient_validation_files,
                     supporting_files=normalized_supporting,
                     no_change_why=no_code_change_why,
@@ -1277,11 +1359,17 @@ def _complete_task_unlocked(
         file_changes,
         final_repositories,
     )
+    historical_file_changes = _historical_task_file_changes(
+        feature_dir,
+        task_id,
+        run_id,
+    )
+    cumulative_file_changes = _merge_file_changes(historical_file_changes, file_changes)
     declared_scope_paths, scope_paths = _run_scope_paths(state, task)
     if scope_paths:
         outside = [
             path
-            for change in file_changes
+            for change in cumulative_file_changes
             for path in (change.get("path"), change.get("fromPath"))
             if isinstance(path, str) and not _path_in_scope(path, scope_paths)
         ]
@@ -1295,15 +1383,32 @@ def _complete_task_unlocked(
                 "out_of_scope_changes_detected:" + ",".join(sorted(set(outside))),
                 requiredAction=required_action,
                 runId=run_id,
-                changedFiles=_changed_files(file_changes),
+                changedFiles=_changed_files(cumulative_file_changes),
                 declaredScopePaths=declared_scope_paths,
                 resolvedScopePaths=scope_paths,
                 requestedCodeWorkspaces=state.get("requestedCodeWorkspaces", []),
                 resolvedGitRoots=[str(item) for item in repositories.values()],
             )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
-    if file_changes:
+    if cumulative_file_changes:
         if no_code_change_why or normalized_supporting:
+            if not file_changes and no_code_change_why:
+                conflict = _prior_aborted_run_conflict(
+                    feature_dir,
+                    task,
+                    run_id,
+                    repositories,
+                    scope_paths,
+                )
+                if conflict:
+                    prior_run_id, prior_changed_files = conflict
+                    raise TaskRunnerError(
+                        f"verified_existing_conflicts_with_prior_run_changes:{prior_run_id}:"
+                        + ",".join(prior_changed_files),
+                        requiredAction="resume_original_run_or_rebuild_baseline",
+                        priorRunId=prior_run_id,
+                        changedFiles=prior_changed_files,
+                    )
             raise TaskRunnerError("no_code_change_claim_conflicts_with_snapshot")
         completion_mode = "implemented"
     else:
@@ -1331,9 +1436,12 @@ def _complete_task_unlocked(
         completion_mode = "verified_existing"
 
     _check_required_coverage(task)
-    changed_files = _changed_files(file_changes)
+    changed_files = _changed_files(cumulative_file_changes)
     if state.get("status") == "validation_running":
-        if state.get("changedFiles") != changed_files or state.get("fileChanges") != file_changes:
+        if (
+            state.get("changedFiles") != changed_files
+            or state.get("fileChanges") != cumulative_file_changes
+        ):
             raise TaskRunnerError("task_run_workspace_changed_after_validation_started")
         if state.get("completionMode") != completion_mode:
             raise TaskRunnerError("task_run_completion_mode_changed")
@@ -1342,7 +1450,7 @@ def _complete_task_unlocked(
             "status": "validation_running",
             "completionMode": completion_mode,
             "changedFiles": changed_files,
-            "fileChanges": file_changes,
+            "fileChanges": cumulative_file_changes,
             "transientValidationFiles": transient_validation_files,
             "finalSnapshot": final_repositories[0]["snapshot"],
             "finalRepositories": final_repositories,
@@ -1394,7 +1502,7 @@ def _complete_task_unlocked(
             command=command,
             exit_code=exit_code,
             completion_mode=completion_mode,
-            file_changes=file_changes,
+            file_changes=cumulative_file_changes,
             transient_validation_files=transient_validation_files,
             supporting_files=normalized_supporting,
             no_change_why=no_code_change_why,

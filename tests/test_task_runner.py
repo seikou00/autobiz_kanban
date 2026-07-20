@@ -2379,6 +2379,49 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertEqual(_evidence(feature_dir, "ev_0001")["changedFiles"], ["implemented.txt"])
 
+    def test_finish_implementation_accumulates_changes_across_aborted_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_deferred_task_validation(feature_dir)
+            original = _start(workspace, code)
+            (code / "first-implementation.txt").write_text("first\n", encoding="utf-8")
+
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", original["runId"], "--force-with-changes",
+                "--abort-why", "scope repair before retry",
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+
+            retry = _start(workspace, code)
+            (code / "second-implementation.txt").write_text("second\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", retry["runId"],
+            )
+
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            payload = json.loads(finished.stdout)
+            self.assertEqual(
+                payload["changedFiles"],
+                ["first-implementation.txt", "second-implementation.txt"],
+            )
+            evidence = _evidence(feature_dir, "ev_0001")
+            self.assertEqual(
+                evidence["changedFiles"],
+                ["first-implementation.txt", "second-implementation.txt"],
+            )
+            self.assertFalse(evidence["implementation"]["noCodeChange"])
+            retry_state = json.loads(
+                (feature_dir / ".task-runs" / "T001" / f"{retry['runId']}.json").read_text()
+            )
+            self.assertEqual(
+                retry_state["changedFiles"],
+                ["first-implementation.txt", "second-implementation.txt"],
+            )
+
     def test_verified_existing_rejects_changes_from_prior_aborted_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, _, code = _workspace(Path(tmp))
