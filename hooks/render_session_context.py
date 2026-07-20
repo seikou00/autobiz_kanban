@@ -20,12 +20,17 @@ board_config.json 注册（样例，附件约定）::
   · 当前 workflow 节点通过 ``--plugin-workspace``、``--project``、``--feature``
     显式定位，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口。
     节点、参数、配置或单个字段缺失时分别使用默认值：``agentMode = \"solo\"``、
-    ``toolCustomConfig.task.enabled = true``。
+    ``toolConfig.task.enabled = true``。
 
 输出（固定形状，注入项目模式系统提示词）::
 
-    { "ok": true, "message": "...", "sessionContext": "...", "runtimePolicy": { ... },
-      "agentmdLoadStatus": [ {deployUnitId, path, loaded, source, message} ] }
+    { "ok": true, "message": "...", "sessionContext": "...",
+      "agentmdLoadStatus": [ {deployUnitId, path, loaded, source, message} ],
+      "agentConfig": {
+        "agentMode": "solo",
+        "toolConfig": {"task": {"enabled": true}},
+        "subagentConfig": {"disabledBuiltinSubagents": [], "customSubagentFiles": []}
+      } }
 
 ``sessionContext`` 分段拼接（见 docs/agents-loading-remote-local.md），各层次各用一对
 **裸 XML 风格标签**外包（不再用反引号包成 inline code——那会让标签变字面量、id 不成锚点）：
@@ -217,6 +222,29 @@ def _session_runtime_policy(
         board_config_path=board_config_path,
     )
     return _runtime_policy(current_node_id, board_config_path=board_config_path)
+
+
+def _agent_config(runtime_policy: dict) -> dict:
+    """将 workflow 的 runtimePolicy 转为 session_context_inject 对外格式。"""
+    tool_custom_config = runtime_policy.get("toolCustomConfig")
+    task_config = (
+        tool_custom_config.get("task") if isinstance(tool_custom_config, dict) else None
+    )
+    task_enabled = task_config.get("enabled") if isinstance(task_config, dict) else None
+    return {
+        "agentMode": runtime_policy.get("agentMode", DEFAULT_AGENT_MODE),
+        "toolConfig": {
+            "task": {
+                "enabled": (
+                    task_enabled if isinstance(task_enabled, bool) else DEFAULT_TASK_ENABLED
+                ),
+            }
+        },
+        "subagentConfig": {
+            "disabledBuiltinSubagents": [],
+            "customSubagentFiles": [],
+        },
+    }
 
 
 def _parse_selected(raw: Optional[str]) -> List[dict]:
@@ -564,12 +592,14 @@ def render(
     board_config_path: Optional[Path] = None,
 ) -> dict:
     """核心逻辑（无 I/O 边界外副作用），便于单测。"""
-    runtime_policy = _session_runtime_policy(
-        node_id,
-        plugin_workspace=plugin_workspace,
-        project=project,
-        feature=feature,
-        board_config_path=board_config_path,
+    agent_config = _agent_config(
+        _session_runtime_policy(
+            node_id,
+            plugin_workspace=plugin_workspace,
+            project=project,
+            feature=feature,
+            board_config_path=board_config_path,
+        )
     )
     # 「会话工作区指令」独立于部署单元选择：先行构建，未选单元也可单独注入。
     workspace_content = _build_workspace_content(session_workspace_path)
@@ -581,7 +611,7 @@ def render(
                 "message": "未选择部署单元，无需注入",
                 "sessionContext": "",
                 "agentmdLoadStatus": [],
-                "runtimePolicy": runtime_policy,
+                "agentConfig": agent_config,
             }
         # 即便未选单元，工作区指令也在适用范围表里占一行映射。
         bindings = [_workspace_binding(session_workspace_path)]
@@ -591,7 +621,7 @@ def render(
             "message": "未选择部署单元，仅注入会话工作区指令",
             "sessionContext": prompt,
             "agentmdLoadStatus": [_workspace_status(session_workspace_path, platform=platform)],
-            "runtimePolicy": runtime_policy,
+            "agentConfig": agent_config,
         }
 
     # 清单不可用（缺失/非法）时降级：所有单元当作未命中，直接走 local 兜底。
@@ -734,7 +764,7 @@ def render(
         "message": message,
         "sessionContext": prompt,
         "agentmdLoadStatus": result_status,
-        "runtimePolicy": runtime_policy,
+        "agentConfig": agent_config,
     }
 
 
@@ -795,11 +825,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             "message": str(exc),
             "sessionContext": "",
             "agentmdLoadStatus": [],
-            "runtimePolicy": _session_runtime_policy(
-                args.node_id,
-                plugin_workspace=args.plugin_workspace,
-                project=args.project,
-                feature=args.feature,
+            "agentConfig": _agent_config(
+                _session_runtime_policy(
+                    args.node_id,
+                    plugin_workspace=args.plugin_workspace,
+                    project=args.project,
+                    feature=args.feature,
+                )
             ),
         }
     else:

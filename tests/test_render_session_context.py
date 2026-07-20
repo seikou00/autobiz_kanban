@@ -133,8 +133,20 @@ class RenderShapeTest(unittest.TestCase):
         res = render([], plugin_root=_plugin_root())
         self.assertIn("sessionContext", res)
         self.assertIn("agentmdLoadStatus", res)
-        self.assertIn("runtimePolicy", res)
+        self.assertIn("agentConfig", res)
+        self.assertNotIn("runtimePolicy", res)
         self.assertNotIn("inlineSystemPrompt", res)  # 破坏性切换，不留旧字段
+        self.assertEqual(
+            res["agentConfig"],
+            {
+                "agentMode": "solo",
+                "toolConfig": {"task": {"enabled": True}},
+                "subagentConfig": {
+                    "disabledBuiltinSubagents": [],
+                    "customSubagentFiles": [],
+                },
+            },
+        )
 
     def test_empty_selection_is_noop(self):
         res = render([], plugin_root=_plugin_root())
@@ -196,33 +208,41 @@ class RuntimePolicyTest(unittest.TestCase):
                 records[feature] = record
                 write_state_records(project, records)
 
-                policy = render([], **arguments)["runtimePolicy"]
+                policy = render([], **arguments)["agentConfig"]
                 self.assertEqual(policy["agentMode"], "solo")
                 self.assertEqual(
-                    policy["toolCustomConfig"]["task"]["enabled"],
+                    policy["toolConfig"]["task"]["enabled"],
                     expected_enabled,
                 )
 
     def test_explicit_node_id_overrides_project_and_feature_arguments(self):
         _project, _feature, arguments = self._feature_arguments("discuss_in_progress")
-        policy = render([], node_id="dev.code", **arguments)["runtimePolicy"]
-        self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
+        policy = render([], node_id="dev.code", **arguments)["agentConfig"]
+        self.assertTrue(policy["toolConfig"]["task"]["enabled"])
 
     def test_missing_arguments_or_feature_falls_back_to_defaults(self):
         expected = {
             "agentMode": "solo",
-            "toolCustomConfig": {"task": {"enabled": True}},
+            "toolConfig": {"task": {"enabled": True}},
+            "subagentConfig": {
+                "disabledBuiltinSubagents": [],
+                "customSubagentFiles": [],
+            },
         }
-        self.assertEqual(render([])["runtimePolicy"], expected)
+        self.assertEqual(render([])["agentConfig"], expected)
 
         _project, _feature, arguments = self._feature_arguments()
         arguments["feature"] = "missing-feature"
-        self.assertEqual(render([], **arguments)["runtimePolicy"], expected)
+        self.assertEqual(render([], **arguments)["agentConfig"], expected)
 
     def test_process_environment_is_not_used_for_node_resolution(self):
         expected = {
             "agentMode": "solo",
-            "toolCustomConfig": {"task": {"enabled": True}},
+            "toolConfig": {"task": {"enabled": True}},
+            "subagentConfig": {
+                "disabledBuiltinSubagents": [],
+                "customSubagentFiles": [],
+            },
         }
         _project, _feature, arguments = self._feature_arguments()
         environment = {
@@ -231,7 +251,7 @@ class RuntimePolicyTest(unittest.TestCase):
             "FEATURE_ID": arguments["feature"],
         }
         with patch.dict(os.environ, environment, clear=True):
-            self.assertEqual(render([])["runtimePolicy"], expected)
+            self.assertEqual(render([])["agentConfig"], expected)
 
     def test_cli_arguments_select_node_policy(self):
         _project, _feature, arguments = self._feature_arguments()
@@ -251,7 +271,7 @@ class RuntimePolicyTest(unittest.TestCase):
             )
         payload = json.loads(output.getvalue())
         self.assertEqual(exit_code, 0)
-        self.assertFalse(payload["runtimePolicy"]["toolCustomConfig"]["task"]["enabled"])
+        self.assertFalse(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
 
     def test_board_config_disables_task_only_for_configured_early_nodes(self):
         for node_id in ("biz.discuss", "biz.prd", "dev.specs"):
@@ -303,14 +323,18 @@ class RuntimePolicyTest(unittest.TestCase):
         code = render([], node_id="dev.code", board_config_path=config_path)
 
         self.assertEqual(
-            specs["runtimePolicy"],
+            specs["agentConfig"],
             {
                 "agentMode": "solo",
-                "toolCustomConfig": {"task": {"enabled": False}},
+                "toolConfig": {"task": {"enabled": False}},
+                "subagentConfig": {
+                    "disabledBuiltinSubagents": [],
+                    "customSubagentFiles": [],
+                },
             },
         )
-        self.assertEqual(code["runtimePolicy"]["agentMode"], "coordinator")
-        self.assertTrue(code["runtimePolicy"]["toolCustomConfig"]["task"]["enabled"])
+        self.assertEqual(code["agentConfig"]["agentMode"], "coordinator")
+        self.assertTrue(code["agentConfig"]["toolConfig"]["task"]["enabled"])
 
     def test_finds_runtime_policy_on_dynamic_node(self):
         config_path = _board_config(
@@ -364,7 +388,7 @@ class RuntimePolicyTest(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertFalse(payload["ok"])
-        self.assertFalse(payload["runtimePolicy"]["toolCustomConfig"]["task"]["enabled"])
+        self.assertFalse(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
 
 
 class RenderRemoteTest(unittest.TestCase):
