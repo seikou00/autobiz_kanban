@@ -1,6 +1,6 @@
 # Ant Design 转换参考
 
-本参考供 `../deps/standard-html-parser.md` 在决定生成 Ant Design 代码时读取。只支持 Ant Design v4 和 v5。转换时按语义意图判断，不按标签名机械替换；先保留源行为，再选择能表达该行为的最小 Ant Design 组件。
+本参考供 `standard-html-parser.md` 在决定生成 Ant Design 代码时读取。只支持 Ant Design v4 和 v5。转换时按语义意图判断，不按标签名机械替换；先保留源行为，再选择能表达该行为的最小 Ant Design 组件。
 
 ## 内容目录
 

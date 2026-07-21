@@ -45,6 +45,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
  `${pluginPath}/skills/references/ask-user-question.md`
    - 使用 `request_user_input` 时的统一提问、选项和回答处理协议
 
+ `{pluginPath}/skills/autobiz/references/ui-context.md`
+   - `UI_CONTEXT.json` 字段格式、ID 规则、UI/非 UI 模板和高保真输入记录方式
+
 执行流程时，必须以评估准则作为判断依据，确保分析有据可依。
 
 ###  更新状态
@@ -124,6 +127,15 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 【核心原则】严格按照 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成需求分析的问题清单。
 
 【关键约束】 - 仅输出有问题、需求有遗漏、需求不明确的事项；无问题则不制造问题
+
+#### UI 范围收口
+
+- 写入或更新 `UI_CONTEXT.json` 前，必须先读取 `{pluginPath}/skills/autobiz/references/ui-context.md`，按其中模板和枚举生成。
+- 必须生成或更新 `UI_CONTEXT.json`，不要只在 `PRD_DISCUSS.md` 中用自然语言描述是否有页面。
+- 进入下一阶段前，必须向用户确认并记录：是否有页面、页面数或页面列表、核心交互、加载态、空态、错误态、成功态，以及是否存在高保真 HTML、标准 HTML、设计稿、Figma/MasterGo 或原型链接。
+- 若存在 UI 范围，写 `uiRequired=true`，并尽量补齐 `pages[]`、`interactions[]`、`visualSources[]`；纯后端能力写 `uiRequired=false` 并说明原因。
+- discuss/PRD 阶段不要编造 `capabilities[].specRefs`；REQ/SCN 由 specs 阶段定义并在锁定时回填。
+- 高保真输入只写入 `visualSources[]`，不要混入需求正文作为行为契约。
 
 ### 问题清单展示与用户确认
 
@@ -278,6 +290,7 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "$
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` — 已存在，格式符合 `ui-context.md`，且 UI 范围决策已结构化沉淀
 - `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 

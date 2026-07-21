@@ -180,6 +180,8 @@ pytest tests/test_foo.py::test_rejects_empty_name
 ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log
 ```
 
+每次测试命令结束后，还必须用 `hooks/evidence_store.py append` 向 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` 末尾追加 validation evidence；这是 feature 产物目录下的证据流，不得写到业务代码仓库根目录或当前 cwd 下的临时 `.autobizdevops`。append 工具会默认从 `PLUGIN_WORKSPACE/PROJECT_DIR` 定位产物根；手写命令时可显式加 `--workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"`。记录 taskId（必须来自 `plans/Bxxx/plan.json.tasks[].id`，无 plan 契约时来自本阶段建立的轻量任务 ID）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并将真实输出写入 evidence log。`ev_XXXX` 由 append 工具按当前流末尾自动递增；不得插入、重排、重编号、删除旧记录或手改 index。结构化记录只存在 JSONL，不得新增 `ev_XXXX.json` sidecar。
+
 日志中至少保留：
 
 - 时间。
@@ -262,7 +264,34 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - E2E 阶段应重点覆盖的链路。
 - 仍需人工确认的项。
 - 若失败，返回用户确认。
-### Step 9: 分支决策
+
+同时必须通过 `${pluginPath}/hooks/unit_test_result_writer.py` 写入 `UNIT_TEST_RESULT.json` 作为机器事实源，禁止直接整份写入或编辑该 JSON。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。若 target 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`；非 UI target 不要伪造 UI 标记。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。优先使用 `unit_test_result_writer.py init --from-plan`、`add-target/update-target`、`derive-scenario-coverage` 与 `set-verdict`。
+
+推进 `unit_test_done` 前必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.utest --feature "${feature}"`。writer 的本地 `validate` 只做结构检查，不能替代 stage gate。
+
+```json
+{
+  "version": 1,
+  "verdict": "PASS",
+  "scenarioCoverage": [
+    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
+  ],
+  "targets": [
+    {
+      "targetId": "UT-001",
+      "taskId": "T001",
+      "uiRequired": true,
+      "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+      "evidenceIds": ["ev_0001"],
+      "result": "PASS",
+      "command": "pytest tests/test_cap.py::test_happy_path",
+      "coverage": {"lines": 12}
+    }
+  ]
+}
+```
+
+### 分支决策
 
 可以推进 `unit_test_done` 的条件：
 
@@ -276,6 +305,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 推进命令：
 
 ```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.utest --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```

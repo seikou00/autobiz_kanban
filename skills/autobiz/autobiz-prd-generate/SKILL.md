@@ -74,6 +74,17 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 #### 输出文件
 
 - 正式稿：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
+- UI 范围机器事实源：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json`
+
+### UI 范围处理
+
+- 写入或更新 `UI_CONTEXT.json` 前，必须先读取 `{pluginPath}/skills/autobiz/references/ui-context.md`。
+- `UI_CONTEXT.json` 是 UI 范围机器事实源；先读它，再写 `PRD.md`，不要从 PRD 正文重新推导 `uiRequired`。
+- `PRD.md` 只描述 UI 行为范围、页面目标、核心交互、加载态、空态、错误态和成功态，不描述前端实现方案。
+- 生成 PRD 后必须同步更新 `UI_CONTEXT.json`，将已确认的 UI 决策推进到 `decisionStatus=confirmed`。
+- `uiRequired=true` 时，确保 `pages[]`、`interactions[]` 或 `visualSources[]` 能表达页面数、页面列表和核心交互。
+- 高保真 HTML、标准 HTML、设计稿或原型链接只保留在 `visualSources[]`；PRD 阶段不要编造 `capabilities[].specRefs`。
+- `uiRequired=false` 时，保留或补齐 `notApplicableReason`。
 
 
 ### Step 4: 最终检查与交接
@@ -83,6 +94,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已存在，且以 `# 需求正式稿` 开头
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 不包含讨论稿说明句 `本文档为需求讨论中间稿，用于记录需求讨论过程和结论`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已追加 `用户故事`、`验收口径`、`验收标准`、`关键约束`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` 已存在，格式符合 `ui-context.md`，且 `decisionStatus` 至少为 `confirmed`
 
 向用户明确说明：
 

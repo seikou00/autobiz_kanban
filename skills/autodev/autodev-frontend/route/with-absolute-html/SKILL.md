@@ -1,6 +1,6 @@
 ---
 name: route-with-absolute-html
-description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义绝对定位 / 碎片 div / Figma 导出类 HTML 的适用条件、读取顺序、转交给本目录 `deps/html-parser.md` 的时机，以及失败兜底方式。
+description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义绝对定位 / 碎片 div / Figma 导出类 HTML 的适用条件、读取顺序、转交给本目录 `references/html-parser.md` 的时机，以及失败兜底方式。
 ---
 
 
@@ -50,9 +50,9 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
 
 ## 2. 这条路线只负责什么
 
-本文件只负责：总原则、读取顺序、转交给 `deps/html-parser.md` 的时机、失败兜底。
+本文件只负责：总原则、读取顺序、转交给 `references/html-parser.md` 的时机、失败兜底。
 
-它不展开实现细则，不替代根技能 `../../SKILL.md` 的全局优先级，也不重复 `deps/html-parser.md` 的执行规则。
+它不展开实现细则，不替代根技能 `../../SKILL.md` 的全局优先级，也不重复 `references/html-parser.md` 的执行规则。
 
 ## 3. 路线总原则
 
@@ -148,19 +148,19 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
    - 若脚本产物齐全：先读取 `<task-stem>-checklist.md`，再读取 `<task-stem>.md`（完整版 handoff），最后回到原始高保真 HTML 做主判断。
    - 若走降级路径：直接以原始高保真 HTML 为主。
    - 若 checklist / handoff 标记 `componentizationMode=conservative` 或 `analysisConfidence.level != high`：先锁定原始 HTML 的宏观布局、模块边界、表格/图表/时间线/上传等所有权，再把脚本产物仅用于缺项点查与 whole-section 保留，不要让 `replacementSlots` 主导大块组件化。
-5. **转交 `deps/html-parser.md`。**
+5. **转交 `references/html-parser.md`。**
    - `hasManifest=true`：表示脚本产物可用，但它们只是辅助。
    - `hasManifest=false`：表示脚本失败，后续完全以原始 HTML 为主。
 6. 完成主线代码生成、页面拆分 / 抽取与最低校验。
-7. 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明"已跳过 Stage 1 脚本及原因"），再立刻确认是否进入 `../review/SKILL.md`；具体询问格式与强制动作遵循 `deps/html-parser.md` 末尾"汇报后的强制动作"，未获用户答复前停止，不自动继续。
+7. 主线完成后先输出交付总结（若走降级路径，须在总结里显式声明"已跳过 Stage 1 脚本及原因"），再立刻确认是否进入 `../review/SKILL.md`；具体询问格式与强制动作遵循 `references/html-parser.md` 末尾"汇报后的强制动作"，未获用户答复前停止，不自动继续。
 
 ## 5. 转交规则
 
 完成 §4 第 4 步后，默认直接转交：
 
-- 目标文件：`deps/html-parser.md`
+- 目标文件：`references/html-parser.md`
 - 默认入口：从 `§3 分类 HTML` 开始
-- 转交时附带状态：`hasManifest=true`（脚本产物齐全，仅作辅助）或 `hasManifest=false`（已走 §7 降级）；`hasManifest=false` 时 `deps/html-parser.md` 直接以原始 HTML 为唯一视觉源继续，不要再要求脚本
+- 转交时附带状态：`hasManifest=true`（脚本产物齐全，仅作辅助）或 `hasManifest=false`（已走 §7 降级）；`hasManifest=false` 时 `references/html-parser.md` 直接以原始 HTML 为唯一视觉源继续，不要再要求脚本
 
 ## 6. 增量修改
 
@@ -187,8 +187,8 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
   - 任何未在上面列举的异常
 - 降级路径动作：
   1. 不再重试脚本，也不要原地等待用户补救
-  2. 直接进入 §4 第 5 步，转交 `deps/html-parser.md`，并带 `hasManifest=false` 状态
-  3. 由 `deps/html-parser.md` 以原始 HTML 为唯一视觉源继续整页恢复与组件化
+  2. 直接进入 §4 第 5 步，转交 `references/html-parser.md`，并带 `hasManifest=false` 状态
+  3. 由 `references/html-parser.md` 以原始 HTML 为唯一视觉源继续整页恢复与组件化
   4. 在最终交付总结里显式列出"已跳过 Stage 1 脚本"和具体原因（如"argparse 缺参数"、"语法错误 line N"、"FileNotFoundError"）
 - 唯一例外（不走降级、必须先修复）：模型自己虚构了"已跳过原因"而实际并未执行脚本。脚本必须至少被真实尝试执行一次，并捕获真实异常信息
 
@@ -198,5 +198,5 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
 | --- | --- |
 | `../../SKILL.md` | 总入口 + 全局优先级与执行清单 |
 | `SKILL.md` | 绝对定位高保真 HTML route 入口、读取顺序与转交规则 |
-| `deps/html-parser.md` | 真正把路走完（分类、整页恢复、组件替换、写代码） |
+| `references/html-parser.md` | 真正把路走完（分类、整页恢复、组件替换、写代码） |
 | `../review/SKILL.md` | 用户确认后进入回检路由 |

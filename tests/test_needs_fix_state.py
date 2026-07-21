@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from board_core.state_store import (
     load_state_json_records,
@@ -64,11 +65,12 @@ class NeedsFixStateTest(unittest.TestCase):
         self._set_checkpoint("verify_in_progress")
         (self.feature_dir / "VERIFY_REPORT.md").write_text("verify failed\n", encoding="utf-8")
 
-        blocked = prepare_checkpoint_update(
-            workspace=self.project,
-            feature=self.feature,
-            checkpoint="needs_fix",
-        )
+        with patch("hooks.update_checkpoint.validate_lifecycle", return_value=[]):
+            blocked = prepare_checkpoint_update(
+                workspace=self.project,
+                feature=self.feature,
+                checkpoint="needs_fix",
+            )
 
         self.assertTrue(blocked.ok, blocked.errors)
         self.assertEqual(
@@ -83,11 +85,12 @@ class NeedsFixStateTest(unittest.TestCase):
             "verify_in_progress",
         )
 
-        unchanged = prepare_checkpoint_update(
-            workspace=self.project,
-            feature=self.feature,
-            checkpoint="needs_fix",
-        )
+        with patch("hooks.update_checkpoint.validate_lifecycle", return_value=[]):
+            unchanged = prepare_checkpoint_update(
+                workspace=self.project,
+                feature=self.feature,
+                checkpoint="needs_fix",
+            )
         self.assertTrue(unchanged.ok, unchanged.errors)
         self.assertEqual(
             unchanged.records[self.feature]["needsFixFromCheckpoint"],
@@ -101,11 +104,12 @@ class NeedsFixStateTest(unittest.TestCase):
         specs_dir.mkdir()
         (specs_dir / "requirements.md").write_text("requirements\n", encoding="utf-8")
 
-        resumed = prepare_checkpoint_update(
-            workspace=self.project,
-            feature=self.feature,
-            checkpoint="code_in_progress",
-        )
+        with patch("hooks.update_checkpoint.validate_lifecycle", return_value=[]):
+            resumed = prepare_checkpoint_update(
+                workspace=self.project,
+                feature=self.feature,
+                checkpoint="code_in_progress",
+            )
 
         self.assertTrue(resumed.ok, resumed.errors)
         self.assertNotIn("needsFixFromCheckpoint", resumed.records[self.feature])

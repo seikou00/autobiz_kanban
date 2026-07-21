@@ -676,7 +676,7 @@ Footer（若有）：top __px
 
 ## 调用位置
 
-本规则由 `html-parser` 在执行 LLM 转换时调用，详细调用流程见 [html-parser.md](../../deps/html-parser.md)。
+本规则由 `html-parser` 在执行 LLM 转换时调用，详细调用流程见 [html-parser.md](../html-parser.md)。
 
 **调用时机：** 当 HTML 识别为原生 div HTML（不含框架组件标签）时，在 LLM Prompt 中包含本规则的转换要求。
 

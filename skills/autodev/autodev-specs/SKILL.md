@@ -131,8 +131,15 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - **列出即生成**：proposal `Capabilities` 三个小节（New/Modified/Removed）中列出的每一个 capability（占位"无"除外）都必须有对应的 `specs/<capability>/spec.md`。不得以等任何理由跳过。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability，保持两边严格一致；禁止单方面少生成。
 - Modified/Removed capability 的 spec 用 `## MODIFIED Requirements` / `## REMOVED Requirements` 承载完整新行为或移除说明，同样不可省略。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
-- Requirement 使用 `### Requirement: <name>`。
-- Scenario 使用四级标题 `#### Scenario: <name>`。
+- 必须读取或生成 `UI_CONTEXT.json`，它是 UI 范围机器事实源；不要从 PRD/specs Markdown 关键词反推 UI 范围。
+- 生成或修改 `UI_CONTEXT.json` 必须使用 `${pluginPath}/hooks/ui_context_writer.py`，不得直接整份写入或编辑该 JSON。调试只使用 `validate` / `show --summary`。
+- `uiRequired=true` 时，UI 行为应形成独立 capability，例如 `order-create-ui`、`dashboard-filter-ui`，并在 `UI_CONTEXT.json.capabilities[]` 回链对应 `REQ/SCN`。
+- specs 完成并锁定 UI_CONTEXT 时，`uiRequired=true` 必须至少有一个 UI capability，且该 capability 必须带真实 `REQ-xxx` 与 `SCN-xxx` 的 `specRefs`；不能只写 pages/interactions 而没有 UI 场景分母。
+- `uiRequired=false` 时，不生成 UI capability，并在 `UI_CONTEXT.json.notApplicableReason` 说明原因。
+- specs 完成时必须将 `UI_CONTEXT.json.decisionStatus` 固化为 `locked`，`lockedAtCheckpoint` 写 `specs_done`。
+- Requirement 使用 `### Requirement [REQ-001]: <name>`。
+- Scenario 使用四级标题 `#### Scenario [SCN-001]: <name>`。
+- `REQ-*` / `SCN-*` 只是标题中的稳定锚点规则，不要在真实 `spec.md` 中写入“稳定 ID 规范”说明章节。
 - 每个 Requirement 至少一个 Scenario。
 - 使用 SHALL/MUST 表达可验证行为。
 - 每个 Requirement 只能放入一个操作段：`ADDED Requirements`、`MODIFIED Requirements` 或 `REMOVED Requirements`。
@@ -146,7 +153,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md` 已生成。
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/` 下至少存在一个 `spec.md`。
-- **数量核对**：数出 proposal `Capabilities` 实际列出的 capability 数 N（排除"无"），数出 `specs/*/spec.md` 数 M，必须 N == M 且逐一对应；推进 specs_done 前在回复中输出对照表 `capability → specs/<capability>/spec.md ✓`，缺任何一行不得推进。
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` 已生成或更新，且 `decisionStatus=locked`。
+- 推进 `specs_done` 前必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.specs --feature "${feature}"`；该检查才是本阶段完整 artifact 门禁。
+- proposal 的每个 capability 都有对应 spec 文件。
 - 每个 spec 至少包含一个 Requirement 和一个 Scenario。
 - specs 只描述行为契约，不包含实现任务。
 
