@@ -2576,6 +2576,16 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "batchCommandTiming": "after_all_task_commands_pass",
                         "validationTarget": "batch_final_snapshot",
                     },
+                    "validationEnvironmentPolicy": {
+                        "preflightBeforeRun": True,
+                        "missingExecutableResult": "error_without_validation_failure_evidence",
+                        "runtimeEnvironmentResult": "error_and_retry_same_run",
+                        "requiredActions": [
+                            "fix_validation_environment_and_retry_batch_validation",
+                            "fix_validation_environment_and_retry_same_run",
+                        ],
+                        "planOrDigestRebuildRequired": False,
+                    },
                     "workspaceContract": {
                         "field": "scope.workspaceRoots",
                         "source": "prepare-task-draft --code-workspace",

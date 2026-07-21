@@ -273,7 +273,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 `taskValidation.status=running` 期间工作区处于硬冻结：runner 拒绝启动/收口实现任务，Plan Writer 拒绝写计划或渲染产物，Evidence Store 拒绝 validation runner 之外的任何追加。子代理不能通过直接调用其他 writer 绕过冻结。
 
-子代理/进程中断时使用同一 runId 和 currentTaskId 恢复，已写 Evidence 的命令不会重复。required 验证失败后停止队列：工作区未变化时重新执行 `start-batch-task-validation` 创建新 run，从失败 TASK 重试；需要修改源码时执行 `start-validation-repair --task-id <FAILED_TASK_ID>`，修复后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
+子代理/进程中断时使用同一 runId 和 currentTaskId 恢复，已写 Evidence 的命令不会重复。若 runner 返回 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。只有普通 required 校验失败才创建新的 task-validation run；需要修改源码时才执行 `start-validation-repair --task-id <FAILED_TASK_ID>`，修复后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
 
 全部 TASK 验证通过后才把 TASK 置 done。`task_covered` 此时生成 `batch_closure`；`commands` 模式返回 `requiredAction=run_batch_check_in_validation_subagent`，由同一个子代理继续下方额外质量门禁。
 

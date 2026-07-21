@@ -1699,6 +1699,19 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["workspaceContract"]["scopePathsMode"], "advisory_change_hint")
         self.assertTrue(contract["workspaceContract"]["codeWorkspacePreflightRequired"])
         self.assertEqual(
+            contract["validationEnvironmentPolicy"],
+            {
+                "preflightBeforeRun": True,
+                "missingExecutableResult": "error_without_validation_failure_evidence",
+                "runtimeEnvironmentResult": "error_and_retry_same_run",
+                "requiredActions": [
+                    "fix_validation_environment_and_retry_batch_validation",
+                    "fix_validation_environment_and_retry_same_run",
+                ],
+                "planOrDigestRebuildRequired": False,
+            },
+        )
+        self.assertEqual(
             contract["fieldRules"]["workspaceRef"],
             {"required": True, "type": "repository_id", "source": "task_group"},
         )

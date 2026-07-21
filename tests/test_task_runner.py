@@ -460,6 +460,126 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
             self.assertEqual(check_code_done(feature_dir), [])
 
+    def test_missing_validation_executable_reports_environment_and_can_retry_after_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_deferred_task_validation(feature_dir)
+            missing_executable = Path(tmp) / "validation-tool"
+            batch = _read_batch(feature_dir)
+            task = batch["tasks"][0]
+            task["validationCommands"][0]["argv"] = [str(missing_executable)]
+            batch["taskValidation"]["taskContractSha256ByTask"] = {
+                "T001": task_contract_sha256(task)
+            }
+            _write_batch(feature_dir, batch)
+
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            blocked = _run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001",
+                "--code-workspace", str(code),
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            blocked_payload = json.loads(blocked.stdout)
+            self.assertEqual(blocked_payload["error"], "validation_environment_unavailable:VAL-T001-01:executable_missing")
+            self.assertEqual(
+                blocked_payload["requiredAction"],
+                "fix_validation_environment_and_retry_batch_validation",
+            )
+            self.assertIn("请修复验证环境后重新运行校验", blocked_payload["userMessage"])
+            self.assertEqual(_read_batch(feature_dir)["taskValidation"]["status"], "ready")
+            self.assertFalse((feature_dir / ".batch-task-validation-runs" / "B001").exists())
+
+            missing_executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            missing_executable.chmod(0o755)
+            validation_run = _run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(validation_run.returncode, 0, validation_run.stdout + validation_run.stderr)
+            payload = json.loads(validation_run.stdout)
+            validated = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T001",
+                "--run-id", payload["runId"], "--code-workspace", str(code),
+            )
+            self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+
+    def test_runtime_environment_block_retries_same_validation_run_after_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            validation_tool = Path(tmp) / "runtime-validation-tool"
+            ready_marker = Path(f"{validation_tool}.ready")
+            validation_tool.write_text(
+                "#!/bin/sh\n"
+                f"test -f '{ready_marker}' || exit 127\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            validation_tool.chmod(0o755)
+            _configure_deferred_task_validation(feature_dir)
+            batch = _read_batch(feature_dir)
+            task = batch["tasks"][0]
+            task["validationCommands"][0]["argv"] = [str(validation_tool)]
+            batch["taskValidation"]["taskContractSha256ByTask"] = {
+                "T001": task_contract_sha256(task)
+            }
+            _write_batch(feature_dir, batch)
+
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            self.assertEqual(_run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            ).returncode, 0)
+            validation_run = _run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(validation_run.returncode, 0, validation_run.stdout + validation_run.stderr)
+            run_id = json.loads(validation_run.stdout)["runId"]
+
+            blocked = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T001",
+                "--run-id", run_id, "--code-workspace", str(code),
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            blocked_payload = json.loads(blocked.stdout)
+            self.assertEqual(
+                blocked_payload["requiredAction"],
+                "fix_validation_environment_and_retry_same_run",
+            )
+            self.assertEqual(blocked_payload["runId"], run_id)
+            self.assertEqual(_read_batch(feature_dir)["taskValidation"]["status"], "running")
+            run_state = json.loads(
+                (feature_dir / ".batch-task-validation-runs" / "B001" / f"{run_id}.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(run_state["status"], "running")
+            self.assertEqual(run_state["evidenceIds"], [])
+
+            ready_marker.write_text("ready\n", encoding="utf-8")
+            retried = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T001",
+                "--run-id", run_id, "--code-workspace", str(code),
+            )
+            self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+            self.assertEqual(json.loads(retried.stdout)["runId"], run_id)
+            self.assertEqual(_read_batch(feature_dir)["taskValidation"]["status"], "passed")
+
     def test_deferred_validation_failure_can_retry_same_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))

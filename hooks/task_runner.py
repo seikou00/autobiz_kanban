@@ -7,6 +7,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -931,7 +933,93 @@ def _command_repository(command: dict[str, Any], repositories: RepositoryMap) ->
     return requested, repositories[requested]
 
 
-def _run_validation(command: dict[str, Any], repositories: RepositoryMap) -> tuple[int, str]:
+def _validation_environment_error(
+    command: dict[str, Any],
+    *,
+    category: str,
+    detail: str,
+    retry_same_run: bool,
+    run_id: str | None = None,
+    batch_id: str | None = None,
+    task_id: str | None = None,
+) -> TaskRunnerError:
+    command_id = str(command.get("id", ""))
+    executable = str(command.get("argv", [""])[0])
+    details: dict[str, Any] = {
+        "requiredAction": (
+            "fix_validation_environment_and_retry_same_run"
+            if retry_same_run
+            else "fix_validation_environment_and_retry_batch_validation"
+        ),
+        "failureCategory": category,
+        "commandId": command_id,
+        "executable": executable,
+        "cwd": command.get("cwd"),
+        "detail": detail,
+        "userMessage": (
+            f"校验命令 {command_id} 无法运行（{category}）。请修复验证环境后重新运行校验；"
+            + ("继续使用原 runId。" if retry_same_run else "无需修改代码或 Plan。")
+        ),
+    }
+    if run_id is not None:
+        details["runId"] = run_id
+    if batch_id is not None:
+        details["batchId"] = batch_id
+    if task_id is not None:
+        details["taskId"] = task_id
+    return TaskRunnerError(
+        f"validation_environment_unavailable:{command_id}:{category}",
+        **details,
+    )
+
+
+def _assert_validation_command_environment(
+    command: dict[str, Any],
+    repositories: RepositoryMap,
+    *,
+    retry_same_run: bool,
+    run_id: str | None = None,
+    batch_id: str | None = None,
+    task_id: str | None = None,
+) -> None:
+    argv = command.get("argv")
+    if not isinstance(argv, list) or not argv or not isinstance(argv[0], str):
+        raise TaskRunnerError(f"invalid_validation_argv:{command.get('id', '')}")
+    _, repo = _command_repository(command, repositories)
+    command_cwd = (repo / str(command.get("cwd"))).resolve()
+    executable = argv[0]
+    has_path = "/" in executable or "\\" in executable or Path(executable).is_absolute()
+    if has_path:
+        candidate = Path(executable)
+        if not candidate.is_absolute():
+            candidate = command_cwd / candidate
+        available = candidate.is_file() and (os.name == "nt" or os.access(candidate, os.X_OK))
+    else:
+        available = shutil.which(executable) is not None
+    if not available:
+        raise _validation_environment_error(
+            command,
+            category="executable_missing",
+            detail=(
+                f"executable={executable};cwd={command_cwd};"
+                "check PATH or use the project wrapper (for example ./mvnw)"
+            ),
+            retry_same_run=retry_same_run,
+            run_id=run_id,
+            batch_id=batch_id,
+            task_id=task_id,
+        )
+
+
+def _run_validation(
+    command: dict[str, Any],
+    repositories: RepositoryMap,
+    *,
+    run_id: str | None = None,
+    batch_id: str | None = None,
+    task_id: str | None = None,
+    retry_same_run: bool = True,
+) -> tuple[int, str]:
     argv = command.get("argv")
     cwd = command.get("cwd")
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
@@ -946,6 +1034,14 @@ def _run_validation(command: dict[str, Any], repositories: RepositoryMap) -> tup
     if not isinstance(timeout, int) or timeout <= 0:
         timeout = DEFAULT_TIMEOUT_SECONDS
     try:
+        _assert_validation_command_environment(
+            command,
+            repositories,
+            retry_same_run=retry_same_run,
+            run_id=run_id,
+            batch_id=batch_id,
+            task_id=task_id,
+        )
         completed = subprocess.run(
             argv,
             cwd=command_cwd,
@@ -955,13 +1051,42 @@ def _run_validation(command: dict[str, Any], repositories: RepositoryMap) -> tup
             check=False,
         )
         output = completed.stdout + completed.stderr
+        if completed.returncode in {126, 127}:
+            raise _validation_environment_error(
+                command,
+                category="executable_failed_to_start",
+                detail=f"exitCode={completed.returncode};output={output[-2000:]}",
+                retry_same_run=retry_same_run,
+                run_id=run_id,
+                batch_id=batch_id,
+                task_id=task_id,
+            )
         return completed.returncode, output
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        return 124, stdout + stderr + f"\ncommand timed out after {timeout} seconds\n"
+        raise _validation_environment_error(
+            command,
+            category="command_timeout",
+            detail=(
+                f"timeoutSeconds={timeout};output="
+                f"{(stdout + stderr)[-2000:]}"
+            ),
+            retry_same_run=retry_same_run,
+            run_id=run_id,
+            batch_id=batch_id,
+            task_id=task_id,
+        )
     except OSError as exc:
-        return 127, str(exc) + "\n"
+        raise _validation_environment_error(
+            command,
+            category="process_start_failed",
+            detail=str(exc),
+            retry_same_run=retry_same_run,
+            run_id=run_id,
+            batch_id=batch_id,
+            task_id=task_id,
+        ) from exc
 
 
 def _criteria_ids(task: dict[str, Any]) -> set[str]:
@@ -1480,7 +1605,13 @@ def _complete_task_unlocked(
         if isinstance(command_id, str) and command_id in completed_commands:
             continue
         command_repository_id, _ = _command_repository(command, repositories)
-        exit_code, output = _run_validation(command, repositories)
+        exit_code, output = _run_validation(
+            command,
+            repositories,
+            run_id=run_id,
+            batch_id=batch_id,
+            task_id=task_id,
+        )
         if not _repository_snapshots_match(final_repositories, _repository_state(repositories)):
             raise TaskRunnerError(f"validation_modified_workspace:{command_id}")
         record = _record_for_command(
@@ -1696,11 +1827,39 @@ def _start_deferred_task_validation_unlocked(
             scope_workspaces,
             contract_name=str(task.get("id")),
         )
+        task_commands = [
+            item for item in task.get("validationCommands", []) if isinstance(item, dict)
+        ]
         _assert_validation_command_workspaces(
-            [item for item in task.get("validationCommands", []) if isinstance(item, dict)],
+            task_commands,
             workspace_roots,
             repositories,
             contract_name=str(task.get("id")),
+        )
+        for command in task_commands:
+            _assert_validation_command_environment(
+                command,
+                repositories,
+                retry_same_run=False,
+                batch_id=batch_id,
+                task_id=str(task.get("id")),
+            )
+    batch_validation = batch.get("batchValidation")
+    batch_commands = (
+        [
+            command
+            for command in batch_validation.get("commands", [])
+            if isinstance(command, dict)
+        ]
+        if isinstance(batch_validation, dict)
+        else []
+    )
+    for command in batch_commands:
+        _assert_validation_command_environment(
+            command,
+            repositories,
+            retry_same_run=False,
+            batch_id=batch_id,
         )
     baseline = _repository_state(repositories)
     snapshot_sha256 = _repository_state_sha256(baseline)
@@ -1992,7 +2151,13 @@ def _validate_deferred_task_unlocked(
         if isinstance(command_id, str) and command_id in completed:
             continue
         repository_id, _ = _command_repository(command, repositories)
-        exit_code, output = _run_validation(command, repositories)
+        exit_code, output = _run_validation(
+            command,
+            repositories,
+            run_id=run_id,
+            batch_id=batch_id,
+            task_id=task_id,
+        )
         if _repository_state_sha256(_repository_state(repositories)) != state.get("batchSnapshotSha256"):
             _fail_deferred_validation_for_workspace_change(
                 workspace,
@@ -2630,6 +2795,14 @@ def _run_batch_checks_unlocked(
         repositories,
         contract_name=batch_id,
     )
+    for command in commands:
+        _assert_validation_command_environment(
+            command,
+            repositories,
+            retry_same_run=run_id is not None,
+            run_id=run_id,
+            batch_id=batch_id,
+        )
     path: Path
     if run_id is None:
         if bundle.root.get("activeBatchId") != batch_id:
@@ -2770,7 +2943,12 @@ def _run_batch_checks_unlocked(
         if command_id in completed_commands:
             continue
         repository_id, _ = _command_repository(command, repositories)
-        exit_code, output = _run_validation(command, repositories)
+        exit_code, output = _run_validation(
+            command,
+            repositories,
+            run_id=run_id,
+            batch_id=batch_id,
+        )
         if not _repository_snapshots_match(validation_snapshot, _repository_state(repositories)):
             raise TaskRunnerError(f"batch_validation_modified_workspace:{command.get('id', '')}")
         record = _record_for_batch_command(
@@ -3124,15 +3302,29 @@ def _run_project_checks_unlocked(
     if (feature_dir / "BATCH_HANDOFF.json").exists():
         raise TaskRunnerError("project_check_blocked_by_batch_handoff")
     repositories = _resolve_repositories(code_workspace)
+    project_commands = [
+        command
+        for command in bundle.root.get("projectValidationCommands", [])
+        if isinstance(command, dict)
+    ]
+    for command in project_commands:
+        _assert_validation_command_environment(
+            command,
+            repositories,
+            retry_same_run=False,
+        )
     project_snapshot = _repository_state(repositories)
     evidence_ids: list[str] = []
     required_failed = False
     run_id = _new_run_id()
-    for command in bundle.root.get("projectValidationCommands", []):
-        if not isinstance(command, dict):
-            continue
+    for command in project_commands:
         repository_id, _ = _command_repository(command, repositories)
-        exit_code, output = _run_validation(command, repositories)
+        exit_code, output = _run_validation(
+            command,
+            repositories,
+            run_id=run_id,
+            retry_same_run=False,
+        )
         if not _repository_snapshots_match(project_snapshot, _repository_state(repositories)):
             raise TaskRunnerError(f"project_validation_modified_workspace:{command.get('id', '')}")
         record = {

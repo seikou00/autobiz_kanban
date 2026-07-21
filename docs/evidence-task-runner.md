@@ -89,7 +89,7 @@ python hooks/task_runner.py resume --workspace "$ARTIFACT_WORKSPACE" --feature "
 
 Resume rejects contract drift, repository mismatch, evidence-bearing runs, and any competing active run in the feature.
 
-If validation fails, fail evidence and its log are still written, while the task becomes `failed`. After interruption, use `recover` with the same arguments. Recovery can adopt evidence already appended for the same `runId` and command, so a crash between evidence append and run-state update does not duplicate validation. A crash between JSONL append and index commit is repaired from `evidence/.pending` before the next append. Use `inspect` to read run state and `abort` only before evidence reaches its terminal write phase.
+If a validation command runs and returns a normal non-zero result, fail evidence and its log are written, while the task becomes `failed`. If the command cannot start, its executable is missing, permission is invalid, or it times out, runner returns a structured environment error immediately and does not write a code-failure Evidence; fix the environment and rerun the same validation entrypoint, using the same `runId` when one already exists. Do not abort the task, modify Plan, or rebuild a digest for an environment error. After interruption, use `recover` with the same arguments. Recovery can adopt evidence already appended for the same `runId` and command, so a crash between evidence append and run-state update does not duplicate validation. A crash between JSONL append and index commit is repaired from `evidence/.pending` before the next append. Use `inspect` to read run state and `abort` only before evidence reaches its terminal write phase.
 
 ## Batch Validation And Revalidation
 
