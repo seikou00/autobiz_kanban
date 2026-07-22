@@ -243,6 +243,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${FEATURE_DIR}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${FEATURE_DIR}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
+候选分组必须先做可验证性判断：若 group 只产出 Entity/PO/DO/DTO/Mapper、配置或脚手架等结构，且唯一校验是 `compile/build` 或文件存在检查，则不得独立成 TASK；在不跨 workspace/lane 且不突破粒度上限时，合并到最早消费它的下游行为 group，并重排 ID/deps。只有能在不依赖后续 TASK 的情况下，通过真实的 behavior/integration/static 契约测试验证的数据迁移、ORM、序列化或 Schema 契约，才可保留为独立 TASK。此判断必须在 `preflight-task-groups` 和创建 Draft 前完成，不得在 task detail 阶段用空 `validationCommands`、伪 `static_check` 或 Batch compile 兜底。
+
 每次 Plan 会话准备 Draft 前只执行一次以下只读命令，并以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流；后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
 ```bash

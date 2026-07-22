@@ -87,6 +87,7 @@ class SkillArtifactDriftTests(unittest.TestCase):
 
         self.assertIn("add-batch-validation-command", plan_skill)
         self.assertIn("TASK 禁止配置 compile/build/typecheck/lint", plan_skill)
+        self.assertIn("唯一校验是 `compile/build` 或文件存在检查，则不得独立成 TASK", plan_skill)
         self.assertIn("requiredAction=run_batch_check", code_skill)
         self.assertIn("fix_batch_and_retry_same_run", code_skill)
         self.assertIn("attemptType=batch_revalidation", code_skill)
