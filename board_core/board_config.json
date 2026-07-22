@@ -328,6 +328,18 @@
         "group": "Dev",
         "skill": "autodev-plan",
         "order": 40,
+         "runtimePolicy": {
+          "agentMode": "solo",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": ["Explore"],
+            "customSubagentFiles": ["agents/explore.md"]
+          }
+        },
         "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、PLAN.md（执行计划：任务 DAG 与各任务依据/验证/状态）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },

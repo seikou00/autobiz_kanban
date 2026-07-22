@@ -10,7 +10,7 @@ REVIEWER_AGENT = (
     / "autodev"
     / "autodev-reviewer"
     / "references"
-    / "reviewer-agent.md"
+    / "reviewer-agents.md"
 )
 REVIEWER_SCHEMA = (
     ROOT
@@ -27,7 +27,7 @@ class ReviewerHandoffContractTest(unittest.TestCase):
         prompt = REVIEWER_AGENT.read_text(encoding="utf-8")
 
         self.assertIn("independent_task", prompt)
-        self.assertIn("把控制权交还主 agent", prompt)
+        self.assertIn("把控制权交还主 agents", prompt)
         self.assertIn("inline_main_agent", prompt)
         self.assertIn("必须停止当前回合", prompt)
         self.assertIn("请用户确认是否在下一回合切回 executor", prompt)
@@ -36,7 +36,7 @@ class ReviewerHandoffContractTest(unittest.TestCase):
         skill = REVIEWER_SKILL.read_text(encoding="utf-8")
 
         self.assertIn("independent_task", skill)
-        self.assertIn("主 agent 在同一回合继续执行第 4 步", skill)
+        self.assertIn("主 agents 在同一回合继续执行第 4 步", skill)
         self.assertIn("inline_main_agent", skill)
         self.assertIn("通过用户确认把 reviewer 与 executor 分隔到不同回合", skill)
         self.assertIn("未获得确认前", skill)

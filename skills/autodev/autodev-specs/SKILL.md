@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.2.1701
+version: v1.2.1703
 ---
 
 ## 缺失产物处理
@@ -38,6 +38,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/<capability>/spec.md`
 
+同步维护（非阶段产物）：
+
+- 会话工作区 `CONTEXT.md`（领域词汇表）：术语对齐后当场回写，协议见 `${pluginPath}/skills/references/domain-context.md`
+
 禁止写入：
 
 - 业务代码、测试代码、配置、迁移脚本
@@ -64,6 +68,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 阅读现有代码，识别已有接口、数据模型、权限、租户、审计、错误体、分页、状态流、配置和测试风格。
 - 将上游需求改写为外部可观察行为，不要把实现猜测写成需求。
 - 识别 capabilities：一组可以独立命名、独立验收的能力边界，例如 `order-export`、`approval-reminder`。
+- 与用户对齐了术语或规范代码名时，按 `${pluginPath}/skills/references/domain-context.md` 当场回写会话工作区 `CONTEXT.md`（领域词汇表）；只收已对齐术语。
 - 如果 API 或数据边界会影响行为契约，必须先与用户讨论。不要带着关键待确认项生成 specs。
 
 接口/数据决策讨论触发：
@@ -93,6 +98,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 | DATA-001 | Data | [表/字段/状态/约束] | [建议] | [备选] | [影响任务/验收] | [问题] |
 ```
 
+> 决策一旦与用户拍板，连同**被否决的备选及原因**要保留到 proposal 的 `Decision Log`，不要只留在对话里。
+
 ## 生成 proposal.md
 
 按 `${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
@@ -120,6 +127,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - **Capabilities**：按 `New Capabilities` / `Modified Capabilities` / `Removed Capabilities` 填入分类表中的 capability；名称使用 kebab-case；每个非“无”的 capability 必须对应一个 `specs/<capability>/spec.md`。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
+- **Decision Log**：把 explore 中已裁定且达门槛的决策逐条记入（决定 / 为什么 / 否决的备选及原因 / 约束的 Requirement）。记录门槛三者取一：结果偏离"直接读代码/需求会得到的显然做法"、有真实备选并择一、或改变外部可观察行为的边界或口径；显然的、无备选的、需求直接决定的不记。不得让否决理由停留在对话里蒸发；无满足门槛的决策时本节写"无"。
 
 ## 生成 specs/**/*.md
 
@@ -149,6 +157,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - **数量核对**：数出 proposal `Capabilities` 实际列出的 capability 数 N（排除"无"），数出 `specs/*/spec.md` 数 M，必须 N == M 且逐一对应；推进 specs_done 前在回复中输出对照表 `capability → specs/<capability>/spec.md ✓`，缺任何一行不得推进。
 - 每个 spec 至少包含一个 Requirement 和一个 Scenario。
 - specs 只描述行为契约，不包含实现任务。
+- proposal 含 `Decision Log` 节：explore 中已裁定且达门槛的决策已逐条记入（含被否决的备选及原因），无满足门槛的决策则写"无"；不得因赶进度省略本节。
 
 完成后推进 checkpoint：
 

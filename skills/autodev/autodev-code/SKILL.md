@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.2.0703
+version: v1.2.0704
 ---
 
 # /autodev-code — 代码执行
@@ -67,7 +67,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 
 ### 全部任务完成后的验证
 
-队列无「待做」「进行中」后，跑项目级验证（优先 系统约束 / Java/Maven 至少编译）。失败回到相关任务，不推进。通过后：
+队列无「待做」「进行中」后，跑项目级验证（优先 系统约束 / Java/Maven 至少编译）。失败回到相关任务，不推进。通过后先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。再推进 checkpoint：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
@@ -76,7 +76,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 
 ## 写入边界
 
-允许：与当前任务需求闭环直接相关的业务代码/测试/配置；能追溯到任务依据与队列的新增文件
+允许：与当前任务需求闭环直接相关的业务代码/测试/配置；能追溯到任务依据与队列的新增文件；会话工作区 `CONTEXT.md` 的领域词汇表锚点回填
 
 
 为完成任务必须改队列未直接提到的业务文件时，先确认与各输入产物确立的依据一致，再把文件与原因记入验证证据或完成/失败摘要，不要悄悄扩大范围。

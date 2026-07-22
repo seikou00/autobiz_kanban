@@ -84,12 +84,19 @@ def _local_repo(body="# 本地知识库\n- 本地约束\n"):
     return str(d)
 
 
-def _workspace(body="# 会话工作区指令\n- 工作区约束\n"):
-    """临时会话工作区目录；body 为 None 时不写 AGENTS.md（目录存在但无指令文件）。"""
+def _workspace(body="# 会话工作区指令\n- 工作区约束\n", *, context_body=None):
+    """临时会话工作区目录；body 为 None 时不写 AGENTS.md（目录存在但无指令文件）；
+    context_body 非 None 时额外写入 CONTEXT.md（领域词汇表，④ 层）。"""
     d = Path(tempfile.mkdtemp())
     if body is not None:
         (d / "AGENTS.md").write_text(body, encoding="utf-8")
+    if context_body is not None:
+        (d / "CONTEXT.md").write_text(context_body, encoding="utf-8")
     return str(d)
+
+
+# 领域词汇表（④ 层）测试正文：用词条独有的加粗标记校验注入，避免与其他段串味。
+GLOSSARY = "# 领域词汇表\n\n**导出任务 (ExportTask)**\n一次批量导出请求。\n_Avoid_: 下载任务\n"
 
 
 def _board_config(workflow):
@@ -335,6 +342,75 @@ class RuntimePolicyTest(unittest.TestCase):
         )
         self.assertEqual(code["agentConfig"]["agentMode"], "coordinator")
         self.assertTrue(code["agentConfig"]["toolConfig"]["task"]["enabled"])
+
+    def test_reads_subagent_config_from_current_node(self):
+        plugin_root = _plugin_root()
+        config_path = _board_config(
+            {
+                "nodes": [
+                    {
+                        "id": "dev.code",
+                        "runtimePolicy": {
+                            "subagentConfig": {
+                                "disabledBuiltinSubagents": ["designer"],
+                                "customSubagentFiles": [
+                                    "agents/domain-reviewer.md"
+                                ],
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+
+        config = render(
+            [],
+            node_id="dev.code",
+            board_config_path=config_path,
+            plugin_root=plugin_root,
+        )["agentConfig"]
+
+        self.assertEqual(
+            config["subagentConfig"],
+            {
+                "disabledBuiltinSubagents": ["designer"],
+                "customSubagentFiles": [
+                    display_path_join(plugin_root.resolve(), "agents/domain-reviewer.md")
+                ],
+            },
+        )
+
+    def test_custom_subagent_plugin_root_uses_target_platform_separator(self):
+        plugin_root = _plugin_root()
+        config_path = _board_config(
+            {
+                "nodes": [
+                    {
+                        "id": "dev.code",
+                        "runtimePolicy": {
+                            "subagentConfig": {
+                                "customSubagentFiles": [
+                                    "agents/explore.md"
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+
+        config = render(
+            [],
+            node_id="dev.code",
+            board_config_path=config_path,
+            plugin_root=plugin_root,
+            platform="win32",
+        )["agentConfig"]
+
+        self.assertEqual(
+            config["subagentConfig"]["customSubagentFiles"],
+            [display_path_join(plugin_root.resolve(), "agents/explore.md", platform="win32")],
+        )
 
     def test_finds_runtime_policy_on_dynamic_node(self):
         config_path = _board_config(
@@ -833,6 +909,110 @@ class RenderWorkspaceTest(unittest.TestCase):
         self.assertTrue(status[0]["loaded"])
         self.assertEqual(status[1]["deployUnitId"], "LF39.18_Outservice")
         self.assertIn("remote 1", res["message"])  # 单元摘要只数单元，不含工作区
+
+
+class RenderDomainContextTest(unittest.TestCase):
+    def test_domain_context_injected_after_unit_with_selection(self):
+        # 选中单元 + 工作区 AGENTS.md + CONTEXT.md：④ 段以裸标签外包、排在单元级整段之后。
+        ws = _workspace(context_body=GLOSSARY)
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+            session_workspace_path=ws,
+        )
+        prompt = res["sessionContext"]
+        self.assertIn('<DOMAIN_CONTEXT id="domain-context" scope="项目级领域词汇表">', prompt)
+        self.assertRegex(prompt, r'<DOMAIN_CONTEXT[^>]*>\n\n')
+        self.assertIn("\n\n</DOMAIN_CONTEXT>", prompt)
+        self.assertIn("**导出任务 (ExportTask)**", prompt)
+        self.assertLess(prompt.index("</UNIT>"), prompt.index("<DOMAIN_CONTEXT"))
+        # 状态顺序：本地工作区 → 领域词汇表 → 各单元；词汇表 local/loaded、路径指向 CONTEXT.md
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(
+            [s["deployUnitId"] for s in status],
+            ["本地工作区", "领域词汇表", "LF39.18_Outservice"],
+        )
+        self.assertTrue(status[1]["loaded"])
+        self.assertEqual(status[1]["source"], "local")
+        self.assertEqual(status[1]["path"], display_path_join(ws, "CONTEXT.md"))
+        # message 的单元摘要不把会话级条目算进去
+        self.assertIn("remote 1 / local 0 / 缺 0", res["message"])
+
+    def test_domain_context_only_no_selection(self):
+        # 未选单元、无工作区 AGENTS.md、仅 CONTEXT.md → 只注入 ④ 段，无 SCOPE/SYSTEM/UNIT。
+        ws = _workspace(body=None, context_body=GLOSSARY)
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        self.assertTrue(res["ok"])
+        prompt = res["sessionContext"]
+        self.assertIn("<DOMAIN_CONTEXT", prompt)
+        self.assertIn("**导出任务 (ExportTask)**", prompt)
+        self.assertNotIn("<SCOPE>", prompt)  # 词汇表不进适用范围表 → 无绑定行 → 整表跳过
+        self.assertNotIn("<UNIT", prompt)
+        self.assertNotIn("<SYSTEM", prompt)
+        self.assertEqual(res["message"], "未选择部署单元，仅注入领域词汇表")
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(len(status), 1)
+        self.assertEqual(status[0]["deployUnitId"], "领域词汇表")
+
+    def test_domain_context_and_workspace_coexist_no_dedup(self):
+        # AGENTS.md 与 CONTEXT.md 同目录并存：两段都注入、互不去重、状态各一条。
+        ws = _workspace(context_body=GLOSSARY)
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        prompt = res["sessionContext"]
+        self.assertIn("## 会话工作区指令", prompt)
+        self.assertIn("- 工作区约束", prompt)
+        self.assertEqual(prompt.count("<DOMAIN_CONTEXT"), 1)
+        self.assertIn("**导出任务 (ExportTask)**", prompt)
+        self.assertEqual(res["message"], "未选择部署单元，仅注入会话工作区指令、领域词汇表")
+        status = res["agentmdLoadStatus"]
+        self.assertEqual([s["deployUnitId"] for s in status], ["本地工作区", "领域词汇表"])
+
+    def test_domain_context_missing_file_skips_section(self):
+        # 只有 AGENTS.md、无 CONTEXT.md → 不生成 ④ 段、无其状态条目（缺失是常态不是错误）。
+        ws = _workspace()
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+            session_workspace_path=ws,
+        )
+        self.assertNotIn("<DOMAIN_CONTEXT", res["sessionContext"])
+        self.assertFalse(
+            any(s["deployUnitId"] == "领域词汇表" for s in res["agentmdLoadStatus"])
+        )
+
+    def test_domain_context_blank_file_skips_section(self):
+        # CONTEXT.md 全空白等同缺失；连同无 AGENTS.md、未选单元 → 空注入。
+        ws = _workspace(body=None, context_body="   \n\n")
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        self.assertEqual(res["sessionContext"], "")
+        self.assertEqual(res["agentmdLoadStatus"], [])
+        self.assertEqual(res["message"], "未选择部署单元，无需注入")
+
+    def test_domain_context_untouched_by_agents_dedup(self):
+        # 会话工作区 == 单元 localRepoPath 且单元走 local 兜底：AGENTS.md 同文件去重照旧生效，
+        # CONTEXT.md 文件名不同、不受去重影响，照常注入。
+        local = _local_repo()
+        (Path(local) / "CONTEXT.md").write_text(GLOSSARY, encoding="utf-8")
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            plugin_root=_plugin_root(write_remote=("LF39.system",)),  # 单元 remote 缺失→local 兜底
+            session_workspace_path=local,
+        )
+        prompt = res["sessionContext"]
+        self.assertNotIn("## 会话工作区指令", prompt)  # AGENTS.md 去重仍生效
+        self.assertIn("<DOMAIN_CONTEXT", prompt)  # 词汇表不受去重影响
+        self.assertIn("**导出任务 (ExportTask)**", prompt)
+        # 工作区条目被去重丢弃后，词汇表条目居首，其后各单元
+        status = res["agentmdLoadStatus"]
+        self.assertEqual([s["deployUnitId"] for s in status], ["领域词汇表", "LF39.18_Outservice"])
+
+    def test_win32_domain_context_status_uses_backslash(self):
+        ws = _workspace(body=None, context_body=GLOSSARY)
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws, platform="win32")
+        self.assertEqual(
+            res["agentmdLoadStatus"][0]["path"],
+            display_path_join(ws, "CONTEXT.md", platform="win32"),
+        )
 
 
 if __name__ == "__main__":

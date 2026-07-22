@@ -15,7 +15,8 @@ board_config.json 注册（样例，附件约定）::
         --selected-deployUnit '[{"deployUnitId":"LF39.18_Outservice","localRepoPath":"/repo/out"}]'
 
   · ``--session-workspace-path`` 是会话工作区目录的路径字符串（可空）；脚本读取该目录下的
-    ``AGENTS.md`` 作为「会话工作区指令」。路径为空 / 该文件缺失 / 全空白 → 不生成该段。
+    ``AGENTS.md`` 作为「会话工作区指令」、``CONTEXT.md`` 作为「领域词汇表」（④）。
+    路径为空 / 对应文件缺失 / 全空白 → 不生成对应段。
 
   · 当前 workflow 节点通过 ``--plugin-workspace``、``--project``、``--feature``
     显式定位，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口。
@@ -29,7 +30,10 @@ board_config.json 注册（样例，附件约定）::
       "agentConfig": {
         "agentMode": "solo",
         "toolConfig": {"task": {"enabled": true}},
-        "subagentConfig": {"disabledBuiltinSubagents": [], "customSubagentFiles": []}
+        "subagentConfig": {
+          "disabledBuiltinSubagents": [],
+          "customSubagentFiles": []
+        }
       } }
 
 ``sessionContext`` 分段拼接（见 docs/agents-loading-remote-local.md），各层次各用一对
@@ -47,6 +51,12 @@ board_config.json 注册（样例，附件约定）::
      单元级的 remote/local/缺 摘要。**去重**：若会话工作区的 ``AGENTS.md`` 与某选中单元实际加载的
      本地 ``AGENTS.md`` 是同一文件（按 resolve 比对），则不重复注入——丢掉会话工作区段（连同其
      ``本地工作区`` 状态条目与 ① 表行），由带 deployUnitId 身份的单元段承载该文件。
+  ④ 领域词汇表 ``<DOMAIN_CONTEXT>``：``<sessionWorkspacePath>/CONTEXT.md`` 全文，排在最后作
+     参考层（项目级领域术语与代码锚点，由 specs/plan 阶段回写维护，见
+     skills/references/domain-context.md）。独立于部署单元选择；文件名与 AGENTS.md 不同，
+     不参与 ③ 的同文件去重，也不进 ① 适用范围表（它不是代码库映射）。注入时在
+     ``agentmdLoadStatus`` 中占一条（``deployUnitId`` = ``领域词汇表``、``source:"local"``、
+     ``loaded:true``，排在「本地工作区」之后、各单元之前），不计入单元级 remote/local/缺 摘要。
 
 加载策略按层次不同：
   · 系统级（②）只认 remote：本机不知道用户把系统级文件放在哪，**不走 local 兜底**（否则会拿
@@ -57,6 +67,9 @@ board_config.json 注册（样例，附件约定）::
 
 系统级（②）与命中清单的单元级（③）正文里的 ``{plugin_root}`` 占位符在拼接前替换为
 知识库根目录绝对路径（``<pluginPath>/sys``）。
+
+当前节点 ``runtimePolicy.subagentConfig.customSubagentFiles`` 保存插件内相对路径；返回前直接
+拼接插件根目录绝对路径，并按目标平台规范化路径分隔符。
 
 设计原则：除入参 JSON 非法外，任何情况都返回 ok:true，绝不抛异常中断会话；
 缺清单 / 未匹配单元 / 缺 AGENTS.md 都降级为「少注入一点」并在 message 说明。
@@ -97,6 +110,8 @@ LOCAL_AGENTS_MD = "AGENTS.md"  # local 兜底文件名（§8 #1：直接读用�
 
 WORKSPACE_AGENTS_MD = "AGENTS.md"  # 工程级「会话工作区指令」文件名（sessionWorkspacePath 下）
 
+WORKSPACE_CONTEXT_MD = "CONTEXT.md"  # 项目级「领域词汇表」文件名（sessionWorkspacePath 下，④ 层）
+
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 DEFAULT_AGENT_MODE = "solo"
 DEFAULT_TASK_ENABLED = True
@@ -134,6 +149,7 @@ def _runtime_policy(
     """
     agent_mode = DEFAULT_AGENT_MODE
     task_enabled = DEFAULT_TASK_ENABLED
+    subagent_config: dict = {}
     current_node_id = (node_id or "").strip()
 
     if current_node_id:
@@ -160,7 +176,16 @@ def _runtime_policy(
                 if isinstance(configured_task_enabled, bool):
                     task_enabled = configured_task_enabled
 
-    return {
+                configured_subagents = policy.get("subagentConfig")
+                if isinstance(configured_subagents, dict):
+                    for field in ("disabledBuiltinSubagents", "customSubagentFiles"):
+                        configured_values = configured_subagents.get(field)
+                        if isinstance(configured_values, list) and all(
+                            isinstance(value, str) for value in configured_values
+                        ):
+                            subagent_config[field] = list(configured_values)
+
+    result = {
         "agentMode": agent_mode,
         "toolCustomConfig": {
             "task": {
@@ -168,6 +193,9 @@ def _runtime_policy(
             }
         },
     }
+    if subagent_config:
+        result["subagentConfig"] = subagent_config
+    return result
 
 
 def _session_node_id(
@@ -224,13 +252,52 @@ def _session_runtime_policy(
     return _runtime_policy(current_node_id, board_config_path=board_config_path)
 
 
-def _agent_config(runtime_policy: dict) -> dict:
+def _prepend_plugin_root_path(
+    value: str,
+    *,
+    plugin_root: Optional[Path] = None,
+    platform: Optional[str] = None,
+) -> str:
+    """在 custom subagent 的插件内相对路径前拼接真实插件根目录。"""
+    root = Path(plugin_root).resolve() if plugin_root is not None else ROOT
+    return display_path_join(root, value, platform=platform)
+
+
+def _agent_config(
+    runtime_policy: dict,
+    *,
+    plugin_root: Optional[Path] = None,
+    platform: Optional[str] = None,
+) -> dict:
     """将 workflow 的 runtimePolicy 转为 session_context_inject 对外格式。"""
     tool_custom_config = runtime_policy.get("toolCustomConfig")
     task_config = (
         tool_custom_config.get("task") if isinstance(tool_custom_config, dict) else None
     )
     task_enabled = task_config.get("enabled") if isinstance(task_config, dict) else None
+    subagent_config = runtime_policy.get("subagentConfig")
+    disabled_builtin_subagents = (
+        subagent_config.get("disabledBuiltinSubagents")
+        if isinstance(subagent_config, dict)
+        else None
+    )
+    custom_subagent_files = (
+        subagent_config.get("customSubagentFiles")
+        if isinstance(subagent_config, dict)
+        else None
+    )
+    expanded_custom_subagent_files = (
+        [
+            _prepend_plugin_root_path(
+                path,
+                plugin_root=plugin_root,
+                platform=platform,
+            )
+            for path in custom_subagent_files
+        ]
+        if isinstance(custom_subagent_files, list)
+        else []
+    )
     return {
         "agentMode": runtime_policy.get("agentMode", DEFAULT_AGENT_MODE),
         "toolConfig": {
@@ -241,8 +308,12 @@ def _agent_config(runtime_policy: dict) -> dict:
             }
         },
         "subagentConfig": {
-            "disabledBuiltinSubagents": [],
-            "customSubagentFiles": [],
+            "disabledBuiltinSubagents": (
+                disabled_builtin_subagents
+                if isinstance(disabled_builtin_subagents, list)
+                else []
+            ),
+            "customSubagentFiles": expanded_custom_subagent_files,
         },
     }
 
@@ -420,6 +491,7 @@ SCOPE_TAG = "SCOPE"   # ① 适用范围
 SYSTEM_TAG = "SYSTEM"     # ② 系统级 AGENTS.md
 UNIT_TAG = "UNIT"    # ③ 单元级：整段只用一对 <UNIT> 外包（工作区指令 + 各单元正文）
 UNIT_SECTION_ANCHOR = "unit-section"  # <UNIT> 标签 id（语义/结构边界）；单元锚点改为各自 ## 标题 slug
+DOMAIN_CONTEXT_TAG = "DOMAIN_CONTEXT"  # ④ 领域词汇表：整段只用一对 <DOMAIN_CONTEXT> 外包
 
 
 def _heading_slug(text: str) -> str:
@@ -494,6 +566,37 @@ def _workspace_binding(session_workspace_path: Optional[str]) -> dict:
     }
 
 
+# 领域词汇表（④）进 agentmdLoadStatus 时的 deployUnitId，与「本地工作区」同为会话级条目。
+DOMAIN_CONTEXT_STATUS_ID = "领域词汇表"
+
+
+def _build_domain_context(session_workspace_path: Optional[str]) -> Optional[str]:
+    """读取 ``<sessionWorkspacePath>/CONTEXT.md`` 作为「领域词汇表」正文（④ 层）。
+
+    路径为空 / 该目录下无 CONTEXT.md / 文件全空白 → 返回 None（不生成该段）。
+    独立于部署单元选择；文件名与 AGENTS.md 不同，不参与单元级同文件去重。
+    """
+    path = (session_workspace_path or "").strip()
+    if not path:
+        return None
+    return _read_nonempty(Path(path) / WORKSPACE_CONTEXT_MD)
+
+
+def _domain_context_status(
+    session_workspace_path: Optional[str], *, platform: Optional[str] = None
+) -> dict:
+    """领域词汇表进 agentmdLoadStatus 的一条。仅在已确认有正文时调用，
+    故 ``loaded:True``、``source:"local"``（词汇表始终读本地文件，无 remote）。"""
+    path = (session_workspace_path or "").strip()
+    return {
+        "deployUnitId": DOMAIN_CONTEXT_STATUS_ID,
+        "path": display_path_join(path, WORKSPACE_CONTEXT_MD, platform=platform) if path else "",
+        "loaded": True,
+        "source": "local",
+        "message": "",
+    }
+
+
 def _attr(text: str) -> str:
     """转义 XML 属性值里的 & < > "，避免 description 等自由文本撑破标签。"""
     return (
@@ -509,8 +612,10 @@ def _compose_prompt(
     system_sections: List[dict],
     workspace_content: Optional[str],
     unit_sections: List[dict],
+    domain_context: Optional[str] = None,
 ) -> str:
-    """① 适用范围（绑定表，deployUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md。
+    """① 适用范围（绑定表，deployUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md
+    → ④ 领域词汇表。
 
     三个层次各用一对 XML 风格标签外包（``<SCOPE>`` / ``<SYSTEM>`` /
     ``<UNIT>``）；被嵌入 md 自带的 ``#``/``##`` 标题被包在标签内，不再与结构
@@ -547,6 +652,30 @@ def _compose_prompt(
             lines.append(f"| {ref} | {cell} | {repo} |")
         lines.append("")
         lines.append(f"</{SCOPE_TAG}>")
+        lines.append('''
+            ## 必须执行的启动协议
+            1.先阅读本文件。
+            2.将任务分类为 frontend、backend、cross-stack 或 docs-only。
+            3.根据上方映射表，阅读对应工程的具体索引章节。
+            4.按下方任务路由表，继续阅读相关架构、领域、API 或编码规范文档。
+            5.到对应的实际工程地址检查代码或文档。不要只凭包名、记忆路径、 相似命名来判断。
+            6.如果任务同时涉及前端 API 调用和后端 API 行为，必须同时应用前端与后端规则，并分别说明验证结果。
+            ## 指令优先级
+            当规则冲突时，按以下顺序执行：
+              1. 当前用户请求。
+              2.本统一 AGENTS.md 的执行协议。
+              3.任务相关的架构、领域、API、编码规范文档。
+              4.实际工程中的既有代码行为。
+              5.通用框架或语言默认实践。
+            
+            ## 最终回复清单
+            完成任务时必须说明：
+            - 本次读取/使用了哪些文档和领域规范。
+            - 本次影响范围：前端、后端、前后端联动或仅文档。
+            - 使用了哪些 AGENTS.md 和详细文档。
+            - 修改了哪些文件。
+            - 执行了哪些验证命令，或说明为什么跳过。
+        ''')
 
     # ② 系统级 AGENTS.md：每段外包 <SYSTEM>（裸标签），id 供 ① 表里无独立 md 的单元回退锚点定位。
     for section in system_sections:
@@ -576,6 +705,15 @@ def _compose_prompt(
         lines.append("")
         lines.append(f"</{UNIT_TAG}>")
 
+    # ④ 领域词汇表：项目级术语与代码锚点，整段只用一对 <DOMAIN_CONTEXT> 外包，排最后作参考层。
+    if domain_context is not None:
+        lines.append("")
+        lines.append(f'<{DOMAIN_CONTEXT_TAG} id="domain-context" scope="项目级领域词汇表">')
+        lines.append("")
+        lines.append(domain_context.strip())
+        lines.append("")
+        lines.append(f"</{DOMAIN_CONTEXT_TAG}>")
+
     return "\n".join(lines)
 
 
@@ -599,13 +737,17 @@ def render(
             project=project,
             feature=feature,
             board_config_path=board_config_path,
-        )
+        ),
+        plugin_root=plugin_root,
+        platform=platform,
     )
     # 「会话工作区指令」独立于部署单元选择：先行构建，未选单元也可单独注入。
     workspace_content = _build_workspace_content(session_workspace_path)
+    # 「领域词汇表」（④）同样独立于部署单元选择；文件名与 AGENTS.md 不同，不参与其去重。
+    domain_context = _build_domain_context(session_workspace_path)
 
     if not selected:
-        if workspace_content is None:
+        if workspace_content is None and domain_context is None:
             return {
                 "ok": True,
                 "message": "未选择部署单元，无需注入",
@@ -613,14 +755,24 @@ def render(
                 "agentmdLoadStatus": [],
                 "agentConfig": agent_config,
             }
-        # 即便未选单元，工作区指令也在适用范围表里占一行映射。
-        bindings = [_workspace_binding(session_workspace_path)]
-        prompt = _compose_prompt(bindings, [], workspace_content, [])
+        # 即便未选单元，工作区指令也在适用范围表里占一行映射；词汇表不进适用范围表（非代码库映射）。
+        bindings = (
+            [_workspace_binding(session_workspace_path)] if workspace_content is not None else []
+        )
+        prompt = _compose_prompt(bindings, [], workspace_content, [], domain_context)
+        parts: List[str] = []
+        session_status: List[dict] = []
+        if workspace_content is not None:
+            parts.append("会话工作区指令")
+            session_status.append(_workspace_status(session_workspace_path, platform=platform))
+        if domain_context is not None:
+            parts.append("领域词汇表")
+            session_status.append(_domain_context_status(session_workspace_path, platform=platform))
         return {
             "ok": True,
-            "message": "未选择部署单元，仅注入会话工作区指令",
+            "message": "未选择部署单元，仅注入" + "、".join(parts),
             "sessionContext": prompt,
-            "agentmdLoadStatus": [_workspace_status(session_workspace_path, platform=platform)],
+            "agentmdLoadStatus": session_status,
             "agentConfig": agent_config,
         }
 
@@ -747,18 +899,19 @@ def render(
             }
         )
 
-    prompt = _compose_prompt(bindings, system_sections, workspace_content, unit_sections)
+    prompt = _compose_prompt(bindings, system_sections, workspace_content, unit_sections, domain_context)
     remote_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "remote")
     local_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "local")
     miss_n = sum(1 for s in load_status if not s["loaded"])
     message = f"remote {remote_n} / local {local_n} / 缺 {miss_n}"
-    # 工作区指令（若有正文注入）在 agentmdLoadStatus 里占首条；其加载结果不计入上面的
-    # remote/local/缺 单元摘要（那行只反映部署单元），避免把工作区混进单元统计。
-    result_status = (
-        [_workspace_status(session_workspace_path, platform=platform), *load_status]
-        if workspace_content is not None
-        else load_status
-    )
+    # 会话级条目（工作区指令、领域词汇表，若有正文注入）在 agentmdLoadStatus 里排前；其加载
+    # 结果不计入上面的 remote/local/缺 单元摘要（那行只反映部署单元），避免混进单元统计。
+    session_entries: List[dict] = []
+    if workspace_content is not None:
+        session_entries.append(_workspace_status(session_workspace_path, platform=platform))
+    if domain_context is not None:
+        session_entries.append(_domain_context_status(session_workspace_path, platform=platform))
+    result_status = [*session_entries, *load_status]
     return {
         "ok": True,
         "message": message,
@@ -831,7 +984,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     plugin_workspace=args.plugin_workspace,
                     project=args.project,
                     feature=args.feature,
-                )
+                ),
+                platform=args.platform,
             ),
         }
     else:
