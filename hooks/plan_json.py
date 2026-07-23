@@ -786,6 +786,15 @@ def validate_batch_plan_data(
     workspace_roots = workspace_root_sets[0] if workspace_root_sets else {}
     if any(item != workspace_roots for item in workspace_root_sets[1:]):
         errors.append(f"{batch_id}.mixed_task_workspace_roots")
+    frontend_routes = {
+        ui_refs.get("frontendRoute")
+        for item in batch_tasks
+        if item.get("uiRequired") is True
+        for ui_refs in [item.get("uiRefs")]
+        if isinstance(ui_refs, dict) and isinstance(ui_refs.get("frontendRoute"), str)
+    }
+    if len(frontend_routes) > 1:
+        errors.append(f"{batch_id}.mixed_task_frontend_routes")
     validation = data.get("batchValidation")
     commands = validation.get("commands") if isinstance(validation, dict) else []
     mode = (

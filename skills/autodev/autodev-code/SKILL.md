@@ -14,12 +14,12 @@ version: v1.2.0703
 python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --start-route-run --json
 ```
 
-如用户本轮直供了不在 `{FEATURE_DIR}/frontend-html/` 或流程文档中的 HTML 文件，追加 `--html-file "<HTML_PATH>"`，可重复。
+active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRefs`，由 resolver 从 Feature 内 `frontend-html/VIS-xxx/` 读取；不要用本轮 `--html-file` 替换 required VIS。只有没有 active Plan 绑定的兼容迁移场景，才允许追加 `--html-file`。
 
 2. 按输出的 `route` 读取 route SKILL 到 EOF：
    - `route=absolute-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md`
    - `route=standard-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-standard-html/SKILL.md`
-   - `route=spec-driven-ui`：有 UI 任务但没有可读取的 HTML/设计稿输入，按 specs/design/plan 实现前端；不读取 HTML parser，不要求 route SKILL。如果输出含 `htmlSourceMissing=true` / `htmlRequestMessage`，先按提示引导用户提供 HTML；用户不提供时，不阻断本阶段，继续按无高保真流程实现。
+   - `route=spec-driven-ui`：当前 active UI Task 的 `visualSourceRefs=[]`，按 specs/design/plan 实现前端；不读取 HTML parser，不要求 route SKILL。其他 Capability 的 required VIS 缺失不影响该 Task。
    - `route=none`：`UI_CONTEXT.json` 标记 `uiRequired=false`，不得写前端业务代码。
    - 如果读取工具返回截断内容，继续续读直到 EOF；未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码。
 
@@ -87,7 +87,7 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 5. PRD / specs / plan.json 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
 
 路径边界：上述 `specs/**/*.md`、`design.md`、`plan.json` 均指 feature 产物目录中的文件，不是业务代码仓库 cwd 下的同名路径；执行具体 task 时必须通过 `hooks/code_task_context.py` 解析并读取对应片段。
-6. 如果前面阶段声明了高保真/HTML 但 resolver 输出 `htmlSourceMissing=true`，先向用户说明缺失路径并请求提供 HTML；若用户本轮不提供，则按 `spec-driven-ui` 的无高保真流程继续，不等待、不阻断，也不得假装读取 HTML。
+6. 如果当前 active UI Task 引用了 required VIS，但 resolver 报 `required_visual_source_missing` 或摘要不一致，先修复/重新归档该 VIS，不能降级为 `spec-driven-ui`，也不能用另一个 HTML 临时替代。没有绑定 VIS 的 UI Task 正常走 `spec-driven-ui`。
 
 内部分流：
 

@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,8 @@ from hooks.ui_context import (  # noqa: E402
     FRONTEND_ROUTES,
     UI_CONTEXT_VERSION,
     validate_ui_context_data,
+    visual_source_bundle_sha256,
+    visual_source_content_sha256,
 )
 
 
@@ -119,6 +123,60 @@ def _upsert(items: list[Any], field: str, item: dict[str, Any]) -> None:
 
 def _string_array(values: list[str] | None) -> list[str]:
     return [value.strip() for value in values or [] if value.strip()]
+
+
+def _archive_visual_source(
+    workspace: Path,
+    feature: str,
+    source_id: str,
+    source_file_value: str,
+    source_root_value: str | None,
+) -> tuple[str, str, str, Path]:
+    source_file = Path(source_file_value).expanduser().resolve()
+    if not source_file.is_file():
+        raise ValueError(f"visual_source_file_missing:{source_file}")
+    source_root = Path(source_root_value).expanduser().resolve() if source_root_value else None
+    if source_root is not None:
+        if not source_root.is_dir():
+            raise ValueError(f"visual_source_root_missing:{source_root}")
+        try:
+            entry_relative = source_file.relative_to(source_root)
+        except ValueError as exc:
+            raise ValueError(f"visual_source_file_outside_root:{source_file}") from exc
+    else:
+        entry_relative = Path(source_file.name)
+
+    archive_parent = _path(workspace, feature).parent / "frontend-html"
+    if source_root is not None:
+        try:
+            archive_parent.resolve().relative_to(source_root)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(f"visual_source_root_contains_archive:{source_root}")
+    archive_dir = archive_parent / source_id
+    if archive_dir.exists():
+        raise ValueError(f"archived_visual_source_immutable:{source_id}")
+    archive_parent.mkdir(parents=True, exist_ok=True)
+    temporary = archive_parent / f".{source_id}-{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        if source_root is not None:
+            shutil.copytree(source_root, temporary)
+        else:
+            temporary.mkdir()
+            shutil.copy2(source_file, temporary / source_file.name)
+        archived_entry = temporary / entry_relative
+        if not archived_entry.is_file():
+            raise ValueError(f"archived_visual_source_entry_missing:{entry_relative.as_posix()}")
+        content_sha256 = visual_source_content_sha256(archived_entry)
+        bundle_sha256 = visual_source_bundle_sha256(temporary)
+        temporary.replace(archive_dir)
+    except Exception:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise
+    relative_path = (Path("frontend-html") / source_id / entry_relative).as_posix()
+    return relative_path, content_sha256, bundle_sha256, archive_dir
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -215,17 +273,54 @@ def _cmd_add_visual_source(args: argparse.Namespace) -> int:
         },
         "VIS",
     )
-    item = {
-        "sourceId": source_id,
-        "type": args.type,
-        "path": args.path,
-    }
+    existing = _find(sources, "sourceId", source_id)
+    if args.source_file and existing is not None and existing.get("contentSha256"):
+        return render_result(fail("archived_visual_source_immutable", source_id))
+    if args.source_file and args.path:
+        return render_result(fail("visual_source_path_conflict", "--path 与 --source-file 只能使用一个"))
+    if args.source_file and args.type not in {"high_fidelity_html", "standard_html"}:
+        return render_result(fail("visual_source_archive_type_invalid", args.type))
+    if args.source_root and not args.source_file:
+        return render_result(fail("visual_source_root_without_file", "--source-root 需要 --source-file"))
+    if not args.source_file and not args.path:
+        return render_result(fail("visual_source_path_missing", "--path 或 --source-file 必填"))
+    if existing is not None and existing.get("contentSha256") and not args.source_file:
+        return render_result(fail("archived_visual_source_immutable", source_id))
+
+    archive_dir: Path | None = None
+    if args.source_file:
+        try:
+            path, content_sha256, bundle_sha256, archive_dir = _archive_visual_source(
+                workspace,
+                feature,
+                source_id,
+                args.source_file,
+                args.source_root,
+            )
+        except ValueError as exc:
+            return render_result(fail("visual_source_archive_failed", str(exc)))
+        item = {
+            "sourceId": source_id,
+            "type": args.type,
+            "path": path,
+            "contentSha256": content_sha256,
+            "bundleSha256": bundle_sha256,
+        }
+    else:
+        item = {
+            "sourceId": source_id,
+            "type": args.type,
+            "path": args.path,
+        }
     if args.route:
         item["route"] = args.route
     if args.required is not None:
         item["required"] = args.required.lower() == "true"
     _upsert(sources, "sourceId", item)
-    return render_result(_write(workspace, feature, data))
+    result = _write(workspace, feature, data)
+    if not result.ok and archive_dir is not None and archive_dir.exists():
+        shutil.rmtree(archive_dir)
+    return render_result(result)
 
 
 def _cmd_add_capability(args: argparse.Namespace) -> int:
@@ -236,6 +331,7 @@ def _cmd_add_capability(args: argparse.Namespace) -> int:
         "capabilityId": args.capability_id,
         "pageRefs": _string_array(args.page_ref),
         "interactionRefs": _string_array(args.interaction_ref),
+        "visualSourceRefs": _string_array(args.visual_source_ref),
         "specRefs": _string_array(args.spec_ref),
     }
     if args.ui_required is not None:
@@ -375,7 +471,9 @@ def main(argv: list[str] | None = None) -> int:
     _add_common(visual)
     visual.add_argument("--source-id")
     visual.add_argument("--type", required=True)
-    visual.add_argument("--path", required=True)
+    visual.add_argument("--path")
+    visual.add_argument("--source-file")
+    visual.add_argument("--source-root")
     visual.add_argument("--route", choices=sorted(FRONTEND_ROUTES - {"none"}))
     visual.add_argument("--required", choices=["true", "false"])
     visual.set_defaults(func=_cmd_add_visual_source)
@@ -383,7 +481,9 @@ def main(argv: list[str] | None = None) -> int:
     _add_common(update_visual)
     update_visual.add_argument("--source-id", required=True)
     update_visual.add_argument("--type", required=True)
-    update_visual.add_argument("--path", required=True)
+    update_visual.add_argument("--path")
+    update_visual.add_argument("--source-file")
+    update_visual.add_argument("--source-root")
     update_visual.add_argument("--route", choices=sorted(FRONTEND_ROUTES - {"none"}))
     update_visual.add_argument("--required", choices=["true", "false"])
     update_visual.set_defaults(func=_cmd_add_visual_source)
@@ -393,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
     capability.add_argument("--capability-id", required=True)
     capability.add_argument("--page-ref", action="append")
     capability.add_argument("--interaction-ref", action="append")
+    capability.add_argument("--visual-source-ref", action="append")
     capability.add_argument("--spec-ref", action="append")
     capability.add_argument("--ui-required", choices=["true", "false"])
     capability.set_defaults(func=_cmd_add_capability)
@@ -401,6 +502,7 @@ def main(argv: list[str] | None = None) -> int:
     update_capability.add_argument("--capability-id", required=True)
     update_capability.add_argument("--page-ref", action="append")
     update_capability.add_argument("--interaction-ref", action="append")
+    update_capability.add_argument("--visual-source-ref", action="append")
     update_capability.add_argument("--spec-ref", action="append")
     update_capability.add_argument("--ui-required", choices=["true", "false"])
     update_capability.set_defaults(func=_cmd_add_capability)

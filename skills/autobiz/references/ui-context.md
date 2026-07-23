@@ -109,8 +109,28 @@ Allowed `route` values for visual sources:
 - `spec-driven-ui`
 - `missing-html`
 
-High-fidelity HTML that is known but not yet provided should still be recorded
-as a traceable visual source:
+When the user provides a high-fidelity HTML file, archive it into the Feature
+artifact directory before leaving the discussion stage. Use the writer's
+`--source-file` mode; do not persist an absolute local path as the stable
+source. A bundle with local assets can be archived with `--source-root`:
+
+```bash
+python "${pluginPath}/hooks/ui_context_writer.py" add-visual-source \
+  --feature "${feature}" \
+  --type high_fidelity_html \
+  --source-file "<HTML_PATH>" \
+  --source-root "<HTML_BUNDLE_ROOT>" \
+  --route absolute-html \
+  --required true
+```
+
+The writer stores the entry under `frontend-html/VIS-xxx/`, records content
+and bundle SHA-256 values, and later stages must use the generated `VIS-xxx`.
+
+High-fidelity HTML that is known but not yet provided may be recorded as a
+traceable required source. Its referenced UI Task cannot pass the Code
+high-fidelity gate until the file is archived. Do not silently downgrade a
+required source:
 
 ```json
 {
@@ -122,5 +142,29 @@ as a traceable visual source:
 }
 ```
 
-The code stage will ask the user for the file first. If the user does not
-provide it, code falls back to `spec-driven-ui` and continues without blocking.
+If a UI capability does not require high-fidelity input, leave its
+`visualSourceRefs` empty and use `spec-driven-ui`; this is valid even when
+another capability in the same Feature uses a required `VIS-xxx`.
+
+## Capability to Visual Source Binding
+
+`capabilities[]` owns the requirement-to-UI binding. Its optional
+`visualSourceRefs` must contain only existing `VIS-xxx` IDs:
+
+```json
+{
+  "capabilityId": "order-create-ui",
+  "uiRequired": true,
+  "pageRefs": ["PAGE-001"],
+  "interactionRefs": ["UIX-001"],
+  "visualSourceRefs": ["VIS-001"],
+  "specRefs": [
+    "specs/order-create/spec.md#REQ-001",
+    "specs/order-create/spec.md#SCN-001"
+  ]
+}
+```
+
+An ordinary UI capability without a high-fidelity source uses
+`"visualSourceRefs": []`; it must not be forced to reference a placeholder
+HTML file.

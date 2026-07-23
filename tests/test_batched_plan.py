@@ -811,6 +811,36 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(backend["executionLane"], "backend")
             self.assertEqual(frontend["executionLane"], "frontend")
 
+    def test_plan_writer_splits_frontend_tasks_with_different_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_plan_state(workspace)
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            spec_driven = task("T001", ui_required=True)
+            high_fidelity = task("T002", deps=["T001"], ui_required=True)
+            high_fidelity["uiRefs"]["visualSourceRefs"] = ["VIS-001"]
+            high_fidelity["uiRefs"]["frontendRoute"] = "absolute-html"
+            for item in (spec_driven, high_fidelity):
+                body = Path(tmp) / f"{item['id']}.json"
+                body.write_text(json.dumps(item), encoding="utf-8")
+                added = writer("add-task", "--body-file", str(body))
+                self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual([entry["taskIds"] for entry in root["batches"]], [["T001"], ["T002"]])
+
     def test_plan_writer_rejects_backend_task_after_frontend_collection_started(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

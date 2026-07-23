@@ -724,6 +724,14 @@ def _batch_workspace_contract(task: dict[str, Any]) -> tuple[tuple[str, str], ..
     return tuple(sorted(roots.items()))
 
 
+def _batch_frontend_route(task: dict[str, Any]) -> str:
+    if task_execution_lane(task) != "frontend":
+        return "none"
+    ui_refs = task.get("uiRefs")
+    route = ui_refs.get("frontendRoute") if isinstance(ui_refs, dict) else None
+    return str(route) if route in FRONTEND_ROUTES else "spec-driven-ui"
+
+
 def _batch_profile_command_matches_workspace(
     command: dict[str, Any],
     workspace_contract: tuple[tuple[str, str], ...],
@@ -745,6 +753,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     spec_roots: dict[str, str] = {}
     execution_lanes: dict[str, str] = {}
     workspace_contracts: dict[str, tuple[tuple[str, str], ...]] = {}
+    frontend_routes: dict[str, str] = {}
     existing_ids = {
         str(entry.get("id"))
         for entry in data.get("batches", [])
@@ -758,12 +767,14 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             primary = _primary_spec_root(task)
             execution_lane = task_execution_lane(task)
             workspace_contract = _batch_workspace_contract(task)
+            frontend_route = _batch_frontend_route(task)
             last_batch = sorted(groups)[-1] if groups else None
             can_append_to_last = bool(
                 last_batch
                 and spec_roots.get(str(last_batch)) == primary
                 and execution_lanes.get(str(last_batch)) == execution_lane
                 and workspace_contracts.get(str(last_batch)) == workspace_contract
+                and frontend_routes.get(str(last_batch)) == frontend_route
                 and len(groups[str(last_batch)]) < MAX_BATCH_TASKS
             )
             batch_id = str(last_batch) if can_append_to_last else _next_batch_id(used_ids)
@@ -783,6 +794,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             batch_id,
             _batch_workspace_contract(task),
         )
+        frontend_routes.setdefault(batch_id, _batch_frontend_route(task))
 
     ordered_ids = sorted(groups)
     root = {
@@ -2620,7 +2632,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "executionLaneOrder": ["backend", "frontend"],
                         "appendRule": (
                             "same_primary_capability_execution_lane_and_workspace_as_"
-                            "immediately_preceding_batch_and_not_full"
+                            "immediately_preceding_batch_frontend_route_and_not_full"
                         ),
                     },
                     "taskSetFinalization": {

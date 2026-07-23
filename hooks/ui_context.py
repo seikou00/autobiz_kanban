@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -25,10 +26,29 @@ VISUAL_SOURCE_ID_RE = re.compile(r"^VIS-\d{3}$")
 CAPABILITY_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class UIContextError(ValueError):
     """Raised when UI_CONTEXT.json cannot be loaded."""
+
+
+def visual_source_content_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def visual_source_bundle_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(bytes.fromhex(visual_source_content_sha256(path)))
+    return digest.hexdigest()
 
 
 def ui_context_path(feature_dir: Path) -> Path:
@@ -229,8 +249,13 @@ def validate_ui_context_data(
         required = visual_source.get("required")
         if required is not None and not isinstance(required, bool):
             errors.append(f"{context}.required_must_be_bool")
+        for field in ("contentSha256", "bundleSha256"):
+            digest = visual_source.get(field)
+            if digest is not None and (not isinstance(digest, str) or not SHA256_RE.fullmatch(digest)):
+                errors.append(f"{context}.{field}_invalid")
 
     capability_ids: set[str] = set()
+    referenced_visual_source_ids: set[str] = set()
     for index, capability in enumerate(capabilities):
         context = f"capabilities[{index}]"
         capability_id = capability.get("capabilityId")
@@ -248,6 +273,23 @@ def validate_ui_context_data(
         for interaction_id in _validate_string_array(errors, capability, "interactionRefs", context, required=False, item_re=INTERACTION_ID_RE):
             if interaction_id not in interaction_ids:
                 errors.append(f"{context}.interactionRef_unknown:{interaction_id}")
+        visual_source_refs = (
+            _validate_string_array(
+                errors,
+                capability,
+                "visualSourceRefs",
+                context,
+                required=False,
+                item_re=VISUAL_SOURCE_ID_RE,
+            )
+            if "visualSourceRefs" in capability
+            else []
+        )
+        for source_id in visual_source_refs:
+            if source_id not in visual_source_ids:
+                errors.append(f"{context}.visualSourceRef_unknown:{source_id}")
+            else:
+                referenced_visual_source_ids.add(source_id)
         _validate_spec_refs(
             errors,
             capability,
@@ -256,6 +298,17 @@ def validate_ui_context_data(
             defined_scenarios,
             required=require_locked or status == "locked",
         )
+
+    if require_locked or status == "locked":
+        for visual_source in visual_sources:
+            source_id = visual_source.get("sourceId")
+            if (
+                isinstance(source_id, str)
+                and visual_source.get("required") is True
+                and isinstance(visual_source.get("contentSha256"), str)
+                and source_id not in referenced_visual_source_ids
+            ):
+                errors.append(f"visualSources.required_archived_source_unbound:{source_id}")
 
     return errors
 

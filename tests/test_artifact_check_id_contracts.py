@@ -489,6 +489,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         )
 
     def _write_ui_context(self, feature_dir: Path, *, ui_required: bool = True) -> None:
+        if ui_required:
+            (feature_dir / "frontend-html").mkdir(parents=True, exist_ok=True)
+            (feature_dir / "frontend-html" / "page.html").write_text("<main>UI</main>", encoding="utf-8")
         self._write_json(
             feature_dir,
             "UI_CONTEXT.json",
@@ -522,6 +525,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                         "uiRequired": True,
                         "pageRefs": ["PAGE-001"],
                         "interactionRefs": ["UIX-001"],
+                        "visualSourceRefs": ["VIS-001"],
                         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
                     }
                 ] if ui_required else [],
@@ -987,8 +991,13 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     ],
                 },
             )
+            self._rewrite_plan_fixture_to_current_schema(feature_dir)
 
-            self.assertEqual(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+            ctx = self._required_output_ctx(feature_dir, "UI_CONTEXT.json")
+            self.assertGreater(validate_plan_ui_projection(ctx), 0)
+            data["capabilities"][0]["visualSourceRefs"] = []
+            self._write_json(feature_dir, "UI_CONTEXT.json", data)
+            self.assertEqual(validate_plan_ui_projection(ctx), 0)
 
     def test_plan_ui_projection_rejects_ui_task_when_feature_not_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

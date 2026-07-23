@@ -1749,7 +1749,7 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["batchAssignment"]["executionLaneOrder"], ["backend", "frontend"])
         self.assertEqual(
             contract["batchAssignment"]["appendRule"],
-            "same_primary_capability_execution_lane_and_workspace_as_immediately_preceding_batch_and_not_full",
+                "same_primary_capability_execution_lane_and_workspace_as_immediately_preceding_batch_frontend_route_and_not_full",
         )
         self.assertFalse(contract["batchAssignment"]["manualBatchIdSupported"])
         self.assertIn("taskSetFinalization", contract)
@@ -2746,6 +2746,120 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(data["interactions"], [])
             self.assertEqual(data["visualSources"], [])
             self.assertEqual(data["capabilities"], [])
+
+    def test_ui_context_writer_archives_html_bundle_and_binds_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            source_root = root / "provided-ui"
+            (source_root / "assets").mkdir(parents=True)
+            source_file = source_root / "index.html"
+            source_file.write_text('<link rel="stylesheet" href="assets/page.css"><main>UI</main>', encoding="utf-8")
+            (source_root / "assets" / "page.css").write_text("main { color: red; }", encoding="utf-8")
+
+            commands = [
+                ("init", "--ui-required"),
+                ("add-page", "--name", "Page", "--goal", "Goal"),
+                (
+                    "add-visual-source",
+                    "--type",
+                    "high_fidelity_html",
+                    "--source-file",
+                    str(source_file),
+                    "--source-root",
+                    str(source_root),
+                    "--route",
+                    "absolute-html",
+                    "--required",
+                    "true",
+                ),
+                (
+                    "add-capability",
+                    "--capability-id",
+                    "alpha-ui",
+                    "--page-ref",
+                    "PAGE-001",
+                    "--visual-source-ref",
+                    "VIS-001",
+                    "--spec-ref",
+                    "specs/cap/spec.md#REQ-001",
+                    "--spec-ref",
+                    "specs/cap/spec.md#SCN-001",
+                    "--ui-required",
+                    "true",
+                ),
+                ("confirm", "--decision-source", "user_confirmed"),
+                ("lock",),
+            ]
+            for command in commands:
+                result = _run(
+                    "ui_context_writer.py",
+                    *command,
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            data = json.loads((feature_dir / "UI_CONTEXT.json").read_text(encoding="utf-8"))
+            source = data["visualSources"][0]
+            self.assertEqual(source["path"], "frontend-html/VIS-001/index.html")
+            self.assertEqual(len(source["contentSha256"]), 64)
+            self.assertEqual(len(source["bundleSha256"]), 64)
+            self.assertEqual(data["capabilities"][0]["visualSourceRefs"], ["VIS-001"])
+            self.assertTrue((feature_dir / source["path"]).is_file())
+            self.assertTrue((feature_dir / "frontend-html" / "VIS-001" / "assets" / "page.css").is_file())
+
+    def test_ui_context_writer_materializes_existing_visual_source_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            source_file = root / "provided.html"
+            source_file.write_text("<main>provided</main>", encoding="utf-8")
+            commands = [
+                ("init", "--ui-required"),
+                (
+                    "add-visual-source",
+                    "--source-id",
+                    "VIS-001",
+                    "--type",
+                    "high_fidelity_html",
+                    "--path",
+                    "frontend-html/<待提供>.html",
+                    "--route",
+                    "absolute-html",
+                    "--required",
+                    "true",
+                ),
+                (
+                    "update-visual-source",
+                    "--source-id",
+                    "VIS-001",
+                    "--type",
+                    "high_fidelity_html",
+                    "--source-file",
+                    str(source_file),
+                    "--route",
+                    "absolute-html",
+                    "--required",
+                    "true",
+                ),
+            ]
+            for command in commands:
+                result = _run(
+                    "ui_context_writer.py",
+                    *command,
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            data = json.loads((feature_dir / "UI_CONTEXT.json").read_text(encoding="utf-8"))
+            self.assertEqual(data["visualSources"][0]["path"], "frontend-html/VIS-001/provided.html")
+            self.assertTrue((feature_dir / data["visualSources"][0]["path"]).is_file())
 
     def test_result_writers_create_expected_ids_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
