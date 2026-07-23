@@ -318,6 +318,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
 - [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 PLAN.md 已同步记录，并更新相关任务或风险项。
 
+如果task工具可用，使用task工具同时对比specs、proposal与design.md和plan.md文件进行严格的审查，主要从三个维度核查：1.技术选择是否合理，2.规格是否完全覆盖，3.测试是否合理和完备。
+如任一task工具返回有问题需要修复plan.md与design.md。
+如果task不可用则不用执行上面的内容。继续任务。
 ---
 
 ## 整体完成条件

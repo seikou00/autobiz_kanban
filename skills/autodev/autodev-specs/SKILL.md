@@ -159,6 +159,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - specs 只描述行为契约，不包含实现任务。
 - proposal 含 `Decision Log` 节：explore 中已裁定且达门槛的决策已逐条记入（含被否决的备选及原因），无满足门槛的决策则写"无"；不得因赶进度省略本节。
 
+如task工具可用，则使用task工具对比prd.md与proposal和specs文件进行严格的审查，看是否spec已经完全覆盖需求范围，和是否有违反需求的地方。
+如task工具返回有问题需要修复specs或proposal。
+如果task不可用则不用执行上面的内容。继续任务。
 完成后推进 checkpoint：
 
 ```bash

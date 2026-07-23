@@ -163,7 +163,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 若当前行为已经由实现支持，测试可能首次运行即通过。此时必须在报告中标记为 `characterization_pass`，不能伪造 red 阶段。
 
-### Step 5: 执行精确测试
+### 执行精确测试
 
 必须优先运行精确到测试方法或最小测试文件的命令，例如：
 
@@ -214,7 +214,9 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 3. 若项目约定要求，运行编译或测试编译命令。
 
 扩大验证失败时，必须回到『失败归因与最小修复』。不得只因精确测试通过就推进完成。
-
+如果task工具可用，则使用task工具使用verfication角色，对当前特性生成的代码进行验收。
+如果task返回，必须修复其汇报的问题。
+如果task不可用则不用执行上面的内容。继续任务。
 ### 生成最终报告
 
 `UNIT_TEST_REPORT.md` 必须包含以下章节：
@@ -262,7 +264,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - E2E 阶段应重点覆盖的链路。
 - 仍需人工确认的项。
 - 若失败，返回用户确认。
-### Step 9: 分支决策
+### 分支决策
 
 可以推进 `unit_test_done` 的条件：
 
