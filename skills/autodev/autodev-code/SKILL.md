@@ -292,20 +292,11 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 - 修复后的 batch-check 返回 `requiredAction=run_batch_task_validation` 时，保留原 batch run ID，整批 TASK 当前 validation completion 指针失效；创建新的 deferred task-validation run，启动一个新的批次级验证子代理串行重验全部 TASK。全部通过后仍由该子代理使用原 batch run ID 再跑最终 batch-check。`pendingRevalidation` 只保存触发和被替代 Evidence 关联，不再启动另一套 `start/complete` 重验。
 - batch-check 直接通过且没有批次修复，或重验证后的最终 batch-check 通过时，runner 才把批次置为完成。非末批会返回 `stop_and_open_new_conversation` 与 `batchHandoff`；末批则进入可选项目检查或完成门禁。
 
-若 `batch-check` 返回 `requiredAction=stop_and_open_new_conversation`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 smoke/project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。
+若 `batch-check` 返回 `requiredAction=stop_and_open_new_conversation`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。
 
 宿主未提供 conversation ID，因此 runner 无法从进程参数中证明调用来自新对话；`requiresNewConversation` 是供宿主和 Agent 执行的协议层约束，不是 runner 可独立验证的身份凭据。`activate-batch` CLI 仅保留给兼容或诊断场景，正常 Code 流程不得直接调用。
-7. 若 `SMOKE_TEST_PLAN.json`存在，按其中 `tests[]` 生成或补齐旁路冒烟测试源码/脚本。每条 smoke 必须按计划中的 `seam` 站在公开边界上验证，不测私有方法、不查内部实现细节；按 `verticalSlice` 一次只实现一个最小闭环，不把多个场景合成一条大烟测；按 `mockPolicy` 只 mock 系统边界，不 mock 自有模块或内部协作者。冒烟测试必须是 opt-in：Java/Spring 可用 `*SmokeIT` + `-Psmoke`，前端可用 `tests/smoke/` + 单独 smoke script，CLI/API 可用 `scripts/smoke/`；这些源码/脚本只用于本地验证，可以放在业务项目测试目录，但不得进入业务项目 Git 托管。生成后必须确保 `sourcePath` 被目标项目 Git 忽略，优先把精确路径或窄范围 AutoDev smoke 模式写入 `.git/info/exclude`，不要把 smoke 源码 `git add`，也不得让默认 `validationCommands` 无意中跑到慢/脆的冒烟。全部强 validation 通过后，运行：
 
-```bash
-python "${pluginPath}/hooks/run_advisory_smoke.py" --feature "${feature}"
-```
-
-`run_advisory_smoke.py` 会写入 `SMOKE_RESULT.json` 并向 `EVIDENCE.jsonl` 追加 `action=smoke` evidence。冒烟 PASS/FAIL/BLOCKED/SKIPPED 都只作为旁路风险信号：不得把 smoke evidence 写入 batch task 的 `evidenceIds`，不得把冒烟失败改成任务失败，不得因为 `SMOKE_RESULT.json.verdict` 非 PASS 而阻断 `code_done`。
-
-若 `run_advisory_smoke.py` 在执行前置检查阶段返回非 0（例如 `sourcePath` 对应测试源码不存在、测试条目非法、命令缺失、sourcePath 已被 Git 跟踪或未被 Git ignore 命中），这表示 Code 阶段尚未按 `SMOKE_TEST_PLAN.json` 补齐本地冒烟测试资产；必须先补齐测试源码/修正计划/更新 `.git/info/exclude` 后重跑。只有冒烟命令已经实际执行后的 PASS/FAIL/BLOCKED/SKIPPED 结果才属于不阻断流转的旁路风险信号。
-
-策略边界：TASK `validationCommands`、`task_covered` 的 `action=batch_closure`、命令模式的 `batchValidation.commands` / `action=batch_validation` evidence 与 `code_done_gate` 都是强门禁；`SMOKE_TEST_PLAN.json` / `SMOKE_RESULT.json` 只表达旁路冒烟风险。
+策略边界：TASK `validationCommands`、`task_covered` 的 `action=batch_closure`、命令模式的 `batchValidation.commands` / `action=batch_validation` evidence 与 `code_done_gate` 都是强门禁。旧 Feature 若已有 `SMOKE_TEST_PLAN.json`，可按需手动运行独立 smoke 工具诊断，但新 Plan/Code 流程不生成、不读取，也不要求其结果。
 
 > 一致性：任务的依据在对应上游产物里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 
@@ -349,7 +340,6 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 - 所有任务都有 `action=implementation` evidence，且批次最终快照上的 required TASK validation 全部通过；`checkedCriteria` 并集覆盖全部 AC；completion evidence 与命令、validation runId、`batchSnapshotSha256`、当前 implementation revision/pointer 一致。未启用 deferred policy 的旧计划只走旧 runner 路径，不允许两种模式混跑。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 task/batch/project validation evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
 - 每个批次最多 5 个任务；该批 `taskValidation.status=passed` 后额外批次质量门禁已通过。存在批次修复时整批 TASK completion 指针先失效，再产生 `attemptType=batch_revalidation` 的新完成 evidence，随后原 batch-check run 再次通过；非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
-- 若 `SMOKE_TEST_PLAN.json`存在：已按计划生成/补齐冒烟测试源码并确认其被目标项目 Git 忽略，已运行 `run_advisory_smoke.py`；`SMOKE_RESULT.json` 已写入。`SMOKE_RESULT.json.verdict` 为 `FAIL` / `BLOCKED` / `SKIPPED` 时，记录为风险但不阻断本阶段流转。
 - 必要验证通过；每批最新 batch-check 晚于该批当前 TASK 完成 evidence，且所有 required 项通过；配置了项目检查时，最新 `project-check` 还必须晚于全部当前 TASK/batch evidence（`code_done` 会再次校验 plan/evidence/run 闭环）。
 - HTML 分支或前端源码变更已完成统一前端回检，或用户明确跳过；仍有 `must-fix` / 执行异常时不得推进 `code_done`。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。

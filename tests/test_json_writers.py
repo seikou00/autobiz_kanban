@@ -272,18 +272,6 @@ def _write_plan_tasks(feature_dir: Path, tasks: list[dict]) -> None:
     path.write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _write_smoke_na(feature_dir: Path) -> None:
-    (feature_dir / "SMOKE_TEST_PLAN.json").write_text(
-        json.dumps(
-            {"version": 1, "featureId": "alpha", "flowBlocking": False, "skipReason": "无冒烟价值", "tests": []},
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 def _plan_task_body() -> dict:
     return {
         "id": "T001",
@@ -1767,7 +1755,6 @@ class JsonWriterTests(unittest.TestCase):
                     "add-batch-validation-command",
                     "add-project-validation-command",
                     "render-md",
-                    "smoke_plan_writer.init",
                 ],
             },
         )
@@ -1960,7 +1947,6 @@ class JsonWriterTests(unittest.TestCase):
             _write_design(feature_dir)
             _write_non_ui(feature_dir)
             _write_plan(feature_dir, include_second=False)
-            _write_smoke_na(feature_dir)
 
             result = validate_stage(workspace=workspace, feature="alpha", stage="dev.plan")
             output = io.StringIO()
@@ -1970,6 +1956,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(result.ok, code == 0)
             self.assertEqual([error["reason"] for error in result.errors or []], [])
             self.assertEqual(output.getvalue().strip(), "")
+            self.assertFalse((feature_dir / "SMOKE_TEST_PLAN.json").exists())
 
     def test_plan_structure_passes_while_stage_gate_fails_on_missing_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1979,7 +1966,6 @@ class JsonWriterTests(unittest.TestCase):
             _write_design(feature_dir)
             _write_non_ui(feature_dir)
             _write_plan(feature_dir, include_second=False)
-            _write_smoke_na(feature_dir)
 
             structure = _run("plan_writer.py", "validate", "--workspace", str(workspace), "--feature", "alpha", "--structure")
             gate = _run("stage_gate.py", "validate", "--workspace", str(workspace), "--feature", "alpha", "--stage", "dev.plan")

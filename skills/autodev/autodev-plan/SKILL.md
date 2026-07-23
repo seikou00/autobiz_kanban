@@ -239,7 +239,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 本阶段必须一次性生成完整的 plan.json + PLAN.md，并同时生成全部 `plans/Bxxx/plan.json`。不得只生成第一批并等待 Code 跑完后再规划下一批。`plan.json` 只保存 feature 状态、任务集封口状态、批次索引、批次状态、lane 级批次验证配置和可选的跨批次项目验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约、task 状态和投影后的批次验证状态。`PLAN.md` 是从 `plan.json` 投影的人类视图，并包含全部批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
-生成或修改 `plan.json` / `PLAN.md` / `SMOKE_TEST_PLAN.json` 必须使用 writer：`${pluginPath}/hooks/plan_writer.py`、`${pluginPath}/hooks/smoke_plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
+生成或修改 `plan.json` / `PLAN.md` 必须使用 `${pluginPath}/hooks/plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
 生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${FEATURE_DIR}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${FEATURE_DIR}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
@@ -394,7 +394,6 @@ UI 任务投影规则：
    - Batch 按 `B001 -> B002` 的计划顺序串行执行；同一 Batch 的 TASK 由单一队列逐个收口和校验。依赖仍只表达真实业务前置关系，不要为了 Batch 串行额外伪造跨 Batch 依赖；Batch 内没有真实依赖的 TASK 也不启动并行 run。
    - 任务数不是首要目标：8-15 个清晰 vertical slice 优于 5 个巨型 capability task。超过 15 个任务时才检查是否把代码步骤误拆成任务；禁止为了压低任务数合并独立场景。
    - specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
-   - 任务拆分变化后必须重新检查 `SMOKE_TEST_PLAN.json`：冒烟案例的 `taskId` 不得继续绑定旧的巨型任务；优先一 task 一 SMK 或一关键 SCN 一 SMK。
 
 与 writer 的衔接：
 
@@ -423,34 +422,19 @@ python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --featu
 python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --feature "${feature}" --lane frontend --command "<FRONTEND_BUILD_OR_TYPECHECK>" --kind build --code-workspace "<FRONTEND_MODULE>"
 ```
 
-`task_covered` 必须由 writer 识别并完整覆盖该 lane 每个 Batch 的 TASK；无法证明时命令失败，必须改用 `commands`，不得强行修改 coverage ID。命令模式的 `kind` 使用 `compile`、`build`、`typecheck`、`lint` 之一。同一 lane 只使用一个 workspace 时 writer 可自动选择；同一 lane 使用多个仓库时，必须为每个 workspace 分别添加 required 命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。确有跨 lane/跨批次集成检查时，再用 `add-project-validation-command --kind integration_test|e2e_test|static_check` 添加可选最终检查。随后生成 `SMOKE_TEST_PLAN.json`。
+`task_covered` 必须由 writer 识别并完整覆盖该 lane 每个 Batch 的 TASK；无法证明时命令失败，必须改用 `commands`，不得强行修改 coverage ID。命令模式的 `kind` 使用 `compile`、`build`、`typecheck`、`lint` 之一。同一 lane 只使用一个 workspace 时 writer 可自动选择；同一 lane 使用多个仓库时，必须为每个 workspace 分别添加 required 命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。确有跨 lane/跨批次集成检查时，再用 `add-project-validation-command --kind integration_test|e2e_test|static_check` 添加可选最终检查。
 
-`SMOKE_TEST_PLAN.json` 是旁路冒烟测试计划，借鉴 superpowers writing-plans 与 TDD 的克制粒度：每个案例只描述一个站在公开 seam 上的 vertical slice，必须写清精确测试源码路径、精确运行命令、预期可观察信号和场景依据。Plan 阶段只写计划，不创建或修改业务测试源码，不批量设计覆盖想象行为的测试矩阵。
+Plan 阶段不再生成独立 smoke 计划。每个 Batch 的测试闭环必须直接落在 TASK `validationCommands`、`task_covered` 或 `batchValidation.commands` 中并由 runner 实际执行；只有测试文件但没有可执行命令和 AC 覆盖关系，不视为有效验证。
 
-`SMOKE_TEST_PLAN.json` 规则：
-- 字段结构以 `${pluginPath}/skills/autodev/autodev-plan/templates/smoke_test_plan.json` 和 artifact validator 为准；本文只说明生成语义，不重复维护完整字段清单。
-- `flowBlocking` 必须为 `false`；`tests[]` 可以为空，确实没有旁路冒烟价值时写清 `skipReason`，不要为了填表编造案例。
-- 每条 smoke 按 `SMK-001` 起编号，引用一个真实 `plans/Bxxx/plan.json.tasks[].id` 和一个 specs 中真实 `SCN-xxx`，不要把多个场景塞进一条冒烟。
-- `seam` 描述测试站立的公开边界：`type` 使用 `startup/api/http/ui/cli/job/migration/health/custom` 之一，`entrypoint` 写调用方真实使用的入口，`observable` 写通过公开响应、页面、CLI 输出或健康信号观察到的结果；不得把私有方法、内部类、内部表查询当作 seam。
-- `verticalSlice` 只写一个最小闭环：`trigger` 是单一用户动作或系统触发，`expectedOutcome` 是来自 specs/design 的独立可观察结果；不要先规划一批横向用例再等 Code 阶段一起实现。
-- `mockPolicy.externalOnly` 必须为 `true`；`allowedMocks` 只能列外部 API、支付、邮件、时间、随机、文件系统或受控测试数据库等系统边界 mock。不得计划 mock 自有模块、内部服务或私有协作者。
-- 三类预期不要同义反复：`seam.observable` 写站在公开边界能看见什么，`verticalSlice.expectedOutcome` 写来自 specs/design 的行为结论，`expectedSignals[]` 写测试命令或断言可检查的机器信号（如 HTTP 状态、关键响应字段、页面路由可达、CLI 输出片段；机器校验以断言和退出码为准，不解析自然语言）。
-- `sourcePath` 只写计划中的目标测试源码或脚本路径，必须落在业务项目测试/冒烟目录，例如 `src/test/`、`tests/smoke/`、`scripts/smoke/`、`e2e/smoke/`；Plan 阶段不要求文件已存在。这些是 AutoDev 本地验证资产，不是业务项目长期测试资产，Code 阶段必须确保对应路径被目标项目 Git 忽略。
-- `command` 必须是只运行对应冒烟案例的 opt-in 命令，例如 `mvn -q -Psmoke -Dtest=OrderSmokeIT verify`、`npm run smoke -- order.spec.ts`；不得写需要人工参与的步骤。
-- 冒烟案例可覆盖启动/context、主链路 API、关键 UI route、CLI 主命令、migration/profile 加载、外部依赖 stub 等高风险信号，但必须按场景拆成多条 SMK，每条只覆盖一个 vertical slice；不要用它替代单测/E2E。
-- 不得把冒烟命令复制进 batch task 的 `validationCommands`。`validationCommands` 是强门禁，必须快、稳、可重复；`SMOKE_TEST_PLAN.json` 是旁路风险信号，失败不阻断 `code_done`。
-
-写入 `SMOKE_TEST_PLAN.json` 后，运行 `python "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`，冒烟计划可另行投影为人类摘要但不作为机器事实源。推进 checkpoint 前必须运行 `python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"`；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代阶段门禁。
+完成任务、Batch 和可选项目验证配置后，运行 `python "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`。推进 checkpoint 前必须运行 `python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"`；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代阶段门禁。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘
 - [ ] `plans/B001/plan.json` 起的批次计划已写入磁盘，每批最多 5 个任务，根 plan 不含 tasks
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘，且从 `plan.json` 投影生成
-- [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SMOKE_TEST_PLAN.json` 文件已写入磁盘，`flowBlocking=false`
 - [ ] 根 `plan.json` 与各批次计划共同作为任务 DAG 机器事实源，状态投影一致
 - [ ] 每个实际使用的 backend/frontend lane 都已选择 `task_covered` 或 `commands`：前者完整覆盖该 lane 的 TASK 强验证，后者至少包含一条有增量价值的 required 批次命令；TASK 中没有 compile/build/typecheck/lint
 - [ ] 每个任务已通过 `set-draft-task-detail`，详情符合 `templates/task-detail-input.json`，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果；writer 初始化状态为 `todo`，初始 evidence 为空
-- [ ] 冒烟案例符合 `templates/smoke_test_plan.json` 与 validator；每条 smoke 绑定真实 `taskId` 与单个 `SCN-xxx`，包含公开 seam、单个 vertical slice 与 `mockPolicy.externalOnly=true`；没有冒烟案例时写明 `skipReason`
 - [ ] 任务按用户可观察 vertical slice 拆分，不按代码层或文件层机械拆分；超过 15 个 task 时已检查是否误拆到代码步骤，没有为了压低任务数合并独立场景
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx），验证命令带具体目标而非裸 mvn test/npm test；但没有写成逐行代码、逐文件微任务或 commit 步骤
 - [ ] 每个任务的「验证命令」都是大模型能直接运行并自行判读的行为/集成/E2E/静态检查命令（精确测试/curl/断言脚本等），没有 compile/build/typecheck/lint，也没有任何"手工""人工验证""Postman""浏览器点击"等需要人参与的步骤；HTTP 接口用 curl 或集成测试覆盖
@@ -461,7 +445,7 @@ python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --featu
 ---
 
 ## 整体完成条件
-- `design.md`、`plan.json`、`PLAN.md`、`SMOKE_TEST_PLAN.json` 已完成
+- `design.md`、`plan.json`、`PLAN.md` 已完成
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done

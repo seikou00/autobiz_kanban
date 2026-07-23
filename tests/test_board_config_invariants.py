@@ -135,7 +135,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "plan_ref_resolution",
             "plan_task_granularity",
             "plan_scenario_coverage",
-            "smoke_test_plan_json",
         }
         offenders: list[str] = []
         for context, node in _iter_nodes(_board_config()):
@@ -148,7 +147,31 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             missing = sorted(required_validators - set(validators))
             if missing:
                 offenders.append(f"{context}[dev.plan]: {','.join(missing)}")
+            if "smoke_test_plan_json" in validators:
+                offenders.append(f"{context}[dev.plan]: advisory_smoke_must_not_be_required")
         self.assertEqual(offenders, [], "dev.plan validators drifted: " + ", ".join(offenders))
+
+    def test_standard_workflow_does_not_depend_on_advisory_smoke_artifacts(self) -> None:
+        offenders: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict):
+                continue
+            artifacts = node.get("artifacts", {})
+            if isinstance(artifacts, dict):
+                for direction in ("inputs", "outputs"):
+                    for artifact in artifacts.get(direction, []):
+                        if isinstance(artifact, dict) and artifact.get("path") in {
+                            "SMOKE_TEST_PLAN.json",
+                            "SMOKE_RESULT.json",
+                        }:
+                            offenders.append(
+                                f"{context}[{node.get('id', '?')}]: {direction}:{artifact['path']}"
+                            )
+            validators = node.get("validators", [])
+            if isinstance(validators, list):
+                for validator in {"smoke_test_plan_json", "smoke_result_json"} & set(validators):
+                    offenders.append(f"{context}[{node.get('id', '?')}]: validator:{validator}")
+        self.assertEqual(offenders, [], "standard workflow must not depend on advisory smoke: " + ", ".join(offenders))
 
     def test_code_stage_rejects_legacy_plan_task_schema(self) -> None:
         offenders: list[str] = []

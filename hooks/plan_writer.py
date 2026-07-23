@@ -2649,7 +2649,6 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                             "add-batch-validation-command",
                             "add-project-validation-command",
                             "render-md",
-                            "smoke_plan_writer.init",
                         ],
                     },
                     "collectingRepairs": {
