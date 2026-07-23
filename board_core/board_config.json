@@ -297,8 +297,12 @@
           "agentMode": "solo",
           "toolCustomConfig": {
             "task": {
-              "enabled": false
+              "enabled": true
             }
+          },
+           "subagentConfig": {
+            "disabledBuiltinSubagents": ["Explore","critic"],
+            "customSubagentFiles": ["agents/explore.md","agents/critic.md"]
           }
         },
         "description": "生成 proposal 与行为规格 \n 产物：proposal.md（变更提案：本轮目标、范围与非目标）、specs/**/*.md（行为规格：各能力 Requirement/Scenario 契约）",
@@ -336,8 +340,8 @@
             }
           },
           "subagentConfig": {
-            "disabledBuiltinSubagents": ["Explore"],
-            "customSubagentFiles": ["agents/explore.md"]
+            "disabledBuiltinSubagents": ["Explore","critic"],
+            "customSubagentFiles": ["agents/explore.md","agents/critic.md"]
           }
         },
         "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、PLAN.md（执行计划：任务 DAG 与各任务依据/验证/状态）",
@@ -371,6 +375,18 @@
         "group": "Dev",
         "skill": "autodev-code",
         "order": 50,
+        "runtimePolicy": {
+          "agentMode": "solo",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": ["code-reviewer","code-simplifier"],
+            "customSubagentFiles": ["agents/code-reviewer.md","agents/code-simplifier.md"]
+          }
+        },
         "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码（本轮新增/修改的代码，按 PLAN 就地更新任务状态；无独立文档产物）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
@@ -457,6 +473,18 @@
         "group": "Dev",
         "skill": "autodev-utest",
         "order": 70,
+        "runtimePolicy": {
+          "agentMode": "solo",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": ["verification"],
+            "customSubagentFiles": ["agents/verification.md"]
+          }
+        },
         "description": "单元测试生成、验证与最小修复 \n 产物：UNIT_TEST_REPORT.md（单元测试报告：用例结果、覆盖与风险）、test-output.log（单测运行原始输出日志）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } },
