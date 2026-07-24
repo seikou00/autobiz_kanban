@@ -372,7 +372,8 @@ def validate_detail_fields(record: dict[str, Any]) -> list[str]:
             errors.append("invalid_evidence_detail_changedFiles_projection")
 
     no_code_change = implementation.get("noCodeChange") is True
-    if not file_changes and not no_code_change:
+    transient_validation_files = record.get("transientValidationFiles") or []
+    if not file_changes and not no_code_change and not transient_validation_files:
         errors.append("missing_evidence_detail_noCodeChange")
     if no_code_change:
         if isinstance(changed_files, list) and changed_files:
@@ -388,7 +389,12 @@ def validate_detail_fields(record: dict[str, Any]) -> list[str]:
             errors.append("missing_evidence_detail_noCodeChange_why")
 
     if detail_version == 2:
-        errors.extend(_validate_v2_detail_fields(record, file_changes, no_code_change))
+        errors.extend(_validate_v2_detail_fields(
+            record,
+            file_changes,
+            no_code_change,
+            bool(transient_validation_files),
+        ))
 
     return errors
 
@@ -397,6 +403,7 @@ def _validate_v2_detail_fields(
     record: dict[str, Any],
     file_changes: list[Any],
     no_code_change: bool,
+    has_transient_validation_files: bool,
 ) -> list[str]:
     errors: list[str] = []
     if not _non_empty_string(record.get("runId")):
@@ -437,7 +444,9 @@ def _validate_v2_detail_fields(
             errors.append("invalid_verified_existing_file_changes")
         if record.get("action") == "validation" and not supporting_files:
             errors.append("missing_verified_existing_supportingFiles")
-    if completion_mode == "implemented" and (no_code_change or not file_changes):
+    if completion_mode == "implemented" and (
+        no_code_change or (not file_changes and not has_transient_validation_files)
+    ):
         errors.append("invalid_implemented_file_changes")
     return errors
 

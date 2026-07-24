@@ -75,6 +75,13 @@ from hooks.repository_snapshot import (  # noqa: E402
     RepositorySnapshotError,
     resolve_git_root,
 )
+from hooks.validation_policy import (  # noqa: E402
+    BEHAVIOR_TASK_VALIDATION_KINDS,
+    FRONTEND_COMPILE_VALIDATION_KINDS,
+    maven_test_plan,
+    package_script_name,
+    package_script_policy_errors,
+)
 
 
 PLAN_FILE = "plan.json"
@@ -1459,6 +1466,40 @@ def _draft_task_validation_errors(
     return errors
 
 
+def _annotate_validation_test_plan(
+    task: dict[str, Any],
+    code_workspaces: list[str],
+) -> dict[str, Any]:
+    """Persist whether each planned Maven target is reused or created in Code."""
+
+    contexts = _code_workspace_contexts(code_workspaces)
+    workspace_roots = task_workspace_roots(task)
+    plans: list[dict[str, Any]] = []
+    for command in task.get("validationCommands", []):
+        if not isinstance(command, dict):
+            continue
+        key = "default" if "default" in workspace_roots else command.get("repo")
+        workspace_root = workspace_roots.get(str(key)) if isinstance(key, str) else None
+        context = (
+            _context_for_workspace_root(contexts, str(key), workspace_root)
+            if isinstance(workspace_root, str)
+            else None
+        )
+        cwd = command.get("cwd")
+        if context is None or not isinstance(cwd, str):
+            continue
+        command_dir = (context["gitRoot"] / cwd).resolve()
+        plan = maven_test_plan(command, command_dir)
+        if plan is not None:
+            plan["cwd"] = cwd
+            if command.get("repo"):
+                plan["repo"] = command.get("repo")
+            plans.append(plan)
+    candidate = copy.deepcopy(task)
+    candidate["validationTestPlan"] = plans
+    return candidate
+
+
 def _tasks(data: dict[str, Any]) -> list[dict[str, Any]]:
     tasks = data.setdefault("tasks", [])
     if not isinstance(tasks, list):
@@ -1990,6 +2031,24 @@ def _command_workspace_preflight_errors(
             "reason": "validation_manifest_missing",
             "detail": f"context={context_name};cwd={cwd};expected={'|'.join(manifests)}",
         }]
+    script_name = package_script_name(command)
+    if script_name is not None:
+        package_path = command_dir / "package.json"
+        try:
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return [{
+                "reason": "validation_package_manifest_invalid",
+                "detail": f"context={context_name};path={package_path};error={exc}",
+            }]
+        scripts = package.get("scripts") if isinstance(package, dict) else None
+        script = scripts.get(script_name) if isinstance(scripts, dict) else None
+        script_errors = package_script_policy_errors(script)
+        if script_errors:
+            return [{
+                "reason": script_errors[0],
+                "detail": f"context={context_name};packageScript={script_name}",
+            }]
     return []
 
 
@@ -2179,6 +2238,7 @@ def _cmd_set_draft_task_detail(args: argparse.Namespace) -> int:
     code_workspaces = [
         item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)
     ]
+    candidate = _annotate_validation_test_plan(candidate, code_workspaces)
     errors = _draft_task_validation_errors(feature, candidate, code_workspaces)
     if errors:
         return render_result(WriterResult(
@@ -2552,6 +2612,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "writerOwnedDetailFields": {
                         "acceptanceCriteria": ["id"],
                         "validationCommands": ["id"],
+                        "validationTestPlan": ["commandId", "framework", "targets"],
                         "scope": ["pages", "workspaceRoots"],
                     },
                     "fieldRules": {
@@ -2573,10 +2634,35 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         },
                     },
                     "validationKinds": sorted(TASK_VALIDATION_KINDS),
+                    "validationKindsByLane": {
+                        "backend": sorted(BEHAVIOR_TASK_VALIDATION_KINDS),
+                        "frontend": sorted(TASK_VALIDATION_KINDS),
+                    },
                     "batchValidationKinds": sorted(BATCH_VALIDATION_KINDS),
                     "validationCoverage": {
                         "rule": "required_commands_cover_all_acceptance_criteria",
-                        "compileMayCoverAcceptanceCriteria": False,
+                        "compileMayCoverAcceptanceCriteriaByLane": {
+                            "backend": False,
+                            "frontend": True,
+                        },
+                        "frontendCompileKinds": sorted(FRONTEND_COMPILE_VALIDATION_KINDS),
+                    },
+                    "validationCommandPolicy": {
+                        "forbiddenExecutables": ["echo", "false", "printf", "true"],
+                        "inlineShell": "forbidden",
+                        "placeholderText": "forbidden",
+                        "packageScriptMustExist": True,
+                        "packageScriptMayNotBeNoop": True,
+                        "mavenTargetMustBeConcreteClass": True,
+                        "mavenSkipOrZeroMatchOptions": "forbidden",
+                    },
+                    "validationTestPlanPolicy": {
+                        "source": "writer_workspace_inspection",
+                        "modes": ["reuse_existing", "create_in_code"],
+                        "existingTargetAction": "reuse_without_creating_duplicate",
+                        "missingTargetAction": "create_transient_test_in_code",
+                        "createdTestRecordedAsChangedFile": False,
+                        "runnerRequiresFreshSurefireOrFailsafeExecution": True,
                     },
                     "taskValidationPolicy": {
                         "mode": "deferred_batch",
@@ -2698,7 +2784,10 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "matrixException": {
                         "normalScenarioMaximum": PLAN_TASK_MAX_SCENARIOS,
                         "scenarioMaximum": PLAN_TASK_MATRIX_MAX_SCENARIOS,
-                        "requiredValidation": "one_complete_required_non_compile_behavior_command",
+                        "requiredValidationByLane": {
+                            "backend": "one_complete_required_behavior_command",
+                            "frontend": "one_complete_required_behavior_or_matching_compile_command",
+                        },
                     },
                     "matrixExceptionExample": _matrix_exception_example(),
                     "projectValidationCommand": {
@@ -2723,7 +2812,11 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                             "--mode <task_covered|commands>"
                         ),
                         "taskCoveredRequirements": (
-                            "one required targeted Maven lifecycle command per task in one workspace"
+                            "frontend lane only; one required matching compile/build/typecheck command "
+                            "per task in one workspace"
+                        ),
+                        "backendRequirement": (
+                            "commands mode with a required compile/build batch command; lint is supplemental"
                         ),
                     },
                     "writerOwnedGeneratedArtifacts": {

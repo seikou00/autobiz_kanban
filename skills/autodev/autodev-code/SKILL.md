@@ -220,7 +220,8 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的业务范围；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/test/resources/迁移/配置会由 runner 自动归集。不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 任务需要写 / 改测试时，遵循 `${pluginPath}/skills/references/test-quality.md`：站在 seam 上验证、期望值来自独立事实源（勿同义反复）、mock 只在系统边界。
-   - 只为本轮实现验证而临时创建、任务完成后不提交的测试文件，必须保持未跟踪且未暂存，不得 `git add`。runner 仅将同时满足“本轮新建、位于请求 workspace 下的 `src/test`、`test`、`tests` 测试根、`finish-implementation` 时仍未跟踪且未暂存”的文件归入 `transientValidationFiles`；这些文件保留到批次 TASK 验证结束，但不进入正式 `changedFiles`。已跟踪、已暂存或 start 前已存在的测试文件仍是正式代码变更。
+   - 先读取 `start` 返回的 `validationTestTargets` 及 Task 的 `validationTestPlan`。标为 `reuse_existing` 的目标必须复用已有测试类，不得创建同名或重复测试；只有 `create_in_code` 的目标才新增最小测试类。Runner 在执行 Maven 验证前要求该目标测试源文件已存在，并要求新鲜的 Surefire/Failsafe 报告证明至少一个对应测试实际执行。
+   - Code 阶段新建、位于请求 workspace 下的 `src/test`、`test`、`tests` 测试根的测试文件一律归入 `transientValidationFiles`，不进入正式 `changedFiles`，即使被暂存也不改变该分类；文件保留到批次 TASK 验证结束。start 前已有的测试文件若被修改，仍是正式代码变更。不得用 `skipTests`、`maven.test.skip` 或允许零匹配测试通过的参数规避验证。
    - TASK 实现期间不得手工执行 `validationCommands`，也不得执行 compile/build/typecheck/lint 或当前 `batchValidation.commands`。所有 TASK 命令统一在批次实现结束后由独立验证子代理通过 runner 执行。
 5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 6. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不运行 `validationCommands`，不写 `completionEvidenceIds`，也不把 TASK 置为 done。deferred 计划调用旧 `complete` 会被明确拒绝：
@@ -237,7 +238,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 python "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task-id "<TASK_ID>" --run-id "<ORIGINAL_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-确实没有文件变更时，不得伪造 changedFiles，也不得把空 diff 当遗漏。必须说明原因并提供至少一个仓库内已有实现/测试文件；该任务还必须有 required 的行为、集成、E2E 或静态验证，compile/build/typecheck/lint 只属于批次验证，不能配置在 TASK：
+确实没有文件变更时，不得伪造 changedFiles，也不得把空 diff 当遗漏。必须说明原因并提供至少一个仓库内已有实现/测试文件；backend 任务还必须有 required 的行为、集成、E2E 或静态验证，frontend 任务可按 frontend validation profile 使用 required 的 compile/build/typecheck。lint 仍只属于批次补充验证：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
@@ -275,7 +276,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 子代理/进程中断时使用同一 runId 和 currentTaskId 恢复，已写 Evidence 的命令不会重复。若 runner 返回 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。只有普通 required 校验失败才创建新的 task-validation run；需要修改源码时才执行 `start-validation-repair --task-id <FAILED_TASK_ID>`，修复后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
 
-全部 TASK 验证通过后才把 TASK 置 done。`task_covered` 此时生成 `batch_closure`；`commands` 模式返回 `requiredAction=run_batch_check_in_validation_subagent`，由同一个子代理继续下方额外质量门禁。
+全部 TASK 验证通过后才把 TASK 置 done。frontend `task_covered` 此时生成 `batch_closure`；backend 固定使用 `commands`，返回 `requiredAction=run_batch_check_in_validation_subagent` 后由同一个子代理执行 compile/build 收口。frontend `commands` 模式也由该子代理继续下方额外质量门禁。
 
 ### 批次验证与重验证
 
@@ -296,7 +297,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 宿主未提供 conversation ID，因此 runner 无法从进程参数中证明调用来自新对话；`requiresNewConversation` 是供宿主和 Agent 执行的协议层约束，不是 runner 可独立验证的身份凭据。`activate-batch` CLI 仅保留给兼容或诊断场景，正常 Code 流程不得直接调用。
 
-策略边界：TASK `validationCommands`、`task_covered` 的 `action=batch_closure`、命令模式的 `batchValidation.commands` / `action=batch_validation` evidence 与 `code_done_gate` 都是强门禁。旧 Feature 若已有 `SMOKE_TEST_PLAN.json`，可按需手动运行独立 smoke 工具诊断，但新 Plan/Code 流程不生成、不读取，也不要求其结果。
+策略边界：TASK `validationCommands`、frontend `task_covered` 的 `action=batch_closure`、命令模式的 `batchValidation.commands` / `action=batch_validation` evidence 与 `code_done_gate` 都是强门禁。旧 Feature 若已有 `SMOKE_TEST_PLAN.json`，可按需手动运行独立 smoke 工具诊断，但新 Plan/Code 流程不生成、不读取，也不要求其结果。
 
 > 一致性：任务的依据在对应上游产物里找不到，或上游有影响本任务的「待确认」项 → 停止并回流。（逐条引用解析的确定性校验拟由上游 traceability validator 承担，见后续轨道；本阶段暂为人工判断。）
 

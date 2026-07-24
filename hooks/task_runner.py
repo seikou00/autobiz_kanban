@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -33,6 +34,7 @@ from hooks.plan_json import (  # noqa: E402
     load_plan_bundle,
     normalize_status,
     task_contract_sha256,
+    task_execution_lane,
     task_workspace_roots,
     validation_command_manifest_names,
 )
@@ -66,10 +68,18 @@ from hooks.task_run_integrity import (  # noqa: E402
     task_run_integrity_error,
     task_run_integrity_sha256,
 )
+from hooks.validation_policy import (  # noqa: E402
+    command_policy_errors,
+    maven_test_plan,
+    maven_test_selectors,
+    package_script_name,
+    package_script_policy_errors,
+    task_validation_assurance_level,
+    task_validation_kinds_for_lane,
+)
 
 
 DEFAULT_TIMEOUT_SECONDS = 300
-BEHAVIOR_VALIDATION_KINDS = {"behavior_test", "integration_test", "e2e_test", "static_check"}
 
 
 class TaskRunnerError(ValueError):
@@ -595,12 +605,9 @@ def _partition_transient_validation_changes(
         repository_path = display_path
         if change.get("repository") == repository_id and display_path.startswith(f"{repository_id}:"):
             repository_path = display_path[len(repository_id) + 1 :]
-        untracked = repositories.get(repository_id, {}).get("untrackedFiles")
         relative_path = _requested_workspace_relative_path(state, repository_id, repository_path)
         if (
             change.get("operation") == "created"
-            and isinstance(untracked, list)
-            and repository_path in untracked
             and isinstance(relative_path, str)
             and _is_transient_validation_path(relative_path)
         ):
@@ -695,6 +702,10 @@ def _start_task_unlocked(
         repositories,
         contract_name=task_id,
     )
+    validation_test_targets = _maven_validation_test_targets(
+        [item for item in task.get("validationCommands", []) if isinstance(item, dict)],
+        repositories,
+    )
     declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
     repository_state = _repository_state(repositories)
     active = _active_feature_runs(feature_dir)
@@ -737,6 +748,7 @@ def _start_task_unlocked(
         "evidenceIds": [],
         "completionEvidenceIds": [],
         "completedCommandEvidence": {},
+        "validationTestTargets": validation_test_targets,
     }
     pending_revalidation = task.get("pendingRevalidation")
     if isinstance(pending_revalidation, dict):
@@ -933,6 +945,131 @@ def _command_repository(command: dict[str, Any], repositories: RepositoryMap) ->
     return requested, repositories[requested]
 
 
+def _maven_command_directory(command: dict[str, Any], repositories: RepositoryMap) -> Path:
+    _, repo = _command_repository(command, repositories)
+    command_dir = (repo / str(command.get("cwd"))).resolve()
+    try:
+        command_dir.relative_to(repo)
+    except ValueError as exc:
+        raise TaskRunnerError(f"validation_cwd_outside_repository:{command.get('cwd')}") from exc
+    return command_dir
+
+
+def _maven_validation_test_targets(
+    commands: list[dict[str, Any]],
+    repositories: RepositoryMap,
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for command in commands:
+        if not maven_test_selectors(command):
+            continue
+        command_dir = _maven_command_directory(command, repositories)
+        plan = maven_test_plan(command, command_dir)
+        if plan is not None:
+            targets.append({
+                **plan,
+                "cwd": command.get("cwd"),
+                **({"repo": command.get("repo")} if command.get("repo") else {}),
+            })
+    return targets
+
+
+def _maven_test_target_errors(command: dict[str, Any], command_dir: Path) -> list[str]:
+    plan = maven_test_plan(command, command_dir)
+    if plan is None:
+        return []
+    return [
+        f"validation_maven_test_target_missing:{command.get('id', '')}:{target.get('selector')}"
+        for target in plan.get("targets", [])
+        if isinstance(target, dict) and target.get("mode") == "create_in_code"
+    ]
+
+
+def _maven_report_snapshot(command_dir: Path) -> dict[str, int]:
+    reports: dict[str, int] = {}
+    if not command_dir.is_dir():
+        return reports
+    for path in command_dir.rglob("TEST-*.xml"):
+        parts = set(path.relative_to(command_dir).parts)
+        if not parts.intersection({"surefire-reports", "failsafe-reports"}):
+            continue
+        try:
+            reports[str(path)] = path.stat().st_mtime_ns
+        except OSError:
+            continue
+    return reports
+
+
+def _maven_report_matches_selector(root: ET.Element, selector: str) -> bool:
+    class_selector, separator, method_selector = selector.partition("#")
+    class_selector = class_selector.strip()
+    expected_simple = class_selector.rsplit(".", 1)[-1]
+    for suite in root.iter("testsuite"):
+        suite_name = str(suite.get("name", ""))
+        suite_class = suite_name.rsplit("$", 1)[0]
+        suite_matches = (
+            suite_name == class_selector
+            or suite_class == class_selector
+            or suite_name.endswith(f".{class_selector}")
+            or suite_class.endswith(f".{class_selector}")
+            or suite_name == expected_simple
+            or suite_class == expected_simple
+        )
+        for testcase in suite.iter("testcase"):
+            testcase_class = str(testcase.get("classname", ""))
+            class_matches = suite_matches or (
+                testcase_class == class_selector
+                or testcase_class.endswith(f".{class_selector}")
+                or testcase_class.rsplit(".", 1)[-1] == expected_simple
+            )
+            if not class_matches:
+                continue
+            if testcase.find("skipped") is not None:
+                continue
+            if separator:
+                testcase_name = str(testcase.get("name", ""))
+                if not (
+                    testcase_name == method_selector
+                    or testcase_name.startswith(f"{method_selector}[")
+                    or testcase_name.startswith(f"{method_selector}(")
+                ):
+                    continue
+            return True
+    return False
+
+
+def _maven_test_execution_errors(
+    command: dict[str, Any],
+    command_dir: Path,
+    before_reports: dict[str, int],
+) -> list[str]:
+    selectors = maven_test_selectors(command)
+    if not selectors:
+        return []
+    fresh_reports = []
+    for path_string, mtime in _maven_report_snapshot(command_dir).items():
+        if before_reports.get(path_string) != mtime:
+            fresh_reports.append(Path(path_string))
+    if not fresh_reports:
+        return [f"validation_maven_test_report_missing:{command.get('id', '')}"]
+    errors: list[str] = []
+    for selector in selectors:
+        executed = False
+        for path in fresh_reports:
+            try:
+                root = ET.parse(path).getroot()
+            except (ET.ParseError, OSError):
+                continue
+            if _maven_report_matches_selector(root, selector):
+                executed = True
+                break
+        if not executed:
+            errors.append(
+                f"validation_maven_test_not_executed:{command.get('id', '')}:{selector}"
+            )
+    return errors
+
+
 def _validation_environment_error(
     command: dict[str, Any],
     *,
@@ -985,8 +1122,41 @@ def _assert_validation_command_environment(
     argv = command.get("argv")
     if not isinstance(argv, list) or not argv or not isinstance(argv[0], str):
         raise TaskRunnerError(f"invalid_validation_argv:{command.get('id', '')}")
+    policy_errors = command_policy_errors(command)
+    if policy_errors:
+        raise TaskRunnerError(
+            f"validation_command_policy_violation:{command.get('id', '')}:{policy_errors[0]}"
+        )
     _, repo = _command_repository(command, repositories)
     command_cwd = (repo / str(command.get("cwd"))).resolve()
+    script_name = package_script_name(command)
+    if script_name is not None:
+        package_path = command_cwd / "package.json"
+        try:
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise _validation_environment_error(
+                command,
+                category="package_manifest_invalid",
+                detail=f"path={package_path};error={exc}",
+                retry_same_run=retry_same_run,
+                run_id=run_id,
+                batch_id=batch_id,
+                task_id=task_id,
+            ) from exc
+        scripts = package.get("scripts") if isinstance(package, dict) else None
+        script = scripts.get(script_name) if isinstance(scripts, dict) else None
+        script_errors = package_script_policy_errors(script)
+        if script_errors:
+            raise _validation_environment_error(
+                command,
+                category=script_errors[0],
+                detail=f"packageScript={script_name}",
+                retry_same_run=retry_same_run,
+                run_id=run_id,
+                batch_id=batch_id,
+                task_id=task_id,
+            )
     executable = argv[0]
     has_path = "/" in executable or "\\" in executable or Path(executable).is_absolute()
     if has_path:
@@ -1030,6 +1200,12 @@ def _run_validation(
         command_cwd.relative_to(repo)
     except ValueError as exc:
         raise TaskRunnerError(f"validation_cwd_outside_repository:{cwd}") from exc
+    maven_before_reports: dict[str, int] = {}
+    if maven_test_selectors(command):
+        maven_before_reports = _maven_report_snapshot(command_cwd)
+        target_errors = _maven_test_target_errors(command, command_cwd)
+        if target_errors:
+            return 1, "\n".join(target_errors)
     timeout = command.get("timeoutSeconds", DEFAULT_TIMEOUT_SECONDS)
     if not isinstance(timeout, int) or timeout <= 0:
         timeout = DEFAULT_TIMEOUT_SECONDS
@@ -1061,6 +1237,15 @@ def _run_validation(
                 batch_id=batch_id,
                 task_id=task_id,
             )
+        if completed.returncode == 0 and maven_test_selectors(command):
+            execution_errors = _maven_test_execution_errors(
+                command,
+                command_cwd,
+                maven_before_reports,
+            )
+            if execution_errors:
+                output = f"{output}\n" + "\n".join(execution_errors)
+                return 1, output
         return completed.returncode, output
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -1112,6 +1297,16 @@ def _check_required_coverage(task: dict[str, Any]) -> None:
     missing = sorted(_criteria_ids(task) - covered)
     if missing:
         raise TaskRunnerError("acceptance_criteria_not_covered:" + ",".join(missing))
+
+
+def _has_required_task_validation(task: dict[str, Any]) -> bool:
+    allowed_kinds = task_validation_kinds_for_lane(task_execution_lane(task))
+    return any(
+        isinstance(command, dict)
+        and command.get("required") is True
+        and command.get("kind") in allowed_kinds
+        for command in task.get("validationCommands", [])
+    )
 
 
 def _record_for_command(
@@ -1169,6 +1364,7 @@ def _record_for_command(
             "command": " ".join(str(item) for item in command.get("argv", [])),
             "cwd": command.get("cwd"),
             "kind": command.get("kind"),
+            "assuranceLevel": task_validation_assurance_level(command),
             "required": command.get("required"),
             **({"repo": repository_id} if repository_id else {}),
             "exitCode": exit_code,
@@ -1297,7 +1493,7 @@ def _finish_implementation_unlocked(
             resolvedScopePaths=scope_paths,
         )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
-    if cumulative_file_changes:
+    if cumulative_file_changes or transient_validation_files:
         if no_code_change_why or normalized_supporting:
             if not file_changes and no_code_change_why:
                 conflict = _prior_aborted_run_conflict(
@@ -1335,13 +1531,8 @@ def _finish_implementation_unlocked(
                 + ",".join(prior_changed_files),
                 requiredAction="resume_original_run_or_rebuild_baseline",
             )
-        commands = [item for item in task.get("validationCommands", []) if isinstance(item, dict)]
-        if not any(
-            item.get("kind") in BEHAVIOR_VALIDATION_KINDS
-            for item in commands
-            if item.get("required") is True
-        ):
-            raise TaskRunnerError("verified_existing_requires_behavior_validation")
+        if not _has_required_task_validation(task):
+            raise TaskRunnerError("verified_existing_requires_task_validation")
         completion_mode = "verified_existing"
     _check_required_coverage(task)
 
@@ -1503,7 +1694,7 @@ def _complete_task_unlocked(
             resolvedGitRoots=[str(item) for item in repositories.values()],
         )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
-    if cumulative_file_changes:
+    if cumulative_file_changes or transient_validation_files:
         if no_code_change_why or normalized_supporting:
             if not file_changes and no_code_change_why:
                 conflict = _prior_aborted_run_conflict(
@@ -1543,9 +1734,8 @@ def _complete_task_unlocked(
                 priorRunId=prior_run_id,
                 changedFiles=prior_changed_files,
             )
-        commands = [item for item in task.get("validationCommands", []) if isinstance(item, dict)]
-        if not any(item.get("kind") in BEHAVIOR_VALIDATION_KINDS for item in commands if item.get("required") is True):
-            raise TaskRunnerError("verified_existing_requires_behavior_validation")
+        if not _has_required_task_validation(task):
+            raise TaskRunnerError("verified_existing_requires_task_validation")
         completion_mode = "verified_existing"
 
     _check_required_coverage(task)

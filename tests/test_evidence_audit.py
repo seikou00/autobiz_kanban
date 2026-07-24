@@ -85,7 +85,7 @@ class EvidenceAuditTest(unittest.TestCase):
                             "backend": {
                                 "commands": [
                                     {
-                                        "argv": ["echo", "backend compile"],
+                                        "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
                                         "cwd": ".",
                                         "kind": "compile",
                                         "required": True,
@@ -148,7 +148,7 @@ class EvidenceAuditTest(unittest.TestCase):
                                 "commands": [
                                     {
                                         "id": f"BATCH-{batch_id}-VAL-001",
-                                        "argv": ["echo", "backend compile"],
+                                        "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
                                         "cwd": ".",
                                         "kind": "compile",
                                         "required": True,

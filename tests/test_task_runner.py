@@ -156,7 +156,7 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
                 "validationCommands": [
                     {
                         "id": "VAL-T000-01",
-                        "argv": ["echo", "ok"],
+                        "argv": [sys.executable, "-c", "raise SystemExit(0)"],
                         "cwd": ".",
                         "kind": "behavior_test",
                         "required": True,
@@ -286,19 +286,33 @@ def _check_batch(workspace: Path, code: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def _configure_task_covered(feature_dir: Path, code: Path) -> None:
-    (code / "pom.xml").write_text("<project/>\n", encoding="utf-8")
-    wrapper = code / "mvnw"
-    wrapper.write_text("#!/bin/sh\necho targeted validation\n", encoding="utf-8")
-    wrapper.chmod(0o755)
+def _configure_frontend_task_covered(feature_dir: Path, code: Path) -> None:
+    (code / "package.json").write_text(
+        json.dumps({"scripts": {"build": "node --check app.js"}}) + "\n",
+        encoding="utf-8",
+    )
+    (code / "app.js").write_text("const compiled = true;\n", encoding="utf-8")
     batch = _read_batch(feature_dir)
+    batch["executionLane"] = "frontend"
     task = batch["tasks"][0]
-    task["scope"].update({"workspaceRoots": {"default": "."}, "paths": ["existing.txt"]})
+    task["uiRequired"] = True
+    task["scope"].update({
+        "workspaceRoots": {"default": "."},
+        "paths": ["app.js"],
+        "pages": ["PAGE-001"],
+    })
+    task["uiRefs"] = {
+        "pageRefs": ["PAGE-001"],
+        "interactionRefs": ["UIX-001"],
+        "visualSourceRefs": [],
+        "frontendRoute": "spec-driven-ui",
+    }
     task["validationCommands"][0].update({
-        "argv": ["./mvnw", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
-        "kind": "integration_test",
+        "argv": ["npm", "run", "build"],
+        "kind": "build",
     })
     batch["batchValidation"].update({
+        "profile": "frontend",
         "mode": "task_covered",
         "coverageCommandIds": ["VAL-T001-01"],
         "commands": [],
@@ -307,7 +321,8 @@ def _configure_task_covered(feature_dir: Path, code: Path) -> None:
     _write_batch(feature_dir, batch)
     root_path = feature_dir / "plan.json"
     root = json.loads(root_path.read_text(encoding="utf-8"))
-    root["batchValidationProfiles"]["backend"] = {"mode": "task_covered", "commands": []}
+    root["batches"][0]["executionLane"] = "frontend"
+    root["batchValidationProfiles"] = {"frontend": {"mode": "task_covered", "commands": []}}
     root["projectValidationCommands"] = []
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -513,6 +528,63 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", payload["runId"], "--code-workspace", str(code),
             )
             self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+
+    def test_maven_runner_requires_target_source_and_fresh_report_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = (Path(tmp) / "repo").resolve()
+            repo.mkdir()
+            (repo / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+            source = repo / "src" / "test" / "java" / "example" / "AppTest.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class AppTest {}\n", encoding="utf-8")
+            fake_maven = repo / "mvn"
+            fake_maven.write_text(
+                "#!/bin/sh\n"
+                "mkdir -p target/surefire-reports\n"
+                "printf '%s' '<testsuite name=\"example.AppTest\" tests=\"1\"><testcase classname=\"example.AppTest\" name=\"runs\"/></testsuite>' > target/surefire-reports/TEST-example.AppTest.xml\n",
+                encoding="utf-8",
+            )
+            fake_maven.chmod(0o755)
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [str(fake_maven), "test", "-Dtest=example.AppTest"],
+                "cwd": ".",
+            }
+            exit_code, output = task_runner_module._run_validation(
+                command,
+                {repo.name: repo},
+            )
+            self.assertEqual(exit_code, 0, output)
+
+            missing_command = {
+                **command,
+                "id": "VAL-T001-02",
+                "argv": [str(fake_maven), "test", "-Dtest=MissingTest"],
+            }
+            exit_code, output = task_runner_module._run_validation(
+                missing_command,
+                {repo.name: repo},
+            )
+            self.assertNotEqual(exit_code, 0)
+            self.assertIn("validation_maven_test_target_missing", output)
+
+    def test_new_staged_test_is_transient_validation_file(self) -> None:
+        state = {
+            "scopeWorkspaces": [{"repository": "repo", "workspacePrefix": "module"}],
+        }
+        changes = [{
+            "operation": "created",
+            "path": "repo:module/src/test/java/example/AppTest.java",
+            "repository": "repo",
+        }]
+        repositories = [{"id": "repo", "untrackedFiles": []}]
+        formal, transient = task_runner_module._partition_transient_validation_changes(
+            state,
+            changes,
+            repositories,
+        )
+        self.assertEqual(formal, [])
+        self.assertEqual(transient, ["repo:module/src/test/java/example/AppTest.java"])
 
     def test_runtime_environment_block_retries_same_validation_run_after_fix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -818,7 +890,7 @@ class TaskRunnerTest(unittest.TestCase):
     def test_deferred_task_covered_closes_only_after_task_validation_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_task_covered(feature_dir, code)
+            _configure_frontend_task_covered(feature_dir, code)
             _configure_deferred_task_validation(feature_dir)
             started = _start(workspace, code)
             (code / "existing.txt").write_text("implemented\n", encoding="utf-8")
@@ -847,10 +919,69 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(_evidence(feature_dir, closure_id)["action"], "batch_closure")
             self.assertEqual(check_code_done(feature_dir), [])
 
+    def test_frontend_build_can_validate_task_and_close_task_covered_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_frontend_task_covered(feature_dir, code)
+            _configure_deferred_task_validation(feature_dir)
+            started = _start(workspace, code)
+            (code / "existing.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--run-id", started["runId"],
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            validation_run = json.loads(_run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--code-workspace", str(code),
+            ).stdout)
+            validated = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T001",
+                "--run-id", validation_run["runId"], "--code-workspace", str(code),
+            )
+            self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+            batch = _read_batch(feature_dir)
+            validation_id = batch["tasks"][0]["completionEvidenceIds"][0]
+            self.assertEqual(_evidence(feature_dir, validation_id)["validation"]["assuranceLevel"], "compile")
+            self.assertEqual(batch["batchValidation"]["status"], "passed")
+
+    def test_frontend_package_script_placeholder_is_environment_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_frontend_task_covered(feature_dir, code)
+            (code / "package.json").write_text(
+                json.dumps({"scripts": {"build": "echo validation placeholder"}}) + "\n",
+                encoding="utf-8",
+            )
+            _configure_deferred_task_validation(feature_dir)
+            started = _start(workspace, code)
+            (code / "existing.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--run-id", started["runId"],
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            blocked = _run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            payload = json.loads(blocked.stdout)
+            self.assertEqual(
+                payload["error"],
+                "validation_environment_unavailable:VAL-T001-01:validation_command_placeholder",
+            )
+            self.assertEqual(payload["requiredAction"], "fix_validation_environment_and_retry_batch_validation")
+
     def test_deferred_task_covered_recovery_rechecks_snapshot_before_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_task_covered(feature_dir, code)
+            _configure_frontend_task_covered(feature_dir, code)
             _configure_deferred_task_validation(feature_dir)
             started = _start(workspace, code)
             target = code / "existing.txt"
@@ -948,8 +1079,9 @@ class TaskRunnerTest(unittest.TestCase):
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
             batch = _read_batch(feature_dir)
-            batch["batchValidation"]["commands"][0]["argv"] = ["echo", "forged"]
-            root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = ["echo", "forged"]
+            forged_command = [sys.executable, "-c", "print('forged')"]
+            batch["batchValidation"]["commands"][0]["argv"] = forged_command
+            root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = forged_command
             root["taskSetDigest"] = task_set_digest(root, {"B001": batch})
             _write_batch(feature_dir, batch)
             root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1796,7 +1928,7 @@ class TaskRunnerTest(unittest.TestCase):
     def test_task_covered_batch_closes_without_running_batch_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_task_covered(feature_dir, code)
+            _configure_frontend_task_covered(feature_dir, code)
             started = _start(workspace, code)
 
             completed = _run(
@@ -1956,13 +2088,16 @@ class TaskRunnerTest(unittest.TestCase):
                 )
 
                 self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-                self.assertEqual(
-                    _evidence(feature_dir, "ev_0001")["changedFiles"],
-                    [
-                        "backend/LF39.05_bccompliancemng/"
-                        "src/test/java/example/application/AppTest.java"
-                    ],
+                evidence = _evidence(feature_dir, "ev_0001")
+                test_path = (
+                    "backend/LF39.05_bccompliancemng/"
+                    "src/test/java/example/application/AppTest.java"
                 )
+                if test_state == "staged":
+                    self.assertEqual(evidence["changedFiles"], [])
+                    self.assertEqual(evidence["transientValidationFiles"], [test_path])
+                else:
+                    self.assertEqual(evidence["changedFiles"], [test_path])
 
     def test_complete_keeps_tests_outside_requested_workspace_in_formal_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2061,6 +2196,26 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertNotEqual(started.returncode, 0)
             self.assertIn("code_workspace_contract_mismatch", started.stdout)
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
+
+    def test_start_requires_backend_compile_or_build_batch_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"].update({"mode": "commands", "commands": []})
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batchValidationProfiles"]["backend"] = {"mode": "commands", "commands": []}
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("backend_compile_command_missing", started.stdout)
             self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
     def test_start_rejects_missing_maven_manifest_before_run_creation(self) -> None:
@@ -3132,7 +3287,11 @@ class TaskRunnerTest(unittest.TestCase):
             started = _start(workspace, code)
             plan_path = _batch_path(feature_dir)
             plan = _read_batch(feature_dir)
-            plan["tasks"][0]["validationCommands"][0]["argv"] = ["echo", "changed"]
+            plan["tasks"][0]["validationCommands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                "print('changed')",
+            ]
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
 
