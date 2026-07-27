@@ -160,7 +160,7 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_task_validation`：当前批次所有 TASK 实现均已收口为 `implemented`；创建 deferred validation run，并启动一个批次级只验证子代理，由它串行运行该批全部 TASK 与 batch 校验命令。
 - `resume_batch_task_validation` / `recover_batch_task_validation_closure`：把返回的原 `activeRunId/currentTaskId` 和完整批次验证上下文交给一个批次级只验证子代理恢复，不得创建新实现 run 或跳到其他 TASK。
-- `fix_or_retry_task_validation`：源码未变化时创建新的 task-validation run 从失败 TASK 重试；需要修改源码时先执行 `start-validation-repair`。
+- `fix_or_retry_task_validation`：源码未变化时创建新的 task-validation run 从 `failedValidationTaskId` 重试；需要修改源码时，必须先对 runner 返回的 `repairOwnerTaskIds` 之一执行 `start-validation-repair`，不得默认把验证游标当成修复责任 TASK。
 - `run_batch_check_in_validation_subagent`：deferred 批次的 TASK 已全部验证通过；把返回的 `validationContext` 交给一个批次级只验证子代理，由它执行下方「批次验证与重验证」，不得由主 agent 接管。
 - `run_batch_check`：仅用于未启用 deferred policy 的旧计划；当前批次 TASK 已全部完成，执行下方「批次验证与重验证」。
 - `recover_task_covered_batch`：仅用于未启用 deferred policy 的旧计划；最后一个 TASK evidence 已写入但批次收口尚未绑定时，inspect 并 recover 原 TASK run。
@@ -262,7 +262,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 python "${pluginPath}/hooks/task_runner.py" start-batch-task-validation --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-保存输出的完整 `validationContext`，其中必须包含 `featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256`。主 agent 只启动一个全新的批次验证子代理，并把该对象原样放入启动 prompt；不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能按 `currentTaskId` 串行调用：
+保存输出的完整 `validationContext`，其中必须包含 `runType/featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256/allowedCommands`。主 agent 只启动一个全新的批次验证子代理，并把该对象原样放入启动 prompt；不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能执行 `allowedCommands` 中列出的 runner 命令，并按 `currentTaskId` 串行调用：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" validate-batch-task --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<CURRENT_TASK_ID>" --run-id "<VALIDATION_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -280,7 +280,9 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 `taskValidation.status=running` 期间工作区处于硬冻结：runner 拒绝启动/收口实现任务，Plan Writer 拒绝写计划或渲染产物，Evidence Store 拒绝 validation runner 之外的任何追加。子代理不能通过直接调用其他 writer 绕过冻结。
 
-子代理/进程中断时使用同一 runId 和 currentTaskId 恢复，已写 Evidence 的命令不会重复。若 runner 返回 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。只有普通 required 校验失败才创建新的 task-validation run；需要修改源码时才执行 `start-validation-repair --task-id <FAILED_TASK_ID>`，修复后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
+子代理/进程中断时使用同一 runId 和 currentTaskId 恢复，已写 Evidence 的命令不会重复。每次失败都必须原样返回 runner 的完整机器结果：`runType/runId/batchId/failedValidationTaskId/failedCommandId/errorCategory/requiredAction/evidenceIds/batchSnapshotSha256/allowedCommands`；存在编译诊断时还必须返回 `diagnosticPaths/repairOwnerTaskIds`。`failedValidationTaskId` 只表示当时正在执行校验命令的游标，真正允许修改源码的 TASK 以 `repairOwnerTaskIds` 为准，禁止把两者混为一谈。
+
+若 runner 返回 `errorCategory=environment_failure` 以及 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。普通 required 校验失败可在工作区未变化时创建新的 task-validation run 重试；需要修改源码时，必须在任何源码、测试或配置改动之前执行 `start-validation-repair --task-id <REPAIR_OWNER_TASK_ID>`。runner 会校验工作区仍等于失败 run 的冻结快照；返回 `workspace_changed_before_validation_repair` 时先恢复该快照，不得补开 repair 掩盖先前改动。repair 完成后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
 
 全部 TASK 验证通过后才把 TASK 置 done。frontend `task_covered` 此时生成 `batch_closure`；backend 固定使用 `commands`，返回 `requiredAction=run_batch_check_in_validation_subagent` 后由同一个子代理执行 compile/build 收口。frontend `commands` 模式也由该子代理继续下方额外质量门禁。
 

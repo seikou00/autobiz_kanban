@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -80,6 +81,14 @@ from hooks.validation_policy import (  # noqa: E402
 
 
 DEFAULT_TIMEOUT_SECONDS = 300
+TASK_VALIDATION_RUN_TYPE = "batch_task_validation"
+TASK_VALIDATION_RUNNING_COMMANDS = ["validate-batch-task", "batch-check"]
+TASK_VALIDATION_FAILED_COMMANDS = ["start-validation-repair", "start-batch-task-validation"]
+VALIDATION_DIAGNOSTIC_PATH_RE = re.compile(
+    r"(?P<path>(?:[A-Za-z]:[\\/]|/)?[^\r\n]*?\.(?:java|kt|kts|groovy|scala|js|jsx|ts|tsx|vue|py))"
+    r"(?=:\[?\d|:\s|$)",
+    re.IGNORECASE,
+)
 
 
 class TaskRunnerError(ValueError):
@@ -98,7 +107,15 @@ def _emit(ok: bool, **data: Any) -> int:
 
 
 def _emit_error(exc: ValueError) -> int:
-    details = exc.details if isinstance(exc, TaskRunnerError) else {}
+    details = dict(exc.details) if isinstance(exc, TaskRunnerError) else {}
+    message = str(exc)
+    if "errorCategory" not in details:
+        if "integrity" in message:
+            details["errorCategory"] = "runner_integrity_failure"
+        elif "workspace" in message and ("changed" in message or "mismatch" in message):
+            details["errorCategory"] = "workspace_changed"
+        elif message.startswith(("validation_command_policy_violation", "invalid_validation_")):
+            details["errorCategory"] = "validation_contract_failure"
     return _emit(False, error=str(exc), **details)
 
 
@@ -1083,16 +1100,27 @@ def _validation_environment_error(
     command_id = str(command.get("id", ""))
     executable = str(command.get("argv", [""])[0])
     details: dict[str, Any] = {
+        "runType": TASK_VALIDATION_RUN_TYPE,
         "requiredAction": (
             "fix_validation_environment_and_retry_same_run"
             if retry_same_run
             else "fix_validation_environment_and_retry_batch_validation"
         ),
+        "errorCategory": "environment_failure",
         "failureCategory": category,
+        "failedValidationTaskId": task_id,
+        "failedTaskId": task_id,
+        "failedCommandId": command_id,
         "commandId": command_id,
         "executable": executable,
         "cwd": command.get("cwd"),
         "detail": detail,
+        "evidenceIds": [],
+        "allowedCommands": (
+            TASK_VALIDATION_RUNNING_COMMANDS
+            if retry_same_run
+            else ["start-batch-task-validation"]
+        ),
         "userMessage": (
             f"校验命令 {command_id} 无法运行（{category}）。请修复验证环境后重新运行校验；"
             + ("继续使用原 runId。" if retry_same_run else "无需修改代码或 Plan。")
@@ -1955,8 +1983,169 @@ def _load_task_validation_run(
     return path, state
 
 
-def _task_validation_context(state: dict[str, Any]) -> dict[str, Any]:
+def _validation_allowed_commands(status: Any) -> list[str]:
+    return list(
+        TASK_VALIDATION_FAILED_COMMANDS
+        if status == "failed"
+        else TASK_VALIDATION_RUNNING_COMMANDS
+    )
+
+
+def _normalize_diagnostic_path(
+    raw: str,
+    command: dict[str, Any],
+    repositories: RepositoryMap,
+) -> str | None:
+    candidate = raw.strip().strip("'\"").replace("\\", "/")
+    candidate = re.sub(r"^(?:\[[A-Z]+\]\s*)+", "", candidate)
+    for repository_id, repository in repositories.items():
+        repository_path = str(repository).replace("\\", "/").rstrip("/")
+        index = candidate.lower().find(f"{repository_path.lower()}/")
+        if index >= 0:
+            relative = candidate[index + len(repository_path) + 1 :]
+            return f"{repository_id}:{relative}" if len(repositories) > 1 else relative
+    for anchor in ("src/", "test/", "tests/"):
+        index = candidate.find(anchor)
+        if index >= 0:
+            candidate = candidate[index:]
+            break
+    if PurePosixPath(candidate).is_absolute() or PureWindowsPath(candidate).is_absolute():
+        return None
+    try:
+        relative = _normalize_git_relative_path(candidate, error="invalid_validation_diagnostic_path")
+    except TaskRunnerError:
+        return None
+    cwd = str(command.get("cwd") or ".").replace("\\", "/").strip("/")
+    if cwd not in {"", "."} and relative != cwd and not relative.startswith(f"{cwd}/"):
+        relative = f"{cwd}/{relative}"
+    repository_id = command.get("repo")
+    if len(repositories) > 1 and isinstance(repository_id, str):
+        return f"{repository_id}:{relative}"
+    return relative
+
+
+def _validation_diagnostic_paths(
+    output: str,
+    command: dict[str, Any],
+    repositories: RepositoryMap,
+) -> list[str]:
+    paths: list[str] = []
+    for line in output.splitlines():
+        for match in VALIDATION_DIAGNOSTIC_PATH_RE.finditer(line):
+            path = _normalize_diagnostic_path(match.group("path"), command, repositories)
+            if isinstance(path, str) and path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _validation_error_category(
+    command: dict[str, Any],
+    output: str,
+    diagnostic_paths: list[str],
+) -> str:
+    lowered = output.lower().replace("\\", "/")
+    if any(
+        marker in lowered
+        for marker in (
+            "validation_maven_test_report_missing",
+            "validation_maven_test_not_executed",
+            "validation_maven_test_target_missing",
+            "validation_command_policy_violation",
+        )
+    ):
+        return "validation_contract_failure"
+    if any("/src/test/" in f"/{path.lower()}" for path in diagnostic_paths) or any(
+        marker in lowered
+        for marker in ("testcompile", "test compilation failure", "maven-testcompile")
+    ):
+        return "test_compile_failure"
+    if any("/src/main/" in f"/{path.lower()}" for path in diagnostic_paths) or any(
+        marker in lowered
+        for marker in (
+            "compilation failure",
+            "compilation error",
+            "cannot find symbol",
+            "maven-compiler-plugin",
+        )
+    ):
+        return "source_compile_failure"
+    return "behavior_test_failure"
+
+
+def _evidence_paths(record: dict[str, Any]) -> set[str]:
+    paths = {
+        item
+        for field in ("changedFiles", "transientValidationFiles", "supportingFiles")
+        for item in record.get(field, [])
+        if isinstance(item, str)
+    }
+    for change in record.get("fileChanges", []):
+        if not isinstance(change, dict):
+            continue
+        paths.update(
+            item
+            for item in (change.get("path"), change.get("fromPath"))
+            if isinstance(item, str)
+        )
+    return {item.replace("\\", "/") for item in paths}
+
+
+def _validation_repair_owner_task_ids(
+    feature_dir: Path,
+    batch: dict[str, Any],
+    failed_validation_task_id: str,
+    diagnostic_paths: list[str],
+) -> list[str]:
+    if not diagnostic_paths:
+        return [failed_validation_task_id]
+    records = {
+        str(record.get("evidenceId")): record
+        for record in read_records(stream_path(feature_dir))
+        if record.get("action") == "implementation"
+        and isinstance(record.get("evidenceId"), str)
+    }
+    owners: list[str] = []
+    diagnostic_set = {item.replace("\\", "/").casefold() for item in diagnostic_paths}
+    for task in batch.get("tasks", []):
+        if not isinstance(task, dict) or not isinstance(task.get("id"), str):
+            continue
+        record = records.get(str(task.get("latestImplementationEvidenceId")))
+        if not isinstance(record, dict):
+            continue
+        evidence_paths = {item.casefold() for item in _evidence_paths(record)}
+        if diagnostic_set & evidence_paths:
+            owners.append(str(task["id"]))
+    return owners or [failed_validation_task_id]
+
+
+def _validation_failure_details(
+    feature_dir: Path,
+    batch: dict[str, Any],
+    task_id: str,
+    command: dict[str, Any],
+    output: str,
+    repositories: RepositoryMap,
+) -> dict[str, Any]:
+    diagnostic_paths = _validation_diagnostic_paths(output, command, repositories)
+    error_category = _validation_error_category(command, output, diagnostic_paths)
     return {
+        "failedValidationTaskId": task_id,
+        "failedTaskId": task_id,
+        "failedCommandId": command.get("id"),
+        "errorCategory": error_category,
+        "diagnosticPaths": diagnostic_paths,
+        "repairOwnerTaskIds": _validation_repair_owner_task_ids(
+            feature_dir,
+            batch,
+            task_id,
+            diagnostic_paths,
+        ),
+    }
+
+
+def _task_validation_context(state: dict[str, Any]) -> dict[str, Any]:
+    context = {
+        "runType": TASK_VALIDATION_RUN_TYPE,
         "featureId": state.get("featureId"),
         "batchId": state.get("batchId"),
         "runId": state.get("runId"),
@@ -1965,8 +2154,20 @@ def _task_validation_context(state: dict[str, Any]) -> dict[str, Any]:
         "requestedCodeWorkspaces": state.get("requestedCodeWorkspaces", []),
         "batchSnapshotSha256": state.get("batchSnapshotSha256"),
         "agentScope": "task_and_batch_validation_commands",
-        "allowedRunnerCommands": ["validate-batch-task", "batch-check"],
+        "allowedCommands": _validation_allowed_commands(state.get("status")),
+        "allowedRunnerCommands": _validation_allowed_commands(state.get("status")),
     }
+    for field in (
+        "failedValidationTaskId",
+        "failedTaskId",
+        "failedCommandId",
+        "errorCategory",
+        "diagnosticPaths",
+        "repairOwnerTaskIds",
+    ):
+        if field in state:
+            context[field] = state.get(field)
+    return context
 
 
 def _start_deferred_task_validation_unlocked(
@@ -2184,6 +2385,7 @@ def _fail_deferred_validation_for_workspace_change(
     task_id: str,
     state: dict[str, Any],
     path: Path,
+    failure: dict[str, Any],
 ) -> None:
     completed_by_task = state.get("completedCommandEvidence")
     completed_by_task = completed_by_task if isinstance(completed_by_task, dict) else {}
@@ -2204,10 +2406,14 @@ def _fail_deferred_validation_for_workspace_change(
         completion_evidence_ids=[],
         success=False,
         batch_snapshot_sha256=str(state.get("batchSnapshotSha256")),
+        failure=failure,
     )
     if not result.ok:
-        raise TaskRunnerError("task_validation_workspace_failure_binding_failed")
-    state.update({"status": "failed", "success": False, "failedTaskId": task_id})
+        raise TaskRunnerError(
+            "task_validation_workspace_failure_binding_failed",
+            planWriterErrors=result.errors or [],
+        )
+    state.update({"status": "failed", "success": False, **failure})
     _save_task_validation_run(path, state)
 
 
@@ -2274,6 +2480,21 @@ def _validate_deferred_task_unlocked(
             currentBatchSnapshotSha256=current_snapshot_sha256,
         )
     if workspace_changed:
+        file_changes, _ = _repository_changes(state, repositories)
+        diagnostic_paths = _changed_files(file_changes)
+        failure = {
+            "failedValidationTaskId": task_id,
+            "failedTaskId": task_id,
+            "failedCommandId": None,
+            "errorCategory": "workspace_changed",
+            "diagnosticPaths": diagnostic_paths,
+            "repairOwnerTaskIds": _validation_repair_owner_task_ids(
+                feature_dir,
+                plan_batch,
+                task_id,
+                diagnostic_paths,
+            ),
+        }
         _fail_deferred_validation_for_workspace_change(
             workspace,
             feature,
@@ -2281,10 +2502,18 @@ def _validate_deferred_task_unlocked(
             task_id,
             state,
             path,
+            failure,
         )
         raise TaskRunnerError(
             "task_validation_workspace_changed",
             requiredAction="start_validation_repair",
+            runType=TASK_VALIDATION_RUN_TYPE,
+            runId=run_id,
+            batchId=batch_id,
+            evidenceIds=state.get("evidenceIds", []),
+            batchSnapshotSha256=state.get("batchSnapshotSha256"),
+            allowedCommands=TASK_VALIDATION_FAILED_COMMANDS,
+            **failure,
         )
     if (
         recovering_passed_plan
@@ -2334,6 +2563,7 @@ def _validate_deferred_task_unlocked(
         isinstance(item, dict) and item.get("required") is True and item.get("result") != "pass"
         for item in completed.values()
     )
+    failure: dict[str, Any] | None = None
     for command in task.get("validationCommands", []):
         if not isinstance(command, dict):
             continue
@@ -2349,6 +2579,21 @@ def _validate_deferred_task_unlocked(
             task_id=task_id,
         )
         if _repository_state_sha256(_repository_state(repositories)) != state.get("batchSnapshotSha256"):
+            file_changes, _ = _repository_changes(state, repositories)
+            diagnostic_paths = _changed_files(file_changes)
+            workspace_failure = {
+                "failedValidationTaskId": task_id,
+                "failedTaskId": task_id,
+                "failedCommandId": command_id,
+                "errorCategory": "workspace_changed",
+                "diagnosticPaths": diagnostic_paths,
+                "repairOwnerTaskIds": _validation_repair_owner_task_ids(
+                    feature_dir,
+                    plan_batch,
+                    task_id,
+                    diagnostic_paths,
+                ),
+            }
             _fail_deferred_validation_for_workspace_change(
                 workspace,
                 feature,
@@ -2356,8 +2601,19 @@ def _validate_deferred_task_unlocked(
                 task_id,
                 state,
                 path,
+                workspace_failure,
             )
-            raise TaskRunnerError(f"validation_modified_workspace:{command_id}")
+            raise TaskRunnerError(
+                f"validation_modified_workspace:{command_id}",
+                requiredAction="restore_batch_snapshot_before_validation_repair",
+                runType=TASK_VALIDATION_RUN_TYPE,
+                runId=run_id,
+                batchId=batch_id,
+                evidenceIds=state.get("evidenceIds", []),
+                batchSnapshotSha256=state.get("batchSnapshotSha256"),
+                allowedCommands=TASK_VALIDATION_FAILED_COMMANDS,
+                **workspace_failure,
+            )
         record = _record_for_command(
             feature=feature,
             task=task,
@@ -2405,6 +2661,15 @@ def _validate_deferred_task_unlocked(
             pass_evidence_ids.append(evidence_id)
         if command.get("required") is True and exit_code != 0:
             required_failed = True
+            if failure is None:
+                failure = _validation_failure_details(
+                    feature_dir,
+                    plan_batch,
+                    task_id,
+                    command,
+                    output,
+                    repositories,
+                )
         state["evidenceIds"] = [
             *[item for item in state.get("evidenceIds", []) if isinstance(item, str)],
             evidence_id,
@@ -2422,11 +2687,23 @@ def _validate_deferred_task_unlocked(
         completion_evidence_ids=pass_evidence_ids if success else [],
         success=success,
         batch_snapshot_sha256=str(state.get("batchSnapshotSha256")),
+        failure=failure,
     )
     if not result.ok:
-        raise TaskRunnerError("task_validation_plan_binding_failed")
+        raise TaskRunnerError(
+            "task_validation_plan_binding_failed",
+            planWriterErrors=result.errors or [],
+        )
     if not success:
-        state.update({"status": "failed", "success": False, "failedTaskId": task_id})
+        failure = failure or {
+            "failedValidationTaskId": task_id,
+            "failedTaskId": task_id,
+            "failedCommandId": None,
+            "errorCategory": "behavior_test_failure",
+            "diagnosticPaths": [],
+            "repairOwnerTaskIds": [task_id],
+        }
+        state.update({"status": "failed", "success": False, **failure})
         _save_task_validation_run(path, state)
         return False, state
 
@@ -3666,8 +3943,69 @@ def start_validation_repair(
         bundle, batch_id, task = _load_plan_and_task(feature_dir, task_id)
         if not deferred_task_validation_enabled(bundle.root):
             raise TaskRunnerError(f"deferred_task_validation_not_enabled:{task_id}")
-        if normalize_status(task.get("status")) != "failed":
-            raise TaskRunnerError(f"validation_repair_requires_failed_task:{task_id}")
+        batch = bundle.batches.get(batch_id)
+        validation = batch.get("taskValidation") if isinstance(batch, dict) else None
+        if not isinstance(validation, dict) or validation.get("status") != "failed":
+            raise TaskRunnerError(f"validation_repair_requires_failed_validation:{task_id}")
+        repair_owner_task_ids = validation.get("repairOwnerTaskIds")
+        repair_owner_task_ids = (
+            [str(item) for item in repair_owner_task_ids if isinstance(item, str)]
+            if isinstance(repair_owner_task_ids, list)
+            else []
+        )
+        if not repair_owner_task_ids:
+            fallback = validation.get("failedValidationTaskId") or validation.get("currentTaskId")
+            repair_owner_task_ids = [str(fallback)] if isinstance(fallback, str) else []
+        if task_id not in repair_owner_task_ids:
+            raise TaskRunnerError(
+                f"validation_repair_owner_mismatch:{task_id}",
+                runType=TASK_VALIDATION_RUN_TYPE,
+                failedValidationTaskId=validation.get("failedValidationTaskId"),
+                repairOwnerTaskIds=repair_owner_task_ids,
+                allowedCommands=TASK_VALIDATION_FAILED_COMMANDS,
+            )
+        last_run_id = validation.get("lastRunId")
+        if not isinstance(last_run_id, str):
+            raise TaskRunnerError(f"task_validation_failed_run_missing:{batch_id}")
+        _, validation_run = _load_task_validation_run(feature_dir, batch_id, last_run_id)
+        requested_workspaces = (
+            [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+        )
+        if len(requested_workspaces) != 1:
+            raise TaskRunnerError(
+                "batch_task_validation_requires_single_code_workspace",
+                batchId=batch_id,
+                requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
+            )
+        repositories = _resolve_repositories(requested_workspaces)
+        _assert_repositories_match(validation_run, repositories)
+        actual_requested = [str(path.resolve()) for path in requested_workspaces]
+        if actual_requested != validation_run.get("requestedCodeWorkspaces"):
+            raise TaskRunnerError(
+                "task_validation_repair_workspace_mismatch",
+                expectedRequestedCodeWorkspaces=validation_run.get("requestedCodeWorkspaces"),
+                requestedCodeWorkspaces=actual_requested,
+            )
+        current_repository_state = _repository_state(repositories)
+        expected_repository_state = _state_repositories(validation_run)
+        if not _repository_snapshots_match(expected_repository_state, current_repository_state):
+            file_changes, _ = _repository_changes(validation_run, repositories)
+            raise TaskRunnerError(
+                "workspace_changed_before_validation_repair",
+                requiredAction="restore_validation_snapshot_before_repair",
+                runType=TASK_VALIDATION_RUN_TYPE,
+                runId=last_run_id,
+                batchId=batch_id,
+                failedValidationTaskId=validation.get("failedValidationTaskId"),
+                failedTaskId=validation.get("failedValidationTaskId"),
+                failedCommandId=validation.get("failedCommandId"),
+                errorCategory="workspace_changed",
+                diagnosticPaths=_changed_files(file_changes),
+                repairOwnerTaskIds=repair_owner_task_ids,
+                evidenceIds=validation.get("evidenceIds", []),
+                batchSnapshotSha256=validation.get("batchSnapshotSha256"),
+                allowedCommands=TASK_VALIDATION_FAILED_COMMANDS,
+            )
         result = invalidate_deferred_task_validation_for_repair(
             workspace,
             feature,
@@ -3821,12 +4159,31 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                     ),
                 }
             if task_validation_status == "failed":
+                last_run_id = task_validation.get("lastRunId")
+                validation_context = None
+                if isinstance(last_run_id, str):
+                    _, validation_run = _load_task_validation_run(
+                        feature_dir,
+                        active_batch_id,
+                        last_run_id,
+                    )
+                    validation_context = _task_validation_context(validation_run)
                 return {
                     "action": "fix_or_retry_task_validation",
+                    "runType": TASK_VALIDATION_RUN_TYPE,
                     "activeBatchId": active_batch_id,
                     "executionLane": execution_lane,
-                    "failedTaskId": task_validation.get("currentTaskId"),
-                    "lastRunId": task_validation.get("lastRunId"),
+                    "failedValidationTaskId": task_validation.get("failedValidationTaskId"),
+                    "failedTaskId": task_validation.get("failedValidationTaskId"),
+                    "failedCommandId": task_validation.get("failedCommandId"),
+                    "errorCategory": task_validation.get("errorCategory"),
+                    "diagnosticPaths": task_validation.get("diagnosticPaths", []),
+                    "repairOwnerTaskIds": task_validation.get("repairOwnerTaskIds", []),
+                    "lastRunId": last_run_id,
+                    "evidenceIds": task_validation.get("evidenceIds", []),
+                    "batchSnapshotSha256": task_validation.get("batchSnapshotSha256"),
+                    "allowedCommands": TASK_VALIDATION_FAILED_COMMANDS,
+                    "validationContext": validation_context,
                     "activatedFromHandoff": activated_from_handoff,
                     "userMessage": (
                         f"批次 {active_batch_id} 的 TASK 验证失败；"
@@ -4099,6 +4456,7 @@ def _cmd_start_batch_task_validation(args: argparse.Namespace) -> int:
         validation_context = _task_validation_context(state)
         return _emit(
             True,
+            runType=TASK_VALIDATION_RUN_TYPE,
             runId=state.get("runId"),
             status=state.get("status"),
             activeBatchId=state.get("batchId"),
@@ -4108,6 +4466,7 @@ def _cmd_start_batch_task_validation(args: argparse.Namespace) -> int:
             batchSnapshotSha256=state.get("batchSnapshotSha256"),
             requestedCodeWorkspaces=state.get("requestedCodeWorkspaces", []),
             validationContext=validation_context,
+            allowedCommands=validation_context.get("allowedCommands", []),
             requiredAction="spawn_batch_validation_subagent",
         )
     except (TaskRunnerError, ValueError) as exc:
@@ -4132,26 +4491,64 @@ def _cmd_validate_batch_task(args: argparse.Namespace) -> int:
         next_action = batch_check.get("requiredAction") if batch_check else "run_batch_check"
         if next_action == "run_batch_check":
             next_action = "run_batch_check_in_validation_subagent"
+        error_category = state.get("errorCategory")
+        failure_action = (
+            "start_validation_repair"
+            if error_category in {"source_compile_failure", "test_compile_failure"}
+            else "fix_or_retry_task_validation"
+        )
         return _emit(
             success,
             error=None if success else "validation_failed",
+            runType=TASK_VALIDATION_RUN_TYPE,
             runId=state.get("runId"),
             status=state.get("status"),
             activeBatchId=state.get("batchId"),
             validatedTaskId=args.task_id,
             currentTaskId=current_task_id,
             evidenceIds=state.get("evidenceIds", []),
+            batchSnapshotSha256=state.get("batchSnapshotSha256"),
+            failedValidationTaskId=state.get("failedValidationTaskId"),
+            failedTaskId=state.get("failedValidationTaskId"),
+            failedCommandId=state.get("failedCommandId"),
+            errorCategory=error_category,
+            diagnosticPaths=state.get("diagnosticPaths", []),
+            repairOwnerTaskIds=state.get("repairOwnerTaskIds", []),
+            allowedCommands=validation_context.get("allowedCommands", []),
             batchCheck=batch_check,
             validationContext=validation_context,
             requiredAction=(
-                "fix_task_validation"
+                failure_action
                 if not success
                 else "continue_batch_validation_subagent"
                 if isinstance(current_task_id, str)
                 else next_action
             ),
         )
-    except (TaskRunnerError, ValueError) as exc:
+    except TaskRunnerError as exc:
+        exc.details.setdefault("runType", TASK_VALIDATION_RUN_TYPE)
+        exc.details.setdefault("runId", args.run_id)
+        exc.details.setdefault("batchId", args.batch_id)
+        exc.details.setdefault("failedValidationTaskId", args.task_id)
+        exc.details.setdefault("failedTaskId", args.task_id)
+        exc.details.setdefault("failedCommandId", None)
+        exc.details.setdefault("evidenceIds", [])
+        exc.details.setdefault("batchSnapshotSha256", None)
+        exc.details.setdefault("allowedCommands", TASK_VALIDATION_RUNNING_COMMANDS)
+        try:
+            workspace, feature, _ = _resolve(args)
+            _, state = _load_task_validation_run(
+                _feature_dir(workspace, feature),
+                args.batch_id,
+                args.run_id,
+            )
+            exc.details["batchSnapshotSha256"] = state.get("batchSnapshotSha256")
+            exc.details["evidenceIds"] = state.get("evidenceIds", [])
+            exc.details["allowedCommands"] = _validation_allowed_commands(state.get("status"))
+        except (TaskRunnerError, ValueError):
+            pass
+        return _emit_error(exc)
+    except ValueError as exc:
         return _emit_error(exc)
 
 

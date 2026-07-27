@@ -56,6 +56,15 @@ TASK_VALIDATION_ORCHESTRATIONS = {"single_batch_subagent"}
 TASK_VALIDATION_FAIL_STRATEGIES = {"fail_fast"}
 TASK_VALIDATION_AGENT_SCOPES = {"task_and_batch_validation_commands"}
 TASK_VALIDATION_STATUSES = {"pending", "ready", "running", "failed", "passed", "invalidated"}
+TASK_VALIDATION_ERROR_CATEGORIES = {
+    "environment_failure",
+    "source_compile_failure",
+    "test_compile_failure",
+    "behavior_test_failure",
+    "validation_contract_failure",
+    "workspace_changed",
+    "runner_integrity_failure",
+}
 PROJECT_VALIDATION_KINDS = {
     "integration_test",
     "e2e_test",
@@ -1300,6 +1309,25 @@ def _validate_task_validation(errors: list[str], data: dict[str, Any], batch_id:
         or not isinstance(snapshot, str)
     ):
         errors.append(f"{batch_id}.taskValidation.failed_state_incomplete")
+    if status == "failed":
+        failed_task = validation.get("failedValidationTaskId")
+        if failed_task not in actual_order:
+            errors.append(f"{batch_id}.taskValidation.failedValidationTaskId_invalid")
+        failed_command = validation.get("failedCommandId")
+        if failed_command is not None and not isinstance(failed_command, str):
+            errors.append(f"{batch_id}.taskValidation.failedCommandId_invalid")
+        if validation.get("errorCategory") not in TASK_VALIDATION_ERROR_CATEGORIES:
+            errors.append(f"{batch_id}.taskValidation.errorCategory_invalid")
+        diagnostic_paths = _string_list(validation.get("diagnosticPaths"))
+        if diagnostic_paths is None:
+            errors.append(f"{batch_id}.taskValidation.diagnosticPaths_invalid")
+        repair_owners = _string_list(validation.get("repairOwnerTaskIds"))
+        if (
+            repair_owners is None
+            or not repair_owners
+            or any(task_id not in actual_order for task_id in repair_owners)
+        ):
+            errors.append(f"{batch_id}.taskValidation.repairOwnerTaskIds_invalid")
     if status == "passed" and completed != actual_order:
         errors.append(f"{batch_id}.taskValidation.passed_without_all_tasks")
     if status == "passed" and (

@@ -927,6 +927,17 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                 ),
                 "taskContractSha256ByTask": task_contracts,
             }
+            if task_contract_unchanged:
+                for field in (
+                    "failedValidationTaskId",
+                    "failedCommandId",
+                    "errorCategory",
+                    "diagnosticPaths",
+                    "repairOwnerTaskIds",
+                    "lastFailure",
+                ):
+                    if field in previous_task_validation:
+                        task_validation[field] = copy.deepcopy(previous_task_validation[field])
         status = _batch_status(batch_tasks, batch_validation, task_validation)
         projected[batch_id] = {
             "featureId": root.get("featureId"),
@@ -3324,6 +3335,14 @@ def start_deferred_task_validation(
         validation["activeRunId"] = run_id
         validation["currentTaskId"] = str(current.get("id"))
         validation["batchSnapshotSha256"] = batch_snapshot_sha256
+        for field in (
+            "failedValidationTaskId",
+            "failedCommandId",
+            "errorCategory",
+            "diagnosticPaths",
+            "repairOwnerTaskIds",
+        ):
+            validation.pop(field, None)
         validation.setdefault("completedTaskIds", [
             str(item.get("id")) for item in batch_tasks if normalize_status(item.get("status")) == "done"
         ])
@@ -3343,6 +3362,7 @@ def record_deferred_task_validation_attempt(
     completion_evidence_ids: list[str],
     success: bool,
     batch_snapshot_sha256: str,
+    failure: dict[str, Any] | None = None,
 ) -> WriterResult:
     with _plan_lock(workspace, feature):
         data = _load(workspace, feature)
@@ -3399,6 +3419,26 @@ def record_deferred_task_validation_attempt(
             validation["activeRunId"] = None
             validation["lastRunId"] = run_id
             validation["currentTaskId"] = task_id
+            failure = failure if isinstance(failure, dict) else {}
+            failed_validation_task_id = failure.get("failedValidationTaskId", task_id)
+            repair_owner_task_ids = failure.get("repairOwnerTaskIds", [task_id])
+            validation.update({
+                "failedValidationTaskId": failed_validation_task_id,
+                "failedCommandId": failure.get("failedCommandId"),
+                "errorCategory": failure.get("errorCategory", "behavior_test_failure"),
+                "diagnosticPaths": list(failure.get("diagnosticPaths", [])),
+                "repairOwnerTaskIds": list(repair_owner_task_ids),
+                "lastFailure": {
+                    "runId": run_id,
+                    "failedValidationTaskId": failed_validation_task_id,
+                    "failedCommandId": failure.get("failedCommandId"),
+                    "errorCategory": failure.get("errorCategory", "behavior_test_failure"),
+                    "diagnosticPaths": list(failure.get("diagnosticPaths", [])),
+                    "repairOwnerTaskIds": list(repair_owner_task_ids),
+                    "evidenceIds": list(evidence_ids),
+                    "batchSnapshotSha256": batch_snapshot_sha256,
+                },
+            })
             data["status"] = "failed"
             data["activeBatchId"] = batch_id
             return _write(workspace, feature, data)
@@ -3449,6 +3489,15 @@ def invalidate_deferred_task_validation_for_repair(
         validation = batch_plan.get("taskValidation")
         if not isinstance(validation, dict) or validation.get("status") not in {"failed", "passed"}:
             return fail("task_validation_repair_not_allowed", batch_id, path=_path(workspace, feature))
+        if validation.get("status") == "failed":
+            repair_owners = validation.get("repairOwnerTaskIds")
+            repair_owners = repair_owners if isinstance(repair_owners, list) else []
+            if repair_task_id not in repair_owners:
+                return fail(
+                    "task_validation_repair_owner_mismatch",
+                    f"requested={repair_task_id};allowed={','.join(str(item) for item in repair_owners)}",
+                    path=_path(workspace, feature),
+                )
         for task in batch_plan.get("tasks", []):
             if not isinstance(task, dict):
                 continue
@@ -3463,6 +3512,14 @@ def invalidate_deferred_task_validation_for_repair(
             "completedTaskIds": [],
             "latestPassEvidenceByTask": {},
         })
+        for field in (
+            "failedValidationTaskId",
+            "failedCommandId",
+            "errorCategory",
+            "diagnosticPaths",
+            "repairOwnerTaskIds",
+        ):
+            validation.pop(field, None)
         batch_validation = batch_plan.get("batchValidation")
         if isinstance(batch_validation, dict):
             batch_validation["status"] = (
