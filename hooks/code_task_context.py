@@ -194,6 +194,57 @@ def resolve_task_refs(base: Path, task: dict[str, Any]) -> tuple[list[dict[str, 
     return resolved_specs, resolved_design, spec_errors + design_errors
 
 
+def _batch_exploration_scope(active_plan: dict[str, Any]) -> dict[str, Any]:
+    tasks = [item for item in active_plan.get("tasks", []) if isinstance(item, dict)]
+    scope_fields = ("modules", "entrypoints", "paths", "pages", "dataObjects")
+    scope: dict[str, Any] = {
+        "taskIds": [str(item["id"]) for item in tasks if isinstance(item.get("id"), str)],
+        "workspaceRefs": sorted(
+            {
+                str(item["workspaceRef"])
+                for item in tasks
+                if isinstance(item.get("workspaceRef"), str) and item["workspaceRef"].strip()
+            }
+        ),
+    }
+    for field in scope_fields:
+        scope[field] = sorted(
+            {
+                str(value)
+                for item in tasks
+                for value in (
+                    item.get("scope", {}).get(field, [])
+                    if isinstance(item.get("scope"), dict)
+                    else []
+                )
+                if isinstance(value, str) and value.strip()
+            }
+        )
+    scope["validationCommands"] = [
+        {
+            "taskId": str(item.get("id", "")),
+            "id": str(command.get("id", "")),
+            "argv": list(command.get("argv", [])),
+            "cwd": command.get("cwd"),
+            "kind": command.get("kind"),
+            **({"repo": command.get("repo")} if isinstance(command.get("repo"), str) else {}),
+        }
+        for item in tasks
+        for command in item.get("validationCommands", [])
+        if isinstance(command, dict)
+    ]
+    return scope
+
+
+def _exploration_phase(active_plan: dict[str, Any]) -> str:
+    tasks = [item for item in active_plan.get("tasks", []) if isinstance(item, dict)]
+    execution_started = any(
+        str(item.get("status", "todo")).strip().lower() != "todo"
+        for item in tasks
+    )
+    return "task_guard" if execution_started else "batch_bootstrap"
+
+
 def build_context(
     *,
     workspace: Path,
@@ -285,6 +336,7 @@ def build_context(
             "completedTaskCount": active_plan.get("completedTaskCount"),
             "taskCount": active_plan.get("taskCount"),
         },
+        "batchExplorationScope": _batch_exploration_scope(active_plan),
         "taskId": task_id,
         "artifactWorkspace": str(workspace),
         "artifactFeatureDir": str(base),
@@ -322,6 +374,20 @@ def build_context(
             "requiresRecord": False,
             "requiresPatch": False,
         }
+    phase = _exploration_phase(active_plan)
+    policy_status = data_out["explorationPolicy"]["status"]
+    full_exploration_required = policy_status in {"missing", "stale"}
+    data_out["explorationDirective"] = {
+        "phase": phase,
+        "scopeSource": (
+            "batchExplorationScope"
+            if phase == "batch_bootstrap" or full_exploration_required
+            else "taskContract.scope"
+        ),
+        "fullExplorationAllowed": full_exploration_required,
+        "requiresRecord": bool(data_out["explorationPolicy"].get("requiresRecord")),
+        "requiresPatch": bool(data_out["explorationPolicy"].get("requiresPatch")),
+    }
     return WriterResult(ok=not errors, path=active_plan_path, errors=errors, data=data_out)
 
 

@@ -302,12 +302,16 @@ def _contract() -> dict[str, Any]:
             "patterns": list(CRITICAL_GLOB_PATTERNS),
         },
         "invalidationRules": {
-            "headCommitChanged": "stale_even_when_file_hashes_match",
+            "headCommitChanged": "reuse_when_file_snapshot_is_unchanged_or_trusted_evidence_matches",
+            "headCommitChangedWithoutTrustedSnapshot": "stale",
             "criticalPathChanged": "stale_even_when_completion_evidence_explains_the_change",
         },
         "batchUpdateRules": {
             "sameBatch": "fresh_with_trusted_changes_without_patch",
+            "sameBatchImplementationEvidence": "trusted_until_deferred_validation_finishes",
+            "sameBatchImplementationStatuses": ["implemented", "validating", "failed", "repair_in_progress"],
             "newBatch": "reusable_with_changes_requires_targeted_patch",
+            "newBatchWithoutFileChanges": "patch_metadata_to_advance_batch_baseline",
             "sensitivePaths": "shared_paths_and_integration_points_require_targeted_patch",
             "transientValidationFiles": "excluded_unless_formal_changed",
         },

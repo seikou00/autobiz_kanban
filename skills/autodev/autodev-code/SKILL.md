@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.2.0703
+version: v1.2.0727
 ---
 
 ## 前端 Route 强制闸门（必须优先执行）
@@ -173,6 +173,12 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 
 - 只读取根 `plan.json` 的批次摘要和 `activeBatchId` 对应的一个 `plans/Bxxx/plan.json`，不得把其他批次完整 task 契约加载进当前对话。使用 `write_todos` 映射当前批次任务，状态用待做 / 进行中 / 实现已就绪 / 完成 / 失败；每次只置一个任务为进行中。根 plan 含 `tasks` 或缺少批次时回流 `/autodev-plan` 重建。
 
+### Batch 级代码探索闸门
+
+每个 active Batch 只允许在首个 TASK run 启动前建立一次仓库认知。选择该 Batch 第一个依赖已满足的待做 TASK，先运行 `code_task_context.py`，读取输出中的 `batchExplorationScope`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`。`batchExplorationScope` 是本批全部 TASK 的 `modules/entrypoints/paths/pages/dataObjects/validationCommands` 并集，首次有界探索必须以该并集为边界，不得只探索第一个 TASK，也不得扩展到其他 Batch。
+
+`explorationDirective.phase=batch_bootstrap` 时按 `scopeSource=batchExplorationScope` 完成本批探索接续；`phase=task_guard` 且 `fullExplorationAllowed=false` 时只能使用 `taskContract.scope` 做定点复核，不得把仍然返回的 Batch scope 当成重新全探授权。按下文缓存状态完成 `record` 或 `patch`，并重新运行 context，直到所有仓库均成为 `fresh` 后，才能启动本批第一个 TASK run。进入后续 TASK 时仍要重跑 context 作为轻量快照守卫；同批前序带有效 `latestImplementationEvidenceId` 的 `implemented/validating/failed` TASK，以及 validation repair 中带该证据的 `in_progress` TASK，能完整解释且最终快照匹配时必须返回 `fresh_with_trusted_changes`，不得重新探测项目框架、模块布局或测试运行器。若后续 TASK 返回 `stale`，先根据 `staleReasons/criticalHits/unexplainedPaths` 处理异常漂移，不得把每个 TASK 的正常实现变化当成新的全量探索机会。
+
 ###  选择下一个任务
 
 跳过「完成」；优先恢复「进行中」；否则取第一个依赖已满足的「待做」；有「失败」先读原因，仅在用户要求修复时再处理。每次只做一个，完成后再进入下一个，并同步更新 `write_todos` 条目。
@@ -189,7 +195,7 @@ python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-
 
 保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `recover` / `abort` 处理原 run。
 `--code-workspace` 同时是 Git 仓库定位入口和 task workspace 基准，必须选择 task `workspaceRef` 指向的实际仓库；请求路径必须与 task `scope.workspaceRoots` 声明的位置完全一致。前端 TASK 不得传后端仓库，后端 TASK 也不得传前端仓库。即使传模块子目录，runner 也会解析并快照整个 Git 根；`scope.paths` 只作为相对该模块的提示性范围，不是实现文件白名单。start 会先验证 workspace 绑定、validation `repo/cwd` 目录和 Maven/Gradle/Node 等 manifest，再保存 `scopePathBase=requested_code_workspace`、`workspacePrefixes` 和 `resolvedScopePaths`；任一 workspace 或命令前置校验失败时尚未创建 run，不得先写代码再重试。TASK finish 会自动记录该 workspace 内全部有效 Git 变更，DTO/domain/test/resources/迁移/配置等同 workspace 文件无需补 scope 或重建 digest；跨 workspace 的变更才需要修复工作区并重试。`finish-implementation` / `abort` / `resume` 必须继续传相同请求路径并保持同一个 run；同一 Git 根下替换成其他模块会返回 `task_run_requested_workspace_mismatch`。快照比较 Git 可见文件的内容哈希，包含未跟踪且未忽略文件；`staging / unstaging` 不会制造内容变更，也不能恢复丢失的 start 基线。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。TASK 的实现 Evidence 使用该 TASK 从首次 start 到最终实现收口之间所有 run 的累计 `fileChanges/changedFiles`；abort 只结束一次 run，不清除已记录的变更。若累计变更非空，禁止用 `--no-code-change-why` 把实现伪装成已有代码。
-`start` 会固化当前 task 契约哈希，并对请求 workspace、scope 投影和初始 Git 快照写入 `integritySha256`。run 活动期间不得修改该 task 的 goal/scope/AC/validationCommands 等计划字段，也禁止直接编辑 `plan.json`、批次 `plan.json` 或 `.task-runs/**/*.json`、手工重算 digest/hash；否则 runner 返回 `task_run_integrity_mismatch` 或计划完整性错误。确需修复 Plan contract 时按下方协议保存 patch、force abort、由 Plan writer 整体重建契约和基线后再应用 patch；普通新增 DTO/XML/测试文件不需要修 scope 或重建 digest。
+`start` 会固化当前 task 契约哈希，并对请求 workspace、scope 投影和初始 Git 快照写入 `integritySha256`。Batch 级探索和首次 `record/patch` 必须发生在首个 TASK `start` 前；后续 TASK 的 context 复核同样应在对应 `start` 前完成。run 活动期间不得修改该 task 的 goal/scope/AC/validationCommands 等计划字段，也禁止直接编辑 `plan.json`、批次 `plan.json` 或 `.task-runs/**/*.json`、手工重算 digest/hash；否则 runner 返回 `task_run_integrity_mismatch` 或计划完整性错误。确需修复 Plan contract 时按下方协议保存 patch、force abort、由 Plan writer 整体重建契约和基线后再应用 patch；普通新增 DTO/XML/测试文件不需要修 scope 或重建 digest。
 
 每个 TASK 必须且只能绑定一个 `workspaceRef`；只向 runner 传该 TASK 的 workspace，禁止对 TASK start/finish/validate 重复传入其他仓库。若一个需求闭环需要修改多个业务仓库，Plan 必须拆成多个 TASK 并用 deps 串联；跨仓库集成检查只能放在 `projectValidationCommands`。Plan 中具名 workspace 的 validation command 必须用 `repo` 指明 Git 根目录名；changed/supporting 路径使用 `repoId:relative/path`。无论涉及多少仓库，`evidence/` 与 `.task-runs/` 只能写入 feature 产物目录，禁止写入任一业务仓库。
 
@@ -200,17 +206,17 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches` 和 `explorationPolicy`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
+该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `batchExplorationScope`、`taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`。探索范围必须服从 `explorationDirective.scopeSource/fullExplorationAllowed`；首个 TASK 启动前通常用 `batchExplorationScope` 建立本批统一认知，后续 TASK 通常只使用 `taskContract.scope` 做定点复核。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
 
 必须按每个仓库的缓存状态执行，不能只看总体最严 policy 后忽略其他仓库：
 
 若 `explorationPolicy.status=unavailable`，说明没有传入业务仓库，必须停止并补传 `--code-workspace`，不得绕过缓存协议继续编码。
 
-- `missing` / `stale`（`full_bounded_explore`、`requiresRecord=true`）：读取 `staleReasons` / `criticalHits`，完成一次有界探索；先读取 `code_exploration_writer.py contract`，并确认业务仓内存在的 `.autobizdevops/`、`.cmbdevclaw/` 等运行期目录已被 Git ignore，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `record --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 写入完整 findings。重新运行 `code_task_context.py`，对应仓库必须成为 `fresh` 后才能改业务代码。`headCommit` 变化即使文件哈希相同也按 `stale` 处理，这是避免 rebase/merge 后误复用的保守失效策略。
+- `missing` / `stale`（`full_bounded_explore`、`requiresRecord=true`）：读取 `staleReasons` / `criticalHits`，完成一次有界探索；先读取 `code_exploration_writer.py contract`，并确认业务仓内存在的 `.autobizdevops/`、`.cmbdevclaw/` 等运行期目录已被 Git ignore，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `record --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 写入完整 findings。重新运行 `code_task_context.py`，对应仓库必须成为 `fresh` 后才能改业务代码。`headCommit` 单独变化但 Git 可见文件快照未变，或当前文件快照与可信 TASK/Batch Evidence 的最终快照一致时允许复用；HEAD 变化且缺少可信最终快照时仍按 `stale` 处理。
 - `fresh`（`task_scope_only`）：直接使用缓存 findings，只定点读取当前 Task scope / entrypoint 涉及文件；不得重复探测项目框架、模块布局和测试运行器。
 - `fresh_with_trusted_changes`（`task_scope_only`）：implementation evidence 已解释本次仓库变化，且缓存与当前 Task 属于同一 active batch；只定点读取当前 Task scope / entrypoint，不执行 `record` 或 `patch`。这是批次内的 `deferredCacheUpdate`，变化会在批次边界统一吸收。
 - `reusable_with_changes`（`targeted_reread`、`requiresPatch=true`）：只读取 `changedPaths + 1-hop 依赖 + 当前 Task scope`，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `patch --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 确认；即使事实未变化，也必须传完整 `reviewedPaths` 和空 `findingUpdates`。`findingUpdates` 对每个字段采用整类替换语义，不得只传该列表的一部分；writer 会在合并后重新校验完整 findings。重新运行 context，成为 `fresh` 后才能改业务代码。
-- 同一 active batch 内，普通且已被 evidence 解释的源文件变化不要求每个 Task 都 patch；进入下一批次时再统一 patch。即使仍在同一批次，命中 `shared/integration` 路径也必须立即 targeted reread/patch；构建配置、迁移/schema、HEAD 变化或无法由 evidence 解释的路径仍进入 `stale`，重新做有界 `record`。`transientValidationFiles` 不参与探索差异，但同一路径后续成为正式变更时必须重新纳入。
+- 同一 active batch 内，普通且已被 implementation Evidence 解释的源文件变化不要求每个 Task 都 patch；进入下一批次时在 Batch 级探索闸门统一 patch。即使仍在同一批次，命中 `shared/integration` 路径也必须立即 targeted reread/patch；构建配置、迁移/schema、HEAD 变化且缺少可信最终快照，或无法由 Evidence 解释的路径仍进入 `stale`，重新做有界 `record`。`transientValidationFiles` 不参与探索差异，但同一路径后续成为正式变更时必须重新纳入。
 
 `fresh/reusable_with_changes 时禁止无边界全仓探索`：不得重新运行无范围全仓 `rg`、递归目录 listing 或框架发现。缓存只能通过 `code_exploration_writer.py` 修改，禁止直接编辑 `cache/code-exploration/**/*.json`。共享路径只更新当前 executionLane；另一 lane 在后续 inspect 时独立判定。runner 能返回 machine policy，但宿主未提供工具调用遥测，无法独立证明 Agent 执行过多少次搜索，这是协议层约束。
 

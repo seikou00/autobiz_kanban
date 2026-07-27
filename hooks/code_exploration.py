@@ -123,6 +123,8 @@ class TrustedEvolution:
     evidence_ids: tuple[str, ...]
     untrusted_reasons: tuple[str, ...]
     transient_paths: frozenset[str] = frozenset()
+    implementation_task_ids: tuple[str, ...] = ()
+    implementation_evidence_ids: tuple[str, ...] = ()
 
     @classmethod
     def empty(cls) -> "TrustedEvolution":
@@ -285,6 +287,8 @@ def _result(
         "unexplainedPaths": sorted(unexplained_paths or []),
         "matchedTaskIds": list(evolution.task_ids),
         "matchedEvidenceIds": list(evolution.evidence_ids),
+        "matchedImplementationTaskIds": list(evolution.implementation_task_ids),
+        "matchedImplementationEvidenceIds": list(evolution.implementation_evidence_ids),
         "untrustedReasons": list(evolution.untrusted_reasons),
         "staleReasons": list(stale_reasons or []),
     }
@@ -302,8 +306,7 @@ def classify_cache(
     cached_snapshot = cache.get("gitSnapshot") if isinstance(cache, dict) else None
     if not isinstance(cached_snapshot, dict) or not isinstance(cached_snapshot.get("files"), dict):
         return _result("stale", stale_reasons=["git_snapshot_invalid"])
-    if cached_snapshot.get("headCommit") != current_snapshot.get("headCommit"):
-        return _result("stale", stale_reasons=["head_commit_changed"])
+    head_commit_changed = cached_snapshot.get("headCommit") != current_snapshot.get("headCommit")
     before = cached_snapshot["files"]
     after = current_snapshot.get("files")
     if not isinstance(after, dict):
@@ -321,7 +324,20 @@ def classify_cache(
     changed_paths.difference_update(trusted.transient_paths - trusted.changed_paths)
     changed_paths = sorted(changed_paths)
     if not changed_paths:
-        return _result("fresh")
+        stale_reasons = list(trusted.untrusted_reasons)
+        if trusted.latest_files is not None and trusted.latest_files != after:
+            stale_reasons.append("current_snapshot_not_latest_task_snapshot")
+            if head_commit_changed:
+                stale_reasons.append("head_commit_changed_without_trusted_snapshot")
+        if stale_reasons:
+            return _result(
+                "stale",
+                trusted=trusted,
+                stale_reasons=stale_reasons,
+            )
+        if current_batch_id is not None and cache.get("capturedBatchId") != current_batch_id:
+            return _result("reusable_with_changes", trusted=trusted)
+        return _result("fresh", trusted=trusted)
     critical_hits = [path for path in changed_paths if is_critical_path(path)]
     if critical_hits:
         return _result(
@@ -337,6 +353,8 @@ def classify_cache(
         stale_reasons.append("unexplained_paths")
     if trusted.latest_files != after:
         stale_reasons.append("current_snapshot_not_latest_task_snapshot")
+        if head_commit_changed:
+            stale_reasons.append("head_commit_changed_without_trusted_snapshot")
     if stale_reasons:
         return _result(
             "stale",
@@ -408,22 +426,60 @@ def _read_run(feature_dir: Path, task_id: str, run_id: str) -> dict[str, Any] | 
 
 def _evidence_by_id(
     feature_dir: Path,
-) -> tuple[dict[str, dict[str, Any]], dict[str, int], list[str]]:
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, int],
+    dict[str, tuple[str, ...]],
+    list[str],
+]:
     try:
         records = read_records(stream_path(feature_dir))
     except (OSError, ValueError):
-        return {}, {}, ["evidence_stream_unreadable"]
+        return {}, {}, {}, ["evidence_stream_unreadable"]
     result: dict[str, dict[str, Any]] = {}
     order: dict[str, int] = {}
-    errors: list[str] = []
+    errors: dict[str, tuple[str, ...]] = {}
     for sequence, record in enumerate(records):
         evidence_id = record.get("evidenceId")
         if not isinstance(evidence_id, str):
             continue
         result[evidence_id] = record
         order[evidence_id] = sequence
-        errors.extend(f"{evidence_id}:{error}" for error in validate_record(record))
-    return result, order, errors
+        record_errors = tuple(validate_record(record))
+        if record_errors:
+            errors[evidence_id] = record_errors
+    return result, order, errors, []
+
+
+def _record_paths_for_repository(
+    record: dict[str, Any],
+    *,
+    repository_id: str,
+    repository_count: int,
+    context: str,
+) -> tuple[set[str], set[str], list[str]]:
+    errors: list[str] = []
+    changed: set[str] = set()
+    transient: set[str] = set()
+
+    def project(raw_paths: Any, field: str, target: set[str]) -> None:
+        if raw_paths is None and field == "transientValidationFiles":
+            raw_paths = []
+        if not isinstance(raw_paths, list) or not all(isinstance(item, str) for item in raw_paths):
+            errors.append(f"{context}_{field}_invalid")
+            return
+        prefix = f"{repository_id}:"
+        for raw_path in raw_paths:
+            if raw_path.startswith(prefix):
+                target.add(raw_path[len(prefix):])
+            elif repository_count == 1:
+                target.add(raw_path)
+            else:
+                errors.append(f"{context}_repository_prefix_missing:{raw_path}")
+
+    project(record.get("changedFiles"), "changedFiles", changed)
+    project(record.get("transientValidationFiles", []), "transientValidationFiles", transient)
+    return changed, transient, errors
 
 
 def collect_trusted_evolution(
@@ -431,20 +487,96 @@ def collect_trusted_evolution(
     bundle: PlanBundle,
     cache: dict[str, Any] | None,
     repository_id: str,
+    *,
+    current_batch_id: str | None = None,
 ) -> TrustedEvolution:
     coverage = cache.get("evidenceCoverage", {}) if isinstance(cache, dict) else {}
     covered_evidence = set(coverage.get("completionEvidenceIds", [])) if isinstance(coverage, dict) else set()
-    evidence_by_id, evidence_order, stream_errors = _evidence_by_id(feature_dir)
+    evidence_by_id, evidence_order, evidence_errors, stream_errors = _evidence_by_id(feature_dir)
     changed_paths: set[str] = set()
     transient_paths: set[str] = set()
     task_ids: list[str] = []
     evidence_ids: list[str] = []
+    implementation_task_ids: list[str] = []
+    implementation_evidence_ids: list[str] = []
     untrusted = list(stream_errors)
     # The append-only evidence stream records completion order independently of plan order.
     latest_files: dict[str, str | None] | None = None
     latest_completion_order = -1
     for task in bundle.tasks:
-        if normalize_status(task.get("status")) != "done":
+        task_status = normalize_status(task.get("status"))
+        task_id = str(task.get("id"))
+        task_batch_id = bundle.task_batches.get(task.get("id"))
+        evidence_id = task.get("latestImplementationEvidenceId")
+        implementation_state_expected = task_status in {"implemented", "validating", "failed"}
+        repair_in_progress = task_status == "in_progress" and isinstance(evidence_id, str)
+        if (
+            (implementation_state_expected or repair_in_progress)
+            and current_batch_id is not None
+            and task_batch_id == current_batch_id
+            and bundle.root.get("activeBatchId") == current_batch_id
+        ):
+            record = evidence_by_id.get(evidence_id) if isinstance(evidence_id, str) else None
+            if (
+                not isinstance(record, dict)
+                or record.get("action") != "implementation"
+                or record.get("taskId") != task.get("id")
+                or not isinstance(record.get("runId"), str)
+                or record.get("evidenceId") != evidence_id
+            ):
+                untrusted.append(f"implementation_evidence_invalid:{task_id}:{evidence_id}")
+                continue
+            if evidence_errors.get(evidence_id):
+                untrusted.extend(
+                    f"{evidence_id}:{error}" for error in evidence_errors[evidence_id]
+                )
+                continue
+            run_id = str(record["runId"])
+            run = _read_run(feature_dir, task_id, run_id)
+            repositories = run.get("finalRepositories") if isinstance(run, dict) else None
+            matching = next(
+                (
+                    item
+                    for item in repositories or []
+                    if isinstance(item, dict) and item.get("id") == repository_id
+                ),
+                None,
+            )
+            if isinstance(run, dict) and isinstance(repositories, list) and matching is None:
+                # The task belongs to another business repository and cannot
+                # explain changes in this cache.
+                continue
+            if (
+                not isinstance(run, dict)
+                or run.get("status") != "implemented"
+                or run.get("success") is not True
+                or not isinstance(matching, dict)
+                or not isinstance(matching.get("snapshot"), dict)
+            ):
+                untrusted.append(f"implementation_run_state_invalid:{task_id}:{run_id}")
+                continue
+            repository_count = len(
+                [item for item in repositories if isinstance(item, dict)]
+            )
+            task_changed_paths, task_transient_paths, path_errors = _record_paths_for_repository(
+                record,
+                repository_id=repository_id,
+                repository_count=repository_count,
+                context=f"implementation:{evidence_id}",
+            )
+            if path_errors:
+                untrusted.extend(path_errors)
+                continue
+            changed_paths.update(task_changed_paths)
+            transient_paths.update(task_transient_paths)
+            implementation_task_ids.append(task_id)
+            implementation_evidence_ids.append(evidence_id)
+            completion_order = evidence_order.get(evidence_id, -1)
+            if completion_order > latest_completion_order:
+                latest_files = matching["snapshot"]
+                latest_completion_order = completion_order
+            continue
+        if task_status != "done":
             continue
         task_evidence = [item for item in task.get("completionEvidenceIds", []) if isinstance(item, str)]
         new_ids = [item for item in task_evidence if item not in covered_evidence]
@@ -452,6 +584,7 @@ def collect_trusted_evolution(
             continue
         run_ids: set[str] = set()
         run_completion_order: dict[str, int] = {}
+        task_records: list[tuple[str, dict[str, Any]]] = []
         task_valid = True
         for evidence_id in new_ids:
             record = evidence_by_id.get(evidence_id)
@@ -472,47 +605,23 @@ def collect_trusted_evolution(
                 untrusted.append(f"evidence_invalid:{evidence_id}")
                 task_valid = False
                 continue
+            if evidence_errors.get(evidence_id):
+                untrusted.extend(
+                    f"{evidence_id}:{error}" for error in evidence_errors[evidence_id]
+                )
+                task_valid = False
+                continue
             run_id = record["runId"]
             run_ids.add(run_id)
             run_completion_order[run_id] = max(
                 run_completion_order.get(run_id, -1),
                 evidence_order.get(evidence_id, -1),
             )
-            evidence_ids.append(evidence_id)
-            raw_paths = record.get("changedFiles")
-            if not isinstance(raw_paths, list) or not all(isinstance(item, str) for item in raw_paths):
-                untrusted.append(f"changed_files_invalid:{evidence_id}")
-                task_valid = False
-                continue
-            for raw_path in raw_paths:
-                prefix = f"{repository_id}:"
-                if raw_path.startswith(prefix):
-                    changed_paths.add(raw_path[len(prefix):])
-                elif len(run_ids) == 1:
-                    changed_paths.add(raw_path)
-                else:
-                    untrusted.append(f"repository_prefix_missing:{evidence_id}:{raw_path}")
-                    task_valid = False
-            raw_transient_paths = record.get("transientValidationFiles", [])
-            if raw_transient_paths is None:
-                raw_transient_paths = []
-            if not isinstance(raw_transient_paths, list) or not all(
-                isinstance(item, str) for item in raw_transient_paths
-            ):
-                untrusted.append(f"transient_files_invalid:{evidence_id}")
-                task_valid = False
-            else:
-                for raw_path in raw_transient_paths:
-                    prefix = f"{repository_id}:"
-                    if raw_path.startswith(prefix):
-                        transient_paths.add(raw_path[len(prefix):])
-                    elif len(run_ids) == 1:
-                        transient_paths.add(raw_path)
-                    else:
-                        untrusted.append(f"repository_prefix_missing:{evidence_id}:{raw_path}")
-                        task_valid = False
+            task_records.append((evidence_id, record))
         task_latest_files: dict[str, str | None] | None = None
         task_completion_order = -1
+        repository_count_by_run: dict[str, int] = {}
+        task_targets_repository = False
         for run_id in sorted(run_ids, key=lambda item: (run_completion_order.get(item, -1), item)):
             run = _read_run(feature_dir, str(task.get("id")), run_id)
             repositories = run.get("finalRepositories") if isinstance(run, dict) else None
@@ -520,10 +629,22 @@ def collect_trusted_evolution(
                 (item for item in repositories or [] if isinstance(item, dict) and item.get("id") == repository_id),
                 None,
             )
-            if not isinstance(run, dict) or run.get("status") != "done" or run.get("success") is not True or not isinstance(matching, dict):
+            if isinstance(run, dict) and isinstance(repositories, list) and matching is None:
+                continue
+            if (
+                not isinstance(run, dict)
+                or run.get("status") != "done"
+                or run.get("success") is not True
+                or not isinstance(repositories, list)
+                or not isinstance(matching, dict)
+            ):
                 untrusted.append(f"run_state_invalid:{task.get('id')}:{run_id}")
                 task_valid = False
                 continue
+            task_targets_repository = True
+            repository_count_by_run[run_id] = len(
+                [item for item in repositories if isinstance(item, dict)]
+            )
             snapshot = matching.get("snapshot")
             if not isinstance(snapshot, dict):
                 untrusted.append(f"run_snapshot_invalid:{task.get('id')}:{run_id}")
@@ -533,8 +654,28 @@ def collect_trusted_evolution(
             if run_order >= task_completion_order:
                 task_latest_files = snapshot
                 task_completion_order = run_order
+        if task_valid and not task_targets_repository:
+            continue
+        task_changed_paths: set[str] = set()
+        task_transient_paths: set[str] = set()
+        for evidence_id, record in task_records:
+            record_changed, record_transient, path_errors = _record_paths_for_repository(
+                record,
+                repository_id=repository_id,
+                repository_count=repository_count_by_run.get(str(record.get("runId")), 0),
+                context=f"validation:{evidence_id}",
+            )
+            if path_errors:
+                untrusted.extend(path_errors)
+                task_valid = False
+                continue
+            task_changed_paths.update(record_changed)
+            task_transient_paths.update(record_transient)
         if task_valid:
+            changed_paths.update(task_changed_paths)
+            transient_paths.update(task_transient_paths)
             task_ids.append(str(task.get("id")))
+            evidence_ids.extend(evidence_id for evidence_id, _ in task_records)
             if task_latest_files is not None and task_completion_order > latest_completion_order:
                 latest_files = task_latest_files
                 latest_completion_order = task_completion_order
@@ -565,6 +706,11 @@ def collect_trusted_evolution(
                 ):
                     untrusted.append(f"batch_closure_evidence_invalid:{evidence_id}")
                     continue
+                if evidence_errors.get(evidence_id):
+                    untrusted.extend(
+                        f"{evidence_id}:{error}" for error in evidence_errors[evidence_id]
+                    )
+                    continue
                 evidence_ids.append(evidence_id)
             continue
         batch_valid = True
@@ -585,6 +731,12 @@ def collect_trusted_evolution(
                 or not isinstance(record.get("runId"), str)
             ):
                 untrusted.append(f"batch_evidence_invalid:{evidence_id}")
+                batch_valid = False
+                continue
+            if evidence_errors.get(evidence_id):
+                untrusted.extend(
+                    f"{evidence_id}:{error}" for error in evidence_errors[evidence_id]
+                )
                 batch_valid = False
                 continue
             run_ids.add(str(record["runId"]))
@@ -621,26 +773,29 @@ def collect_trusted_evolution(
             untrusted.append(f"batch_run_snapshot_invalid:{batch_id}:{run_id}")
             continue
         repository_count = len([item for item in repositories or [] if isinstance(item, dict)])
+        batch_changed_paths: set[str] = set()
+        batch_transient_paths: set[str] = set()
         for evidence_id, record in batch_records:
-            raw_paths = record.get("changedFiles")
-            if not isinstance(raw_paths, list) or not all(isinstance(item, str) for item in raw_paths):
-                untrusted.append(f"batch_changed_files_invalid:{evidence_id}")
+            record_changed, record_transient, path_errors = _record_paths_for_repository(
+                record,
+                repository_id=repository_id,
+                repository_count=repository_count,
+                context=f"batch:{evidence_id}",
+            )
+            if path_errors:
+                untrusted.extend(path_errors)
                 batch_valid = False
                 continue
-            for raw_path in raw_paths:
-                prefix = f"{repository_id}:"
-                if raw_path.startswith(prefix):
-                    changed_paths.add(raw_path[len(prefix):])
-                elif repository_count == 1:
-                    changed_paths.add(raw_path)
-                else:
-                    untrusted.append(f"batch_repository_prefix_missing:{evidence_id}:{raw_path}")
-                    batch_valid = False
-            evidence_ids.append(evidence_id)
+            batch_changed_paths.update(record_changed)
+            batch_transient_paths.update(record_transient)
         batch_order = max((evidence_order.get(evidence_id, -1) for evidence_id, _ in batch_records), default=-1)
-        if batch_valid and batch_order > latest_completion_order:
-            latest_files = matching["snapshot"]
-            latest_completion_order = batch_order
+        if batch_valid:
+            changed_paths.update(batch_changed_paths)
+            transient_paths.update(batch_transient_paths)
+            evidence_ids.extend(evidence_id for evidence_id, _ in batch_records)
+            if batch_order > latest_completion_order:
+                latest_files = matching["snapshot"]
+                latest_completion_order = batch_order
     return TrustedEvolution(
         changed_paths=frozenset(changed_paths),
         latest_files=latest_files,
@@ -648,6 +803,8 @@ def collect_trusted_evolution(
         evidence_ids=tuple(evidence_ids),
         untrusted_reasons=tuple(sorted(set(untrusted))),
         transient_paths=frozenset(transient_paths),
+        implementation_task_ids=tuple(implementation_task_ids),
+        implementation_evidence_ids=tuple(implementation_evidence_ids),
     )
 
 
@@ -683,7 +840,13 @@ def inspect_exploration_cache(
             raise CodeExplorationError("code_exploration_cache_invalid:" + ",".join(errors))
         cache = value
     current = capture_repository_snapshot(repository_root)
-    trusted = collect_trusted_evolution(feature_dir, bundle, cache, repository_id)
+    trusted = collect_trusted_evolution(
+        feature_dir,
+        bundle,
+        cache,
+        repository_id,
+        current_batch_id=batch_id,
+    )
     result = classify_cache(cache, current, trusted, current_batch_id=batch_id)
     result.update(
         {
