@@ -41,7 +41,7 @@ python "${pluginPath}/skills/autodev/hooks/plan_execution_check.py" "${feature}"
 ```
 
 - `PASS` → 继续。
-- 其他 `FAIL`（引用缺失 / DAG 非法）→ 停止，展示错误项，提示回 `/autodev-plan` 修 PLAN；不得跳过或自行改写引用。
+- 其他 `FAIL`（引用缺失 / DAG 非法 / design 决策未被任务覆盖）→ 停止，展示错误项，提示回 `/autodev-plan` 修 PLAN；不得跳过或自行改写引用。`uncovered_design_decision` 表示 design.md 的某个 API/DATA/D 决策没有任何任务的「设计依据」引用它——code 只展开任务引用的决策，漏引用等于该决策永远不会被实现，必须回 plan 补任务或在 Contract Coverage 标注「无需实现:<理由>」。
 - `LEGACY_PLAN_DEGRADE`→ 继续，但仍按下方协议装载 PLAN 的任务，不得重拆。
 
 ## 写入 checkpoint

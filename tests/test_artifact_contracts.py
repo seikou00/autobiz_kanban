@@ -143,7 +143,7 @@ PLAN_OK = """# 执行计划: 导出
 - **做什么:** x
 - **规格依据:** REQ-order-export-001
 - **场景依据:** SCN-order-export-001-01
-- **设计依据:** API-01
+- **设计依据:** API-01, D-01
 - **代码证据:** EVD-001
 - **验证方法:** pytest 预期结果：通过
 - **状态:** 待做
@@ -154,6 +154,8 @@ PLAN_OK = """# 执行计划: 导出
 | Contract Item | Type | 关联 Scenario | 覆盖任务 | 验证方法 |
 |---------------|------|---------------|----------|----------|
 | REQ-order-export-001 | Behavior | SCN-order-export-001-01 | TASK-001 | pytest |
+| API-01 | API | - | TASK-001 | pytest |
+| D-01 | Technical Decision | - | TASK-001 | pytest |
 """
 
 
@@ -491,8 +493,10 @@ class PlanFinishedContractTest(ContractTestBase):
         self.assertIn("task_missing_completion_evidence", output)
 
     def test_design_decision_uncovered_fails(self) -> None:
-        self.write("PLAN.md", PLAN_DONE)
-        # design 含 D-01 决策，但 PLAN_DONE 里没有 D-01 → 未覆盖
+        # 把 D-01 从 PLAN 中彻底抹掉：design 有该决策而 PLAN 一处不提 → 未覆盖
+        text = PLAN_DONE.replace("- **设计依据:** API-01, D-01", "- **设计依据:** API-01")
+        text = text.replace("| D-01 | Technical Decision | - | TASK-001 | pytest |\n", "")
+        self.write("PLAN.md", text)
         self.write("design.md", DESIGN_OK)
         failures, output = self.run_validator(validate_plan_finished_tasks)
         self.assertGreater(failures, 0)
@@ -500,8 +504,7 @@ class PlanFinishedContractTest(ContractTestBase):
         self.assertIn("D-01", output)
 
     def test_design_decision_covered_passes(self) -> None:
-        text = PLAN_DONE.replace("- **设计依据:** API-01", "- **设计依据:** API-01, D-01")
-        self.write("PLAN.md", text)
+        self.write("PLAN.md", PLAN_DONE)
         self.write("design.md", DESIGN_OK)
         failures, output = self.run_validator(validate_plan_finished_tasks)
         self.assertEqual(failures, 0, output)
@@ -554,6 +557,97 @@ class PlanExecutionCheckTest(ContractTestBase):
         code, output = self.run_check()
         self.assertEqual(code, 1)
         self.assertIn("missing_req_ref", output)
+
+    def test_uncovered_design_decision_fails(self) -> None:
+        """design 的决策没被任何任务认领 → 不得放行。
+
+        引用校验只查 PLAN→design 方向，漏了这一向的话，裁定门产出的 API/DATA/D
+        可以在 PLAN 生成时被静默丢弃，而 code 只按任务「设计依据」展开。
+        """
+        self._write_upstream()
+        plan = PLAN_OK.replace("- **设计依据:** API-01, D-01", "- **设计依据:** API-01")
+        plan = plan.replace("| D-01 | Technical Decision | - | TASK-001 | pytest |\n", "")
+        self.write("PLAN.md", plan)
+        code, output = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("uncovered_design_decision", output)
+        self.assertIn("id=D-01", output)
+
+    def test_waived_design_decision_passes(self) -> None:
+        """Contract Coverage 标注「无需实现:<理由>」是合法出口。"""
+        self._write_upstream()
+        plan = PLAN_OK.replace("- **设计依据:** API-01, D-01", "- **设计依据:** API-01")
+        plan = plan.replace(
+            "| D-01 | Technical Decision | - | TASK-001 | pytest |",
+            "| D-01 | Technical Decision | - | 无需实现:本轮沿用既有队列实现 | - |",
+        )
+        self.write("PLAN.md", plan)
+        code, output = self.run_check()
+        self.assertEqual(code, 0, output)
+
+    def test_waiver_without_reason_fails(self) -> None:
+        """「无需实现」不带理由就是免费出口，反向校验等于没加。"""
+        self._write_upstream()
+        plan = PLAN_OK.replace("- **设计依据:** API-01, D-01", "- **设计依据:** API-01")
+        plan = plan.replace(
+            "| D-01 | Technical Decision | - | TASK-001 | pytest |",
+            "| D-01 | Technical Decision | - | 无需实现 | - |",
+        )
+        self.write("PLAN.md", plan)
+        code, output = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("waiver_missing_reason", output)
+
+    def test_task_claim_outranks_waiver_wording(self) -> None:
+        """模板把「TASK-002 / 无需实现:<原因>」并排摆在同一格。
+
+        任务已认领的 ID 不该因为同格还留着豁免措辞就报 waiver_missing_reason。
+        """
+        self._write_upstream()
+        plan = PLAN_OK.replace(
+            "| D-01 | Technical Decision | - | TASK-001 | pytest |",
+            "| D-01 | Technical Decision | - | TASK-001 / 无需实现:[原因] | pytest |",
+        )
+        self.write("PLAN.md", plan)
+        code, output = self.run_check()
+        self.assertEqual(code, 0, output)
+
+    def test_evidence_ids_need_no_coverage(self) -> None:
+        """EVD 是代码事实，不是待落地的决策，不进反向覆盖。"""
+        self._write_upstream()
+        plan = PLAN_OK.replace("- **代码证据:** EVD-001", "- **代码证据:** 无")
+        self.write("PLAN.md", plan)
+        code, output = self.run_check()
+        self.assertEqual(code, 0, output)
+
+    def test_structured_design_without_ids_still_checks_refs(self) -> None:
+        """新格式 design.md 无 ID 行时不得整体 degrade。
+
+        「本轮真的无 API/无 SQL」是模板鼓励的合法状态，和「legacy 无 ID 体系」
+        共用跳过分支的话，PLAN 引用捏造 ID 也会放行。
+        """
+        self._write_upstream()
+        self.write(
+            "design.md",
+            "# 技术设计\n\n## 4. API Decisions\n\n- **x-auto-no-http-api:** true\n"
+            "\n## 5. Data Decisions\n\n- **x-auto-no-sql:** true\n",
+        )
+        plan = PLAN_OK.replace("- **设计依据:** API-01, D-01", "- **设计依据:** API-99")
+        self.write("PLAN.md", plan)
+        code, output = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("missing_design_ref", output)
+        self.assertNotIn("legacy_design_skip_design_ref_check", output)
+
+    def test_legacy_design_still_degrades(self) -> None:
+        """无 ID 行也无格式标记的老 design.md 保持 degrade，历史 feature 可回放。"""
+        self._write_upstream()
+        self.write("design.md", "# 技术设计\n\n随手写的老格式，没有 ID 体系。\n")
+        plan = PLAN_OK.replace("- **设计依据:** API-01, D-01", "- **设计依据:** API-99")
+        self.write("PLAN.md", plan)
+        code, output = self.run_check()
+        self.assertEqual(code, 0, output)
+        self.assertIn("legacy_design_skip_design_ref_check", output)
 
     def test_dependency_cycle(self) -> None:
         self._write_upstream()
