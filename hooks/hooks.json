@@ -39,12 +39,12 @@
       "hooks": [
         {
           "type": "command",
-          "command": "python hooks/check_hook_log_read.py",
+          "command": "python hooks/check_state_read.py",
           "timeout": 300,
           "onBlock": {
-            "reason": "hooks.ndjson 不是状态源",
+            "reason": "状态源不允许直接读取",
             "systemMessage": "改用 read_state_json.py 读取当前 checkpoint",
-            "additionalContext": "hooks.ndjson 是 hook 审计日志，当前 checkpoint 只以 state.json 为准"
+            "additionalContext": "state.json / STATE.md / hooks.ndjson 都不得直接读取，当前 checkpoint 只以 read_state_json.py 的输出为准"
           },
           "persistAfterInterrupt": true
         }
@@ -61,12 +61,12 @@
         },
         {
           "type": "command",
-          "command": "python hooks/check_hook_log_read.py",
+          "command": "python hooks/check_state_read.py",
           "timeout": 300,
           "onBlock": {
-            "reason": "hooks.ndjson 不是状态源",
+            "reason": "状态源不允许直接读取",
             "systemMessage": "改用 read_state_json.py 读取当前 checkpoint",
-            "additionalContext": "hooks.ndjson 是 hook 审计日志，当前 checkpoint 只以 state.json 为准"
+            "additionalContext": "state.json / STATE.md / hooks.ndjson 都不得直接读取，当前 checkpoint 只以 read_state_json.py 的输出为准"
           },
           "persistAfterInterrupt": true
         }
