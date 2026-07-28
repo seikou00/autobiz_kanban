@@ -14,6 +14,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_HOOKS_DIR = Path(__file__).resolve().parent
+if str(_HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_HOOKS_DIR))
+
 # 将项目根目录加入 sys.path，以便导入 hooks.paths
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT))
@@ -27,12 +31,22 @@ from board_core.artifact_paths import resolve_exact_relative_path
 from board_core.contracts import BoardConfigError, SkillContract, load_record_workflow_contracts
 from board_core.state_store import check_or_fix_state_sync
 
+# 正式稿标题/禁用标题/必需段落的单一事实源在 prd_rules.py，
+# 搬运脚本 prd_transplant.py 与本校验脚本共用同一份规则。
+from prd_rules import (  # noqa: F401  （re-export，供外部按原名引用）
+    DISCUSSION_SECTION_TITLES,
+    FORBIDDEN_PRD_SECTION_TITLES,
+    FORMAL_PRD_TITLE,
+    FORMAL_SECTION_MAX_LEVEL,
+    REQUIRED_PRD_SECTIONS,
+    heading_matches,
+    iter_headings,
+)
+
 
 BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR = (
     "biz_validate.py 不接受 --workspace/-w；路径由 PLUGIN_WORKSPACE/PROJECT_DIR 环境变量决定。"
 )
-FORMAL_PRD_TITLE = "# 需求正式稿"
-FORBIDDEN_PRD_SECTION_TITLES = ("审理提炼", "待确认事项", "待确认项", "外部依赖", "第三方依赖")
 
 
 def _resolve_feature_context(feature: str, workspace: Path):
@@ -85,7 +99,7 @@ def _check_done_checkpoint(record: Dict[str, Any], contract: SkillContract, erro
         )
 
 
-def _get_feature_dir(feature: Optional[str], workspace: Path) -> Optional[Path]:
+def resolve_feature_dir(feature: Optional[str], workspace: Path) -> Optional[Path]:
     features_dir = get_features_active_dir(workspace)
     if feature:
         d = resolve_exact_relative_path(features_dir, feature)
@@ -98,7 +112,7 @@ def _get_feature_dir(feature: Optional[str], workspace: Path) -> Optional[Path]:
     return None
 
 
-def _exact_file(feature_dir: Path, name: str) -> Optional[Path]:
+def exact_file(feature_dir: Path, name: str) -> Optional[Path]:
     path = resolve_exact_relative_path(feature_dir, name)
     return path if path is not None and path.is_file() else None
 
@@ -118,7 +132,7 @@ def _ok(message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any
 
 
 def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
-    feature_dir = _get_feature_dir(feature, workspace)
+    feature_dir = resolve_feature_dir(feature, workspace)
     if not feature_dir:
         return _fail(f"未找到 feature 目录: feature={feature}, 请确认 .autobizdevops/features/ 下存在对应目录")
 
@@ -134,7 +148,7 @@ def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
             {"feature": slug, "skipped": True},
         )
 
-    discuss_md = _exact_file(feature_dir, "PRD_DISCUSS.md")
+    discuss_md = exact_file(feature_dir, "PRD_DISCUSS.md")
     if "PRD_DISCUSS.md" in contract.required_outputs:
         if discuss_md is None:
             errors.append(f"PRD_DISCUSS.md 不存在: {feature_dir / 'PRD_DISCUSS.md'}")
@@ -152,12 +166,8 @@ def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     return _ok("discuss 阶段产出物校验通过", {"feature": slug})
 
 
-def _markdown_headings(content: str) -> List[str]:
-    return re.findall(r"^#{1,6}\s+(.+?)\s*$", content, re.MULTILINE)
-
-
 def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
-    feature_dir = _get_feature_dir(feature, workspace)
+    feature_dir = resolve_feature_dir(feature, workspace)
     if not feature_dir:
         return _fail(f"未找到 feature 目录: feature={feature}")
 
@@ -173,8 +183,8 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
             {"feature": slug, "skipped": True},
         )
 
-    discuss_md = _exact_file(feature_dir, "PRD_DISCUSS.md")
-    prd_md = _exact_file(feature_dir, "PRD.md")
+    discuss_md = exact_file(feature_dir, "PRD_DISCUSS.md")
+    prd_md = exact_file(feature_dir, "PRD.md")
     # 讨论稿存在性只在它仍属于本 Feature 契约的必需输入时检查；
     # custom 链未选 biz.discuss 时该输入已从 bundle 中移除。
     if "PRD_DISCUSS.md" in contract.required_inputs and discuss_md is None:
@@ -188,24 +198,29 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
         if first_line != FORMAL_PRD_TITLE:
             errors.append(f"PRD.md 必须以 {FORMAL_PRD_TITLE} 开头")
 
-        required_sections = ["用户故事", "验收口径", "验收标准", "关键约束"]
-        headings = _markdown_headings(content)
+        all_headings = iter_headings(content)
+        headings = [heading.text for heading in all_headings]
+        # 四段必须是正式章节标题；功能详情里的深层 `###### 验收标准` 不算数
+        section_headings = [
+            heading.text for heading in all_headings
+            if heading.level <= FORMAL_SECTION_MAX_LEVEL
+        ]
         bolds = re.findall(r"\*\*(.+?)\*\*", content)
-        markers = headings + bolds
-        missing = [s for s in required_sections if not any(s in m for m in markers)]
+        markers = section_headings + bolds
+        missing = [s for s in REQUIRED_PRD_SECTIONS if not any(s in m for m in markers)]
         if missing:
             errors.append(f"PRD.md 缺少必要段落: {', '.join(missing)}")
 
         discussion_headings = [
             heading for heading in headings
-            if "历次讨论记录" in heading or "讨论记录" in heading
+            if heading_matches(heading, DISCUSSION_SECTION_TITLES)
         ]
         if discussion_headings:
             errors.append(f"PRD.md 不应包含讨论记录标题: {', '.join(discussion_headings)}")
 
         forbidden_headings = [
             heading for heading in headings
-            if any(marker in heading for marker in FORBIDDEN_PRD_SECTION_TITLES)
+            if heading_matches(heading, FORBIDDEN_PRD_SECTION_TITLES)
         ]
         if forbidden_headings:
             errors.append(f"PRD.md 不应包含正式稿禁用标题: {', '.join(forbidden_headings)}")
