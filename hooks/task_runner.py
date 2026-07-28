@@ -7,11 +7,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import locale
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -1336,15 +1338,49 @@ def _run_validation(
             batch_id=batch_id,
             task_id=task_id,
         )
-        completed = subprocess.run(
-            argv,
-            cwd=command_cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        output = completed.stdout + completed.stderr
+        with tempfile.TemporaryFile(mode="w+b") as command_log:
+            try:
+                completed = subprocess.run(
+                    argv,
+                    cwd=command_cwd,
+                    stdout=command_log,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                command_log.flush()
+                command_log.seek(0)
+                output = command_log.read().decode(
+                    locale.getpreferredencoding(False) or "utf-8",
+                    errors="replace",
+                )
+                diagnostic_paths = _validation_diagnostic_paths(
+                    output, command, repositories
+                )
+                error_category = _validation_error_category(
+                    command, output, diagnostic_paths
+                )
+                if error_category in {"source_compile_failure", "test_compile_failure"}:
+                    return 1, (
+                        f"{output}\nvalidation_process_timeout_after_compile_failure:"
+                        f"{error_category}:timeoutSeconds={timeout}"
+                    )
+                raise _validation_environment_error(
+                    command,
+                    category="command_timeout",
+                    detail=f"timeoutSeconds={timeout};output={output[-2000:]}",
+                    retry_same_run=retry_same_run,
+                    run_id=run_id,
+                    batch_id=batch_id,
+                    task_id=task_id,
+                )
+            command_log.flush()
+            command_log.seek(0)
+            output = command_log.read().decode(
+                locale.getpreferredencoding(False) or "utf-8",
+                errors="replace",
+            )
         if completed.returncode in {126, 127}:
             raise _validation_environment_error(
                 command,
@@ -1365,21 +1401,6 @@ def _run_validation(
                 output = f"{output}\n" + "\n".join(execution_errors)
                 return 1, output
         return completed.returncode, output
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        raise _validation_environment_error(
-            command,
-            category="command_timeout",
-            detail=(
-                f"timeoutSeconds={timeout};output="
-                f"{(stdout + stderr)[-2000:]}"
-            ),
-            retry_same_run=retry_same_run,
-            run_id=run_id,
-            batch_id=batch_id,
-            task_id=task_id,
-        )
     except OSError as exc:
         raise _validation_environment_error(
             command,

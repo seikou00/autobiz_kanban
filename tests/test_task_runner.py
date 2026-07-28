@@ -852,6 +852,82 @@ class TaskRunnerTest(unittest.TestCase):
                     expected,
                 )
 
+    def test_validation_timeout_preserves_source_compile_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            source = repo / "src" / "main" / "java" / "example" / "App.java"
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys,time; "
+                        f"print('[ERROR] {source}:[1,1] cannot find symbol', "
+                        "file=sys.stderr, flush=True); time.sleep(2)"
+                    ),
+                ],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 1,
+            }
+            exit_code, output = task_runner_module._run_validation(
+                command, {repo.name: repo}
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertIn("cannot find symbol", output)
+            self.assertIn(
+                "validation_process_timeout_after_compile_failure:source_compile_failure",
+                output,
+            )
+
+    def test_validation_timeout_preserves_test_compile_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            source = repo / "src" / "test" / "java" / "example" / "AppTest.java"
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys,time; "
+                        f"print('[ERROR] {source}:[1,1] testCompile failed', "
+                        "file=sys.stderr, flush=True); time.sleep(2)"
+                    ),
+                ],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 1,
+            }
+            exit_code, output = task_runner_module._run_validation(
+                command, {repo.name: repo}
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "validation_process_timeout_after_compile_failure:test_compile_failure",
+                output,
+            )
+
+    def test_validation_timeout_without_compile_diagnostic_remains_environment_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [sys.executable, "-c", "import time; time.sleep(2)"],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 1,
+            }
+            with self.assertRaises(task_runner_module.TaskRunnerError) as raised:
+                task_runner_module._run_validation(command, {repo.name: repo})
+            self.assertEqual(raised.exception.details["errorCategory"], "environment_failure")
+            self.assertEqual(raised.exception.details["failureCategory"], "command_timeout")
+            self.assertEqual(
+                raised.exception.details["requiredAction"],
+                "fix_validation_environment_and_retry_same_run",
+            )
+
     def test_new_staged_test_is_transient_validation_file(self) -> None:
         state = {
             "scopeWorkspaces": [{"repository": "repo", "workspacePrefix": "module"}],
@@ -1234,11 +1310,12 @@ class TaskRunnerTest(unittest.TestCase):
                 sys.executable,
                 "-c",
                 (
-                    "import sys; "
-                    f"print('[ERROR] {diagnostic_path}:[1,1] cannot find symbol', file=sys.stderr); "
-                    "raise SystemExit(1)"
+                    "import sys,time; "
+                    f"print('[ERROR] {diagnostic_path}:[1,1] cannot find symbol', "
+                    "file=sys.stderr, flush=True); time.sleep(2)"
                 ),
             ]
+            batch["tasks"][0]["validationCommands"][0]["timeoutSeconds"] = 1
             batch["tasks"].append(second)
             batch["taskCount"] = 2
             _write_batch(feature_dir, batch)
