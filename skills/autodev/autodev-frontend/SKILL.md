@@ -23,14 +23,12 @@ version: v1.1.1604
 
 ```bash
 python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 完成前端实现和必要验证后：
 
 ```bash
 python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint frontend_done
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 完成后汇报变更文件、验证命令和未覆盖风险，并提醒用户回到特性面板新开新对话。

@@ -199,7 +199,6 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 #### 写入checkpoint
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ---

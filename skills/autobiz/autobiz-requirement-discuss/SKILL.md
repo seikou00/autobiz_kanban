@@ -53,7 +53,6 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 
@@ -262,7 +261,6 @@ Expected output: `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${fea
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 

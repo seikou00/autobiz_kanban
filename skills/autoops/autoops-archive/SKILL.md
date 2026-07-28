@@ -64,7 +64,6 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint archived --iteration "{N}"
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 只允许更新当前 `{slug}` 对应的 Feature 行，不得删除该行，不得改写其他 Feature 状态。

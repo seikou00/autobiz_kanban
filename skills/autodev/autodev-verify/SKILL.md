@@ -52,7 +52,6 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint verify_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ## 提取验收契约

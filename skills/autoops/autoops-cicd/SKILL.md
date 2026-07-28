@@ -59,7 +59,6 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress --stage "CI/CD（来源: Dev 验收）" --allow-create
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### 生成交付文档
@@ -121,7 +120,6 @@ macOS/Linux:
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### 是否再次执行

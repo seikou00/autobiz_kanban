@@ -120,7 +120,6 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### 建立单测计划
@@ -278,7 +277,6 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 若存在 `FAIL`、`BLOCKED`、未归因失败、合同缺口或超过最大修复次数，保持 `unit_test_in_progress`，向用户报告阻断。只有根路由或后续验收阶段需要统一回流时，才使用 `needs_fix`。

@@ -166,7 +166,6 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 **Skill 完成。**

@@ -28,18 +28,19 @@ FEATURE_DIR=${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-e2e --feature "${feature}" --plain
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
+
+每次需要当前 checkpoint 时，运行上面的脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 
 按检查脚本给出的降级方式处理缺失输入。读取现有产物、项目约束和当前 feature 直接相关的代码与配置；以 `specs/**/*.md` 的 Requirement / Scenario 作为 pass/fail 的主要行为依据。
 
-当 `CHECKPOINT=e2e_in_progress` 时进入恢复模式：读取已有三个 E2E 产物，恢复未完成用例和修复轮次，只覆盖 E2E 产物并继续已记录的修复闭环。
+当前 checkpoint 为 `e2e_in_progress` 时进入恢复模式：读取已有三个 E2E 产物，恢复未完成用例和修复轮次，只覆盖 E2E 产物并继续已记录的修复闭环。
 
 开始或恢复执行后写入并刷新状态：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ## 生成结构化用例
@@ -134,14 +135,12 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 存在失败、阻断或未闭合修复时，在报告中记录问题来源与建议回流阶段后推进 `needs_fix`：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 **完成标准：** `E2E_REPORT.md` 和 `e2e-run.log` 支撑最终 verdict；刷新后的 checkpoint 与 verdict 一致。

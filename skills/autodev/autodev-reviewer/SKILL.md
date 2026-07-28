@@ -88,7 +88,6 @@ verdict 为 `PASS` 或 `PASS_WITH_WARNINGS` 后写入：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### 6. 最终回复
