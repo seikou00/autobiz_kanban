@@ -293,7 +293,7 @@ class CacheClassificationTest(unittest.TestCase):
         self.assertEqual(result["status"], "fresh")
         self.assertEqual(result["changedPaths"], [])
 
-    def test_head_change_is_stale(self) -> None:
+    def test_head_change_with_equal_file_snapshot_is_fresh(self) -> None:
         from hooks.code_exploration import TrustedEvolution, classify_cache
 
         result = classify_cache(
@@ -302,8 +302,95 @@ class CacheClassificationTest(unittest.TestCase):
             TrustedEvolution.empty(),
         )
 
+        self.assertEqual(result["status"], "fresh")
+        self.assertEqual(result["staleReasons"], [])
+
+    def test_new_batch_with_equal_snapshot_requires_metadata_patch(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        result = classify_cache(
+            self._cache(),
+            self._snapshot(),
+            TrustedEvolution.empty(),
+            current_batch_id="B002",
+        )
+
+        self.assertEqual(result["status"], "reusable_with_changes")
+        self.assertEqual(result["changedPaths"], [])
+        self.assertTrue(result["policy"]["requiresPatch"])
+
+    def test_empty_diff_with_untrusted_evidence_is_stale(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        trusted = TrustedEvolution(
+            changed_paths=frozenset(),
+            latest_files=None,
+            task_ids=(),
+            evidence_ids=(),
+            untrusted_reasons=("implementation_evidence_invalid:T001:ev_0001",),
+        )
+
+        result = classify_cache(
+            self._cache(),
+            self._snapshot(),
+            trusted,
+            current_batch_id="B002",
+        )
+
         self.assertEqual(result["status"], "stale")
-        self.assertIn("head_commit_changed", result["staleReasons"])
+        self.assertEqual(
+            result["untrustedReasons"],
+            ["implementation_evidence_invalid:T001:ev_0001"],
+        )
+
+    def test_empty_diff_with_mismatched_trusted_snapshot_is_stale(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        trusted = TrustedEvolution(
+            changed_paths=frozenset(),
+            latest_files={"src/a.py": "task-final"},
+            task_ids=(),
+            evidence_ids=(),
+            untrusted_reasons=(),
+            implementation_task_ids=("T001",),
+            implementation_evidence_ids=("ev_0001",),
+        )
+
+        result = classify_cache(self._cache(), self._snapshot(), trusted)
+
+        self.assertEqual(result["status"], "stale")
+        self.assertIn("current_snapshot_not_latest_task_snapshot", result["staleReasons"])
+        self.assertEqual(result["matchedImplementationTaskIds"], ["T001"])
+
+    def test_head_change_with_unexplained_file_change_is_stale(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        result = classify_cache(
+            self._cache(),
+            self._snapshot(head="head-2", files={"src/a.py": "new"}),
+            TrustedEvolution.empty(),
+        )
+
+        self.assertEqual(result["status"], "stale")
+        self.assertIn("head_commit_changed_without_trusted_snapshot", result["staleReasons"])
+
+    def test_head_change_with_trusted_final_snapshot_is_reusable(self) -> None:
+        from hooks.code_exploration import TrustedEvolution, classify_cache
+
+        current = self._snapshot(head="head-2", files={"src/a.py": "new"})
+        trusted = TrustedEvolution(
+            changed_paths=frozenset({"src/a.py"}),
+            latest_files=current["files"],
+            task_ids=("T001",),
+            evidence_ids=("ev_0001",),
+            untrusted_reasons=(),
+        )
+
+        result = classify_cache(self._cache(), current, trusted, current_batch_id="B002")
+
+        self.assertEqual(result["status"], "reusable_with_changes")
+        self.assertEqual(result["changedPaths"], ["src/a.py"])
+        self.assertEqual(result["staleReasons"], [])
 
     def test_critical_path_change_is_stale_even_when_evidence_explains_it(self) -> None:
         from hooks.code_exploration import TrustedEvolution, classify_cache
@@ -511,7 +598,15 @@ class CodeExplorationWriterTest(unittest.TestCase):
         self.assertIn("package.json", payload["criticalPathRules"]["basenames"])
         self.assertEqual(
             payload["invalidationRules"]["headCommitChanged"],
-            "stale_even_when_file_hashes_match",
+            "reuse_when_file_snapshot_is_unchanged_or_trusted_evidence_matches",
+        )
+        self.assertEqual(
+            payload["batchUpdateRules"]["sameBatchImplementationEvidence"],
+            "trusted_until_deferred_validation_finishes",
+        )
+        self.assertEqual(
+            payload["batchUpdateRules"]["sameBatchImplementationStatuses"],
+            ["implemented", "validating", "failed", "repair_in_progress"],
         )
         self.assertEqual(
             payload["runtimeIgnoreRequirements"]["paths"],
@@ -551,6 +646,47 @@ class CodeExplorationWriterTest(unittest.TestCase):
             self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
             self.assertEqual(json.loads(inspected.stdout)["explorationCaches"][0]["status"], "fresh")
 
+            persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+            persisted["capturedBatchId"] = "B000"
+            cache_path.write_text(
+                json.dumps(persisted, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            next_batch = self._run_writer(
+                "inspect", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+            )
+            next_batch_cache = json.loads(next_batch.stdout)["explorationCaches"][0]
+            self.assertEqual(next_batch_cache["status"], "reusable_with_changes")
+            self.assertEqual(next_batch_cache["changedPaths"], [])
+            patch_body = Path(tmp) / "patch-empty.json"
+            patch_body.write_text(
+                json.dumps(
+                    {
+                        "reviewedPaths": [],
+                        "findingUpdates": {},
+                        "exploredPathsAdd": [],
+                        "sharedPathsAdd": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            patched = self._run_writer(
+                "patch", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+                "--expected-cache-sha256", next_batch_cache["cacheSha256"],
+                "--body-file", str(patch_body),
+            )
+            self.assertEqual(patched.returncode, 0, patched.stdout + patched.stderr)
+            refreshed = self._run_writer(
+                "inspect", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+            )
+            self.assertEqual(
+                json.loads(refreshed.stdout)["explorationCaches"][0]["status"],
+                "fresh",
+            )
+
             (repo / "existing.txt").write_text("changed\n", encoding="utf-8")
             wrong = self._run_writer(
                 "record",
@@ -563,6 +699,115 @@ class CodeExplorationWriterTest(unittest.TestCase):
             )
             self.assertNotEqual(wrong.returncode, 0)
             self.assertIn("code_exploration_cache_sha_mismatch", wrong.stdout)
+
+    def test_implemented_task_change_is_trusted_within_deferred_batch(self) -> None:
+        from tests.test_task_runner import (
+            _configure_deferred_task_validation,
+            _read_batch,
+            _workspace,
+            _write_batch,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            batch = _read_batch(feature_dir)
+            second = copy.deepcopy(batch["tasks"][0])
+            second.update({"id": "T002", "title": "second", "deps": ["T001"]})
+            second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
+            second["validationCommands"][0].update(
+                {"id": "VAL-T002-01", "covers": ["AC-T002-01"]}
+            )
+            root["batches"][0]["taskIds"].append("T002")
+            batch["tasks"].append(second)
+            batch["taskCount"] = 2
+            root_path.write_text(
+                json.dumps(root, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            _write_batch(feature_dir, batch)
+            _configure_deferred_task_validation(feature_dir)
+
+            body = Path(tmp) / "record.json"
+            self._body(body)
+            recorded = self._run_writer(
+                "record", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+                "--expected-cache-sha256", "missing", "--body-file", str(body),
+            )
+            self.assertEqual(recorded.returncode, 0, recorded.stdout + recorded.stderr)
+
+            started = subprocess.run(
+                [sys.executable, "hooks/task_runner.py", "start", "--workspace", str(workspace),
+                 "--feature", "alpha", "--task-id", "T001", "--code-workspace", str(repo)],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            run_id = json.loads(started.stdout)["runId"]
+            (repo / "existing.txt").write_text("implemented\n", encoding="utf-8")
+            finished = subprocess.run(
+                [sys.executable, "hooks/task_runner.py", "finish-implementation",
+                 "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001",
+                 "--run-id", run_id, "--code-workspace", str(repo)],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            inspected = self._run_writer(
+                "inspect", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--code-workspace", str(repo),
+            )
+            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
+            cache = json.loads(inspected.stdout)["explorationCaches"][0]
+            self.assertEqual(cache["status"], "fresh_with_trusted_changes")
+            self.assertEqual(cache["changedPaths"], ["existing.txt"])
+            self.assertEqual(cache["matchedImplementationTaskIds"], ["T001"])
+            self.assertEqual(cache["matchedImplementationEvidenceIds"], ["ev_0001"])
+            self.assertEqual(cache["matchedEvidenceIds"], [])
+            self.assertEqual(cache["untrustedReasons"], [])
+
+            for trusted_status in ["validating", "failed", "in_progress"]:
+                batch = _read_batch(feature_dir)
+                batch["tasks"][0]["status"] = trusted_status
+                _write_batch(feature_dir, batch)
+                inspected = self._run_writer(
+                    "inspect", "--workspace", str(workspace), "--feature", "alpha",
+                    "--task-id", "T002", "--code-workspace", str(repo),
+                )
+                self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
+                cache = json.loads(inspected.stdout)["explorationCaches"][0]
+                self.assertEqual(cache["status"], "fresh_with_trusted_changes")
+                self.assertEqual(cache["matchedImplementationTaskIds"], ["T001"])
+                self.assertEqual(cache["untrustedReasons"], [])
+
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["status"] = "implemented"
+            _write_batch(feature_dir, batch)
+            stream = feature_dir / "evidence" / "EVIDENCE.jsonl"
+            records = [json.loads(line) for line in stream.read_text(encoding="utf-8").splitlines()]
+            records[0]["transientValidationFiles"] = "not-a-list"
+            stream.write_text(
+                "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+                encoding="utf-8",
+            )
+            inspected = self._run_writer(
+                "inspect", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--code-workspace", str(repo),
+            )
+            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
+            cache = json.loads(inspected.stdout)["explorationCaches"][0]
+            self.assertEqual(cache["status"], "stale")
+            self.assertEqual(cache["changedPaths"], ["existing.txt"])
+            self.assertEqual(cache["unexplainedPaths"], ["existing.txt"])
+            self.assertEqual(cache["matchedImplementationTaskIds"], [])
+            self.assertIn("ev_0001:invalid_transientValidationFiles", cache["untrustedReasons"])
 
     def test_completed_task_change_is_reusable_then_patch_advances_to_fresh(self) -> None:
         from tests.test_task_runner import _read_batch, _workspace, _write_batch
@@ -829,6 +1074,12 @@ class CodeTaskContextCacheTest(unittest.TestCase):
 
             self.assertTrue(result.ok, result.errors)
             self.assertEqual(result.data["executionLane"], "backend")
+            self.assertEqual(result.data["batchExplorationScope"]["taskIds"], ["T001"])
+            self.assertEqual(result.data["batchExplorationScope"]["workspaceRefs"], ["default"])
+            self.assertEqual(
+                result.data["batchExplorationScope"]["validationCommands"][0]["id"],
+                "VAL-T001-01",
+            )
             self.assertEqual(result.data["explorationCaches"][0]["status"], "missing")
             self.assertEqual(
                 result.data["explorationPolicy"],
@@ -839,10 +1090,20 @@ class CodeTaskContextCacheTest(unittest.TestCase):
                     "requiresPatch": False,
                 },
             )
+            self.assertEqual(
+                result.data["explorationDirective"],
+                {
+                    "phase": "batch_bootstrap",
+                    "scopeSource": "batchExplorationScope",
+                    "fullExplorationAllowed": True,
+                    "requiresRecord": True,
+                    "requiresPatch": False,
+                },
+            )
 
     def test_backend_context_never_projects_frontend_shared_findings(self) -> None:
         from hooks.code_task_context import build_context
-        from tests.test_task_runner import _workspace
+        from tests.test_task_runner import _start, _workspace
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))
@@ -881,6 +1142,7 @@ class CodeTaskContextCacheTest(unittest.TestCase):
             frontend["executionLane"] = "frontend"
             frontend["findings"]["moduleMap"] = [{"path": "shared", "role": "frontend contract"}]
             frontend_path.write_text(json.dumps(frontend, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            _start(workspace, repo)
 
             result = build_context(
                 workspace=workspace,
@@ -895,6 +1157,16 @@ class CodeTaskContextCacheTest(unittest.TestCase):
             self.assertEqual(cache["findings"]["moduleMap"][0]["role"], "backend contract")
             self.assertNotIn("frontend contract", json.dumps(cache, ensure_ascii=False))
             self.assertTrue(frontend_path.is_file())
+            self.assertEqual(
+                result.data["explorationDirective"],
+                {
+                    "phase": "task_guard",
+                    "scopeSource": "taskContract.scope",
+                    "fullExplorationAllowed": False,
+                    "requiresRecord": False,
+                    "requiresPatch": False,
+                },
+            )
 
 
 if __name__ == "__main__":

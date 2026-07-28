@@ -50,6 +50,9 @@ from hooks.plan_json import write_plan_json  # noqa: E402
 from hooks.ui_context import validate_ui_context_data  # noqa: E402
 
 
+TEST_TASK_COMMAND = f"{sys.executable} -m unittest tests.test_plan_granularity"
+
+
 class ArtifactCheckIdContractsTest(unittest.TestCase):
     def _rewrite_plan_fixture_to_current_schema(self, feature_dir: Path) -> None:
         path = feature_dir / "plan.json"
@@ -58,7 +61,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         data["projectValidationCommands"] = [
             {
                 "id": "PROJECT-VAL-001",
-                "argv": ["echo", "integration"],
+                "argv": [sys.executable, "-m", "unittest", "tests.test_validation_policy"],
                 "cwd": ".",
                 "kind": "integration_test",
                 "required": True,
@@ -101,7 +104,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             task["validationCommands"] = [
                 {
                     "id": f"VAL-{task_id}-01",
-                    "argv": ["echo", "ok"],
+                    "argv": [sys.executable, "-m", "unittest", "tests.test_plan_granularity"],
                     "cwd": ".",
                     "kind": "behavior_test",
                     "required": True,
@@ -145,7 +148,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 lane: {
                     "commands": [
                         {
-                            "argv": ["echo", f"{lane} compile"],
+                            "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
                             "cwd": ".",
                             "kind": "compile",
                             "required": True,
@@ -184,7 +187,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     "commands": [
                         {
                             "id": f"BATCH-{entry['id']}-VAL-001",
-                            "argv": ["echo", f"{entry['executionLane']} compile"],
+                            "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
                             "cwd": ".",
                             "kind": "compile",
                             "required": True,
@@ -267,7 +270,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "integration"],
+                        "argv": [sys.executable, "-m", "unittest", "tests.test_validation_policy"],
                         "cwd": ".",
                         "kind": "integration_test",
                         "required": True,
@@ -321,7 +324,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                         "validationCommands": [
                             {
                                 "id": "VAL-T001-01",
-                                "argv": ["echo", "ok"],
+                                "argv": [sys.executable, "-m", "unittest", "tests.test_plan_granularity"],
                                 "cwd": ".",
                                 "kind": "behavior_test",
                                 "required": True,
@@ -406,7 +409,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
             "validationCommands": [
                 {
                     "id": "VAL-T001-01",
-                    "argv": ["echo", "ok"],
+                    "argv": [sys.executable, "-m", "unittest", "tests.test_plan_granularity"],
                     "cwd": ".",
                     "kind": "behavior_test",
                     "required": True,
@@ -428,7 +431,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "integration"],
+                        "argv": [sys.executable, "-m", "unittest", "tests.test_validation_policy"],
                         "cwd": ".",
                         "kind": "integration_test",
                         "required": True,
@@ -489,6 +492,9 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
         )
 
     def _write_ui_context(self, feature_dir: Path, *, ui_required: bool = True) -> None:
+        if ui_required:
+            (feature_dir / "frontend-html").mkdir(parents=True, exist_ok=True)
+            (feature_dir / "frontend-html" / "page.html").write_text("<main>UI</main>", encoding="utf-8")
         self._write_json(
             feature_dir,
             "UI_CONTEXT.json",
@@ -522,6 +528,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                         "uiRequired": True,
                         "pageRefs": ["PAGE-001"],
                         "interactionRefs": ["UIX-001"],
+                        "visualSourceRefs": ["VIS-001"],
                         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
                     }
                 ] if ui_required else [],
@@ -895,7 +902,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": ["API-001"],
                             "dataIds": ["DATA-001"],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],
@@ -935,7 +942,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": ["API-001"],
                             "dataIds": ["DATA-001"],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],
@@ -979,7 +986,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": ["API-001"],
                             "dataIds": ["DATA-001"],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],
@@ -987,8 +994,13 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                     ],
                 },
             )
+            self._rewrite_plan_fixture_to_current_schema(feature_dir)
 
-            self.assertEqual(validate_plan_ui_projection(self._required_output_ctx(feature_dir, "UI_CONTEXT.json")), 0)
+            ctx = self._required_output_ctx(feature_dir, "UI_CONTEXT.json")
+            self.assertGreater(validate_plan_ui_projection(ctx), 0)
+            data["capabilities"][0]["visualSourceRefs"] = []
+            self._write_json(feature_dir, "UI_CONTEXT.json", data)
+            self.assertEqual(validate_plan_ui_projection(ctx), 0)
 
     def test_plan_ui_projection_rejects_ui_task_when_feature_not_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1014,7 +1026,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": ["API-001"],
                             "dataIds": ["DATA-001"],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],
@@ -1055,7 +1067,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": ["API-001"],
                             "dataIds": ["DATA-001"],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],
@@ -1077,7 +1089,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": ["API-001"],
                             "dataIds": ["DATA-001"],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],
@@ -1179,7 +1191,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": ["API-001"],
                             "dataIds": ["DATA-001"],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],
@@ -1194,7 +1206,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": [],
                             "dataIds": [],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],
@@ -2240,7 +2252,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": [],
                             "dataIds": [],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": ["ev_0001"],
                             "blockers": [],
@@ -2811,7 +2823,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": [],
                             "dataIds": [],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": ["ev_0001"],
                             "blockers": [],
@@ -2862,7 +2874,7 @@ class ArtifactCheckIdContractsTest(unittest.TestCase):
                             "apiIds": [],
                             "dataIds": [],
                             "decisionIds": ["D-001"],
-                            "validationCommands": [{"command": "echo ok"}],
+                            "validationCommands": [{"command": TEST_TASK_COMMAND}],
                             "expectedFiles": [],
                             "evidenceIds": [],
                             "blockers": [],

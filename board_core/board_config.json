@@ -543,7 +543,7 @@
         "group": "Dev",
         "skill": "autodev-plan",
         "order": 40,
-        "description": "生成技术设计和批次执行计划 \n 产物：design.md、plan.json（批次索引与项目状态）、plans/Bxxx/plan.json（每批最多5个任务）、PLAN.md、SMOKE_TEST_PLAN.json",
+        "description": "生成技术设计和批次执行计划 \n 产物：design.md、plan.json（批次索引与项目状态）、plans/Bxxx/plan.json（每批最多5个任务）、PLAN.md",
         "states": [
           {
             "nodeStatus": "not_started",
@@ -611,46 +611,12 @@
             }
           ],
           "outputs": [
-            {
-              "id": "design",
-              "label": "技术设计",
-              "artifactType": "file",
-              "path": "design.md",
-              "required": true
-            },
-            {
-              "id": "plan",
-              "label": "执行计划",
-              "artifactType": "file",
-              "path": "PLAN.md",
-              "required": true
-            },
-            {
-              "id": "plan_json",
-              "label": "计划机器结构化内容",
-              "artifactType": "json",
-              "path": "plan.json",
-              "required": true
-            },
-            {
-              "id": "smoke_test_plan_json",
-              "label": "冒烟测试计划",
-              "artifactType": "json",
-              "path": "SMOKE_TEST_PLAN.json",
-              "required": true
-            }
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
+            { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true }
           ]
         },
-        "validators": [
-          "design_contract",
-          "ui_context_json",
-          "plan_json_contract",
-          "plan_json_initial_tasks",
-          "plan_ref_resolution",
-          "plan_task_granularity",
-          "plan_scenario_coverage",
-          "smoke_test_plan_json"
-        ]
+        "validators": ["design_contract", "ui_context_json", "plan_json_contract", "plan_json_initial_tasks", "plan_ref_resolution", "plan_task_granularity", "plan_scenario_coverage"]
       },
       {
         "id": "dev.code",
@@ -742,24 +708,8 @@
               "required": true,
               "extract": {
                 "degrade": "无 plan.json 或结构已过时时，回到 /autodev-plan 清理并按当前唯一结构重新生成；不得建立旁路任务队列"
-              }
-            },
-            {
-              "id": "smoke_test_plan_json",
-              "label": "旁路冒烟测试计划",
-              "artifactType": "json",
-              "path": "SMOKE_TEST_PLAN.json",
-              "required": false,
-              "extract": {
-                "degrade": "无 SMOKE_TEST_PLAN.json 时只得参考plan.json，如果无任何产物，则提示无法进行冒烟测试；lean/custom 未列出该输入时可生成 tests=[] 的 NOT_APPLICABLE 结果"
-              }
-            },
-            {
-              "id": "ui_context_json",
-              "label": "UI范围机器事实源",
-              "artifactType": "json",
-              "path": "UI_CONTEXT.json",
-              "required": true,
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
                 "degrade": "无 UI_CONTEXT.json 时，直接与用户询问是否需要生成前端代码"
               }
@@ -784,32 +734,11 @@
               "required": false,
               "extract": {
                 "degrade": "缺失或过期时由 Code 上下文返回 full_bounded_explore，不能以缓存替代 plan/evidence 验收"
-              }
-            },
-            {
-              "id": "smoke_result_json",
-              "label": "旁路冒烟执行结果",
-              "artifactType": "json",
-              "path": "SMOKE_RESULT.json",
-              "required": false
-            }
+              } }
           ]
         },
-        "validators": [
-          "ui_context_json",
-          "plan_json_contract",
-          "plan_task_detail_schema",
-          "plan_ref_resolution",
-          "plan_finished_tasks",
-          "smoke_result_json",
-          "frontend_route_gate",
-          "evidence_detail_quality",
-          "code_done_gate",
-          "evidence_integrity"
-        ],
-        "guards": [
-          "code_compile"
-        ]
+        "validators": ["ui_context_json", "plan_json_contract", "plan_task_detail_schema", "plan_ref_resolution", "plan_finished_tasks", "frontend_route_gate", "evidence_detail_quality", "code_done_gate", "evidence_integrity"],
+        "guards": ["code_compile"]
       },
       {
         "id": "dev.review",
@@ -921,18 +850,7 @@
               "required": true,
               "extract": {
                 "degrade": "缺失时回到 code 阶段补齐证据流，不能用 Markdown 报告替代"
-              }
-            },
-            {
-              "id": "smoke_result_json",
-              "label": "旁路冒烟执行结果",
-              "artifactType": "json",
-              "path": "SMOKE_RESULT.json",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时按无旁路冒烟风险信号处理，不用 Markdown 替代"
-              }
-            }
+              } }
           ],
           "outputs": [
             {
@@ -1086,18 +1004,7 @@
               "required": true,
               "extract": {
                 "degrade": "无 REVIEW_FINDINGS.json 时回到 review 阶段补齐结构化评审结果"
-              }
-            },
-            {
-              "id": "smoke_result_json",
-              "label": "旁路冒烟执行结果",
-              "artifactType": "json",
-              "path": "SMOKE_RESULT.json",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过，不影响 UNIT_TEST_RESULT.json 的生成与门禁"
-              }
-            }
+              } }
           ],
           "outputs": [
             {
@@ -1286,24 +1193,8 @@
               "required": true,
               "extract": {
                 "degrade": "无 UNIT_TEST_RESULT.json 时回到单测阶段补齐结构化结果"
-              }
-            },
-            {
-              "id": "smoke_result_json",
-              "label": "旁路冒烟执行结果",
-              "artifactType": "json",
-              "path": "SMOKE_RESULT.json",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时跳过，不影响 E2E_RESULT.json 的生成与门禁"
-              }
-            },
-            {
-              "id": "test_output",
-              "label": "测试输出日志",
-              "artifactType": "file",
-              "path": "test-output.log",
-              "required": false,
+              } },
+            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
                 "degrade": "缺失时跳过"
               }
@@ -1531,24 +1422,8 @@
               "required": true,
               "extract": {
                 "degrade": "无 E2E_RESULT.json 时回到 E2E 阶段补齐结构化结果"
-              }
-            },
-            {
-              "id": "smoke_result_json",
-              "label": "旁路冒烟执行结果",
-              "artifactType": "json",
-              "path": "SMOKE_RESULT.json",
-              "required": false,
-              "extract": {
-                "degrade": "缺失时按无旁路冒烟信号处理"
-              }
-            },
-            {
-              "id": "e2e_log",
-              "label": "E2E 运行日志",
-              "artifactType": "file",
-              "path": "e2e-run.log",
-              "required": true,
+              } },
+            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true,
               "extract": {
                 "degrade": "缺失时在验收报告中记为缺项"
               }

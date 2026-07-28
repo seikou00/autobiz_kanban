@@ -134,6 +134,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 必须读取或生成 `UI_CONTEXT.json`，它是 UI 范围机器事实源；不要从 PRD/specs Markdown 关键词反推 UI 范围。
 - 生成或修改 `UI_CONTEXT.json` 必须使用 `${pluginPath}/hooks/ui_context_writer.py`，不得直接整份写入或编辑该 JSON。调试只使用 `validate` / `show --summary`。
 - `uiRequired=true` 时，UI 行为应形成独立 capability，例如 `order-create-ui`、`dashboard-filter-ui`，并在 `UI_CONTEXT.json.capabilities[]` 回链对应 `REQ/SCN`。
+- 每个 UI capability 按自身需求决定是否有高保真输入：有则使用 `ui_context_writer.py add-capability --visual-source-ref VIS-xxx` 绑定真实 `VIS-xxx`；无则明确写 `visualSourceRefs=[]`，不要为普通 UI 行为伪造高保真引用。
 - specs 完成并锁定 UI_CONTEXT 时，`uiRequired=true` 必须至少有一个 UI capability，且该 capability 必须带真实 `REQ-xxx` 与 `SCN-xxx` 的 `specRefs`；不能只写 pages/interactions 而没有 UI 场景分母。
 - `uiRequired=false` 时，不生成 UI capability，并在 `UI_CONTEXT.json.notApplicableReason` 说明原因。
 - specs 完成时必须将 `UI_CONTEXT.json.decisionStatus` 固化为 `locked`，`lockedAtCheckpoint` 写 `specs_done`。

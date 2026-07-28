@@ -75,6 +75,13 @@ from hooks.repository_snapshot import (  # noqa: E402
     RepositorySnapshotError,
     resolve_git_root,
 )
+from hooks.validation_policy import (  # noqa: E402
+    BEHAVIOR_TASK_VALIDATION_KINDS,
+    FRONTEND_COMPILE_VALIDATION_KINDS,
+    maven_test_plan,
+    package_script_name,
+    package_script_policy_errors,
+)
 
 
 PLAN_FILE = "plan.json"
@@ -724,6 +731,14 @@ def _batch_workspace_contract(task: dict[str, Any]) -> tuple[tuple[str, str], ..
     return tuple(sorted(roots.items()))
 
 
+def _batch_frontend_route(task: dict[str, Any]) -> str:
+    if task_execution_lane(task) != "frontend":
+        return "none"
+    ui_refs = task.get("uiRefs")
+    route = ui_refs.get("frontendRoute") if isinstance(ui_refs, dict) else None
+    return str(route) if route in FRONTEND_ROUTES else "spec-driven-ui"
+
+
 def _batch_profile_command_matches_workspace(
     command: dict[str, Any],
     workspace_contract: tuple[tuple[str, str], ...],
@@ -745,6 +760,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     spec_roots: dict[str, str] = {}
     execution_lanes: dict[str, str] = {}
     workspace_contracts: dict[str, tuple[tuple[str, str], ...]] = {}
+    frontend_routes: dict[str, str] = {}
     existing_ids = {
         str(entry.get("id"))
         for entry in data.get("batches", [])
@@ -758,12 +774,14 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             primary = _primary_spec_root(task)
             execution_lane = task_execution_lane(task)
             workspace_contract = _batch_workspace_contract(task)
+            frontend_route = _batch_frontend_route(task)
             last_batch = sorted(groups)[-1] if groups else None
             can_append_to_last = bool(
                 last_batch
                 and spec_roots.get(str(last_batch)) == primary
                 and execution_lanes.get(str(last_batch)) == execution_lane
                 and workspace_contracts.get(str(last_batch)) == workspace_contract
+                and frontend_routes.get(str(last_batch)) == frontend_route
                 and len(groups[str(last_batch)]) < MAX_BATCH_TASKS
             )
             batch_id = str(last_batch) if can_append_to_last else _next_batch_id(used_ids)
@@ -783,6 +801,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             batch_id,
             _batch_workspace_contract(task),
         )
+        frontend_routes.setdefault(batch_id, _batch_frontend_route(task))
 
     ordered_ids = sorted(groups)
     root = {
@@ -908,6 +927,18 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                 ),
                 "taskContractSha256ByTask": task_contracts,
             }
+            if task_contract_unchanged:
+                for field in (
+                    "failedValidationTaskId",
+                    "failedCommandId",
+                    "errorCategory",
+                    "diagnosticPaths",
+                    "repairOwnerTaskIds",
+                    "validationFailures",
+                    "lastFailure",
+                ):
+                    if field in previous_task_validation:
+                        task_validation[field] = copy.deepcopy(previous_task_validation[field])
         status = _batch_status(batch_tasks, batch_validation, task_validation)
         projected[batch_id] = {
             "featureId": root.get("featureId"),
@@ -1447,6 +1478,40 @@ def _draft_task_validation_errors(
     return errors
 
 
+def _annotate_validation_test_plan(
+    task: dict[str, Any],
+    code_workspaces: list[str],
+) -> dict[str, Any]:
+    """Persist whether each planned Maven target is reused or created in Code."""
+
+    contexts = _code_workspace_contexts(code_workspaces)
+    workspace_roots = task_workspace_roots(task)
+    plans: list[dict[str, Any]] = []
+    for command in task.get("validationCommands", []):
+        if not isinstance(command, dict):
+            continue
+        key = "default" if "default" in workspace_roots else command.get("repo")
+        workspace_root = workspace_roots.get(str(key)) if isinstance(key, str) else None
+        context = (
+            _context_for_workspace_root(contexts, str(key), workspace_root)
+            if isinstance(workspace_root, str)
+            else None
+        )
+        cwd = command.get("cwd")
+        if context is None or not isinstance(cwd, str):
+            continue
+        command_dir = (context["gitRoot"] / cwd).resolve()
+        plan = maven_test_plan(command, command_dir)
+        if plan is not None:
+            plan["cwd"] = cwd
+            if command.get("repo"):
+                plan["repo"] = command.get("repo")
+            plans.append(plan)
+    candidate = copy.deepcopy(task)
+    candidate["validationTestPlan"] = plans
+    return candidate
+
+
 def _tasks(data: dict[str, Any]) -> list[dict[str, Any]]:
     tasks = data.setdefault("tasks", [])
     if not isinstance(tasks, list):
@@ -1978,6 +2043,24 @@ def _command_workspace_preflight_errors(
             "reason": "validation_manifest_missing",
             "detail": f"context={context_name};cwd={cwd};expected={'|'.join(manifests)}",
         }]
+    script_name = package_script_name(command)
+    if script_name is not None:
+        package_path = command_dir / "package.json"
+        try:
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return [{
+                "reason": "validation_package_manifest_invalid",
+                "detail": f"context={context_name};path={package_path};error={exc}",
+            }]
+        scripts = package.get("scripts") if isinstance(package, dict) else None
+        script = scripts.get(script_name) if isinstance(scripts, dict) else None
+        script_errors = package_script_policy_errors(script)
+        if script_errors:
+            return [{
+                "reason": script_errors[0],
+                "detail": f"context={context_name};packageScript={script_name}",
+            }]
     return []
 
 
@@ -2167,6 +2250,7 @@ def _cmd_set_draft_task_detail(args: argparse.Namespace) -> int:
     code_workspaces = [
         item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)
     ]
+    candidate = _annotate_validation_test_plan(candidate, code_workspaces)
     errors = _draft_task_validation_errors(feature, candidate, code_workspaces)
     if errors:
         return render_result(WriterResult(
@@ -2540,6 +2624,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "writerOwnedDetailFields": {
                         "acceptanceCriteria": ["id"],
                         "validationCommands": ["id"],
+                        "validationTestPlan": ["commandId", "framework", "targets"],
                         "scope": ["pages", "workspaceRoots"],
                     },
                     "fieldRules": {
@@ -2561,10 +2646,35 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         },
                     },
                     "validationKinds": sorted(TASK_VALIDATION_KINDS),
+                    "validationKindsByLane": {
+                        "backend": sorted(BEHAVIOR_TASK_VALIDATION_KINDS),
+                        "frontend": sorted(TASK_VALIDATION_KINDS),
+                    },
                     "batchValidationKinds": sorted(BATCH_VALIDATION_KINDS),
                     "validationCoverage": {
                         "rule": "required_commands_cover_all_acceptance_criteria",
-                        "compileMayCoverAcceptanceCriteria": False,
+                        "compileMayCoverAcceptanceCriteriaByLane": {
+                            "backend": False,
+                            "frontend": True,
+                        },
+                        "frontendCompileKinds": sorted(FRONTEND_COMPILE_VALIDATION_KINDS),
+                    },
+                    "validationCommandPolicy": {
+                        "forbiddenExecutables": ["echo", "false", "printf", "true"],
+                        "inlineShell": "forbidden",
+                        "placeholderText": "forbidden",
+                        "packageScriptMustExist": True,
+                        "packageScriptMayNotBeNoop": True,
+                        "mavenTargetMustBeConcreteClass": True,
+                        "mavenSkipOrZeroMatchOptions": "forbidden",
+                    },
+                    "validationTestPlanPolicy": {
+                        "source": "writer_workspace_inspection",
+                        "modes": ["reuse_existing", "create_in_code"],
+                        "existingTargetAction": "reuse_without_creating_duplicate",
+                        "missingTargetAction": "create_transient_test_in_code",
+                        "createdTestRecordedAsChangedFile": False,
+                        "runnerRequiresFreshSurefireOrFailsafeExecution": True,
                     },
                     "taskValidationPolicy": {
                         "mode": "deferred_batch",
@@ -2620,7 +2730,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "executionLaneOrder": ["backend", "frontend"],
                         "appendRule": (
                             "same_primary_capability_execution_lane_and_workspace_as_"
-                            "immediately_preceding_batch_and_not_full"
+                            "immediately_preceding_batch_frontend_route_and_not_full"
                         ),
                     },
                     "taskSetFinalization": {
@@ -2637,7 +2747,6 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                             "add-batch-validation-command",
                             "add-project-validation-command",
                             "render-md",
-                            "smoke_plan_writer.init",
                         ],
                     },
                     "collectingRepairs": {
@@ -2687,7 +2796,10 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "matrixException": {
                         "normalScenarioMaximum": PLAN_TASK_MAX_SCENARIOS,
                         "scenarioMaximum": PLAN_TASK_MATRIX_MAX_SCENARIOS,
-                        "requiredValidation": "one_complete_required_non_compile_behavior_command",
+                        "requiredValidationByLane": {
+                            "backend": "one_complete_required_behavior_command",
+                            "frontend": "one_complete_required_behavior_or_matching_compile_command",
+                        },
                     },
                     "matrixExceptionExample": _matrix_exception_example(),
                     "projectValidationCommand": {
@@ -2712,7 +2824,11 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                             "--mode <task_covered|commands>"
                         ),
                         "taskCoveredRequirements": (
-                            "one required targeted Maven lifecycle command per task in one workspace"
+                            "frontend lane only; one required matching compile/build/typecheck command "
+                            "per task in one workspace"
+                        ),
+                        "backendRequirement": (
+                            "commands mode with a required compile/build batch command; lint is supplemental"
                         ),
                     },
                     "writerOwnedGeneratedArtifacts": {
@@ -3220,6 +3336,15 @@ def start_deferred_task_validation(
         validation["activeRunId"] = run_id
         validation["currentTaskId"] = str(current.get("id"))
         validation["batchSnapshotSha256"] = batch_snapshot_sha256
+        for field in (
+            "failedValidationTaskId",
+            "failedCommandId",
+            "errorCategory",
+            "diagnosticPaths",
+            "repairOwnerTaskIds",
+            "validationFailures",
+        ):
+            validation.pop(field, None)
         validation.setdefault("completedTaskIds", [
             str(item.get("id")) for item in batch_tasks if normalize_status(item.get("status")) == "done"
         ])
@@ -3239,6 +3364,7 @@ def record_deferred_task_validation_attempt(
     completion_evidence_ids: list[str],
     success: bool,
     batch_snapshot_sha256: str,
+    failure: dict[str, Any] | None = None,
 ) -> WriterResult:
     with _plan_lock(workspace, feature):
         data = _load(workspace, feature)
@@ -3295,6 +3421,34 @@ def record_deferred_task_validation_attempt(
             validation["activeRunId"] = None
             validation["lastRunId"] = run_id
             validation["currentTaskId"] = task_id
+            failure = failure if isinstance(failure, dict) else {}
+            failed_validation_task_id = failure.get("failedValidationTaskId", task_id)
+            repair_owner_task_ids = failure.get("repairOwnerTaskIds", [task_id])
+            validation_failures = failure.get("validationFailures", [])
+            validation_failures = (
+                copy.deepcopy(validation_failures)
+                if isinstance(validation_failures, list)
+                else []
+            )
+            validation.update({
+                "failedValidationTaskId": failed_validation_task_id,
+                "failedCommandId": failure.get("failedCommandId"),
+                "errorCategory": failure.get("errorCategory", "behavior_test_failure"),
+                "diagnosticPaths": list(failure.get("diagnosticPaths", [])),
+                "repairOwnerTaskIds": list(repair_owner_task_ids),
+                "validationFailures": validation_failures,
+                "lastFailure": {
+                    "runId": run_id,
+                    "failedValidationTaskId": failed_validation_task_id,
+                    "failedCommandId": failure.get("failedCommandId"),
+                    "errorCategory": failure.get("errorCategory", "behavior_test_failure"),
+                    "diagnosticPaths": list(failure.get("diagnosticPaths", [])),
+                    "repairOwnerTaskIds": list(repair_owner_task_ids),
+                    "validationFailures": validation_failures,
+                    "evidenceIds": list(evidence_ids),
+                    "batchSnapshotSha256": batch_snapshot_sha256,
+                },
+            })
             data["status"] = "failed"
             data["activeBatchId"] = batch_id
             return _write(workspace, feature, data)
@@ -3345,6 +3499,15 @@ def invalidate_deferred_task_validation_for_repair(
         validation = batch_plan.get("taskValidation")
         if not isinstance(validation, dict) or validation.get("status") not in {"failed", "passed"}:
             return fail("task_validation_repair_not_allowed", batch_id, path=_path(workspace, feature))
+        if validation.get("status") == "failed":
+            repair_owners = validation.get("repairOwnerTaskIds")
+            repair_owners = repair_owners if isinstance(repair_owners, list) else []
+            if repair_task_id not in repair_owners:
+                return fail(
+                    "task_validation_repair_owner_mismatch",
+                    f"requested={repair_task_id};allowed={','.join(str(item) for item in repair_owners)}",
+                    path=_path(workspace, feature),
+                )
         for task in batch_plan.get("tasks", []):
             if not isinstance(task, dict):
                 continue
@@ -3359,6 +3522,15 @@ def invalidate_deferred_task_validation_for_repair(
             "completedTaskIds": [],
             "latestPassEvidenceByTask": {},
         })
+        for field in (
+            "failedValidationTaskId",
+            "failedCommandId",
+            "errorCategory",
+            "diagnosticPaths",
+            "repairOwnerTaskIds",
+            "validationFailures",
+        ):
+            validation.pop(field, None)
         batch_validation = batch_plan.get("batchValidation")
         if isinstance(batch_validation, dict):
             batch_validation["status"] = (

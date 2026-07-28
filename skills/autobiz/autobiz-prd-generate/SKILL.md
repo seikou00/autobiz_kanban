@@ -80,10 +80,12 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 - 写入或更新 `UI_CONTEXT.json` 前，必须先读取 `{pluginPath}/skills/autobiz/references/ui-context.md`。
 - `UI_CONTEXT.json` 是 UI 范围机器事实源；先读它，再写 `PRD.md`，不要从 PRD 正文重新推导 `uiRequired`。
-- `PRD.md` 只描述 UI 行为范围、页面目标、核心交互、加载态、空态、错误态和成功态，不描述前端实现方案。
-- 生成 PRD 后必须同步更新 `UI_CONTEXT.json`，将已确认的 UI 决策推进到 `decisionStatus=confirmed`。
-- `uiRequired=true` 时，确保 `pages[]`、`interactions[]` 或 `visualSources[]` 能表达页面数、页面列表和核心交互。
-- 高保真 HTML、标准 HTML、设计稿或原型链接只保留在 `visualSources[]`；PRD 阶段不要编造 `capabilities[].specRefs`。
+- `PRD.md` 只描述 UI 行为范围、页面目标、关键交互、加载态、空态、错误态和成功态，不描述前端实现方案、组件库选择或代码结构。
+- 生成 PRD 后必须同步更新 `UI_CONTEXT.json`：将已确认的 UI 决策推进到 `decisionStatus=confirmed`。
+- `uiRequired=true` 时，确保 `pages[]`、`interactions[]` 或 `visualSources[]` 至少能表达 UI 范围；页面数、页面列表、页面目标和核心交互必须能从这些结构化字段读出。
+- 高保真 HTML、标准 HTML、设计稿、Figma/MasterGo 或原型链接只保留在 `visualSources[]`，作为 code 阶段实现输入；已提供的 HTML 必须使用 Feature 内归档的 `frontend-html/VIS-xxx/...` 路径和稳定 `VIS-xxx`，不要把 HTML、设计稿、原型链接直接混入 `PRD.md` 正文作为需求实现。
+- 若讨论阶段确认存在高保真但尚未拿到文件或链接，保留 `visualSources[]` 的占位引用和 `required=true`，并在 `PRD.md` 中只写“高保真输入待提供”的风险或依赖；进入锁定/Code 前必须完成归档。没有高保真要求的 UI Capability 保持空 `visualSourceRefs`，不得因此阻断其他 UI Task。
+- PRD 阶段不要编造 `capabilities[].specRefs`；PRD 阶段通常只维护 `pages[]`、`interactions[]`、`visualSources[]`。
 - `uiRequired=false` 时，保留或补齐 `notApplicableReason`。
 
 

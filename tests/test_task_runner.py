@@ -156,7 +156,7 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
                 "validationCommands": [
                     {
                         "id": "VAL-T000-01",
-                        "argv": ["echo", "ok"],
+                        "argv": [sys.executable, "-c", "raise SystemExit(0)"],
                         "cwd": ".",
                         "kind": "behavior_test",
                         "required": True,
@@ -286,19 +286,33 @@ def _check_batch(workspace: Path, code: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def _configure_task_covered(feature_dir: Path, code: Path) -> None:
-    (code / "pom.xml").write_text("<project/>\n", encoding="utf-8")
-    wrapper = code / "mvnw"
-    wrapper.write_text("#!/bin/sh\necho targeted validation\n", encoding="utf-8")
-    wrapper.chmod(0o755)
+def _configure_frontend_task_covered(feature_dir: Path, code: Path) -> None:
+    (code / "package.json").write_text(
+        json.dumps({"scripts": {"build": "node --check app.js"}}) + "\n",
+        encoding="utf-8",
+    )
+    (code / "app.js").write_text("const compiled = true;\n", encoding="utf-8")
     batch = _read_batch(feature_dir)
+    batch["executionLane"] = "frontend"
     task = batch["tasks"][0]
-    task["scope"].update({"workspaceRoots": {"default": "."}, "paths": ["existing.txt"]})
+    task["uiRequired"] = True
+    task["scope"].update({
+        "workspaceRoots": {"default": "."},
+        "paths": ["app.js"],
+        "pages": ["PAGE-001"],
+    })
+    task["uiRefs"] = {
+        "pageRefs": ["PAGE-001"],
+        "interactionRefs": ["UIX-001"],
+        "visualSourceRefs": [],
+        "frontendRoute": "spec-driven-ui",
+    }
     task["validationCommands"][0].update({
-        "argv": ["./mvnw", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
-        "kind": "integration_test",
+        "argv": ["npm", "run", "build"],
+        "kind": "build",
     })
     batch["batchValidation"].update({
+        "profile": "frontend",
         "mode": "task_covered",
         "coverageCommandIds": ["VAL-T001-01"],
         "commands": [],
@@ -307,7 +321,8 @@ def _configure_task_covered(feature_dir: Path, code: Path) -> None:
     _write_batch(feature_dir, batch)
     root_path = feature_dir / "plan.json"
     root = json.loads(root_path.read_text(encoding="utf-8"))
-    root["batchValidationProfiles"]["backend"] = {"mode": "task_covered", "commands": []}
+    root["batches"][0]["executionLane"] = "frontend"
+    root["batchValidationProfiles"] = {"frontend": {"mode": "task_covered", "commands": []}}
     root["projectValidationCommands"] = []
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -423,6 +438,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(
                 validation_payload["validationContext"],
                 {
+                    "runType": "batch_task_validation",
                     "featureId": "alpha",
                     "batchId": "B001",
                     "runId": validation_payload["runId"],
@@ -431,7 +447,16 @@ class TaskRunnerTest(unittest.TestCase):
                     "requestedCodeWorkspaces": [str(code.resolve())],
                     "batchSnapshotSha256": validation_payload["batchSnapshotSha256"],
                     "agentScope": "task_and_batch_validation_commands",
+                    "allowedCommands": ["validate-batch-task", "batch-check"],
                     "allowedRunnerCommands": ["validate-batch-task", "batch-check"],
+                    "executionGroups": [
+                        {
+                            "id": "TVG-001",
+                            "strategy": "single",
+                            "status": "pending",
+                            "taskIds": ["T001"],
+                        }
+                    ],
                 },
             )
             validated = _run(
@@ -459,6 +484,49 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
             self.assertEqual(check_code_done(feature_dir), [])
+
+    def test_deferred_validation_integrity_failure_returns_machine_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_deferred_task_validation(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            self.assertEqual(_run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            ).returncode, 0)
+            validation_run = json.loads(_run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001",
+                "--code-workspace", str(code),
+            ).stdout)
+            run_path = (
+                feature_dir
+                / ".batch-task-validation-runs"
+                / "B001"
+                / f"{validation_run['runId']}.json"
+            )
+            run_state = json.loads(run_path.read_text(encoding="utf-8"))
+            run_state["taskOrder"] = ["T999"]
+            run_path.write_text(
+                json.dumps(run_state, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            failed = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T001",
+                "--run-id", validation_run["runId"], "--code-workspace", str(code),
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            payload = json.loads(failed.stdout)
+            self.assertEqual(payload["error"], "task_validation_run_integrity_mismatch")
+            self.assertEqual(payload["errorCategory"], "runner_integrity_failure")
+            self.assertEqual(payload["runType"], "batch_task_validation")
+            self.assertEqual(payload["runId"], validation_run["runId"])
+            self.assertEqual(payload["failedValidationTaskId"], "T001")
+            self.assertEqual(payload["allowedCommands"], ["validate-batch-task", "batch-check"])
 
     def test_missing_validation_executable_reports_environment_and_can_retry_after_fix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -494,6 +562,11 @@ class TaskRunnerTest(unittest.TestCase):
                 blocked_payload["requiredAction"],
                 "fix_validation_environment_and_retry_batch_validation",
             )
+            self.assertEqual(blocked_payload["runType"], "batch_task_validation")
+            self.assertEqual(blocked_payload["errorCategory"], "environment_failure")
+            self.assertEqual(blocked_payload["failedValidationTaskId"], "T001")
+            self.assertEqual(blocked_payload["failedCommandId"], "VAL-T001-01")
+            self.assertEqual(blocked_payload["allowedCommands"], ["start-batch-task-validation"])
             self.assertIn("请修复验证环境后重新运行校验", blocked_payload["userMessage"])
             self.assertEqual(_read_batch(feature_dir)["taskValidation"]["status"], "ready")
             self.assertFalse((feature_dir / ".batch-task-validation-runs" / "B001").exists())
@@ -513,6 +586,289 @@ class TaskRunnerTest(unittest.TestCase):
                 "--run-id", payload["runId"], "--code-workspace", str(code),
             )
             self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+
+    def test_maven_runner_requires_target_source_and_fresh_report_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = (Path(tmp) / "repo").resolve()
+            repo.mkdir()
+            (repo / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+            source = repo / "src" / "test" / "java" / "example" / "AppTest.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class AppTest {}\n", encoding="utf-8")
+            fake_maven = repo / "mvn"
+            fake_maven.write_text(
+                "#!/bin/sh\n"
+                "mkdir -p target/surefire-reports\n"
+                "printf '%s' '<testsuite name=\"example.AppTest\" tests=\"1\"><testcase classname=\"example.AppTest\" name=\"runs\"/></testsuite>' > target/surefire-reports/TEST-example.AppTest.xml\n",
+                encoding="utf-8",
+            )
+            fake_maven.chmod(0o755)
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [str(fake_maven), "test", "-Dtest=example.AppTest"],
+                "cwd": ".",
+            }
+            exit_code, output = task_runner_module._run_validation(
+                command,
+                {repo.name: repo},
+            )
+            self.assertEqual(exit_code, 0, output)
+
+            missing_command = {
+                **command,
+                "id": "VAL-T001-02",
+                "argv": [str(fake_maven), "test", "-Dtest=MissingTest"],
+            }
+            exit_code, output = task_runner_module._run_validation(
+                missing_command,
+                {repo.name: repo},
+            )
+            self.assertNotEqual(exit_code, 0)
+            self.assertIn("validation_maven_test_target_missing", output)
+
+    def test_grouped_maven_execution_splits_distinct_test_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            report_dir = repo / "target" / "surefire-reports"
+            group = task_runner_module.plan_validation_groups({"tasks": [
+                {
+                    "id": "T001",
+                    "validationCommands": [{
+                        "id": "VAL-T001-01",
+                        "argv": ["mvn", "test", "-Dtest=FirstTest"],
+                        "cwd": ".",
+                        "kind": "behavior_test",
+                        "required": True,
+                    }],
+                },
+                {
+                    "id": "T002",
+                    "validationCommands": [{
+                        "id": "VAL-T002-01",
+                        "argv": ["mvn", "test", "-Dtest=SecondTest#asserts"],
+                        "cwd": ".",
+                        "kind": "behavior_test",
+                        "required": True,
+                    }],
+                },
+                {
+                    "id": "T003",
+                    "validationCommands": [{
+                        "id": "VAL-T003-01",
+                        "argv": ["mvn", "test", "-Dtest=ThirdTest#crashes"],
+                        "cwd": ".",
+                        "kind": "behavior_test",
+                        "required": True,
+                    }],
+                },
+            ]})[0]
+
+            def write_reports(*_args, **_kwargs):
+                report_dir.mkdir(parents=True)
+                (report_dir / "TEST-group.xml").write_text(
+                    """<testsuites>
+<testsuite name="FirstTest"><testcase classname="FirstTest" name="passes"/></testsuite>
+<testsuite name="SecondTest"><testcase classname="SecondTest" name="asserts">
+<failure type="java.lang.AssertionError" message="expected true"/></testcase></testsuite>
+<testsuite name="ThirdTest"><testcase classname="ThirdTest" name="crashes">
+<error type="java.lang.NullPointerException" message="boom"/></testcase></testsuite>
+</testsuites>""",
+                    encoding="utf-8",
+                )
+                return 1, "two tests failed"
+
+            with patch.object(task_runner_module, "_run_validation", side_effect=write_reports) as run:
+                _, physical_exit, _, logical = task_runner_module._run_deferred_validation_group(
+                    group,
+                    {"default": repo},
+                    run_id="run-1",
+                    batch_id="B001",
+                    task_id="T001",
+                )
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(physical_exit, 1)
+            self.assertEqual([item["exitCode"] for item in logical], [0, 1, 1])
+            self.assertEqual(
+                logical[1]["testFailures"][0]["failureKind"],
+                "assertion_failure",
+            )
+            self.assertEqual(
+                logical[2]["testFailures"][0]["failureKind"],
+                "unexpected_exception",
+            )
+
+    def test_validation_group_is_complete_only_after_every_logical_evidence(self) -> None:
+        group = {
+            "logicalCommands": [
+                {"taskId": "T001", "commandId": "VAL-T001-01"},
+                {"taskId": "T002", "commandId": "VAL-T002-01"},
+            ]
+        }
+        state = {
+            "completedCommandEvidence": {
+                "T001": {"VAL-T001-01": {"evidenceId": "ev_0001"}},
+            }
+        }
+        self.assertFalse(task_runner_module._validation_group_evidence_complete(state, group))
+        state["completedCommandEvidence"]["T002"] = {
+            "VAL-T002-01": {"evidenceId": "ev_0002"}
+        }
+        self.assertTrue(task_runner_module._validation_group_evidence_complete(state, group))
+
+    def test_deferred_validation_executes_shared_maven_group_once_for_two_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            (code / ".git" / "info" / "exclude").write_text(
+                ".cmbdevclaw/large_tool_results/\ntarget/\n",
+                encoding="utf-8",
+            )
+            (code / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+            test_root = code / "src" / "test" / "java"
+            test_root.mkdir(parents=True)
+            (test_root / "FirstTest.java").write_text("class FirstTest {}\n", encoding="utf-8")
+            (test_root / "SecondTest.java").write_text("class SecondTest {}\n", encoding="utf-8")
+            fake_maven = code / "mvn"
+            fake_maven.write_text(
+                "#!/bin/sh\n"
+                "count_file=.git/info/maven-group-count\n"
+                "count=0\n"
+                "test ! -f \"$count_file\" || count=$(cat \"$count_file\")\n"
+                "count=$((count + 1))\n"
+                "printf '%s' \"$count\" > \"$count_file\"\n"
+                "mkdir -p target/surefire-reports\n"
+                "printf '%s' '<testsuites><testsuite name=\"FirstTest\"><testcase classname=\"FirstTest\" name=\"passes\"/></testsuite><testsuite name=\"SecondTest\"><testcase classname=\"SecondTest\" name=\"passes\"/></testsuite></testsuites>' > target/surefire-reports/TEST-group.xml\n",
+                encoding="utf-8",
+            )
+            fake_maven.chmod(0o755)
+
+            batch = _read_batch(feature_dir)
+            first = batch["tasks"][0]
+            second = json.loads(json.dumps(first))
+            second.update({"id": "T002", "title": "second behavior", "deps": ["T001"]})
+            second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
+            first["validationCommands"][0].update({
+                "argv": [str(fake_maven), "test", "-Dtest=FirstTest"],
+                "covers": ["AC-T001-01"],
+            })
+            second["validationCommands"][0].update({
+                "id": "VAL-T002-01",
+                "argv": [str(fake_maven), "test", "-Dtest=SecondTest"],
+                "covers": ["AC-T002-01"],
+            })
+            batch["tasks"].append(second)
+            batch["taskCount"] = 2
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batches"][0]["taskIds"] = ["T001", "T002"]
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            _configure_deferred_task_validation(feature_dir)
+
+            first_run = _start(workspace, code)
+            (code / "first.txt").write_text("first\n", encoding="utf-8")
+            self.assertEqual(_run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--run-id", first_run["runId"],
+                "--code-workspace", str(code),
+            ).returncode, 0)
+            second_run = json.loads(_run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--code-workspace", str(code),
+            ).stdout)
+            (code / "second.txt").write_text("second\n", encoding="utf-8")
+            self.assertEqual(_run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--run-id", second_run["runId"],
+                "--code-workspace", str(code),
+            ).returncode, 0)
+
+            validation = json.loads(_run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001",
+                "--code-workspace", str(code),
+            ).stdout)
+            first_result = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T001",
+                "--run-id", validation["runId"], "--code-workspace", str(code),
+            )
+            self.assertEqual(first_result.returncode, 0, first_result.stdout + first_result.stderr)
+            self.assertEqual(
+                (code / ".git" / "info" / "maven-group-count").read_text(encoding="utf-8"),
+                "1",
+            )
+            second_result = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T002",
+                "--run-id", validation["runId"], "--code-workspace", str(code),
+            )
+            self.assertEqual(second_result.returncode, 0, second_result.stdout + second_result.stderr)
+            self.assertEqual(
+                (code / ".git" / "info" / "maven-group-count").read_text(encoding="utf-8"),
+                "1",
+            )
+            completed = _read_batch(feature_dir)
+            self.assertEqual(completed["taskValidation"]["status"], "passed")
+            evidence = [
+                item
+                for item in (feature_dir / "evidence" / "EVIDENCE.jsonl")
+                .read_text(encoding="utf-8").splitlines()
+                if item
+            ]
+            validation_records = [
+                json.loads(item) for item in evidence
+                if json.loads(item).get("action") == "validation"
+            ]
+            self.assertEqual(len(validation_records), 2)
+            self.assertEqual(
+                len({item["validation"]["sharedExecutionId"] for item in validation_records}),
+                1,
+            )
+
+    def test_validation_failure_classifier_covers_compile_test_and_contract_failures(self) -> None:
+        command = {"id": "VAL-T001-01", "cwd": ".", "kind": "behavior_test"}
+        cases = [
+            (
+                "[ERROR] /repo/src/main/java/example/App.java:[1,1] cannot find symbol",
+                ["src/main/java/example/App.java"],
+                "source_compile_failure",
+            ),
+            (
+                "[ERROR] /repo/src/test/java/example/AppTest.java:[1,1] testCompile failed",
+                ["src/test/java/example/AppTest.java"],
+                "test_compile_failure",
+            ),
+            (
+                "validation_maven_test_report_missing:VAL-T001-01",
+                [],
+                "validation_contract_failure",
+            ),
+            ("expected 2 but was 3", [], "behavior_test_failure"),
+        ]
+        for output, paths, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    task_runner_module._validation_error_category(command, output, paths),
+                    expected,
+                )
+
+    def test_new_staged_test_is_transient_validation_file(self) -> None:
+        state = {
+            "scopeWorkspaces": [{"repository": "repo", "workspacePrefix": "module"}],
+        }
+        changes = [{
+            "operation": "created",
+            "path": "repo:module/src/test/java/example/AppTest.java",
+            "repository": "repo",
+        }]
+        repositories = [{"id": "repo", "untrackedFiles": []}]
+        formal, transient = task_runner_module._partition_transient_validation_changes(
+            state,
+            changes,
+            repositories,
+        )
+        self.assertEqual(formal, [])
+        self.assertEqual(transient, ["repo:module/src/test/java/example/AppTest.java"])
 
     def test_runtime_environment_block_retries_same_validation_run_after_fix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -560,6 +916,15 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(
                 blocked_payload["requiredAction"],
                 "fix_validation_environment_and_retry_same_run",
+            )
+            self.assertEqual(blocked_payload["runType"], "batch_task_validation")
+            self.assertEqual(blocked_payload["errorCategory"], "environment_failure")
+            self.assertEqual(blocked_payload["failedValidationTaskId"], "T001")
+            self.assertEqual(blocked_payload["failedCommandId"], "VAL-T001-01")
+            self.assertEqual(blocked_payload["batchSnapshotSha256"], json.loads(validation_run.stdout)["batchSnapshotSha256"])
+            self.assertEqual(
+                blocked_payload["allowedCommands"],
+                ["validate-batch-task", "batch-check"],
             )
             self.assertEqual(blocked_payload["runId"], run_id)
             self.assertEqual(_read_batch(feature_dir)["taskValidation"]["status"], "running")
@@ -611,8 +976,30 @@ class TaskRunnerTest(unittest.TestCase):
                 "--code-workspace", str(code),
             )
             self.assertNotEqual(failed.returncode, 0)
-            self.assertEqual(json.loads(failed.stdout)["requiredAction"], "fix_task_validation")
-            self.assertEqual(_read_batch(feature_dir)["taskValidation"]["status"], "failed")
+            failed_payload = json.loads(failed.stdout)
+            self.assertEqual(failed_payload["requiredAction"], "fix_or_retry_task_validation")
+            self.assertEqual(failed_payload["runType"], "batch_task_validation")
+            self.assertEqual(failed_payload["errorCategory"], "behavior_test_failure")
+            self.assertEqual(failed_payload["failedValidationTaskId"], "T001")
+            self.assertEqual(failed_payload["repairOwnerTaskIds"], ["T001"])
+            self.assertEqual(
+                failed_payload["validationFailures"],
+                [{
+                    "taskId": "T001",
+                    "commandId": "VAL-T001-01",
+                    "selectors": [],
+                    "errorCategory": "behavior_test_failure",
+                    "diagnosticPaths": [],
+                    "repairOwnerTaskIds": ["T001"],
+                    "testFailures": [],
+                }],
+            )
+            task_validation = _read_batch(feature_dir)["taskValidation"]
+            self.assertEqual(task_validation["status"], "failed")
+            self.assertEqual(
+                task_validation["lastFailure"]["validationFailures"],
+                failed_payload["validationFailures"],
+            )
 
             (code / ".git" / "info" / "retry-ready").write_text("ready\n", encoding="utf-8")
             retry_run = _run(
@@ -679,7 +1066,10 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(task["status"], "implemented")
             self.assertEqual(task["completionEvidenceIds"], [])
             self.assertEqual(task["implementationRevision"], 2)
-            self.assertEqual(_read_batch(feature_dir)["taskValidation"]["status"], "ready")
+            task_validation = _read_batch(feature_dir)["taskValidation"]
+            self.assertEqual(task_validation["status"], "ready")
+            self.assertNotIn("failedValidationTaskId", task_validation)
+            self.assertEqual(task_validation["lastFailure"]["errorCategory"], "behavior_test_failure")
 
     def test_deferred_validation_freezes_batch_snapshot_until_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -729,6 +1119,18 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(batch["tasks"][0]["status"], "failed")
             self.assertEqual(batch["tasks"][0]["completionEvidenceIds"], [])
 
+            repair = _run(
+                "start-validation-repair", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(repair.returncode, 0)
+            repair_blocked = json.loads(repair.stdout)
+            self.assertEqual(repair_blocked["error"], "workspace_changed_before_validation_repair")
+            self.assertEqual(
+                repair_blocked["requiredAction"],
+                "restore_validation_snapshot_before_repair",
+            )
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
             repair = _run(
                 "start-validation-repair", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
@@ -815,10 +1217,114 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(second_validated.returncode, 0, second_validated.stdout + second_validated.stderr)
             self.assertEqual(_read_batch(feature_dir)["taskValidation"]["status"], "passed")
 
+    def test_deferred_validation_repairs_task_that_owns_compiler_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            second = json.loads(json.dumps(batch["tasks"][0]))
+            second.update({"id": "T002", "title": "second behavior", "deps": ["T001"]})
+            second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
+            second["validationCommands"][0].update({
+                "id": "VAL-T002-01",
+                "covers": ["AC-T002-01"],
+                "argv": [sys.executable, "-c", "raise SystemExit(0)"],
+            })
+            diagnostic_path = code / "src" / "main" / "java" / "example" / "Second.java"
+            batch["tasks"][0]["validationCommands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    f"print('[ERROR] {diagnostic_path}:[1,1] cannot find symbol', file=sys.stderr); "
+                    "raise SystemExit(1)"
+                ),
+            ]
+            batch["tasks"].append(second)
+            batch["taskCount"] = 2
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batches"][0]["taskIds"] = ["T001", "T002"]
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            _configure_deferred_task_validation(feature_dir)
+
+            first_run = _start(workspace, code)
+            first_path = code / "src" / "main" / "java" / "example" / "First.java"
+            first_path.parent.mkdir(parents=True)
+            first_path.write_text("class First {}\n", encoding="utf-8")
+            self.assertEqual(_run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--run-id", first_run["runId"],
+                "--code-workspace", str(code),
+            ).returncode, 0)
+            second_started = json.loads(_run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--code-workspace", str(code),
+            ).stdout)
+            diagnostic_path.write_text("class Second {}\n", encoding="utf-8")
+            self.assertEqual(_run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--run-id", second_started["runId"],
+                "--code-workspace", str(code),
+            ).returncode, 0)
+
+            validation_run = json.loads(_run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--code-workspace", str(code),
+            ).stdout)
+            failed = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T001",
+                "--run-id", validation_run["runId"], "--code-workspace", str(code),
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            payload = json.loads(failed.stdout)
+            self.assertEqual(payload["runType"], "batch_task_validation")
+            self.assertEqual(payload["failedValidationTaskId"], "T001")
+            self.assertEqual(payload["failedCommandId"], "VAL-T001-01")
+            self.assertEqual(payload["errorCategory"], "source_compile_failure")
+            self.assertEqual(payload["diagnosticPaths"], ["src/main/java/example/Second.java"])
+            self.assertEqual(payload["repairOwnerTaskIds"], ["T002"])
+            self.assertEqual(payload["requiredAction"], "start_validation_repair")
+            self.assertEqual(
+                payload["allowedCommands"],
+                ["start-validation-repair", "start-batch-task-validation"],
+            )
+            task_validation = _read_batch(feature_dir)["taskValidation"]
+            self.assertEqual(task_validation["failedValidationTaskId"], "T001")
+            self.assertEqual(task_validation["repairOwnerTaskIds"], ["T002"])
+            session = json.loads(_run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            ).stdout)
+            self.assertEqual(session["action"], "fix_or_retry_task_validation")
+            self.assertEqual(session["failedValidationTaskId"], "T001")
+            self.assertEqual(session["repairOwnerTaskIds"], ["T002"])
+            self.assertEqual(
+                session["validationContext"]["allowedCommands"],
+                ["start-validation-repair", "start-batch-task-validation"],
+            )
+
+            wrong_owner = _run(
+                "start-validation-repair", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(wrong_owner.returncode, 0)
+            self.assertIn("validation_repair_owner_mismatch:T001", wrong_owner.stdout)
+            repair = _run(
+                "start-validation-repair", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T002", "--code-workspace", str(code),
+            )
+            self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
+            repaired_batch = _read_batch(feature_dir)
+            self.assertEqual(
+                [task["status"] for task in repaired_batch["tasks"]],
+                ["implemented", "in_progress"],
+            )
+
     def test_deferred_task_covered_closes_only_after_task_validation_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_task_covered(feature_dir, code)
+            _configure_frontend_task_covered(feature_dir, code)
             _configure_deferred_task_validation(feature_dir)
             started = _start(workspace, code)
             (code / "existing.txt").write_text("implemented\n", encoding="utf-8")
@@ -847,10 +1353,69 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(_evidence(feature_dir, closure_id)["action"], "batch_closure")
             self.assertEqual(check_code_done(feature_dir), [])
 
+    def test_frontend_build_can_validate_task_and_close_task_covered_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_frontend_task_covered(feature_dir, code)
+            _configure_deferred_task_validation(feature_dir)
+            started = _start(workspace, code)
+            (code / "existing.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--run-id", started["runId"],
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            validation_run = json.loads(_run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--code-workspace", str(code),
+            ).stdout)
+            validated = _run(
+                "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--task-id", "T001",
+                "--run-id", validation_run["runId"], "--code-workspace", str(code),
+            )
+            self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+            batch = _read_batch(feature_dir)
+            validation_id = batch["tasks"][0]["completionEvidenceIds"][0]
+            self.assertEqual(_evidence(feature_dir, validation_id)["validation"]["assuranceLevel"], "compile")
+            self.assertEqual(batch["batchValidation"]["status"], "passed")
+
+    def test_frontend_package_script_placeholder_is_environment_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_frontend_task_covered(feature_dir, code)
+            (code / "package.json").write_text(
+                json.dumps({"scripts": {"build": "echo validation placeholder"}}) + "\n",
+                encoding="utf-8",
+            )
+            _configure_deferred_task_validation(feature_dir)
+            started = _start(workspace, code)
+            (code / "existing.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--run-id", started["runId"],
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            blocked = _run(
+                "start-batch-task-validation", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            payload = json.loads(blocked.stdout)
+            self.assertEqual(
+                payload["error"],
+                "validation_environment_unavailable:VAL-T001-01:validation_command_placeholder",
+            )
+            self.assertEqual(payload["requiredAction"], "fix_validation_environment_and_retry_batch_validation")
+
     def test_deferred_task_covered_recovery_rechecks_snapshot_before_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_task_covered(feature_dir, code)
+            _configure_frontend_task_covered(feature_dir, code)
             _configure_deferred_task_validation(feature_dir)
             started = _start(workspace, code)
             target = code / "existing.txt"
@@ -948,8 +1513,9 @@ class TaskRunnerTest(unittest.TestCase):
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
             batch = _read_batch(feature_dir)
-            batch["batchValidation"]["commands"][0]["argv"] = ["echo", "forged"]
-            root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = ["echo", "forged"]
+            forged_command = [sys.executable, "-c", "print('forged')"]
+            batch["batchValidation"]["commands"][0]["argv"] = forged_command
+            root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = forged_command
             root["taskSetDigest"] = task_set_digest(root, {"B001": batch})
             _write_batch(feature_dir, batch)
             root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1796,7 +2362,7 @@ class TaskRunnerTest(unittest.TestCase):
     def test_task_covered_batch_closes_without_running_batch_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
-            _configure_task_covered(feature_dir, code)
+            _configure_frontend_task_covered(feature_dir, code)
             started = _start(workspace, code)
 
             completed = _run(
@@ -1956,13 +2522,16 @@ class TaskRunnerTest(unittest.TestCase):
                 )
 
                 self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-                self.assertEqual(
-                    _evidence(feature_dir, "ev_0001")["changedFiles"],
-                    [
-                        "backend/LF39.05_bccompliancemng/"
-                        "src/test/java/example/application/AppTest.java"
-                    ],
+                evidence = _evidence(feature_dir, "ev_0001")
+                test_path = (
+                    "backend/LF39.05_bccompliancemng/"
+                    "src/test/java/example/application/AppTest.java"
                 )
+                if test_state == "staged":
+                    self.assertEqual(evidence["changedFiles"], [])
+                    self.assertEqual(evidence["transientValidationFiles"], [test_path])
+                else:
+                    self.assertEqual(evidence["changedFiles"], [test_path])
 
     def test_complete_keeps_tests_outside_requested_workspace_in_formal_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2061,6 +2630,26 @@ class TaskRunnerTest(unittest.TestCase):
 
             self.assertNotEqual(started.returncode, 0)
             self.assertIn("code_workspace_contract_mismatch", started.stdout)
+            self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
+
+    def test_start_requires_backend_compile_or_build_batch_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"].update({"mode": "commands", "commands": []})
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["batchValidationProfiles"]["backend"] = {"mode": "commands", "commands": []}
+            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            started = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+
+            self.assertNotEqual(started.returncode, 0)
+            self.assertIn("backend_compile_command_missing", started.stdout)
             self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
     def test_start_rejects_missing_maven_manifest_before_run_creation(self) -> None:
@@ -3132,7 +3721,11 @@ class TaskRunnerTest(unittest.TestCase):
             started = _start(workspace, code)
             plan_path = _batch_path(feature_dir)
             plan = _read_batch(feature_dir)
-            plan["tasks"][0]["validationCommands"][0]["argv"] = ["echo", "changed"]
+            plan["tasks"][0]["validationCommands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                "print('changed')",
+            ]
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
 

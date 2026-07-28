@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import os
 import sys
@@ -72,7 +73,12 @@ def write_ui_context(workspace: Path, payload: dict) -> None:
     write_json(workspace / ".autobizdevops" / "features" / "alpha" / "UI_CONTEXT.json", payload)
 
 
-def write_plan_route(workspace: Path, route: str) -> None:
+def write_plan_route(
+    workspace: Path,
+    route: str,
+    *,
+    visual_source_refs: list[str] | None = None,
+) -> None:
     feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
     write_json(
         feature_dir / "plan.json",
@@ -123,7 +129,11 @@ def write_plan_route(workspace: Path, route: str) -> None:
                     "uiRefs": {
                         "pageRefs": ["PAGE-001"],
                         "interactionRefs": ["UIX-001"],
-                        "visualSourceRefs": ["VIS-001"],
+                        "visualSourceRefs": (
+                            visual_source_refs
+                            if visual_source_refs is not None
+                            else ([] if route in {ROUTE_NONE, ROUTE_SPEC_DRIVEN} else ["VIS-001"])
+                        ),
                         "frontendRoute": route,
                     },
                     "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
@@ -164,6 +174,7 @@ def base_ui_context(*, ui_required: bool = True) -> dict:
                 "uiRequired": True,
                 "pageRefs": ["PAGE-001"],
                 "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": [],
                 "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
             }
         ] if ui_required else [],
@@ -248,12 +259,16 @@ class FrontendRouteResolverTests(unittest.TestCase):
                     "required": True,
                 }
             ]
+            context["capabilities"][0]["visualSourceRefs"] = ["VIS-001"]
             write_ui_context(workspace, context)
+            write_plan_route(workspace, ROUTE_ABSOLUTE)
 
             payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
 
         self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
         self.assertEqual(payload["visualSourceIds"], ["VIS-001"])
+        self.assertEqual(payload["taskSourceBindings"]["T001"]["visualSourceIds"], ["VIS-001"])
+        self.assertEqual(payload["taskSourceBindings"]["T001"]["htmlSourcePaths"], [str(html_path.resolve())])
 
     def test_ui_context_visual_route_overrides_plan_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -316,21 +331,24 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertIn("position:absolute count=4", payload["reasons"])
         self.assertIn("plan.json route overridden by HTML/UI_CONTEXT evidence", payload["reasons"])
 
-    def test_plan_html_route_without_readable_html_falls_back_to_spec_driven(self) -> None:
+    def test_required_plan_html_route_without_readable_html_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
-            write_ui_context(workspace, base_ui_context(ui_required=True))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
             write_plan_route(workspace, ROUTE_ABSOLUTE)
 
-            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+            with self.assertRaisesRegex(FrontendRouteError, "required_visual_source_missing:VIS-001"):
+                resolve_frontend_route(workspace, "alpha", write_evidence=True)
 
-        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
-        self.assertTrue(payload["htmlSourceMissing"])
-        self.assertEqual(payload["htmlFallbackRoute"], ROUTE_SPEC_DRIVEN)
-        self.assertIn("plan.json HTML route has no readable HTML source", payload["reasons"])
-        self.assertIn("declared HTML visual source is missing; falling back to spec-driven-ui", payload["reasons"])
-
-    def test_explicit_html_route_without_readable_html_resolves_missing(self) -> None:
+    def test_explicit_required_html_route_without_readable_html_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             context = base_ui_context(ui_required=True)
@@ -345,16 +363,10 @@ class FrontendRouteResolverTests(unittest.TestCase):
             ]
             write_ui_context(workspace, context)
 
-            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+            with self.assertRaisesRegex(FrontendRouteError, "required_visual_source_missing:VIS-001"):
+                resolve_frontend_route(workspace, "alpha", write_evidence=True)
 
-        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
-        self.assertEqual(payload["htmlSourcePaths"], [])
-        self.assertTrue(payload["htmlSourceMissing"])
-        self.assertIn("missing.html", payload["missingHtmlSourcePaths"][0])
-        self.assertIn("--html-file", payload["htmlRequestMessage"])
-        self.assertIn("不因缺少 HTML 阻断", payload["htmlRequestMessage"])
-
-    def test_missing_high_fidelity_fallback_allows_code_done_after_review(self) -> None:
+    def test_optional_missing_high_fidelity_fallback_allows_code_done_after_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             context = base_ui_context(ui_required=True)
@@ -364,7 +376,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
                     "type": "high_fidelity_html",
                     "path": "frontend-html/missing.html",
                     "route": ROUTE_ABSOLUTE,
-                    "required": True,
+                    "required": False,
                 }
             ]
             write_ui_context(workspace, context)
@@ -376,7 +388,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
         self.assertEqual(failures, 0)
 
-    def test_direct_html_file_satisfies_missing_declared_high_fidelity_source(self) -> None:
+    def test_direct_html_file_does_not_replace_missing_required_bound_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             html_path = Path(tmp) / "provided.html"
@@ -393,10 +405,48 @@ class FrontendRouteResolverTests(unittest.TestCase):
             ]
             write_ui_context(workspace, context)
 
-            payload = resolve_frontend_route(workspace, "alpha", html_files=[str(html_path)], write_evidence=True)
+            with self.assertRaisesRegex(FrontendRouteError, "required_visual_source_missing:VIS-001"):
+                resolve_frontend_route(workspace, "alpha", html_files=[str(html_path)], write_evidence=True)
 
-        self.assertEqual(payload["route"], ROUTE_ABSOLUTE)
-        self.assertNotIn("htmlSourceMissing", payload)
+    def test_spec_driven_task_ignores_unrelated_required_high_fidelity_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/missing.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+            }]
+            write_ui_context(workspace, context)
+            write_plan_route(workspace, ROUTE_SPEC_DRIVEN, visual_source_refs=[])
+
+            payload = resolve_frontend_route(workspace, "alpha", write_evidence=True)
+
+        self.assertEqual(payload["route"], ROUTE_SPEC_DRIVEN)
+        self.assertEqual(payload["visualSourceIds"], [])
+        self.assertEqual(payload["taskSourceBindings"]["T001"]["htmlSourcePaths"], [])
+
+    def test_required_archived_html_digest_mismatch_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            html_path = write_feature_file(workspace, "frontend-html/VIS-001/index.html", "<main>before</main>")
+            context = base_ui_context(ui_required=True)
+            context["visualSources"] = [{
+                "sourceId": "VIS-001",
+                "type": "high_fidelity_html",
+                "path": "frontend-html/VIS-001/index.html",
+                "route": ROUTE_ABSOLUTE,
+                "required": True,
+                "contentSha256": hashlib.sha256(b"<main>before</main>").hexdigest(),
+            }]
+            write_ui_context(workspace, context)
+            write_plan_route(workspace, ROUTE_ABSOLUTE)
+            html_path.write_text("<main>after</main>", encoding="utf-8")
+
+            with self.assertRaisesRegex(FrontendRouteError, "required_visual_source_digest_mismatch:VIS-001"):
+                resolve_frontend_route(workspace, "alpha", write_evidence=True)
 
     def test_legacy_missing_html_from_ui_context_allows_code_done_after_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

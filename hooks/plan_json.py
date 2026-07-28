@@ -18,6 +18,18 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from hooks.validation_policy import (
+    BATCH_VALIDATION_KINDS,
+    BEHAVIOR_TASK_VALIDATION_KINDS,
+    FRONTEND_COMPILE_VALIDATION_KINDS,
+    TASK_VALIDATION_KINDS,
+    command_policy_errors,
+    frontend_command_provides_task_coverage,
+    frontend_compile_command_matches_kind,
+    maven_test_selectors,
+    task_validation_kinds_for_lane,
+)
+
 
 TASK_ID_RE = re.compile(r"^T\d{3}$")
 BATCH_ID_RE = re.compile(r"^B\d{3}$")
@@ -38,24 +50,21 @@ VISUAL_SOURCE_ID_RE = re.compile(r"^VIS-\d{3}$")
 TASK_SET_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 FRONTEND_ROUTES = {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"}
 COMPLETION_POLICIES = {"all_required_validations_pass"}
-TASK_VALIDATION_KINDS = {
-    "behavior_test",
-    "integration_test",
-    "e2e_test",
-    "static_check",
-}
-BATCH_VALIDATION_KINDS = {
-    "build",
-    "typecheck",
-    "lint",
-    "compile",
-}
 BATCH_VALIDATION_MODES = {"commands", "task_covered"}
 TASK_VALIDATION_POLICY_MODES = {"deferred_batch"}
 TASK_VALIDATION_ORCHESTRATIONS = {"single_batch_subagent"}
 TASK_VALIDATION_FAIL_STRATEGIES = {"fail_fast"}
 TASK_VALIDATION_AGENT_SCOPES = {"task_and_batch_validation_commands"}
 TASK_VALIDATION_STATUSES = {"pending", "ready", "running", "failed", "passed", "invalidated"}
+TASK_VALIDATION_ERROR_CATEGORIES = {
+    "environment_failure",
+    "source_compile_failure",
+    "test_compile_failure",
+    "behavior_test_failure",
+    "validation_contract_failure",
+    "workspace_changed",
+    "runner_integrity_failure",
+}
 PROJECT_VALIDATION_KINDS = {
     "integration_test",
     "e2e_test",
@@ -319,52 +328,18 @@ def _maven_goals(argv: list[str]) -> set[str]:
     }
 
 
-def task_command_provides_maven_lifecycle_coverage(command: Any) -> bool:
-    """Return whether a required task command compiles code and runs scoped tests."""
-
-    if not isinstance(command, dict) or command.get("required") is not True:
-        return False
-    argv = _string_list(command.get("argv"))
-    if not argv or _command_executable(argv) not in {"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"}:
-        return False
-    lowered = [item.lower() for item in argv]
-    if any(
-        item in {"-dskiptests", "-dmaven.test.skip=true", "-dskipits"}
-        or item.startswith("-dskiptests=")
-        or item.startswith("-dmaven.test.skip=")
-        or item.startswith("-dskipits=")
-        for item in lowered
-    ):
-        return False
-    if any(
-        item in {"-pl", "--projects", "-f", "--file", "--activate-profiles"}
-        or item.startswith("-pl=")
-        or item.startswith("--projects=")
-        or item.startswith("--file=")
-        for item in lowered
-    ) or any(item.startswith("-P") for item in argv):
-        return False
-    goals = _maven_goals(argv)
-    if not goals.intersection({"test", "integration-test", "verify", "package", "install"}):
-        return False
-    if not any(
-        item.startswith("-dtest=") or item.startswith("-dit.test=")
-        for item in lowered
-    ):
-        return False
-    return command.get("kind") in {"behavior_test", "integration_test", "e2e_test"}
-
-
 def task_covered_command_ids(batch_tasks: list[dict[str, Any]]) -> list[str]:
-    """Select one deterministic Maven lifecycle coverage command per task."""
+    """Select one deterministic frontend compile closure command per task."""
 
     result: list[str] = []
     for task in batch_tasks:
+        if task_execution_lane(task) != "frontend":
+            return []
         command_id = next(
             (
                 str(command.get("id"))
                 for command in task.get("validationCommands", [])
-                if task_command_provides_maven_lifecycle_coverage(command)
+                if frontend_command_provides_task_coverage(command)
                 and isinstance(command.get("id"), str)
             ),
             None,
@@ -590,6 +565,7 @@ def _validate_tasks_container(
                     task_id=task_id,
                     command_index=command_index,
                     acceptance_ids=_acceptance_ids(raw_task),
+                    execution_lane=task_execution_lane(raw_task),
                 )
                 if command.get("required") is True:
                     required_coverage.update(
@@ -597,6 +573,7 @@ def _validate_tasks_container(
                     )
             for criterion_id in sorted(_acceptance_ids(raw_task) - required_coverage):
                 errors.append(f"{task_id}.acceptanceCriteria_uncovered:{criterion_id}")
+        _validate_validation_test_plan(errors, raw_task, task_id)
 
     known_ids = known_task_ids or {task_id for task_id in task_ids if TASK_ID_RE.match(task_id)}
     for task_id, deps in deps_by_task.items():
@@ -613,6 +590,7 @@ def validate_plan_data(
     require_initial_status: bool = False,
     require_all_done: bool = False,
     require_task_details: bool = False,
+    require_backend_compile: bool = False,
 ) -> list[str]:
     """Validate the root batch index. Task contracts live in batch plans."""
 
@@ -695,6 +673,7 @@ def validate_plan_data(
         errors,
         data,
         require_initial_status=require_initial_status,
+        require_backend_compile=(require_backend_compile or require_all_done),
         used_lanes=used_lanes,
     )
 
@@ -718,6 +697,7 @@ def validate_batch_plan_data(
     known_task_ids: set[str] | None = None,
     require_initial_status: bool = False,
     require_all_done: bool = False,
+    require_backend_compile: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
@@ -755,7 +735,12 @@ def validate_batch_plan_data(
     completed_count = sum(normalize_status(item.get("status")) == "done" for item in batch_tasks)
     if data.get("completedTaskCount") != completed_count:
         errors.append(f"{batch_id}.completedTaskCount_mismatch")
-    _validate_batch_validation(errors, data, str(batch_id))
+    _validate_batch_validation(
+        errors,
+        data,
+        str(batch_id),
+        require_backend_compile=require_backend_compile,
+    )
     if "taskValidation" in data:
         _validate_task_validation(errors, data, str(batch_id))
         task_validation = data.get("taskValidation")
@@ -786,6 +771,15 @@ def validate_batch_plan_data(
     workspace_roots = workspace_root_sets[0] if workspace_root_sets else {}
     if any(item != workspace_roots for item in workspace_root_sets[1:]):
         errors.append(f"{batch_id}.mixed_task_workspace_roots")
+    frontend_routes = {
+        ui_refs.get("frontendRoute")
+        for item in batch_tasks
+        if item.get("uiRequired") is True
+        for ui_refs in [item.get("uiRefs")]
+        if isinstance(ui_refs, dict) and isinstance(ui_refs.get("frontendRoute"), str)
+    }
+    if len(frontend_routes) > 1:
+        errors.append(f"{batch_id}.mixed_task_frontend_routes")
     validation = data.get("batchValidation")
     commands = validation.get("commands") if isinstance(validation, dict) else []
     mode = (
@@ -910,6 +904,7 @@ def _validate_validation_command(
     task_id: str,
     command_index: int,
     acceptance_ids: set[str],
+    execution_lane: str,
 ) -> None:
     context = f"{task_id}.validationCommands[{command_index}]"
     command_id = command.get("id")
@@ -926,20 +921,30 @@ def _validate_validation_command(
     kind = command.get("kind")
     if kind not in TASK_VALIDATION_KINDS:
         errors.append(f"{context}.kind_invalid")
+    elif kind not in task_validation_kinds_for_lane(execution_lane):
+        errors.append(f"{context}.kind_invalid_for_lane:{execution_lane}")
     if argv:
+        for policy_error in command_policy_errors(command):
+            errors.append(f"{context}.{policy_error}")
         executable = _command_executable(argv)
         goals = _maven_goals(argv) if executable in {"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"} else set()
-        lowered = [item.lower() for item in argv]
-        if "compile" in goals and not goals.intersection(
+        if kind in FRONTEND_COMPILE_VALIDATION_KINDS:
+            if execution_lane == "frontend" and not frontend_compile_command_matches_kind(command):
+                errors.append(f"{context}.frontend_compile_command_mismatch:{kind}")
+        elif "compile" in goals and not goals.intersection(
             {"test", "integration-test", "verify", "package", "install"}
         ):
             errors.append(f"{context}.batch_owned_command")
-        if "test" in goals and not any(
-            item.startswith("-dtest=") or item.startswith("-dit.test=")
-            for item in lowered
-        ):
+        if "test" in goals and not maven_test_selectors(command):
             errors.append(f"{context}.maven_test_selector_missing")
-        if executable in {"npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"} and any(
+        if kind in BEHAVIOR_TASK_VALIDATION_KINDS and executable in {
+            "npm",
+            "npm.cmd",
+            "pnpm",
+            "pnpm.cmd",
+            "yarn",
+            "yarn.cmd",
+        } and any(
             item.lower() in {"build", "typecheck", "lint"} for item in argv[1:]
         ):
             errors.append(f"{context}.batch_owned_command")
@@ -959,6 +964,54 @@ def _validate_validation_command(
                 errors.append(f"{context}.covers_unknown:{criterion_id}")
 
 
+def _validate_validation_test_plan(
+    errors: list[str],
+    task: dict[str, Any],
+    task_id: str,
+) -> None:
+    raw_plan = task.get("validationTestPlan")
+    if raw_plan is None:
+        return
+    context = f"{task_id}.validationTestPlan"
+    if not isinstance(raw_plan, list):
+        errors.append(f"{context}_must_be_array")
+        return
+    command_ids = {
+        str(command.get("id"))
+        for command in task.get("validationCommands", [])
+        if isinstance(command, dict) and isinstance(command.get("id"), str)
+    }
+    for index, item in enumerate(raw_plan):
+        item_context = f"{context}[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{item_context}_must_be_object")
+            continue
+        command_id = item.get("commandId")
+        if command_id not in command_ids:
+            errors.append(f"{item_context}.commandId_invalid")
+        if item.get("framework") != "maven":
+            errors.append(f"{item_context}.framework_invalid")
+        targets = item.get("targets")
+        if not isinstance(targets, list) or not targets:
+            errors.append(f"{item_context}.targets_missing")
+            continue
+        for target_index, target in enumerate(targets):
+            target_context = f"{item_context}.targets[{target_index}]"
+            if not isinstance(target, dict):
+                errors.append(f"{target_context}_must_be_object")
+                continue
+            if not isinstance(target.get("selector"), str) or not target.get("selector", "").strip():
+                errors.append(f"{target_context}.selector_missing")
+            if target.get("mode") not in {"reuse_existing", "create_in_code"}:
+                errors.append(f"{target_context}.mode_invalid")
+            source_files = target.get("sourceFiles")
+            if not isinstance(source_files, list) or not all(
+                isinstance(value, str) and value.strip() and not Path(value).is_absolute()
+                for value in source_files
+            ):
+                errors.append(f"{target_context}.sourceFiles_invalid")
+
+
 def _validate_batch_command(
     errors: list[str],
     command: Any,
@@ -976,6 +1029,9 @@ def _validate_batch_command(
     argv = _string_list(command.get("argv"))
     if argv is None or not argv:
         errors.append(f"{context}.argv_missing")
+    else:
+        for policy_error in command_policy_errors(command):
+            errors.append(f"{context}.{policy_error}")
     cwd = command.get("cwd")
     if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
         errors.append(f"{context}.cwd_invalid")
@@ -995,6 +1051,7 @@ def _validate_batch_profiles(
     data: dict[str, Any],
     *,
     require_initial_status: bool,
+    require_backend_compile: bool,
     used_lanes: set[str],
 ) -> None:
     profiles = data.get("batchValidationProfiles")
@@ -1015,8 +1072,22 @@ def _validate_batch_profiles(
         mode = profile.get("mode", "commands" if commands else None)
         if mode not in BATCH_VALIDATION_MODES:
             errors.append(f"batchValidationProfiles.{lane}.mode_invalid")
+        elif mode == "task_covered" and lane != "frontend":
+            errors.append(f"batchValidationProfiles.{lane}.task_covered_frontend_only")
         elif mode == "task_covered" and commands:
             errors.append(f"batchValidationProfiles.{lane}.task_covered_commands_must_be_empty")
+        if (
+            require_backend_compile
+            and lane == "backend"
+            and mode == "commands"
+            and not any(
+                isinstance(command, dict)
+                and command.get("required") is True
+                and command.get("kind") in {"compile", "build"}
+                for command in commands
+            )
+        ):
+            errors.append(f"batchValidationProfiles.{lane}.backend_compile_command_missing")
         for index, command in enumerate(commands):
             _validate_batch_command(
                 errors,
@@ -1033,16 +1104,34 @@ def _validate_batch_profiles(
                 if isinstance(profile, dict)
                 else None
             )
-            configured = mode == "task_covered" or (
-                mode == "commands"
-                and isinstance(commands, list)
-                and any(isinstance(command, dict) and command.get("required") is True for command in commands)
-            )
+            if lane == "backend" and require_backend_compile:
+                configured = (
+                    mode == "commands"
+                    and isinstance(commands, list)
+                    and any(
+                        isinstance(command, dict)
+                        and command.get("required") is True
+                        and command.get("kind") in {"compile", "build"}
+                        for command in commands
+                    )
+                )
+            else:
+                configured = (mode == "task_covered") or (
+                    mode == "commands"
+                    and isinstance(commands, list)
+                    and any(isinstance(command, dict) and command.get("required") is True for command in commands)
+                )
             if not configured:
                 errors.append(f"batchValidationProfiles_missing_lane:{lane}")
 
 
-def _validate_batch_validation(errors: list[str], data: dict[str, Any], batch_id: str) -> None:
+def _validate_batch_validation(
+    errors: list[str],
+    data: dict[str, Any],
+    batch_id: str,
+    *,
+    require_backend_compile: bool,
+) -> None:
     validation = data.get("batchValidation")
     if validation is None:
         errors.append(f"batch_validation_contract_requires_rebuild:{batch_id}.batchValidation")
@@ -1056,6 +1145,8 @@ def _validate_batch_validation(errors: list[str], data: dict[str, Any], batch_id
     mode = validation.get("mode", "commands" if commands else None)
     if mode not in BATCH_VALIDATION_MODES:
         errors.append(f"{batch_id}.batchValidation.mode_invalid")
+    elif mode == "task_covered" and data.get("executionLane") != "frontend":
+        errors.append(f"{batch_id}.batchValidation.task_covered_frontend_only")
     if validation.get("status") not in BATCH_VALIDATION_STATUSES:
         errors.append(f"{batch_id}.batchValidation.status_invalid")
     if not isinstance(commands, list):
@@ -1082,6 +1173,19 @@ def _validate_batch_validation(errors: list[str], data: dict[str, Any], batch_id
         errors.append(f"{batch_id}.coverageCommandIds_missing")
     if mode == "commands" and coverage_ids:
         errors.append(f"{batch_id}.batchValidation.commands_mode_coverage_must_be_empty")
+    if (
+        require_backend_compile
+        and mode == "commands"
+        and data.get("executionLane") == "backend"
+        and isinstance(commands, list)
+        and not any(
+            isinstance(command, dict)
+            and command.get("required") is True
+            and command.get("kind") in {"compile", "build"}
+            for command in commands
+        )
+    ):
+        errors.append(f"{batch_id}.batchValidation.backend_compile_command_missing")
     if mode == "task_covered":
         if commands:
             errors.append(f"{batch_id}.batchValidation.task_covered_commands_must_be_empty")
@@ -1205,6 +1309,33 @@ def _validate_task_validation(errors: list[str], data: dict[str, Any], batch_id:
         or not isinstance(snapshot, str)
     ):
         errors.append(f"{batch_id}.taskValidation.failed_state_incomplete")
+    if status == "failed":
+        failed_task = validation.get("failedValidationTaskId")
+        if failed_task not in actual_order:
+            errors.append(f"{batch_id}.taskValidation.failedValidationTaskId_invalid")
+        failed_command = validation.get("failedCommandId")
+        if failed_command is not None and not isinstance(failed_command, str):
+            errors.append(f"{batch_id}.taskValidation.failedCommandId_invalid")
+        if validation.get("errorCategory") not in TASK_VALIDATION_ERROR_CATEGORIES:
+            errors.append(f"{batch_id}.taskValidation.errorCategory_invalid")
+        diagnostic_paths = _string_list(validation.get("diagnosticPaths"))
+        if diagnostic_paths is None:
+            errors.append(f"{batch_id}.taskValidation.diagnosticPaths_invalid")
+        repair_owners = _string_list(validation.get("repairOwnerTaskIds"))
+        if (
+            repair_owners is None
+            or not repair_owners
+            or any(task_id not in actual_order for task_id in repair_owners)
+        ):
+            errors.append(f"{batch_id}.taskValidation.repairOwnerTaskIds_invalid")
+        validation_failures = validation.get("validationFailures", [])
+        if not isinstance(validation_failures, list) or any(
+            not isinstance(item, dict)
+            or item.get("taskId") not in actual_order
+            or not isinstance(item.get("commandId"), str)
+            for item in validation_failures
+        ):
+            errors.append(f"{batch_id}.taskValidation.validationFailures_invalid")
     if status == "passed" and completed != actual_order:
         errors.append(f"{batch_id}.taskValidation.passed_without_all_tasks")
     if status == "passed" and (
@@ -1261,6 +1392,9 @@ def _validate_project_commands(
         argv = _string_list(command.get("argv"))
         if argv is None or not argv:
             errors.append(f"{context}.argv_missing")
+        else:
+            for policy_error in command_policy_errors(command):
+                errors.append(f"{context}.{policy_error}")
         cwd = command.get("cwd")
         if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
             errors.append(f"{context}.cwd_invalid")
@@ -1495,6 +1629,7 @@ def _bundle_consistency_errors(
     *,
     require_initial_status: bool = False,
     require_all_done: bool = False,
+    require_backend_compile: bool = True,
 ) -> list[str]:
     entries = [entry for entry in root.get("batches", []) if isinstance(entry, dict)]
     all_tasks: list[dict[str, Any]] = []
@@ -1541,6 +1676,7 @@ def _bundle_consistency_errors(
                 known_task_ids=known_task_ids,
                 require_initial_status=require_initial_status,
                 require_all_done=require_all_done,
+                require_backend_compile=require_backend_compile,
             )
         )
         actual_ids = [str(item.get("id")) for item in tasks(data)]
@@ -1629,11 +1765,13 @@ def validate_plan_bundle_data(
     *,
     require_initial_status: bool = False,
     require_all_done: bool = False,
+    require_backend_compile: bool = False,
 ) -> list[str]:
     errors = validate_plan_data(
         root,
         require_initial_status=require_initial_status,
         require_all_done=require_all_done,
+        require_backend_compile=require_backend_compile,
     )
     if errors:
         return errors
@@ -1642,6 +1780,7 @@ def validate_plan_bundle_data(
         batch_data,
         require_initial_status=require_initial_status,
         require_all_done=require_all_done,
+        require_backend_compile=(require_backend_compile or require_all_done),
     )
 
 
@@ -1658,6 +1797,7 @@ def load_plan_bundle(
         root,
         require_initial_status=require_initial_status,
         require_all_done=require_all_done,
+        require_backend_compile=(root.get("taskSetStatus") == "finalized" or require_all_done),
     )
     if root_errors:
         raise PlanJsonError(";".join(root_errors))
@@ -1693,6 +1833,7 @@ def load_plan_bundle(
         batch_data,
         require_initial_status=require_initial_status,
         require_all_done=require_all_done,
+        require_backend_compile=(root.get("taskSetStatus") == "finalized" or require_all_done),
     )
     if errors:
         raise PlanJsonError(";".join(errors))

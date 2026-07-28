@@ -49,7 +49,7 @@ def valid_plan(
         "projectValidationCommands": [
             {
                 "id": "PROJECT-VAL-001",
-                "argv": ["echo", "compile ok"],
+                "argv": [sys.executable, "-c", "print('project integration')"],
                 "cwd": ".",
                 "kind": "integration_test",
                 "required": True,
@@ -85,7 +85,7 @@ def valid_plan(
                 "validationCommands": [
                     {
                         "id": "VAL-T001-01",
-                        "argv": ["echo", "ok"],
+                        "argv": [sys.executable, "-c", "print('task validation')"],
                         "cwd": ".",
                         "kind": "behavior_test",
                         "required": True,
@@ -125,7 +125,7 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 execution_lane: {
                     "commands": [
                         {
-                            "argv": ["echo", f"{execution_lane} compile"],
+                            "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
                             "cwd": ".",
                             "kind": "compile",
                             "required": True,
@@ -171,7 +171,7 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 "commands": [
                     {
                         "id": "BATCH-B001-VAL-001",
-                        "argv": ["echo", f"{execution_lane} compile"],
+                        "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
                         "cwd": ".",
                         "kind": "compile",
                         "required": True,
@@ -235,8 +235,8 @@ def append_current_evidence(
             "checkedCriteria": checked_criteria if checked_criteria is not None else ["AC-T001-01"],
             "validation": {
                 "commandId": command_id,
-                "argv": ["echo", "ok"],
-                "command": "echo ok",
+                "argv": [sys.executable, "-c", "print('task validation')"],
+                "command": f"{sys.executable} -c print('task validation')",
                 "cwd": ".",
                 "kind": "behavior_test",
                 "required": True,
@@ -272,7 +272,65 @@ class PlanJsonTest(unittest.TestCase):
         task = plan["tasks"][0]
         task["validationCommands"][0]["kind"] = "compile"
 
-        self.assertIn("T001.validationCommands[0].kind_invalid", validate_test_tasks(plan))
+        self.assertIn(
+            "T001.validationCommands[0].kind_invalid_for_lane:backend",
+            validate_test_tasks(plan),
+        )
+
+    def test_frontend_plan_accepts_build_as_acceptance_coverage(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["uiRequired"] = True
+        task["scope"]["pages"] = ["PAGE-001"]
+        task["uiRefs"] = {
+            "pageRefs": ["PAGE-001"],
+            "interactionRefs": ["UIX-001"],
+            "visualSourceRefs": [],
+            "frontendRoute": "spec-driven-ui",
+        }
+        task["validationCommands"][0].update({
+            "argv": ["npm", "run", "build"],
+            "kind": "build",
+        })
+
+        self.assertEqual(validate_test_tasks(plan), [])
+
+    def test_frontend_compile_kind_must_match_command(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["uiRequired"] = True
+        task["scope"]["pages"] = ["PAGE-001"]
+        task["uiRefs"] = {
+            "pageRefs": ["PAGE-001"],
+            "interactionRefs": [],
+            "visualSourceRefs": [],
+            "frontendRoute": "spec-driven-ui",
+        }
+        task["validationCommands"][0].update({
+            "argv": ["npm", "run", "typecheck"],
+            "kind": "build",
+        })
+
+        self.assertIn(
+            "T001.validationCommands[0].frontend_compile_command_mismatch:build",
+            validate_test_tasks(plan),
+        )
+
+    def test_plan_rejects_noop_placeholder_and_inline_shell_commands(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        command = plan["tasks"][0]["validationCommands"][0]
+        command["argv"] = ["bash", "-c", "echo validation placeholder"]
+
+        errors = validate_test_tasks(plan)
+
+        self.assertIn("T001.validationCommands[0].validation_command_placeholder", errors)
+        self.assertIn("T001.validationCommands[0].validation_command_inline_shell_forbidden", errors)
+
+        command["argv"] = ["echo", "ok"]
+        self.assertIn(
+            "T001.validationCommands[0].validation_command_noop",
+            validate_test_tasks(plan),
+        )
 
     def test_plan_requires_required_commands_to_cover_every_acceptance_criterion(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
@@ -868,8 +926,8 @@ class EvidenceStoreTest(unittest.TestCase):
             "checkedCriteria": ["AC-T001-01"],
             "validation": {
                 "commandId": "VAL-T001-01",
-                "argv": ["echo", "ok"],
-                "command": "echo ok",
+                "argv": [sys.executable, "-c", "print('task validation')"],
+                "command": f"{sys.executable} -c print('task validation')",
                 "cwd": ".",
                 "kind": "behavior_test",
                 "required": True,

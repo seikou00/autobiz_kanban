@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,12 @@ from hooks.update_checkpoint import prepare_checkpoint_update  # noqa: E402
 from hooks.update_checkpoint import validate_plan_json_for_checkpoint  # noqa: E402
 from hooks.evidence_store import append_evidence  # noqa: E402
 from hooks.plan_json import task_contract_sha256  # noqa: E402
+
+
+TASK_VALIDATION_ARGV = [sys.executable, "-m", "unittest", "tests.test_plan_granularity"]
+SECOND_TASK_VALIDATION_ARGV = [sys.executable, "-m", "unittest", "tests.test_validation_policy"]
+BATCH_VALIDATION_ARGV = [sys.executable, "-m", "compileall", "-q", "hooks"]
+PROJECT_VALIDATION_ARGV = [sys.executable, "-m", "unittest", "tests.test_json_writers"]
 
 
 def make_workspace(root: Path) -> Path:
@@ -116,7 +123,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
     batch_run_id = "run-batch-state"
     batch_command = {
         "id": "BATCH-B001-VAL-001",
-        "argv": ["echo", "batch ok"],
+        "argv": BATCH_VALIDATION_ARGV,
         "cwd": ".",
         "kind": "compile",
         "required": True,
@@ -128,7 +135,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "project ok"],
+                        "argv": PROJECT_VALIDATION_ARGV,
                         "cwd": ".",
                         "kind": "integration_test",
                         "required": True,
@@ -169,7 +176,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
                         "validationCommands": [
                             {
                                 "id": "VAL-T001-01",
-                                "argv": ["echo", "ok"],
+                                "argv": TASK_VALIDATION_ARGV,
                                 "cwd": ".",
                                 "kind": "behavior_test",
                                 "required": True,
@@ -298,8 +305,8 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
             "checkedCriteria": ["AC-T001-01"],
             "validation": {
                 "commandId": "VAL-T001-01",
-                "argv": ["echo", "ok"],
-                "command": "echo ok",
+                "argv": TASK_VALIDATION_ARGV,
+                "command": shlex.join(TASK_VALIDATION_ARGV),
                 "cwd": ".",
                 "kind": "behavior_test",
                 "required": True,
@@ -338,7 +345,7 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
             "validation": {
                 "commandId": batch_command["id"],
                 "argv": batch_command["argv"],
-                "command": "echo batch ok",
+                "command": shlex.join(BATCH_VALIDATION_ARGV),
                 "cwd": batch_command["cwd"],
                 "kind": batch_command["kind"],
                 "required": batch_command["required"],
@@ -374,8 +381,8 @@ def write_done_plan_json_and_evidence(feature_dir: Path, *, feature: str = "alph
             "checkedCriteria": ["PROJECT-VAL-001"],
             "validation": {
                 "commandId": "PROJECT-VAL-001",
-                "argv": ["echo", "project ok"],
-                "command": "echo project ok",
+                "argv": PROJECT_VALIDATION_ARGV,
+                "command": shlex.join(PROJECT_VALIDATION_ARGV),
                 "cwd": ".",
                 "kind": "integration_test",
                 "required": True,
@@ -816,7 +823,7 @@ class StateIntegrationTests(unittest.TestCase):
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "integration"],
+                        "argv": PROJECT_VALIDATION_ARGV,
                         "cwd": ".",
                         "kind": "integration_test",
                         "required": True,
@@ -852,7 +859,7 @@ class StateIntegrationTests(unittest.TestCase):
                         "validationCommands": [
                             {
                                 "id": "VAL-T001-01",
-                                "argv": ["echo", "one"],
+                                "argv": TASK_VALIDATION_ARGV,
                                 "cwd": ".",
                                 "kind": "behavior_test",
                                 "required": True,
@@ -892,7 +899,7 @@ class StateIntegrationTests(unittest.TestCase):
                         "validationCommands": [
                             {
                                 "id": "VAL-T002-01",
-                                "argv": ["echo", "two"],
+                                "argv": SECOND_TASK_VALIDATION_ARGV,
                                 "cwd": ".",
                                 "kind": "behavior_test",
                                 "required": True,
@@ -919,7 +926,7 @@ class StateIntegrationTests(unittest.TestCase):
                         "backend": {
                             "commands": [
                                 {
-                                    "argv": ["echo", "backend compile"],
+                                    "argv": BATCH_VALIDATION_ARGV,
                                     "cwd": ".",
                                     "kind": "compile",
                                     "required": True,
@@ -961,7 +968,7 @@ class StateIntegrationTests(unittest.TestCase):
                             "commands": [
                                 {
                                     "id": "BATCH-B001-VAL-001",
-                                    "argv": ["echo", "backend compile"],
+                                    "argv": BATCH_VALIDATION_ARGV,
                                     "cwd": ".",
                                     "kind": "compile",
                                     "required": True,

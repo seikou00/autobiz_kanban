@@ -178,6 +178,20 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 
 **禁止假设用户确认需求没有问题**： 需求已经很清楚所以跳过问题确认是**错误推理**。即使没有问题清单，也必须告知用户"需求检查完毕，未发现问题，是否确认进入下一阶段？"
 
+#### UI 范围收口
+
+- 写入或更新 `UI_CONTEXT.json` 前，必须先读取 `{pluginPath}/skills/autobiz/references/ui-context.md`，按其中模板和枚举生成，不要等校验失败后再读取 Python validator 反推格式。
+- 必须生成或更新 `UI_CONTEXT.json`，不要只在 `PRD_DISCUSS.md` 中用自然语言描述是否有页面。
+- `uiRequired` 默认可为 `false`，但必须通过 `decisionStatus` 区分 `defaulted` 与用户已确认。
+- 进入下一阶段前，必须向用户确认并记录：是否有页面、页面数或页面列表、核心交互、加载态、空态、错误态、成功态，以及是否存在高保真 HTML、标准 HTML、设计稿、Figma/MasterGo 或原型链接。
+- 若用户确认有页面、前端交互、设计稿、HTML、Figma/MasterGo 或原型链接，写 `uiRequired=true`，并尽量补 `pages[]`、`interactions[]`、`visualSources[]`。
+- 若用户确认本 feature 纯后端/纯规则/纯数据能力，写 `uiRequired=false`，并填写 `notApplicableReason`。
+- discuss/PRD 阶段不要编造 `capabilities[].specRefs`；REQ/SCN 由 specs 阶段定义并在 `decisionStatus=locked` 时回填。
+- 高保真 HTML、标准 HTML、设计稿、原型链接是独立设计输入，只写入 `visualSources[]`，不要混入需求正文作为行为契约。
+- 若用户已提供高保真 HTML，必须在离开需求讨论阶段前通过 `ui_context_writer.py add-visual-source --source-file` 归档到 Feature 的 `frontend-html/VIS-xxx/`，保存 writer 生成的 `VIS-xxx`，后续只传递该 ID，不把本机绝对路径写入 UI_CONTEXT。
+- 若用户确认存在高保真但暂未提供文件，可在 `visualSources[]` 中保留 `required=true` 的占位引用并记录待确认风险；引用该源的 Task 在文件归档前不能通过 Code 高保真门禁。没有高保真要求的 UI Capability 不创建占位源，使用空 `visualSourceRefs`。
+- 页面信息优先投到 `pages[]`：`name` 写页面名，`goal` 写页面目标，`states` 写 `loading` / `empty` / `error` / `success` 等可观察状态；交互信息投到 `interactions[]`，不要只写在 Markdown 段落里。
+- `UI_CONTEXT.json` 模板、枚举和 ID 格式只以 `ui-context.md` 为准，本技能正文不维护第二份 JSON 模板。
 
 ### 对话式引导并调整 `PRD_DISCUSS.md`
 

@@ -41,6 +41,7 @@ from plan_json import (  # noqa: E402
     unfinished_tasks,
 )
 from task_run_integrity import task_run_integrity_error  # noqa: E402
+from validation_groups import validation_groups_sha256_payload  # noqa: E402
 
 
 PASS_RESULTS = {"pass", "passed", "success", "ok", "PASS", "PASS_WITH_WARNINGS"}
@@ -457,8 +458,14 @@ def _deferred_validation_run_integrity_sha256(state: dict[str, Any]) -> str:
         "batchSnapshotSha256",
         "startedAt",
     )
+    integrity_data = {field: state.get(field) for field in fields}
+    integrity_data["executionPlan"] = validation_groups_sha256_payload(
+        state.get("executionGroups", [])
+        if isinstance(state.get("executionGroups"), list)
+        else []
+    )
     content = json.dumps(
-        {field: state.get(field) for field in fields},
+        integrity_data,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

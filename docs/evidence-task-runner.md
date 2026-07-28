@@ -70,9 +70,9 @@ python hooks/task_runner.py complete --workspace "$ARTIFACT_WORKSPACE" --feature
   --supporting-file src/existing_implementation.py
 ```
 
-This mode requires an empty snapshot diff, a real supporting file, and a required behavior/integration/E2E/static validation. Compile, typecheck, or lint alone cannot complete a no-change task.
+This mode requires an empty snapshot diff, a real supporting file, and a required lane-appropriate task validation. Backend tasks require behavior/integration/E2E/static validation. Frontend tasks may instead use a matching compile/build/typecheck command; lint alone cannot complete a no-change task.
 
-Task `validationCommands` accept only behavior, integration, E2E, or static checks. Maven `test` commands must select a test with `-Dtest=` or `-Dit.test=`. Compile, build, typecheck, and lint never run once per task, and agents must not invoke batch-owned commands manually during a task.
+Task `validationCommands` are lane-aware. Backend tasks accept behavior, integration, E2E, or static checks. Frontend tasks additionally accept compile, build, or typecheck when the command action matches its kind; resulting evidence records compile assurance. Maven `test` commands must select a concrete test class with `-Dtest=XxxTest` or `-Dit.test=XxxIT`; file paths, wildcards, skip flags, and zero-match bypasses are rejected. Plan records whether each Maven target already exists or must be created in Code. Runner requires the target source file at validation time and a fresh Surefire/Failsafe report showing that target executed. Lint remains batch-owned, and agents must not invoke task or batch validation commands manually during implementation.
 
 `--supporting-file` is relative to the resolved Git root; prefix it with `repoId:` for a multi-repository run. Verified-existing mode is only for behavior that existed before start. It is not a recovery mechanism for implementation files absorbed into a replacement run's baseline, and the runner rejects conflicts found in earlier aborted runs.
 
@@ -93,9 +93,9 @@ If a validation command runs and returns a normal non-zero result, fail evidence
 
 ## Batch Validation And Revalidation
 
-Batch validation has two modes. `task_covered` is valid when every task in the batch has a required, targeted Maven lifecycle command in one workspace. Batch order is serial: finish one active Batch, complete its final validation, then consume the handoff in a new conversation before starting the next Batch; TASK implementation and deferred validation are also single-queue operations. Completing the final task appends one `action=batch_closure` record that points to the current task evidence, marks the batch passed, and creates no batch run or shell command.
+Batch validation has two modes. Backend always uses `commands`: Task validation runs targeted behavior tests such as `mvn test -Dtest=...`, while Batch closure independently runs compile/build such as `mvn compile`. `task_covered` is frontend-only and is valid when every frontend task in one workspace has a required compile/build/typecheck command whose action matches its kind. Batch order is serial: finish one active Batch, complete its final validation, then consume the handoff in a new conversation before starting the next Batch; TASK implementation and deferred validation are also single-queue operations. Frontend `task_covered` completion appends one `action=batch_closure` record that points to the current task evidence, marks the batch passed, and creates no batch run or shell command.
 
-Use `commands` only when compile/build/typecheck/lint adds coverage not provided by task validation. After every task in such a batch is done, run the profile once:
+Use `commands` for every backend batch, including its independent compile/build closure, and for frontend whenever compile/build/typecheck/lint adds coverage not provided by task validation. After every task in such a batch is done, run the profile once:
 
 ```bash
 python hooks/task_runner.py batch-check --workspace "$ARTIFACT_WORKSPACE" \

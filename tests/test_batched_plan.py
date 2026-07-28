@@ -22,6 +22,7 @@ from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
     load_and_validate_plan,
     load_plan_bundle,
+    task_covered_command_ids,
     task_set_digest,
     validate_plan_data,
     write_plan_json,
@@ -73,7 +74,7 @@ def task(
         "validationCommands": [
             {
                 "id": f"VAL-{task_id}-01",
-                "argv": ["echo", "ok"],
+                "argv": [sys.executable, "-c", "print('task validation')"],
                 "cwd": ".",
                 "kind": "behavior_test",
                 "required": True,
@@ -110,7 +111,7 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
             "backend": {
                 "commands": [
                     {
-                        "argv": ["echo", "backend compile"],
+                        "argv": [sys.executable, "-c", "print('backend compile')"],
                         "cwd": ".",
                         "kind": "compile",
                         "required": True,
@@ -120,7 +121,7 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
             "frontend": {
                 "commands": [
                     {
-                        "argv": ["echo", "frontend build"],
+                        "argv": [sys.executable, "-c", "print('frontend build')"],
                         "cwd": ".",
                         "kind": "build",
                         "required": True,
@@ -131,7 +132,7 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
         "projectValidationCommands": [
             {
                 "id": "PROJECT-VAL-001",
-                "argv": ["echo", "integration"],
+                "argv": [sys.executable, "-c", "print('project integration')"],
                 "cwd": ".",
                 "kind": "integration_test",
                 "required": True,
@@ -164,7 +165,11 @@ def batch_entry(
 def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = "backend") -> dict:
     command = {
         "id": f"BATCH-{batch_id}-VAL-001",
-        "argv": ["echo", "frontend build" if execution_lane == "frontend" else "backend compile"],
+        "argv": [
+            sys.executable,
+            "-c",
+            "print('frontend build')" if execution_lane == "frontend" else "print('backend compile')",
+        ],
         "cwd": ".",
         "kind": "build" if execution_lane == "frontend" else "compile",
         "required": True,
@@ -231,6 +236,52 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_backend_maven_test_does_not_replace_batch_compile_closure(self) -> None:
+        item = task("T001")
+        item["validationCommands"][0].update({
+            "argv": ["mvn", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
+            "kind": "integration_test",
+        })
+
+        self.assertEqual(task_covered_command_ids([item]), [])
+
+    def test_frontend_build_task_can_cover_batch_closure(self) -> None:
+        item = task("T001", ui_required=True)
+        item["validationCommands"][0].update({
+            "argv": ["npm", "run", "build"],
+            "kind": "build",
+        })
+
+        self.assertEqual(task_covered_command_ids([item]), ["VAL-T001-01"])
+
+    def test_batch_and_project_commands_reject_noop_validation(self) -> None:
+        root = root_plan(batches=[batch_entry("B001", ["T001"])])
+        root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = ["echo", "compile"]
+        root["projectValidationCommands"][0]["argv"] = ["echo", "integration"]
+
+        errors = validate_plan_data(root, require_backend_compile=True)
+
+        self.assertIn(
+            "batchValidationProfiles.backend.commands[0].validation_command_noop",
+            errors,
+        )
+        self.assertIn("projectValidationCommands[0].validation_command_noop", errors)
+
+    def test_backend_batch_requires_compile_or_build_beyond_lint(self) -> None:
+        root = root_plan(batches=[batch_entry("B001", ["T001"])])
+        root["batchValidationProfiles"]["backend"]["commands"] = [
+            {
+                "argv": ["ruff", "check", "."],
+                "cwd": ".",
+                "kind": "lint",
+                "required": True,
+            }
+        ]
+
+        errors = validate_plan_data(root, require_backend_compile=True)
+
+        self.assertIn("batchValidationProfiles.backend.backend_compile_command_missing", errors)
+
     def test_explicit_commands_mode_preserves_legacy_task_set_digest(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
         batch = batch_plan("B001", [task("T001")])
@@ -295,7 +346,7 @@ class BatchedPlanContractTest(unittest.TestCase):
         duplicate["projectValidationCommands"] = [
             {
                 "id": "PROJECT-VAL-001",
-                "argv": ["echo", "backend compile"],
+                "argv": [sys.executable, "-c", "print('backend compile')"],
                 "cwd": ".",
                 "kind": "static_check",
                 "required": True,
@@ -314,7 +365,7 @@ class BatchedPlanContractTest(unittest.TestCase):
                 equivalent["projectValidationCommands"] = [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "backend compile"],
+                        "argv": [sys.executable, "-c", "print('backend compile')"],
                         "cwd": project_cwd,
                         "kind": "static_check",
                         "required": True,
@@ -507,7 +558,7 @@ class BatchedPlanContractTest(unittest.TestCase):
                 "--lane",
                 "backend",
                 "--command",
-                "echo backend compile",
+                f"{sys.executable} -c \"print('backend compile')\"",
                 "--kind",
                 "compile",
             )
@@ -519,7 +570,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(batch["batchValidation"]["commands"][0]["id"], "BATCH-B001-VAL-001")
             self.assertEqual(batch["batchValidation"]["status"], "pending")
 
-    def test_plan_writer_projects_task_covered_batch_mode(self) -> None:
+    def test_plan_writer_rejects_backend_task_covered_batch_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -562,14 +613,61 @@ class BatchedPlanContractTest(unittest.TestCase):
                 "task_covered",
             )
 
+            self.assertNotEqual(configured.returncode, 0)
+            self.assertIn("task_covered_frontend_only", configured.stdout + configured.stderr)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
+            self.assertNotEqual(root["batchValidationProfiles"].get("backend", {}).get("mode"), "task_covered")
+            self.assertNotEqual(batch["batchValidation"].get("mode"), "task_covered")
+
+    def test_plan_writer_projects_frontend_task_covered_batch_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_plan_state(workspace)
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "hooks" / "plan_writer.py"),
+                        *args,
+                        "--workspace",
+                        str(workspace),
+                        "--feature",
+                        "alpha",
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            item = task("T001", ui_required=True)
+            item["scope"].update({"workspaceRoots": {"default": "."}, "paths": ["src"]})
+            item["validationCommands"][0].update({
+                "argv": ["npm", "run", "build"],
+                "kind": "build",
+            })
+            self.assertEqual(writer("init").returncode, 0)
+            body = Path(tmp) / "T001.json"
+            body.write_text(json.dumps(item), encoding="utf-8")
+            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+
+            configured = writer(
+                "set-batch-validation-mode",
+                "--lane",
+                "frontend",
+                "--mode",
+                "task_covered",
+            )
+
             self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
-            self.assertEqual(root["batchValidationProfiles"]["backend"]["mode"], "task_covered")
-            self.assertEqual(root["batchValidationProfiles"]["backend"]["commands"], [])
-            self.assertEqual(batch["batchValidation"]["mode"], "task_covered")
+            self.assertEqual(root["batchValidationProfiles"]["frontend"]["mode"], "task_covered")
             self.assertEqual(batch["batchValidation"]["coverageCommandIds"], ["VAL-T001-01"])
-            self.assertEqual(batch["batchValidation"]["commands"], [])
 
     def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -579,7 +677,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             item["validationCommands"].append(
                 {
                     "id": "VAL-T001-02",
-                    "argv": ["echo", "compile"],
+                    "argv": ["mvn", "compile", "-q"],
                     "cwd": ".",
                     "kind": "compile",
                     "required": True,
@@ -590,7 +688,7 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             _, errors = load_and_validate_plan(feature_dir / "plan.json")
 
-            self.assertIn("T001.validationCommands[1].kind_invalid", errors)
+            self.assertIn("T001.validationCommands[1].kind_invalid_for_lane:backend", errors)
 
     def test_bundle_rejects_disguised_compile_and_unscoped_maven_test(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -609,6 +707,16 @@ class BatchedPlanContractTest(unittest.TestCase):
             write_bundle(feature_dir, [[item]])
             _, test_errors = load_and_validate_plan(feature_dir / "plan.json")
             self.assertIn("T001.validationCommands[0].maven_test_selector_missing", test_errors)
+
+            item["validationCommands"][0]["argv"] = [
+                "mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-DskipTests=true"
+            ]
+            write_bundle(feature_dir, [[item]])
+            _, bypass_errors = load_and_validate_plan(feature_dir / "plan.json")
+            self.assertIn(
+                "T001.validationCommands[0].maven_test_execution_skipped",
+                bypass_errors,
+            )
 
     def test_bundle_rejects_batch_validation_cwd_outside_task_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -811,6 +919,36 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(backend["executionLane"], "backend")
             self.assertEqual(frontend["executionLane"], "frontend")
 
+    def test_plan_writer_splits_frontend_tasks_with_different_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            feature_dir.mkdir(parents=True)
+            write_plan_state(workspace)
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            spec_driven = task("T001", ui_required=True)
+            high_fidelity = task("T002", deps=["T001"], ui_required=True)
+            high_fidelity["uiRefs"]["visualSourceRefs"] = ["VIS-001"]
+            high_fidelity["uiRefs"]["frontendRoute"] = "absolute-html"
+            for item in (spec_driven, high_fidelity):
+                body = Path(tmp) / f"{item['id']}.json"
+                body.write_text(json.dumps(item), encoding="utf-8")
+                added = writer("add-task", "--body-file", str(body))
+                self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual([entry["taskIds"] for entry in root["batches"]], [["T001"], ["T002"]])
+
     def test_plan_writer_rejects_backend_task_after_frontend_collection_started(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -881,6 +1019,18 @@ class BatchedPlanContractTest(unittest.TestCase):
             second_body = Path(tmp) / "T002.json"
             second_body.write_text(json.dumps(second), encoding="utf-8")
             self.assertEqual(writer("add-task", "--body-file", str(second_body)).returncode, 0)
+            self.assertEqual(
+                writer(
+                    "add-batch-validation-command",
+                    "--lane",
+                    "backend",
+                    "--command",
+                    f"{sys.executable} -m compileall -q hooks",
+                    "--kind",
+                    "compile",
+                ).returncode,
+                0,
+            )
 
             finalized = writer("finalize-task-set")
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)

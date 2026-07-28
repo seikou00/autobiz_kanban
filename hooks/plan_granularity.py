@@ -7,6 +7,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from hooks.validation_policy import (
+    BEHAVIOR_TASK_VALIDATION_KINDS,
+    FRONTEND_COMPILE_VALIDATION_KINDS,
+)
+
 
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
 SCN_SUBSTRING = re.compile(r"SCN-\d{3}")
@@ -65,7 +70,7 @@ PLAN_TASK_SPLIT_RATIONALE_MIN_IDS_BY_PREFIX = {
     "PAGE": 2,
     "UIX": 3,
 }
-MATRIX_VALIDATION_KINDS = {"behavior_test", "integration_test", "e2e_test"}
+MATRIX_VALIDATION_KINDS = BEHAVIOR_TASK_VALIDATION_KINDS - {"static_check"}
 
 
 def scenario_refs_from_spec_refs(spec_refs: list[str]) -> set[str]:
@@ -133,12 +138,15 @@ def _has_single_complete_matrix_validation(task: dict[str, Any]) -> bool:
     commands = task.get("validationCommands")
     if not acceptance_ids or not isinstance(commands, list):
         return False
+    allowed_kinds = set(MATRIX_VALIDATION_KINDS)
+    if task.get("uiRequired") is True:
+        allowed_kinds.update(FRONTEND_COMPILE_VALIDATION_KINDS)
     behavior_commands = [
         command
         for command in commands
         if isinstance(command, dict)
         and command.get("required") is True
-        and command.get("kind") in MATRIX_VALIDATION_KINDS
+        and command.get("kind") in allowed_kinds
     ]
     if len(behavior_commands) != 1:
         return False

@@ -135,7 +135,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "plan_ref_resolution",
             "plan_task_granularity",
             "plan_scenario_coverage",
-            "smoke_test_plan_json",
         }
         offenders: list[str] = []
         for context, node in _iter_nodes(_board_config()):
@@ -148,7 +147,31 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             missing = sorted(required_validators - set(validators))
             if missing:
                 offenders.append(f"{context}[dev.plan]: {','.join(missing)}")
+            if "smoke_test_plan_json" in validators:
+                offenders.append(f"{context}[dev.plan]: advisory_smoke_must_not_be_required")
         self.assertEqual(offenders, [], "dev.plan validators drifted: " + ", ".join(offenders))
+
+    def test_standard_workflow_does_not_depend_on_advisory_smoke_artifacts(self) -> None:
+        offenders: list[str] = []
+        for context, node in _iter_nodes(_board_config()):
+            if not isinstance(node, dict):
+                continue
+            artifacts = node.get("artifacts", {})
+            if isinstance(artifacts, dict):
+                for direction in ("inputs", "outputs"):
+                    for artifact in artifacts.get(direction, []):
+                        if isinstance(artifact, dict) and artifact.get("path") in {
+                            "SMOKE_TEST_PLAN.json",
+                            "SMOKE_RESULT.json",
+                        }:
+                            offenders.append(
+                                f"{context}[{node.get('id', '?')}]: {direction}:{artifact['path']}"
+                            )
+            validators = node.get("validators", [])
+            if isinstance(validators, list):
+                for validator in {"smoke_test_plan_json", "smoke_result_json"} & set(validators):
+                    offenders.append(f"{context}[{node.get('id', '?')}]: validator:{validator}")
+        self.assertEqual(offenders, [], "standard workflow must not depend on advisory smoke: " + ", ".join(offenders))
 
     def test_code_stage_rejects_legacy_plan_task_schema(self) -> None:
         offenders: list[str] = []
@@ -651,11 +674,11 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
             "transientValidationFiles",
-            "本轮新建",
-            "未跟踪且未暂存",
+            "Code 阶段新建",
             "`src/test`、`test`、`tests`",
-            "不得 `git add`",
-            "已跟踪、已暂存或 start 前已存在",
+            "不进入正式 `changedFiles`",
+            "即使被暂存也不改变该分类",
+            "start 前已有的测试文件若被修改",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -667,8 +690,15 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_code_skill_defines_batch_level_exploration_cache_policy(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
+            "batchExplorationScope",
+            "explorationDirective",
+            "batch_bootstrap",
+            "task_guard",
+            "fullExplorationAllowed=false",
+            "首个 TASK run 启动前",
             "fresh_with_trusted_changes",
             "同一 active batch",
+            "implementation Evidence",
             "批次边界",
             "shared/integration",
             "deferredCacheUpdate",

@@ -1419,6 +1419,11 @@ def validate_plan_ui_projection(ctx: HookContext) -> int:
         for item in ui_data.get("visualSources", [])
         if isinstance(item, dict) and isinstance(item.get("sourceId"), str)
     }
+    capabilities = [
+        item
+        for item in ui_data.get("capabilities", [])
+        if isinstance(item, dict) and item.get("uiRequired") is not False
+    ]
 
     plan_data, errors = load_and_validate_plan(plan_json_path(ctx.feature_dir))
     if errors or plan_data is None:
@@ -1479,6 +1484,35 @@ def validate_plan_ui_projection(ctx: HookContext) -> int:
                 failures += fail_line(ctx, "invalid_plan_ui_frontend_route", f" task={task_id}")
                 continue
             visual_refs = _string_list_value(ui_refs.get("visualSourceRefs")) or []
+            task_spec_refs = set(_string_list_value(task.get("specRefs")) or [])
+            matching_capabilities = [
+                capability
+                for capability in capabilities
+                if task_spec_refs.intersection(_string_list_value(capability.get("specRefs")) or [])
+            ]
+            if matching_capabilities and any(
+                "visualSourceRefs" in capability for capability in matching_capabilities
+            ):
+                expected_visual_refs = {
+                    ref
+                    for capability in matching_capabilities
+                    for ref in (_string_list_value(capability.get("visualSourceRefs")) or [])
+                }
+                if set(visual_refs) != expected_visual_refs:
+                    failures += fail_line(
+                        ctx,
+                        "plan_ui_visual_source_projection_mismatch",
+                        (
+                            f" task={task_id} expected={','.join(sorted(expected_visual_refs)) or 'none'}"
+                            f" actual={','.join(sorted(visual_refs)) or 'none'}"
+                        ),
+                    )
+                if not expected_visual_refs and frontend_route != ROUTE_SPEC_DRIVEN:
+                    failures += fail_line(
+                        ctx,
+                        "plan_ui_route_without_visual_source",
+                        f" task={task_id} expected={ROUTE_SPEC_DRIVEN} actual={frontend_route}",
+                    )
             for visual_ref in visual_refs:
                 visual_source = visual_sources_by_id.get(visual_ref)
                 if visual_source is None:

@@ -18,6 +18,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.paths import get_plugin_output_workspace, resolve_env_feature  # noqa: E402
+from hooks.ui_context import (  # noqa: E402
+    visual_source_bundle_sha256,
+    visual_source_content_sha256,
+)
 
 
 EVIDENCE_NAME = "FRONTEND_ROUTE.json"
@@ -196,6 +200,30 @@ def _existing_visual_source_paths(workspace: Path, fd: Path, visual_sources: lis
     return existing_paths(paths)
 
 
+def validate_required_visual_sources(workspace: Path, fd: Path, visual_sources: list[dict[str, Any]]) -> None:
+    for source in visual_sources:
+        if source.get("required") is not True:
+            continue
+        source_id = source.get("sourceId")
+        raw_path = source.get("path")
+        if not isinstance(source_id, str) or not isinstance(raw_path, str) or not raw_path.strip():
+            raise FrontendRouteError(f"required_visual_source_invalid:{source_id}")
+        path = _visual_source_candidate_path(workspace, fd, raw_path)
+        if not path.is_file():
+            raise FrontendRouteError(f"required_visual_source_missing:{source_id}:{path}")
+        expected_content = source.get("contentSha256")
+        normalized_path = raw_path.replace("\\", "/").lstrip("./")
+        if isinstance(expected_content, str) and not normalized_path.startswith("frontend-html/"):
+            raise FrontendRouteError(f"required_visual_source_not_archived:{source_id}")
+        if isinstance(expected_content, str) and visual_source_content_sha256(path) != expected_content:
+            raise FrontendRouteError(f"required_visual_source_digest_mismatch:{source_id}")
+        expected_bundle = source.get("bundleSha256")
+        if isinstance(expected_bundle, str):
+            archive_root = fd / "frontend-html" / source_id
+            if not archive_root.is_dir() or visual_source_bundle_sha256(archive_root) != expected_bundle:
+                raise FrontendRouteError(f"required_visual_source_bundle_digest_mismatch:{source_id}")
+
+
 def _missing_declared_html_paths(workspace: Path, fd: Path, visual_sources: list[dict[str, Any]]) -> list[str]:
     missing: list[str] = []
     for source in visual_sources:
@@ -266,7 +294,7 @@ def _route_from_visual_sources(visual_sources: list[dict[str, Any]], html_source
     return ROUTE_SPEC_DRIVEN, ["UI_CONTEXT uiRequired without HTML visual source"]
 
 
-def _plan_ui_routes(fd: Path) -> list[str]:
+def _active_plan_ui_tasks(fd: Path) -> list[dict[str, Any]]:
     _, _, load_plan = _import_ui_context_helpers()
     if load_plan is None:
         return []
@@ -288,7 +316,7 @@ def _plan_ui_routes(fd: Path) -> list[str]:
     tasks = batch.get("tasks")
     if not isinstance(tasks, list):
         return []
-    routes: list[str] = []
+    result: list[dict[str, Any]] = []
     for task in tasks:
         if not isinstance(task, dict) or task.get("uiRequired") is not True:
             continue
@@ -296,9 +324,23 @@ def _plan_ui_routes(fd: Path) -> list[str]:
         if not isinstance(ui_refs, dict):
             continue
         route = ui_refs.get("frontendRoute")
-        if isinstance(route, str) and route in VALID_ROUTES:
-            routes.append(route)
-    return routes
+        visual_source_refs = ui_refs.get("visualSourceRefs")
+        if (
+            isinstance(route, str)
+            and route in VALID_ROUTES
+            and isinstance(visual_source_refs, list)
+            and all(isinstance(item, str) for item in visual_source_refs)
+        ):
+            result.append({
+                "taskId": task.get("id"),
+                "route": route,
+                "visualSourceRefs": list(visual_source_refs),
+            })
+    return result
+
+
+def _plan_ui_routes(fd: Path) -> list[str]:
+    return [str(item["route"]) for item in _active_plan_ui_tasks(fd)]
 
 
 def _route_from_plan(fd: Path) -> tuple[str | None, list[str]]:
@@ -353,12 +395,40 @@ def route_payload_from_ui_context(
 ) -> dict[str, Any]:
     fd = feature_dir(workspace, feature)
     cli_html_sources = existing_paths(normalize_path(raw) for raw in html_files if raw.strip())
-    visual_sources = [
+    all_visual_sources = [
         source
         for source in data.get("visualSources", [])
         if isinstance(source, dict)
     ] if isinstance(data.get("visualSources"), list) else []
-    html_sources = existing_paths([*cli_html_sources, *_existing_visual_source_paths(workspace, fd, visual_sources)])
+    active_ui_tasks = _active_plan_ui_tasks(fd)
+    visual_sources_by_id = {
+        str(source.get("sourceId")): source
+        for source in all_visual_sources
+        if isinstance(source.get("sourceId"), str)
+    }
+    referenced_source_ids = {
+        source_id
+        for task in active_ui_tasks
+        for source_id in task.get("visualSourceRefs", [])
+        if isinstance(source_id, str)
+    }
+    unknown_source_ids = sorted(referenced_source_ids - set(visual_sources_by_id))
+    if unknown_source_ids:
+        raise FrontendRouteError("active_task_visual_source_unknown:" + ",".join(unknown_source_ids))
+    visual_sources = (
+        [visual_sources_by_id[source_id] for source_id in sorted(referenced_source_ids)]
+        if active_ui_tasks
+        else all_visual_sources
+    )
+    active_routes = {str(task.get("route")) for task in active_ui_tasks}
+    if len(active_routes) > 1:
+        raise FrontendRouteError("mixed_active_ui_routes:" + ",".join(sorted(active_routes)))
+    validate_required_visual_sources(workspace, fd, visual_sources)
+    effective_cli_html_sources = [] if active_ui_tasks else cli_html_sources
+    html_sources = existing_paths([
+        *effective_cli_html_sources,
+        *_existing_visual_source_paths(workspace, fd, visual_sources),
+    ])
     missing_html_sources = _missing_declared_html_paths(workspace, fd, visual_sources)
     ui_required = data.get("uiRequired") is True
     route_missing_declared = False
@@ -407,6 +477,27 @@ def route_payload_from_ui_context(
         "htmlSourcePaths": [str(path) for path in html_sources],
         "reasons": route_reasons,
         "docPaths": [],
+        "taskSourceBindings": {
+            str(task.get("taskId")): {
+                "route": task.get("route"),
+                "visualSourceIds": list(task.get("visualSourceRefs", [])),
+                "htmlSourcePaths": [
+                    str(path)
+                    for source_id in task.get("visualSourceRefs", [])
+                    if isinstance(source_id, str) and source_id in visual_sources_by_id
+                    for path in [
+                        _visual_source_candidate_path(
+                            workspace,
+                            fd,
+                            str(visual_sources_by_id[source_id].get("path", "")),
+                        )
+                    ]
+                    if path.is_file()
+                ],
+            }
+            for task in active_ui_tasks
+            if isinstance(task.get("taskId"), str)
+        },
     }
     if route_missing_declared or (missing_html_sources and not html_sources):
         payload["htmlSourceMissing"] = True

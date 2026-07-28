@@ -30,6 +30,10 @@ from hooks.stage_gate import validate_stage  # noqa: E402
 from skills.autodev.hooks.artifact_check import run_postcheck  # noqa: E402
 
 
+TEST_TASK_COMMAND = f'{sys.executable} -c "print(\'task validation\')"'
+TEST_PROJECT_COMMAND = f'{sys.executable} -c "print(\'project validation\')"'
+
+
 def _state_record(checkpoint: str = "plan_in_progress") -> dict:
     return {
         "feature": "alpha",
@@ -174,7 +178,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "dataIds": ["DATA-001"],
         "decisionIds": ["D-001"],
         "completionPolicy": "all_required_validations_pass",
-        "validationCommands": [{"id": "VAL-T001-01", "argv": ["echo", "ok"], "cwd": ".", "kind": "behavior_test", "required": True, "covers": ["AC-T001-01"]}],
+        "validationCommands": [{"id": "VAL-T001-01", "argv": [sys.executable, "-c", "print('task validation')"], "cwd": ".", "kind": "behavior_test", "required": True, "covers": ["AC-T001-01"]}],
         "expectedFiles": [],
         "evidenceIds": [],
         "completionEvidenceIds": [],
@@ -197,7 +201,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                     "backend": {
                         "commands": [
                             {
-                                "argv": ["echo", "compile"],
+                                "argv": [sys.executable, "-c", "print('backend compile')"],
                                 "cwd": ".",
                                 "kind": "compile",
                                 "required": True,
@@ -208,7 +212,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
-                        "argv": ["echo", "integration"],
+                        "argv": [sys.executable, "-c", "print('project validation')"],
                         "cwd": ".",
                         "kind": "integration_test",
                         "required": True,
@@ -232,7 +236,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
             "commands": [
                 {
                     "id": "BATCH-B001-VAL-001",
-                    "argv": ["echo", "compile"],
+                    "argv": [sys.executable, "-c", "print('backend compile')"],
                     "cwd": ".",
                     "kind": "compile",
                     "required": True,
@@ -272,18 +276,6 @@ def _write_plan_tasks(feature_dir: Path, tasks: list[dict]) -> None:
     path.write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _write_smoke_na(feature_dir: Path) -> None:
-    (feature_dir / "SMOKE_TEST_PLAN.json").write_text(
-        json.dumps(
-            {"version": 1, "featureId": "alpha", "flowBlocking": False, "skipReason": "无冒烟价值", "tests": []},
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 def _plan_task_body() -> dict:
     return {
         "id": "T001",
@@ -311,7 +303,7 @@ def _plan_task_body() -> dict:
         "validationCommands": [
             {
                 "id": "VAL-T001-01",
-                "argv": ["echo", "ok"],
+                "argv": [sys.executable, "-c", "print('task validation')"],
                 "cwd": ".",
                 "kind": "behavior_test",
                 "required": True,
@@ -424,7 +416,18 @@ def _named_code_workspace(
     workspace.mkdir(parents=True)
     subprocess.run(["git", "init", "-b", "main"], cwd=repository, check=True, capture_output=True)
     if manifest:
-        (workspace / manifest).write_text("{}\n" if manifest == "package.json" else "<project/>\n", encoding="utf-8")
+        content = (
+            json.dumps({
+                "scripts": {
+                    "build": "vite build",
+                    "test": "vitest run",
+                    "typecheck": "tsc --noEmit",
+                }
+            }) + "\n"
+            if manifest == "package.json"
+            else "<project/>\n"
+        )
+        (workspace / manifest).write_text(content, encoding="utf-8")
     return repository, workspace
 
 
@@ -492,6 +495,33 @@ class JsonWriterTests(unittest.TestCase):
                 "--feature", "alpha", "--task-id", "T001", "--body-file", str(backend_path),
             )
             self.assertEqual(backend_result.returncode, 0, backend_result.stdout + backend_result.stderr)
+            draft = json.loads(
+                (
+                    feature_dir / ".tmp" / "plan_writer" / "draft"
+                    / "plans" / "B001" / "plan.json"
+                ).read_text(
+                    encoding="utf-8"
+                )
+            )
+            backend_task = next(task for task in draft["tasks"] if task["id"] == "T001")
+            self.assertEqual(
+                backend_task["validationTestPlan"],
+                [
+                    {
+                        "commandId": "VAL-T001-01",
+                        "framework": "maven",
+                        "targets": [
+                            {
+                                "selector": "TargetTest",
+                                "mode": "create_in_code",
+                                "sourceFiles": [],
+                            }
+                        ],
+                        "cwd": "backend/service",
+                        "repo": "backend-repo",
+                    }
+                ],
+            )
 
             frontend_detail = _draft_detail_body(frontend)
             frontend_detail["validationCommands"][0].update({"argv": ["npm", "test"]})
@@ -1564,7 +1594,7 @@ class JsonWriterTests(unittest.TestCase):
 
             project = _run(
                 "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--command", "echo compile",
+                "--feature", "alpha", "--command", TEST_PROJECT_COMMAND,
             )
             rendered = _run(
                 "plan_writer.py", "render-md", "--workspace", str(workspace), "--feature", "alpha"
@@ -1585,7 +1615,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(
                 _run(
                     "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
-                    "--feature", "alpha", "--command", "echo compile",
+                    "--feature", "alpha", "--command", TEST_PROJECT_COMMAND,
                 ).returncode,
                 0,
             )
@@ -1664,6 +1694,31 @@ class JsonWriterTests(unittest.TestCase):
         self.assertIn("splitRationale", group_exception)
         self.assertIn("validationBoundary", group_exception)
         self.assertEqual(contract["validationKinds"], sorted(TASK_VALIDATION_KINDS))
+        self.assertEqual(
+            contract["validationKindsByLane"],
+            {
+                "backend": ["behavior_test", "e2e_test", "integration_test", "static_check"],
+                "frontend": sorted(TASK_VALIDATION_KINDS),
+            },
+        )
+        self.assertEqual(
+            contract["validationCoverage"]["compileMayCoverAcceptanceCriteriaByLane"],
+            {"backend": False, "frontend": True},
+        )
+        self.assertEqual(
+            contract["validationCoverage"]["frontendCompileKinds"],
+            ["build", "compile", "typecheck"],
+        )
+        self.assertEqual(contract["validationCommandPolicy"]["inlineShell"], "forbidden")
+        self.assertTrue(contract["validationCommandPolicy"]["packageScriptMustExist"])
+        self.assertTrue(contract["validationCommandPolicy"]["mavenTargetMustBeConcreteClass"])
+        self.assertEqual(
+            contract["validationTestPlanPolicy"]["modes"],
+            ["reuse_existing", "create_in_code"],
+        )
+        self.assertFalse(
+            contract["validationTestPlanPolicy"]["createdTestRecordedAsChangedFile"]
+        )
         self.assertEqual(contract["batchValidationKinds"], sorted(BATCH_VALIDATION_KINDS))
         self.assertEqual(
             contract["projectValidationCommand"]["allowedKinds"],
@@ -1687,6 +1742,8 @@ class JsonWriterTests(unittest.TestCase):
             contract["batchValidationMode"]["command"],
             "set-batch-validation-mode --lane <backend|frontend> --mode <task_covered|commands>",
         )
+        self.assertIn("frontend lane only", contract["batchValidationMode"]["taskCoveredRequirements"])
+        self.assertIn("commands mode", contract["batchValidationMode"]["backendRequirement"])
         self.assertEqual(contract["workspaceContract"]["field"], "scope.workspaceRoots")
         self.assertEqual(contract["workspaceContract"]["taskBindingField"], "workspaceRef")
         self.assertEqual(contract["workspaceContract"]["maxWorkspaceRefsPerTask"], 1)
@@ -1749,7 +1806,7 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["batchAssignment"]["executionLaneOrder"], ["backend", "frontend"])
         self.assertEqual(
             contract["batchAssignment"]["appendRule"],
-            "same_primary_capability_execution_lane_and_workspace_as_immediately_preceding_batch_and_not_full",
+                "same_primary_capability_execution_lane_and_workspace_as_immediately_preceding_batch_frontend_route_and_not_full",
         )
         self.assertFalse(contract["batchAssignment"]["manualBatchIdSupported"])
         self.assertIn("taskSetFinalization", contract)
@@ -1767,7 +1824,6 @@ class JsonWriterTests(unittest.TestCase):
                     "add-batch-validation-command",
                     "add-project-validation-command",
                     "render-md",
-                    "smoke_plan_writer.init",
                 ],
             },
         )
@@ -1811,7 +1867,10 @@ class JsonWriterTests(unittest.TestCase):
             {
                 "normalScenarioMaximum": 5,
                 "scenarioMaximum": 12,
-                "requiredValidation": "one_complete_required_non_compile_behavior_command",
+                "requiredValidationByLane": {
+                    "backend": "one_complete_required_behavior_command",
+                    "frontend": "one_complete_required_behavior_or_matching_compile_command",
+                },
             },
         )
         self.assertEqual(len(contract["matrixExceptionExample"]["mergedScenarioRefs"]), 6)
@@ -1960,7 +2019,6 @@ class JsonWriterTests(unittest.TestCase):
             _write_design(feature_dir)
             _write_non_ui(feature_dir)
             _write_plan(feature_dir, include_second=False)
-            _write_smoke_na(feature_dir)
 
             result = validate_stage(workspace=workspace, feature="alpha", stage="dev.plan")
             output = io.StringIO()
@@ -1970,6 +2028,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(result.ok, code == 0)
             self.assertEqual([error["reason"] for error in result.errors or []], [])
             self.assertEqual(output.getvalue().strip(), "")
+            self.assertFalse((feature_dir / "SMOKE_TEST_PLAN.json").exists())
 
     def test_plan_structure_passes_while_stage_gate_fails_on_missing_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1979,7 +2038,6 @@ class JsonWriterTests(unittest.TestCase):
             _write_design(feature_dir)
             _write_non_ui(feature_dir)
             _write_plan(feature_dir, include_second=False)
-            _write_smoke_na(feature_dir)
 
             structure = _run("plan_writer.py", "validate", "--workspace", str(workspace), "--feature", "alpha", "--structure")
             gate = _run("stage_gate.py", "validate", "--workspace", str(workspace), "--feature", "alpha", "--stage", "dev.plan")
@@ -2059,7 +2117,7 @@ class JsonWriterTests(unittest.TestCase):
                         "apiIds": [],
                         "dataIds": [],
                         "decisionIds": ["D-001"],
-                        "validationCommands": [{"command": "echo ok"}],
+                        "validationCommands": [{"command": TEST_TASK_COMMAND}],
                         "expectedFiles": [],
                         "evidenceIds": ["ev_0001"],
                         "blockers": [],
@@ -2114,7 +2172,7 @@ class JsonWriterTests(unittest.TestCase):
                 "--decision-id",
                 "D-001",
                 "--validation-command",
-                "echo ok",
+                TEST_TASK_COMMAND,
             )
 
             self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
@@ -2148,7 +2206,7 @@ class JsonWriterTests(unittest.TestCase):
                         "apiIds": [],
                         "dataIds": [],
                         "decisionIds": ["D-001"],
-                        "validationCommands": [{"command": "echo ok"}],
+                        "validationCommands": [{"command": TEST_TASK_COMMAND}],
                         "expectedFiles": [],
                         "evidenceIds": [],
                         "blockers": [],
@@ -2194,7 +2252,7 @@ class JsonWriterTests(unittest.TestCase):
                 "apiIds": [],
                 "dataIds": [],
                 "decisionIds": ["D-001"],
-                "validationCommands": [{"command": "echo ok"}],
+                "validationCommands": [{"command": TEST_TASK_COMMAND}],
                 "expectedFiles": [],
                 "evidenceIds": ["ev_0001"],
                 "blockers": [],
@@ -2235,7 +2293,7 @@ class JsonWriterTests(unittest.TestCase):
                 "nonGoals": ["do not change unrelated behavior"],
                 "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
                 "designRefs": ["design.md#D-001"],
-                "validationCommands": [{"command": "echo ok"}],
+                "validationCommands": [{"command": TEST_TASK_COMMAND}],
             }
             body_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
@@ -2297,7 +2355,7 @@ class JsonWriterTests(unittest.TestCase):
                 "apiIds": [],
                 "dataIds": [],
                 "decisionIds": ["D-001"],
-                "validationCommands": [{"command": "echo ok"}],
+                "validationCommands": [{"command": TEST_TASK_COMMAND}],
             }
 
             init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
@@ -2344,7 +2402,7 @@ class JsonWriterTests(unittest.TestCase):
                 "validationCommands": [
                     {
                         "id": "VAL-T001-01",
-                        "argv": ["echo", "ok"],
+                        "argv": [sys.executable, "-c", "print('task matrix validation')"],
                         "cwd": ".",
                         "kind": "integration_test",
                         "required": True,
@@ -2391,7 +2449,7 @@ class JsonWriterTests(unittest.TestCase):
                     "apiIds": [],
                     "dataIds": [],
                     "decisionIds": ["D-001"],
-                    "validationCommands": [{"command": "echo ok"}],
+                    "validationCommands": [{"command": TEST_TASK_COMMAND}],
                 }
 
                 init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
@@ -2434,7 +2492,7 @@ class JsonWriterTests(unittest.TestCase):
                 "apiIds": [],
                 "dataIds": [],
                 "decisionIds": ["D-001"],
-                "validationCommands": [{"command": "echo ok"}],
+                "validationCommands": [{"command": TEST_TASK_COMMAND}],
             }
 
             init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
@@ -2494,7 +2552,7 @@ class JsonWriterTests(unittest.TestCase):
                 "--decision-id",
                 "D-001",
                 "--validation-command",
-                "echo ok",
+                TEST_TASK_COMMAND,
                 "--split-rationale",
                 rationale,
             )
@@ -2527,7 +2585,7 @@ class JsonWriterTests(unittest.TestCase):
                 "apiIds": [],
                 "dataIds": [],
                 "decisionIds": ["D-001"],
-                "validationCommands": [{"command": "echo ok"}],
+                "validationCommands": [{"command": TEST_TASK_COMMAND}],
             }
 
             init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
@@ -2572,7 +2630,7 @@ class JsonWriterTests(unittest.TestCase):
                 "apiIds": [],
                 "dataIds": [],
                 "decisionIds": ["D-001"],
-                "validationCommands": [{"command": "echo ok"}],
+                "validationCommands": [{"command": TEST_TASK_COMMAND}],
                 "splitRationale": "specs/cap1/spec.md#SCN-001、specs/cap3/spec.md#SCN-001、specs/cap5/spec.md#SCN-001 均由同一次提交动作触发、同一个响应断言验证，拆开会复制同一验证闭环。",
             }
 
@@ -2747,6 +2805,120 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(data["visualSources"], [])
             self.assertEqual(data["capabilities"], [])
 
+    def test_ui_context_writer_archives_html_bundle_and_binds_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            source_root = root / "provided-ui"
+            (source_root / "assets").mkdir(parents=True)
+            source_file = source_root / "index.html"
+            source_file.write_text('<link rel="stylesheet" href="assets/page.css"><main>UI</main>', encoding="utf-8")
+            (source_root / "assets" / "page.css").write_text("main { color: red; }", encoding="utf-8")
+
+            commands = [
+                ("init", "--ui-required"),
+                ("add-page", "--name", "Page", "--goal", "Goal"),
+                (
+                    "add-visual-source",
+                    "--type",
+                    "high_fidelity_html",
+                    "--source-file",
+                    str(source_file),
+                    "--source-root",
+                    str(source_root),
+                    "--route",
+                    "absolute-html",
+                    "--required",
+                    "true",
+                ),
+                (
+                    "add-capability",
+                    "--capability-id",
+                    "alpha-ui",
+                    "--page-ref",
+                    "PAGE-001",
+                    "--visual-source-ref",
+                    "VIS-001",
+                    "--spec-ref",
+                    "specs/cap/spec.md#REQ-001",
+                    "--spec-ref",
+                    "specs/cap/spec.md#SCN-001",
+                    "--ui-required",
+                    "true",
+                ),
+                ("confirm", "--decision-source", "user_confirmed"),
+                ("lock",),
+            ]
+            for command in commands:
+                result = _run(
+                    "ui_context_writer.py",
+                    *command,
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            data = json.loads((feature_dir / "UI_CONTEXT.json").read_text(encoding="utf-8"))
+            source = data["visualSources"][0]
+            self.assertEqual(source["path"], "frontend-html/VIS-001/index.html")
+            self.assertEqual(len(source["contentSha256"]), 64)
+            self.assertEqual(len(source["bundleSha256"]), 64)
+            self.assertEqual(data["capabilities"][0]["visualSourceRefs"], ["VIS-001"])
+            self.assertTrue((feature_dir / source["path"]).is_file())
+            self.assertTrue((feature_dir / "frontend-html" / "VIS-001" / "assets" / "page.css").is_file())
+
+    def test_ui_context_writer_materializes_existing_visual_source_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            source_file = root / "provided.html"
+            source_file.write_text("<main>provided</main>", encoding="utf-8")
+            commands = [
+                ("init", "--ui-required"),
+                (
+                    "add-visual-source",
+                    "--source-id",
+                    "VIS-001",
+                    "--type",
+                    "high_fidelity_html",
+                    "--path",
+                    "frontend-html/<待提供>.html",
+                    "--route",
+                    "absolute-html",
+                    "--required",
+                    "true",
+                ),
+                (
+                    "update-visual-source",
+                    "--source-id",
+                    "VIS-001",
+                    "--type",
+                    "high_fidelity_html",
+                    "--source-file",
+                    str(source_file),
+                    "--route",
+                    "absolute-html",
+                    "--required",
+                    "true",
+                ),
+            ]
+            for command in commands:
+                result = _run(
+                    "ui_context_writer.py",
+                    *command,
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            data = json.loads((feature_dir / "UI_CONTEXT.json").read_text(encoding="utf-8"))
+            self.assertEqual(data["visualSources"][0]["path"], "frontend-html/VIS-001/provided.html")
+            self.assertTrue((feature_dir / data["visualSources"][0]["path"]).is_file())
+
     def test_result_writers_create_expected_ids_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
@@ -2826,7 +2998,7 @@ class JsonWriterTests(unittest.TestCase):
                 "--task-id",
                 "T001",
                 "--command",
-                "echo ok",
+                TEST_TASK_COMMAND,
             )
             e2e = _run(
                 "e2e_result_writer.py",
