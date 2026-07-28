@@ -9,13 +9,18 @@ import hashlib
 import json
 import locale
 import os
+import queue
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -87,6 +92,10 @@ from hooks.validation_groups import (  # noqa: E402
 
 
 DEFAULT_TIMEOUT_SECONDS = 300
+VALIDATION_OUTPUT_POLL_SECONDS = 0.2
+COMPILE_DIAGNOSTIC_DRAIN_SECONDS = 2.0
+PROCESS_TERMINATION_GRACE_SECONDS = 3.0
+VALIDATION_DIAGNOSTIC_BUFFER_BYTES = 64 * 1024
 TASK_VALIDATION_RUN_TYPE = "batch_task_validation"
 TASK_VALIDATION_RUNNING_COMMANDS = ["validate-batch-task", "batch-check"]
 TASK_VALIDATION_FAILED_COMMANDS = ["start-validation-repair", "start-batch-task-validation"]
@@ -101,6 +110,16 @@ class TaskRunnerError(ValueError):
     def __init__(self, message: str, **details: Any) -> None:
         super().__init__(message)
         self.details = details
+
+
+@dataclass(frozen=True)
+class ValidationProcessResult:
+    exit_code: int | None
+    output: str
+    termination_reason: str | None
+    compile_category: str | None
+    duration_seconds: float
+    process_tree_terminated: bool
 
 
 def _utc_now() -> str:
@@ -1301,6 +1320,263 @@ def _assert_validation_command_environment(
         )
 
 
+def _decode_validation_output(content: bytes) -> str:
+    return content.decode(
+        locale.getpreferredencoding(False) or "utf-8",
+        errors="replace",
+    )
+
+
+def _validation_process_group_options() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _definitive_compile_failure_category(
+    output: str,
+    command: dict[str, Any],
+    repositories: RepositoryMap,
+) -> str | None:
+    lowered = output.lower().replace("\\", "/")
+    explicit_compile_markers = (
+        "compilation error",
+        "compilation failure",
+        "fatal error compiling",
+    )
+    path_compile_markers = (
+        "cannot find symbol",
+        "must be caught or declared to be thrown",
+        "未报告的异常错误",
+        "必须对其进行捕获或声明以便抛出",
+        "incompatible types",
+        "does not exist",
+        "cannot be applied to given types",
+        "illegal start of",
+        "not a statement",
+        "; expected",
+        "has private access",
+        "does not override",
+    )
+    diagnostic_paths = _validation_diagnostic_paths(output, command, repositories)
+    has_explicit_compile_marker = any(
+        marker in line
+        and ("[error]" in line or "failed to execute goal" in line)
+        for line in lowered.splitlines()
+        for marker in explicit_compile_markers
+    )
+    has_path_compile_marker = any(
+        _validation_diagnostic_paths(line, command, repositories)
+        and any(marker in line.lower() for marker in path_compile_markers)
+        for line in output.splitlines()
+    )
+    if not has_explicit_compile_marker and not has_path_compile_marker:
+        return None
+    if (
+        any("/src/test/" in f"/{path.lower()}" for path in diagnostic_paths)
+        or "testcompile" in lowered
+        or "test compilation failure" in lowered
+        or "maven-testcompile" in lowered
+    ):
+        return "test_compile_failure"
+    return "source_compile_failure"
+
+
+def _terminate_validation_process_tree(
+    process: subprocess.Popen[bytes],
+) -> bool:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=PROCESS_TERMINATION_GRACE_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if process.poll() is None:
+            try:
+                process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    return False
+        return process.poll() is not None
+
+    def process_group_exists() -> bool:
+        try:
+            os.killpg(process.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        if process.poll() is None:
+            process.terminate()
+
+    grace_deadline = time.monotonic() + PROCESS_TERMINATION_GRACE_SECONDS
+    while time.monotonic() < grace_deadline:
+        process.poll()
+        if not process_group_exists():
+            break
+        time.sleep(VALIDATION_OUTPUT_POLL_SECONDS)
+    if process_group_exists():
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if process.poll() is None:
+                process.kill()
+    if process.poll() is None:
+        try:
+            process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                return False
+    return process.poll() is not None and not process_group_exists()
+
+
+def _run_validation_process(
+    argv: list[str],
+    command_cwd: Path,
+    timeout: int,
+    command: dict[str, Any],
+    repositories: RepositoryMap,
+) -> ValidationProcessResult:
+    started_at = time.monotonic()
+    process = subprocess.Popen(
+        argv,
+        cwd=command_cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+        **_validation_process_group_options(),
+    )
+    if process.stdout is None:
+        raise OSError("validation_process_stdout_unavailable")
+
+    output_queue: queue.Queue[bytes | None] = queue.Queue()
+
+    def read_output() -> None:
+        try:
+            while True:
+                chunk = os.read(process.stdout.fileno(), 8192)
+                if not chunk:
+                    break
+                output_queue.put(chunk)
+        except (OSError, ValueError):
+            pass
+        finally:
+            output_queue.put(None)
+
+    reader = threading.Thread(
+        target=read_output,
+        name=f"validation-output-{process.pid}",
+        daemon=True,
+    )
+    reader.start()
+
+    hard_deadline = started_at + timeout
+    compile_category: str | None = None
+    compile_deadline: float | None = None
+    termination_reason: str | None = None
+    process_tree_terminated = True
+    reader_done = False
+    rolling_output = bytearray()
+
+    with tempfile.TemporaryFile(mode="w+b") as command_log:
+        def record_chunk(chunk: bytes | None) -> None:
+            nonlocal reader_done, compile_category, compile_deadline
+            if chunk is None:
+                reader_done = True
+                return
+            command_log.write(chunk)
+            rolling_output.extend(chunk)
+            if len(rolling_output) > VALIDATION_DIAGNOSTIC_BUFFER_BYTES:
+                del rolling_output[:-VALIDATION_DIAGNOSTIC_BUFFER_BYTES]
+            detected = _definitive_compile_failure_category(
+                _decode_validation_output(bytes(rolling_output)),
+                command,
+                repositories,
+            )
+            if detected is not None:
+                if compile_category is None:
+                    compile_deadline = (
+                        time.monotonic() + COMPILE_DIAGNOSTIC_DRAIN_SECONDS
+                    )
+                if detected == "test_compile_failure" or compile_category is None:
+                    compile_category = detected
+
+        while True:
+            now = time.monotonic()
+            deadlines = [hard_deadline]
+            if compile_deadline is not None:
+                deadlines.append(compile_deadline)
+            wait_seconds = max(
+                0.0,
+                min(VALIDATION_OUTPUT_POLL_SECONDS, min(deadlines) - now),
+            )
+            try:
+                record_chunk(output_queue.get(timeout=wait_seconds))
+                while True:
+                    record_chunk(output_queue.get_nowait())
+            except queue.Empty:
+                pass
+
+            now = time.monotonic()
+            if process.poll() is not None and reader_done:
+                break
+            if compile_category is not None and (
+                (compile_deadline is not None and now >= compile_deadline)
+                or now >= hard_deadline
+            ):
+                termination_reason = "compile_diagnostic"
+                process_tree_terminated = _terminate_validation_process_tree(process)
+                break
+            if now >= hard_deadline:
+                termination_reason = "command_timeout"
+                process_tree_terminated = _terminate_validation_process_tree(process)
+                break
+
+        reader.join(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+        if reader.is_alive():
+            process.stdout.close()
+            reader.join(timeout=VALIDATION_OUTPUT_POLL_SECONDS)
+        try:
+            while True:
+                record_chunk(output_queue.get_nowait())
+        except queue.Empty:
+            pass
+        command_log.flush()
+        command_log.seek(0)
+        output = _decode_validation_output(command_log.read())
+        if not process.stdout.closed:
+            process.stdout.close()
+
+    return ValidationProcessResult(
+        exit_code=process.poll(),
+        output=output,
+        termination_reason=termination_reason,
+        compile_category=compile_category,
+        duration_seconds=time.monotonic() - started_at,
+        process_tree_terminated=process_tree_terminated,
+    )
+
+
 def _run_validation(
     command: dict[str, Any],
     repositories: RepositoryMap,
@@ -1338,60 +1614,55 @@ def _run_validation(
             batch_id=batch_id,
             task_id=task_id,
         )
-        with tempfile.TemporaryFile(mode="w+b") as command_log:
-            try:
-                completed = subprocess.run(
-                    argv,
-                    cwd=command_cwd,
-                    stdout=command_log,
-                    stderr=subprocess.STDOUT,
-                    timeout=timeout,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                command_log.flush()
-                command_log.seek(0)
-                output = command_log.read().decode(
-                    locale.getpreferredencoding(False) or "utf-8",
-                    errors="replace",
-                )
-                diagnostic_paths = _validation_diagnostic_paths(
-                    output, command, repositories
-                )
-                error_category = _validation_error_category(
-                    command, output, diagnostic_paths
-                )
-                if error_category in {"source_compile_failure", "test_compile_failure"}:
-                    return 1, (
-                        f"{output}\nvalidation_process_timeout_after_compile_failure:"
-                        f"{error_category}:timeoutSeconds={timeout}"
-                    )
-                raise _validation_environment_error(
-                    command,
-                    category="command_timeout",
-                    detail=f"timeoutSeconds={timeout};output={output[-2000:]}",
-                    retry_same_run=retry_same_run,
-                    run_id=run_id,
-                    batch_id=batch_id,
-                    task_id=task_id,
-                )
-            command_log.flush()
-            command_log.seek(0)
-            output = command_log.read().decode(
-                locale.getpreferredencoding(False) or "utf-8",
-                errors="replace",
+        process_result = _run_validation_process(
+            argv,
+            command_cwd,
+            timeout,
+            command,
+            repositories,
+        )
+        output = process_result.output
+        if process_result.termination_reason == "compile_diagnostic":
+            return 1, (
+                f"{output}\nvalidation_process_stopped_after_compile_failure:"
+                f"{process_result.compile_category}:"
+                f"durationSeconds={process_result.duration_seconds:.3f}:"
+                f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
             )
-        if completed.returncode in {126, 127}:
+        if process_result.termination_reason == "command_timeout":
+            diagnostic_paths = _validation_diagnostic_paths(
+                output, command, repositories
+            )
+            error_category = _validation_error_category(
+                command, output, diagnostic_paths
+            )
+            if error_category in {"source_compile_failure", "test_compile_failure"}:
+                return 1, (
+                    f"{output}\nvalidation_process_timeout_after_compile_failure:"
+                    f"{error_category}:timeoutSeconds={timeout}:"
+                    f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
+                )
             raise _validation_environment_error(
                 command,
-                category="executable_failed_to_start",
-                detail=f"exitCode={completed.returncode};output={output[-2000:]}",
+                category="command_timeout",
+                detail=f"timeoutSeconds={timeout};output={output[-2000:]}",
                 retry_same_run=retry_same_run,
                 run_id=run_id,
                 batch_id=batch_id,
                 task_id=task_id,
             )
-        if completed.returncode == 0 and maven_test_selectors(command):
+        exit_code = process_result.exit_code
+        if exit_code in {126, 127}:
+            raise _validation_environment_error(
+                command,
+                category="executable_failed_to_start",
+                detail=f"exitCode={exit_code};output={output[-2000:]}",
+                retry_same_run=retry_same_run,
+                run_id=run_id,
+                batch_id=batch_id,
+                task_id=task_id,
+            )
+        if exit_code == 0 and maven_test_selectors(command):
             execution_errors = _maven_test_execution_errors(
                 command,
                 command_cwd,
@@ -1400,7 +1671,7 @@ def _run_validation(
             if execution_errors:
                 output = f"{output}\n" + "\n".join(execution_errors)
                 return 1, output
-        return completed.returncode, output
+        return int(exit_code or 0), output
     except OSError as exc:
         raise _validation_environment_error(
             command,

@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -864,20 +865,25 @@ class TaskRunnerTest(unittest.TestCase):
                     (
                         "import sys,time; "
                         f"print('[ERROR] {source}:[1,1] cannot find symbol', "
-                        "file=sys.stderr, flush=True); time.sleep(2)"
+                        "file=sys.stderr, flush=True); time.sleep(5)"
                     ),
                 ],
                 "cwd": ".",
                 "kind": "behavior_test",
-                "timeoutSeconds": 1,
+                "timeoutSeconds": 10,
             }
-            exit_code, output = task_runner_module._run_validation(
-                command, {repo.name: repo}
-            )
+            started_at = time.monotonic()
+            with patch.object(
+                task_runner_module, "COMPILE_DIAGNOSTIC_DRAIN_SECONDS", 0.05
+            ):
+                exit_code, output = task_runner_module._run_validation(
+                    command, {repo.name: repo}
+                )
             self.assertEqual(exit_code, 1)
+            self.assertLess(time.monotonic() - started_at, 2)
             self.assertIn("cannot find symbol", output)
             self.assertIn(
-                "validation_process_timeout_after_compile_failure:source_compile_failure",
+                "validation_process_stopped_after_compile_failure:source_compile_failure",
                 output,
             )
 
@@ -892,22 +898,88 @@ class TaskRunnerTest(unittest.TestCase):
                     "-c",
                     (
                         "import sys,time; "
-                        f"print('[ERROR] {source}:[1,1] testCompile failed', "
-                        "file=sys.stderr, flush=True); time.sleep(2)"
+                        "print('[ERROR] maven-compiler-plugin:testCompile', "
+                        "file=sys.stderr, flush=True); "
+                        f"print('[ERROR] {source}:[1,1] 未报告的异常错误', "
+                        "file=sys.stderr, flush=True); time.sleep(5)"
                     ),
                 ],
                 "cwd": ".",
                 "kind": "behavior_test",
-                "timeoutSeconds": 1,
+                "timeoutSeconds": 10,
             }
-            exit_code, output = task_runner_module._run_validation(
-                command, {repo.name: repo}
-            )
+            with patch.object(
+                task_runner_module, "COMPILE_DIAGNOSTIC_DRAIN_SECONDS", 0.05
+            ):
+                exit_code, output = task_runner_module._run_validation(
+                    command, {repo.name: repo}
+                )
             self.assertEqual(exit_code, 1)
             self.assertIn(
-                "validation_process_timeout_after_compile_failure:test_compile_failure",
+                "validation_process_stopped_after_compile_failure:test_compile_failure",
                 output,
             )
+
+    def test_validation_live_monitor_does_not_stop_ordinary_test_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            source = repo / "src" / "test" / "java" / "example" / "AppTest.java"
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import time; "
+                        f"print('at example.AppTest.run({source}:12) expected no compilation error', "
+                        "flush=True); time.sleep(0.2)"
+                    ),
+                ],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 3,
+            }
+            with patch.object(
+                task_runner_module, "COMPILE_DIAGNOSTIC_DRAIN_SECONDS", 0.01
+            ):
+                exit_code, output = task_runner_module._run_validation(
+                    command, {repo.name: repo}
+                )
+            self.assertEqual(exit_code, 0)
+            self.assertNotIn("validation_process_stopped_after_compile_failure", output)
+
+    def test_validation_compile_stop_terminates_descendant_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            source = repo / "src" / "main" / "java" / "example" / "App.java"
+            descendant_marker = repo / "descendant-survived.txt"
+            descendant_script = (
+                "import time; from pathlib import Path; time.sleep(0.8); "
+                f"Path({str(descendant_marker)!r}).write_text('alive', encoding='utf-8')"
+            )
+            parent_script = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable, '-c', {descendant_script!r}]); "
+                f"print('[ERROR] {source}:[1,1] cannot find symbol', flush=True); "
+                "time.sleep(5)"
+            )
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [sys.executable, "-c", parent_script],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 10,
+            }
+            with patch.object(
+                task_runner_module, "COMPILE_DIAGNOSTIC_DRAIN_SECONDS", 0.05
+            ):
+                exit_code, output = task_runner_module._run_validation(
+                    command, {repo.name: repo}
+                )
+            self.assertEqual(exit_code, 1)
+            self.assertIn("processTreeTerminated=true", output)
+            time.sleep(1)
+            self.assertFalse(descendant_marker.exists())
 
     def test_validation_timeout_without_compile_diagnostic_remains_environment_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1315,7 +1387,7 @@ class TaskRunnerTest(unittest.TestCase):
                     "file=sys.stderr, flush=True); time.sleep(2)"
                 ),
             ]
-            batch["tasks"][0]["validationCommands"][0]["timeoutSeconds"] = 1
+            batch["tasks"][0]["validationCommands"][0]["timeoutSeconds"] = 10
             batch["tasks"].append(second)
             batch["taskCount"] = 2
             _write_batch(feature_dir, batch)

@@ -312,7 +312,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 若 runner 返回 `errorCategory=environment_failure` 以及 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。普通 required 校验失败可在工作区未变化时创建新的 task-validation run 重试；需要修改源码时，必须在任何源码、测试或配置改动之前执行 `start-validation-repair --task-id <REPAIR_OWNER_TASK_ID>`。runner 会校验工作区仍等于失败 run 的冻结快照；返回 `workspace_changed_before_validation_repair` 时先恢复该快照，不得补开 repair 掩盖先前改动。repair 完成后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
 
-验证命令即使最终触发 runner 超时，只要已捕获输出包含明确的业务源码或测试源码编译诊断，runner 会分别返回 `source_compile_failure` 或 `test_compile_failure`，并要求 `start_validation_repair`；不得把这类结果改写成环境超时。runner 确实返回 `environment_failure` 时，验证子代理禁止绕过 runner 手工执行 Maven/Gradle/npm 或读取业务源码来探测另一种失败原因，也禁止主 agent 接管重复执行验证命令；只能按返回的 `requiredAction` 和原 runId 处理。
+runner 会实时监测验证输出；发现明确的业务源码或测试源码编译诊断后，先短暂收集完整诊断，再终止验证进程树并分别返回 `source_compile_failure` 或 `test_compile_failure`，要求 `start_validation_repair`。总超时前未能实时识别但已捕获到编译诊断时仍按相同规则兜底，均不得改写成环境超时。runner 确实返回 `environment_failure` 时，验证子代理禁止绕过 runner 手工执行 Maven/Gradle/npm 或读取业务源码来探测另一种失败原因，也禁止主 agent 接管重复执行验证命令；只能按返回的 `requiredAction` 和原 runId 处理。
 
 全部 TASK 验证通过后才把 TASK 置 done。frontend `task_covered` 此时生成 `batch_closure`；backend 固定使用 `commands`，返回 `requiredAction=run_batch_check_in_validation_subagent` 后由同一个子代理执行 compile/build 收口。frontend `commands` 模式也由该子代理继续下方额外质量门禁。
 
