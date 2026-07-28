@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.2.1704
+version: v1.3.1707
 ---
 
 ## 缺失产物处理
@@ -15,21 +15,21 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
 ## explore
-使用task工具进入设计探索模式。未提供的上游产物根据缺失清单处理，不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+进入设计探索模式。未提供的上游产物根据缺失清单处理，不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
-> 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 plan.md` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
+> 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 PLAN.md` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
 **重要：探索模式用于澄清和调研，不用于实现。** 你可以读取已有的设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
 
 **这是一种工作姿态，不是固定流程。** 没有必须照搬的问题清单，也没有强制产物。你的任务是作为技术设计伙伴，把 specs 中的行为契约变成可实现、可验证的设计上下文：明确接口、数据、模块边界、风险、待确认项，以及后续 Plan 可以使用的结论。
 
 ---
-
+使用task工具进行探索，指定Explore-autodev角色，探索必须要读<AGENTS_INSTRUCTIONS></AGENTS_INSTRUCTIONS>里面提到的文件，再按下面列举的要求，最后需要返回完整详尽的结构化文档结果让主代理参考。
 ### 探索姿态
 
 - **好奇而不武断** - 顺着用户表达、proposal 和 specs 自然追问，不预设唯一答案。
 - **展开线索而不审问** - 同时呈现几个值得看的方向，让用户选择最相关的，不要把对话压成机械问卷。
-- **扎根现实** - 优先读取 proposal、specs、已有代码、现有接口、数据表、测试和约定；不要只做抽象讨论。
+- **扎根现实** - 优先读取 proposal、specs、已有源码、现有接口、数据表、测试和约定；不要只做抽象讨论。
 - **适度可视化** - 当结构复杂时，用 ASCII 图、列表或表格澄清模块关系、数据流、状态流、任务边界。
 - **允许不确定** - 未确认的业务语义、字段、权限、异常分支要标成待确认，不要替用户补齐。
 - **为设计和计划服务** - 探索的目标不是产出漂亮分析，而是为 `design.md` 与 `PLAN.md` 提供可靠依据。
@@ -50,10 +50,11 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 **调查代码库**
 
 - 读取项目约定
+- **只探索源码，不碰编译/生成产物**：`target/`、`build/`、`out/`、`bin/`、`*.class`、`*.jar/war/ear`、`__pycache__/`、`*.pyc`、`.gradle/`、`.idea/`，以及一切 `.gitignore` 命中的路径，不得作为 `EVD-xx` 代码证据。扫描优先 `git ls-files <pattern>` 找文件、`git grep <regex>` 搜内容：只走已跟踪源码，自动排除上述产物；不要用裸 `find`/`grep` 做全库扫描。例外：某生成物本身就是问题对象（如 codegen 生成的 stub）时可读，但须标注「生成物」并回溯到其生成器/源码，不得当作已提交事实源引用。
 - 查找相关模块、路由、接口、schema、数据库访问、测试和已有任务模板
 - 找到最可能的集成点和受影响文件
 - 识别现有命名、错误体、分页、鉴权、租户、审计、日志等风格
-- 隐性知识你需要理解现有系统完成探索，并将隐性知识与我讨论
+- 隐性知识你需要理解现有系统完成探索，并将隐性知识与用户讨论
 
 **比较选项**
 
@@ -83,8 +84,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
 
 - 读取上游产物原件、用户补充说明；其中 proposal.md(如有) 的 `Decision Log` 记录了本轮行为契约背后**已裁定的决策及否决理由**，必须读，作为设计的既定前提，不是可自由重估的建议。
-- 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
+- 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。探索中确认的代码现状事实按 `EVD-xx`（Path/Symbol、Observed Fact、Verified At commit）整理，供 design.md 的 `Code Evidence` 落盘；同一事实不重复起号。
 - 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
+- **重入协议（design.md 已存在时）**：不从零重新解释。逐条复核 `Code Evidence`，只更新代码已变化的条目。复核或探索发现代码现实与 specs Requirement / proposal Decision Log 不符时，**不得直接覆盖 Evidence、改写 specs 或 Decision Log**，逐条记为 reconciliation（design.md R-xx，Type=读码差异，Description 写「spec/DEC-xx 是 X，代码是 Y（EVD-xx）」），进入下方设计确认的逐条裁定门。
 
 当探索发现不同类型的信息时，按下面方式准备给 Plan 使用：
 
@@ -95,7 +97,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 | 新增或变化的 HTTP 行为       | `design.md` 的 API Decisions；无 API 写 `x-auto-no-http-api: true` |
 | 数据表/字段/索引/迁移需求    | `design.md` 的 Data Decisions；无数据变更写 `x-auto-no-sql: true` |
 | 技术方案、模块边界、集成点   | `design.md` 的 Technical Design                              |
-| 实现切分、涉及文件、验证方法 | `PLAN.md` 的任务 DAG、任务详情和覆盖矩阵                     |
+| 探索确认的代码现状事实       | `design.md` 的 Code Evidence（EVD-xx，含 Verified At commit） |
+| specs/DEC 与代码现实的冲突   | `design.md` R-xx（Type=读码差异）→ 设计确认逐条裁定门，不得静默按代码改写 |
+| 实现切分、涉及文件、验证方法 | `PLAN.md` 的任务 DAG、任务详情和 Contract Coverage           |
 | 术语、规范代码名与代码锚点的对齐 | 当场回写会话工作区 `CONTEXT.md`（领域词汇表），协议见 `${pluginPath}/skills/references/domain-context.md` |
 | 未确认业务语义或技术假设     | `design.md` 与 `PLAN.md` 的风险与待确认项，并回到用户确认    |
 
@@ -186,7 +190,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - 提出上面的结束询问时，按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `进入 Plan 生成/更新 (Recommended)` / `继续探索` / `暂不生成、停在澄清结果`；
 - **自由表达即退出结构化**：若用户不点选项、而是直接给出实质回复（补需求、改约束、抛新问题），
   当作普通文本吸收、更新探索结论后继续探索，**不得机械重复同一结构化选择**；下一轮再择机重发该门。
-- 未拿到明确答复前，不得写入 `plan_in_progress`，也不得生成 design.md / plan.md。
+- 未拿到明确答复前，不得写入 `plan_in_progress`，也不得生成 design.md / PLAN.md。
 
 用户确认后，才进入 `PLAN阶段`。
 
@@ -210,8 +214,9 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 按 `${pluginPath}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
-- **Context / 输入上下文**：引用 proposal 和 specs，说明当前代码现状和约束。
-- **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。
+- **Context / 输入上下文**：引用 proposal 和 specs，一句话概述现状；逐条事实进 Code Evidence。
+- **Code Evidence / 代码探索证据**：探索确认的代码事实逐条落盘（EVD-xx、Path/Symbol、Observed Fact、Verified At commit）；ID 稳定不复用；与 DEC/REQ 冲突的观察不得直接覆盖，记为 R-xx（Type=读码差异）进裁定门。
+- **Spec Traceability / 规格追踪**：逐 Requirement 列出 `REQ-<capability>-NNN`、关联 `SCN-…`、约束它的 `DEC-xxx`（无则写无）、覆盖它的设计项（API-/DATA-/D-）与支撑证据（EVD-xx）；只用稳定 ID。
 - **API Decisions / 接口决策**：
   - 如本轮不涉及 HTTP/API，必须写 `x-auto-no-http-api: true` 并说明原因。
   - 如涉及 HTTP/API，用结构化表格记录 Method、Path/Entry、Request、Response、Errors、Auth/Tenant/Audit、Status。
@@ -225,11 +230,13 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 文件已写入磁盘
-- [ ] design.md 包含 Context、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
+- [ ] design.md 包含 Context、Code Evidence、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
+- [ ] Code Evidence 逐条含 Verified At；Spec Traceability 全部使用 REQ/SCN/DEC/EVD 稳定 ID
 - [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
 - [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
 - [ ] 未确认项没有进入硬约束
 - [ ] 与 proposal `Decision Log` 既定决策冲突的技术判断均已记为 `待确认` 并经裁定门确认，未在 design 里静默倒向代码
+- [ ] 读码差异（specs/DEC 与代码现实不符）均已记为 R-xx（Type=读码差异）并经裁定门消解，未静默按代码重解释 spec
 
 #### design.md 确认规则
 
@@ -248,20 +255,20 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 [D-xx 中影响实现路径的决策及备选方案]
 
 **待确认项**
-[所有待确认条目：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」的行；逐条说明影响。]
+[所有待确认条目：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」或「读码差异」的行；逐条说明影响，读码差异条目按「spec/DEC 说 X，代码是 Y（EVD-xx）」呈现。]
 ```
 
 展示后按以下两步确认，顺序不可颠倒：
 
 **第一步：待确认项逐条裁定**
 
-- 范围：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」的行；没有待确认条目时跳过本步，直接进入第二步。
+- 范围：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」或「读码差异」的行；没有待裁定条目时跳过本步，直接进入第二步。读码差异条目的选项闭集同样适用：裁定结果只能是「spec 基线过时，按代码现实修订（结果回写 spec/design 对应处）」「plan 读码有误，修正 Evidence」「行为契约需要变更，回 /autodev-specs」三者之一的具体化，不存在「按代码先做」的默认出口。
 - 消解定义：裁定即消解。一个条目被消解 = design.md 对应行 Status/Type 回写「已确认」，**且**裁定产生的具体内容（采纳的方案、用户提供的链接/字段）已写进对应行或章节。每个预设选项选中后必须能立即达成消解或明确暂停推进；两者之外的选项非法。
 - 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与条目 ID 对应（如 `pending_r_01`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
 - 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前设计确认 (Recommended)」：采纳设计中已写出的方案；②「采纳备选：<方案>」：选项自身携带具体替代方案；③「需要调整」：用户将给出修改意见，吸收后更新章节、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 plan 阶段、不推进。
 - 信息缺口型条目（缺接口文档 url、字段定义、外部约定等）：`question` 中直接写「若现在能提供，请在『其他』中粘贴链接或具体内容」；预设选项只从「调整设计移除该依赖」「暂停，拿到材料后继续」中取。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口——该出口已从选项闭集移除，不得以任何措辞重新引入。用户在「其他」提供内容 → 内容写进 design.md → 回写「已确认」。共享协议第 3 节的「后续补充并继续」模板是探索/讨论阶段收集信息用的，这个阶段禁止搬进裁定门。
 - 回写：拿到裁定后立即回写 design.md 对应行——回写「已确认」的前提是信息实体落地：用户答复中给出的链接/字段/方案必须先写进对应行或章节。**声称拥有 ≠ 提供**：用户仅声称「我有 / 稍后给」而未提供实体时，该条**未消解**：追问一次索取内容，仍未提供则按「调整设计移除该依赖 / 暂停」重发裁定。不得有延后选择，后续阶段不会检查待确认；裁定改变设计内容时更新对应章节并重新展示变更部分。
-- 消解自查：全部裁定回写后、发起第二步之前，自查 design.md 四张表单元格无「待确认」、回写内容无 TBD/待补充/待提供/占位 等词、无对缺失材料的引用（「根据实际文档」「以实际接口为准」「编码阶段补充」等）；任一命中回到第一步。
+- 消解自查：全部裁定回写后、发起第二步之前，自查 design.md 各表单元格无「待确认」「读码差异」、回写内容无 TBD/待补充/待提供/占位 等词、无对缺失材料的引用（「根据实际文档」「以实际接口为准」「编码阶段补充」等）；任一命中回到第一步。plan_done 的 postcheck 会机械校验残留单元格，绕过自查也无法推进。
 - 顺序硬约束：所有待确认条目都拿到用户裁定之前，禁止发起第二步的整体确认门。
 
 **第二步：整体确认门**
@@ -283,43 +290,44 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 #### 生成 PLAN
 
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.md`。PLAN 只承载执行任务，不再重复写需求契约、行为规格或完整技术设计；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md`。PLAN 只承载执行任务，不再重复写需求契约、行为规格或完整技术设计；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `PLAN.md`。
 - 如果用户补充内容改变了外部可观察行为、验收标准或能力边界，停止并建议回到 `/autodev-specs` 更新 `proposal.md` / `specs/**/*.md`。
 - 必须在 PLAN.md 中新增或更新「用户补充说明 / 技术细节」章节。
 - 用户明确确认的内容，标记为「已确认」。
-- 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
+- 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」——但「待确认」不是合法的落点状态：必须回到 design.md 记为 R-xx 并重开逐条裁定门消解，再重新生成受影响任务；plan_done 时 PLAN.md 与 design.md 均不得残留「待确认」单元格，已关闭的决策门不得以补充信息为名悄悄重开而不裁定。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
-- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 与 PLAN.md 的「风险与待确认项」中记录，并回到用户确认，不得擅自覆盖 specs。
+- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 记为 R-xx（Type=待确认或读码差异）走裁定门，并回到用户确认，不得擅自覆盖 specs。
 - 用户补充的实现细节只能作为计划依据，不得在 Plan 阶段创建或修改业务代码文件。
 
 任务拆分粒度：
 
-- 默认按 specs 中的 Requirement / Scenario、用户主流程或验收闭环拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件、测试文件等代码层步骤拆任务。
-- 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
+- 默认按 specs 中的 Requirement / Scenario、开发主流程闭环拆成“需求任务”，不要按 Controller、DTO、Mapper、SQL、样式文件等代码层步骤拆任务。
+- 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端和配置。
 - 只有在满足以下条件之一时才继续拆分：可独立验证；风险或决策明显不同；存在明确依赖顺序；可被多个需求复用的基础能力；任务过大导致执行者无法在一次编码闭环中完成。
 - 小需求通常 2-5 个任务，中等需求通常 4-8 个任务；如果超过 10 个任务，必须检查是否把代码步骤误拆成了任务，并优先合并。
 - 不要生成“新增 DTO”“修改 Controller”“补 Mapper”“写单测”这类单纯代码操作任务。
 - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
 - 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
 
-每个任务都要能追溯到 specs 中的 Requirement / Scenario；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
+任务使用稳定 ID `TASK-NNN`。每个任务的「规格依据 / 场景依据 / 设计依据 / 代码证据」只用稳定 ID（REQ-/SCN-/API-/DATA-/D-/EVD-）；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或在 Contract Coverage 中明确标注无需实现及原因。
 
 按 `{PLUGIN_ROOT}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入
-- [ ] PLAN.md 包含「任务 DAG」「任务总览」「任务详情」「Specs 行为覆盖」「规格与设计决策覆盖」
-- [ ] 每个任务都包含「做什么」「规格依据」「设计依据」「验证方法」「状态: 待做」
+- [ ] PLAN.md 包含「任务 DAG」「任务总览」「任务详情」「Contract Coverage」
+- [ ] 每个任务以 `TASK-NNN` 命名，包含「做什么」「规格依据」「场景依据」「设计依据」「代码证据」「验证方法」「状态: 待做」「完成记录: 无」，引用全部为稳定 ID
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
-- [ ] specs 中每个 Requirement / Scenario 至少被一个任务覆盖
-- [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
+- [ ] specs 中每个 REQ 与 SCN 至少被一个任务覆盖（Contract Coverage 可逐行核对）
+- [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或在 Contract Coverage 标注无需实现及原因
+- [ ] PLAN.md 与 design.md 所有表格单元格无「待确认」「读码差异」残留
 - [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 PLAN.md 已同步记录，并更新相关任务或风险项。
 
-如果task工具可用，使用task工具同时对比specs、proposal与design.md和plan.md文件进行严格的审查，主要从三个维度核查：1.技术选择是否合理，2.规格是否完全覆盖，3.测试是否合理和完备。
-如任一task工具返回有问题需要修复plan.md与design.md。
+如果task工具可用，使用task工具，指定critic-autodev角色，对比specs、proposal与design.md和PLAN.md文件进行严格的审查，主要从四个维度核查：1.技术选择是否合理，2.规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对），3.测试是否合理和完备，4.引用与事实是否相符（Code Evidence 各条与代码实际一致、Spec Traceability 引用的 REQ/SCN/DEC 在上游真实存在）。
+如任一task工具返回有问题需要修复PLAN.md与design.md。
 如果task不可用则不用执行上面的内容。继续任务。
 ---
 
