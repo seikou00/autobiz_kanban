@@ -212,7 +212,7 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 3. 若项目约定要求，运行编译或测试编译命令。
 
 扩大验证失败时，必须回到『失败归因与最小修复』。不得只因精确测试通过就推进完成。
-如果task工具可用，则使用task工具使用verfication角色，对当前特性生成的代码进行验收。
+如果task工具可用，则使用task工具指定verfication角色，对当前特性生成的代码进行验收。
 如果task返回，必须修复其汇报的问题。
 如果task不可用则不用执行上面的内容。继续任务。
 ### 生成最终报告

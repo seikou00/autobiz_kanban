@@ -104,11 +104,17 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 按 `${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
 
-生成前先建立 capability 变更分类表，后续 `proposal.md` 与 `specs/**/*.md` 必须保持一致：
+生成前先建立 capability 变更分类表，直接写入 proposal 的 `## Capability Index` 节（唯一权威索引），后续 `specs/**/*.md` 必须与其一一对应。探索中形成的判定依据与既有行为来源在对话中说明，索引表只留结论：
 
-| Capability | Operation | 判定依据 | 既有行为来源 | 本轮目标 |
-|------------|-----------|----------|--------------|----------|
-| `[name]` | `ADDED/MODIFIED/REMOVED` | [为什么归入该类] | [现有 spec/代码/API/UI/无] | [目标行为] |
+| Capability ID | Capability | Operations | Spec Path | Status |
+|---------------|------------|------------|-----------|--------|
+| `CAP-[name]` | `[kebab-case-name]` | `ADDED/MODIFIED/REMOVED`（多值逗号分隔） | `specs/[name]/spec.md` | confirmed |
+
+ID 规则：
+
+- Capability ID 使用 `CAP-<kebab-case-name>`，与 spec 文件头 `Capability-ID:` 一致。
+- Requirement 使用 `REQ-<capability>-NNN`（NNN 三位递增）；Scenario 使用 `SCN-<capability>-NNN-NN`，前缀对应所属 REQ。
+- 改标题不改 ID；Requirement 删除后其 ID 不复用；ID 在同一 feature 内全局唯一；多份 spec 因命名空间天然不重号。
 
 分类规则：
 
@@ -117,17 +123,17 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 - `REMOVED`：已有能力、入口、分支或业务结果在本轮后不再支持、不可访问或不再生效；必须说明移除原因、迁移/兼容方式，以及旧入口被触发时的期望行为。
 - 同一用户目标同时包含新增独立能力和修改既有能力时，拆成不同 capability 或同一 spec 内不同 Requirement，不得用一个分类吞掉全部变化。
 - 无法判断是否已有行为时，先搜索既有 specs、代码入口、接口、菜单、配置和测试；仍不确定则回到用户确认，不要猜测分类。
-- capability 分类小节为空时，该小节正文只写 `无`；不得保留 `[capability-name]` / `[existing-capability]` / `[removed-capability]` 占位项，也不得写 `- [capability]: 无`。
-- 一旦列出 capability，说明必须写实质原因、范围或迁移方式，并且必须对应真实 `specs/<capability>/spec.md`。
+- 本轮无 capability 时，`Capability Index` 表正文只写 `无`；不得保留 `CAP-[name]` / `[kebab-case-name]` 占位行。
+- 一旦列入索引，Spec Path 必须指向真实 `specs/<capability>/spec.md`；同一用户目标混合新增与修改时，用 Operations 多值或拆分 capability 表达，不得用单一操作表达全部变化。
 
 必须包含：
 
 - **Why**：为什么要做。
 - **What Changes**：用户可见或系统外部可观察变化。
-- **Capabilities**：按 `New Capabilities` / `Modified Capabilities` / `Removed Capabilities` 填入分类表中的 capability；名称使用 kebab-case；每个非“无”的 capability 必须对应一个 `specs/<capability>/spec.md`。
+- **Capability Index**：唯一权威索引表；每行 `CAP-<name>` / kebab-case 名称 / Operations 集合 / Spec Path / Status，每个 capability 必须对应一个 `specs/<capability>/spec.md`。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
-- **Decision Log**：把 explore 中已裁定且达门槛的决策逐条记入（决定 / 为什么 / 否决的备选及原因 / 约束的 Requirement）。记录门槛三者取一：结果偏离"直接读代码/需求会得到的显然做法"、有真实备选并择一、或改变外部可观察行为的边界或口径；显然的、无备选的、需求直接决定的不记。不得让否决理由停留在对话里蒸发；无满足门槛的决策时本节写"无"。
+- **Decision Log**：把 explore 中已裁定且达门槛的决策逐条记入（决定 / 为什么 / 否决的备选及原因 / 约束的稳定 ID）。`约束` 必须引用 `REQ-<capability>-NNN`（尚未落到具体 Requirement 时引用 `CAP-<name>`）。记录门槛三者取一：结果偏离"直接读代码/需求会得到的显然做法"、有真实备选并择一、或改变外部可观察行为的边界或口径；显然的、无备选的、需求直接决定的不记。不得让否决理由停留在对话里蒸发；无满足门槛的决策时本节写"无"。
 
 ## 生成 specs/**/*.md
 
@@ -135,13 +141,13 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 规则：
 
-- 每个 capability 一个 spec 文件：`specs/<capability>/spec.md`。
-- **列出即生成**：proposal `Capabilities` 三个小节（New/Modified/Removed）中列出的每一个 capability（占位"无"除外）都必须有对应的 `specs/<capability>/spec.md`。不得以等任何理由跳过。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability，保持两边严格一致；禁止单方面少生成。
-- Modified/Removed capability 的 spec 用 `## MODIFIED Requirements` / `## REMOVED Requirements` 承载完整新行为或移除说明，同样不可省略。
+- 每个 capability 一个 spec 文件：`specs/<capability>/spec.md`，文件头必须含 `Capability-ID: CAP-<capability>`（与目录名、索引行一致）。
+- **列入即生成**：`Capability Index` 中每一行（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`。不得以任何理由跳过。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其从索引移除或并入其他 capability，保持两边严格对应；禁止单方面少生成。
+- MODIFIED/REMOVED 操作的 Requirement 用 `## MODIFIED Requirements` / `## REMOVED Requirements` 承载完整新行为或移除说明，同样不可省略。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
-- Requirement 使用 `### Requirement: <name>`。
-- Scenario 使用四级标题 `#### Scenario: <name>`。
-- 每个 Requirement 至少一个 Scenario。
+- Requirement 使用 `### REQ-<capability>-NNN: <标题>`（三位递增；改标题不改 ID；删除后 ID 不复用）。
+- Scenario 使用四级标题 `#### SCN-<capability>-NNN-NN: <标题>`，前缀必须对应本文件中已存在的 REQ。
+- 每个 Requirement 至少一个 Scenario；REMOVED Requirement 也必须用 Scenario 描述旧入口被触发时的期望响应。
 - 使用 SHALL/MUST 表达可验证行为。
 - 每个 Requirement 只能放入一个操作段：`ADDED Requirements`、`MODIFIED Requirements` 或 `REMOVED Requirements`。
 - `ADDED Requirements` 只写新增行为；如果只是已有行为增加条件、字段、状态或分支，放入 `MODIFIED Requirements`。
@@ -154,12 +160,12 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md` 已生成。
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/` 下至少存在一个 `spec.md`。
-- **数量核对**：数出 proposal `Capabilities` 实际列出的 capability 数 N（排除"无"），数出 `specs/*/spec.md` 数 M，必须 N == M 且逐一对应；推进 specs_done 前在回复中输出对照表 `capability → specs/<capability>/spec.md ✓`，缺任何一行不得推进。
+- **索引对应**：`Capability Index` 每行的 Spec Path 都存在实际文件，`specs/*/spec.md` 每个文件都有索引行，且 Operations 列与 spec 内实际操作段一致；推进 specs_done 前在回复中输出对照表 `CAP-<name> → specs/<capability>/spec.md ✓`，缺任何一行不得推进。`Capability-ID` 文件头、REQ/SCN ID 格式与唯一性，校验失败无法写入 specs_done。
 - 每个 spec 至少包含一个 Requirement 和一个 Scenario。
 - specs 只描述行为契约，不包含实现任务。
 - proposal 含 `Decision Log` 节：explore 中已裁定且达门槛的决策已逐条记入（含被否决的备选及原因），无满足门槛的决策则写"无"；不得因赶进度省略本节。
 
-如task工具可用，则使用task工具对比prd.md与proposal和specs文件进行严格的审查，看是否spec已经完全覆盖需求范围，和是否有违反需求的地方。
+如task工具可用，则使用task工具，指定critic-autodev角色，对比prd.md与proposal和specs文件进行严格的审查，看是否spec已经完全覆盖需求范围，和是否有违反需求的地方。
 如task工具返回有问题需要修复specs或proposal。
 如果task不可用则不用执行上面的内容。继续任务。
 完成后推进 checkpoint：

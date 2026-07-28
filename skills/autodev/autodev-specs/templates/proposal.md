@@ -13,19 +13,15 @@
 - [用户可见或系统外部可观察的变化]
 - [新增/修改/移除的能力]
 
-## Capabilities
+## Capability Index
 
-### New Capabilities
+> 本表是 capability 的唯一权威索引，`specs/**/*.md` 与本表一一对应。
+> Capability ID 用 `CAP-<kebab-case-name>`；Operations 填该 spec 中实际出现的操作段集合
+> （ADDED / MODIFIED / REMOVED，多值逗号分隔）；本轮无 capability 时本表正文只写「无」。
 
-- `[capability-name]`: [能力说明，对应 specs/<capability-name>/spec.md]
-
-### Modified Capabilities
-
-- `[existing-capability]`: [修改原因与范围；无则写“无”]
-
-### Removed Capabilities
-
-- `[removed-capability]`: [移除原因；无则写“无”]
+| Capability ID | Capability | Operations | Spec Path | Status |
+|---------------|------------|------------|-----------|--------|
+| CAP-[name] | [kebab-case-name] | ADDED | specs/[name]/spec.md | confirmed |
 
 ## Impact
 
@@ -46,15 +42,18 @@
 > ② 有真实备选并择一；③ 改变外部可观察行为的边界或口径、读者不知理由会困惑。
 > 显然的、无备选的、需求直接决定的不记。无满足门槛的决策时，本节写“无”。
 
-### DEC-01: [决策标题]
+### DEC-001: [决策标题]
 
 - **决定:** [定了什么行为、边界或口径]
 - **为什么:** [理由]
 - **否决:** [被否决的备选及原因；无真实备选写“无”]
-- **约束:** [关联的 capability / Requirement]
+- **约束:** [关联的稳定 ID：`REQ-<capability>-NNN`；尚未落到具体 Requirement 时写 `CAP-<name>`]
 
 ## Open Questions
 
+> specs_done 前本表必须消解：所有行 Status 为「已确认」，或本表正文写「无」；
+> 残留「待确认」不得推进 specs_done。
+
 | ID | Question | Impact | Status |
 |----|----------|--------|--------|
-| Q-01 | [待确认问题；无则写“无”] | [影响] | 已确认/待确认 |
+| Q-01 | [待确认问题；无则写“无”] | [影响] | 已确认 |

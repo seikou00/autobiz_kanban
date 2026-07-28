@@ -138,10 +138,29 @@ def info(ctx: HookContext, reason: str, extra: str = "") -> None:
     print(f"POST_SKILL_INFO skill={ctx.skill} reason={reason}{extra}")
 
 
+TASK_HEADING = re.compile(r"^###\s+(TASK-\d{3}):", re.MULTILINE)
+
+
 def task_count(plan: Path) -> int:
     if not is_nonempty(plan):
         return 0
-    return len(re.findall(r"^### [0-9]+\.", read_text(plan), re.MULTILINE))
+    # 新格式 `### TASK-001: 名称`；兼容旧格式 `### 1. 名称`
+    return len(re.findall(r"^### (?:TASK-\d{3}:|[0-9]+\.)", read_text(plan), re.MULTILINE))
+
+
+def plan_task_blocks(plan_text: str) -> dict[str, str]:
+    """按 `### TASK-NNN:` 标题切出任务详情块；legacy 数字标题 PLAN 返回空 dict。"""
+    blocks: dict[str, str] = {}
+    matches = list(TASK_HEADING.finditer(plan_text))
+    for index, match in enumerate(matches):
+        start = match.end()
+        if index + 1 < len(matches):
+            end = matches[index + 1].start()
+        else:
+            next_section = re.search(r"^##\s", plan_text[start:], re.MULTILINE)
+            end = start + next_section.start() if next_section else len(plan_text)
+        blocks[match.group(1)] = plan_text[start:end]
+    return blocks
 
 
 def task_statuses(plan: Path) -> list[str]:
