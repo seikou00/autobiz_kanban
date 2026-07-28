@@ -40,6 +40,18 @@ DESIGN_DECISION_ROW = re.compile(r"^\|\s*`?((?:API|DATA)-\d{1,3}|D-\d{1,3})`?\s*
 FENCE_OPEN_LINE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 BLOCKQUOTE_LINE = re.compile(r"^[ \t]{0,3}>")
 TEMPLATE_WRAPPER_HEADINGS = {"# 技术设计模板", "# 计划模板"}
+# proposal Open Questions：「已确认」不是可以自己给自己发的状态，必须带跨文件证据
+PENDING_MARKERS = {"待确认", "读码差异"}
+RESOLVED_STATUS = "已确认"
+DEC_ID = re.compile(r"\bDEC-\d{1,3}\b")
+DEC_HEADING = re.compile(r"^###\s+(DEC-\d{1,3})\s*[:：]", re.MULTILINE)
+DECISION_FIELD = re.compile(
+    r"^[ \t]*[-*][ \t]*\*{0,2}(决定|为什么|否决|约束)\*{0,2}[:：]\*{0,2}[ \t]*(.*)$",
+    re.MULTILINE,
+)
+CONSTRAINT_ID = re.compile(r"\b(?:REQ-[a-z0-9][a-z0-9-]*-\d{3}|CAP-[a-z0-9][a-z0-9-]*)\b")
+PLACEHOLDER_TEXT = re.compile(r"\[[^\]]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
+NORMALIZE_STRIP = re.compile(r"[\s？?。.，,、；;：:！!「」“”\"'`*（）()]+")
 
 
 def section_text(text: str, heading: str) -> str:
@@ -111,6 +123,83 @@ def spec_actual_operations(text: str) -> set[str]:
         if REQ_HEADING.search(body):
             operations.add(match.group(1))
     return operations
+
+
+def parse_open_questions(text: str) -> tuple[bool, list[dict[str, str]]] | None:
+    """解析 proposal 的 Open Questions 表。
+
+    返回 ``(legacy, rows)``；``None`` 表示 proposal 没有该节。``legacy=True`` 表示表头缺
+    ``Resolution``/``Decision`` 列（老 proposal），只走「无待确认单元格」的宽松检查。
+    正文写「无」或没有表格时返回空行列表。
+    """
+    body = section_text(text, "Open Questions")
+    if not body:
+        return None
+
+    header: list[str] = []
+    rows: list[dict[str, str]] = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip().strip("`").strip() for cell in line.strip("|").split("|")]
+        if not cells or all(not cell or set(cell) <= {"-", ":", " "} for cell in cells):
+            continue
+        if not header:
+            header = cells
+            continue
+        row = dict(zip(header, cells))
+        if not row.get("ID"):
+            continue
+        rows.append(row)
+
+    # 没有表格（正文写「无」）不算 legacy，没有可降级的内容
+    legacy = bool(header) and not {"Resolution", "Decision"} <= set(header)
+    if legacy:
+        return True, rows
+    return False, [
+        {
+            "id": row.get("ID", ""),
+            "question": row.get("Question", ""),
+            "resolution": row.get("Resolution", ""),
+            "decision": row.get("Decision", ""),
+            "status": row.get("Status", ""),
+        }
+        for row in rows
+    ]
+
+
+def decision_log_entries(text: str) -> dict[str, dict[str, str]]:
+    """解析 proposal 的 Decision Log：``{DEC-001: {决定/为什么/否决/约束}}``。"""
+    body = section_text(text, "Decision Log")
+    entries: dict[str, dict[str, str]] = {}
+    headings = list(DEC_HEADING.finditer(body))
+    for index, match in enumerate(headings):
+        start = match.end()
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        fields = {name: value.strip() for name, value in DECISION_FIELD.findall(body[start:end])}
+        entries[match.group(1)] = fields
+    return entries
+
+
+def is_filled(value: str | None) -> bool:
+    """非空且不是 `[占位]` / TBD / 待补充 这类占位文本。"""
+    return bool(value) and not PLACEHOLDER_TEXT.search(value)
+
+
+def restates_question(resolution: str, question: str) -> bool:
+    """Resolution 只是 Question 的复述（去标点空白后被 Question 包含）。
+
+    很短的回答（如「是」「支持」）天然会是问句的子串，不当作复述；真正的空转由
+    ``is_filled`` 与 Decision 绑定检查兜住。
+    """
+    normalized_resolution = NORMALIZE_STRIP.sub("", resolution)
+    normalized_question = NORMALIZE_STRIP.sub("", question)
+    if not normalized_resolution or not normalized_question:
+        return False
+    if normalized_resolution == normalized_question:
+        return True
+    return len(normalized_resolution) >= 8 and normalized_resolution in normalized_question
 
 
 def find_template_guidance_residue(text: str) -> list[tuple[int, str]]:
@@ -195,6 +284,74 @@ def spec_files(ctx: HookContext) -> list[Path]:
     )
 
 
+def spec_declared_ids(ctx: HookContext) -> set[str] | None:
+    """specs/** 中真实存在的 REQ / CAP 稳定 ID；无 spec 文件时返回 None。"""
+    specs = spec_files(ctx)
+    if not specs:
+        return None
+    declared: set[str] = set()
+    for spec in specs:
+        text = read_text(spec)
+        declared.update(f"REQ-{cap}-{number}" for cap, number in REQ_HEADING.findall(text))
+        declared.update(CAP_ID_HEADER.findall(text))
+    return declared
+
+
+def validate_open_questions_rows(
+    ctx: HookContext,
+    text: str,
+    rows: list[dict[str, str]],
+    spec_ids: set[str] | None,
+) -> int:
+    """每行「已确认」都必须带跨文件证据，只翻 Status 不算消解。
+
+    证据链：``Resolution`` 是裁定的具体结论（非占位、非问题复述）→ ``Decision`` 指向
+    ``Decision Log`` 中一条填齐的 ``DEC-NNN`` → 该决策的 ``约束`` 落到 specs 中真实存在的
+    ``REQ``/``CAP``。任一环断裂则该行未消解。
+    """
+    decisions = decision_log_entries(text)
+    failures = 0
+    for row in rows:
+        qid = row["id"]
+        status = row["status"]
+        if status in PENDING_MARKERS:
+            # 已由 proposal_open_questions_pending 统一报，不逐行重复
+            continue
+        if status != RESOLVED_STATUS:
+            failures += fail_line(
+                ctx, "open_questions_status_invalid", f" id={qid!r} status={status!r}"
+            )
+            continue
+
+        if not is_filled(row["resolution"]):
+            failures += fail_line(ctx, "open_questions_resolution_missing", f" id={qid!r}")
+        elif restates_question(row["resolution"], row["question"]):
+            failures += fail_line(
+                ctx, "open_questions_resolution_restates_question", f" id={qid!r}"
+            )
+
+        decision_match = DEC_ID.search(row["decision"])
+        if not decision_match:
+            failures += fail_line(ctx, "open_questions_decision_missing", f" id={qid!r}")
+            continue
+        decision_id = decision_match.group(0)
+        entry = decisions.get(decision_id)
+        if entry is None or not is_filled(entry.get("决定")) or not is_filled(entry.get("为什么")):
+            failures += fail_line(
+                ctx, "open_questions_decision_not_in_log", f" id={qid!r} decision={decision_id!r}"
+            )
+            continue
+
+        if spec_ids is None:
+            # 缺 specs 由 specs_contract 单独报，这里不重复
+            continue
+        if not set(CONSTRAINT_ID.findall(entry.get("约束", ""))) & spec_ids:
+            failures += fail_line(
+                ctx, "open_questions_decision_unbound", f" id={qid!r} decision={decision_id!r}"
+            )
+    return failures
+
+
 def validate_proposal_contract(ctx: HookContext) -> int:
     proposal = ctx.file("proposal.md")
     if not is_nonempty(proposal):
@@ -208,6 +365,7 @@ def validate_proposal_contract(ctx: HookContext) -> int:
         "Capability Index",
         "Impact",
         "Out of Scope",
+        "Decision Log",
     ]
     for section in required_sections:
         if section not in text:
@@ -236,6 +394,19 @@ def validate_proposal_contract(ctx: HookContext) -> int:
     open_questions = section_text(text, "Open Questions")
     if PENDING_CELL.search(open_questions):
         failures += fail_line(ctx, "proposal_open_questions_pending")
+
+    # 按标题查，比 required_sections 的子串判断更严：删掉整节不再是免检出口
+    parsed = parse_open_questions(text)
+    if parsed is None:
+        failures += fail_line(
+            ctx, "invalid_proposal_missing_section", " section='Open Questions'"
+        )
+    else:
+        legacy, rows = parsed
+        if legacy:
+            info(ctx, "open_questions_legacy_degrade")
+        else:
+            failures += validate_open_questions_rows(ctx, text, rows, spec_declared_ids(ctx))
     return failures
 
 

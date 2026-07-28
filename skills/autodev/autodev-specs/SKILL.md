@@ -77,13 +77,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 - 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据语义还不准确，先讨论。
 - 讨论时只提出影响实现路径或验收结果的关键问题，并给出当前建议、备选方案和影响面；不要机械问卷。
 - 仍有 `待确认` 且会影响接口形态、数据模型、权限/租户/审计、幂等、分页、异步、状态流、迁移或验收结果时，不要结束探索。
-- 待确认决策逐项与用户对齐后，是否结束探索进入 specs 生成必须由用户拍板：
-- 按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为
-  `这些决策已确认、生成 specs (Recommended)` / `继续讨论待确认项`；
-- **自由表达即退出结构化**：若用户不点选项、而是直接给出实质回复（补一条决策、
-  改一个字段、提新问题），当作普通文本吸收进待确认表并更新建议，**不得机械重复弹同一个
-  结构化选择**；下一轮合适时机再重新发起该决策。
-- 仍有影响行为契约的待确认项时，不得进入 specs 生成。
+
 讨论输出建议：
 
 ```markdown
@@ -99,6 +93,27 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 ```
 
 > 决策一旦与用户拍板，连同**被否决的备选及原因**要保留到 proposal 的 `Decision Log`，不要只留在对话里。
+
+### Open Questions 逐条裁定门
+
+**展示上表 ≠ 裁定。** 表中每一条都必须逐条拿到用户裁定，才能进入 specs 生成。两步顺序不可颠倒。
+
+**第一步：逐条裁定**
+
+- 范围：讨论表中的全部待确认条目；没有条目时跳过本步，直接进入第二步。
+- 消解定义：裁定即消解，但**裁定必须落盘才算数**。生成 proposal 时每条落为 `Open Questions` 一行：`Resolution` 写下裁定的具体结论（不是 Question 的复述、不是占位）、`Decision` 填 `DEC-NNN`、`Status=已确认`，同时 `Decision Log` 中有这条 DEC（决定 / 为什么 / 否决 / 约束齐备，`约束` 指向 `specs/**` 中真实存在的 `REQ-<capability>-NNN` 或 `CAP-<name>`）。每条 Open Question 的裁定天然达到 `Decision Log` 记录门槛（它有真实备选且改动行为契约），不得以「不达门槛」为由不记。
+- 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与讨论表条目 ID 对应（如 `SPEC-01` → `spec_01`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
+- 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前建议确认 (Recommended)」：采纳讨论表中的当前建议；②「采纳备选：<方案>」：选项自身携带具体方案；③「需要调整」：用户将给出修改意见，吸收后更新讨论表、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 specs 阶段、不推进。
+- **禁止自行确认**：`已确认` 只能是用户裁定的结果。不得以「这是外部接口细节」「不影响行为契约的定义」「specs 阶段只关心 WHAT」等任何理由，自己把 Status 写成 `已确认`。判定某条不影响行为契约不是跳过裁定的理由——是否需要定，同样由用户裁定。
+- 禁止「先假设 / 按默认方案 / 后续补充 / 先占位 / 编码阶段再定」后推进——该出口不在闭集内，不得以任何措辞重新引入。共享协议第 3 节的「后续补充并继续」模板属于探索/讨论环节，本裁定门禁止搬用。
+- **整体门不构成对任何一条的裁定**：第二步只确认「进入 specs 生成」，不能被当作对全部条目的一次性打包确认。
+- **自由表达即退出结构化**：用户不点选项、而是直接给出实质回复（补一条决策、改一个字段、提新问题），当作该条的裁定内容吸收并更新，**不得机械重复弹同一个结构化选择**；下一轮合适时机再重新发起该决策。
+- 顺序硬约束：全部条目拿到裁定之前，禁止发起第二步，也禁止在 proposal 中写下任何 `已确认`。
+
+**第二步：整体确认门**
+
+- 按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `这些决策已确认、生成 specs (Recommended)` / `继续讨论待确认项`；不设置 `autoResolutionMs`，必须等待明确答复。
+- 用户选择继续讨论时回到探索，不进入 specs 生成。
 
 ## 生成 proposal.md
 
@@ -135,6 +150,7 @@ ID 规则：
 - **Capability Index**：唯一权威索引表；每行 `CAP-<name>` / kebab-case 名称 / Operations 集合 / Spec Path / Status，每个 capability 必须对应一个 `specs/<capability>/spec.md`。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
+- **Open Questions**：discussion 表中的每条待确认项落一行，按上面「Open Questions 逐条裁定门」的消解定义填 `Resolution` / `Decision` / `Status`；本轮无待确认项时本节正文只写「无」。
 - **Decision Log**：把 explore 中已裁定且达门槛的决策逐条记入（决定 / 为什么 / 否决的备选及原因 / 约束的稳定 ID）。`约束` 必须引用 `REQ-<capability>-NNN`（尚未落到具体 Requirement 时引用 `CAP-<name>`）。记录门槛三者取一：结果偏离"直接读代码/需求会得到的显然做法"、有真实备选并择一、或改变外部可观察行为的边界或口径；显然的、无备选的、需求直接决定的不记。不得让否决理由停留在对话里蒸发；无满足门槛的决策时本节写"无"。
 
 ## 生成 specs/**/*.md
@@ -166,6 +182,7 @@ ID 规则：
 - 每个 spec 至少包含一个 Requirement 和一个 Scenario。
 - specs 只描述行为契约，不包含实现任务。
 - proposal 含 `Decision Log` 节：explore 中已裁定且达门槛的决策已逐条记入（含被否决的备选及原因），无满足门槛的决策则写"无"；不得因赶进度省略本节。
+- proposal 含 `Open Questions` 节：每行都经逐条裁定门消解并落证据（`Status=已确认` + `Resolution` 非复述非占位 + `Decision`=DEC-NNN，且该 DEC 在 `Decision Log` 中齐备、其 `约束` 指向 specs 中真实存在的 REQ/CAP），或本节正文只写「无」。**残留未消解行、或只翻 Status 不落证据，都不得推进 specs_done**——由 `proposal_contract` 在 specs_done 的 postcheck 机械强制，删掉本节同样会被拦下。
 
 如task工具可用，则使用task工具，指定critic-autodev角色，对比prd.md与proposal和specs文件进行严格的审查，看是否spec已经完全覆盖需求范围，和是否有违反需求的地方。
 如task工具返回有问题需要修复specs或proposal。

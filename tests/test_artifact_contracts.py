@@ -55,6 +55,37 @@ x
 无
 """
 
+PROPOSAL_RESOLVED = PROPOSAL_OK.replace(
+    "## Decision Log\n无\n",
+    """## Decision Log
+
+### DEC-001: 导出文件保留 7 天
+
+- **决定:** 导出结果在对象存储保留 7 天后自动清理
+- **为什么:** 与既有报表清理策略一致，不额外引入配置项
+- **否决:** 永久保留（存储成本不可控）
+- **约束:** REQ-order-export-001
+""",
+).replace(
+    "## Open Questions\n无\n",
+    """## Open Questions
+
+| ID | Question | Impact | Resolution | Decision | Status |
+|----|----------|--------|------------|----------|--------|
+| Q-01 | 导出文件保留多久？ | 影响验收口径与存储成本 | 保留 7 天后自动清理 | DEC-001 | 已确认 |
+""",
+)
+
+PROPOSAL_LEGACY_OPEN_QUESTIONS = PROPOSAL_OK.replace(
+    "## Open Questions\n无\n",
+    """## Open Questions
+
+| ID | Question | Impact | Status |
+|----|----------|--------|--------|
+| Q-01 | 导出文件保留多久？ | 影响验收口径 | 已确认 |
+""",
+)
+
 SPEC_OK = """# Order Export Specification
 
 Capability-ID: CAP-order-export
@@ -264,6 +295,86 @@ class ProposalContractTest(ContractTestBase):
         self.assertGreater(failures, 0)
         self.assertIn("artifact_template_guidance_residue", output)
         self.assertIn("file='proposal.md' line=11 kind=blockquote", output)
+
+
+class OpenQuestionsEvidenceTest(ContractTestBase):
+    """「已确认」必须带跨文件证据：只翻 Status 不算消解。"""
+
+    def write_feature(self, proposal: str) -> None:
+        self.write("proposal.md", proposal)
+        self.write("specs/order-export/spec.md", SPEC_OK)
+
+    def assert_fails_with(self, proposal: str, reason: str) -> None:
+        self.write_feature(proposal)
+        failures, output = self.run_validator(validate_proposal_contract)
+        self.assertGreater(failures, 0, output)
+        self.assertIn(reason, output)
+
+    def test_resolved_row_with_evidence_passes(self) -> None:
+        self.write_feature(PROPOSAL_RESOLVED)
+        failures, output = self.run_validator(validate_proposal_contract)
+        self.assertEqual(failures, 0, output)
+
+    def test_deleting_whole_section_fails(self) -> None:
+        text = PROPOSAL_OK.replace("## Open Questions\n无\n", "")
+        self.assert_fails_with(text, "invalid_proposal_missing_section")
+
+    def test_placeholder_resolution_fails(self) -> None:
+        text = PROPOSAL_RESOLVED.replace("保留 7 天后自动清理", "[用户裁定的具体结论]")
+        self.assert_fails_with(text, "open_questions_resolution_missing")
+
+    def test_resolution_restating_question_fails(self) -> None:
+        text = PROPOSAL_RESOLVED.replace("保留 7 天后自动清理", "导出文件保留多久")
+        self.assert_fails_with(text, "open_questions_resolution_restates_question")
+
+    def test_missing_decision_fails(self) -> None:
+        text = PROPOSAL_RESOLVED.replace("| 保留 7 天后自动清理 | DEC-001 |", "| 保留 7 天后自动清理 |  |")
+        self.assert_fails_with(text, "open_questions_decision_missing")
+
+    def test_decision_not_in_log_fails(self) -> None:
+        text = PROPOSAL_RESOLVED.replace("| DEC-001 | 已确认 |", "| DEC-009 | 已确认 |")
+        self.assert_fails_with(text, "open_questions_decision_not_in_log")
+
+    def test_decision_with_placeholder_body_fails(self) -> None:
+        text = PROPOSAL_RESOLVED.replace(
+            "- **为什么:** 与既有报表清理策略一致，不额外引入配置项",
+            "- **为什么:** [理由]",
+        )
+        self.assert_fails_with(text, "open_questions_decision_not_in_log")
+
+    def test_decision_unbound_to_specs_fails(self) -> None:
+        text = PROPOSAL_RESOLVED.replace(
+            "- **约束:** REQ-order-export-001", "- **约束:** REQ-order-export-999"
+        )
+        self.assert_fails_with(text, "open_questions_decision_unbound")
+
+    def test_status_not_resolved_fails(self) -> None:
+        text = PROPOSAL_RESOLVED.replace("| DEC-001 | 已确认 |", "| DEC-001 | 讨论中 |")
+        self.assert_fails_with(text, "open_questions_status_invalid")
+
+    def test_pending_row_reports_once(self) -> None:
+        text = PROPOSAL_RESOLVED.replace("| DEC-001 | 已确认 |", "| DEC-001 | 待确认 |")
+        self.write_feature(text)
+        failures, output = self.run_validator(validate_proposal_contract)
+        self.assertEqual(failures, 1, output)
+        self.assertIn("proposal_open_questions_pending", output)
+
+    def test_legacy_table_degrades(self) -> None:
+        self.write_feature(PROPOSAL_LEGACY_OPEN_QUESTIONS)
+        failures, output = self.run_validator(validate_proposal_contract)
+        self.assertEqual(failures, 0, output)
+        self.assertIn("open_questions_legacy_degrade", output)
+
+    def test_legacy_table_still_blocks_pending(self) -> None:
+        text = PROPOSAL_LEGACY_OPEN_QUESTIONS.replace("| 影响验收口径 | 已确认 |", "| 影响验收口径 | 待确认 |")
+        self.assert_fails_with(text, "proposal_open_questions_pending")
+
+    def test_template_row_left_in_fails(self) -> None:
+        text = PROPOSAL_RESOLVED.replace(
+            "| Q-01 | 导出文件保留多久？ | 影响验收口径与存储成本 | 保留 7 天后自动清理 | DEC-001 | 已确认 |",
+            "| Q-01 | [待确认问题；无则本节正文只写“无”] | [影响] | [用户裁定的具体结论] | DEC-001 | 已确认 |",
+        )
+        self.assert_fails_with(text, "open_questions_resolution_missing")
 
 
 class SpecsContractTest(ContractTestBase):
