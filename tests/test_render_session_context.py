@@ -200,7 +200,7 @@ class RuntimePolicyTest(unittest.TestCase):
         cases = (
             ("discuss_in_progress", False),
             ("prd_in_progress", False),
-            ("specs_in_progress", False),
+            ("specs_in_progress", True),
             ("code_in_progress", True),
         )
 
@@ -281,14 +281,53 @@ class RuntimePolicyTest(unittest.TestCase):
         self.assertFalse(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
 
     def test_board_config_disables_task_only_for_configured_early_nodes(self):
-        for node_id in ("biz.discuss", "biz.prd", "dev.specs"):
+        for node_id in ("biz.discuss", "biz.prd"):
             policy = _runtime_policy(node_id)
             self.assertEqual(policy["agentMode"], "solo")
             self.assertFalse(policy["toolCustomConfig"]["task"]["enabled"])
 
-        self.assertTrue(
-            _runtime_policy("dev.code")["toolCustomConfig"]["task"]["enabled"]
+        # dev.specs 起各节点配置了子代理，子代理只能经 task 工具启动，因此必须放开 task。
+        for node_id in ("dev.specs", "dev.plan", "dev.code", "dev.utest"):
+            policy = _runtime_policy(node_id)
+            self.assertEqual(policy["agentMode"], "solo")
+            self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
+
+    def test_board_config_nodes_with_subagents_keep_task_enabled(self):
+        """配置了 customSubagentFiles 的节点必须同时开放 task，否则子代理无法启动。"""
+        config = json.loads(
+            (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
         )
+
+        def walk(value):
+            if isinstance(value, dict):
+                nodes = value.get("nodes")
+                if isinstance(nodes, list):
+                    for node in nodes:
+                        if isinstance(node, dict):
+                            yield node
+                for key, nested in value.items():
+                    if key != "nodes":
+                        yield from walk(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    yield from walk(nested)
+
+        checked = 0
+        for node in walk(config["workflow"]):
+            policy = node.get("runtimePolicy")
+            if not isinstance(policy, dict):
+                continue
+            subagents = policy.get("subagentConfig") or {}
+            if not subagents.get("customSubagentFiles"):
+                continue
+            checked += 1
+            with self.subTest(node=node.get("id")):
+                self.assertTrue(
+                    policy["toolCustomConfig"]["task"]["enabled"],
+                    f"{node.get('id')} 配置了子代理但禁用了 task 工具",
+                )
+
+        self.assertGreater(checked, 0)
 
     def test_missing_node_config_uses_required_defaults(self):
         expected = {
@@ -460,7 +499,7 @@ class RuntimePolicyTest(unittest.TestCase):
     def test_invalid_selected_json_still_returns_runtime_policy(self):
         output = io.StringIO()
         with redirect_stdout(output):
-            exit_code = main(["--node-id", "dev.specs", "--selected-deployUnit", "not-json"])
+            exit_code = main(["--node-id", "biz.discuss", "--selected-deployUnit", "not-json"])
         payload = json.loads(output.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertFalse(payload["ok"])
