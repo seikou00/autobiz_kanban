@@ -1,10 +1,3 @@
-# 技术设计模板
-
-> 由 Plan 阶段生成，写入 `{FEATURE_DIR}/design.md`。
-
----
-
-```markdown
 # 技术设计: [来自 proposal/specs 的标题]
 
 来源: proposal.md + specs/**/*.md + design exploration 结论 + 现有代码/项目约束
@@ -19,9 +12,6 @@
 - **当前代码现状:** [一句话概述；逐条事实进 Code Evidence]
 
 ## 2. Code Evidence / 代码探索证据
-
-> 探索得到的代码事实逐条落盘：EVD ID 稳定、不复用；重入时只复核并更新变化的条目。
-> 与 DEC/REQ 冲突的观察不得直接覆盖本表或改写 specs/Decision Log，列为 reconciliation（R-xx Type=读码差异）进裁定门。
 
 | Evidence ID | Path / Symbol | Observed Fact | Verified At |
 |-------------|---------------|---------------|-------------|
@@ -69,7 +59,3 @@
 | ID | Type | Description | Impact | Owner/Next Step |
 |----|------|-------------|--------|-----------------|
 | R-01 | 风险/待确认/读码差异 | [描述；读码差异写明「spec/DEC 说 X，代码是 Y（EVD-xx）」] | [影响] | [下一步] |
-
-> Type 为「待确认」或「读码差异」的 R-xx 条目属于设计确认环节的逐条裁定范围；用户裁定后回写本表（更新 Type 或在 Owner/Next Step 记录裁定结果）。
-> 进入 PLAN 生成前，本文件所有表格不得残留「待确认」「读码差异」单元格；裁定结果（含用户提供的链接/内容）须回写到对应行或章节。
-```

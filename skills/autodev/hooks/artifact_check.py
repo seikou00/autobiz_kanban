@@ -37,6 +37,9 @@ TASK_STATUS_LINE = re.compile(r"^[ \t]*[-*][ \t]*\*\*状态:\*\*[ \t]*(.+)$", re
 TASK_EVIDENCE_LINE = re.compile(r"^[ \t]*[-*][ \t]*\*\*完成记录:\*\*[ \t]*(.+)$", re.MULTILINE)
 # design 决策表首列 ID（API/DATA/D；EVD 是证据不是待实现决策，不参与覆盖检查）
 DESIGN_DECISION_ROW = re.compile(r"^\|\s*`?((?:API|DATA)-\d{1,3}|D-\d{1,3})`?\s*\|", re.MULTILINE)
+FENCE_OPEN_LINE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+BLOCKQUOTE_LINE = re.compile(r"^[ \t]{0,3}>")
+TEMPLATE_WRAPPER_HEADINGS = {"# 技术设计模板", "# 计划模板"}
 
 
 def section_text(text: str, heading: str) -> str:
@@ -108,6 +111,73 @@ def spec_actual_operations(text: str) -> set[str]:
         if REQ_HEADING.search(body):
             operations.add(match.group(1))
     return operations
+
+
+def find_template_guidance_residue(text: str) -> list[tuple[int, str]]:
+    """Return ``(line number, kind)`` for template-only markup in an artifact.
+
+    Autodev contract artifacts use paragraphs, lists, and tables for explanatory
+    content. Markdown blockquotes are reserved for template authoring guidance
+    and must not survive generation. Fenced code blocks are ignored so examples
+    containing shell redirects or quoted Markdown do not false-positive.
+    """
+    residues: list[tuple[int, str]] = []
+    fence_char = ""
+    fence_length = 0
+    seen_content = False
+
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if fence_char:
+            stripped = line.lstrip(" \t")
+            run_length = len(stripped) - len(stripped.lstrip(fence_char))
+            if run_length >= fence_length and not stripped[run_length:].strip():
+                fence_char = ""
+                fence_length = 0
+            continue
+
+        fence_match = FENCE_OPEN_LINE.match(line)
+        if fence_match:
+            fence = fence_match.group("fence")
+            info = fence_match.group("info").strip().lower()
+            if info in {"markdown", "md"} and not seen_content:
+                residues.append((lineno, "outer_markdown_fence"))
+            fence_char = fence[0]
+            fence_length = len(fence)
+            seen_content = True
+            continue
+
+        stripped = line.strip()
+        if stripped in TEMPLATE_WRAPPER_HEADINGS:
+            residues.append((lineno, "wrapper_heading"))
+        if BLOCKQUOTE_LINE.match(line):
+            residues.append((lineno, "blockquote"))
+        if stripped:
+            seen_content = True
+
+    return residues
+
+
+def validate_no_template_guidance(
+    ctx: HookContext,
+    path: Path,
+    text: str,
+) -> int:
+    """Reject template authoring guidance copied into a generated artifact."""
+    try:
+        artifact = path.relative_to(ctx.feature_dir).as_posix()
+    except ValueError:
+        artifact = str(path)
+
+    failures = 0
+    for lineno, kind in find_template_guidance_residue(text):
+        failures += fail_line(
+            ctx,
+            "artifact_template_guidance_residue",
+            f" file={artifact!r} line={lineno} kind={kind}",
+        )
+    return failures
+
+
 VALID_VERDICT = re.compile(r"verdict\s*[:=]\s*(PASS_WITH_WARNINGS|PASS|FAIL|DEGRADED)\b", re.IGNORECASE)
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
 UNIT_TEST_VERDICT = re.compile(
@@ -131,7 +201,7 @@ def validate_proposal_contract(ctx: HookContext) -> int:
         return fail_line(ctx, "missing_proposal")
 
     text = read_text(proposal)
-    failures = 0
+    failures = validate_no_template_guidance(ctx, proposal, text)
     required_sections = [
         "Why",
         "What Changes",
@@ -183,6 +253,7 @@ def validate_specs_contract(ctx: HookContext) -> int:
         text = read_text(spec)
         rel = spec.relative_to(ctx.feature_dir)
         rel_posix = rel.as_posix()
+        failures += validate_no_template_guidance(ctx, spec, text)
         actual_paths.add(rel_posix)
         capability = spec.parent.name
 
@@ -280,7 +351,7 @@ def validate_design_contract(ctx: HookContext) -> int:
         return fail_line(ctx, "missing_design")
 
     text = read_text(design)
-    failures = 0
+    failures = validate_no_template_guidance(ctx, design, text)
     required_sections = [
         "Context / 输入上下文",
         "Code Evidence",
@@ -308,8 +379,8 @@ def validate_plan_initial_tasks(ctx: HookContext) -> int:
     plan = ctx.file("PLAN.md")
     if not is_nonempty(plan):
         return fail_line(ctx, "missing_plan")
-    failures = 0
     plan_text = read_text(plan)
+    failures = validate_no_template_guidance(ctx, plan, plan_text)
     if "任务总览" not in plan_text or "任务详情" not in plan_text:
         failures += fail_line(ctx, "invalid_plan_structure")
     # 新模板要求单一覆盖表；legacy 双覆盖表 PLAN 仍可回放
@@ -344,7 +415,8 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
             info(ctx, "plan_not_in_contract_degrade")
             return 0
         return fail_line(ctx, "missing_plan")
-    failures = 0
+    plan_text = read_text(plan)
+    failures = validate_no_template_guidance(ctx, plan, plan_text)
     if task_count(plan) <= 0:
         failures += fail_line(ctx, "invalid_plan_no_tasks")
     statuses = task_statuses(plan)
@@ -356,7 +428,6 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
         failures += fail_line(ctx, "plan_has_failed_tasks")
     elif any("完成" not in status for status in statuses):
         failures += fail_line(ctx, "invalid_task_status")
-    plan_text = read_text(plan)
     pending = PENDING_CELL.findall(plan_text)
     if pending:
         failures += fail_line(ctx, "plan_has_pending_cells", f" count={len(pending)}")

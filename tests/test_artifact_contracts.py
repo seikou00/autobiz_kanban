@@ -17,6 +17,7 @@ if str(AUTODEV_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS_DIR))
 
 from artifact_check import (  # noqa: E402
+    find_template_guidance_residue,
     validate_design_contract,
     validate_plan_finished_tasks,
     validate_plan_initial_tasks,
@@ -156,6 +157,38 @@ PLAN_OK = """# 执行计划: 导出
 """
 
 
+class TemplateGuidanceScannerTest(unittest.TestCase):
+    def test_blockquote_inside_fence_and_comparison_operator_pass(self) -> None:
+        text = "# 示例\n\n````markdown\n> 围栏内引用\n````\n\n比较结果：a > b\n"
+        self.assertEqual(find_template_guidance_residue(text), [])
+
+    def test_outer_markdown_fence_fails(self) -> None:
+        text = "```markdown\n# Proposal: 示例\n```\n"
+        self.assertEqual(
+            find_template_guidance_residue(text),
+            [(1, "outer_markdown_fence")],
+        )
+
+    def test_known_wrapper_heading_fails(self) -> None:
+        self.assertEqual(
+            find_template_guidance_residue("# 计划模板\n"),
+            [(1, "wrapper_heading")],
+        )
+
+    def test_autodev_output_templates_are_clean(self) -> None:
+        templates = {
+            ROOT / "skills/autodev/autodev-specs/templates/proposal.md": "# Proposal:",
+            ROOT / "skills/autodev/autodev-specs/templates/spec.md": "# [Capability Name] Specification",
+            ROOT / "skills/autodev/autodev-plan/templates/design.md": "# 技术设计:",
+            ROOT / "skills/autodev/autodev-plan/templates/plan.md": "# 执行计划:",
+        }
+        for template, expected_prefix in templates.items():
+            with self.subTest(template=template):
+                text = template.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith(expected_prefix))
+                self.assertEqual(find_template_guidance_residue(text), [])
+
+
 class ContractTestBase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -218,6 +251,17 @@ class ProposalContractTest(ContractTestBase):
         failures, output = self.run_validator(validate_proposal_contract)
         self.assertGreater(failures, 0)
         self.assertIn("proposal_open_questions_pending", output)
+
+    def test_template_guidance_fails_with_location(self) -> None:
+        text = PROPOSAL_OK.replace(
+            "## Capability Index",
+            "## Capability Index\n\n> 本表是 capability 的唯一权威索引。",
+        )
+        self.write("proposal.md", text)
+        failures, output = self.run_validator(validate_proposal_contract)
+        self.assertGreater(failures, 0)
+        self.assertIn("artifact_template_guidance_residue", output)
+        self.assertIn("file='proposal.md' line=11 kind=blockquote", output)
 
 
 class SpecsContractTest(ContractTestBase):
@@ -315,6 +359,18 @@ class SpecsContractTest(ContractTestBase):
         failures, output = self.run_validator(validate_specs_contract)
         self.assertEqual(failures, 0, output)
 
+    def test_template_guidance_fails_with_location(self) -> None:
+        self.write("proposal.md", PROPOSAL_OK)
+        text = SPEC_OK.replace(
+            "Capability-ID: CAP-order-export",
+            "Capability-ID: CAP-order-export\n\n> 稳定 ID 规则：",
+        )
+        self.write("specs/order-export/spec.md", text)
+        failures, output = self.run_validator(validate_specs_contract)
+        self.assertGreater(failures, 0)
+        self.assertIn("artifact_template_guidance_residue", output)
+        self.assertIn("file='specs/order-export/spec.md' line=5 kind=blockquote", output)
+
 
 class DesignContractTest(ContractTestBase):
     def test_valid_design_passes(self) -> None:
@@ -341,6 +397,17 @@ class DesignContractTest(ContractTestBase):
         self.write("design.md", text)
         failures, output = self.run_validator(validate_design_contract)
         self.assertEqual(failures, 0, output)
+
+    def test_template_guidance_fails_with_location(self) -> None:
+        text = DESIGN_OK.replace(
+            "# 技术设计: 导出",
+            "# 技术设计: 导出\n\n> 探索得到的代码事实逐条落盘。",
+        )
+        self.write("design.md", text)
+        failures, output = self.run_validator(validate_design_contract)
+        self.assertGreater(failures, 0)
+        self.assertIn("artifact_template_guidance_residue", output)
+        self.assertIn("file='design.md' line=3 kind=blockquote", output)
 
 
 class PlanContractTest(ContractTestBase):
@@ -388,6 +455,17 @@ class PlanContractTest(ContractTestBase):
         self.assertGreater(failures, 0)
         self.assertIn("invalid_initial_completion_record", output)
 
+    def test_template_guidance_fails_with_location(self) -> None:
+        text = PLAN_OK.replace(
+            "# 执行计划: 导出",
+            "# 执行计划: 导出\n\n> 唯一覆盖表说明。",
+        )
+        self.write("PLAN.md", text)
+        failures, output = self.run_validator(validate_plan_initial_tasks)
+        self.assertGreater(failures, 0)
+        self.assertIn("artifact_template_guidance_residue", output)
+        self.assertIn("file='PLAN.md' line=3 kind=blockquote", output)
+
 
 PLAN_DONE = PLAN_OK.replace("- **状态:** 待做", "- **状态:** 完成").replace(
     "- **完成记录:** 无",
@@ -427,6 +505,17 @@ class PlanFinishedContractTest(ContractTestBase):
         self.write("design.md", DESIGN_OK)
         failures, output = self.run_validator(validate_plan_finished_tasks)
         self.assertEqual(failures, 0, output)
+
+    def test_template_guidance_fails_after_execution(self) -> None:
+        text = PLAN_DONE.replace(
+            "# 执行计划: 导出",
+            "# 执行计划: 导出\n\n> Code 阶段模板说明。",
+        )
+        self.write("PLAN.md", text)
+        failures, output = self.run_validator(validate_plan_finished_tasks)
+        self.assertGreater(failures, 0)
+        self.assertIn("artifact_template_guidance_residue", output)
+        self.assertIn("file='PLAN.md' line=3 kind=blockquote", output)
 
 
 class PlanExecutionCheckTest(ContractTestBase):

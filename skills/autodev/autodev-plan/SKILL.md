@@ -200,6 +200,8 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 > **specs 驱动设计**：基于 `proposal.md`、`specs/**/*.md` 和 design exploration 结论，先生成 `design.md`，再基于 specs + design 生成 `PLAN.md`。
 。
 
+模板仅定义最终产物骨架。填入实际内容后直接落盘，不得复制模板说明、外围“模板”标题、外层代码围栏或占位解释。`design.md` 与 `PLAN.md` 的代码围栏外不得使用 Markdown 块引用（`>`）；需要表达说明时改写为普通段落、列表或表格。
+
 #### 写入checkpoint
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
@@ -300,6 +302,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
 - 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 记为 R-xx（Type=待确认或读码差异）走裁定门，并回到用户确认，不得擅自覆盖 specs。
 - 用户补充的实现细节只能作为计划依据，不得在 Plan 阶段创建或修改业务代码文件。
+- `PLAN.md` 的「风险」只承载 `design.md` 中 Type=风险的 R-xx；Type=待确认或读码差异的条目必须回到 design 裁定门消解，不得进入 PLAN。
 
 任务拆分粒度：
 

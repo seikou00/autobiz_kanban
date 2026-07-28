@@ -3,11 +3,6 @@
 Capability-ID: CAP-[capability-name]
 来源: proposal.md + PRD.md + explore 阶段结论
 
-> 稳定 ID 规则：
-> - Requirement 标题：`### REQ-<capability>-NNN: <标题>`，NNN 三位递增；`<capability>` 与本文件目录名一致。
-> - Scenario 标题：`#### SCN-<capability>-NNN-NN: <标题>`，前缀必须对应本文件中已存在的 REQ。
-> - 改标题不改 ID；Requirement 删除后其 ID 不复用；ID 在同一 feature 内全局唯一。
-
 ## ADDED Requirements
 
 ### REQ-[capability]-001: [能力名]

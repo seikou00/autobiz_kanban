@@ -104,6 +104,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 按 `${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
 
+模板仅定义最终产物骨架。填入实际内容后直接落盘，不得复制模板说明、外围“模板”标题、外层代码围栏或占位解释。`proposal.md` 与 `specs/**/*.md` 的代码围栏外不得使用 Markdown 块引用（`>`）；需要表达说明时改写为普通段落、列表或表格。
+
 生成前先建立 capability 变更分类表，直接写入 proposal 的 `## Capability Index` 节（唯一权威索引），后续 `specs/**/*.md` 必须与其一一对应。探索中形成的判定依据与既有行为来源在对话中说明，索引表只留结论：
 
 | Capability ID | Capability | Operations | Spec Path | Status |
