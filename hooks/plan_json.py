@@ -1328,6 +1328,14 @@ def _validate_task_validation(errors: list[str], data: dict[str, Any], batch_id:
             or any(task_id not in actual_order for task_id in repair_owners)
         ):
             errors.append(f"{batch_id}.taskValidation.repairOwnerTaskIds_invalid")
+        validation_failures = validation.get("validationFailures", [])
+        if not isinstance(validation_failures, list) or any(
+            not isinstance(item, dict)
+            or item.get("taskId") not in actual_order
+            or not isinstance(item.get("commandId"), str)
+            for item in validation_failures
+        ):
+            errors.append(f"{batch_id}.taskValidation.validationFailures_invalid")
     if status == "passed" and completed != actual_order:
         errors.append(f"{batch_id}.taskValidation.passed_without_all_tasks")
     if status == "passed" and (

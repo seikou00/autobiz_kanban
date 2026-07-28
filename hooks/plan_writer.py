@@ -934,6 +934,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                     "errorCategory",
                     "diagnosticPaths",
                     "repairOwnerTaskIds",
+                    "validationFailures",
                     "lastFailure",
                 ):
                     if field in previous_task_validation:
@@ -3341,6 +3342,7 @@ def start_deferred_task_validation(
             "errorCategory",
             "diagnosticPaths",
             "repairOwnerTaskIds",
+            "validationFailures",
         ):
             validation.pop(field, None)
         validation.setdefault("completedTaskIds", [
@@ -3422,12 +3424,19 @@ def record_deferred_task_validation_attempt(
             failure = failure if isinstance(failure, dict) else {}
             failed_validation_task_id = failure.get("failedValidationTaskId", task_id)
             repair_owner_task_ids = failure.get("repairOwnerTaskIds", [task_id])
+            validation_failures = failure.get("validationFailures", [])
+            validation_failures = (
+                copy.deepcopy(validation_failures)
+                if isinstance(validation_failures, list)
+                else []
+            )
             validation.update({
                 "failedValidationTaskId": failed_validation_task_id,
                 "failedCommandId": failure.get("failedCommandId"),
                 "errorCategory": failure.get("errorCategory", "behavior_test_failure"),
                 "diagnosticPaths": list(failure.get("diagnosticPaths", [])),
                 "repairOwnerTaskIds": list(repair_owner_task_ids),
+                "validationFailures": validation_failures,
                 "lastFailure": {
                     "runId": run_id,
                     "failedValidationTaskId": failed_validation_task_id,
@@ -3435,6 +3444,7 @@ def record_deferred_task_validation_attempt(
                     "errorCategory": failure.get("errorCategory", "behavior_test_failure"),
                     "diagnosticPaths": list(failure.get("diagnosticPaths", [])),
                     "repairOwnerTaskIds": list(repair_owner_task_ids),
+                    "validationFailures": validation_failures,
                     "evidenceIds": list(evidence_ids),
                     "batchSnapshotSha256": batch_snapshot_sha256,
                 },
@@ -3518,6 +3528,7 @@ def invalidate_deferred_task_validation_for_repair(
             "errorCategory",
             "diagnosticPaths",
             "repairOwnerTaskIds",
+            "validationFailures",
         ):
             validation.pop(field, None)
         batch_validation = batch_plan.get("batchValidation")

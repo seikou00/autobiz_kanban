@@ -14,6 +14,7 @@ from hooks.validation_policy import (
     maven_test_target_sources,
     task_validation_kinds_for_lane,
 )
+from hooks.validation_groups import plan_validation_groups
 
 
 class ValidationPolicyTest(unittest.TestCase):
@@ -93,6 +94,80 @@ class ValidationPolicyTest(unittest.TestCase):
         self.assertIn("maven_test_execution_skipped", errors)
         self.assertIn("maven_test_zero_match_allowed", errors)
         self.assertIn("maven_test_selector_must_name_class", errors)
+
+    def test_groups_compatible_maven_tests_into_one_physical_command(self) -> None:
+        groups = plan_validation_groups({"tasks": [
+            {
+                "id": "T001",
+                "validationCommands": [{
+                    "id": "VAL-T001-01",
+                    "argv": ["mvn", "test", "-q", "-Dtest=FirstTest"],
+                    "cwd": "service",
+                    "repo": "backend",
+                    "kind": "behavior_test",
+                    "required": True,
+                }],
+            },
+            {
+                "id": "T002",
+                "validationCommands": [{
+                    "id": "VAL-T002-01",
+                    "argv": ["mvn", "test", "-q", "-Dtest=SecondTest#fails"],
+                    "cwd": "service",
+                    "repo": "backend",
+                    "kind": "behavior_test",
+                    "required": True,
+                }],
+            },
+        ]})
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["strategy"], "maven_test_aggregate")
+        self.assertEqual(groups[0]["taskIds"], ["T001", "T002"])
+        self.assertEqual(
+            groups[0]["physicalCommand"]["argv"],
+            ["mvn", "test", "-q", "-Dtest=FirstTest,SecondTest#fails"],
+        )
+
+    def test_keeps_incompatible_maven_tests_separate(self) -> None:
+        groups = plan_validation_groups({"tasks": [
+            {
+                "id": "T001",
+                "validationCommands": [{
+                    "id": "VAL-T001-01",
+                    "argv": ["mvn", "test", "-Dtest=FirstTest"],
+                    "cwd": "service-a",
+                    "kind": "behavior_test",
+                    "required": True,
+                }],
+            },
+            {
+                "id": "T002",
+                "validationCommands": [{
+                    "id": "VAL-T002-01",
+                    "argv": ["mvn", "test", "-Dtest=SecondTest"],
+                    "cwd": "service-b",
+                    "kind": "behavior_test",
+                    "required": True,
+                }],
+            },
+        ]})
+        self.assertEqual(len(groups), 2)
+
+    def test_deduplicates_exact_frontend_compile_commands(self) -> None:
+        command = {
+            "argv": ["npm", "run", "build"],
+            "cwd": ".",
+            "repo": "frontend",
+            "kind": "build",
+            "required": True,
+        }
+        groups = plan_validation_groups({"tasks": [
+            {"id": "T001", "validationCommands": [{"id": "VAL-T001-01", **command}]},
+            {"id": "T002", "validationCommands": [{"id": "VAL-T002-01", **command}]},
+        ]})
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["strategy"], "exact_frontend_compile")
+        self.assertEqual(len(groups[0]["logicalCommands"]), 2)
 
 
 if __name__ == "__main__":

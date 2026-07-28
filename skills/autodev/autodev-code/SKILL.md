@@ -2,6 +2,7 @@
 name: autodev-code
 description: 进行代码实现。
 version: v1.2.0727
+allowed-tools: execute task_output read_file grep glob write_file edit_file
 ---
 
 ## 前端 Route 强制闸门（必须优先执行）
@@ -262,13 +263,38 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 python "${pluginPath}/hooks/task_runner.py" start-batch-task-validation --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-保存输出的完整 `validationContext`，其中必须包含 `runType/featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256/allowedCommands`。主 agent 只启动一个全新的批次验证子代理，并把该对象原样放入启动 prompt；不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能执行 `allowedCommands` 中列出的 runner 命令，并按 `currentTaskId` 串行调用：
+保存输出的完整 `validationContext`，其中必须包含 `runType/featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256/allowedCommands/executionGroups`。主 agent 只启动一个全新的批次验证子代理，并把该对象原样放入启动 prompt；不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能执行 `allowedCommands` 中列出的 runner 命令，并按 `currentTaskId` 调用：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" validate-batch-task --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<CURRENT_TASK_ID>" --run-id "<VALIDATION_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-runner 按计划顺序执行该 TASK 全部命令，验证前后都校验同一 `batchSnapshotSha256`，并写 `validationTarget=batch_final_snapshot` Evidence。返回 `requiredAction=continue_batch_validation_subagent` 和新的 `currentTaskId` 时，同一个子代理继续下一个 TASK；禁止主 agent 接管命令或并行启动其他验证子代理。
+runner 把逻辑 TASK 命令先规划成 `executionGroups`：同仓库、同 cwd、同 Maven 配置的定向测试合并为一次 `-Dtest=A,B` 物理执行；完全相同的前端 compile/build/typecheck 命令只执行一次；不兼容命令保持独立。同一物理执行根据 Surefire/Failsafe XML 拆回每个 TASK 的逻辑结果和独立 Evidence，因此一次 Maven 失败不会把所有测试笼统归为同一个错误。物理组完成后，后续 TASK 只采用已有 Evidence，不重复执行命令。
+
+同一 workspace 的验证命令由 runner 串行调度，禁止为每个 TASK 并行启动 Maven/Gradle/Node 进程；这会争用 `target`、缓存和报告目录，也会破坏冻结快照。子代理隔离保留在逻辑 Task/Evidence 层，耗时优化来自物理命令合并和去重。返回 `requiredAction=continue_batch_validation_subagent` 和新的 `currentTaskId` 时，同一个子代理继续下一个 TASK；禁止主 agent 接管命令或并行启动其他验证子代理。
+
+#### Claw 异步 Bash 执行规则
+
+`validate-batch-task`、`batch-check`、`project-check` 以及它们内部触发的 Maven/Gradle/npm 构建和测试可能超过 Claw 默认 30 秒超时。Agent 必须通过 Claw 原生工具异步执行整个 runner 命令；插件 Python 脚本不得 import 或调用 Claw Bash API。
+
+1. 调用 `execute` 并设置 `run_in_background: true`，保存返回的 `task_id`。
+2. 使用 `task_output({task_id, timeout: 120000})` 等待结果。
+3. 返回 `retrieval_status: "timeout"` 时，用同一个 `task_id` 继续调用 `task_output`；不得重新启动 runner。
+4. 只查询状态时使用 `task_output({task_id, block: false})`。
+5. 退出码非 0 时读取 runner 的完整 JSON 结果并按 `requiredAction` 处理；不得把超时或非零退出码伪装成通过。
+6. 禁止使用 shell `&`、`nohup` 或另开不可追踪进程；Claw 后台任务最长可运行 2 小时并能持续返回部分输出。
+
+```text
+execute({
+  command: "python \"${pluginPath}/hooks/task_runner.py\" validate-batch-task --feature \"${feature}\" --batch-id \"<BATCH_ID>\" --task-id \"<CURRENT_TASK_ID>\" --run-id \"<VALIDATION_RUN_ID>\" --code-workspace \"<BUSINESS_REPO>\"",
+  cwd: "<WORKSPACE>",
+  run_in_background: true
+})
+
+task_output({task_id: "<TASK_ID_FROM_EXECUTE>", timeout: 120000})
+```
+
+Coordinator 模式必须使用具备 `execute/task_output` 的 verify worker，或没有 `owned_files` 限制的全工作区 write worker承载验证；read_only worker 会拒绝 runner 的 Evidence/Plan 状态写入，局部 `owned_files` worker 可能没有异步 Bash 工具。`allowed-tools` 只声明建议工具，不绕过沙箱或自动提权。
 
 最后一个 TASK 通过且返回 `requiredAction=run_batch_check_in_validation_subagent` 时，仍由同一个子代理执行批次级 compile/build/typecheck/lint：
 
@@ -280,7 +306,9 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 `taskValidation.status=running` 期间工作区处于硬冻结：runner 拒绝启动/收口实现任务，Plan Writer 拒绝写计划或渲染产物，Evidence Store 拒绝 validation runner 之外的任何追加。子代理不能通过直接调用其他 writer 绕过冻结。
 
-子代理/进程中断时使用同一 runId 和 currentTaskId 恢复，已写 Evidence 的命令不会重复。每次失败都必须原样返回 runner 的完整机器结果：`runType/runId/batchId/failedValidationTaskId/failedCommandId/errorCategory/requiredAction/evidenceIds/batchSnapshotSha256/allowedCommands`；存在编译诊断时还必须返回 `diagnosticPaths/repairOwnerTaskIds`。`failedValidationTaskId` 只表示当时正在执行校验命令的游标，真正允许修改源码的 TASK 以 `repairOwnerTaskIds` 为准，禁止把两者混为一谈。
+子代理/进程中断时使用同一 runId 和 currentTaskId 恢复，已写 Evidence 的物理组和逻辑命令不会重复。每次失败都必须原样返回 runner 的完整机器结果：`runType/runId/batchId/failedValidationTaskId/failedCommandId/errorCategory/requiredAction/evidenceIds/batchSnapshotSha256/allowedCommands/validationFailures`；存在编译诊断时还必须返回 `diagnosticPaths/repairOwnerTaskIds`。`validationFailures[]` 按逻辑 TASK/command 列出 selectors、errorCategory、diagnosticPaths、repairOwnerTaskIds 和 `testFailures`；`testFailures.failureKind` 区分 `assertion_failure` 与 `unexpected_exception`。`failedValidationTaskId` 只表示当时正在执行校验命令的游标，真正允许修改源码的 TASK 以 `repairOwnerTaskIds` 为准，禁止把两者混为一谈。
+
+多个测试同时失败时，先按 `validationFailures[].repairOwnerTaskIds` 分组：同一 owner 的失败可在一次 repair 中一起修复；不同 owner 必须选择一个允许的 owner 启动 repair，完成实现收口并整批重验，剩余失败在后续轮次继续处理。不得把多个 owner 的修改全部记到一个 TASK，也不得因某个 selector 已通过而重跑或改写其历史 Evidence。
 
 若 runner 返回 `errorCategory=environment_failure` 以及 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。普通 required 校验失败可在工作区未变化时创建新的 task-validation run 重试；需要修改源码时，必须在任何源码、测试或配置改动之前执行 `start-validation-repair --task-id <REPAIR_OWNER_TASK_ID>`。runner 会校验工作区仍等于失败 run 的冻结快照；返回 `workspace_changed_before_validation_repair` 时先恢复该快照，不得补开 repair 掩盖先前改动。repair 完成后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
 
