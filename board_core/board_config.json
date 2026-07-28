@@ -89,8 +89,6 @@
               "inputs": [
                 { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
                   "extract": {
-                    "focus": ["页面/交互需求与验收标准", "HTML 设计稿的引用与格式"],
-                    "method": "按 HTML 格式分流转换入口，再以 PRD 验收标准核对前端实现",
                     "degrade": "无 PRD 时基于用户提供的 HTML 与描述实现，并记录验收基准缺失"
                   } }
               ],
@@ -387,7 +385,7 @@
             "customSubagentFiles": ["agents/code-reviewer.md","agents/code-simplifier.md"]
           }
         },
-        "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码（本轮新增/修改的代码，按 PLAN 就地更新任务状态；无独立文档产物）",
+        "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码；PLAN.md 任务状态与完成记录就地回写（无独立文档产物；执行协议以 autodev-code skill 正文为准）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
@@ -414,9 +412,11 @@
               } },
             { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
               "extract": {
-                "focus": ["任务 DAG 与依赖顺序", "每个任务的做什么/规格依据/设计依据/验证方法/状态", "specs 行为覆盖与设计决策覆盖"],
-                "method": "作为现成执行队列，按任务 DAG 逐项推进、不必再自行拆解；就地更新任务状态（保持 `- **状态:** 待做|进行中|完成|失败` 行格式，hook 据此识别）与验证证据",
                 "degrade": "无 PLAN 契约时从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务），逐项实现并在完成摘要中记录任务与验证结果"
+              } },
+            { "id": "detail_design_optional", "label": "详细设计参考", "artifactType": "file", "path": "DETAIL_DESIGN.md", "required": false,
+              "extract": {
+                "degrade": "无 DETAIL_DESIGN 时按 design.md 与 PLAN.md 的任务执行包直接实现"
               } }
           ],
           "outputs": [

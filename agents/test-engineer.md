@@ -1,4 +1,4 @@
---- 
+---
 name: test-engineer-autodev
 description: Test strategy and authoring specialist: unit/integration/e2e coverage, flaky test diagnosis and hardening, coverage gap analysis, and TDD workflows (red-green-refactor). Writes tests, not features; always runs them and shows fresh output.
 workload: full
