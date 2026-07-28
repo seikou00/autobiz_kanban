@@ -67,7 +67,7 @@ prd_done → resolve_next_skill.py --json
 
 子技能返回后，根路由器必须：
 
-1. 子技能返回后重新调用 `read_state_json.py` 重新捕获 `CHECKPOINT`。
+1. 子技能返回后重新运行 `read_state_json.py` 读取当前 checkpoint。
 2. 重新调用 `resolve_next_skill.py --json`，若返回 `ok: false` 或 checkpoint 不在 board_config 当前 profile 的合法矩阵中，保持原状态并告警。
 3. `needs_fix` → 按最近阶段报告中的建议回流阶段处理。
 4. 合法出口只更新当前阶段结果；后续阶段需由用户再次触发根路由器或指定子技能继续执行。

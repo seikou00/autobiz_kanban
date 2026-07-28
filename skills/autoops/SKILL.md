@@ -36,11 +36,10 @@ version: v1.1.2609
 ###  确定 Feature状态
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-后续 checkpoint 路由、准入判断和执行后校验直接取用 `CHECKPOINT`。
-
+每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
@@ -65,7 +64,7 @@ python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --json
 
 子技能返回后，根路由器必须：
 
-1. 子技能返回后重新调用 `read_state_json.py` 重新捕获 `CHECKPOINT`。
+1. 子技能返回后重新运行 `read_state_json.py` 读取当前 checkpoint。
 2. 重新调用 `resolve_next_skill.py --json`，确认出口仍在当前 profile 的合法矩阵中。
 3. 出口不合法时保持原状态并告警，不继续推进。
 4. 若脚本推荐 `/autoops-archive`，继续归档；`archived` 后 Ops 阶段结束。

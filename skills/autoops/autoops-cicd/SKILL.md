@@ -49,10 +49,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-3. 后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，仅用户直供 CI/CD 场景可继续通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
+3. 每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 4. 若尚未执行 workspace 初始化，先执行 `python hooks/init_workspace.py .`
 5. 读取仓库构建配置、流水线配置、已有流程产物和用户输入，整理 CI/CD 所需上下文
 6. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：

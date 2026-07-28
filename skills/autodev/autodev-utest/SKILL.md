@@ -37,11 +37,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "
 调用脚本读取当前 Feature 快照：
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-后续准入、恢复和完成判断直接取用 `CHECKPOINT`。
-
+每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 ## 参数
 
 扫描 `$ARGUMENTS`：

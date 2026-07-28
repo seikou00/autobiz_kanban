@@ -30,14 +30,13 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature 
 
 **当前 Feature **
 
-确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+调用脚本读取当前 Feature 状态：
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-后续准入、恢复和分支决策直接取用 `CHECKPOINT`：
-
+每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 | Checkpoint | 行为 |
 |-----------|------|
 | `e2e_done` | ✓ 正常开始最终验收汇总 |
@@ -201,7 +200,6 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint verify_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature ${feature})
 ```
 
 **输出提示：**
@@ -227,7 +225,6 @@ checkpoint=verify_done → Dev 阶段结束
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 在 `VERIFY_REPORT.md` 的失败详情中追加：

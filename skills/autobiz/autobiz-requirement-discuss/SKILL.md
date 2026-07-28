@@ -30,10 +30,10 @@ version: v1.2.1701
 
 ### 获取feature状态
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-后续需要当前 checkpoint 时直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，本技能允许通过下面的 `update_checkpoint.py --allow-create` 创建；创建或推进 checkpoint 后，必须再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
+每次需要当前 checkpoint 时，运行上面的脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 
 ### 加载参考文档
 

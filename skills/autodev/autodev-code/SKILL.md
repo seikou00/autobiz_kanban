@@ -9,10 +9,10 @@ version: v1.2.0704
 
 ## 准入检查
 
-先读快照并捕获 `CHECKPOINT`：
+先获取当前 checkpoint：
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
+python "${pluginPath}/read_state_json.py" --feature "{feature}"
 ```
 
 
@@ -40,7 +40,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 ```
 
 ## 执行协议
@@ -73,7 +72,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "{feature}")
 ```
 
 ## 写入边界

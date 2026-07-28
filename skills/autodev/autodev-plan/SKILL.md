@@ -77,10 +77,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 探索开始时，优先确认当前 Feature：
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
+每次需要当前 checkpoint 时，运行上面的脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 
 - 读取上游产物原件、用户补充说明；其中 proposal.md(如有) 的 `Decision Log` 记录了本轮行为契约背后**已裁定的决策及否决理由**，必须读，作为设计的既定前提，不是可自由重估的建议。
 - 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
@@ -327,7 +327,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 - `design.md`、`PLAN.md` 已完成
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 **Skill 完成。**

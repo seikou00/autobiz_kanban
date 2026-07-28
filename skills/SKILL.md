@@ -42,7 +42,7 @@ version: v1.1.2609
 
 ### State 快照读取
 
-所有需要当前 FEATURE_ID checkpoint 的判断，第一步必须调用脚本读取 `.autobizdevops/state.json`：已知 Feature 时把 stdout 捕获为 `CHECKPOINT`；未知 Feature 时读取全量 JSON 并记为 `STATE`，仅用于从 `STATE.records` 选择 Feature。不得绕过脚本重新手工读取 `state.json`。
+所有需要当前 FEATURE_ID checkpoint 的判断，第一步必须调用脚本读取 `.autobizdevops/state.json`：已知 Feature 时把脚本 stdout 读入 `CHECKPOINT`；未知 Feature 时读取全量 JSON 并记为 `STATE`，仅用于从 `STATE.records` 选择 Feature。不得绕过脚本重新手工读取 `state.json`。
 
 ```bash
 # 已知 Feature
@@ -54,7 +54,7 @@ python "${pluginPath}/read_state_json.py"
 
 - 需要用户从候选 Feature 中选择时，按 `${pluginPath}/skills/references/ask-user-question.md` 提问。候选不超过 3 个时直接列成结构化选项；超过 3 个时先展示完整 slug 清单，再把最多 3 个最相关候选放入结构化选项，其他候选由客户端自动提供的 Other 自由输入承接。若当前模式不支持 `request_user_input`，必须列出完整候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
 
-只有执行 `update_checkpoint.py` 后、子技能返回后，或明确需要确认外部状态变化时，才再次调用 `read_state_json.py` 刷新 `CHECKPOINT`。
+每次需要当前 checkpoint 时，都重新运行 `read_state_json.py` 读取，不得沿用先前回合的旧值，也不得改从 `hooks.ndjson` 等日志或产物推断——当前 checkpoint 只以 `read_state_json.py` / `state.json` 的输出为准。
 
 ### 动态路由读取
 

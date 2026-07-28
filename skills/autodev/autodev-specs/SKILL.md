@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.2.1703
+version: v1.3.1705
 ---
 
 ## 缺失产物处理
@@ -53,7 +53,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ## Explore 协议
@@ -61,11 +60,12 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
 > 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索澄清行为/接口/数据边界` / `生成 proposal.md` / `生成 specs/**/*.md` / `推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
-
+使用task工具，指定Explore-autodev角色进行探索， 探索必须要读<AGENTS_INSTRUCTIONS></AGENTS_INSTRUCTIONS>里面提到的文件，再需要参考下面的要求，然后返回结构化的内容供主代理参考。
 探索时必须：
 
 - 从上游需求输入提取目标、用户角色、主流程、验收标准、非目标。
 - 阅读现有代码，识别已有接口、数据模型、权限、租户、审计、错误体、分页、状态流、配置和测试风格。
+- **只探索源码，不碰编译/生成产物**：`target/`、`build/`、`out/`、`bin/`、`*.class`、`*.jar/war/ear`、`__pycache__/`、`*.pyc`，以及一切 `.gitignore` 命中的路径，都不是事实源，不得据其识别接口/数据模型/约定——它们由源码再生成。扫描优先 `git ls-files <pattern>` 找文件、`git grep <regex>` 搜内容：只走已跟踪源码，自动排除上述产物；不要用裸 `find`/`grep` 做全库扫描。例外：某生成物本身就是问题对象时可读，但须标注「生成物」并回溯到其生成器/源码。
 - 将上游需求改写为外部可观察行为，不要把实现猜测写成需求。
 - 识别 capabilities：一组可以独立命名、独立验收的能力边界，例如 `order-export`、`approval-reminder`。
 - 与用户对齐了术语或规范代码名时，按 `${pluginPath}/skills/references/domain-context.md` 当场回写会话工作区 `CONTEXT.md`（领域词汇表）；只收已对齐术语。
