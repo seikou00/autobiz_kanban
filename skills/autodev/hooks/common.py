@@ -125,8 +125,19 @@ def load_artifact_config(
     )
 
 
-def fail_line(ctx: HookContext, reason: str, extra: str = "") -> int:
+def fail_line(
+    ctx: HookContext,
+    reason: str,
+    extra: str = "",
+    *,
+    repair: str = "",
+) -> int:
     print(f"POST_SKILL_FAIL skill={ctx.skill} reason={reason}{extra}")
+    if repair:
+        print(
+            f"POST_SKILL_REPAIR skill={ctx.skill} reason={reason} "
+            f"action={repair!r}"
+        )
     return 1
 
 

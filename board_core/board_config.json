@@ -365,7 +365,7 @@
             { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
           ]
         },
-        "validators": ["design_contract", "plan_initial_tasks"]
+        "validators": ["design_contract", "plan_initial_tasks", "plan_execution_contract"]
       },
       {
         "id": "dev.code",

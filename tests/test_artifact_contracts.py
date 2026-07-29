@@ -17,7 +17,9 @@ if str(AUTODEV_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS_DIR))
 
 from artifact_check import (  # noqa: E402
+    PLAN_INITIAL_REPAIRS,
     find_template_guidance_residue,
+    run_postcheck,
     validate_design_contract,
     validate_plan_finished_tasks,
     validate_plan_initial_tasks,
@@ -25,7 +27,12 @@ from artifact_check import (  # noqa: E402
     validate_specs_contract,
 )
 from common import HookContext, task_count  # noqa: E402
-from plan_execution_check import main as plan_check_main  # noqa: E402
+from plan_execution_check import (  # noqa: E402
+    PLAN_CHECK_REPAIRS,
+    detect_cycle,
+    main as plan_check_main,
+    scn_shorthand_issues,
+)
 
 
 PROPOSAL_OK = """# Proposal: 导出
@@ -220,6 +227,12 @@ class TemplateGuidanceScannerTest(unittest.TestCase):
                 text = template.read_text(encoding="utf-8")
                 self.assertTrue(text.startswith(expected_prefix))
                 self.assertEqual(find_template_guidance_residue(text), [])
+
+    def test_specs_proposal_template_does_not_preconfirm_questions(self) -> None:
+        template = ROOT / "skills/autodev/autodev-specs/templates/proposal.md"
+        open_questions = template.read_text(encoding="utf-8").split("## Open Questions", 1)[1]
+        self.assertIn("| ID | Question | Impact | Resolution | Decision | Status |", open_questions)
+        self.assertNotIn("已确认", open_questions)
 
 
 class ContractTestBase(unittest.TestCase):
@@ -460,6 +473,34 @@ class SpecsContractTest(ContractTestBase):
         self.assertGreater(failures, 0)
         self.assertIn("capability_operations_mismatch", output)
 
+    def test_malformed_ids_report_expected_formats_without_operations_cascade(self) -> None:
+        malformed = """# Order Export Specification
+
+Capability-ID: CAP-order-export
+
+## ADDED Requirements
+
+### REQ-OE-001: 创建导出任务
+
+The system SHALL 创建导出任务。
+
+#### SCN-OE-001-01: 创建成功
+
+- **WHEN** x
+- **THEN** y
+"""
+        self.write("proposal.md", PROPOSAL_OK.replace("ADDED, MODIFIED", "ADDED"))
+        self.write("specs/order-export/spec.md", malformed)
+        failures, output = self.run_validator(validate_specs_contract)
+        self.assertEqual(failures, 2, output)
+        self.assertIn("reason=invalid_spec_requirement_heading", output)
+        self.assertIn("found=['REQ-OE-001']", output)
+        self.assertIn("expected='### REQ-order-export-NNN: <title>'", output)
+        self.assertIn("reason=invalid_spec_scenario_heading", output)
+        self.assertIn("found=['SCN-OE-001-01']", output)
+        self.assertIn("expected='#### SCN-order-export-NNN-NN: <title>'", output)
+        self.assertNotIn("capability_operations_mismatch", output)
+
     def test_legacy_spec_without_header_uses_legacy_rules(self) -> None:
         legacy_spec = (
             "# Legacy Spec\n\n## ADDED Requirements\n\n"
@@ -560,6 +601,58 @@ class PlanContractTest(ContractTestBase):
         failures, output = self.run_validator(validate_plan_initial_tasks)
         self.assertGreater(failures, 0)
         self.assertIn("task_missing_completion_record_field", output)
+        self.assertIn("POST_SKILL_REPAIR skill=test", output)
+        self.assertIn("- **完成记录:** 无", output)
+
+    def test_fullwidth_non_list_task_fields_report_exact_repair(self) -> None:
+        text = PLAN_OK.replace("- **状态:** 待做", "**状态：** 待做")
+        text = text.replace("- **完成记录:** 无", "**完成记录：** 无")
+        self.write("PLAN.md", text)
+
+        failures, output = self.run_validator(validate_plan_initial_tasks)
+
+        self.assertEqual(failures, 2, output)
+        self.assertIn("reason=missing_task_statuses", output)
+        self.assertIn("reason=task_missing_completion_record_field tasks=TASK-001", output)
+        self.assertIn("- **状态:** 待做", output)
+        self.assertIn("- **完成记录:** 无", output)
+
+    def test_same_task_field_error_is_grouped(self) -> None:
+        second_task = """
+### TASK-002: 后续任务
+
+- **做什么:** x
+- **规格依据:** REQ-order-export-002
+- **场景依据:** SCN-order-export-002-01
+- **设计依据:** API-01
+- **代码证据:** EVD-001
+- **验证方法:** pytest 预期结果：通过
+- **状态:** 待做
+- **完成记录:** 无
+
+"""
+        text = PLAN_OK.replace(
+            "## Contract Coverage / 契约覆盖",
+            second_task + "## Contract Coverage / 契约覆盖",
+        )
+        text = text.replace("- **状态:** 待做", "**状态：** 待做")
+        text = text.replace("- **完成记录:** 无", "**完成记录：** 无")
+        self.write("PLAN.md", text)
+
+        failures, output = self.run_validator(validate_plan_initial_tasks)
+
+        self.assertEqual(failures, 2, output)
+        self.assertIn(
+            "reason=task_missing_completion_record_field tasks=TASK-001,TASK-002",
+            output,
+        )
+        self.assertEqual(
+            output.count(
+                "POST_SKILL_REPAIR skill=test "
+                "reason=task_missing_completion_record_field"
+            ),
+            1,
+        )
 
     def test_prefilled_completion_record_fails(self) -> None:
         text = PLAN_OK.replace("- **完成记录:** 无", "- **完成记录:** 已通过 pytest")
@@ -651,6 +744,56 @@ class PlanExecutionCheckTest(ContractTestBase):
         self.assertEqual(code, 0, output)
         self.assertIn("verdict=PASS", output)
 
+    def test_plan_postcheck_passes_valid_execution_contract(self) -> None:
+        self._write_upstream()
+        self.write("PLAN.md", PLAN_OK)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code, message = run_postcheck(
+                ROOT,
+                self.root,
+                "autodev-plan",
+                self.slug,
+            )
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertIn("POST_SKILL_PASS skill=autodev-plan", message)
+        self.assertIn("verdict=PASS", output.getvalue())
+
+    def test_acyclic_chain(self) -> None:
+        deps = {
+            "TASK-001": set(),
+            "TASK-002": {"TASK-001"},
+            "TASK-003": {"TASK-002"},
+        }
+        self.assertEqual(detect_cycle(deps), [])
+
+    def test_acyclic_fan_in(self) -> None:
+        deps = {
+            "TASK-001": set(),
+            "TASK-002": set(),
+            "TASK-003": {"TASK-001", "TASK-002"},
+        }
+        self.assertEqual(detect_cycle(deps), [])
+
+    def test_acyclic_fan_out(self) -> None:
+        deps = {
+            "TASK-001": set(),
+            "TASK-002": {"TASK-001"},
+            "TASK-003": {"TASK-001"},
+        }
+        self.assertEqual(detect_cycle(deps), [])
+
+    def test_acyclic_disconnected_components(self) -> None:
+        deps = {
+            "TASK-001": set(),
+            "TASK-002": {"TASK-001"},
+            "TASK-003": set(),
+            "TASK-004": {"TASK-003"},
+        }
+        self.assertEqual(detect_cycle(deps), [])
+
     def test_upstream_artifact_change_does_not_block(self) -> None:
         self._write_upstream()
         self.write("PLAN.md", PLAN_OK)
@@ -668,6 +811,49 @@ class PlanExecutionCheckTest(ContractTestBase):
         code, output = self.run_check()
         self.assertEqual(code, 1)
         self.assertIn("missing_req_ref", output)
+        self.assertIn("PLAN_CHECK_REPAIR reason=missing_req_ref", output)
+        self.assertIn("「规格依据」", output)
+
+    def test_scn_range_shorthand_reports_exact_replacement(self) -> None:
+        self._write_upstream()
+        plan = PLAN_OK.replace(
+            "SCN-order-export-001-01",
+            "SCN-order-export-001-01~006",
+        )
+        self.write("PLAN.md", plan)
+        code, output = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("reason=scn_reference_shorthand", output)
+        self.assertIn("file=PLAN.md lines=", output)
+        self.assertIn("场景序号固定为两位", output)
+        self.assertIn(
+            "SCN-order-export-001-01, SCN-order-export-001-02, "
+            "SCN-order-export-001-03, SCN-order-export-001-04, "
+            "SCN-order-export-001-05, SCN-order-export-001-06",
+            output,
+        )
+
+    def test_scn_shorthand_variants_are_rejected(self) -> None:
+        variants = (
+            "SCN-order-export-001-01～06",
+            "SCN-order-export-001-01…06",
+            "SCN-order-export-001-01至06",
+            "SCN-order-export-001-01-06",
+            "SCN-order-export-001-01, -02",
+        )
+        for value in variants:
+            with self.subTest(value=value):
+                issues = scn_shorthand_issues(f"- **场景依据:** {value}")
+                self.assertEqual(len(issues), 1)
+                self.assertEqual(issues[0][0], value)
+                self.assertIn("SCN-order-export-001-02", issues[0][2])
+
+    def test_full_scn_list_is_not_shorthand(self) -> None:
+        text = (
+            "- **场景依据:** SCN-order-export-001-01, "
+            "SCN-order-export-001-02"
+        )
+        self.assertEqual(scn_shorthand_issues(text), [])
 
     def test_uncovered_design_decision_fails(self) -> None:
         """design 的决策没被任何任务认领 → 不得放行。
@@ -776,6 +962,68 @@ class PlanExecutionCheckTest(ContractTestBase):
         code, output = self.run_check()
         self.assertEqual(code, 1)
         self.assertIn("dependency_cycle", output)
+        self.assertIn("PLAN_CHECK_REPAIR reason=dependency_cycle", output)
+        self.assertIn("至少一个起点任务依赖写「无」", output)
+
+    def test_every_plan_error_has_repair_instruction(self) -> None:
+        self.assertEqual(
+            set(PLAN_INITIAL_REPAIRS),
+            {
+                "missing_plan",
+                "invalid_plan_structure",
+                "missing_plan_contract_coverage",
+                "invalid_plan_no_tasks",
+                "missing_task_statuses",
+                "invalid_initial_task_status",
+                "task_missing_completion_record_field",
+                "invalid_initial_completion_record",
+                "plan_has_pending_cells",
+            },
+        )
+        self.assertEqual(
+            set(PLAN_CHECK_REPAIRS),
+            {
+                "missing_req_ref",
+                "missing_scn_ref",
+                "scn_reference_shorthand",
+                "missing_design_ref",
+                "waiver_missing_reason",
+                "uncovered_design_decision",
+                "missing_task_overview_rows",
+                "unknown_dependency",
+                "self_dependency",
+                "dependency_cycle",
+                "task_missing_detail",
+                "task_missing_overview_row",
+            },
+        )
+
+    def test_plan_postcheck_blocks_dependency_cycle(self) -> None:
+        self._write_upstream()
+        plan = PLAN_OK.replace(
+            "| TASK-001 | 实现导出闭环 | 无 | REQ-order-export-001 | 待做 |",
+            "| TASK-001 | 实现导出闭环 | TASK-002 | REQ-order-export-001 | 待做 |\n"
+            "| TASK-002 | 后续任务 | TASK-001 | REQ-order-export-002 | 待做 |",
+        )
+        plan += (
+            "\n### TASK-002: 后续任务\n\n- **做什么:** x\n- **规格依据:** REQ-order-export-002\n"
+            "- **场景依据:** SCN-order-export-002-01\n- **设计依据:** API-01\n- **代码证据:** EVD-001\n"
+            "- **验证方法:** pytest 预期结果：通过\n- **状态:** 待做\n- **完成记录:** 无\n"
+        )
+        self.write("PLAN.md", plan)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code, message = run_postcheck(
+                ROOT,
+                self.root,
+                "autodev-plan",
+                self.slug,
+            )
+
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertIn("POST_SKILL_FAIL skill=autodev-plan", message)
+        self.assertIn("dependency_cycle", output.getvalue())
 
     def test_legacy_plan_degrades(self) -> None:
         legacy = (
@@ -786,6 +1034,14 @@ class PlanExecutionCheckTest(ContractTestBase):
         code, output = self.run_check()
         self.assertEqual(code, 0)
         self.assertIn("verdict=LEGACY_PLAN_DEGRADE", output)
+
+
+class PlanValidationPlacementTest(unittest.TestCase):
+    def test_code_skill_does_not_run_plan_execution_check(self) -> None:
+        content = (
+            ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("plan_execution_check.py", content)
 
 
 if __name__ == "__main__":

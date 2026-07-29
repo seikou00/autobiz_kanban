@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.3.1707
+version: v1.3.1708
 ---
 
 ## 缺失产物处理
@@ -312,7 +312,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
 - 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
 
-任务使用稳定 ID `TASK-NNN`。每个任务的「规格依据 / 场景依据 / 设计依据 / 代码证据」只用稳定 ID（REQ-/SCN-/API-/DATA-/D-/EVD-）；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或在 Contract Coverage 中明确标注无需实现及原因。
+任务使用稳定 ID `TASK-NNN`。每个任务的「规格依据 / 场景依据 / 设计依据 / 代码证据」只用稳定 ID（REQ-/SCN-/API-/DATA-/D-/EVD-）；SCN 引用必须逐个写完整 ID，场景序号固定为两位，禁止使用 `~`、`～`、`…`、`至`、`01-06`、`-02` 等范围或省略写法；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或在 Contract Coverage 中明确标注无需实现及原因。
 
 按 `{PLUGIN_ROOT}/skills/autodev/autodev-plan/templates/plan.md` 的结构输出。
 

@@ -64,7 +64,7 @@ graph TD
 
 | Contract Item | Type | 关联 Scenario | 覆盖任务 | 验证方法 |
 |---------------|------|---------------|----------|----------|
-| REQ-[capability]-001 | Behavior | SCN-…-01, -02 | TASK-001 | [命令/测试] |
+| REQ-[capability]-001 | Behavior | SCN-[capability]-001-01, SCN-[capability]-001-02 | TASK-001 | [命令/测试] |
 | API-01 / x-auto-no-http-api | API | - | TASK-002 / 无需实现:[原因] | [验证方法] |
 | DATA-01 / x-auto-no-sql | Data | - | TASK-001 | [验证方法] |
 | D-01 | Technical Decision | - | TASK-001 | [验证方法] |

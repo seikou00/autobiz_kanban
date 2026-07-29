@@ -31,6 +31,8 @@ PENDING_CELL = re.compile(r"\|\s*(待确认|读码差异)\s*\|")
 CAP_ID_HEADER = re.compile(r"^Capability-ID:\s*`?(CAP-[a-z0-9][a-z0-9-]*)`?\s*$", re.MULTILINE)
 REQ_HEADING = re.compile(r"^###\s+REQ-([a-z0-9][a-z0-9-]*?)-(\d{3}):\s*\S", re.MULTILINE)
 SCN_HEADING = re.compile(r"^####\s+SCN-([a-z0-9][a-z0-9-]*?)-(\d{3})-(\d{2}):\s*\S", re.MULTILINE)
+REQ_CANDIDATE_HEADING = re.compile(r"^###\s+(REQ-[^:\s]+):\s*\S", re.MULTILINE)
+SCN_CANDIDATE_HEADING = re.compile(r"^####\s+(SCN-[^:\s]+):\s*\S", re.MULTILINE)
 OPERATION_HEADING = re.compile(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", re.MULTILINE)
 VALID_OPERATIONS = {"ADDED", "MODIFIED", "REMOVED", "RENAMED"}
 TASK_STATUS_LINE = re.compile(r"^[ \t]*[-*][ \t]*\*\*状态:\*\*[ \t]*(.+)$", re.MULTILINE)
@@ -52,6 +54,17 @@ DECISION_FIELD = re.compile(
 CONSTRAINT_ID = re.compile(r"\b(?:REQ-[a-z0-9][a-z0-9-]*-\d{3}|CAP-[a-z0-9][a-z0-9-]*)\b")
 PLACEHOLDER_TEXT = re.compile(r"\[[^\]]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
 NORMALIZE_STRIP = re.compile(r"[\s？?。.，,、；;：:！!「」“”\"'`*（）()]+")
+PLAN_INITIAL_REPAIRS = {
+    "missing_plan": "创建 PLAN.md，并按 autodev-plan/templates/plan.md 生成任务总览、任务详情和 Contract Coverage。",
+    "invalid_plan_structure": "在 PLAN.md 中补齐二级标题「## 任务总览」和「## 任务详情」。",
+    "missing_plan_contract_coverage": "在 PLAN.md 中补齐「## Contract Coverage / 契约覆盖」及覆盖表。",
+    "invalid_plan_no_tasks": "在「任务详情」中至少新增一个「### TASK-NNN: 任务名」任务块，并在任务总览增加同 ID 行。",
+    "missing_task_statuses": "在每个「### TASK-NNN:」任务块内加入独立一行「- **状态:** 待做」；保留列表符号、半角冒号和中文状态。",
+    "invalid_initial_task_status": "将每个任务块的状态行改为「- **状态:** 待做」；Plan 阶段不得写 pending、进行中或完成。",
+    "task_missing_completion_record_field": "在报错 task 的任务块内加入独立一行「- **完成记录:** 无」；保留列表符号和半角冒号。",
+    "invalid_initial_completion_record": "将报错 task 的完成记录行改为「- **完成记录:** 无」；执行证据只由 Code 阶段回写。",
+    "plan_has_pending_cells": "逐个消解 PLAN.md 表格中的「待确认」或「读码差异」单元格并写入确定值；无法裁定时停留在 Plan 阶段。",
+}
 
 
 def section_text(text: str, heading: str) -> str:
@@ -123,6 +136,18 @@ def spec_actual_operations(text: str) -> set[str]:
         if REQ_HEADING.search(body):
             operations.add(match.group(1))
     return operations
+
+
+def malformed_contract_headings(
+    text: str,
+    candidate_pattern: re.Pattern[str],
+    valid_ids: set[str],
+) -> list[str]:
+    return [
+        match.group(1)
+        for match in candidate_pattern.finditer(text)
+        if match.group(1) not in valid_ids
+    ]
 
 
 def parse_open_questions(text: str) -> tuple[bool, list[dict[str, str]]] | None:
@@ -263,6 +288,7 @@ def validate_no_template_guidance(
             ctx,
             "artifact_template_guidance_residue",
             f" file={artifact!r} line={lineno} kind={kind}",
+            repair="删除报错 file/line 的模板说明、外层 Markdown 围栏或引用块，只保留实际产物内容。",
         )
     return failures
 
@@ -442,9 +468,40 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 )
             req_matches = list(REQ_HEADING.finditer(text))
             scn_matches = list(SCN_HEADING.finditer(text))
-            if not req_matches:
+            valid_req_ids = {
+                f"REQ-{match.group(1)}-{match.group(2)}" for match in req_matches
+            }
+            valid_scn_ids = {
+                f"SCN-{match.group(1)}-{match.group(2)}-{match.group(3)}"
+                for match in scn_matches
+            }
+            malformed_req_ids = malformed_contract_headings(
+                text, REQ_CANDIDATE_HEADING, valid_req_ids
+            )
+            malformed_scn_ids = malformed_contract_headings(
+                text, SCN_CANDIDATE_HEADING, valid_scn_ids
+            )
+            if malformed_req_ids:
+                failures += fail_line(
+                    ctx,
+                    "invalid_spec_requirement_heading",
+                    (
+                        f" file={rel} found={malformed_req_ids!r}"
+                        f" expected='### REQ-{capability}-NNN: <title>'"
+                    ),
+                )
+            elif not req_matches:
                 failures += fail_line(ctx, "invalid_spec_missing_requirement", f" file={rel}")
-            if not scn_matches:
+            if malformed_scn_ids:
+                failures += fail_line(
+                    ctx,
+                    "invalid_spec_scenario_heading",
+                    (
+                        f" file={rel} found={malformed_scn_ids!r}"
+                        f" expected='#### SCN-{capability}-NNN-NN: <title>'"
+                    ),
+                )
+            elif not scn_matches:
                 failures += fail_line(ctx, "invalid_spec_missing_scenario", f" file={rel}")
 
             req_ids_in_file: set[str] = set()
@@ -501,7 +558,16 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 if CAP_ID_HEADER.search(spec_text):
                     declared = parse_operations_cell(row["operations"])
                     actual = spec_actual_operations(spec_text)
-                    if declared != actual:
+                    valid_req_ids = {
+                        f"REQ-{match.group(1)}-{match.group(2)}"
+                        for match in REQ_HEADING.finditer(spec_text)
+                    }
+                    has_invalid_req_structure = not valid_req_ids or bool(
+                        malformed_contract_headings(
+                            spec_text, REQ_CANDIDATE_HEADING, valid_req_ids
+                        )
+                    )
+                    if declared != actual and not has_invalid_req_structure:
                         failures += fail_line(
                             ctx,
                             "capability_operations_mismatch",
@@ -549,32 +615,85 @@ def validate_design_contract(ctx: HookContext) -> int:
 def validate_plan_initial_tasks(ctx: HookContext) -> int:
     plan = ctx.file("PLAN.md")
     if not is_nonempty(plan):
-        return fail_line(ctx, "missing_plan")
+        return fail_line(
+            ctx,
+            "missing_plan",
+            repair=PLAN_INITIAL_REPAIRS["missing_plan"],
+        )
     plan_text = read_text(plan)
     failures = validate_no_template_guidance(ctx, plan, plan_text)
     if "任务总览" not in plan_text or "任务详情" not in plan_text:
-        failures += fail_line(ctx, "invalid_plan_structure")
+        failures += fail_line(
+            ctx,
+            "invalid_plan_structure",
+            repair=PLAN_INITIAL_REPAIRS["invalid_plan_structure"],
+        )
     # 新模板要求单一覆盖表；legacy 双覆盖表 PLAN 仍可回放
     if "Contract Coverage" not in plan_text and "Specs 行为覆盖" not in plan_text:
-        failures += fail_line(ctx, "missing_plan_contract_coverage")
+        failures += fail_line(
+            ctx,
+            "missing_plan_contract_coverage",
+            repair=PLAN_INITIAL_REPAIRS["missing_plan_contract_coverage"],
+        )
     if task_count(plan) <= 0:
-        failures += fail_line(ctx, "invalid_plan_no_tasks")
+        failures += fail_line(
+            ctx,
+            "invalid_plan_no_tasks",
+            repair=PLAN_INITIAL_REPAIRS["invalid_plan_no_tasks"],
+        )
     statuses = task_statuses(plan)
     if not statuses:
-        failures += fail_line(ctx, "missing_task_statuses")
+        failures += fail_line(
+            ctx,
+            "missing_task_statuses",
+            repair=PLAN_INITIAL_REPAIRS["missing_task_statuses"],
+        )
     elif any("待做" not in status for status in statuses):
-        failures += fail_line(ctx, "invalid_initial_task_status")
+        failures += fail_line(
+            ctx,
+            "invalid_initial_task_status",
+            repair=PLAN_INITIAL_REPAIRS["invalid_initial_task_status"],
+        )
     # 新格式任务块必须带「完成记录」字段且初始为「无」（code 阶段回写的落点）
+    missing_completion_records: list[str] = []
+    invalid_completion_records: list[str] = []
     for task_id, block in plan_task_blocks(plan_text).items():
         evidence = TASK_EVIDENCE_LINE.search(block)
         if not evidence:
-            failures += fail_line(ctx, "task_missing_completion_record_field", f" task={task_id}")
+            missing_completion_records.append(task_id)
         elif evidence.group(1).strip() != "无":
-            failures += fail_line(ctx, "invalid_initial_completion_record", f" task={task_id}")
+            invalid_completion_records.append(task_id)
+    if missing_completion_records:
+        failures += fail_line(
+            ctx,
+            "task_missing_completion_record_field",
+            f" tasks={','.join(missing_completion_records)}",
+            repair=PLAN_INITIAL_REPAIRS["task_missing_completion_record_field"],
+        )
+    if invalid_completion_records:
+        failures += fail_line(
+            ctx,
+            "invalid_initial_completion_record",
+            f" tasks={','.join(invalid_completion_records)}",
+            repair=PLAN_INITIAL_REPAIRS["invalid_initial_completion_record"],
+        )
     pending = PENDING_CELL.findall(plan_text)
     if pending:
-        failures += fail_line(ctx, "plan_has_pending_cells", f" count={len(pending)}")
+        failures += fail_line(
+            ctx,
+            "plan_has_pending_cells",
+            f" count={len(pending)}",
+            repair=PLAN_INITIAL_REPAIRS["plan_has_pending_cells"],
+        )
     return failures
+
+
+def validate_plan_execution_contract(ctx: HookContext) -> int:
+    from plan_execution_check import main as plan_execution_check_main
+
+    return plan_execution_check_main(
+        [ctx.slug, "--workspace-root", str(ctx.root)]
+    )
 
 
 def validate_plan_finished_tasks(ctx: HookContext) -> int:
@@ -683,6 +802,7 @@ VALIDATORS = {
     "specs_contract": validate_specs_contract,
     "design_contract": validate_design_contract,
     "plan_initial_tasks": validate_plan_initial_tasks,
+    "plan_execution_contract": validate_plan_execution_contract,
     "plan_finished_tasks": validate_plan_finished_tasks,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
     "unit_test_report_contract": validate_unit_test_report_contract,

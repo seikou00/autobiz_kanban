@@ -9,6 +9,7 @@ SKILLS = ROOT / "skills"
 PROTOCOL = SKILLS / "references" / "ask-user-question.md"
 DISCUSS_SKILL = SKILLS / "autobiz" / "autobiz-requirement-discuss" / "SKILL.md"
 PLAN_SKILL = SKILLS / "autodev" / "autodev-plan" / "SKILL.md"
+SPECS_SKILL = SKILLS / "autodev" / "autodev-specs" / "SKILL.md"
 
 
 class RequestUserInputProtocolTest(unittest.TestCase):
@@ -65,6 +66,25 @@ class RequestUserInputProtocolTest(unittest.TestCase):
 
         protocol = PROTOCOL.read_text(encoding="utf-8")
         self.assertIn("逐条裁定环节禁止使用延后类预设选项", protocol)
+
+    def test_specs_only_adjudicates_open_questions(self) -> None:
+        content = SPECS_SKILL.read_text(encoding="utf-8")
+
+        for required_rule in (
+            "探索并生成待确认问题清单",
+            "仅裁定讨论表中的待确认条目",
+            "不把切分、命名或规格范围交给用户确认",
+            "全部条目裁定后直接生成 proposal 与 specs",
+            "不得使用「已准备好，稍后提供」",
+        ):
+            self.assertIn(required_rule, content)
+
+        for forbidden_rule in (
+            "等待用户确认规格范围",
+            "整体确认门",
+            "确认范围并生成 specs",
+        ):
+            self.assertNotIn(forbidden_rule, content)
 
     def test_every_usage_loads_the_shared_protocol(self) -> None:
         missing: list[str] = []

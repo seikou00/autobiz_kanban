@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.3.1705
+version: v1.3.1706
 ---
 
 ## 缺失产物处理
@@ -59,7 +59,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
-> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索澄清行为/接口/数据边界` / `生成 proposal.md` / `生成 specs/**/*.md` / `推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
+> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `集中校验并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
 使用task工具，指定Explore-autodev角色进行探索， 探索必须要读<AGENTS_INSTRUCTIONS></AGENTS_INSTRUCTIONS>里面提到的文件，再需要参考下面的要求，然后返回结构化的内容供主代理参考。
 探索时必须：
 
@@ -78,7 +78,9 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 - 讨论时只提出影响实现路径或验收结果的关键问题，并给出当前建议、备选方案和影响面；不要机械问卷。
 - 仍有 `待确认` 且会影响接口形态、数据模型、权限/租户/审计、幂等、分页、异步、状态流、迁移或验收结果时，不要结束探索。
 
-讨论输出建议：
+探索结束时先生成待确认问题清单。需求、PRD 或用户材料中的「待补充」「待提供」「后续给出」如影响行为契约，逐项列入；无待确认项时写「无」并继续生成产物。
+
+讨论输出：
 
 ```markdown
 ## 行为/API/数据决策待确认
@@ -94,32 +96,28 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 > 决策一旦与用户拍板，连同**被否决的备选及原因**要保留到 proposal 的 `Decision Log`，不要只留在对话里。
 
-### Open Questions 逐条裁定门
+### 待确认问题裁定门
 
-**展示上表 ≠ 裁定。** 表中每一条都必须逐条拿到用户裁定，才能进入 specs 生成。两步顺序不可颠倒。
-
-**第一步：逐条裁定**
-
-- 范围：讨论表中的全部待确认条目；没有条目时跳过本步，直接进入第二步。
+- 仅裁定讨论表中的待确认条目；没有条目时直接生成产物。
 - 消解定义：裁定即消解，但**裁定必须落盘才算数**。生成 proposal 时每条落为 `Open Questions` 一行：`Resolution` 写下裁定的具体结论（不是 Question 的复述、不是占位）、`Decision` 填 `DEC-NNN`、`Status=已确认`，同时 `Decision Log` 中有这条 DEC（决定 / 为什么 / 否决 / 约束齐备，`约束` 指向 `specs/**` 中真实存在的 `REQ-<capability>-NNN` 或 `CAP-<name>`）。每条 Open Question 的裁定不得以「不达门槛」为由不记。
 - 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与讨论表条目 ID 对应（如 `SPEC-01` → `spec_01`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
 - 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前建议确认 (Recommended)」：采纳讨论表中的当前建议；②「采纳备选：<方案>」：选项自身携带具体方案；③「需要调整」：用户将给出修改意见，吸收后更新讨论表、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 specs 阶段、不推进。
+- 信息缺口不得使用「已准备好，稍后提供」或「后续补充并继续」；现在提供材料时由用户在「其他」中填写。
 - **禁止自行确认**：`已确认` 只能是用户裁定的结果。不得以「这是外部接口细节」「不影响行为契约的定义」「specs 阶段只关心 WHAT」等任何理由，自己把 Status 写成 `已确认`。判定某条不影响行为契约不是跳过裁定的理由，必须由用户裁定。
-- 禁止「先假设 / 按默认方案 / 后续补充 / 先占位 / 编码阶段再定」后推进——该出口不在闭集内，不得以任何措辞重新引入。共享协议第 3 节的「后续补充并继续」模板属于探索/讨论环节，本裁定门禁止搬用。
-- **整体门不构成对任何一条的裁定**：第二步只确认「进入 specs 生成」，不能被当作对全部条目的一次性打包确认。
 - **自由表达即退出结构化**：用户不点选项、而是直接给出实质回复（补一条决策、改一个字段、提新问题），当作该条的裁定内容吸收并更新，**不得机械重复弹同一个结构化选择**；下一轮合适时机再重新发起该决策。
-- 顺序硬约束：全部条目拿到裁定之前，禁止发起第二步，也禁止在 proposal 中写下任何 `已确认`。
-
-**第二步：整体确认门**
-
-- 按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `这些决策已确认、生成 specs (Recommended)` / `继续讨论待确认项`；不设置 `autoResolutionMs`，必须等待明确答复。
-- 用户选择继续讨论时回到探索，不进入 specs 生成。
+- 每次发起问题后停止执行，等待用户回复；不得在同一轮继续生成产物。
+- 全部条目裁定后直接生成 proposal 与 specs，不再确认 capability 切分或规格范围。
+- `request_user_input` 不可用时按共享协议文本降级，并结束当前回复等待用户。
 
 ## 生成 proposal.md
 
+讨论表有待确认条目时，全部裁定后进入本节；没有条目时直接进入本节。
+
 按 `${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
 
-生成前先建立 capability 变更分类表，直接写入 proposal 的 `## Capability Index` 节（唯一权威索引），后续 `specs/**/*.md` 必须与其一一对应。探索中形成的判定依据与既有行为来源在对话中说明，索引表只留结论：
+生成前一次性建立规格清单，列出每个 capability 的 `Capability ID / Operations / Spec Path / REQ IDs / SCN IDs`。同一份清单用于生成 proposal 与全部 specs，不逐文件临时起名。
+
+将 capability 变更分类表写入 proposal 的 `## Capability Index` 节（唯一权威索引），后续 `specs/**/*.md` 必须与其一一对应。探索中形成的判定依据与既有行为来源在对话中说明，索引表只留结论：
 
 | Capability ID | Capability | Operations | Spec Path | Status |
 |---------------|------------|------------|-----------|--------|
@@ -129,6 +127,7 @@ ID 规则：
 
 - Capability ID 使用 `CAP-<kebab-case-name>`，与 spec 文件头 `Capability-ID:` 一致。
 - Requirement 使用 `REQ-<capability>-NNN`（NNN 三位递增）；Scenario 使用 `SCN-<capability>-NNN-NN`，前缀对应所属 REQ。
+- `<capability>` 必须逐字使用 Capability Index 的完整名称，不得使用首字母或其他缩写。
 - 改标题不改 ID；Requirement 删除后其 ID 不复用；ID 在同一 feature 内全局唯一；多份 spec 因命名空间天然不重号。
 
 分类规则：
@@ -148,7 +147,7 @@ ID 规则：
 - **Capability Index**：唯一权威索引表；每行 `CAP-<name>` / kebab-case 名称 / Operations 集合 / Spec Path / Status，每个 capability 必须对应一个 `specs/<capability>/spec.md`。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
-- **Open Questions**：discussion 表中的每条待确认项落一行，按上面「Open Questions 逐条裁定门」的消解定义填 `Resolution` / `Decision` / `Status`；本轮无待确认项时本节正文只写「无」。
+- **Open Questions**：discussion 表中的每条待确认项落一行，按上面「待确认问题裁定门」的消解定义填 `Resolution` / `Decision` / `Status`；本轮无待确认项时本节正文只写「无」。
 - **Decision Log**：把 explore 中已裁定且达门槛的决策逐条记入（决定 / 为什么 / 否决的备选及原因 / 约束的稳定 ID）。`约束` 必须引用 `REQ-<capability>-NNN`（尚未落到具体 Requirement 时引用 `CAP-<name>`）。记录门槛三者取一：结果偏离"直接读代码/需求会得到的显然做法"、有真实备选并择一、或改变外部可观察行为的边界或口径；显然的、无备选的、需求直接决定的不记。不得让否决理由停留在对话里蒸发；无满足门槛的决策时本节写"无"。
 
 ## 生成 specs/**/*.md
@@ -157,6 +156,7 @@ ID 规则：
 
 规则：
 
+- 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
 - 每个 capability 一个 spec 文件：`specs/<capability>/spec.md`，文件头必须含 `Capability-ID: CAP-<capability>`（与目录名、索引行一致）。
 - **列入即生成**：`Capability Index` 中每一行（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`。不得以任何理由跳过。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其从索引移除或并入其他 capability，保持两边严格对应；禁止单方面少生成。
 - MODIFIED/REMOVED 操作的 Requirement 用 `## MODIFIED Requirements` / `## REMOVED Requirements` 承载完整新行为或移除说明，同样不可省略。
@@ -172,6 +172,19 @@ ID 规则：
 - 某个操作段无内容时写“无”；不要保留模板占位 Requirement。
 - 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
 
+## 集中校验
+
+proposal 与全部 specs 生成完成后执行一次完整校验：
+
+```bash
+python "${pluginPath}/skills/autodev/hooks/artifact_check.py" postcheck autodev-specs "${feature}" --repo-root "${pluginPath}" --workspace-root "${pluginWorkspace}/${projectDir}"
+```
+
+- 等命令完整结束后再处理结果。
+- 汇总本次输出中的全部失败项，按文件归组，一次性修改所有受影响产物。
+- 修改完成后重新执行同一完整校验；通过前不得推进 checkpoint。
+- 不以 `update_checkpoint.py` 代替产物预检，不按单条错误在校验与编辑之间往返。
+
 ## 完成条件
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md` 已生成。
@@ -180,12 +193,12 @@ ID 规则：
 - 每个 spec 至少包含一个 Requirement 和一个 Scenario。
 - specs 只描述行为契约，不包含实现任务。
 - proposal 含 `Decision Log` 节：explore 中已裁定且达门槛的决策已逐条记入（含被否决的备选及原因），无满足门槛的决策则写"无"；不得因赶进度省略本节。
-- proposal 含 `Open Questions` 节：每行都经逐条裁定门消解并落证据（`Status=已确认` + `Resolution` 非复述非占位 + `Decision`=DEC-NNN，且该 DEC 在 `Decision Log` 中齐备、其 `约束` 指向 specs 中真实存在的 REQ/CAP），或本节正文只写「无」。**残留未消解行、或只翻 Status 不落证据，都不得推进 specs_done**——由 `proposal_contract` 在 specs_done 的 postcheck 机械强制，删掉本节同样会被拦下。
+- proposal 含 `Open Questions` 节：每行都经逐条裁定门消解并落证据（`Status=已确认` + `Resolution` 非复述非占位 + `Decision`=DEC-NNN，且该 DEC 在 `Decision Log` 中齐备、其 `约束` 指向 specs 中真实存在的 REQ/CAP），或本节正文只写「无」。
 
 如task工具可用，则使用task工具，指定critic-autodev角色，对比prd.md与proposal和specs文件进行严格的审查，看是否spec已经完全覆盖需求范围，和是否有违反需求的地方。
 如task工具返回有问题需要修复specs或proposal。
 如果task不可用则不用执行上面的内容。继续任务。
-完成后推进 checkpoint：
+集中校验通过后推进 checkpoint：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done

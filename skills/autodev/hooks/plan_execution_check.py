@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Code 入场校验：PLAN.md 引用完整性、design 决策覆盖、任务 DAG 合法性。
+"""Plan 完成校验：PLAN.md 引用完整性、design 决策覆盖、任务 DAG 合法性。
 
 引用完整性是 PLAN→design 方向（任务引用的 ID 在 design 里存在）；覆盖是
 design→PLAN 方向（design 的每个 API/DATA/D 决策都被某个任务的「设计依据」认领，
@@ -10,7 +10,7 @@ design→PLAN 方向（design 的每个 API/DATA/D 决策都被某个任务的�
     python plan_execution_check.py <feature-slug> [--workspace-root PATH]
 
 退出码：0 = PASS / LEGACY_PLAN_DEGRADE / PLAN_NOT_FOUND（精简工作流）；1 = 校验失败。
-失败时逐行输出 `PLAN_CHECK_FAIL reason=... detail=...`，最后输出总verdict行。
+失败时输出 `PLAN_CHECK_FAIL` 与对应 `PLAN_CHECK_REPAIR`，最后输出总 verdict 行。
 """
 
 from __future__ import annotations
@@ -34,6 +34,15 @@ OVERVIEW_ROW = re.compile(
 DESIGN_ID_ROW = re.compile(r"^\|\s*`?((?:API|DATA|EVD)-\d{1,3}|D-\d{1,3})`?\s*\|", re.MULTILINE)
 REQ_TOKEN = re.compile(r"\bREQ-[a-z0-9][a-z0-9-]*-\d{3}\b")
 SCN_TOKEN = re.compile(r"\bSCN-[a-z0-9][a-z0-9-]*-\d{3}-\d{2}\b")
+SCN_PREFIX_PATTERN = r"SCN-[a-z0-9][a-z0-9-]*-\d{3}-"
+SCN_RANGE_SHORTHAND = re.compile(
+    rf"\b(?P<prefix>{SCN_PREFIX_PATTERN})(?P<start>\d{{2}})"
+    r"\s*(?:~|～|…|\.{2,}|至|到|-)\s*(?P<end>\d{2,3})\b"
+)
+SCN_LIST_SHORTHAND = re.compile(
+    rf"\b(?P<prefix>{SCN_PREFIX_PATTERN})(?P<first>\d{{2}})"
+    r"(?P<suffixes>(?:\s*[,，]\s*-\d{2})+)"
+)
 DESIGN_TOKEN = re.compile(r"\b((?:API|DATA|EVD)-\d{1,3}|D-\d{1,3})\b")
 REF_LINE_KEYS = ("规格依据", "场景依据", "设计依据", "代码证据")
 # 新格式 design.md 必写这两个标记之一；认得出新格式就不再走 legacy degrade。
@@ -44,12 +53,67 @@ WAIVER_MARKER = "无需实现"
 WAIVER_REASON = re.compile(rf"{WAIVER_MARKER}\s*[:：]\s*(\S.*)")
 PLACEHOLDER_CELL = re.compile(r"^\[[^\]]*\]$")
 SEPARATOR_CHARS = set(":- ")
+PLAN_CHECK_REPAIRS = {
+    "missing_req_ref": "编辑 PLAN.md 中报错 task 的「规格依据」：删除报错 id，或替换为 specs/**/*.md 对应 Requirement 标题中的完整 REQ ID。",
+    "missing_scn_ref": "编辑 PLAN.md 中报错 task 的「场景依据」：删除报错 id，或替换为 specs/**/*.md 对应 Scenario 标题中的完整 SCN ID。",
+    "scn_reference_shorthand": "SCN 引用必须逐个写完整稳定 ID，场景序号固定为两位；禁止范围或后缀省略写法。",
+    "missing_design_ref": "编辑 PLAN.md 中报错 task 的「设计依据/代码证据」：删除报错 id，或替换为 design.md 表格首列真实存在的 API/DATA/D/EVD ID。",
+    "waiver_missing_reason": "编辑 PLAN.md 的 Contract Coverage：将报错 id 的覆盖任务写成「无需实现:<具体原因>」，或改为真实 TASK-NNN 并在该任务「设计依据」中加入此 id。",
+    "uncovered_design_decision": "编辑 PLAN.md：把报错 id 加入负责落地它的 TASK-NNN「设计依据」，并在 Contract Coverage 填同一任务及验证方法；确实无需实现时写「无需实现:<具体原因>」。",
+    "missing_task_overview_rows": "按 autodev-plan/templates/plan.md 重建「任务总览」五列表格，并为每个任务详情 TASK-NNN 增加一行。",
+    "unknown_dependency": "编辑 PLAN.md「任务总览」的依赖列：删除报错 dep，或替换为任务总览中真实存在的前置 TASK-NNN。",
+    "self_dependency": "编辑 PLAN.md「任务总览」的依赖列：从报错 task 中删除其自身 ID；无其他前置任务时写「无」。",
+    "dependency_cycle": "编辑 PLAN.md「任务总览」的依赖列，打断报错 tasks 之间的闭环；至少一个起点任务依赖写「无」，并同步更新「任务 DAG」。",
+    "task_missing_detail": "为报错 task 补齐「### TASK-NNN: 任务名」详情块及全部标准字段；若该行不是任务则从任务总览和 DAG 删除。",
+    "task_missing_overview_row": "在 PLAN.md「任务总览」中为报错 task 增加五列表格行，并在「任务 DAG」中补上同一任务。",
+}
 
 
-def fail(reason: str, detail: str = "") -> int:
+def fail(reason: str, detail: str = "", *, repair: str = "") -> int:
     suffix = f" detail={detail}" if detail else ""
     print(f"PLAN_CHECK_FAIL reason={reason}{suffix}")
+    print(
+        f"PLAN_CHECK_REPAIR reason={reason}{suffix} "
+        f"action={(repair or PLAN_CHECK_REPAIRS[reason])!r}"
+    )
     return 1
+
+
+def scn_shorthand_issues(plan_text: str) -> list[tuple[str, tuple[int, ...], str]]:
+    """返回 ``(非法原文, 行号, 完整 ID 替换文本)``。"""
+    grouped: dict[str, tuple[set[int], str]] = {}
+
+    def record(raw: str, line_number: int, replacement: str) -> None:
+        if raw in grouped:
+            grouped[raw][0].add(line_number)
+            return
+        grouped[raw] = ({line_number}, replacement)
+
+    for line_number, line in enumerate(plan_text.splitlines(), start=1):
+        if "SCN-" not in line:
+            continue
+        for match in SCN_RANGE_SHORTHAND.finditer(line):
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+            replacement = ""
+            if start <= end <= 99 and end - start < 20:
+                replacement = ", ".join(
+                    f"{match.group('prefix')}{index:02d}"
+                    for index in range(start, end + 1)
+                )
+            record(match.group(0), line_number, replacement)
+        for match in SCN_LIST_SHORTHAND.finditer(line):
+            suffixes = re.findall(r"-(\d{2})", match.group("suffixes"))
+            scenario_numbers = [match.group("first"), *suffixes]
+            replacement = ", ".join(
+                f"{match.group('prefix')}{number}" for number in scenario_numbers
+            )
+            record(match.group(0), line_number, replacement)
+
+    return [
+        (raw, tuple(sorted(lines)), replacement)
+        for raw, (lines, replacement) in grouped.items()
+    ]
 
 
 def ref_tokens(block: str) -> tuple[set[str], set[str], set[str]]:
@@ -111,19 +175,17 @@ def coverage_waivers(plan_text: str) -> tuple[set[str], set[str]]:
 
 
 def detect_cycle(deps: dict[str, set[str]]) -> list[str]:
-    indegree = {task: 0 for task in deps}
-    for targets in deps.values():
-        for target in targets:
-            if target in indegree:
-                indegree[target] += 1
-    # Kahn：deps 记录「task 依赖 target」，反向图无所谓，只判断是否有环
+    indegree = {
+        task: sum(1 for dependency in dependencies if dependency in deps)
+        for task, dependencies in deps.items()
+    }
     queue = [task for task, degree in indegree.items() if degree == 0]
     visited = 0
     graph: dict[str, set[str]] = {task: set() for task in deps}
-    for task, targets in deps.items():
-        for target in targets:
-            if target in graph:
-                graph[target].add(task)
+    for task, dependencies in deps.items():
+        for dependency in dependencies:
+            if dependency in graph:
+                graph[dependency].add(task)
     while queue:
         node = queue.pop()
         visited += 1
@@ -137,7 +199,7 @@ def detect_cycle(deps: dict[str, set[str]]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Code 入场校验：PLAN 引用/DAG")
+    parser = argparse.ArgumentParser(description="Plan 完成校验：PLAN 引用/DAG")
     parser.add_argument("slug")
     parser.add_argument("--workspace-root", default=str(Path.cwd().resolve()))
     args = parser.parse_args(argv)
@@ -156,6 +218,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     failures = 0
+
+    for raw, lines, replacement in scn_shorthand_issues(plan_text):
+        line_detail = ",".join(str(line) for line in lines)
+        repair = PLAN_CHECK_REPAIRS["scn_reference_shorthand"]
+        if replacement:
+            repair += f" 将 {raw!r} 替换为 {replacement!r}。"
+        else:
+            repair += f" 将 {raw!r} 改为逐个完整 ID。"
+        failures += fail(
+            "scn_reference_shorthand",
+            f"file=PLAN.md lines={line_detail} value={raw!r}",
+            repair=repair,
+        )
 
     # 上游 ID 集合
     spec_req_ids: set[str] = set()
