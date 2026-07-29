@@ -9,14 +9,12 @@ import hashlib
 import json
 import locale
 import os
-import queue
 import re
 import signal
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -93,9 +91,11 @@ from hooks.validation_groups import (  # noqa: E402
 
 DEFAULT_TIMEOUT_SECONDS = 300
 VALIDATION_OUTPUT_POLL_SECONDS = 0.2
+VALIDATION_PROGRESS_INTERVAL_SECONDS = 30.0
 COMPILE_DIAGNOSTIC_DRAIN_SECONDS = 2.0
 PROCESS_TERMINATION_GRACE_SECONDS = 3.0
 VALIDATION_DIAGNOSTIC_BUFFER_BYTES = 64 * 1024
+WINDOWS_BATCH_EXECUTABLE_SUFFIXES = frozenset({".bat", ".cmd"})
 TASK_VALIDATION_RUN_TYPE = "batch_task_validation"
 TASK_VALIDATION_RUNNING_COMMANDS = ["validate-batch-task", "batch-check"]
 TASK_VALIDATION_FAILED_COMMANDS = ["start-validation-repair", "start-batch-task-validation"]
@@ -120,6 +120,14 @@ class ValidationProcessResult:
     compile_category: str | None
     duration_seconds: float
     process_tree_terminated: bool
+
+
+@dataclass(frozen=True)
+class ValidationLaunchSpec:
+    requested_argv: tuple[str, ...]
+    resolved_executable: str
+    launch_mode: str
+    command_shell: str | None = None
 
 
 def _utc_now() -> str:
@@ -704,7 +712,7 @@ def _start_task_unlocked(
         if isinstance(task_validation, dict) and task_validation.get("status") == "running":
             raise TaskRunnerError(
                 f"task_validation_workspace_frozen:{batch_id}",
-                requiredAction="resume_batch_task_validation",
+                requiredAction="call_code_session_for_validation_subagent_handoff",
                 activeRunId=task_validation.get("activeRunId"),
                 currentTaskId=task_validation.get("currentTaskId"),
             )
@@ -1198,6 +1206,80 @@ def _maven_test_execution_errors(
     return errors
 
 
+def _fresh_maven_failure_results(
+    command: dict[str, Any],
+    command_dir: Path,
+    before_reports: dict[str, int],
+) -> list[dict[str, Any]]:
+    selectors = maven_test_selectors(command)
+    if not selectors:
+        return []
+    roots = _fresh_maven_report_roots(command_dir, before_reports)
+    return [
+        result
+        for selector in selectors
+        if (result := _maven_selector_report_result(roots, selector))["failures"]
+    ]
+
+
+def _runtime_environment_failure_category(output: str) -> str | None:
+    lowered = output.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "java_home environment variable is not defined correctly",
+            "no compiler is provided in this environment",
+        )
+    ):
+        return "java_toolchain_unavailable"
+    artifact_context = any(
+        marker in lowered
+        for marker in (
+            "could not transfer artifact",
+            "failed to read artifact descriptor",
+            "non-resolvable parent pom",
+            "plugin or one of its dependencies could not be resolved",
+        )
+    )
+    network_context = any(
+        marker in lowered
+        for marker in (
+            "unknown host",
+            "connection timed out",
+            "connect timed out",
+            "connection refused",
+            "network is unreachable",
+            "no route to host",
+            "proxy authentication required",
+        )
+    )
+    if artifact_context and network_context:
+        return "dependency_network_unavailable"
+    if artifact_context and any(
+        marker in lowered
+        for marker in (
+            "pkix path building failed",
+            "unable to find valid certification path",
+            "return code is: 401",
+            "return code is: 403",
+            "status code: 401",
+            "status code: 403",
+        )
+    ):
+        return "dependency_credentials_or_certificate_failure"
+    if any(
+        marker in lowered
+        for marker in (
+            "npm error code eai_again",
+            "npm err! code eai_again",
+            "npm error code enetunreach",
+            "npm err! code enetunreach",
+        )
+    ):
+        return "dependency_network_unavailable"
+    return None
+
+
 def _validation_environment_error(
     command: dict[str, Any],
     *,
@@ -1257,9 +1339,14 @@ def _assert_validation_command_environment(
     run_id: str | None = None,
     batch_id: str | None = None,
     task_id: str | None = None,
-) -> None:
+    platform_name: str | None = None,
+) -> ValidationLaunchSpec:
     argv = command.get("argv")
-    if not isinstance(argv, list) or not argv or not isinstance(argv[0], str):
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(item, str) for item in argv)
+    ):
         raise TaskRunnerError(f"invalid_validation_argv:{command.get('id', '')}")
     policy_errors = command_policy_errors(command)
     if policy_errors:
@@ -1297,14 +1384,20 @@ def _assert_validation_command_environment(
                 task_id=task_id,
             )
     executable = argv[0]
+    effective_platform = platform_name or os.name
     has_path = "/" in executable or "\\" in executable or Path(executable).is_absolute()
     if has_path:
         candidate = Path(executable)
         if not candidate.is_absolute():
             candidate = command_cwd / candidate
-        available = candidate.is_file() and (os.name == "nt" or os.access(candidate, os.X_OK))
+        candidate = candidate.resolve()
+        available = candidate.is_file() and (
+            effective_platform == "nt" or os.access(candidate, os.X_OK)
+        )
+        resolved_executable = str(candidate) if available else None
     else:
-        available = shutil.which(executable) is not None
+        resolved_executable = shutil.which(executable)
+        available = resolved_executable is not None
     if not available:
         raise _validation_environment_error(
             command,
@@ -1318,6 +1411,34 @@ def _assert_validation_command_environment(
             batch_id=batch_id,
             task_id=task_id,
         )
+    resolved_executable = str(Path(str(resolved_executable)).resolve())
+    if (
+        effective_platform == "nt"
+        and Path(resolved_executable).suffix.casefold()
+        in WINDOWS_BATCH_EXECUTABLE_SUFFIXES
+    ):
+        command_shell = os.environ.get("COMSPEC") or shutil.which("cmd.exe")
+        if not isinstance(command_shell, str) or not Path(command_shell).is_file():
+            raise _validation_environment_error(
+                command,
+                category="command_shell_missing",
+                detail="COMSPEC/cmd.exe is unavailable for Windows batch validation",
+                retry_same_run=retry_same_run,
+                run_id=run_id,
+                batch_id=batch_id,
+                task_id=task_id,
+            )
+        return ValidationLaunchSpec(
+            requested_argv=tuple(argv),
+            resolved_executable=resolved_executable,
+            launch_mode="windows_batch",
+            command_shell=str(Path(command_shell).resolve()),
+        )
+    return ValidationLaunchSpec(
+        requested_argv=tuple(argv),
+        resolved_executable=resolved_executable,
+        launch_mode="direct",
+    )
 
 
 def _decode_validation_output(content: bytes) -> str:
@@ -1325,6 +1446,22 @@ def _decode_validation_output(content: bytes) -> str:
         locale.getpreferredencoding(False) or "utf-8",
         errors="replace",
     )
+
+
+def _emit_validation_progress(event: str, **details: Any) -> None:
+    """Keep async hosts informed without mixing progress into stdout JSON."""
+    try:
+        print(
+            json.dumps(
+                {"event": event, **details},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+    except OSError:
+        pass
 
 
 def _validation_process_group_options() -> dict[str, Any]:
@@ -1450,122 +1587,201 @@ def _terminate_validation_process_tree(
     return process.poll() is not None and not process_group_exists()
 
 
+def _validation_command_argv(launch_spec: ValidationLaunchSpec) -> list[str]:
+    return [
+        launch_spec.resolved_executable,
+        *launch_spec.requested_argv[1:],
+    ]
+
+
+def _windows_batch_quote(value: str) -> str:
+    if any(marker in value for marker in ("\x00", "\r", "\n")):
+        raise OSError("validation_windows_batch_argument_invalid")
+    return f'"{value.replace("%", "%%").replace(chr(34), chr(34) * 2)}"'
+
+
+def _validation_windows_wrapper_content(
+    launch_spec: ValidationLaunchSpec,
+    log_path: Path,
+) -> str:
+    command_line = " ".join(
+        _windows_batch_quote(item)
+        for item in _validation_command_argv(launch_spec)
+    )
+    log_target = _windows_batch_quote(str(log_path))
+    return (
+        "@echo off\r\n"
+        f">{log_target} echo validation_windows_wrapper_started\r\n"
+        f"call {command_line} 1>>{log_target} 2>&1\r\n"
+        "set \"_autobiz_exit=%ERRORLEVEL%\"\r\n"
+        "exit /b %_autobiz_exit%\r\n"
+    )
+
+
+def _validation_windows_shell_command(
+    launch_spec: ValidationLaunchSpec,
+    wrapper_path: Path,
+) -> str:
+    if not isinstance(launch_spec.command_shell, str):
+        raise OSError("validation_windows_command_shell_missing")
+    command_shell = _windows_batch_quote(launch_spec.command_shell)
+    wrapper = _windows_batch_quote(str(wrapper_path))
+    return f'{command_shell} /D /S /V:OFF /C "{wrapper}"'
+
+
 def _run_validation_process(
-    argv: list[str],
+    launch_spec: ValidationLaunchSpec,
     command_cwd: Path,
     timeout: int,
     command: dict[str, Any],
     repositories: RepositoryMap,
 ) -> ValidationProcessResult:
     started_at = time.monotonic()
-    process = subprocess.Popen(
-        argv,
-        cwd=command_cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        bufsize=0,
-        **_validation_process_group_options(),
+    log_fd, log_name = tempfile.mkstemp(
+        prefix="autobiz-validation-",
+        suffix=".log",
     )
-    if process.stdout is None:
-        raise OSError("validation_process_stdout_unavailable")
-
-    output_queue: queue.Queue[bytes | None] = queue.Queue()
-
-    def read_output() -> None:
-        try:
-            while True:
-                chunk = os.read(process.stdout.fileno(), 8192)
-                if not chunk:
-                    break
-                output_queue.put(chunk)
-        except (OSError, ValueError):
-            pass
-        finally:
-            output_queue.put(None)
-
-    reader = threading.Thread(
-        target=read_output,
-        name=f"validation-output-{process.pid}",
-        daemon=True,
-    )
-    reader.start()
-
+    os.close(log_fd)
+    log_path = Path(log_name)
+    wrapper_path: Path | None = None
+    process: subprocess.Popen[bytes] | None = None
     hard_deadline = started_at + timeout
     compile_category: str | None = None
     compile_deadline: float | None = None
     termination_reason: str | None = None
     process_tree_terminated = True
-    reader_done = False
     rolling_output = bytearray()
+    captured_bytes = 0
+    next_progress_at = started_at + VALIDATION_PROGRESS_INTERVAL_SECONDS
 
-    with tempfile.TemporaryFile(mode="w+b") as command_log:
-        def record_chunk(chunk: bytes | None) -> None:
-            nonlocal reader_done, compile_category, compile_deadline
-            if chunk is None:
-                reader_done = True
-                return
-            command_log.write(chunk)
-            rolling_output.extend(chunk)
-            if len(rolling_output) > VALIDATION_DIAGNOSTIC_BUFFER_BYTES:
-                del rolling_output[:-VALIDATION_DIAGNOSTIC_BUFFER_BYTES]
-            detected = _definitive_compile_failure_category(
-                _decode_validation_output(bytes(rolling_output)),
-                command,
-                repositories,
+    try:
+        if launch_spec.launch_mode == "windows_batch":
+            wrapper_fd, wrapper_name = tempfile.mkstemp(
+                prefix="autobiz-validation-",
+                suffix=".cmd",
             )
-            if detected is not None:
-                if compile_category is None:
-                    compile_deadline = (
-                        time.monotonic() + COMPILE_DIAGNOSTIC_DRAIN_SECONDS
-                    )
-                if detected == "test_compile_failure" or compile_category is None:
-                    compile_category = detected
+            os.close(wrapper_fd)
+            wrapper_path = Path(wrapper_name)
+            wrapper_path.write_text(
+                _validation_windows_wrapper_content(launch_spec, log_path),
+                encoding="mbcs" if os.name == "nt" else "utf-8",
+            )
+            process = subprocess.Popen(
+                _validation_windows_shell_command(launch_spec, wrapper_path),
+                executable=launch_spec.command_shell,
+                cwd=command_cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+                **_validation_process_group_options(),
+            )
+        else:
+            with log_path.open("ab", buffering=0) as child_output:
+                process = subprocess.Popen(
+                    _validation_command_argv(launch_spec),
+                    cwd=command_cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=child_output,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
+                    **_validation_process_group_options(),
+                )
+        _emit_validation_progress(
+            "validation_process_started",
+            commandId=str(command.get("id", "")),
+            pid=process.pid,
+            timeoutSeconds=timeout,
+            resolvedExecutable=launch_spec.resolved_executable,
+            launchMode=launch_spec.launch_mode,
+            cwd=str(command_cwd),
+        )
 
-        while True:
-            now = time.monotonic()
-            deadlines = [hard_deadline]
-            if compile_deadline is not None:
-                deadlines.append(compile_deadline)
-            wait_seconds = max(
-                0.0,
-                min(VALIDATION_OUTPUT_POLL_SECONDS, min(deadlines) - now),
-            )
-            try:
-                record_chunk(output_queue.get(timeout=wait_seconds))
+        with log_path.open("rb", buffering=0) as command_log:
+            def read_available_output() -> None:
+                nonlocal captured_bytes, compile_category, compile_deadline
                 while True:
-                    record_chunk(output_queue.get_nowait())
-            except queue.Empty:
+                    chunk = command_log.read(8192)
+                    if not chunk:
+                        break
+                    captured_bytes += len(chunk)
+                    rolling_output.extend(chunk)
+                    if len(rolling_output) > VALIDATION_DIAGNOSTIC_BUFFER_BYTES:
+                        del rolling_output[:-VALIDATION_DIAGNOSTIC_BUFFER_BYTES]
+                    detected = _definitive_compile_failure_category(
+                        _decode_validation_output(bytes(rolling_output)),
+                        command,
+                        repositories,
+                    )
+                    if detected is not None:
+                        if compile_category is None:
+                            compile_deadline = (
+                                time.monotonic() + COMPILE_DIAGNOSTIC_DRAIN_SECONDS
+                            )
+                        if detected == "test_compile_failure" or compile_category is None:
+                            compile_category = detected
+
+            while True:
+                read_available_output()
+                now = time.monotonic()
+                if process.poll() is not None:
+                    read_available_output()
+                    if compile_category is not None:
+                        termination_reason = "compile_diagnostic"
+                    break
+                if compile_category is not None and (
+                    (compile_deadline is not None and now >= compile_deadline)
+                    or now >= hard_deadline
+                ):
+                    termination_reason = "compile_diagnostic"
+                    process_tree_terminated = _terminate_validation_process_tree(process)
+                    read_available_output()
+                    break
+                if now >= hard_deadline:
+                    termination_reason = "command_timeout"
+                    process_tree_terminated = _terminate_validation_process_tree(process)
+                    read_available_output()
+                    break
+                if now >= next_progress_at:
+                    _emit_validation_progress(
+                        "validation_process_running",
+                        commandId=str(command.get("id", "")),
+                        pid=process.pid,
+                        elapsedSeconds=round(now - started_at, 3),
+                        capturedBytes=captured_bytes,
+                        resolvedExecutable=launch_spec.resolved_executable,
+                        launchMode=launch_spec.launch_mode,
+                    )
+                    next_progress_at = now + VALIDATION_PROGRESS_INTERVAL_SECONDS
+                time.sleep(VALIDATION_OUTPUT_POLL_SECONDS)
+
+        output = _decode_validation_output(log_path.read_bytes())
+    finally:
+        try:
+            log_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if wrapper_path is not None:
+            try:
+                wrapper_path.unlink(missing_ok=True)
+            except OSError:
                 pass
 
-            now = time.monotonic()
-            if process.poll() is not None and reader_done:
-                break
-            if compile_category is not None and (
-                (compile_deadline is not None and now >= compile_deadline)
-                or now >= hard_deadline
-            ):
-                termination_reason = "compile_diagnostic"
-                process_tree_terminated = _terminate_validation_process_tree(process)
-                break
-            if now >= hard_deadline:
-                termination_reason = "command_timeout"
-                process_tree_terminated = _terminate_validation_process_tree(process)
-                break
+    if process is None:
+        raise OSError("validation_process_not_started")
 
-        reader.join(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
-        if reader.is_alive():
-            process.stdout.close()
-            reader.join(timeout=VALIDATION_OUTPUT_POLL_SECONDS)
-        try:
-            while True:
-                record_chunk(output_queue.get_nowait())
-        except queue.Empty:
-            pass
-        command_log.flush()
-        command_log.seek(0)
-        output = _decode_validation_output(command_log.read())
-        if not process.stdout.closed:
-            process.stdout.close()
+    _emit_validation_progress(
+        "validation_process_finished",
+        commandId=str(command.get("id", "")),
+        pid=process.pid,
+        exitCode=process.poll(),
+        terminationReason=termination_reason,
+        compileCategory=compile_category,
+        durationSeconds=round(time.monotonic() - started_at, 3),
+        capturedBytes=captured_bytes,
+        resolvedExecutable=launch_spec.resolved_executable,
+        launchMode=launch_spec.launch_mode,
+    )
 
     return ValidationProcessResult(
         exit_code=process.poll(),
@@ -1606,7 +1822,7 @@ def _run_validation(
     if not isinstance(timeout, int) or timeout <= 0:
         timeout = DEFAULT_TIMEOUT_SECONDS
     try:
-        _assert_validation_command_environment(
+        launch_spec = _assert_validation_command_environment(
             command,
             repositories,
             retry_same_run=retry_same_run,
@@ -1615,7 +1831,7 @@ def _run_validation(
             task_id=task_id,
         )
         process_result = _run_validation_process(
-            argv,
+            launch_spec,
             command_cwd,
             timeout,
             command,
@@ -1642,6 +1858,18 @@ def _run_validation(
                     f"{error_category}:timeoutSeconds={timeout}:"
                     f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
                 )
+            maven_failures = _fresh_maven_failure_results(
+                command,
+                command_cwd,
+                maven_before_reports,
+            )
+            if maven_failures:
+                return 1, (
+                    f"{output}\nvalidation_maven_test_failures_detected_after_timeout:"
+                    f"{json.dumps(maven_failures, ensure_ascii=False, separators=(',', ':'))}:"
+                    f"timeoutSeconds={timeout}:"
+                    f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
+                )
             raise _validation_environment_error(
                 command,
                 category="command_timeout",
@@ -1662,6 +1890,18 @@ def _run_validation(
                 batch_id=batch_id,
                 task_id=task_id,
             )
+        if exit_code not in {None, 0}:
+            environment_category = _runtime_environment_failure_category(output)
+            if environment_category is not None:
+                raise _validation_environment_error(
+                    command,
+                    category=environment_category,
+                    detail=f"exitCode={exit_code};output={output[-2000:]}",
+                    retry_same_run=retry_same_run,
+                    run_id=run_id,
+                    batch_id=batch_id,
+                    task_id=task_id,
+                )
         if exit_code == 0 and maven_test_selectors(command):
             execution_errors = _maven_test_execution_errors(
                 command,
@@ -2544,6 +2784,40 @@ def _task_validation_context(state: dict[str, Any]) -> dict[str, Any]:
         "agentScope": "task_and_batch_validation_commands",
         "allowedCommands": _validation_allowed_commands(state.get("status")),
         "allowedRunnerCommands": _validation_allowed_commands(state.get("status")),
+        "commandAudience": "validation_subagent_only",
+        "executorDirective": {
+            "requiredExecutor": "batch_validation_subagent",
+            "mainAgentAction": "spawn_subagent_immediately",
+            "mainAgentAllowedRunnerCommands": [],
+            "mainAgentPreflightAllowed": False,
+            "passValidationContextVerbatim": True,
+        },
+        "subagentProtocol": {
+            "version": "batch-validation-subagent.v3",
+            "singleSubagent": True,
+            "workspaceReadOnly": True,
+            "runnerCommandsOnly": True,
+            "asyncExecution": {
+                "executeInBackground": True,
+                "pollTool": "task_output",
+                "pollTimeoutMs": 120000,
+                "pollTimeoutIsTerminal": False,
+                "reuseTaskIdOnPollTimeout": True,
+                "progressStream": "stderr",
+                "progressEvents": [
+                    "validation_process_started",
+                    "validation_process_running",
+                    "validation_process_finished",
+                ],
+                "finalResultStream": "stdout",
+            },
+            "terminalResultPolicy": {
+                "environmentFailure": "return_userMessage_and_stop",
+                "forbidSecondSubagentForDiagnostics": True,
+                "forbidDuplicateRunnerInvocation": True,
+                "forbidDirectBuildToolInvocation": True,
+            },
+        },
         "executionGroups": [
             {
                 "id": group.get("id"),
@@ -4796,7 +5070,8 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                     active_run_id,
                 )
                 return {
-                    "action": "resume_batch_task_validation",
+                    "action": "spawn_batch_validation_subagent",
+                    "validationSubagentMode": "resume",
                     "activeBatchId": active_batch_id,
                     "executionLane": execution_lane,
                     "activeRunId": active_run_id,
@@ -4881,7 +5156,8 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                         last_run_id,
                     )
                     return {
-                        "action": "recover_batch_task_validation_closure",
+                        "action": "spawn_batch_validation_subagent",
+                        "validationSubagentMode": "recover_closure",
                         "activeBatchId": active_batch_id,
                         "executionLane": execution_lane,
                         "activeRunId": last_run_id,
@@ -4923,9 +5199,14 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                 validation_context = None
             return {
                 "action": (
-                    "run_batch_check_in_validation_subagent"
+                    "spawn_batch_validation_subagent"
                     if validation_context is not None
                     else "run_batch_check"
+                ),
+                **(
+                    {"validationSubagentMode": "batch_check"}
+                    if validation_context is not None
+                    else {}
                 ),
                 "activeBatchId": active_batch_id,
                 "executionLane": execution_lane,
@@ -5106,6 +5387,8 @@ def _cmd_start_batch_task_validation(args: argparse.Namespace) -> int:
         validation_context = _task_validation_context(state)
         return _emit(
             True,
+            action="spawn_batch_validation_subagent",
+            validationSubagentMode="start",
             runType=TASK_VALIDATION_RUN_TYPE,
             runId=state.get("runId"),
             status=state.get("status"),

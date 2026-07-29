@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.2.0727
+version: v1.2.0729
 allowed-tools: execute task_output read_file grep glob write_file edit_file
 ---
 
@@ -160,9 +160,8 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_task_validation`：当前批次所有 TASK 实现均已收口为 `implemented`；创建 deferred validation run，并启动一个批次级只验证子代理，由它串行运行该批全部 TASK 与 batch 校验命令。
-- `resume_batch_task_validation` / `recover_batch_task_validation_closure`：把返回的原 `activeRunId/currentTaskId` 和完整批次验证上下文交给一个批次级只验证子代理恢复，不得创建新实现 run 或跳到其他 TASK。
+- `spawn_batch_validation_subagent`：立即用一次“子任务执行”创建批次级只验证子代理，并把 `validationContext` 原样传入。`validationSubagentMode=start/resume/recover_closure/batch_check` 只说明子代理从哪个阶段接续；主 agent 不得先读取 Task context、检查状态或自行调用 `validate-batch-task` / `batch-check`。`validationContext.commandAudience=validation_subagent_only` 且 `executorDirective.mainAgentAllowedRunnerCommands=[]` 是硬边界。
 - `fix_or_retry_task_validation`：源码未变化时创建新的 task-validation run 从 `failedValidationTaskId` 重试；需要修改源码时，必须先对 runner 返回的 `repairOwnerTaskIds` 之一执行 `start-validation-repair`，不得默认把验证游标当成修复责任 TASK。
-- `run_batch_check_in_validation_subagent`：deferred 批次的 TASK 已全部验证通过；把返回的 `validationContext` 交给一个批次级只验证子代理，由它执行下方「批次验证与重验证」，不得由主 agent 接管。
 - `run_batch_check`：仅用于未启用 deferred policy 的旧计划；当前批次 TASK 已全部完成，执行下方「批次验证与重验证」。
 - `recover_task_covered_batch`：仅用于未启用 deferred policy 的旧计划；最后一个 TASK evidence 已写入但批次收口尚未绑定时，inspect 并 recover 原 TASK run。
 - `run_project_check`：所有批次验证已完成且配置了额外项目检查，跳过 Task 队列，执行「全部任务完成后的验证」。
@@ -263,7 +262,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 python "${pluginPath}/hooks/task_runner.py" start-batch-task-validation --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-保存输出的完整 `validationContext`，其中必须包含 `runType/featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256/allowedCommands/executionGroups`。主 agent 只启动一个全新的批次验证子代理，并把该对象原样放入启动 prompt；不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能执行 `allowedCommands` 中列出的 runner 命令，并按 `currentTaskId` 调用：
+保存输出的完整 `validationContext`，其中必须包含 `runType/featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256/allowedCommands/commandAudience/executorDirective/subagentProtocol/executionGroups`。runner 返回 `action/requiredAction=spawn_batch_validation_subagent` 后，主 agent 的下一次工具调用必须是一次“子任务执行”；禁止在两者之间调用 `code_task_context.py`、`inspect`、`validate-batch-task`、`batch-check` 或任何底层构建命令。主 agent 只启动一个全新的批次验证子代理，并把该对象原样放入启动 prompt；必须把 `executorDirective/subagentProtocol` 作为机器协议执行，不得用旧模板覆盖或省略其中的执行角色、异步轮询、单子代理和终态规则，不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能执行 `allowedCommands` 中列出的 runner 命令，并按 `currentTaskId` 调用：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" validate-batch-task --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<CURRENT_TASK_ID>" --run-id "<VALIDATION_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -278,8 +277,8 @@ runner 把逻辑 TASK 命令先规划成 `executionGroups`：同仓库、同 cwd
 `validate-batch-task`、`batch-check`、`project-check` 以及它们内部触发的 Maven/Gradle/npm 构建和测试可能超过 Claw 默认 30 秒超时。Agent 必须通过 Claw 原生工具异步执行整个 runner 命令；插件 Python 脚本不得 import 或调用 Claw Bash API。
 
 1. 调用 `execute` 并设置 `run_in_background: true`，保存返回的 `task_id`。
-2. 使用 `task_output({task_id, timeout: 120000})` 等待结果。
-3. 返回 `retrieval_status: "timeout"` 时，用同一个 `task_id` 继续调用 `task_output`；不得重新启动 runner。
+2. 使用 `task_output({task_id, timeout: 120000})` 等待结果。这里的 `timeout` 只是一次结果拉取的最长等待时间，不是验证命令失败，也不等于 runner 的 `command_timeout`。
+3. 返回 `retrieval_status: "timeout"` 时，用同一个 `task_id` 继续调用 `task_output`；不得重新启动 runner、不得新建验证子代理。runner 会在 `stderr` 输出 `validation_process_started/running/finished` 进度事件，最终机器结果仍只写到 `stdout`。
 4. 只查询状态时使用 `task_output({task_id, block: false})`。
 5. 退出码非 0 时读取 runner 的完整 JSON 结果并按 `requiredAction` 处理；不得把超时或非零退出码伪装成通过。
 6. 禁止使用 shell `&`、`nohup` 或另开不可追踪进程；Claw 后台任务最长可运行 2 小时并能持续返回部分输出。
@@ -310,9 +309,11 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 多个测试同时失败时，先按 `validationFailures[].repairOwnerTaskIds` 分组：同一 owner 的失败可在一次 repair 中一起修复；不同 owner 必须选择一个允许的 owner 启动 repair，完成实现收口并整批重验，剩余失败在后续轮次继续处理。不得把多个 owner 的修改全部记到一个 TASK，也不得因某个 selector 已通过而重跑或改写其历史 Evidence。
 
-若 runner 返回 `errorCategory=environment_failure` 以及 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。普通 required 校验失败可在工作区未变化时创建新的 task-validation run 重试；需要修改源码时，必须在任何源码、测试或配置改动之前执行 `start-validation-repair --task-id <REPAIR_OWNER_TASK_ID>`。runner 会校验工作区仍等于失败 run 的冻结快照；返回 `workspace_changed_before_validation_repair` 时先恢复该快照，不得补开 repair 掩盖先前改动。repair 完成后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
+若 runner 最终返回 `errorCategory=environment_failure` 以及 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；这是该次 runner 的终态，不得为了“获取详情”再启动第二个子代理、重新调用同一 runner 或手工执行底层 Maven/Gradle/npm。用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。普通 required 校验失败可在工作区未变化时创建新的 task-validation run 重试；需要修改源码时，必须在任何源码、测试或配置改动之前执行 `start-validation-repair --task-id <REPAIR_OWNER_TASK_ID>`。runner 会校验工作区仍等于失败 run 的冻结快照；返回 `workspace_changed_before_validation_repair` 时先恢复该快照，不得补开 repair 掩盖先前改动。repair 完成后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
 
-runner 会实时监测验证输出；发现明确的业务源码或测试源码编译诊断后，先短暂收集完整诊断，再终止验证进程树并分别返回 `source_compile_failure` 或 `test_compile_failure`，要求 `start_validation_repair`。总超时前未能实时识别但已捕获到编译诊断时仍按相同规则兜底，均不得改写成环境超时。runner 确实返回 `environment_failure` 时，验证子代理禁止绕过 runner 手工执行 Maven/Gradle/npm 或读取业务源码来探测另一种失败原因，也禁止主 agent 接管重复执行验证命令；只能按返回的 `requiredAction` 和原 runId 处理。
+runner 会先解析验证工具的真实可执行文件。Windows `.cmd/.bat`（包括 `mvn.cmd`、`npm.cmd`）通过临时 `.cmd` 包装文件和 `%COMSPEC% /D /S /C` 原始命令行启动；包装文件先写入 `validation_windows_wrapper_started` 哨兵，再在命令侧把 Maven/npm 的 stdout/stderr 追加到临时日志。其他平台直接把子进程 stdout/stderr 写入同类日志。runner 每 200ms tail 日志，避免 `mvn.cmd -> cmd.exe -> java.exe` 进程链丢失匿名管道输出。发现明确的业务源码或测试源码编译诊断后，先短暂收集完整诊断，再终止验证进程树并分别返回 `source_compile_failure` 或 `test_compile_failure`，要求 `start_validation_repair`。测试进程在总超时点仍存活但已生成新的 Surefire/Failsafe 失败报告时，也必须返回普通测试失败并进入 repair，不能归类为环境超时。
+
+环境失败使用窄分类：可执行文件/`cmd.exe` 无法启动、Java 工具链不可用、依赖仓库网络不可达、依赖认证或证书失败，以及没有任何编译诊断、测试失败报告或其他代码失败证据的真实硬超时。普通非零退出码、源码编译错误、测试编译错误、断言失败和异常测试结果都属于代码验证失败，由主 agent 按 runner 返回的 repair owner 修复后重验。runner 确实返回 `environment_failure` 时，验证子代理禁止绕过 runner 手工执行 Maven/Gradle/npm 或读取业务源码来探测另一种失败原因，也禁止主 agent 接管重复执行验证命令；只能按返回的 `requiredAction` 和原 runId 处理。
 
 全部 TASK 验证通过后才把 TASK 置 done。frontend `task_covered` 此时生成 `batch_closure`；backend 固定使用 `commands`，返回 `requiredAction=run_batch_check_in_validation_subagent` 后由同一个子代理执行 compile/build 收口。frontend `commands` 模式也由该子代理继续下方额外质量门禁。
 

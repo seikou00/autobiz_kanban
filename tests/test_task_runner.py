@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -435,6 +437,8 @@ class TaskRunnerTest(unittest.TestCase):
             validation_payload = json.loads(validation_run.stdout)
             self.assertEqual(validation_payload["currentTaskId"], "T001")
             self.assertEqual(validation_payload["requiredAction"], "spawn_batch_validation_subagent")
+            self.assertEqual(validation_payload["action"], "spawn_batch_validation_subagent")
+            self.assertEqual(validation_payload["validationSubagentMode"], "start")
             self.assertEqual(validation_payload["requestedCodeWorkspaces"], [str(code.resolve())])
             self.assertEqual(
                 validation_payload["validationContext"],
@@ -450,6 +454,40 @@ class TaskRunnerTest(unittest.TestCase):
                     "agentScope": "task_and_batch_validation_commands",
                     "allowedCommands": ["validate-batch-task", "batch-check"],
                     "allowedRunnerCommands": ["validate-batch-task", "batch-check"],
+                    "commandAudience": "validation_subagent_only",
+                    "executorDirective": {
+                        "requiredExecutor": "batch_validation_subagent",
+                        "mainAgentAction": "spawn_subagent_immediately",
+                        "mainAgentAllowedRunnerCommands": [],
+                        "mainAgentPreflightAllowed": False,
+                        "passValidationContextVerbatim": True,
+                    },
+                    "subagentProtocol": {
+                        "version": "batch-validation-subagent.v3",
+                        "singleSubagent": True,
+                        "workspaceReadOnly": True,
+                        "runnerCommandsOnly": True,
+                        "asyncExecution": {
+                            "executeInBackground": True,
+                            "pollTool": "task_output",
+                            "pollTimeoutMs": 120000,
+                            "pollTimeoutIsTerminal": False,
+                            "reuseTaskIdOnPollTimeout": True,
+                            "progressStream": "stderr",
+                            "progressEvents": [
+                                "validation_process_started",
+                                "validation_process_running",
+                                "validation_process_finished",
+                            ],
+                            "finalResultStream": "stdout",
+                        },
+                        "terminalResultPolicy": {
+                            "environmentFailure": "return_userMessage_and_stop",
+                            "forbidSecondSubagentForDiagnostics": True,
+                            "forbidDuplicateRunnerInvocation": True,
+                            "forbidDirectBuildToolInvocation": True,
+                        },
+                    },
                     "executionGroups": [
                         {
                             "id": "TVG-001",
@@ -459,6 +497,37 @@ class TaskRunnerTest(unittest.TestCase):
                         }
                     ],
                 },
+            )
+            resumed_session = _run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(
+                resumed_session.returncode,
+                0,
+                resumed_session.stdout + resumed_session.stderr,
+            )
+            resumed_payload = json.loads(resumed_session.stdout)
+            self.assertEqual(
+                resumed_payload["action"],
+                "spawn_batch_validation_subagent",
+            )
+            self.assertEqual(resumed_payload["validationSubagentMode"], "resume")
+            self.assertEqual(
+                resumed_payload["validationContext"]["subagentProtocol"]["version"],
+                "batch-validation-subagent.v3",
+            )
+            self.assertEqual(
+                resumed_payload["validationContext"]["commandAudience"],
+                "validation_subagent_only",
+            )
+            self.assertEqual(
+                resumed_payload["validationContext"]["executorDirective"]
+                ["mainAgentAllowedRunnerCommands"],
+                [],
+            )
+            self.assertFalse(
+                resumed_payload["validationContext"]["subagentProtocol"]
+                ["asyncExecution"]["pollTimeoutIsTerminal"]
             )
             validated = _run(
                 "validate-batch-task", "--workspace", str(workspace), "--feature", "alpha",
@@ -477,6 +546,18 @@ class TaskRunnerTest(unittest.TestCase):
             validation_evidence = _evidence(feature_dir, "ev_0002")
             self.assertEqual(validation_evidence["validationTarget"], "batch_final_snapshot")
             self.assertEqual(validation_evidence["latestImplementationEvidenceId"], "ev_0001")
+
+            batch_session = json.loads(_run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            ).stdout)
+            self.assertEqual(
+                batch_session["action"],
+                "spawn_batch_validation_subagent",
+            )
+            self.assertEqual(
+                batch_session["validationSubagentMode"],
+                "batch_check",
+            )
 
             _check_batch(workspace, code)
             project = _run(
@@ -947,6 +1028,268 @@ class TaskRunnerTest(unittest.TestCase):
                 )
             self.assertEqual(exit_code, 0)
             self.assertNotIn("validation_process_stopped_after_compile_failure", output)
+
+    def test_validation_process_uses_file_output_and_emits_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    "print('validation output captured', flush=True)",
+                ],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 3,
+            }
+            real_popen = subprocess.Popen
+            child_outputs = []
+
+            def tracked_popen(*args, **kwargs):
+                child_outputs.append(kwargs.get("stdout"))
+                return real_popen(*args, **kwargs)
+
+            progress = io.StringIO()
+            with (
+                patch.object(
+                    task_runner_module.subprocess,
+                    "Popen",
+                    side_effect=tracked_popen,
+                ),
+                patch.object(task_runner_module.sys, "stderr", progress),
+            ):
+                exit_code, output = task_runner_module._run_validation(
+                    command, {repo.name: repo}
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("validation output captured", output)
+            self.assertEqual(len(child_outputs), 1)
+            self.assertIsNot(child_outputs[0], subprocess.PIPE)
+            self.assertTrue(hasattr(child_outputs[0], "fileno"))
+            self.assertIn('"event":"validation_process_started"', progress.getvalue())
+            self.assertIn('"event":"validation_process_finished"', progress.getvalue())
+
+    def test_windows_batch_validation_uses_comspec_and_command_side_log_redirection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = (Path(tmp) / "repo with spaces").resolve()
+            tool_dir = (Path(tmp) / "工具 with spaces").resolve()
+            repo.mkdir()
+            tool_dir.mkdir()
+            maven = tool_dir / "mvn.cmd"
+            command_shell = tool_dir / "cmd.exe"
+            maven.write_text("@echo off\r\n", encoding="utf-8")
+            command_shell.write_text("placeholder", encoding="utf-8")
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [str(maven), "test", "-Dtest=AppTest"],
+                "cwd": ".",
+                "kind": "behavior_test",
+            }
+
+            with patch.dict(
+                task_runner_module.os.environ,
+                {"COMSPEC": str(command_shell)},
+                clear=False,
+            ):
+                launch_spec = task_runner_module._assert_validation_command_environment(
+                    command,
+                    {repo.name: repo},
+                    retry_same_run=True,
+                    platform_name="nt",
+                )
+
+            self.assertEqual(launch_spec.launch_mode, "windows_batch")
+            self.assertEqual(launch_spec.resolved_executable, str(maven))
+            self.assertEqual(launch_spec.command_shell, str(command_shell))
+            log_path = Path(tmp) / "日志 with spaces.log"
+            wrapper_content = task_runner_module._validation_windows_wrapper_content(
+                launch_spec,
+                log_path,
+            )
+            self.assertIn(
+                f'call "{maven}" "test" "-Dtest=AppTest"',
+                wrapper_content,
+            )
+            self.assertIn(
+                f'>"{log_path}" echo validation_windows_wrapper_started',
+                wrapper_content,
+            )
+            self.assertIn(f'1>>"{log_path}" 2>&1', wrapper_content)
+            wrapper_path = Path(tmp) / "包装 with spaces.cmd"
+            self.assertEqual(
+                task_runner_module._validation_windows_shell_command(
+                    launch_spec,
+                    wrapper_path,
+                ),
+                (
+                    f'"{command_shell}" /D /S /V:OFF '
+                    f'/C ""{wrapper_path}""'
+                ),
+            )
+
+    def test_direct_validation_resolves_executable_without_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [sys.executable, "--version"],
+                "cwd": ".",
+                "kind": "behavior_test",
+            }
+            launch_spec = task_runner_module._assert_validation_command_environment(
+                command,
+                {repo.name: repo},
+                retry_same_run=True,
+            )
+            self.assertEqual(launch_spec.launch_mode, "direct")
+            self.assertIsNone(launch_spec.command_shell)
+            self.assertTrue(Path(launch_spec.resolved_executable).is_absolute())
+            self.assertEqual(
+                task_runner_module._validation_command_argv(launch_spec),
+                [launch_spec.resolved_executable, "--version"],
+            )
+
+    @unittest.skipUnless(os.name == "nt", "Windows batch launch integration")
+    def test_windows_batch_compile_failure_is_captured_before_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = (Path(tmp) / "含空格仓库").resolve()
+            source = repo / "src" / "test" / "java" / "example" / "AppTest.java"
+            source.parent.mkdir(parents=True)
+            source.write_text("class AppTest {}\n", encoding="utf-8")
+            maven = repo / "mvn.cmd"
+            maven.write_text(
+                "@echo off\r\n"
+                f"echo [ERROR] {source}:[1,1] must be caught or declared to be thrown 1>&2\r\n"
+                "exit /b 1\r\n",
+                encoding="utf-8",
+            )
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [str(maven), "test", "-Dtest=AppTest"],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 10,
+            }
+            started_at = time.monotonic()
+            exit_code, output = task_runner_module._run_validation(
+                command,
+                {repo.name: repo},
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertLess(time.monotonic() - started_at, 5)
+            self.assertIn("must be caught or declared to be thrown", output)
+            self.assertIn(
+                "validation_process_stopped_after_compile_failure:test_compile_failure",
+                output,
+            )
+
+    def test_validation_timeout_uses_fresh_maven_failure_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            report = repo / "target" / "surefire-reports" / "TEST-example.AppTest.xml"
+            script = (
+                "import time; from pathlib import Path; "
+                f"p=Path({str(report)!r}); p.parent.mkdir(parents=True, exist_ok=True); "
+                "time.sleep(0.1); "
+                "p.write_text('<testsuite name=\"example.AppTest\"><testcase "
+                "classname=\"example.AppTest\" name=\"fails\"><failure "
+                "type=\"java.lang.AssertionError\" message=\"expected true\"/>"
+                "</testcase></testsuite>', encoding='utf-8'); time.sleep(5)"
+            )
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [sys.executable, "-c", script],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 1,
+            }
+            with patch.object(
+                task_runner_module,
+                "maven_test_selectors",
+                return_value=["AppTest"],
+            ):
+                exit_code, output = task_runner_module._run_validation(
+                    command,
+                    {repo.name: repo},
+                )
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "validation_maven_test_failures_detected_after_timeout",
+                output,
+            )
+            self.assertIn("expected true", output)
+
+    def test_runtime_environment_failure_requires_strong_environment_marker(self) -> None:
+        cases = {
+            "The JAVA_HOME environment variable is not defined correctly":
+                "java_toolchain_unavailable",
+            "Could not transfer artifact a:b:jar:1 from central: Unknown host repo.example":
+                "dependency_network_unavailable",
+            "Failed to read artifact descriptor for a:b:jar:1: PKIX path building failed":
+                "dependency_credentials_or_certificate_failure",
+            "[ERROR] /repo/src/test/AppTest.java:[1,1] cannot find symbol": None,
+            "Tests run: 1, Failures: 1": None,
+        }
+        for output, expected in cases.items():
+            with self.subTest(output=output):
+                self.assertEqual(
+                    task_runner_module._runtime_environment_failure_category(output),
+                    expected,
+                )
+
+    def test_nonzero_test_failure_remains_code_validation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    "print('Tests run: 1, Failures: 1'); raise SystemExit(1)",
+                ],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 3,
+            }
+            exit_code, output = task_runner_module._run_validation(
+                command,
+                {repo.name: repo},
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertIn("Tests run: 1, Failures: 1", output)
+
+    def test_nonzero_toolchain_failure_is_returned_as_environment_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "print('The JAVA_HOME environment variable is not defined correctly'); "
+                        "raise SystemExit(1)"
+                    ),
+                ],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "timeoutSeconds": 3,
+            }
+            with self.assertRaises(task_runner_module.TaskRunnerError) as raised:
+                task_runner_module._run_validation(
+                    command,
+                    {repo.name: repo},
+                )
+            self.assertEqual(
+                raised.exception.details["errorCategory"],
+                "environment_failure",
+            )
+            self.assertEqual(
+                raised.exception.details["failureCategory"],
+                "java_toolchain_unavailable",
+            )
 
     def test_validation_compile_stop_terminates_descendant_processes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
