@@ -101,10 +101,10 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 **第一步：逐条裁定**
 
 - 范围：讨论表中的全部待确认条目；没有条目时跳过本步，直接进入第二步。
-- 消解定义：裁定即消解，但**裁定必须落盘才算数**。生成 proposal 时每条落为 `Open Questions` 一行：`Resolution` 写下裁定的具体结论（不是 Question 的复述、不是占位）、`Decision` 填 `DEC-NNN`、`Status=已确认`，同时 `Decision Log` 中有这条 DEC（决定 / 为什么 / 否决 / 约束齐备，`约束` 指向 `specs/**` 中真实存在的 `REQ-<capability>-NNN` 或 `CAP-<name>`）。每条 Open Question 的裁定天然达到 `Decision Log` 记录门槛（它有真实备选且改动行为契约），不得以「不达门槛」为由不记。
+- 消解定义：裁定即消解，但**裁定必须落盘才算数**。生成 proposal 时每条落为 `Open Questions` 一行：`Resolution` 写下裁定的具体结论（不是 Question 的复述、不是占位）、`Decision` 填 `DEC-NNN`、`Status=已确认`，同时 `Decision Log` 中有这条 DEC（决定 / 为什么 / 否决 / 约束齐备，`约束` 指向 `specs/**` 中真实存在的 `REQ-<capability>-NNN` 或 `CAP-<name>`）。每条 Open Question 的裁定不得以「不达门槛」为由不记。
 - 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与讨论表条目 ID 对应（如 `SPEC-01` → `spec_01`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
 - 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前建议确认 (Recommended)」：采纳讨论表中的当前建议；②「采纳备选：<方案>」：选项自身携带具体方案；③「需要调整」：用户将给出修改意见，吸收后更新讨论表、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 specs 阶段、不推进。
-- **禁止自行确认**：`已确认` 只能是用户裁定的结果。不得以「这是外部接口细节」「不影响行为契约的定义」「specs 阶段只关心 WHAT」等任何理由，自己把 Status 写成 `已确认`。判定某条不影响行为契约不是跳过裁定的理由——是否需要定，同样由用户裁定。
+- **禁止自行确认**：`已确认` 只能是用户裁定的结果。不得以「这是外部接口细节」「不影响行为契约的定义」「specs 阶段只关心 WHAT」等任何理由，自己把 Status 写成 `已确认`。判定某条不影响行为契约不是跳过裁定的理由，必须由用户裁定。
 - 禁止「先假设 / 按默认方案 / 后续补充 / 先占位 / 编码阶段再定」后推进——该出口不在闭集内，不得以任何措辞重新引入。共享协议第 3 节的「后续补充并继续」模板属于探索/讨论环节，本裁定门禁止搬用。
 - **整体门不构成对任何一条的裁定**：第二步只确认「进入 specs 生成」，不能被当作对全部条目的一次性打包确认。
 - **自由表达即退出结构化**：用户不点选项、而是直接给出实质回复（补一条决策、改一个字段、提新问题），当作该条的裁定内容吸收并更新，**不得机械重复弹同一个结构化选择**；下一轮合适时机再重新发起该决策。
@@ -118,8 +118,6 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 ## 生成 proposal.md
 
 按 `${pluginPath}/skills/autodev/autodev-specs/templates/proposal.md` 输出。
-
-模板仅定义最终产物骨架。填入实际内容后直接落盘，不得复制模板说明、外围“模板”标题、外层代码围栏或占位解释。`proposal.md` 与 `specs/**/*.md` 的代码围栏外不得使用 Markdown 块引用（`>`）；需要表达说明时改写为普通段落、列表或表格。
 
 生成前先建立 capability 变更分类表，直接写入 proposal 的 `## Capability Index` 节（唯一权威索引），后续 `specs/**/*.md` 必须与其一一对应。探索中形成的判定依据与既有行为来源在对话中说明，索引表只留结论：
 
@@ -140,7 +138,7 @@ ID 规则：
 - `REMOVED`：已有能力、入口、分支或业务结果在本轮后不再支持、不可访问或不再生效；必须说明移除原因、迁移/兼容方式，以及旧入口被触发时的期望行为。
 - 同一用户目标同时包含新增独立能力和修改既有能力时，拆成不同 capability 或同一 spec 内不同 Requirement，不得用一个分类吞掉全部变化。
 - 无法判断是否已有行为时，先搜索既有 specs、代码入口、接口、菜单、配置和测试；仍不确定则回到用户确认，不要猜测分类。
-- 本轮无 capability 时，`Capability Index` 表正文只写 `无`；不得保留 `CAP-[name]` / `[kebab-case-name]` 占位行。
+- 本轮无 capability 时，`Capability Index` 表正文只写 `无`；不得保留占位行。
 - 一旦列入索引，Spec Path 必须指向真实 `specs/<capability>/spec.md`；同一用户目标混合新增与修改时，用 Operations 多值或拆分 capability 表达，不得用单一操作表达全部变化。
 
 必须包含：

@@ -200,8 +200,6 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 > **specs 驱动设计**：基于 `proposal.md`、`specs/**/*.md` 和 design exploration 结论，先生成 `design.md`，再基于 specs + design 生成 `PLAN.md`。
 。
 
-模板仅定义最终产物骨架。填入实际内容后直接落盘，不得复制模板说明、外围“模板”标题、外层代码围栏或占位解释。`design.md` 与 `PLAN.md` 的代码围栏外不得使用 Markdown 块引用（`>`）；需要表达说明时改写为普通段落、列表或表格。
-
 #### 写入checkpoint
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
@@ -298,7 +296,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - 如果用户补充内容改变了外部可观察行为、验收标准或能力边界，停止并建议回到 `/autodev-specs` 更新 `proposal.md` / `specs/**/*.md`。
 - 必须在 PLAN.md 中新增或更新「用户补充说明 / 技术细节」章节。
 - 用户明确确认的内容，标记为「已确认」。
-- 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」——但「待确认」不是合法的落点状态：必须回到 design.md 记为 R-xx 并重开逐条裁定门消解，再重新生成受影响任务；plan_done 时 PLAN.md 与 design.md 均不得残留「待确认」单元格，已关闭的决策门不得以补充信息为名悄悄重开而不裁定。
+- 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」：必须回到 design.md 记为 R-xx 并重开逐条裁定门消解，再重新生成受影响任务；已关闭的决策门不得以补充信息为名悄悄重开而不裁定。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
 - 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 记为 R-xx（Type=待确认或读码差异）走裁定门，并回到用户确认，不得擅自覆盖 specs。
 - 用户补充的实现细节只能作为计划依据，不得在 Plan 阶段创建或修改业务代码文件。
@@ -324,7 +322,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - [ ] 每个任务以 `TASK-NNN` 命名，包含「做什么」「规格依据」「场景依据」「设计依据」「代码证据」「验证方法」「状态: 待做」「完成记录: 无」，引用全部为稳定 ID
 - [ ] 任务按需求闭环拆分，不按代码层或文件层机械拆分；过细任务已合并到对应需求任务
 - [ ] specs 中每个 REQ 与 SCN 至少被一个任务覆盖（Contract Coverage 可逐行核对）
-- [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或在 Contract Coverage 标注「无需实现:<理由>」（理由不得留占位）——code 入场校验会机械拦截，漏引用报 `uncovered_design_decision`，豁免无理由报 `waiver_missing_reason`
+- [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或在 Contract Coverage 标注「无需实现:<理由>」（理由不得留占位）
 - [ ] PLAN.md 与 design.md 所有表格单元格无「待确认」「读码差异」残留
 - [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 PLAN.md 已同步记录，并更新相关任务或风险项。
 

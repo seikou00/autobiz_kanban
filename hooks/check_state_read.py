@@ -64,14 +64,14 @@ STATE_MD = "state_md"
 TARGET_REASONS = {
     HOOK_LOG: (
         "hooks.ndjson 是 append-only 的 hook 审计日志，不是状态源，"
-        "不得据其判断或推断当前 checkpoint（写入失败会被静默丢弃，可能缺行或滞后）。"
+        "不得据其判断或推断当前 checkpoint。"
     ),
     STATE_JSON: (
-        "state.json 是 checkpoint 主事实源，但不得绕过脚本手工读取后自行解析，"
+        "state.json 是 checkpoint 唯一来源，但不得绕过脚本手工读取后自行解析，"
         "以免漏掉脚本的规范化与校验处理。"
     ),
     STATE_MD: (
-        "STATE.md 是 state.json 的自动生成视图，不是事实源，"
+        "STATE.md 是 state.json 的自动生成视图，"
         "不得据其判断当前 checkpoint。"
     ),
 }
