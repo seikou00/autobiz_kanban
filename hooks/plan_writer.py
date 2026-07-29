@@ -52,6 +52,8 @@ from hooks.plan_json import (  # noqa: E402
     TASK_VALIDATION_KINDS,
     VISUAL_SOURCE_ID_RE,
     batch_plan_path,
+    batch_validation_terminal,
+    code_validation_max_repair_attempts,
     deferred_task_validation_enabled,
     load_plan_bundle,
     normalize_status,
@@ -59,6 +61,7 @@ from hooks.plan_json import (  # noqa: E402
     task_contract_sha256,
     task_covered_command_ids,
     task_set_digest,
+    task_validation_terminal,
     task_workspace_roots,
     validation_command_manifest_names,
     validate_plan_bundle_data,
@@ -368,15 +371,21 @@ def _initial(feature: str) -> dict[str, Any]:
         "taskValidationPolicy": {
             "mode": "deferred_batch",
             "orchestration": "single_batch_subagent",
-            "failStrategy": "fail_fast",
+            "failStrategy": "repair_then_defer",
             "maxConcurrency": 1,
             "agentScope": "task_and_batch_validation_commands",
+            "maxRepairAttempts": 2,
+            "environmentFailureDisposition": "defer",
+            "exhaustedRepairDisposition": "defer",
         },
         "batches": [],
         "batchValidationProfiles": {},
         "projectValidationCommands": [],
         "projectCheckEvidenceIds": [],
         "latestProjectCheckEvidenceId": None,
+        "projectValidationDisposition": None,
+        "projectValidationFailedRunIds": [],
+        "deferredValidationIssues": [],
         "tasks": [],  # in-memory working view; never written to root plan.json
         "_batchAssignments": {},
         "_batchPlans": {},
@@ -408,6 +417,9 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     data.setdefault("projectValidationCommands", [])
     data.setdefault("projectCheckEvidenceIds", [])
     data.setdefault("latestProjectCheckEvidenceId", None)
+    data.setdefault("projectValidationDisposition", None)
+    data.setdefault("projectValidationFailedRunIds", [])
+    data.setdefault("deferredValidationIssues", [])
     task_items: list[dict[str, Any]] = []
     assignments: dict[str, str] = {}
     batch_plans: dict[str, dict[str, Any]] = {}
@@ -716,8 +728,15 @@ def _batch_status(
     ):
         return "failed"
     if statuses and all(status == "done" for status in statuses):
-        task_gate_passed = not isinstance(task_validation, dict) or task_validation.get("status") == "passed"
-        return "done" if task_gate_passed and batch_validation.get("status") == "passed" else "in_progress"
+        task_gate_passed = (
+            not isinstance(task_validation, dict)
+            or task_validation_terminal(task_validation.get("status"))
+        )
+        return (
+            "done"
+            if task_gate_passed and batch_validation_terminal(batch_validation.get("status"))
+            else "in_progress"
+        )
     if any(status in {"in_progress", "implemented", "validating", "done"} for status in statuses):
         return "in_progress"
     return "todo"
@@ -873,6 +892,11 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                 list(previous_validation.get("latestPassEvidenceIds", [])) if contract_unchanged else []
             ),
             "activeRunId": previous_validation.get("activeRunId") if contract_unchanged else None,
+            "deferredIssues": (
+                copy.deepcopy(previous_validation.get("deferredIssues", []))
+                if contract_unchanged
+                else []
+            ),
         }
         task_validation: dict[str, Any] | None = None
         if deferred_task_validation_enabled(root):
@@ -926,6 +950,16 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                     else {}
                 ),
                 "taskContractSha256ByTask": task_contracts,
+                "deferredTaskIds": (
+                    list(previous_task_validation.get("deferredTaskIds", []))
+                    if task_contract_unchanged
+                    else []
+                ),
+                "deferredIssues": (
+                    copy.deepcopy(previous_task_validation.get("deferredIssues", []))
+                    if task_contract_unchanged
+                    else []
+                ),
             }
             if task_contract_unchanged:
                 for field in (
@@ -976,6 +1010,24 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             }
         )
     root["batches"] = root_entries
+    deferred_issues: list[dict[str, Any]] = []
+    seen_issue_ids: set[str] = set()
+    for batch_plan in projected.values():
+        for validation_name in ("taskValidation", "batchValidation"):
+            validation = batch_plan.get(validation_name)
+            issues = validation.get("deferredIssues") if isinstance(validation, dict) else None
+            for issue in issues if isinstance(issues, list) else []:
+                issue_id = issue.get("issueId") if isinstance(issue, dict) else None
+                if isinstance(issue_id, str) and issue_id not in seen_issue_ids:
+                    deferred_issues.append(copy.deepcopy(issue))
+                    seen_issue_ids.add(issue_id)
+    project_disposition = root.get("projectValidationDisposition")
+    project_issue_id = (
+        project_disposition.get("issueId") if isinstance(project_disposition, dict) else None
+    )
+    if isinstance(project_issue_id, str) and project_issue_id not in seen_issue_ids:
+        deferred_issues.append(copy.deepcopy(project_disposition))
+    root["deferredValidationIssues"] = deferred_issues
     root["taskSetDigest"] = task_set_digest(root, projected)
     unfinished = [entry["id"] for entry in root_entries if entry["status"] != "done"]
     if not root_entries:
@@ -989,7 +1041,11 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             project_commands = root.get("projectValidationCommands")
             project_ready = (
                 isinstance(project_commands, list)
-                and (not project_commands or isinstance(root.get("latestProjectCheckEvidenceId"), str))
+                and (
+                    not project_commands
+                    or isinstance(root.get("latestProjectCheckEvidenceId"), str)
+                    or isinstance(root.get("projectValidationDisposition"), dict)
+                )
             )
             root["status"] = "done" if project_ready else "in_progress"
         root["activeBatchId"] = None
@@ -2679,21 +2735,21 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "taskValidationPolicy": {
                         "mode": "deferred_batch",
                         "orchestration": "single_batch_subagent",
-                        "failStrategy": "fail_fast",
+                        "failStrategy": "repair_then_defer",
                         "maxConcurrency": 1,
                         "agentScope": "task_and_batch_validation_commands",
+                        "maxRepairAttempts": 2,
+                        "environmentFailureDisposition": "defer",
+                        "exhaustedRepairDisposition": "defer",
                         "taskCommandTiming": "after_all_batch_tasks_implemented",
                         "batchCommandTiming": "after_all_task_commands_pass",
                         "validationTarget": "batch_final_snapshot",
                     },
                     "validationEnvironmentPolicy": {
-                        "preflightBeforeRun": True,
-                        "missingExecutableResult": "error_without_validation_failure_evidence",
-                        "runtimeEnvironmentResult": "error_and_retry_same_run",
-                        "requiredActions": [
-                            "fix_validation_environment_and_retry_batch_validation",
-                            "fix_validation_environment_and_retry_same_run",
-                        ],
+                        "preflightBeforeRun": False,
+                        "missingExecutableResult": "blocked_evidence_and_defer",
+                        "runtimeEnvironmentResult": "blocked_evidence_and_defer",
+                        "requiredActions": ["record_deferred_and_continue"],
                         "planOrDigestRebuildRequired": False,
                     },
                     "workspaceContract": {
@@ -3463,16 +3519,129 @@ def record_deferred_task_validation_attempt(
         )
         result_data: dict[str, Any]
         if next_task is None:
-            validation["status"] = "passed"
+            has_deferred = bool(validation.get("deferredTaskIds"))
+            validation["status"] = "passed_with_deferred" if has_deferred else "passed"
             validation["activeRunId"] = None
             validation["lastRunId"] = run_id
             validation["currentTaskId"] = None
-            result_data = {"taskValidationPassed": True, "activeBatchId": batch_id}
+            result_data = {
+                "taskValidationPassed": True,
+                "taskValidationDeferred": has_deferred,
+                "activeBatchId": batch_id,
+            }
         else:
             next_task["status"] = "validating"
             validation["currentTaskId"] = str(next_task.get("id"))
             result_data = {
                 "taskValidationPassed": False,
+                "activeBatchId": batch_id,
+                "nextTaskId": str(next_task.get("id")),
+            }
+        data["status"] = "in_progress"
+        data["activeBatchId"] = batch_id
+        result = _write(workspace, feature, data)
+        return with_result_data(result, **result_data) if result.ok else result
+
+
+def record_deferred_task_validation_deferral(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    task_id: str,
+    run_id: str,
+    evidence_ids: list[str],
+    issue: dict[str, Any],
+) -> WriterResult:
+    """Record an unresolved Code validation and continue the batch queue."""
+
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        batch_plans = data.get("_batchPlans")
+        batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+        if not isinstance(batch_plan, dict):
+            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
+        validation = batch_plan.get("taskValidation")
+        if not isinstance(validation, dict):
+            return fail("task_validation_contract_missing", batch_id, path=_path(workspace, feature))
+        if validation.get("status") not in {"ready", "running", "failed"}:
+            return fail(
+                "task_validation_deferral_not_allowed",
+                f"batch={batch_id};status={validation.get('status')}",
+                path=_path(workspace, feature),
+            )
+        task = _find_task(data, task_id)
+        if normalize_status(task.get("status")) not in {"implemented", "validating", "failed"}:
+            return fail("task_validation_deferral_task_invalid", task_id, path=_path(workspace, feature))
+
+        task["evidenceIds"] = _append_unique(
+            task.get("evidenceIds") if isinstance(task.get("evidenceIds"), list) else [],
+            evidence_ids,
+        )
+        task["validationEvidenceIds"] = _append_unique(
+            task.get("validationEvidenceIds")
+            if isinstance(task.get("validationEvidenceIds"), list)
+            else [],
+            evidence_ids,
+        )
+        task["completionEvidenceIds"] = []
+        task["latestPassEvidenceId"] = None
+        task["validationDisposition"] = copy.deepcopy(issue)
+        task["status"] = "done"
+
+        validation["evidenceIds"] = _append_unique(
+            validation.get("evidenceIds") if isinstance(validation.get("evidenceIds"), list) else [],
+            evidence_ids,
+        )
+        completed = validation.get("completedTaskIds")
+        completed = completed if isinstance(completed, list) else []
+        validation["completedTaskIds"] = _append_unique(completed, [task_id])
+        latest_by_task = validation.get("latestPassEvidenceByTask")
+        latest_by_task = latest_by_task if isinstance(latest_by_task, dict) else {}
+        latest_by_task[task_id] = []
+        validation["latestPassEvidenceByTask"] = latest_by_task
+        validation["deferredTaskIds"] = _append_unique(
+            validation.get("deferredTaskIds")
+            if isinstance(validation.get("deferredTaskIds"), list)
+            else [],
+            [task_id],
+        )
+        issues = validation.get("deferredIssues")
+        issues = issues if isinstance(issues, list) else []
+        if not any(
+            isinstance(item, dict) and item.get("issueId") == issue.get("issueId")
+            for item in issues
+        ):
+            issues.append(copy.deepcopy(issue))
+        validation["deferredIssues"] = issues
+
+        batch_tasks = [item for item in batch_plan.get("tasks", []) if isinstance(item, dict)]
+        next_task = next(
+            (item for item in batch_tasks if normalize_status(item.get("status")) != "done"),
+            None,
+        )
+        if next_task is None:
+            validation["status"] = "passed_with_deferred"
+            validation["activeRunId"] = None
+            validation["lastRunId"] = run_id
+            validation["currentTaskId"] = None
+            result_data = {
+                "taskValidationPassed": True,
+                "taskValidationDeferred": True,
+                "activeBatchId": batch_id,
+            }
+        else:
+            has_active_run = (
+                validation.get("status") == "running"
+                or validation.get("lastRunId") == run_id
+            )
+            validation["status"] = "running" if has_active_run else "ready"
+            validation["activeRunId"] = run_id if has_active_run else None
+            validation["currentTaskId"] = str(next_task.get("id")) if has_active_run else None
+            if has_active_run:
+                next_task["status"] = "validating"
+            result_data = {
+                "taskValidationPassed": False,
+                "taskValidationDeferred": True,
                 "activeBatchId": batch_id,
                 "nextTaskId": str(next_task.get("id")),
             }
@@ -3497,7 +3666,11 @@ def invalidate_deferred_task_validation_for_repair(
         if not isinstance(batch_plan, dict):
             return fail("batch_not_found", batch_id, path=_path(workspace, feature))
         validation = batch_plan.get("taskValidation")
-        if not isinstance(validation, dict) or validation.get("status") not in {"failed", "passed"}:
+        if not isinstance(validation, dict) or validation.get("status") not in {
+            "failed",
+            "passed",
+            "passed_with_deferred",
+        }:
             return fail("task_validation_repair_not_allowed", batch_id, path=_path(workspace, feature))
         if validation.get("status") == "failed":
             repair_owners = validation.get("repairOwnerTaskIds")
@@ -3508,11 +3681,16 @@ def invalidate_deferred_task_validation_for_repair(
                     f"requested={repair_task_id};allowed={','.join(str(item) for item in repair_owners)}",
                     path=_path(workspace, feature),
                 )
+        repair_task = _find_task(data, repair_task_id)
+        repair_task["validationRepairAttempts"] = (
+            int(repair_task.get("validationRepairAttempts", 0)) + 1
+        )
         for task in batch_plan.get("tasks", []):
             if not isinstance(task, dict):
                 continue
             task["completionEvidenceIds"] = []
             task["latestPassEvidenceId"] = None
+            task.pop("validationDisposition", None)
             task["status"] = "in_progress" if task.get("id") == repair_task_id else "implemented"
         validation.update({
             "status": "invalidated",
@@ -3521,6 +3699,8 @@ def invalidate_deferred_task_validation_for_repair(
             "batchSnapshotSha256": None,
             "completedTaskIds": [],
             "latestPassEvidenceByTask": {},
+            "deferredTaskIds": [],
+            "deferredIssues": [],
         })
         for field in (
             "failedValidationTaskId",
@@ -3656,13 +3836,54 @@ def record_project_check_attempt(
     evidence_ids: list[str],
     *,
     success: bool,
+    run_id: str | None = None,
 ) -> WriterResult:
     with _plan_lock(workspace, feature):
         data = _load(workspace, feature)
         existing = data.get("projectCheckEvidenceIds") if isinstance(data.get("projectCheckEvidenceIds"), list) else []
         data["projectCheckEvidenceIds"] = _append_unique(existing, evidence_ids)
         data["latestProjectCheckEvidenceId"] = evidence_ids[-1] if success and evidence_ids else None
+        if success:
+            data["projectValidationDisposition"] = None
+            data["projectValidationFailedRunIds"] = []
+        elif isinstance(run_id, str):
+            failed_run_ids = (
+                data.get("projectValidationFailedRunIds")
+                if isinstance(data.get("projectValidationFailedRunIds"), list)
+                else []
+            )
+            data["projectValidationFailedRunIds"] = _append_unique(failed_run_ids, [run_id])
         data["status"] = "done" if success else "failed"
+        return _write(workspace, feature, data)
+
+
+def record_project_check_deferral(
+    workspace: Path,
+    feature: str,
+    evidence_ids: list[str],
+    issue: dict[str, Any],
+) -> WriterResult:
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        existing = (
+            data.get("projectCheckEvidenceIds")
+            if isinstance(data.get("projectCheckEvidenceIds"), list)
+            else []
+        )
+        data["projectCheckEvidenceIds"] = _append_unique(existing, evidence_ids)
+        data["latestProjectCheckEvidenceId"] = None
+        data["projectValidationDisposition"] = copy.deepcopy(issue)
+        run_id = issue.get("runId")
+        if isinstance(run_id, str):
+            failed_run_ids = (
+                data.get("projectValidationFailedRunIds")
+                if isinstance(data.get("projectValidationFailedRunIds"), list)
+                else []
+            )
+            data["projectValidationFailedRunIds"] = _append_unique(failed_run_ids, [run_id])
+        data["status"] = "done"
+        data["activeBatchId"] = None
+        data["nextBatchId"] = None
         return _write(workspace, feature, data)
 
 
@@ -3718,6 +3939,18 @@ def _build_batch_handoff(
     next_batch = str(next_entry.get("id"))
     if data.get("status") != "awaiting_next_conversation" or data.get("nextBatchId") != next_batch:
         return None
+    batch_plan = data.get("_batchPlans", {}).get(batch_id, {})
+    deferred_validation_issues: list[dict[str, Any]] = []
+    if isinstance(batch_plan, dict):
+        for validation_name in ("taskValidation", "batchValidation"):
+            validation = batch_plan.get(validation_name)
+            if not isinstance(validation, dict):
+                continue
+            deferred_validation_issues.extend(
+                copy.deepcopy(issue)
+                for issue in validation.get("deferredIssues", [])
+                if isinstance(issue, dict)
+            )
     user_message = f"当前批次 {batch_id} 已完成，请打开新的对话继续执行 {next_batch}。"
     return {
         "featureId": feature,
@@ -3731,6 +3964,7 @@ def _build_batch_handoff(
             if isinstance(evidence_id, str)
         ],
         "batchValidationEvidenceIds": list(passing_evidence_ids),
+        "deferredValidationIssues": deferred_validation_issues,
         "nextBatch": {
             "title": str(next_entry.get("title", "")),
             "taskIds": list(next_entry.get("taskIds", [])),
@@ -3783,7 +4017,9 @@ def record_batch_validation_attempt(
             )
         if deferred_task_validation_enabled(data):
             task_validation = batch_plan.get("taskValidation")
-            if not isinstance(task_validation, dict) or task_validation.get("status") != "passed":
+            if not isinstance(task_validation, dict) or not task_validation_terminal(
+                task_validation.get("status")
+            ):
                 return fail(
                     "batch_validation_requires_task_validation_passed",
                     batch_id,
@@ -3876,6 +4112,77 @@ def record_batch_validation_attempt(
         return result
 
 
+def record_batch_validation_deferral(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    evidence_ids: list[str],
+    *,
+    run_id: str,
+    issue: dict[str, Any],
+) -> WriterResult:
+    """Close a batch while preserving an unresolved validation issue."""
+
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        batch_plans = data.get("_batchPlans")
+        batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+        if not isinstance(batch_plan, dict):
+            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
+        batch_tasks = [item for item in batch_plan.get("tasks", []) if isinstance(item, dict)]
+        if any(normalize_status(item.get("status")) != "done" for item in batch_tasks):
+            return fail("batch_validation_requires_tasks_done", batch_id, path=_path(workspace, feature))
+        task_validation = batch_plan.get("taskValidation")
+        if isinstance(task_validation, dict) and not task_validation_terminal(
+            task_validation.get("status")
+        ):
+            return fail("batch_validation_requires_terminal_task_validation", batch_id, path=_path(workspace, feature))
+        validation = batch_plan.get("batchValidation")
+        if not isinstance(validation, dict):
+            return fail("batch_validation_contract_missing", batch_id, path=_path(workspace, feature))
+        validation["evidenceIds"] = _append_unique(
+            validation.get("evidenceIds")
+            if isinstance(validation.get("evidenceIds"), list)
+            else [],
+            evidence_ids,
+        )
+        validation["latestPassEvidenceIds"] = []
+        validation["activeRunId"] = None
+        validation["status"] = "deferred"
+        issues = validation.get("deferredIssues")
+        issues = issues if isinstance(issues, list) else []
+        if not any(
+            isinstance(item, dict) and item.get("issueId") == issue.get("issueId")
+            for item in issues
+        ):
+            issues.append(copy.deepcopy(issue))
+        validation["deferredIssues"] = issues
+        batch_plan["completedAt"] = _utc_now()
+
+        entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
+        ordered_ids = [str(entry.get("id")) for entry in entries]
+        batch_index = ordered_ids.index(batch_id)
+        handoff: dict[str, Any] | None = None
+        if batch_index + 1 < len(ordered_ids):
+            data["status"] = "awaiting_next_conversation"
+            data["activeBatchId"] = None
+            data["nextBatchId"] = ordered_ids[batch_index + 1]
+            handoff = _build_batch_handoff(
+                workspace, feature, data, batch_id, batch_tasks, []
+            )
+        else:
+            data["status"] = "in_progress"
+            data["activeBatchId"] = None
+            data["nextBatchId"] = None
+        result = _write(workspace, feature, data)
+        if result.ok:
+            write_text(_md_path(workspace, feature), _render_plan_md(data))
+            if handoff is not None:
+                atomic_write_json(_handoff_path(workspace, feature), handoff)
+                result = with_result_data(result, batchHandoff=handoff)
+        return result
+
+
 def record_task_covered_batch(
     workspace: Path,
     feature: str,
@@ -3947,14 +4254,19 @@ def request_batch_revalidation(
             if not isinstance(task, dict) or task.get("id") not in affected:
                 continue
             existing_pending = task.get("pendingRevalidation")
+            prior_disposition = task.get("validationDisposition")
+            superseded_ids = (
+                list(task.get("completionEvidenceIds", []))
+                if isinstance(task.get("completionEvidenceIds"), list)
+                and task.get("completionEvidenceIds")
+                else list(prior_disposition.get("evidenceIds", []))
+                if isinstance(prior_disposition, dict)
+                else []
+            )
             expected_pending = {
                 "attemptType": "batch_revalidation",
                 "triggeredByBatchEvidenceIds": list(evidence_ids),
-                "supersedesEvidenceIds": (
-                    list(task.get("completionEvidenceIds", []))
-                    if isinstance(task.get("completionEvidenceIds"), list)
-                    else []
-                ),
+                "supersedesEvidenceIds": superseded_ids,
             }
             if isinstance(existing_pending, dict):
                 if (
@@ -3967,14 +4279,11 @@ def request_batch_revalidation(
                         path=_path(workspace, feature),
                     )
                 continue
-            superseded = (
-                list(task.get("completionEvidenceIds", []))
-                if isinstance(task.get("completionEvidenceIds"), list)
-                else []
-            )
+            superseded = superseded_ids
             task["pendingRevalidation"] = {**expected_pending, "supersedesEvidenceIds": superseded}
             task["completionEvidenceIds"] = []
             task["latestPassEvidenceId"] = None
+            task.pop("validationDisposition", None)
             task["status"] = "implemented" if deferred else "todo"
 
         if deferred:
@@ -3988,6 +4297,8 @@ def request_batch_revalidation(
                 "batchSnapshotSha256": None,
                 "completedTaskIds": [],
                 "latestPassEvidenceByTask": {},
+                "deferredTaskIds": [],
+                "deferredIssues": [],
             })
 
         data["status"] = "in_progress"
@@ -4132,6 +4443,27 @@ def _render_plan_md(data: dict[str, Any]) -> str:
         else:
             lines.append("  - -")
         lines.append(f"- 状态: {task.get('status', '')}")
+        disposition = task.get("validationDisposition")
+        if isinstance(disposition, dict):
+            lines.append(
+                "- Code 验证延期: "
+                f"{disposition.get('issueId', '')}; "
+                f"reason={disposition.get('reason', '')}; "
+                f"command={disposition.get('commandId', '')}; "
+                f"repairAttempts={disposition.get('repairAttempts', 0)}"
+            )
+        lines.append("")
+    deferred_issues = data.get("deferredValidationIssues")
+    if isinstance(deferred_issues, list) and deferred_issues:
+        lines.extend(["## Code 验证延期交接", ""])
+        for issue in deferred_issues:
+            if not isinstance(issue, dict):
+                continue
+            lines.append(
+                f"- {issue.get('issueId', '')}: scope={issue.get('scope', '')}; "
+                f"reason={issue.get('reason', '')}; command={issue.get('commandId', '')}; "
+                f"handoff={_fmt(issue.get('handoffStages'))}"
+            )
         lines.append("")
     return "\n".join(lines)
 

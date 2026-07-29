@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.2.0729
+version: v1.3.0729
 allowed-tools: execute task_output read_file grep glob write_file edit_file
 ---
 
@@ -161,7 +161,7 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_task_validation`：当前批次所有 TASK 实现均已收口为 `implemented`；创建 deferred validation run，并启动一个批次级只验证子代理，由它串行运行该批全部 TASK 与 batch 校验命令。
 - `spawn_batch_validation_subagent`：立即用一次“子任务执行”创建批次级只验证子代理，并把 `validationContext` 原样传入。`validationSubagentMode=start/resume/recover_closure/batch_check` 只说明子代理从哪个阶段接续；主 agent 不得先读取 Task context、检查状态或自行调用 `validate-batch-task` / `batch-check`。`validationContext.commandAudience=validation_subagent_only` 且 `executorDirective.mainAgentAllowedRunnerCommands=[]` 是硬边界。
-- `fix_or_retry_task_validation`：源码未变化时创建新的 task-validation run 从 `failedValidationTaskId` 重试；需要修改源码时，必须先对 runner 返回的 `repairOwnerTaskIds` 之一执行 `start-validation-repair`，不得默认把验证游标当成修复责任 TASK。
+- `fix_or_retry_task_validation`：源码未变化时可创建新的 task-validation run 从 `failedValidationTaskId` 重试；需要修改源码时，必须先对 runner 返回的 `repairOwnerTaskIds` 之一执行 `start-validation-repair`，不得默认把验证游标当成修复责任 TASK。若源码已在 repair 启动前被修改，显式执行 `start-validation-repair --adopt-workspace-changes`；runner 只采用请求代码工作区内的变化，并把父 validation run、采用文件与 repair 次数写入新 run 和后续 implementation Evidence。每个责任 TASK 最多做 2 次 validation repair；第 2 次修复后仍失败时 runner 自动记录延期问题并继续队列。
 - `run_batch_check`：仅用于未启用 deferred policy 的旧计划；当前批次 TASK 已全部完成，执行下方「批次验证与重验证」。
 - `recover_task_covered_batch`：仅用于未启用 deferred policy 的旧计划；最后一个 TASK evidence 已写入但批次收口尚未绑定时，inspect 并 recover 原 TASK run。
 - `run_project_check`：所有批次验证已完成且配置了额外项目检查，跳过 Task 队列，执行「全部任务完成后的验证」。
@@ -309,13 +309,13 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 多个测试同时失败时，先按 `validationFailures[].repairOwnerTaskIds` 分组：同一 owner 的失败可在一次 repair 中一起修复；不同 owner 必须选择一个允许的 owner 启动 repair，完成实现收口并整批重验，剩余失败在后续轮次继续处理。不得把多个 owner 的修改全部记到一个 TASK，也不得因某个 selector 已通过而重跑或改写其历史 Evidence。
 
-若 runner 最终返回 `errorCategory=environment_failure` 以及 `requiredAction=fix_validation_environment_and_retry_batch_validation` 或 `fix_validation_environment_and_retry_same_run`，必须停止并把 `userMessage` 原样提示用户；这是该次 runner 的终态，不得为了“获取详情”再启动第二个子代理、重新调用同一 runner 或手工执行底层 Maven/Gradle/npm。用户修复环境后重新运行校验，已有 run 时必须继续使用同一 runId/currentTaskId，不能 abort、改代码或重建 digest。普通 required 校验失败可在工作区未变化时创建新的 task-validation run 重试；需要修改源码时，必须在任何源码、测试或配置改动之前执行 `start-validation-repair --task-id <REPAIR_OWNER_TASK_ID>`。runner 会校验工作区仍等于失败 run 的冻结快照；返回 `workspace_changed_before_validation_repair` 时先恢复该快照，不得补开 repair 掩盖先前改动。repair 完成后重新 `finish-implementation`。任何源码修复都会清空整批当前 completion 指针并从 T001 重验，历史 Evidence 保留。
+runner 将 `environment_failure` 直接记录为 `validation.result=blocked`，并在 `plan.json.deferredValidationIssues[]`、TASK `validationDisposition` 和对应 task/batch/project validation 状态中写入 `deferred` 事实；验证子代理继续下一个 TASK 或后续门禁，不得停止主流程、重复启动子代理或绕过 runner 手工执行底层 Maven/Gradle/npm。普通 required 校验失败仍先修复：需要修改源码时，必须在任何源码、测试或配置改动之前执行 `start-validation-repair --task-id <REPAIR_OWNER_TASK_ID>`。runner 会校验工作区仍等于失败 run 的冻结快照；若改动已提前发生，可执行 `start-validation-repair --task-id <REPAIR_OWNER_TASK_ID> --adopt-workspace-changes`，让 runner 在工作区边界校验后采用变化并记录审计上下文；不希望采用时则恢复失败快照。每个责任 TASK 最多 2 次 repair，第 2 次修复后重验仍失败则以 `reason=repair_attempts_exhausted` 延期并继续；历史 FAIL/BLOCKED Evidence 全部保留。
 
 runner 会先解析验证工具的真实可执行文件。Windows `.cmd/.bat`（包括 `mvn.cmd`、`npm.cmd`）通过临时 `.cmd` 包装文件和 `%COMSPEC% /D /S /C` 原始命令行启动；包装文件先写入 `validation_windows_wrapper_started` 哨兵，再在命令侧把 Maven/npm 的 stdout/stderr 追加到临时日志。其他平台直接把子进程 stdout/stderr 写入同类日志。runner 每 200ms tail 日志，避免 `mvn.cmd -> cmd.exe -> java.exe` 进程链丢失匿名管道输出。发现明确的业务源码或测试源码编译诊断后，先短暂收集完整诊断，再终止验证进程树并分别返回 `source_compile_failure` 或 `test_compile_failure`，要求 `start_validation_repair`。测试进程在总超时点仍存活但已生成新的 Surefire/Failsafe 失败报告时，也必须返回普通测试失败并进入 repair，不能归类为环境超时。
 
-环境失败使用窄分类：可执行文件/`cmd.exe` 无法启动、Java 工具链不可用、依赖仓库网络不可达、依赖认证或证书失败，以及没有任何编译诊断、测试失败报告或其他代码失败证据的真实硬超时。普通非零退出码、源码编译错误、测试编译错误、断言失败和异常测试结果都属于代码验证失败，由主 agent 按 runner 返回的 repair owner 修复后重验。runner 确实返回 `environment_failure` 时，验证子代理禁止绕过 runner 手工执行 Maven/Gradle/npm 或读取业务源码来探测另一种失败原因，也禁止主 agent 接管重复执行验证命令；只能按返回的 `requiredAction` 和原 runId 处理。
+环境失败仍使用窄分类：可执行文件/`cmd.exe` 无法启动、Java 工具链不可用、依赖仓库网络不可达、依赖认证或证书失败，以及没有任何编译诊断、测试失败报告或其他代码失败证据的真实硬超时。普通非零退出码、源码编译错误、测试编译错误、断言失败和异常测试结果都属于代码验证失败，先按 repair owner 修复；只有 repair 次数耗尽才延期。延期不是 PASS，最终摘要必须列出 issueId、scope、reason、commandId、evidenceIds、repairAttempts 和交接阶段 `dev.utest/dev.e2e`。
 
-全部 TASK 验证通过后才把 TASK 置 done。frontend `task_covered` 此时生成 `batch_closure`；backend 固定使用 `commands`，返回 `requiredAction=run_batch_check_in_validation_subagent` 后由同一个子代理执行 compile/build 收口。frontend `commands` 模式也由该子代理继续下方额外质量门禁。
+全部 TASK 验证通过或已按上述策略记录延期后，才把 TASK 置 done。frontend `task_covered` 此时生成 `batch_closure` 或 deferred closure；backend 固定使用 `commands`，返回 `requiredAction=run_batch_check_in_validation_subagent` 后由同一个子代理执行 compile/build 收口。frontend `commands` 模式也由该子代理继续下方额外质量门禁。
 
 ### 批次验证与重验证
 
@@ -326,6 +326,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 ```
 
 - 返回 `requiredAction=fix_batch_and_retry_same_run` 时，保留返回的 `runId`，只在当前批次请求 workspace 内修复问题，然后用完全相同的 workspace 和 `--run-id "<RUN_ID>"` 重跑 `batch-check`。`scope.paths` 不构成修复白名单；批次失败 evidence 只追加，不覆盖；不得新建 run 隐藏失败历史。验证命令若修改 Git 可见文件会被拒绝。
+- Batch 验证环境失败立即写 blocked evidence 并置 `batchValidation.status=deferred`；普通失败允许 2 次修复重跑，第 3 次失败自动延期。两者都正常完成 batch handoff，不阻断下一批。
 - runner 在首条命令前把 `activeRunId` 投影到 plan；命令 evidence 全部写完后先保存 `status=evidence_written`，再幂等绑定 plan。进程在 evidence append、TASK 重验证请求或最终批次绑定后中断时，重新调用 `code-session` 取得原 `activeRunId`，再以同一 `--run-id` 执行 `batch-check`；runner 会采用已写入 stream 的 evidence，不重复执行已完成命令。
 - required 命令决定批次成败及 `latestPassEvidenceIds`；optional 成功或 optional 失败 evidence 都只追加到批次历史和 run attempt，不得让 optional 失败阻断 code-done，也不得把 optional 记录伪装为 required latest pass。
 - 修复路径超出当前批次请求 workspace 时返回 `batch_fix_outside_workspace`，必须修复工作区后用同一 batch run 重试；同 workspace 内的任何修复都会改变批次最终快照，因此无论修改了哪个文件，都清空整批当前 completion 指针并按稳定顺序重验全部 TASK，不再按 `scope.paths` 归因。
@@ -342,11 +343,13 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 
 ###  全部任务完成后的验证
 
-只有 Code 会话入口返回 `run_project_check`，即全部批次验证通过且根 plan 配置了非空 `projectValidationCommands` 后，才通过 runner 跑额外的跨 lane/跨批次项目检查。其 kind 只允许 `integration_test/e2e_test/static_check`，不得重复 batch profile 的 `argv + cwd + repo`；提前执行会被拒绝。项目检查单独写 `action=project_check` evidence，不参与任一 TASK 的验收覆盖。未配置项目检查时入口直接返回 `code_done_ready`，不要求伪造一轮最终编译：
+只有 Code 会话入口返回 `run_project_check`，即全部批次验证已进入 PASS 或 deferred 终态且根 plan 配置了非空 `projectValidationCommands` 后，才通过 runner 跑额外的跨 lane/跨批次项目检查。其 kind 只允许 `integration_test/e2e_test/static_check`，不得重复 batch profile 的 `argv + cwd + repo`；提前执行会被拒绝。项目检查单独写 `action=project_check` evidence，不参与任一 TASK 的验收覆盖。未配置项目检查时入口直接返回 `code_done_ready`，不要求伪造一轮最终编译：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" project-check --feature "${feature}" --code-workspace "<BUSINESS_REPO>"
 ```
+
+Project 验证同样遵循环境失败立即延期、普通失败最多 2 次修复后延期的策略；延期写入 `projectValidationDisposition`，随后入口返回 `code_done_ready`。
 
 如本轮触发 HTML 分支，或变更了前端源码（`.tsx` / `.jsx` / `.ts` / `.js` / `.vue` 及相关样式文件），全部批次验证以及配置了的项目级验证通过后必须运行统一前端回检；只有用户明确要求“跳过回检 / 先不回检 / 不要跑回检 / 先不验证”时才跳过，并在最终摘要写 `reviewStatus=skipped-by-user`。默认命令：
 
@@ -376,11 +379,11 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ## 完成条件
 
-- 队列所有任务「完成」；有「失败」则不算完成、不得推进 `code_done`，须说明阻断与建议回流阶段。
-- 所有任务都有 `action=implementation` evidence，且批次最终快照上的 required TASK validation 全部通过；`checkedCriteria` 并集覆盖全部 AC；completion evidence 与命令、validation runId、`batchSnapshotSha256`、当前 implementation revision/pointer 一致。未启用 deferred policy 的旧计划只走旧 runner 路径，不允许两种模式混跑。
+- 队列所有任务「完成」；TASK 验证结果必须是 PASS，或具有结构完整、Evidence 可回链的 `validationDisposition.status=deferred`。未记录的失败仍阻断。
+- 所有任务都有 `action=implementation` evidence。非延期 TASK 的 required validation 必须全部通过且覆盖全部 AC；延期 TASK 必须保留真实 FAIL/BLOCKED evidence、失败原因、repair 次数和 UTEST/E2E 交接阶段，不得伪造成 completion pass。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 task/batch/project validation evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
-- 每个批次最多 5 个任务；该批 `taskValidation.status=passed` 后额外批次质量门禁已通过。存在批次修复时整批 TASK completion 指针先失效，再产生 `attemptType=batch_revalidation` 的新完成 evidence，随后原 batch-check run 再次通过；非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
-- 必要验证通过；每批最新 batch-check 晚于该批当前 TASK 完成 evidence，且所有 required 项通过；配置了项目检查时，最新 `project-check` 还必须晚于全部当前 TASK/batch evidence（`code_done` 会再次校验 plan/evidence/run 闭环）。
+- 每个批次最多 5 个任务；该批 `taskValidation.status` 已进入 `passed` 或 `passed_with_deferred`，且额外批次质量门禁已通过或记录为 deferred。存在批次修复时整批 TASK completion 指针先失效，再产生 `attemptType=batch_revalidation` 的新完成 evidence，随后原 batch-check run 再次通过或在次数耗尽后延期；非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
+- 必要验证已通过或已按策略延期；PASS 仍校验 evidence 顺序，deferred 则校验 issue、失败 evidence 与 run 终态闭环。配置了项目检查时同理。
 - HTML 分支或前端源码变更已完成统一前端回检，或用户明确跳过；仍有 `must-fix` / 执行异常时不得推进 `code_done`。
 - 刷新后的 `CHECKPOINT` 为 `code_done`。
 

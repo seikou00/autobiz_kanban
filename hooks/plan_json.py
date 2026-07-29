@@ -53,9 +53,17 @@ COMPLETION_POLICIES = {"all_required_validations_pass"}
 BATCH_VALIDATION_MODES = {"commands", "task_covered"}
 TASK_VALIDATION_POLICY_MODES = {"deferred_batch"}
 TASK_VALIDATION_ORCHESTRATIONS = {"single_batch_subagent"}
-TASK_VALIDATION_FAIL_STRATEGIES = {"fail_fast"}
+TASK_VALIDATION_FAIL_STRATEGIES = {"fail_fast", "repair_then_defer"}
 TASK_VALIDATION_AGENT_SCOPES = {"task_and_batch_validation_commands"}
-TASK_VALIDATION_STATUSES = {"pending", "ready", "running", "failed", "passed", "invalidated"}
+TASK_VALIDATION_STATUSES = {
+    "pending",
+    "ready",
+    "running",
+    "failed",
+    "passed",
+    "passed_with_deferred",
+    "invalidated",
+}
 TASK_VALIDATION_ERROR_CATEGORIES = {
     "environment_failure",
     "source_compile_failure",
@@ -77,7 +85,18 @@ EXECUTION_LANES = {"backend", "frontend"}
 TASK_SET_STATUSES = {"collecting", "finalized"}
 FEATURE_STATUSES = {"todo", "in_progress", "awaiting_next_conversation", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
-BATCH_VALIDATION_STATUSES = {"pending", "running", "failed", "revalidation_required", "passed"}
+BATCH_VALIDATION_STATUSES = {
+    "pending",
+    "running",
+    "failed",
+    "revalidation_required",
+    "passed",
+    "deferred",
+}
+VALIDATION_DEFERRAL_REASONS = {"environment_failure", "repair_attempts_exhausted"}
+VALIDATION_DEFERRAL_SCOPES = {"task", "batch", "project"}
+VALIDATION_DEFERRAL_STATUS = "deferred"
+DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS = 2
 DEFAULT_WORKSPACE_ROOT = "default"
 
 TODO_STATUSES = {"todo", "pending", "not_started", "not-started", "待做", "未开始"}
@@ -97,6 +116,8 @@ TASK_RUNTIME_FIELDS = {
     "latestPassEvidenceId",
     "pendingRevalidation",
     "completedRevalidation",
+    "validationRepairAttempts",
+    "validationDisposition",
 }
 
 
@@ -149,6 +170,30 @@ def task_execution_lane(task: dict[str, Any]) -> str:
 def deferred_task_validation_enabled(data: dict[str, Any]) -> bool:
     policy = data.get("taskValidationPolicy")
     return isinstance(policy, dict) and policy.get("mode") == "deferred_batch"
+
+
+def code_validation_max_repair_attempts(data: dict[str, Any]) -> int:
+    policy = data.get("taskValidationPolicy")
+    value = policy.get("maxRepairAttempts") if isinstance(policy, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS
+
+
+def code_validation_fail_strategy(data: dict[str, Any]) -> str:
+    policy = data.get("taskValidationPolicy")
+    value = policy.get("failStrategy") if isinstance(policy, dict) else None
+    if value in TASK_VALIDATION_FAIL_STRATEGIES:
+        return str(value)
+    return "fail_fast"
+
+
+def task_validation_terminal(status: Any) -> bool:
+    return status in {"passed", "passed_with_deferred"}
+
+
+def batch_validation_terminal(status: Any) -> bool:
+    return status in {"passed", "deferred"}
 
 
 def normalize_repository_relative_path(value: Any) -> str | None:
@@ -490,6 +535,23 @@ def _validate_tasks_container(
             errors.append(f"{task_id}.implementationRevision_invalid")
         elif revision is not None and revision != len(implementation_ids):
             errors.append(f"{task_id}.implementationRevision_evidence_mismatch")
+        repair_attempts = raw_task.get("validationRepairAttempts", 0)
+        if (
+            not isinstance(repair_attempts, int)
+            or isinstance(repair_attempts, bool)
+            or repair_attempts < 0
+        ):
+            errors.append(f"{task_id}.validationRepairAttempts_invalid")
+        disposition = raw_task.get("validationDisposition")
+        if disposition is not None:
+            _validate_validation_deferral(
+                errors,
+                disposition,
+                context=f"{task_id}.validationDisposition",
+                expected_scope="task",
+            )
+            if isinstance(disposition, dict) and disposition.get("taskId") != task_id:
+                errors.append(f"{task_id}.validationDisposition.taskId_mismatch")
         completion_evidence_ids = _validate_string_list(
             errors,
             raw_task,
@@ -507,13 +569,16 @@ def _validate_tasks_container(
         ):
             errors.append(f"{task_id}.latestPassEvidenceId_invalid")
         if require_all_done:
-            if not completion_evidence_ids:
+            validation_deferred = isinstance(disposition, dict)
+            if not completion_evidence_ids and not validation_deferred:
                 errors.append(f"{task_id}.completionEvidenceIds_missing")
-            if not isinstance(latest_pass, str) or not latest_pass:
+            if validation_deferred and latest_pass is not None:
+                errors.append(f"{task_id}.latestPassEvidenceId_forbidden_when_deferred")
+            elif not validation_deferred and (not isinstance(latest_pass, str) or not latest_pass):
                 errors.append(f"{task_id}.latestPassEvidenceId_missing")
-            elif latest_pass not in completion_evidence_ids:
+            elif isinstance(latest_pass, str) and latest_pass not in completion_evidence_ids:
                 errors.append(f"{task_id}.latestPassEvidenceId_not_completion_evidence:{latest_pass}")
-            elif latest_pass != completion_evidence_ids[-1]:
+            elif isinstance(latest_pass, str) and latest_pass != completion_evidence_ids[-1]:
                 errors.append(f"{task_id}.latestPassEvidenceId_not_latest:{latest_pass}")
         _validate_string_list(errors, raw_task, task_id, "expectedFiles", required=False)
         blockers = _validate_string_list(errors, raw_task, task_id, "blockers", required=False)
@@ -754,7 +819,7 @@ def validate_batch_plan_data(
                 or task_validation.get("activeRunId") is not None
             ):
                 errors.append(f"{batch_id}.taskValidation.runtime_not_initial")
-            if require_all_done and task_validation.get("status") != "passed":
+            if require_all_done and not task_validation_terminal(task_validation.get("status")):
                 errors.append(f"{batch_id}.taskValidation.status_not_passed")
     workspace_root_sets = [
         task_workspace_roots(item)
@@ -1211,6 +1276,19 @@ def _validate_batch_validation(
     active_run_id = validation.get("activeRunId")
     if active_run_id is not None and (not isinstance(active_run_id, str) or not active_run_id.strip()):
         errors.append(f"{batch_id}.batchValidation.activeRunId_invalid")
+    deferred_issues = validation.get("deferredIssues", [])
+    if not isinstance(deferred_issues, list):
+        errors.append(f"{batch_id}.batchValidation.deferredIssues_must_be_array")
+        deferred_issues = []
+    for index, issue in enumerate(deferred_issues):
+        _validate_validation_deferral(
+            errors,
+            issue,
+            context=f"{batch_id}.batchValidation.deferredIssues[{index}]",
+            expected_scope="batch",
+        )
+    if validation.get("status") == "deferred" and not deferred_issues:
+        errors.append(f"{batch_id}.batchValidation.deferred_issue_missing")
 
 
 def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) -> None:
@@ -1230,6 +1308,55 @@ def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) ->
         errors.append("taskValidationPolicy.maxConcurrency_must_be_1")
     if policy.get("agentScope") not in TASK_VALIDATION_AGENT_SCOPES:
         errors.append("taskValidationPolicy.agentScope_invalid")
+    max_repairs = policy.get("maxRepairAttempts", DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS)
+    if not isinstance(max_repairs, int) or isinstance(max_repairs, bool) or max_repairs < 0:
+        errors.append("taskValidationPolicy.maxRepairAttempts_invalid")
+    for field in ("environmentFailureDisposition", "exhaustedRepairDisposition"):
+        value = policy.get(field, "defer")
+        if value != "defer":
+            errors.append(f"taskValidationPolicy.{field}_invalid")
+
+
+def _validate_validation_deferral(
+    errors: list[str],
+    issue: Any,
+    *,
+    context: str,
+    expected_scope: str | None = None,
+) -> None:
+    if not isinstance(issue, dict):
+        errors.append(f"{context}_must_be_object")
+        return
+    if not isinstance(issue.get("issueId"), str) or not issue.get("issueId", "").strip():
+        errors.append(f"{context}.issueId_invalid")
+    scope = issue.get("scope")
+    if scope not in VALIDATION_DEFERRAL_SCOPES or (
+        expected_scope is not None and scope != expected_scope
+    ):
+        errors.append(f"{context}.scope_invalid")
+    if issue.get("status") != VALIDATION_DEFERRAL_STATUS:
+        errors.append(f"{context}.status_invalid")
+    if issue.get("reason") not in VALIDATION_DEFERRAL_REASONS:
+        errors.append(f"{context}.reason_invalid")
+    if issue.get("errorCategory") not in TASK_VALIDATION_ERROR_CATEGORIES:
+        errors.append(f"{context}.errorCategory_invalid")
+    command_id = issue.get("commandId")
+    if command_id is not None and (not isinstance(command_id, str) or not command_id.strip()):
+        errors.append(f"{context}.commandId_invalid")
+    attempts = issue.get("repairAttempts")
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+        errors.append(f"{context}.repairAttempts_invalid")
+    max_attempts = issue.get("maxRepairAttempts")
+    if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or max_attempts < 0:
+        errors.append(f"{context}.maxRepairAttempts_invalid")
+    evidence_ids = _string_list(issue.get("evidenceIds"))
+    if evidence_ids is None or any(not EVIDENCE_ID_RE.fullmatch(item) for item in evidence_ids):
+        errors.append(f"{context}.evidenceIds_invalid")
+    owner_stages = _string_list(issue.get("handoffStages"))
+    if owner_stages is None or not owner_stages:
+        errors.append(f"{context}.handoffStages_invalid")
+    if not isinstance(issue.get("createdAt"), str) or not issue.get("createdAt", "").strip():
+        errors.append(f"{context}.createdAt_invalid")
 
 
 def _validate_task_validation(errors: list[str], data: dict[str, Any], batch_id: str) -> None:
@@ -1275,6 +1402,28 @@ def _validate_task_validation(errors: list[str], data: dict[str, Any], batch_id:
                 continue
             if any(not EVIDENCE_ID_RE.fullmatch(item) for item in evidence_ids):
                 errors.append(f"{batch_id}.taskValidation.latestPassEvidenceByTask_invalid:{task_id}")
+    deferred_task_ids = _string_list(validation.get("deferredTaskIds", []))
+    if deferred_task_ids is None or any(task_id not in actual_order for task_id in deferred_task_ids):
+        errors.append(f"{batch_id}.taskValidation.deferredTaskIds_invalid")
+        deferred_task_ids = []
+    deferred_issues = validation.get("deferredIssues", [])
+    if not isinstance(deferred_issues, list):
+        errors.append(f"{batch_id}.taskValidation.deferredIssues_must_be_array")
+        deferred_issues = []
+    for index, issue in enumerate(deferred_issues):
+        _validate_validation_deferral(
+            errors,
+            issue,
+            context=f"{batch_id}.taskValidation.deferredIssues[{index}]",
+            expected_scope="task",
+        )
+    issue_task_ids = {
+        str(issue.get("taskId"))
+        for issue in deferred_issues
+        if isinstance(issue, dict) and isinstance(issue.get("taskId"), str)
+    }
+    if set(deferred_task_ids) != issue_task_ids:
+        errors.append(f"{batch_id}.taskValidation.deferred_issue_projection_mismatch")
     for field in ("activeRunId", "lastRunId", "currentTaskId", "batchSnapshotSha256"):
         value = validation.get(field)
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -1336,15 +1485,19 @@ def _validate_task_validation(errors: list[str], data: dict[str, Any], batch_id:
             for item in validation_failures
         ):
             errors.append(f"{batch_id}.taskValidation.validationFailures_invalid")
-    if status == "passed" and completed != actual_order:
-        errors.append(f"{batch_id}.taskValidation.passed_without_all_tasks")
-    if status == "passed" and (
+    if task_validation_terminal(status) and completed != actual_order:
+        errors.append(f"{batch_id}.taskValidation.terminal_without_all_tasks")
+    if task_validation_terminal(status) and (
         validation.get("activeRunId") is not None
         or not isinstance(validation.get("lastRunId"), str)
         or current is not None
         or not isinstance(snapshot, str)
     ):
-        errors.append(f"{batch_id}.taskValidation.passed_state_incomplete")
+        errors.append(f"{batch_id}.taskValidation.terminal_state_incomplete")
+    if status == "passed" and deferred_task_ids:
+        errors.append(f"{batch_id}.taskValidation.passed_with_deferred_tasks")
+    if status == "passed_with_deferred" and not deferred_task_ids:
+        errors.append(f"{batch_id}.taskValidation.deferred_tasks_missing")
 
 
 def _validate_project_commands(
@@ -1432,6 +1585,40 @@ def _validate_project_commands(
             errors.append(f"latestProjectCheckEvidenceId_not_in_history:{latest}")
         elif latest != project_evidence_ids[-1]:
             errors.append(f"latestProjectCheckEvidenceId_not_latest:{latest}")
+    disposition = data.get("projectValidationDisposition")
+    if disposition is not None:
+        _validate_validation_deferral(
+            errors,
+            disposition,
+            context="projectValidationDisposition",
+            expected_scope="project",
+        )
+    if "projectValidationFailedRunIds" in data:
+        failed_run_ids = _validate_string_list(
+            errors,
+            data,
+            "plan",
+            "projectValidationFailedRunIds",
+            required=False,
+        )
+        if len(failed_run_ids) != len(set(failed_run_ids)):
+            errors.append("projectValidationFailedRunIds_duplicate")
+    deferred_issues = data.get("deferredValidationIssues", [])
+    if not isinstance(deferred_issues, list):
+        errors.append("deferredValidationIssues_must_be_array")
+    else:
+        seen_issue_ids: set[str] = set()
+        for index, issue in enumerate(deferred_issues):
+            _validate_validation_deferral(
+                errors,
+                issue,
+                context=f"deferredValidationIssues[{index}]",
+            )
+            issue_id = issue.get("issueId") if isinstance(issue, dict) else None
+            if isinstance(issue_id, str):
+                if issue_id in seen_issue_ids:
+                    errors.append(f"deferredValidationIssues_duplicate:{issue_id}")
+                seen_issue_ids.add(issue_id)
 
 
 def _validate_task_details(

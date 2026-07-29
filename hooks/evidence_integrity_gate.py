@@ -36,6 +36,8 @@ from plan_json import (  # noqa: E402
     load_and_validate_plan,
     plan_json_path,
     task_contract_sha256,
+    batch_validation_terminal,
+    task_validation_terminal,
     task_ids,
     tasks,
     unfinished_tasks,
@@ -121,6 +123,37 @@ def _validation_passed(record: dict[str, Any]) -> bool:
         return result.strip() in PASS_RESULTS and validation.get("exitCode") == 0
     exit_code = validation.get("exitCode")
     return exit_code == 0
+
+
+def _validation_deferred(task: dict[str, Any]) -> bool:
+    disposition = task.get("validationDisposition")
+    return isinstance(disposition, dict) and disposition.get("status") == "deferred"
+
+
+def _check_deferral_evidence(
+    disposition: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+    *,
+    expected_action: str,
+    expected_task_id: str,
+    context: str,
+) -> list[str]:
+    errors: list[str] = []
+    evidence_ids = disposition.get("evidenceIds")
+    if not isinstance(evidence_ids, list) or not evidence_ids:
+        return [f"{context}.deferred_evidence_missing"]
+    for evidence_id in evidence_ids:
+        record = by_id.get(str(evidence_id))
+        validation = record.get("validation") if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or record.get("action") != expected_action
+            or record.get("taskId") != expected_task_id
+            or not isinstance(validation, dict)
+            or validation.get("result") not in {"fail", "blocked"}
+        ):
+            errors.append(f"{context}.invalid_deferred_evidence:{evidence_id}")
+    return errors
 
 
 def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
@@ -248,8 +281,30 @@ def _check_completion(
         if isinstance(record.get("evidenceId"), str)
     }
     deferred = deferred_task_validation_enabled(plan)
+    projected_issue_ids = {
+        str(issue.get("issueId"))
+        for issue in plan.get("deferredValidationIssues", [])
+        if isinstance(issue, dict) and isinstance(issue.get("issueId"), str)
+    }
+    actual_issue_ids: set[str] = set()
     for task in tasks(plan):
         task_id = str(task.get("id", ""))
+        validation_deferred = _validation_deferred(task)
+        disposition = (
+            task.get("validationDisposition") if validation_deferred else None
+        )
+        if isinstance(disposition, dict):
+            if isinstance(disposition.get("issueId"), str):
+                actual_issue_ids.add(str(disposition["issueId"]))
+            errors.extend(
+                _check_deferral_evidence(
+                    disposition,
+                    by_id,
+                    expected_action="validation",
+                    expected_task_id=task_id,
+                    context=task_id,
+                )
+            )
         if isinstance(task.get("pendingRevalidation"), dict):
             errors.append(f"{task_id}.pending_batch_revalidation")
         completion_ids = task.get("completionEvidenceIds")
@@ -434,12 +489,29 @@ def _check_completion(
         elif revalidation_records:
             errors.append(f"{task_id}.completed_revalidation_pointer_missing")
 
-        for command_id in sorted(required_command_ids - passed_command_ids):
-            errors.append(f"{task_id}.missing_required_validation_pass:{command_id}")
-        acceptance_ids = _task_acceptance_ids(task)
-        missing_criteria = sorted(acceptance_ids - covered_criteria)
-        if missing_criteria:
-            errors.append(f"{task_id}.missing_acceptance_coverage:" + ",".join(missing_criteria))
+        if not validation_deferred:
+            for command_id in sorted(required_command_ids - passed_command_ids):
+                errors.append(f"{task_id}.missing_required_validation_pass:{command_id}")
+            acceptance_ids = _task_acceptance_ids(task)
+            missing_criteria = sorted(acceptance_ids - covered_criteria)
+            if missing_criteria:
+                errors.append(f"{task_id}.missing_acceptance_coverage:" + ",".join(missing_criteria))
+    for batch in (plan.get("_bundleBatches") or {}).values():
+        if not isinstance(batch, dict):
+            continue
+        validation = batch.get("batchValidation")
+        for issue in (
+            validation.get("deferredIssues", []) if isinstance(validation, dict) else []
+        ):
+            if isinstance(issue, dict) and isinstance(issue.get("issueId"), str):
+                actual_issue_ids.add(str(issue["issueId"]))
+    project_disposition = plan.get("projectValidationDisposition")
+    if isinstance(project_disposition, dict) and isinstance(
+        project_disposition.get("issueId"), str
+    ):
+        actual_issue_ids.add(str(project_disposition["issueId"]))
+    if projected_issue_ids != actual_issue_ids:
+        errors.append("deferred_validation_issue_projection_mismatch")
     errors.extend(_check_batch_completion(plan, by_id, feature_dir=feature_dir))
     errors.extend(_check_project_completion(plan, by_id))
     return errors
@@ -485,6 +557,9 @@ def _check_deferred_task_validation_run_state(
         for record in completion_records
         if isinstance(record.get("runId"), str)
     }
+    disposition = task.get("validationDisposition")
+    if not run_ids and isinstance(disposition, dict) and isinstance(disposition.get("runId"), str):
+        run_ids.add(str(disposition["runId"]))
     if len(run_ids) != 1:
         return [
             f"{task_id}.deferred_validation_run_count_invalid:"
@@ -544,7 +619,7 @@ def _check_batch_completion(
             if not isinstance(task_validation, dict):
                 errors.append(f"{batch_id}.task_validation_contract_missing")
             else:
-                if task_validation.get("status") != "passed":
+                if not task_validation_terminal(task_validation.get("status")):
                     errors.append(f"{batch_id}.task_validation_not_passed")
                 expected_task_ids = [
                     str(task.get("id"))
@@ -567,12 +642,46 @@ def _check_batch_completion(
                     for task_id in expected_task_ids
                 ):
                     errors.append(f"{batch_id}.task_validation_evidence_projection_mismatch")
+                expected_deferred = [
+                    str(task.get("id"))
+                    for task in batch.get("tasks", [])
+                    if isinstance(task, dict) and _validation_deferred(task)
+                ]
+                if task_validation.get("deferredTaskIds", []) != expected_deferred:
+                    errors.append(f"{batch_id}.task_validation_deferred_projection_mismatch")
         validation = batch.get("batchValidation")
         if not isinstance(validation, dict):
             errors.append(f"{batch_id}.batch_validation_contract_missing")
             continue
-        if validation.get("status") != "passed":
+        if not batch_validation_terminal(validation.get("status")):
             errors.append(f"{batch_id}.batch_validation_not_passed")
+        if validation.get("status") == "deferred":
+            deferred_issues = validation.get("deferredIssues")
+            if not isinstance(deferred_issues, list) or not deferred_issues:
+                errors.append(f"{batch_id}.batch_validation_deferred_issue_missing")
+                continue
+            for issue in deferred_issues:
+                if not isinstance(issue, dict):
+                    errors.append(f"{batch_id}.batch_validation_deferred_issue_invalid")
+                    continue
+                errors.extend(
+                    _check_deferral_evidence(
+                        issue,
+                        by_id,
+                        expected_action=(
+                            "validation"
+                            if issue.get("taskId") not in {None, ""}
+                            else "batch_validation"
+                        ),
+                        expected_task_id=(
+                            str(issue.get("taskId"))
+                            if issue.get("taskId") not in {None, ""}
+                            else "__batch__"
+                        ),
+                        context=f"{batch_id}.batchValidation",
+                    )
+                )
+            continue
         mode = validation.get("mode", "commands" if validation.get("commands") else None)
         latest_ids = validation.get("latestPassEvidenceIds")
         latest_ids = latest_ids if isinstance(latest_ids, list) else []
@@ -785,6 +894,18 @@ def _check_project_completion(
         if isinstance(command, dict) and isinstance(command.get("id"), str)
     }
     if not planned:
+        return errors
+    disposition = plan.get("projectValidationDisposition")
+    if isinstance(disposition, dict):
+        errors.extend(
+            _check_deferral_evidence(
+                disposition,
+                by_id,
+                expected_action="project_check",
+                expected_task_id="__project__",
+                context="projectValidation",
+            )
+        )
         return errors
     required = {command_id for command_id, command in planned.items() if command.get("required") is True}
     passed: set[str] = set()

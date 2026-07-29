@@ -446,7 +446,7 @@ cicd_done -> archived
 - 按 Source Bundle 读取规格、设计、计划。
 - 在真实代码工作区做最小必要实现。
 - 更新 `PLAN.md` 中的任务状态和验证证据。
-- 验证通过后推进到 `code_done`。
+- 验证通过，或环境/重复修复失败已形成可审计延期记录后，推进到 `code_done`。
    注意：
 - 代码阶段不能偷偷修改 `PRD.md`、`proposal.md`、`specs/**/*.md`、`design.md`。
 - 如果发现规格或设计冲突，应停止并回流到 Specs 或 Plan。
@@ -455,6 +455,7 @@ cicd_done -> archived
 - TASK 实现期间不得手工提前运行 Batch 命令；定向 `mvn test -Dtest=...` 自身包含必要的 Maven 编译生命周期。
 - 批次修复若改到 TASK 范围，旧 evidence 历史保留，但受影响 TASK 必须重新验证并追加新 evidence；随后还要再跑一次最终 batch 验证，全部通过后才能进入下一批。
 - batch-check 中断时通过 `code-session` 取回原 `activeRunId` 并用同一个 run 重试；已写入的命令 evidence 会被恢复采用。optional 命令失败会保留历史，但不会让 required 已通过的批次失败。
+- Code 验证遇到环境问题会写 blocked evidence 并延期；普通失败最多做 2 次 repair，第 2 次修复后仍失败也会延期。延期项保存在 `plan.json.deferredValidationIssues`，继续后续 TASK/Batch/UTEST/E2E，但不等同于验证通过。
 - 不要为了通过验证削弱校验、安全检查、日志或错误处理。
 ### 9.8 Dev: 独立需求评审
 技能：`/autodev-reviewer`
@@ -483,6 +484,7 @@ cicd_done -> archived
 - 不得跳过失败测试、削弱断言或伪造日志。
 - 只有满足“最小业务修复门槛”时，才允许改生产代码。
 - 默认模式是 `auto`，也可以使用 `--mode test`、`--mode code`、`--no-fix`。
+- 优先读取并处理 `plan.json.deferredValidationIssues` 中能映射到单元边界的 Code 延期项。
 ### 9.10 Dev: E2E
 技能：`/autodev-e2e`
 作用：
@@ -492,6 +494,7 @@ cicd_done -> archived
 - 通过后进入 `e2e_done`，失败可进入 `needs_fix`。
    注意：
 - E2E pass/fail 的主要依据是 specs。
+- Code 延期项中能映射到用户主链路或集成环境的内容，应进入 E2E 用例或环境复核；不能覆盖时明确标为 manual/missing。
 - 涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由、用户可见流程的 P0/P1 用例，应标记 `ui_required: true`。
 - 不要为了通过 E2E 删除用例、弱化断言或伪造报告。
 ### 9.11 Dev: 验收汇总

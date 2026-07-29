@@ -455,7 +455,7 @@
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "degrade": "Source Bundle 未列出 plan.json 时使用本阶段轻量任务 ID 组织测试覆盖；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成，不能以 PLAN.md 替代机器事实源"
+                "degrade": "Source Bundle 未列出 plan.json 时使用本阶段轻量任务 ID 组织测试覆盖；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成，不能以 PLAN.md 替代机器事实源；存在 deferredValidationIssues 时必须作为 Code 未解决项进入单测计划或扩大验证"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {
@@ -516,7 +516,7 @@
               } },
             { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
+                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源；存在 deferredValidationIssues 时必须映射到 E2E 用例、环境复核或 manual/missing 结论"
               } },
             { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
               "extract": {

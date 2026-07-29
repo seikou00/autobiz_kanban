@@ -31,9 +31,20 @@ TASK_RUN_INTEGRITY_FIELDS = (
     "revalidation",
 )
 
+TASK_RUN_OPTIONAL_INTEGRITY_FIELDS = (
+    "repairContext",
+)
+
 
 def task_run_integrity_sha256(state: dict[str, Any]) -> str:
     payload = {field: state.get(field) for field in TASK_RUN_INTEGRITY_FIELDS}
+    # Optional fields are sealed only when present so existing v2 runs keep
+    # their original digest while newer repair runs can carry audit context.
+    payload.update({
+        field: state[field]
+        for field in TASK_RUN_OPTIONAL_INTEGRITY_FIELDS
+        if field in state
+    })
     content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(content).hexdigest()
 

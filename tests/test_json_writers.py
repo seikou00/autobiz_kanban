@@ -1654,9 +1654,12 @@ class JsonWriterTests(unittest.TestCase):
             {
                 "mode": "deferred_batch",
                 "orchestration": "single_batch_subagent",
-                "failStrategy": "fail_fast",
+                "failStrategy": "repair_then_defer",
                 "maxConcurrency": 1,
                 "agentScope": "task_and_batch_validation_commands",
+                "maxRepairAttempts": 2,
+                "environmentFailureDisposition": "defer",
+                "exhaustedRepairDisposition": "defer",
                 "taskCommandTiming": "after_all_batch_tasks_implemented",
                 "batchCommandTiming": "after_all_task_commands_pass",
                 "validationTarget": "batch_final_snapshot",
@@ -1758,13 +1761,10 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["validationEnvironmentPolicy"],
             {
-                "preflightBeforeRun": True,
-                "missingExecutableResult": "error_without_validation_failure_evidence",
-                "runtimeEnvironmentResult": "error_and_retry_same_run",
-                "requiredActions": [
-                    "fix_validation_environment_and_retry_batch_validation",
-                    "fix_validation_environment_and_retry_same_run",
-                ],
+                "preflightBeforeRun": False,
+                "missingExecutableResult": "blocked_evidence_and_defer",
+                "runtimeEnvironmentResult": "blocked_evidence_and_defer",
+                "requiredActions": ["record_deferred_and_continue"],
                 "planOrDigestRebuildRequired": False,
             },
         )

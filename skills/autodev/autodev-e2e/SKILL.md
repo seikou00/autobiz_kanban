@@ -30,6 +30,8 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 各输入的用途以其 `读取方式` 为准；行为契约（specs 的 Requirement / Scenario）是 E2E pass/fail 的主要行为依据。
 
+读取 `plan.json.deferredValidationIssues[]` 及对应 batch plan 明细。Code 延期项不是 PASS：能映射到用户主链路的 `scope=task` 问题必须进入 P0/P1 E2E 用例；`scope=batch/project` 的集成、环境问题必须在服务启动/扩大验证时复核。用例或报告记录原 `issueId` 与 `evidenceIds`，通过新鲜 E2E evidence 证明已解决；无法在本阶段复核时保留为 manual/missing，不得静默丢弃。
+
 禁止写入：
 
 - 不要修改执行清单列出的任何 input（凡在清单中即只读）。
