@@ -5,8 +5,15 @@
     "sshUrl": "git@gitee.itc.cmbchina.cn:S992391/LF39_Product_Knowledge.git",
     "ref": "master"
   },
+  "knowledge_config": {
+    "sync_type": "invoke_session",
+    "nextAction": {
+      "slashSkill": "knowledge-sync",
+      "userMessage": "请针对${projectCode}项目发起知识沉淀，这个是 token：${leanToken}",
+      "dialogTips": "发起知识沉淀"
+    }
+  },
   "supported_deploy_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
-  "enable_task_tool": false,
   "inspectCommands": {
     "darwin": {
       "knowledge_path": "${pluginPath}/sys",
@@ -292,7 +299,7 @@
         "skill": "autodev-specs",
         "order": 30,
         "runtimePolicy": {
-          "agentMode": "solo",
+          "agentMode": "multi",
           "toolCustomConfig": {
             "task": {
               "enabled": true
@@ -331,7 +338,7 @@
         "skill": "autodev-plan",
         "order": 40,
          "runtimePolicy": {
-          "agentMode": "solo",
+          "agentMode": "multi",
           "toolCustomConfig": {
             "task": {
               "enabled": true
@@ -374,7 +381,7 @@
         "skill": "autodev-code",
         "order": 50,
         "runtimePolicy": {
-          "agentMode": "solo",
+          "agentMode": "multi",
           "toolCustomConfig": {
             "task": {
               "enabled": true
@@ -430,6 +437,18 @@
         "label": "需求实现评审",
         "group": "Dev",
         "skill": "autodev-reviewer",
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [],
+            "customSubagentFiles": []
+          }
+        },
         "order": 60,
         "description": "评审代码实现是否满足规格 \n 产物：REQUIREMENTS_EVAL.md（需求实现评审报告：实现对规格的覆盖结论与发现项）",
         "states": [
@@ -474,7 +493,7 @@
         "skill": "autodev-utest",
         "order": 70,
         "runtimePolicy": {
-          "agentMode": "solo",
+          "agentMode": "multi",
           "toolCustomConfig": {
             "task": {
               "enabled": true
@@ -531,6 +550,18 @@
         "label": "E2E 测试",
         "group": "Dev",
         "skill": "autodev-e2e",
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [],
+            "customSubagentFiles": []
+          }
+        },
         "order": 80,
         "description": "端到端测试 \n 产物：E2E_TEST_CASES.yaml（E2E 测试用例：步骤与断言定义）、E2E_REPORT.md（E2E 测试报告：执行结论与失败项）、e2e-run.log（E2E 运行原始日志）",
         "states": [

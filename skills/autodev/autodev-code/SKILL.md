@@ -78,13 +78,11 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
    - 失败 → 代码问题就继续最小修复重跑；环境/依赖/需求不清/契约冲突则停止，PLAN.md 状态置「失败」、记原因与建议回流阶段。
 
 ### 全部任务完成后的验证
-
 使用task工具，先从git cache中获取当前改动的代码，对照 PLAN.md 与 design.md 同时审查三个方面：
 1. 使用explore-autodev角色，逐 TASK 对照「做什么 / 规格依据 / 设计依据」核对 diff：每个任务的改动是否兑现其引用的 REQ/SCN 行为与 API/DATA/D 形态，有无未覆盖项、有无越界改动；
 2. 使用code-reviewer-autodev角色，查看代码是否有不满足设计与需求的地方；
 3. 使用code-simplifier-autodev角色，代码是否有冗余或不合理的地方。
-task 工具不可用时跳过本节，继续任务。
-
+如任一子代理返回有问题，则需要修复代码。
 回检结论逐条分类：先读 diff 与被引用的 REQ/SCN/API/DATA/D 原文复核该条是否成立，再按下表动作；同一文件的多条结论一次性改完。
 
 | 分类 | 判定 | 动作 |
@@ -99,7 +97,7 @@ task 工具不可用时跳过本节，继续任务。
 - code-simplifier 已直接改动的文件同样逐条复核：采纳的重跑相关任务「验证方法」，不采纳的还原。
 - 修复触达的任务在 PLAN.md 完成记录补记本轮改动与重跑结果；全部结论闭合后再进入下面的编译验证。
 
-PLAN.md 队列无「待做」「进行中」后，进行编译验证（优先 系统约束 ）。失败回到相关任务，不推进。通过后先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。再推进 checkpoint：
+队列无「待做」「进行中」后，进行编译验证（优先 系统约束 ）。失败回到相关任务，不推进。通过后先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。再推进 checkpoint：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done

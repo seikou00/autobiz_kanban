@@ -15,7 +15,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
 ## explore
-进入设计探索模式。未提供的上游产物根据缺失清单处理，不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+使用task工具，指定Explore-autodev角色，进入设计探索模式。未提供的上游产物根据缺失清单处理，不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
 > 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 PLAN.md` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
@@ -328,7 +328,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 #### 回检与修复
 
-使用task工具，指定critic-autodev角色，对比specs、proposal与design.md和PLAN.md文件进行严格的审查，主要从四个维度核查：1.技术选择是否合理，2.规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对），3.测试是否合理和完备，4.引用与事实是否相符（Code Evidence 各条与代码实际一致、Spec Traceability 引用的 REQ/SCN/DEC 在上游真实存在）。
+使用task工具，指定critic-autodev角色，同时对比specs、proposal与design.md和PLAN.md文件进行严格的审查，主要从四个维度核查：1.技术选择是否合理，2.规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对），3.测试是否合理和完备，4.引用与事实是否相符（Code Evidence 各条与代码实际一致、Spec Traceability 引用的 REQ/SCN/DEC 在上游真实存在）。
 
 回检结论逐条分类：先用 specs、design.md、PLAN.md 原文与源码复核该条是否成立，再按下表动作；受影响产物一次性改完，不逐条往返。
 
