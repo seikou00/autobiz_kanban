@@ -13,7 +13,7 @@ from hooks.validation_policy import (
 )
 
 
-SCN_ID = re.compile(r"\bSCN-\d{3}\b")
+SCN_ID = re.compile(r"\bSCN-(?:[a-z0-9][a-z0-9-]*?-\d{3}-\d{2}|\d{3})\b")
 SCN_SUBSTRING = re.compile(r"SCN-\d{3}")
 
 PLAN_TASK_MAX_SCENARIOS = 5

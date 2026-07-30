@@ -703,66 +703,98 @@ modules_compile.json 编译清单
 （dev_0803「生成 PLAN.md」对应 wpy「生成 plan.json 与批次」），
 前 149 行完全相同，取 wpy 侧后补回 dev_0803 的独有段落即可。
 
-### §9.13 后端线合入完成后的两处遗留
+### §9.13 两处遗留的取证与处置（已解决）
 
-后端线（F00 -> F01 -> F02 -> F03 -> F04 -> F08 -> F10 -> F11）已全部合入
-`integration/dev_0803-feature-platform`。合入后仍有两处未由本轮解决，都不是
-合并引入，均在 `origin/dev_0803` 或 `dev_workflow_py` 净 worktree 上可复现。
+§9.13 初版把这两项都记为「不单方面裁定的遗留」。补做取证后两项定性都变了，
+均已在本分支处置完毕。初版的结论与成本估算作废，以本节为准。
 
-#### 一、`test_request_user_input_protocol` 与 AGENTS.md 自相矛盾（未修）
+#### 一、`test_request_user_input_protocol` 失败是同一提交内的笔误（已修测试）
 
-`tests/test_request_user_input_protocol.py::test_specs_only_adjudicates_open_questions`
-断言 `skills/autodev/autodev-specs/SKILL.md` 必须包含
-「不把切分、命名或规格范围交给用户确认」。
-
-而 `AGENTS.md` 第 5 行把这句话本身列为技能编写反模式的示例：
+初版记为「测试与 AGENTS.md 谁为准的项目策略选择」。取证否定了这个定性：
+两者出自**同一个提交** `c846b7b`（fix： 修复plan spec技能改动，2026-07-29）。
+该提交同时做了三件事：
 
 ```text
-- 不要把需求或者改动目的写入技能中，保持技能克制、干净，例如"capability 切分、
-  Operations、Spec Path 和稳定 ID 由模型完成，不把切分、命名或规格范围交给用户
-  确认"不用写在技能中
+1. 从 autodev-specs/SKILL.md 删掉「整体确认门」两步裁定结构
+2. 在 AGENTS.md 把「capability 切分 ... 不把切分、命名或规格范围交给用户确认」
+   补成「不要把需求或改动目的写入技能」这条反模式的示例
+3. 新增 test_specs_only_adjudicates_open_questions，8 条断言
 ```
 
-两者直接冲突。该语义已由 `autodev-specs/SKILL.md:109`
-「全部条目裁定后直接生成 proposal 与 specs，不再确认 capability 切分或规格范围」
-以 AGENTS.md 合规的形式表达。
+8 条断言里 7 条与第 1 项改动严格对应（3 条 forbidden 断言正是在断言「整体确认门
+已被删除」）。只有 `不把切分、命名或规格范围交给用户确认` 这一条，其句子
+**在 SKILL.md 全部历史中从未出现过**（`git log -S` 该句 → 只命中 AGENTS.md
+与测试文件两处）。即作者在同一提交里判定该句属反模式、不写入技能，却把它留在了
+断言清单里。
 
-在 `origin/dev_0803` 净 worktree 上同样失败（其余 4 条断言均通过，只缺这一条），
-属基线既有矛盾。修哪一侧是项目策略选择：改测试断言（承认 AGENTS.md 为准）
-或改技能文本（承认测试为准）。本轮不单方面裁定，保留失败并记录在此。
-
-#### 二、两套 spec ID 约定并存（已确认边界，未统一）
-
-合并后的 `artifact_check.py` 同时存在两套 spec 标题约定，各自服务一族校验器：
-
-| 约定 | 正则常量 | 标题形态 | 使用者 |
-| --- | --- | --- | --- |
-| wpy | `SPEC_REQUIREMENT_DEF_RE` / `SPEC_SCENARIO_DEF_RE` | `### Requirement [REQ-001]:` / `#### Scenario [SCN-001]:` | `_spec_definition_index`、`_spec_scenario_refs_by_path`（即全部下游 JSON 校验器的 scenario 索引来源） |
-| dev_0803 | `REQ_HEADING` / `SCN_HEADING` | `### REQ-<capability>-NNN:` / `#### SCN-<capability>-NNN-NN:` | `validate_specs_contract`、`spec_declared_ids`、`spec_actual_operations` |
-
-两族各自的测试都通过（`test_plan_json_and_evidence` / `test_json_writers` /
-`test_task_runner` 用 wpy 形态；`test_artifact_contracts` 用 dev_0803 形态），
-因此不是合并造成的破坏。但 `autodev-specs/SKILL.md`（保留 dev_0803 版）指导模型
-按 dev_0803 形态写 specs，而下游 JSON 校验器按 wpy 形态建索引：
+不是策略冲突，是一次提交内的笔误。该断言的语义已由同清单下一条所在行承载：
 
 ```text
-0803 形态 spec -> collect_spec_definition_index() -> REQ=[] SCN=[]
-wpy  形态 spec -> collect_spec_definition_index() -> REQ=['REQ-001'] SCN=['SCN-001']
+- 全部条目裁定后直接生成 proposal 与 specs，不再确认 capability 切分或规格范围。
 ```
 
-后果：真实特性的 specs 若按技能指导写成 dev_0803 形态，
-`VERIFY_DECISION.json` / `E2E_RESULT.json` / `REVIEW_FINDINGS.json` /
-`UNIT_TEST_RESULT.json` 中每个 `scenarioRef` 都会报
-`unknown_verify_scenario_ref` / `unknown_scenario_coverage_ref`。
+处置：删该条断言并注明原因，其余 7 条不动。删后 5 个用例全通过，3 条 forbidden
+断言仍在守「整体确认门已删除」这个意图。
 
-另注：scenario ref 的比较对象是裸 ID（`SCN-001`），而
-`verify_decision_writer.py derive-scenario-coverage` 产出的是路径限定形式
-（`specs/cap/spec.md#SCN-001`），两者不相等。本轮 `test_needs_fix_state`
-的 fixture 因此使用裸 ID 传入 `update-scenario`。
+#### 二、两套 spec ID 约定并存会静默关闭 scenario 覆盖门（已修实现）
 
-统一这套约定要同时改 `autodev-specs/SKILL.md`、两族校验器、writer 的 ref 形态
-以及两个测试文件的 fixture，跨 F01 已合入的校验器，属独立收口项，不在后端合入
-范围内。留待专门处理。
+初版只说「真实特性会报 unknown_verify_scenario_ref」。实测发现真正的后果比报错
+严重得多，且影响面比初版估的更靠前。
+
+**影响面**：从 board_config 已装配的 18 个校验器做调用图闭包，8 个依赖旧式索引，
+最早的断点在 dev.plan 而非 verify：
+
+| 阶段 | 依赖旧式索引的已装配校验器 |
+| --- | --- |
+| dev.plan | `plan_json_contract`、`plan_scenario_coverage` |
+| dev.code | `plan_json_contract` |
+| dev.review | `review_findings_json` |
+| dev.utest | `unit_test_result_json` |
+| dev.e2e | `e2e_result_json`、`fix_request_json` |
+| dev.verify | `verify_decision_json`、`fix_request_json` |
+
+而 dev.specs 的 `specs_contract` / `proposal_contract` 用新式。技能与模板
+（`autodev-specs/SKILL.md`、`templates/spec.md`）教的也是新式。
+
+**真正的后果是静默放行，不是报错**。`missing_scenario_coverage_rows` 用
+`defined_scenarios - seen_scenarios` 判覆盖完整性；索引取不到 ID 时
+`defined_scenarios` 为空集，该差集恒空，覆盖门被真空满足。实测：
+
+```text
+spec 声明 3 个 Scenario，VERIFY_DECISION 全部数组留空、verdict=pass
+  修复前：postcheck 放行 -> verify_done          （覆盖门等于不存在）
+  修复后：3 条失败拦下（missing_scenario_coverage_rows
+          / missing_verify_scenario_decision / ...）
+对照组（旧式 spec，约定本就对齐）：修复前即被同样 3 条拦下
+```
+
+即错配不是让流程报错卡住，而是把 verify 的 scenario 覆盖门整个变成空操作。
+
+**处置**：取方向 A——让索引同时识别两种标题写法，技能与模板不动。共 6 个正则
+常量并集化 + 1 个抽取 helper，3 个文件 49 行：
+
+| 文件 | 改动 |
+| --- | --- |
+| `skills/autodev/hooks/artifact_check.py` | `REQ_ID`、`SCN_ID`、`SPEC_REQUIREMENT_DEF_RE`、`SPEC_SCENARIO_DEF_RE` 并集化 + `_spec_def_ids()` |
+| `hooks/plan_writer.py` | 该文件自带一份 `SPEC_SCENARIO_DEF_RE` 副本（非 import），同步 |
+| `hooks/plan_granularity.py` | 第三份 `SCN_ID` 副本，同步 |
+
+三份重复副本是这个缺陷能长期潜伏的原因之一：改一处不会让另两处的行为跟上。
+
+初版估「跨 F01 已合入校验器 + 技能 + writer + 两个测试 fixture」是高估。实测
+**零 fixture 改动**：并集正则在旧式输入下与原正则结果逐字节一致，向后完全兼容。
+全套测试（含 test_task_runner 127）在修复后全绿。
+
+**新增 `tests/test_spec_id_convention.py`** 钉死三点：两种写法都要能索引、
+两种写法都要能解析路径限定 ref、零覆盖的 VERIFY_DECISION 在两种写法下都必须被拦。
+三个用例在回退修复后全部失败，确认它们真的守住了这个不变式。
+
+**仍未做的**：两套约定长期并存本身是技术债。新式（`REQ-<capability>-NNN`）有
+capability 命名空间和 REQ 归属，语义容量严格更强，且被 dev.specs 的机械校验和
+模板强制；旧式（`REQ-NNN`）是全 feature 平坦 ID。建议后续统一到新式并移除旧式
+写法支持，但那要改 `test_json_writers` / `test_code_exploration` /
+`test_batched_plan` / `test_needs_fix_state` 的 fixture（旧式命中 26 处），
+属独立收口项，不适合夹在本次合并里。
 
 ### §9.14 测试归属表的补充：11 个原表未列的 `dev_workflow_py` 独有测试文件
 

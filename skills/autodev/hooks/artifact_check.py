@@ -63,13 +63,21 @@ from hooks.ui_context import (  # noqa: E402
 FRONTEND_REVIEW_PASS = {"passed", "has-suggestions", "skipped-by-user"}
 UI_APPLICABILITIES = {"required", "not_applicable", "manual", "missing"}
 E2E_ID = re.compile(r"\bE2E-[A-Za-z0-9_-]+-\d{3}\b")
-REQ_ID = re.compile(r"\bREQ-\d{3}\b")
-SCN_ID = re.compile(r"\bSCN-\d{3}\b")
+REQ_ID = re.compile(r"\bREQ-(?:[a-z0-9][a-z0-9-]*?-\d{3}|\d{3})\b")
+SCN_ID = re.compile(r"\bSCN-(?:[a-z0-9][a-z0-9-]*?-\d{3}-\d{2}|\d{3})\b")
 TASK_ID = re.compile(r"\bT\d{3}\b")
 EVIDENCE_ID = re.compile(r"\bev_\d{4}\b")
 SMOKE_ID = re.compile(r"SMK-\d{3}")
-SPEC_REQUIREMENT_DEF_RE = re.compile(r"^###\s+Requirement\s+\[(REQ-\d{3})\]:\s+.+$", re.MULTILINE)
-SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
+SPEC_REQUIREMENT_DEF_RE = re.compile(
+    r"^###\s+(?:Requirement\s+\[(?P<bracketed>REQ-\d{3})\]"
+    r"|(?P<plain>REQ-[a-z0-9][a-z0-9-]*?-\d{3})):\s*\S",
+    re.MULTILINE,
+)
+SPEC_SCENARIO_DEF_RE = re.compile(
+    r"^####\s+(?:Scenario\s+\[(?P<bracketed>SCN-\d{3})\]"
+    r"|(?P<plain>SCN-[a-z0-9][a-z0-9-]*?-\d{3}-\d{2})):\s*\S",
+    re.MULTILINE,
+)
 DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DATA_DEF_RE = re.compile(r"^\|\s*(DATA-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
@@ -114,6 +122,18 @@ DECISION_FIELD = re.compile(
     r"^[ \t]*[-*][ \t]*\*{0,2}(决定|为什么|否决|约束)\*{0,2}[:：]\*{0,2}[ \t]*(.*)$",
     re.MULTILINE,
 )
+
+
+def _spec_def_ids(pattern: "re.Pattern[str]", text: str) -> list[str]:
+    """抽取 spec 标题中定义的稳定 ID，兼容两种标题写法。
+
+    `### Requirement [REQ-001]:` 与 `### REQ-<capability>-001:` 均可识别；
+    scenario 同理。返回顺序与出现顺序一致，便于上游做重复检测。
+    """
+    ids: list[str] = []
+    for match in pattern.finditer(text):
+        ids.append(match.group("bracketed") or match.group("plain"))
+    return ids
 CONSTRAINT_ID = re.compile(r"\b(?:REQ-[a-z0-9][a-z0-9-]*-\d{3}|CAP-[a-z0-9][a-z0-9-]*)\b")
 PLACEHOLDER_TEXT = re.compile(r"\[[^\]]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
 NORMALIZE_STRIP = re.compile(r"[\s？?。.，,、；;：:！!「」“”\"'`*（）()]+")
@@ -1089,8 +1109,8 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 def _spec_definition_index(text: str) -> tuple[dict[str, set[str]], list[str]]:
-    req_ids = SPEC_REQUIREMENT_DEF_RE.findall(text)
-    scn_ids = SPEC_SCENARIO_DEF_RE.findall(text)
+    req_ids = _spec_def_ids(SPEC_REQUIREMENT_DEF_RE, text)
+    scn_ids = _spec_def_ids(SPEC_SCENARIO_DEF_RE, text)
     failures: list[str] = []
     if len(req_ids) != len(set(req_ids)):
         failures.append("duplicate_requirement_id")
@@ -2828,7 +2848,7 @@ def _spec_scenario_refs_by_path(ctx: HookContext) -> dict[str, set[str]]:
     refs_by_id: dict[str, set[str]] = {}
     for spec in spec_files(ctx):
         rel = spec.relative_to(ctx.feature_dir).as_posix()
-        for scn_id in SPEC_SCENARIO_DEF_RE.findall(read_text(spec)):
+        for scn_id in _spec_def_ids(SPEC_SCENARIO_DEF_RE, read_text(spec)):
             refs_by_id.setdefault(scn_id, set()).add(f"{rel}#{scn_id}")
     return refs_by_id
 
