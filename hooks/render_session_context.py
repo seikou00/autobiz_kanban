@@ -82,7 +82,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Match, Optional, Set, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -385,7 +385,7 @@ def _fill_plugin_root(
     if not platform_text.startswith("win"):
         return content.replace(PLUGIN_ROOT_PLACEHOLDER, root_dir)
 
-    def _replace_win32(match: re.Match[str]) -> str:
+    def _replace_win32(match: Match[str]) -> str:
         suffix = match.group(1) or ""
         if not suffix:
             return root_dir
@@ -802,10 +802,10 @@ def render(
     load_status: List[dict] = []
     system_sections: List[dict] = []  # ② 按 systemId 去重，首次出现顺序
     unit_sections: List[dict] = []    # ③ 按选择顺序
-    seen_systems: set[str] = set()
-    seen_paths: set[Path] = set()     # 正文按规范化后绝对路径去重（resolve 消除 symlink/.. 差异）
-    system_loaded: set[str] = set()   # 实际产出系统段的 systemId（供锚点回退）
-    unit_has_section: set[str] = set()  # 实际产出单元段的 deployUnitId（供锚点指向）
+    seen_systems: Set[str] = set()
+    seen_paths: Set[Path] = set()     # 正文按规范化后绝对路径去重（resolve 消除 symlink/.. 差异）
+    system_loaded: Set[str] = set()   # 实际产出系统段的 systemId（供锚点回退）
+    unit_has_section: Set[str] = set()  # 实际产出单元段的 deployUnitId（供锚点指向）
 
     def _append_body(abs_path: Optional[Path], bucket: List[dict], section: dict) -> bool:
         if abs_path is None:

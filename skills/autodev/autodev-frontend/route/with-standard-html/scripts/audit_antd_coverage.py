@@ -2,6 +2,7 @@
 """Audit React source for native UI controls that may need Ant Design conversion."""
 
 from __future__ import annotations
+from typing import List
 
 import argparse
 import re
@@ -73,6 +74,14 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8-sig", errors="replace")
 
 
+def is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def should_skip(path: Path) -> bool:
     return any(part in SKIP_DIRS for part in path.parts)
 
@@ -90,7 +99,7 @@ def iter_source_files(root: Path):
             yield path
 
 
-def has_ignore(lines: list[str], index: int) -> bool:
+def has_ignore(lines: List[str], index: int) -> bool:
     window = lines[max(0, index - 2) : min(len(lines), index + 2)]
     return any(IGNORE_RE.search(line) for line in window)
 
@@ -141,7 +150,7 @@ def main() -> int:
         print("| File | Line | Candidate | Recommendation | Source |")
         print("| --- | ---: | --- | --- | --- |")
         for path, line_no, candidate, reason, source in findings:
-            rel = path.relative_to(root) if root.is_dir() and path.is_relative_to(root) else path
+            rel = path.relative_to(root) if root.is_dir() and is_relative_to(path, root) else path
             escaped = source.replace("|", "\\|")
             print(f"| `{rel}` | {line_no} | `{candidate}` | {reason} | `{escaped}` |")
         return 1
@@ -152,7 +161,7 @@ def main() -> int:
 
     print("Ant Design coverage audit found possible missed conversions:")
     for path, line_no, candidate, reason, source in findings:
-        rel = path.relative_to(root) if root.is_dir() and path.is_relative_to(root) else path
+        rel = path.relative_to(root) if root.is_dir() and is_relative_to(path, root) else path
         print(f"{rel}:{line_no}: {candidate} - {reason}")
         print(f"  {source}")
     print("\nResolve each finding by converting it to Ant Design or adding an `antd-audit-ignore` comment with a reason.")

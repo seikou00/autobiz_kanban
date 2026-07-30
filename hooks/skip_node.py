@@ -9,6 +9,7 @@ PROJECT_DIR / FEATURE_ID 环境变量，因此通过 --plugin-workspace / --proj
 """
 
 from __future__ import annotations
+from typing import List, Optional
 
 import argparse
 import sys
@@ -28,7 +29,7 @@ from hooks.update_checkpoint import (  # noqa: E402
 from board_core.state_store import write_state_records  # noqa: E402
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="UI 直调：跳过工作流节点（参数式定位，不依赖环境变量）",
         allow_abbrev=False,

@@ -36,7 +36,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -171,8 +171,8 @@ def parse_manifest(data: object) -> Manifest:
         raise AgentsManifestError("systems 必须是数组")
 
     systems: List[SystemEntry] = []
-    seen_systems: set[str] = set()
-    seen_units: dict[str, str] = {}  # deployUnitId -> systemId（全局唯一）
+    seen_systems: Set[str] = set()
+    seen_units: Dict[str, str] = {}  # deployUnitId -> systemId（全局唯一）
 
     for idx, raw in enumerate(raw_systems):
         ctx = f"systems[{idx}]"

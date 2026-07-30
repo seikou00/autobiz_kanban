@@ -13,6 +13,7 @@
 """
 
 from __future__ import annotations
+from typing import List, Optional, Tuple
 
 import json
 import re
@@ -102,12 +103,12 @@ def basename(value: str) -> str:
     return value.rstrip("/").rsplit("/", 1)[-1].lower()
 
 
-def has_path_suffix(value: str, suffix: tuple[str, ...]) -> bool:
+def has_path_suffix(value: str, suffix: Tuple[str, ...]) -> bool:
     parts = [part.lower() for part in value.split("/") if part and part != "."]
     return tuple(parts[-len(suffix):]) == suffix
 
 
-def blocked_read_target(value: str) -> str | None:
+def blocked_read_target(value: str) -> Optional[str]:
     """返回被拦截的状态源类型；不是状态源时返回 None。"""
     normalized = normalize(value)
     if not normalized:
@@ -121,11 +122,11 @@ def blocked_read_target(value: str) -> str | None:
     return None
 
 
-def extract_candidate_paths(tool_input: object) -> list[str]:
+def extract_candidate_paths(tool_input: object) -> List[str]:
     if not isinstance(tool_input, dict):
         return []
 
-    paths: list[str] = []
+    paths: List[str] = []
     for key in PATH_KEYS:
         raw = tool_input.get(key)
         if isinstance(raw, str) and raw.strip():
@@ -135,7 +136,7 @@ def extract_candidate_paths(tool_input: object) -> list[str]:
     return paths
 
 
-def command_read_target(command: str) -> str | None:
+def command_read_target(command: str) -> Optional[str]:
     """命令由读取类命令发起、且目标是状态源时，返回被拦截的类型。"""
     for segment in COMMAND_SEPARATORS.split(command):
         tokens = segment.split()
@@ -150,7 +151,7 @@ def command_read_target(command: str) -> str | None:
     return None
 
 
-def payload_read_target(payload: dict) -> str | None:
+def payload_read_target(payload: dict) -> Optional[str]:
     tool_input = payload.get("tool_input", {})
     for path in extract_candidate_paths(tool_input):
         target = blocked_read_target(path)

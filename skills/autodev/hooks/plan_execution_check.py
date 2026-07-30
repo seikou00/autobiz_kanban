@@ -14,6 +14,7 @@ design→PLAN 方向（design 的每个 API/DATA/D 决策都被某个任务的�
 """
 
 from __future__ import annotations
+from typing import Dict, List, Optional, Set, Tuple
 
 import argparse
 import re
@@ -79,9 +80,9 @@ def fail(reason: str, detail: str = "", *, repair: str = "") -> int:
     return 1
 
 
-def scn_shorthand_issues(plan_text: str) -> list[tuple[str, tuple[int, ...], str]]:
+def scn_shorthand_issues(plan_text: str) -> List[Tuple[str, Tuple[int, ...], str]]:
     """返回 ``(非法原文, 行号, 完整 ID 替换文本)``。"""
-    grouped: dict[str, tuple[set[int], str]] = {}
+    grouped: Dict[str, Tuple[Set[int], str]] = {}
 
     def record(raw: str, line_number: int, replacement: str) -> None:
         if raw in grouped:
@@ -116,10 +117,10 @@ def scn_shorthand_issues(plan_text: str) -> list[tuple[str, tuple[int, ...], str
     ]
 
 
-def ref_tokens(block: str) -> tuple[set[str], set[str], set[str]]:
-    req: set[str] = set()
-    scn: set[str] = set()
-    design: set[str] = set()
+def ref_tokens(block: str) -> Tuple[Set[str], Set[str], Set[str]]:
+    req: Set[str] = set()
+    scn: Set[str] = set()
+    design: Set[str] = set()
     for line in block.splitlines():
         stripped = line.strip()
         if not any(f"**{key}:**" in stripped for key in REF_LINE_KEYS):
@@ -130,7 +131,7 @@ def ref_tokens(block: str) -> tuple[set[str], set[str], set[str]]:
     return req, scn, design
 
 
-def coverage_waivers(plan_text: str) -> tuple[set[str], set[str]]:
+def coverage_waivers(plan_text: str) -> Tuple[Set[str], Set[str]]:
     """Contract Coverage 中「覆盖任务」列标注「无需实现」的契约 ID。
 
     返回 ``(已豁免 ID, 理由缺失的 ID)``。豁免必须带理由——否则「无需实现」
@@ -140,9 +141,9 @@ def coverage_waivers(plan_text: str) -> tuple[set[str], set[str]]:
     if not body:
         return set(), set()
 
-    waived: set[str] = set()
-    reasonless: set[str] = set()
-    task_column: int | None = None
+    waived: Set[str] = set()
+    reasonless: Set[str] = set()
+    task_column: Optional[int] = None
     header_seen = False
 
     for line in body.splitlines():
@@ -174,14 +175,14 @@ def coverage_waivers(plan_text: str) -> tuple[set[str], set[str]]:
     return waived, reasonless
 
 
-def detect_cycle(deps: dict[str, set[str]]) -> list[str]:
+def detect_cycle(deps: Dict[str, Set[str]]) -> List[str]:
     indegree = {
         task: sum(1 for dependency in dependencies if dependency in deps)
         for task, dependencies in deps.items()
     }
     queue = [task for task, degree in indegree.items() if degree == 0]
     visited = 0
-    graph: dict[str, set[str]] = {task: set() for task in deps}
+    graph: Dict[str, Set[str]] = {task: set() for task in deps}
     for task, dependencies in deps.items():
         for dependency in dependencies:
             if dependency in graph:
@@ -198,7 +199,7 @@ def detect_cycle(deps: dict[str, set[str]]) -> list[str]:
     return sorted(task for task, degree in indegree.items() if degree > 0)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Plan 完成校验：PLAN 引用/DAG")
     parser.add_argument("slug")
     parser.add_argument("--workspace-root", default=str(Path.cwd().resolve()))
@@ -233,8 +234,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # 上游 ID 集合
-    spec_req_ids: set[str] = set()
-    spec_scn_ids: set[str] = set()
+    spec_req_ids: Set[str] = set()
+    spec_scn_ids: Set[str] = set()
     for spec in sorted(feature_dir.glob("specs/**/*.md")):
         if not spec.is_file() or spec.stat().st_size == 0:
             continue
@@ -245,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
             spec_scn_ids.add(f"SCN-{match.group(1)}-{match.group(2)}-{match.group(3)}")
 
     design_path = feature_dir / "design.md"
-    design_ids: set[str] = set()
+    design_ids: Set[str] = set()
     design_structured = False
     if design_path.is_file() and design_path.stat().st_size > 0:
         design_text = read_text(design_path)
@@ -256,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ① 引用完整性（上游为 legacy 无 ID 时跳过对应维度）
     design_checked = bool(design_ids or design_structured)
-    claimed_design: set[str] = set()
+    claimed_design: Set[str] = set()
     for task_id, block in tasks.items():
         req_refs, scn_refs, design_refs = ref_tokens(block)
         claimed_design |= design_refs
@@ -291,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
             failures += fail("uncovered_design_decision", f"id={ref}")
 
     # ③ DAG 合法性
-    overview: dict[str, set[str]] = {}
+    overview: Dict[str, Set[str]] = {}
     for match in OVERVIEW_ROW.finditer(plan_text):
         task_id = match.group(1)
         dep_cell = match.group(3)

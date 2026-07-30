@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,28 +54,28 @@ class RollbackPlan:
     workspace: Path
     feature: str
     requested_stage: str
-    target_node_id: str | None = None
-    previous_node_id: str | None = None
-    old_checkpoint: str | None = None
-    new_checkpoint: str | None = None
-    feature_dir: Path | None = None
-    active_feature_dir: Path | None = None
-    artifact_paths: tuple[Path, ...] = ()
+    target_node_id: Optional[str] = None
+    previous_node_id: Optional[str] = None
+    old_checkpoint: Optional[str] = None
+    new_checkpoint: Optional[str] = None
+    feature_dir: Optional[Path] = None
+    active_feature_dir: Optional[Path] = None
+    artifact_paths: Tuple[Path, ...] = ()
     old_records: StateRecords = field(default_factory=dict)
     records: StateRecords = field(default_factory=dict)
-    raw_records: dict[str, Any] = field(default_factory=dict)
+    raw_records: Dict[str, Any] = field(default_factory=dict)
     workflow_profile: str = "standard"
-    workflow_decisions: dict[str, str] = field(default_factory=dict)
-    errors: tuple[str, ...] = ()
+    workflow_decisions: Dict[str, str] = field(default_factory=dict)
+    errors: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class RollbackResult:
     ok: bool
     plan: RollbackPlan
-    deleted_artifacts: tuple[str, ...] = ()
+    deleted_artifacts: Tuple[str, ...] = ()
     restored_active_dir: bool = False
-    errors: tuple[str, ...] = ()
+    errors: Tuple[str, ...] = ()
 
 
 def _failed_plan(
@@ -83,7 +83,7 @@ def _failed_plan(
     workspace: Path,
     feature: str,
     stage: str,
-    errors: list[str] | tuple[str, ...],
+    errors: Union[List[str], Tuple[str, ...]],
     **values: Any,
 ) -> RollbackPlan:
     return RollbackPlan(
@@ -103,8 +103,8 @@ def _checkpoint_base(checkpoint: str) -> str:
     return checkpoint
 
 
-def _node_aliases(node: dict, stage_labels: dict[str, str]) -> set[str]:
-    aliases: set[str] = set()
+def _node_aliases(node: dict, stage_labels: Dict[str, str]) -> Set[str]:
+    aliases: Set[str] = set()
     for value in (node.get("id"), node.get("label"), node.get("skill")):
         if isinstance(value, str) and value.strip():
             aliases.add(value.strip().casefold())
@@ -125,10 +125,10 @@ def _node_aliases(node: dict, stage_labels: dict[str, str]) -> set[str]:
 
 
 def _resolve_target_node(
-    nodes: list[dict],
+    nodes: List[dict],
     stage: str,
-    stage_labels: dict[str, str],
-) -> tuple[dict | None, tuple[str, ...]]:
+    stage_labels: Dict[str, str],
+) -> Tuple[Optional[dict], Tuple[str, ...]]:
     query = stage.strip().casefold()
     matches = [
         node
@@ -149,7 +149,7 @@ def _resolve_target_node(
     return None, (f"未知阶段: {stage}；可用 node id: {available}",)
 
 
-def _done_checkpoint(node: dict) -> str | None:
+def _done_checkpoint(node: dict) -> Optional[str]:
     return next(
         (
             checkpoint
@@ -160,7 +160,7 @@ def _done_checkpoint(node: dict) -> str | None:
     )
 
 
-def _archive_feature_dir(workspace: Path, feature: str, iteration: object) -> Path | None:
+def _archive_feature_dir(workspace: Path, feature: str, iteration: object) -> Optional[Path]:
     archive_dir = get_features_archive_dir(workspace)
     iteration_text = str(iteration or "").strip()
     if iteration_text and iteration_text != "—":
@@ -183,8 +183,8 @@ def _archive_feature_dir(workspace: Path, feature: str, iteration: object) -> Pa
 def _resolve_feature_dir(
     workspace: Path,
     feature: str,
-    record: dict[str, Any],
-) -> tuple[Path | None, tuple[str, ...]]:
+    record: Dict[str, Any],
+) -> Tuple[Optional[Path], Tuple[str, ...]]:
     active_dir = get_feature_active_dir(workspace, feature)
     if active_dir.is_dir():
         return active_dir, ()
@@ -198,7 +198,7 @@ def _resolve_feature_dir(
     return archived_dir, ()
 
 
-def _validate_artifact_path(path: str) -> str | None:
+def _validate_artifact_path(path: str) -> Optional[str]:
     candidate = Path(path)
     if candidate.is_absolute() or ".." in candidate.parts:
         return f"产物路径必须位于 Feature 目录内: {path}"
@@ -215,7 +215,7 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _safe_existing_candidate(feature_dir: Path, candidate: Path) -> tuple[Path | None, str | None]:
+def _safe_existing_candidate(feature_dir: Path, candidate: Path) -> Tuple[Optional[Path], Optional[str]]:
     try:
         relative = candidate.relative_to(feature_dir)
     except ValueError:
@@ -232,10 +232,10 @@ def _safe_existing_candidate(feature_dir: Path, candidate: Path) -> tuple[Path |
 
 def _artifact_candidates(
     feature_dir: Path,
-    nodes: list[dict],
-) -> tuple[tuple[Path, ...], tuple[str, ...]]:
-    candidates: set[Path] = set()
-    errors: list[str] = []
+    nodes: List[dict],
+) -> Tuple[Tuple[Path, ...], Tuple[str, ...]]:
+    candidates: Set[Path] = set()
+    errors: List[str] = []
 
     for node in nodes:
         for artifact in artifact_dicts(node, "outputs"):
@@ -270,7 +270,7 @@ def _artifact_candidates(
         candidates,
         key=lambda path: (len(path.relative_to(feature_dir).parts), path.as_posix()),
     )
-    top_level: list[Path] = []
+    top_level: List[Path] = []
     for candidate in ordered:
         if any(parent == candidate or parent in candidate.parents for parent in top_level):
             continue
@@ -283,7 +283,7 @@ def prepare_stage_rollback(
     workspace: Path,
     feature: str,
     stage: str,
-    updated_at: str | None = None,
+    updated_at: Optional[str] = None,
 ) -> RollbackPlan:
     workspace = workspace.resolve()
     feature = feature.strip()
@@ -517,7 +517,7 @@ def prepare_stage_rollback(
     )
 
 
-def _restore_moved_artifacts(feature_dir: Path, backup_dir: Path, paths: list[Path]) -> None:
+def _restore_moved_artifacts(feature_dir: Path, backup_dir: Path, paths: List[Path]) -> None:
     for original in reversed(paths):
         relative = original.relative_to(feature_dir)
         backup = backup_dir / relative
@@ -527,7 +527,7 @@ def _restore_moved_artifacts(feature_dir: Path, backup_dir: Path, paths: list[Pa
         backup.replace(original)
 
 
-def _prune_empty_parents(feature_dir: Path, deleted_paths: tuple[Path, ...]) -> None:
+def _prune_empty_parents(feature_dir: Path, deleted_paths: Tuple[Path, ...]) -> None:
     directories = sorted(
         {
             parent
@@ -560,7 +560,7 @@ def execute_stage_rollback(plan: RollbackPlan) -> RollbackResult:
             dir=backup_parent,
         )
     )
-    moved_artifacts: list[Path] = []
+    moved_artifacts: List[Path] = []
     moved_to_active = False
     try:
         for original in plan.artifact_paths:
@@ -583,7 +583,7 @@ def execute_stage_rollback(plan: RollbackPlan) -> RollbackResult:
             raw_records=plan.raw_records,
         )
     except Exception as exc:
-        recovery_errors: list[str] = []
+        recovery_errors: List[str] = []
         if moved_to_active and active_feature_dir.exists() and not feature_dir.exists():
             try:
                 active_feature_dir.replace(feature_dir)
@@ -651,7 +651,7 @@ def _result_payload(
     result: RollbackResult,
     *,
     dry_run: bool,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     plan = result.plan
     planned_artifacts = (
         [
@@ -677,7 +677,7 @@ def _result_payload(
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if contains_workspace_argument(raw_args):
         print(STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR, file=sys.stderr)

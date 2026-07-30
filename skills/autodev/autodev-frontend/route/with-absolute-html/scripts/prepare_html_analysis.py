@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 
 def ensure_dir(path: Path) -> None:
@@ -22,12 +22,12 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def unique(values: list[str]) -> list[str]:
+def unique(values: List[str]) -> List[str]:
     return list(dict.fromkeys(v for v in values if v))
 
 
-def split_html_inputs(values: list[str]) -> list[Path]:
-    result: list[Path] = []
+def split_html_inputs(values: List[str]) -> List[Path]:
+    result: List[Path] = []
     for value in values:
         if not value:
             continue
@@ -52,8 +52,8 @@ def extract_html_fragment(content: str) -> str:
     return content.strip()
 
 
-def build_merged_html_input(sources: list[Path], target: Path) -> Path:
-    sections: list[str] = []
+def build_merged_html_input(sources: List[Path], target: Path) -> Path:
+    sections: List[str] = []
     for idx, source in enumerate(sources, start=1):
         fragment = extract_html_fragment(read_text(source))
         if not fragment:
@@ -84,8 +84,8 @@ def build_merged_html_input(sources: list[Path], target: Path) -> Path:
     return target
 
 
-def render_whole_sections(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+def render_whole_sections(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
     for section in manifest.get("sections", []):
         contract = section.get("renderContract") or {}
         if contract.get("mustRenderWholeSection"):
@@ -100,7 +100,7 @@ def render_whole_sections(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def source_action_texts(full_manifest: dict[str, Any]) -> list[str]:
+def source_action_texts(full_manifest: Dict[str, Any]) -> List[str]:
     texts = []
     for item in full_manifest.get("texts", []):
         if item.get("kind") == "action":
@@ -108,8 +108,8 @@ def source_action_texts(full_manifest: dict[str, Any]) -> list[str]:
     return unique(texts)
 
 
-def safe_leaf_slots_summary(full_manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+def safe_leaf_slots_summary(full_manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
     for slot in full_manifest.get("safeLeafSlots", []):
         result.append({
             "slot": str(slot.get("slot", "")),
@@ -122,8 +122,8 @@ def safe_leaf_slots_summary(full_manifest: dict[str, Any]) -> list[dict[str, Any
     return result[:16]
 
 
-def deferred_block_slots_summary(full_manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+def deferred_block_slots_summary(full_manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
     for slot in full_manifest.get("deferredBlockSlots", []):
         result.append({
             "slot": str(slot.get("slot", "")),
@@ -136,8 +136,8 @@ def deferred_block_slots_summary(full_manifest: dict[str, Any]) -> list[dict[str
     return result[:16]
 
 
-def icon_candidates_summary(full_manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+def icon_candidates_summary(full_manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
     for icon in full_manifest.get("iconCandidates", []):
         result.append({
             "owner": str(icon.get("owner", "")),
@@ -153,8 +153,8 @@ def icon_candidates_summary(full_manifest: dict[str, Any]) -> list[dict[str, Any
     return result[:24]
 
 
-def interaction_candidates_summary(full_manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+def interaction_candidates_summary(full_manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
     for item in full_manifest.get("interactionCandidates", []):
         result.append({
             "kind": str(item.get("kind", "")),
@@ -166,9 +166,9 @@ def interaction_candidates_summary(full_manifest: dict[str, Any]) -> list[dict[s
 
 
 def build_layout_contract(
-    html_source_paths: list[str],
-    full_manifest: dict[str, Any],
-) -> dict[str, Any]:
+    html_source_paths: List[str],
+    full_manifest: Dict[str, Any],
+) -> Dict[str, Any]:
     sections = full_manifest.get("sections", [])
     regions = full_manifest.get("regions", [])
     return {
@@ -206,12 +206,12 @@ def build_layout_contract(
 
 def build_checklist(
     task_stem: str,
-    html_source_paths: list[str],
+    html_source_paths: List[str],
     html_input_path: str,
     analysis_source_path: str,
     output_dir: Path,
-    full_manifest: dict[str, Any],
-) -> dict[str, Any]:
+    full_manifest: Dict[str, Any],
+) -> Dict[str, Any]:
     manifest_path = str(output_dir / f"{task_stem}.json")
     markdown_path = str(output_dir / f"{task_stem}.md")
     checklist_path = str(output_dir / f"{task_stem}-checklist.md")
@@ -269,7 +269,7 @@ def build_checklist(
     }
 
 
-def write_checklist_md(path: Path, checklist: dict[str, Any]) -> None:
+def write_checklist_md(path: Path, checklist: Dict[str, Any]) -> None:
     lines = [
         "# HTML Stage 1 Checklist",
         "",
@@ -421,7 +421,7 @@ def write_checklist_md(path: Path, checklist: dict[str, Any]) -> None:
     write_text(path, "\n".join(lines) + "\n")
 
 
-def verify_paths(paths: list[str]) -> None:
+def verify_paths(paths: List[str]) -> None:
     missing = [path for path in paths if not Path(path).exists()]
     if missing:
         raise SystemExit("Missing required analysis artifacts:\n" + "\n".join(missing))
@@ -462,7 +462,7 @@ def main() -> int:
             html_input_path = str(html_input_target)
             analysis_inputs = [html_input_target]
         else:
-            copied_paths: list[str] = []
+            copied_paths: List[str] = []
             for idx, source_path in enumerate(html_files, start=1):
                 html_input_target = html_input_dir / f"{args.task_stem}-{idx}.html"
                 html_input_target.write_bytes(source_path.read_bytes())

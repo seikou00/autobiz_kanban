@@ -7,7 +7,7 @@ from .autobizdevops/state.json first. STATE.md is a generated view.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from hooks.paths import (
     get_features_active_dir,
@@ -19,8 +19,8 @@ from board_core.state_store import (
 )
 
 
-StateResult = tuple[dict[str, str], list[str], bool]  # rows, errors, file_exists
-StateRecordsResult = tuple[dict[str, dict[str, Any]], list[str], bool]
+StateResult = Tuple[Dict[str, str], List[str], bool]  # rows, errors, file_exists
+StateRecordsResult = Tuple[Dict[str, Dict[str, Any]], List[str], bool]
 
 
 def load_state_md(workspace: Path) -> StateResult:
@@ -32,7 +32,7 @@ def load_state_md(workspace: Path) -> StateResult:
     return state_rows_from_records(result.records), result.errors, result.state_exists
 
 
-def load_state_rows(workspace: Path) -> dict[str, str]:
+def load_state_rows(workspace: Path) -> Dict[str, str]:
     """快速读取 feature→checkpoint 映射，忽略错误。
 
     与 load_state_md 的区别：不返回错误列表，适用于不需要精确错误的场景。
@@ -52,7 +52,7 @@ def load_state_records(workspace: Path) -> StateRecordsResult:
     return result.records, result.errors, result.state_exists
 
 
-def list_active_feature_names(workspace: Path) -> list[str]:
+def list_active_feature_names(workspace: Path) -> List[str]:
     """Return active feature directory names under .autobizdevops/features."""
     active = get_features_active_dir(workspace)
     if not active.is_dir():
@@ -60,7 +60,7 @@ def list_active_feature_names(workspace: Path) -> list[str]:
     return sorted(entry.name for entry in active.iterdir() if entry.is_dir())
 
 
-def find_feature_dir(workspace: Path, feature: str) -> Path | None:
+def find_feature_dir(workspace: Path, feature: str) -> Optional[Path]:
     """Return the feature directory path (active first, fall back to archive)."""
     active = get_features_active_dir(workspace) / feature
     if active.is_dir():

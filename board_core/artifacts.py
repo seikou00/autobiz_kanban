@@ -1,6 +1,7 @@
 """Artifact scanning — check file existence per node."""
 
 from __future__ import annotations
+from typing import List
 
 from pathlib import Path
 
@@ -83,10 +84,10 @@ def _scan_file_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
 
 
 def scan_artifacts(
-    feature_dir: Path, workspace: Path, artifacts_config: list[dict],
-) -> list[dict]:
+    feature_dir: Path, workspace: Path, artifacts_config: List[dict],
+) -> List[dict]:
     """Check file existence for each artifact definition."""
-    result: list[dict] = []
+    result: List[dict] = []
     for art in artifacts_config:
         if _has_glob(art["path"]):
             result.append(_scan_glob_artifact(feature_dir, workspace, art))

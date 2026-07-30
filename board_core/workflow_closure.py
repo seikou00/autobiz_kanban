@@ -1,6 +1,7 @@
 """Dependency closure solver for custom workflow node selections."""
 
 from __future__ import annotations
+from typing import Dict, List, Set, Tuple
 
 from dataclasses import dataclass
 
@@ -21,14 +22,14 @@ class ClosureResult:
         advisory only, the UI may offer these as optional upstream additions.
     """
 
-    nodes: tuple[str, ...]
-    added: tuple[str, ...]
-    entry_nodes: tuple[str, ...]
-    dropped: dict[str, tuple[str, ...]]
-    suggestions: dict[str, dict[str, str]]
+    nodes: Tuple[str, ...]
+    added: Tuple[str, ...]
+    entry_nodes: Tuple[str, ...]
+    dropped: Dict[str, Tuple[str, ...]]
+    suggestions: Dict[str, Dict[str, str]]
 
 
-def _base_nodes(base_config: dict) -> list[dict]:
+def _base_nodes(base_config: dict) -> List[dict]:
     workflow = base_config.get("workflow")
     if not isinstance(workflow, dict):
         raise WorkflowCompileError("workflow must be an object")
@@ -38,8 +39,8 @@ def _base_nodes(base_config: dict) -> list[dict]:
     return [node for node in nodes if isinstance(node, dict) and isinstance(node.get("id"), str)]
 
 
-def _producer_index(nodes: list[dict]) -> dict[str, str]:
-    producers: dict[str, str] = {}
+def _producer_index(nodes: List[dict]) -> Dict[str, str]:
+    producers: Dict[str, str] = {}
     for node in nodes:
         for artifact in _artifact_dicts(node, "outputs"):
             if isinstance(artifact, dict) and isinstance(artifact.get("path"), str):
@@ -47,8 +48,8 @@ def _producer_index(nodes: list[dict]) -> dict[str, str]:
     return producers
 
 
-def _input_paths(node: dict) -> list[tuple[str, bool]]:
-    paths: list[tuple[str, bool]] = []
+def _input_paths(node: dict) -> List[Tuple[str, bool]]:
+    paths: List[Tuple[str, bool]] = []
     for artifact in _artifact_dicts(node, "inputs"):
         if not isinstance(artifact, dict):
             continue
@@ -90,7 +91,7 @@ def solve_node_closure(
         raise WorkflowCompileError(f"node selection references unknown nodes: {', '.join(unknown)}")
 
     selected = set(requested)
-    added: set[str] = set()
+    added: Set[str] = set()
     if auto_include_producers:
         producers = _producer_index(nodes)
         changed = True
@@ -112,10 +113,10 @@ def solve_node_closure(
     # node is an entry point when required inputs are affected. For each
     # dropped input with an in-base producer, record a suggestion.
     producers = _producer_index(nodes)
-    available: set[str] = set()
-    dropped: dict[str, tuple[str, ...]] = {}
-    suggestions: dict[str, dict[str, str]] = {}
-    entry_nodes: list[str] = [ordered[0]] if ordered else []
+    available: Set[str] = set()
+    dropped: Dict[str, Tuple[str, ...]] = {}
+    suggestions: Dict[str, Dict[str, str]] = {}
+    entry_nodes: List[str] = [ordered[0]] if ordered else []
     for node_id in ordered:
         node = node_by_id[node_id]
         inputs = _input_paths(node)

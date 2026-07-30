@@ -225,7 +225,7 @@ def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
     return feature_dir
 
 
-def _parse_workflow_nodes(raw_value: str) -> list[str]:
+def _parse_workflow_nodes(raw_value: str) -> List[str]:
     try:
         value = json.loads(raw_value)
     except json.JSONDecodeError as exc:
@@ -236,7 +236,7 @@ def _parse_workflow_nodes(raw_value: str) -> list[str]:
     if not isinstance(value, list):
         raise argparse.ArgumentTypeError("--workflow-nodes must be a JSON list of node ids")
 
-    nodes: list[str] = []
+    nodes: List[str] = []
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise argparse.ArgumentTypeError("--workflow-nodes must contain only non-empty string node ids")
@@ -250,7 +250,7 @@ def create_feature(
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
     *,
     workflow_template: str = BASE_WORKFLOW_TEMPLATE,
-    workflow_nodes: list[str] | None = None,
+    workflow_nodes: Optional[List[str]] = None,
 ) -> Dict[str, object]:
     workspace = workspace.resolve()
     workflow_profile = normalize_workflow_profile(workflow_profile)

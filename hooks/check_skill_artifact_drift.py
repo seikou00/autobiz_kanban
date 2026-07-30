@@ -8,7 +8,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List, Optional, Pattern, Set
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,8 +105,8 @@ def is_managed_contract(contract: SkillContract) -> bool:
     return group_dir is not None and contract.skill.startswith(f"{group_dir}-")
 
 
-def managed_contracts(contracts: WorkflowContracts) -> list[SkillContract]:
-    result: list[SkillContract] = []
+def managed_contracts(contracts: WorkflowContracts) -> List[SkillContract]:
+    result: List[SkillContract] = []
     for node in sorted(contracts.nodes, key=lambda item: item.get("order", 0)):
         skill = node.get("skill")
         if not isinstance(skill, str):
@@ -117,7 +117,7 @@ def managed_contracts(contracts: WorkflowContracts) -> list[SkillContract]:
     return result
 
 
-def profile_names(repo_root: Path, profile: str) -> list[str]:
+def profile_names(repo_root: Path, profile: str) -> List[str]:
     cleaned = profile.strip()
     if cleaned == "all":
         return list(configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json")))
@@ -125,7 +125,7 @@ def profile_names(repo_root: Path, profile: str) -> list[str]:
     return profiles or ["standard"]
 
 
-def profile_contracts(repo_root: Path, profile: str = "standard") -> list[WorkflowContracts]:
+def profile_contracts(repo_root: Path, profile: str = "standard") -> List[WorkflowContracts]:
     profiles = profile_names(repo_root, profile)
     return [
         load_repo_workflow_contracts(repo_root, profile=profile)
@@ -133,9 +133,9 @@ def profile_contracts(repo_root: Path, profile: str = "standard") -> list[Workfl
     ]
 
 
-def unique_contracts(contracts: list[SkillContract]) -> list[SkillContract]:
-    result: list[SkillContract] = []
-    seen: set[str] = set()
+def unique_contracts(contracts: List[SkillContract]) -> List[SkillContract]:
+    result: List[SkillContract] = []
+    seen: Set[str] = set()
     for contract in contracts:
         if contract.skill in seen:
             continue
@@ -144,7 +144,7 @@ def unique_contracts(contracts: list[SkillContract]) -> list[SkillContract]:
     return result
 
 
-def selected_contracts(contract_sets: list[WorkflowContracts], skill: str | None) -> list[SkillContract]:
+def selected_contracts(contract_sets: List[WorkflowContracts], skill: Optional[str]) -> List[SkillContract]:
     if skill is None:
         return unique_contracts([
             contract
@@ -152,7 +152,7 @@ def selected_contracts(contract_sets: list[WorkflowContracts], skill: str | None
             for contract in managed_contracts(contracts)
         ])
 
-    last_error: BoardConfigError | None = None
+    last_error: Optional[BoardConfigError] = None
     for contracts in contract_sets:
         try:
             contract = contracts.contract_for_skill(skill)
@@ -188,7 +188,7 @@ def skill_body_for_drift_scan(content: str) -> str:
     return remove_marked_section(content, LEGACY_RULES_BEGIN_MARKER, LEGACY_RULES_END_MARKER)
 
 
-def artifact_pattern(artifact_paths: Iterable[str]) -> re.Pattern[str]:
+def artifact_pattern(artifact_paths: Iterable[str]) -> Pattern[str]:
     escaped = [re.escape(path) for path in sorted(set(artifact_paths), key=len, reverse=True)]
     if not escaped:
         return re.compile(r"a\Ab")
@@ -201,12 +201,12 @@ def line_is_gate_context(line: str, heading_context: str) -> bool:
     ) or ("状态:" in line and any(word in line for word in ("完成", "待做", "失败")))
 
 
-def contract_artifact_paths(contract: SkillContract) -> set[str]:
+def contract_artifact_paths(contract: SkillContract) -> Set[str]:
     return {artifact.path for artifact in (*contract.inputs, *contract.outputs)}
 
 
-def all_workflow_artifact_paths(contracts: WorkflowContracts) -> set[str]:
-    result: set[str] = set(DEFAULT_FORMAL_ARTIFACT_PATHS)
+def all_workflow_artifact_paths(contracts: WorkflowContracts) -> Set[str]:
+    result: Set[str] = set(DEFAULT_FORMAL_ARTIFACT_PATHS)
     for contract in contracts.skill_contracts.values():
         result.update(contract_artifact_paths(contract))
     return result
@@ -217,13 +217,13 @@ def detect_artifact_drift_in_content(
     content: str,
     contract: SkillContract,
     path: Path,
-    known_artifact_paths: set[str],
-) -> list[ArtifactDriftFinding]:
+    known_artifact_paths: Set[str],
+) -> List[ArtifactDriftFinding]:
     scan_content = skill_body_for_drift_scan(content)
     allowed = contract_artifact_paths(contract)
     pattern = artifact_pattern(known_artifact_paths)
-    findings: list[ArtifactDriftFinding] = []
-    headings: list[str] = []
+    findings: List[ArtifactDriftFinding] = []
+    headings: List[str] = []
     in_code_fence = False
 
     for line_number, line in enumerate(scan_content.splitlines(), start=1):
@@ -267,12 +267,12 @@ def check_contracts_for_drift(
     contracts: Iterable[SkillContract],
     *,
     profile: str = "standard",
-) -> list[ArtifactDriftFinding]:
+) -> List[ArtifactDriftFinding]:
     workflow_contracts = profile_contracts(repo_root, profile)
-    known_artifact_paths: set[str] = set(DEFAULT_FORMAL_ARTIFACT_PATHS)
+    known_artifact_paths: Set[str] = set(DEFAULT_FORMAL_ARTIFACT_PATHS)
     for contract_set in workflow_contracts:
         known_artifact_paths.update(all_workflow_artifact_paths(contract_set))
-    findings: list[ArtifactDriftFinding] = []
+    findings: List[ArtifactDriftFinding] = []
 
     for contract in contracts:
         path = skill_file_for_contract(repo_root, contract)
@@ -290,7 +290,7 @@ def check_contracts_for_drift(
     return findings
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Check SKILL.md artifact drift for Biz/Dev/Ops node skills")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
     parser.add_argument("--skill", help="check a single node skill, e.g. autodev-plan / autobiz-prd-generate")

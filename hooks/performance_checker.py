@@ -22,9 +22,8 @@ import json
 import os
 import shlex
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from typing import Any
 from paths import (
     STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR,
     contains_workspace_argument,
@@ -643,14 +642,14 @@ def remove_duplicate_dirs(path):
     return os.sep.join(unique_parts)
 
 
-def command_words(command: str) -> list[str]:
+def command_words(command: str) -> List[str]:
     try:
         return shlex.split(command)
     except ValueError:
         return command.split()
 
 
-def command_variants(command: str) -> list[str]:
+def command_variants(command: str) -> List[str]:
     variants = [command]
     tokens = command_words(command)
     for index, token in enumerate(tokens):
@@ -658,7 +657,7 @@ def command_variants(command: str) -> list[str]:
             variants.append(tokens[index + 1])
     return variants
 
-def option_value(tokens: list[str], *names: str) -> str:
+def option_value(tokens: List[str], *names: str) -> str:
     for index, token in enumerate(tokens):
         for name in names:
             if token == name and index + 1 < len(tokens):
@@ -668,10 +667,10 @@ def option_value(tokens: list[str], *names: str) -> str:
     return ""
 
 
-def has_flag(tokens: list[str], *names: str) -> bool:
+def has_flag(tokens: List[str], *names: str) -> bool:
     return any(token in names for token in tokens)
 
-def parse_checkpoint_command(command: str) -> CheckpointCommand | None:
+def parse_checkpoint_command(command: str) -> Optional[CheckpointCommand]:
     state_scripts = {"update_checkpoint.py"}
     print(f"checkpoint: {command}", file=sys.stderr)
     for variant in command_variants(command):
@@ -691,7 +690,7 @@ def parse_checkpoint_command(command: str) -> CheckpointCommand | None:
         return CheckpointCommand(checkpoint=checkpoint)
     return None
 
-def as_dict(value: Any) -> dict[str, Any]:
+def as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 def first_text(*values: Any) -> str:
@@ -702,7 +701,7 @@ def first_text(*values: Any) -> str:
             return " ".join(str(item) for item in value).strip()
     return ""
 
-def extract_command(payload: dict[str, Any]) -> str:
+def extract_command(payload: Dict[str, Any]) -> str:
     tool_input = as_dict(payload.get("tool_input") or payload.get("input"))
     return first_text(
         tool_input.get("command"),

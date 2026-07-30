@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Optional
 
 import contextlib
 import io
@@ -44,8 +45,8 @@ class NeedsFixStateTest(unittest.TestCase):
         self,
         checkpoint: str,
         *,
-        needs_fix_from: str | None = None,
-        stage: str | None = None,
+        needs_fix_from: Optional[str] = None,
+        stage: Optional[str] = None,
     ) -> None:
         records, errors, exists = load_state_json_records(self.project)
         self.assertTrue(exists)

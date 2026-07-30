@@ -2,6 +2,7 @@
 """Shared checkpoint parsing, transition, and guard helpers."""
 
 from __future__ import annotations
+from typing import Dict, List, Optional, Tuple
 
 import contextlib
 import io
@@ -56,13 +57,13 @@ START_CHECKPOINT_TO_SKILL = WORKFLOW_CONTRACTS.start_checkpoint_to_skill
 END_CHECKPOINT_TO_SKILL = WORKFLOW_CONTRACTS.end_checkpoint_to_skill
 
 
-def is_separator_row(cells: list[str]) -> bool:
+def is_separator_row(cells: List[str]) -> bool:
     return all(cell and set(cell) <= {"-", ":"} for cell in cells)
 
 
-def parse_state_record_table(content: str) -> tuple[dict[str, dict[str, str]], list[str]]:
-    result: dict[str, dict[str, str]] = {}
-    errors: list[str] = []
+def parse_state_record_table(content: str) -> Tuple[Dict[str, Dict[str, str]], List[str]]:
+    result: Dict[str, Dict[str, str]] = {}
+    errors: List[str] = []
 
     for lineno, raw_line in enumerate(content.splitlines(), start=1):
         line = raw_line.strip()
@@ -98,13 +99,13 @@ def parse_state_record_table(content: str) -> tuple[dict[str, dict[str, str]], l
     return result, errors
 
 
-def parse_state_table(content: str) -> tuple[dict[str, str], list[str]]:
+def parse_state_table(content: str) -> Tuple[Dict[str, str], List[str]]:
     records, errors = parse_state_record_table(content)
     return {feature: row["checkpoint"] for feature, row in records.items()}, errors
 
 
-def parse_state_rows(content: str) -> dict[str, str]:
-    rows: dict[str, str] = {}
+def parse_state_rows(content: str) -> Dict[str, str]:
+    rows: Dict[str, str] = {}
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if not line.startswith("|"):
@@ -140,10 +141,10 @@ def hook_log(message: str) -> None:
 
 def load_workflow_nodes(
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Optional[Path] = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-) -> list[dict]:
+    workflow_decisions: Optional[Dict[str, str]] = None,
+) -> List[dict]:
     if workspace_root is not None or workflow_profile != BASE_WORKFLOW_PROFILE or workflow_decisions:
         try:
             return list(
@@ -165,11 +166,11 @@ def load_workflow_nodes(
 
 
 def checkpoint_node_id(
-    checkpoint: str | None,
+    checkpoint: Optional[str],
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Optional[Path] = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
+    workflow_decisions: Optional[Dict[str, str]] = None,
 ) -> str:
     if not checkpoint:
         return ""
@@ -192,13 +193,13 @@ def safe_feature_slug(feature: str) -> bool:
 def append_feature_hook_log(
     workspace_root: Path,
     feature: str,
-    checkpoint: str | None,
+    checkpoint: Optional[str],
     *,
     event_id: str,
     event_status: str,
     message: str,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
+    workflow_decisions: Optional[Dict[str, str]] = None,
 ) -> None:
     if not safe_feature_slug(feature):
         return
@@ -229,17 +230,17 @@ def append_feature_hook_log(
 
 def append_checkpoint_hook_logs(
     workspace_root: Path,
-    changes: list[tuple[str, str | None, str | None]],
+    changes: List[Tuple[str, Optional[str], Optional[str]]],
     *,
-    event_id: str | None = None,
-    hook_id: str | None = None,
+    event_id: Optional[str] = None,
+    hook_id: Optional[str] = None,
     label: str,
-    errors: list[str],
-    event_status: str | None = None,
-    exit_code: int | None = None,
-    message: str | None = None,
-    workflow_profiles: dict[str, str] | None = None,
-    workflow_decisions: dict[str, dict[str, str]] | None = None,
+    errors: List[str],
+    event_status: Optional[str] = None,
+    exit_code: Optional[int] = None,
+    message: Optional[str] = None,
+    workflow_profiles: Optional[Dict[str, str]] = None,
+    workflow_decisions: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> None:
     if not changes:
         return
@@ -260,7 +261,7 @@ def append_checkpoint_hook_logs(
         )
 
 
-def normalize_path(path: str, cwd: Path | None = None) -> Path:
+def normalize_path(path: str, cwd: Optional[Path] = None) -> Path:
     cwd = cwd or Path.cwd()
     normalized = Path(path.replace("\\", "/"))
     if not normalized.is_absolute():
@@ -268,7 +269,7 @@ def normalize_path(path: str, cwd: Path | None = None) -> Path:
     return normalized.resolve()
 
 
-def has_path_suffix(path: Path, suffix: tuple[str, ...]) -> bool:
+def has_path_suffix(path: Path, suffix: Tuple[str, ...]) -> bool:
     parts = tuple(part for part in str(path).replace("\\", "/").split("/") if part and part != ".")
     return parts[-len(suffix) :] == suffix
 
@@ -281,13 +282,13 @@ def has_state_json_path_suffix(path: Path) -> bool:
     return has_path_suffix(path, STATE_JSON_PATH_SUFFIX)
 
 
-def is_state_path(path: str, cwd: Path | None = None) -> bool:
+def is_state_path(path: str, cwd: Optional[Path] = None) -> bool:
     if not path:
         return False
     return has_state_path_suffix(normalize_path(path, cwd))
 
 
-def is_managed_state_path(path: str, cwd: Path | None = None) -> bool:
+def is_managed_state_path(path: str, cwd: Optional[Path] = None) -> bool:
     if not path:
         return False
     normalized = normalize_path(path, cwd)
@@ -304,7 +305,7 @@ def build_new_content(
     *,
     error_subject: str = "checkpoint 转移",
     include_state_in_missing_error: bool = True,
-) -> tuple[str, list[str]]:
+) -> Tuple[str, List[str]]:
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {})
 
@@ -344,8 +345,8 @@ def build_new_content(
 
 def _record_for_feature(
     feature: str,
-    old_records: dict[str, dict] | None,
-    new_records: dict[str, dict] | None,
+    old_records: Optional[Dict[str, dict]],
+    new_records: Optional[Dict[str, dict]],
 ) -> dict:
     for records in (new_records, old_records):
         if not records:
@@ -357,7 +358,7 @@ def _record_for_feature(
 
 
 def _contracts_for_record(
-    workspace_root: Path | None,
+    workspace_root: Optional[Path],
     record: dict,
     repo_root: Path,
 ):
@@ -377,15 +378,15 @@ def _contracts_for_record(
 
 
 def validate_transitions(
-    old_map: dict[str, str],
-    new_map: dict[str, str],
+    old_map: Dict[str, str],
+    new_map: Dict[str, str],
     *,
-    workspace_root: Path | None = None,
-    old_records: dict[str, dict[str, str]] | None = None,
-    new_records: dict[str, dict[str, str]] | None = None,
+    workspace_root: Optional[Path] = None,
+    old_records: Optional[Dict[str, Dict[str, str]]] = None,
+    new_records: Optional[Dict[str, Dict[str, str]]] = None,
     repo_root: Path = ROOT,
-) -> list[str]:
-    errors: list[str] = []
+) -> List[str]:
+    errors: List[str] = []
 
     for feature in sorted(set(old_map) | set(new_map)):
         old_cp = old_map.get(feature)
@@ -418,8 +419,8 @@ def validate_transitions(
     return errors
 
 
-def changed_rows(old_rows: dict[str, str], new_rows: dict[str, str]) -> list[tuple[str, str | None, str | None]]:
-    changes: list[tuple[str, str | None, str | None]] = []
+def changed_rows(old_rows: Dict[str, str], new_rows: Dict[str, str]) -> List[Tuple[str, Optional[str], Optional[str]]]:
+    changes: List[Tuple[str, Optional[str], Optional[str]]] = []
     for slug in sorted(set(old_rows) | set(new_rows)):
         old_checkpoint = old_rows.get(slug)
         new_checkpoint = new_rows.get(slug)
@@ -435,9 +436,9 @@ def check_stage_inputs(
     repo_root: Path = ROOT,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-    workflow_record: dict | None = None,
-) -> str | None:
+    workflow_decisions: Optional[Dict[str, str]] = None,
+    workflow_record: Optional[dict] = None,
+) -> Optional[str]:
     code, message = run_precheck(
         repo_root,
         root,
@@ -459,9 +460,9 @@ def check_stage_outputs(
     repo_root: Path = ROOT,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-    workflow_record: dict | None = None,
-) -> str | None:
+    workflow_decisions: Optional[Dict[str, str]] = None,
+    workflow_record: Optional[dict] = None,
+) -> Optional[str]:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         code, message = run_postcheck(
@@ -481,14 +482,14 @@ def check_stage_outputs(
 
 def validate_lifecycle(
     root: Path,
-    old_rows: dict[str, str],
-    new_rows: dict[str, str],
+    old_rows: Dict[str, str],
+    new_rows: Dict[str, str],
     repo_root: Path = ROOT,
     *,
-    old_records: dict[str, dict[str, str]] | None = None,
-    new_records: dict[str, dict[str, str]] | None = None,
-) -> list[str]:
-    errors: list[str] = []
+    old_records: Optional[Dict[str, Dict[str, str]]] = None,
+    new_records: Optional[Dict[str, Dict[str, str]]] = None,
+) -> List[str]:
+    errors: List[str] = []
     for slug, old_checkpoint, new_checkpoint in changed_rows(old_rows, new_rows):
         record = _record_for_feature(slug, old_records, new_records)
         try:
@@ -531,7 +532,7 @@ def validate_lifecycle(
     return errors
 
 
-def features_entering_code_done(old_map: dict[str, str], new_map: dict[str, str]) -> list[str]:
+def features_entering_code_done(old_map: Dict[str, str], new_map: Dict[str, str]) -> List[str]:
     return [
         feature
         for feature in sorted(set(old_map) & set(new_map))
@@ -546,7 +547,7 @@ def tail_output(stdout: str, stderr: str) -> str:
     return combined[-MAVEN_OUTPUT_LIMIT:]
 
 
-def validate_maven_compile(cwd: Path, features: list[str]) -> list[str]:
+def validate_maven_compile(cwd: Path, features: List[str]) -> List[str]:
     if not features:
         return []
 
@@ -588,7 +589,7 @@ def validate_maven_compile(cwd: Path, features: list[str]) -> list[str]:
     return []
 
 
-def payload_state_path(payload: dict) -> Path | None:
+def payload_state_path(payload: dict) -> Optional[Path]:
     tool_input = payload.get("tool_input", {})
     file_path = tool_input.get("filePath") or tool_input.get("file_path") or tool_input.get("path", "")
     cwd = Path(payload.get("cwd") or Path.cwd())
@@ -597,7 +598,7 @@ def payload_state_path(payload: dict) -> Path | None:
     return normalize_path(str(file_path), cwd)
 
 
-def payload_managed_state_path(payload: dict) -> Path | None:
+def payload_managed_state_path(payload: dict) -> Optional[Path]:
     tool_input = payload.get("tool_input", {})
     file_path = tool_input.get("filePath") or tool_input.get("file_path") or tool_input.get("path", "")
     cwd = Path(payload.get("cwd") or Path.cwd())
@@ -730,7 +731,7 @@ HOOK_COMMANDS = {
 }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) != 1 or argv[0] not in HOOK_COMMANDS:
         choices = " | ".join(sorted(HOOK_COMMANDS))

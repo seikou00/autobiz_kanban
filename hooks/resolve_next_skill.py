@@ -2,6 +2,7 @@
 """Resolve the next workflow skill from the plugin-provided session context."""
 
 from __future__ import annotations
+from typing import List, Optional
 
 import argparse
 import json
@@ -27,7 +28,7 @@ CONTEXT_ARGUMENT_ERROR = (
 )
 
 
-def _contains_feature_argument(args: list[str]) -> bool:
+def _contains_feature_argument(args: List[str]) -> bool:
     return any(
         arg in {"--feature", "-f"}
         or arg.startswith("--feature=")
@@ -68,7 +69,7 @@ def _print_text(payload: dict) -> None:
             )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if contains_workspace_argument(raw_args) or _contains_feature_argument(raw_args):
         print(CONTEXT_ARGUMENT_ERROR, file=sys.stderr)

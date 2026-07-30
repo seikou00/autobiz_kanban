@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple, Union
 
 from board_core.workflow_compiler import (
     ALLOWED_GUARDS,
@@ -40,7 +40,7 @@ class ArtifactSpec:
     path: str
     kind: str = "file"
     required: bool = True
-    extract: ExtractSpec | None = None
+    extract: Optional[ExtractSpec] = None
 
 
 @dataclass(frozen=True)
@@ -49,33 +49,33 @@ class SkillContract:
     label: str
     group: str
     skill: str
-    checkpoints: tuple[str, ...]
-    inputs: tuple[ArtifactSpec, ...]
-    outputs: tuple[ArtifactSpec, ...]
-    validators: tuple[str, ...]
-    guards: tuple[str, ...] = ()
+    checkpoints: Tuple[str, ...]
+    inputs: Tuple[ArtifactSpec, ...]
+    outputs: Tuple[ArtifactSpec, ...]
+    validators: Tuple[str, ...]
+    guards: Tuple[str, ...] = ()
 
     @property
-    def required_inputs(self) -> tuple[str, ...]:
+    def required_inputs(self) -> Tuple[str, ...]:
         return tuple(artifact.path for artifact in self.inputs if artifact.required)
 
     @property
-    def required_outputs(self) -> tuple[str, ...]:
+    def required_outputs(self) -> Tuple[str, ...]:
         return tuple(artifact.path for artifact in self.outputs if artifact.required)
 
 
 @dataclass(frozen=True)
 class WorkflowContracts:
-    nodes: tuple[dict, ...]
+    nodes: Tuple[dict, ...]
     profile: str
-    skill_contracts: dict[str, SkillContract]
-    known_checkpoints: frozenset[str]
-    initial_checkpoints: frozenset[str]
-    allowed_next: dict[str, frozenset[str]]
-    stage_labels: dict[str, str]
-    start_checkpoint_to_skill: dict[str, str]
-    end_checkpoint_to_skill: dict[str, str]
-    skipped_skills: dict[str, str] = field(default_factory=dict)
+    skill_contracts: Dict[str, SkillContract]
+    known_checkpoints: FrozenSet[str]
+    initial_checkpoints: FrozenSet[str]
+    allowed_next: Dict[str, FrozenSet[str]]
+    stage_labels: Dict[str, str]
+    start_checkpoint_to_skill: Dict[str, str]
+    end_checkpoint_to_skill: Dict[str, str]
+    skipped_skills: Dict[str, str] = field(default_factory=dict)
 
     def contract_for_skill(self, skill: str) -> SkillContract:
         try:
@@ -97,7 +97,7 @@ def config_path_for_repo(repo_root: Path) -> Path:
     return repo_root / "board_core" / "board_config.json"
 
 
-def load_board_config(config_path: Path | None = None) -> dict:
+def load_board_config(config_path: Optional[Path] = None) -> dict:
     path = config_path or default_config_path()
     if not path.is_file():
         raise BoardConfigError(f"board_config.json not found: {path}")
@@ -107,7 +107,7 @@ def load_board_config(config_path: Path | None = None) -> dict:
         raise BoardConfigError(f"invalid board_config.json: {path}:{exc.lineno}:{exc.colno}") from exc
 
 
-def artifact_dicts(node: dict, direction: str = "outputs") -> list[dict]:
+def artifact_dicts(node: dict, direction: str = "outputs") -> List[dict]:
     artifacts = node.get("artifacts")
     if isinstance(artifacts, dict):
         value = artifacts.get(direction, [])
@@ -121,13 +121,13 @@ def artifact_dicts(node: dict, direction: str = "outputs") -> list[dict]:
     return []
 
 
-def _read_string_list(value: object, *, context: str) -> tuple[str, ...]:
+def _read_string_list(value: object, *, context: str) -> Tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
         raise BoardConfigError(f"{context} must be a list of non-empty strings")
     return tuple(value)
 
 
-def _read_extract_spec(value: object, *, context: str) -> ExtractSpec | None:
+def _read_extract_spec(value: object, *, context: str) -> Optional[ExtractSpec]:
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -138,12 +138,12 @@ def _read_extract_spec(value: object, *, context: str) -> ExtractSpec | None:
     return ExtractSpec(degrade=degrade)
 
 
-def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, ...]:
+def _read_artifact_specs(items: object, *, context: str) -> Tuple[ArtifactSpec, ...]:
     if not isinstance(items, list):
         raise BoardConfigError(f"{context} must be a list")
 
-    specs: list[ArtifactSpec] = []
-    seen_paths: set[str] = set()
+    specs: List[ArtifactSpec] = []
+    seen_paths: Set[str] = set()
     for index, item in enumerate(items):
         item_context = f"{context}[{index}]"
         if not isinstance(item, dict):
@@ -183,8 +183,8 @@ def _read_artifact_specs(items: object, *, context: str) -> tuple[ArtifactSpec, 
     return tuple(specs)
 
 
-def _flatten_transition_values(transitions: dict[str, Iterable[str]]) -> set[str]:
-    result: set[str] = set()
+def _flatten_transition_values(transitions: Dict[str, Iterable[str]]) -> Set[str]:
+    result: Set[str] = set()
     for values in transitions.values():
         result.update(values)
     return result
@@ -195,15 +195,15 @@ def _node_uses_lifecycle(node: dict) -> bool:
 
 
 def load_workflow_contracts(
-    config_path: Path | None = None,
+    config_path: Optional[Path] = None,
     *,
-    repo_root: Path | None = None,
-    workspace: Path | None = None,
+    repo_root: Optional[Path] = None,
+    workspace: Optional[Path] = None,
     profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: object | None = None,
-    overlays: list[dict] | None = None,
-    node_subset: list[str] | tuple[str, ...] | None = None,
-    skipped_nodes: object | None = None,
+    workflow_decisions: Optional[object] = None,
+    overlays: Optional[List[dict]] = None,
+    node_subset: Optional[Union[List[str], Tuple[str, ...]]] = None,
+    skipped_nodes: Optional[object] = None,
 ) -> WorkflowContracts:
     profile = normalize_workflow_profile(profile)
     try:
@@ -251,7 +251,7 @@ def load_workflow_contracts(
     raw_transitions = checkpoint_config.get("transitions", {})
     if not isinstance(raw_transitions, dict):
         raise BoardConfigError("workflow.checkpoints.transitions must be an object")
-    allowed_next: dict[str, frozenset[str]] = {}
+    allowed_next: Dict[str, FrozenSet[str]] = {}
     for checkpoint, targets in raw_transitions.items():
         if not isinstance(checkpoint, str) or not checkpoint:
             raise BoardConfigError("workflow.checkpoints.transitions keys must be non-empty strings")
@@ -259,11 +259,11 @@ def load_workflow_contracts(
             _read_string_list(targets, context=f"workflow.checkpoints.transitions.{checkpoint}")
         )
 
-    checkpoint_owner: dict[str, str] = {}
-    skill_contracts: dict[str, SkillContract] = {}
-    start_checkpoint_to_skill: dict[str, str] = {}
-    end_checkpoint_to_skill: dict[str, str] = {}
-    skipped_skills: dict[str, str] = {}
+    checkpoint_owner: Dict[str, str] = {}
+    skill_contracts: Dict[str, SkillContract] = {}
+    start_checkpoint_to_skill: Dict[str, str] = {}
+    end_checkpoint_to_skill: Dict[str, str] = {}
+    skipped_skills: Dict[str, str] = {}
 
     for index, node in enumerate(nodes):
         if not isinstance(node, dict):
@@ -368,12 +368,12 @@ def load_workflow_contracts(
 def load_repo_workflow_contracts(
     repo_root: Path,
     *,
-    workspace: Path | None = None,
+    workspace: Optional[Path] = None,
     profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: object | None = None,
-    overlays: list[dict] | None = None,
-    node_subset: list[str] | tuple[str, ...] | None = None,
-    skipped_nodes: object | None = None,
+    workflow_decisions: Optional[object] = None,
+    overlays: Optional[List[dict]] = None,
+    node_subset: Optional[Union[List[str], Tuple[str, ...]]] = None,
+    skipped_nodes: Optional[object] = None,
 ) -> WorkflowContracts:
     return load_workflow_contracts(
         config_path_for_repo(repo_root),
@@ -391,7 +391,7 @@ def load_record_workflow_contracts(
     repo_root: Path,
     record: dict,
     *,
-    workspace: Path | None = None,
+    workspace: Optional[Path] = None,
 ) -> WorkflowContracts:
     """Resolve contracts from a state record's workflow fields (template-aware).
 

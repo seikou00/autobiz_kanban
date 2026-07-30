@@ -3,6 +3,7 @@
 """Safely update one Feature checkpoint in .autobizdevops/state.json."""
 
 from __future__ import annotations
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import argparse
 import json
@@ -73,16 +74,16 @@ class CheckpointUpdate:
     content: str
     state_json_content: str
     records: StateRecords
-    transition_errors: tuple[str, ...]
-    lifecycle_errors: tuple[str, ...]
-    old_checkpoint: str | None
-    new_checkpoint: str | None
+    transition_errors: Tuple[str, ...]
+    lifecycle_errors: Tuple[str, ...]
+    old_checkpoint: Optional[str]
+    new_checkpoint: Optional[str]
     workflow_profile: str = BASE_WORKFLOW_PROFILE
-    workflow_decisions: dict[str, str] | None = None
-    raw_records: dict[str, object] = field(default_factory=dict)
+    workflow_decisions: Optional[Dict[str, str]] = None
+    raw_records: Dict[str, object] = field(default_factory=dict)
 
     @property
-    def errors(self) -> tuple[str, ...]:
+    def errors(self) -> Tuple[str, ...]:
         return (*self.transition_errors, *self.lifecycle_errors)
 
 
@@ -91,17 +92,17 @@ def replace_feature_record(
     *,
     feature: str,
     checkpoint: str,
-    stage: str | None,
-    owner: str | None,
-    iteration: str | None,
+    stage: Optional[str],
+    owner: Optional[str],
+    iteration: Optional[str],
     allow_create: bool,
     updated_at: str,
     workflow_profile: str,
-    workflow_decisions: dict[str, str],
-    stage_labels: dict[str, str],
-    initial_checkpoints: frozenset[str],
-) -> tuple[StateRecords, list[str]]:
-    errors: list[str] = []
+    workflow_decisions: Dict[str, str],
+    stage_labels: Dict[str, str],
+    initial_checkpoints: FrozenSet[str],
+) -> Tuple[StateRecords, List[str]]:
+    errors: List[str] = []
     resolved_stage = stage if stage is not None else stage_labels.get(checkpoint, "")
     new_records: StateRecords = {slug: dict(record) for slug, record in records.items()}
     if feature in new_records:
@@ -152,9 +153,9 @@ def replace_feature_record(
     return new_records, []
 
 
-def parse_workflow_decision_args(items: list[str] | None) -> tuple[dict[str, str], tuple[str, ...]]:
-    updates: dict[str, str] = {}
-    errors: list[str] = []
+def parse_workflow_decision_args(items: Optional[List[str]]) -> Tuple[Dict[str, str], Tuple[str, ...]]:
+    updates: Dict[str, str] = {}
+    errors: List[str] = []
     for raw in items or []:
         if "=" not in raw:
             errors.append(f"--workflow-decision 必须使用 stage=enabled|skipped 格式: {raw}")
@@ -174,13 +175,13 @@ def parse_workflow_decision_args(items: list[str] | None) -> tuple[dict[str, str
 
 def validate_workflow_decision_updates(
     *,
-    old_checkpoint: str | None,
-    updates: dict[str, str],
-) -> tuple[str, ...]:
+    old_checkpoint: Optional[str],
+    updates: Dict[str, str],
+) -> Tuple[str, ...]:
     if not updates:
         return ()
     stage_by_id = {stage["id"]: stage for stage in configured_dynamic_stages(load_board_config(ROOT / "board_core" / "board_config.json"))}
-    errors: list[str] = []
+    errors: List[str] = []
     for stage_id in sorted(updates):
         stage = stage_by_id.get(stage_id)
         if stage is None:
@@ -199,14 +200,14 @@ def prepare_checkpoint_update(
     workspace: Path,
     feature: str,
     checkpoint: str,
-    stage: str | None = None,
-    owner: str | None = None,
-    iteration: str | None = None,
+    stage: Optional[str] = None,
+    owner: Optional[str] = None,
+    iteration: Optional[str] = None,
     allow_create: bool = False,
-    updated_at: str | None = None,
-    workflow_profile: str | None = None,
-    workflow_decision_updates: dict[str, str] | None = None,
-    needs_fix_from_checkpoint: str | None = None,
+    updated_at: Optional[str] = None,
+    workflow_profile: Optional[str] = None,
+    workflow_decision_updates: Optional[Dict[str, str]] = None,
+    needs_fix_from_checkpoint: Optional[str] = None,
 ) -> CheckpointUpdate:
     workspace = workspace.resolve()
     state_path = workspace / STATE_RELATIVE_PATH
@@ -396,7 +397,7 @@ def prepare_checkpoint_update(
 
     content = ""
     state_json_content = ""
-    render_errors: list[str] = []
+    render_errors: List[str] = []
     if not update_errors:
         try:
             content = render_state_md(new_records, workspace=workspace)
@@ -419,7 +420,7 @@ def prepare_checkpoint_update(
             new_records=new_records,
         ),
     ]
-    lifecycle_errors: list[str] = []
+    lifecycle_errors: List[str] = []
     if not transition_errors:
         lifecycle_errors.extend(
             validate_lifecycle(
@@ -454,8 +455,8 @@ def prepare_skip_update(
     *,
     workspace: Path,
     feature: str,
-    skip_nodes: list[str],
-    updated_at: str | None = None,
+    skip_nodes: List[str],
+    updated_at: Optional[str] = None,
 ) -> CheckpointUpdate:
     """Atomically skip workflow nodes for one feature.
 
@@ -468,14 +469,14 @@ def prepare_skip_update(
     state_path = workspace / STATE_RELATIVE_PATH
     state_json_path = workspace / STATE_JSON_RELATIVE_PATH
 
-    raw_records: dict[str, object] = {}
+    raw_records: Dict[str, object] = {}
 
     def failed(
         *transition_errors: str,
-        old_checkpoint: str | None = None,
-        new_checkpoint: str | None = None,
+        old_checkpoint: Optional[str] = None,
+        new_checkpoint: Optional[str] = None,
         profile: str = BASE_WORKFLOW_PROFILE,
-        decisions: dict[str, str] | None = None,
+        decisions: Optional[Dict[str, str]] = None,
     ) -> CheckpointUpdate:
         return CheckpointUpdate(
             ok=False,
@@ -576,7 +577,7 @@ def prepare_skip_update(
 
     content = ""
     state_json_content = ""
-    render_errors: list[str] = []
+    render_errors: List[str] = []
     try:
         content = render_state_md(new_records, workspace=workspace)
         state_json_content = state_json_content_from_records_preserving_raw(
@@ -587,7 +588,7 @@ def prepare_skip_update(
     except ValueError as exc:
         render_errors.extend(str(exc).splitlines())
 
-    lifecycle_errors: list[str] = []
+    lifecycle_errors: List[str] = []
     if not render_errors and landing is not None:
         start_skill = new_contracts.start_checkpoint_to_skill.get(new_checkpoint)
         if start_skill:
@@ -626,7 +627,7 @@ def write_skip_hook_logs(
     *,
     workspace: Path,
     feature: str,
-    skip_nodes: list[str],
+    skip_nodes: List[str],
 ) -> None:
     label = "节点跳过"
     skipped_text = ", ".join(skip_nodes)
@@ -661,7 +662,7 @@ def stage_event_status(result: CheckpointUpdate, stage: str) -> str:
     return "error"
 
 
-def stage_errors(result: CheckpointUpdate, stage: str) -> tuple[str, ...]:
+def stage_errors(result: CheckpointUpdate, stage: str) -> Tuple[str, ...]:
     if stage == "transition_errors":
         return result.transition_errors
     if stage == "lifecycle_errors":
@@ -706,7 +707,7 @@ def write_result_json(
     feature: str,
     checkpoint: str,
     dry_run: bool,
-    skip_nodes: list[str] | None = None,
+    skip_nodes: Optional[List[str]] = None,
     errors_as_message: bool = False,
 ) -> None:
     payload = {
@@ -731,7 +732,7 @@ def write_result_json(
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if contains_workspace_argument(raw_args):
         print(STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR, file=sys.stderr)

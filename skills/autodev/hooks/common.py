@@ -7,7 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, Iterable, List, Optional, Tuple
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -32,9 +32,9 @@ class HookCheckError(Exception):
 @dataclass(frozen=True)
 class ArtifactConfig:
     skill: str
-    required_inputs: tuple[str, ...]
-    required_outputs: tuple[str, ...]
-    validators: tuple[str, ...]
+    required_inputs: Tuple[str, ...]
+    required_outputs: Tuple[str, ...]
+    validators: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -42,8 +42,8 @@ class HookContext:
     skill: str
     slug: str
     root: Path
-    required_inputs: tuple[str, ...] = ()
-    required_outputs: tuple[str, ...] = ()
+    required_inputs: Tuple[str, ...] = ()
+    required_outputs: Tuple[str, ...] = ()
 
     def requires_artifact(self, name: str) -> bool:
         return name in self.required_inputs or name in self.required_outputs
@@ -69,7 +69,7 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
-def missing_files(root: Path, slug: str, file_names: Iterable[str]) -> list[str]:
+def missing_files(root: Path, slug: str, file_names: Iterable[str]) -> List[str]:
     feature_dir = root / ".autobizdevops" / "features" / slug
     return [name for name in file_names if not artifact_exists(feature_dir, name)]
 
@@ -94,10 +94,10 @@ def load_artifact_config(
     repo_root: Path,
     skill: str,
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Optional[Path] = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-    workflow_record: dict | None = None,
+    workflow_decisions: Optional[Dict[str, str]] = None,
+    workflow_record: Optional[dict] = None,
 ) -> ArtifactConfig:
     try:
         if workflow_record is not None:
@@ -159,9 +159,9 @@ def task_count(plan: Path) -> int:
     return len(re.findall(r"^### (?:TASK-\d{3}:|[0-9]+\.)", read_text(plan), re.MULTILINE))
 
 
-def plan_task_blocks(plan_text: str) -> dict[str, str]:
+def plan_task_blocks(plan_text: str) -> Dict[str, str]:
     """按 `### TASK-NNN:` 标题切出任务详情块；legacy 数字标题 PLAN 返回空 dict。"""
-    blocks: dict[str, str] = {}
+    blocks: Dict[str, str] = {}
     matches = list(TASK_HEADING.finditer(plan_text))
     for index, match in enumerate(matches):
         start = match.end()
@@ -174,7 +174,7 @@ def plan_task_blocks(plan_text: str) -> dict[str, str]:
     return blocks
 
 
-def task_statuses(plan: Path) -> list[str]:
+def task_statuses(plan: Path) -> List[str]:
     if not is_nonempty(plan):
         return []
     return [

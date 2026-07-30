@@ -1,6 +1,7 @@
 """可计算契约图校验：Capability Index 双射、REQ/SCN 稳定 ID、基线/证据结构、待确认残留。"""
 
 from __future__ import annotations
+from typing import Tuple
 
 import contextlib
 import io
@@ -251,7 +252,7 @@ class ContractTestBase(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    def run_validator(self, validator) -> tuple[int, str]:
+    def run_validator(self, validator) -> Tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             failures = validator(self.ctx)
@@ -731,7 +732,7 @@ class PlanExecutionCheckTest(ContractTestBase):
         self.write("specs/order-export/spec.md", SPEC_OK)
         self.write("design.md", DESIGN_OK)
 
-    def run_check(self) -> tuple[int, str]:
+    def run_check(self) -> Tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             code = plan_check_main([self.slug, "--workspace-root", str(self.root)])

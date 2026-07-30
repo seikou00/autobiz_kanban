@@ -7,14 +7,14 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 
 def ensure_dir(path: Path) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def combined_bbox(boxes: list[dict[str, Any]]) -> dict[str, float]:
+def combined_bbox(boxes: List[Dict[str, Any]]) -> Dict[str, float]:
     valid = []
     for box in boxes:
         if not isinstance(box, dict):
@@ -38,7 +38,7 @@ def combined_bbox(boxes: list[dict[str, Any]]) -> dict[str, float]:
     return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
 
 
-def page_reference_bbox(manifest: dict[str, Any]) -> dict[str, float]:
+def page_reference_bbox(manifest: Dict[str, Any]) -> Dict[str, float]:
     summary = manifest.get("summary", {}) or {}
     canvas = summary.get("canvas", {}) or {}
     canvas_box = {
@@ -47,7 +47,7 @@ def page_reference_bbox(manifest: dict[str, Any]) -> dict[str, float]:
         "w": float(canvas.get("width", 1280) or 1280),
         "h": float(canvas.get("height", 900) or 900),
     }
-    boxes: list[dict[str, Any]] = []
+    boxes: List[Dict[str, Any]] = []
     for region in manifest.get("regions", []) or []:
         bbox = region.get("bbox") or {}
         if bbox:
@@ -72,7 +72,7 @@ def page_reference_bbox(manifest: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def trim_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+def trim_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
     bbox = page_reference_bbox(manifest)
     origin_x = float(bbox.get("x", 0) or 0)
     origin_y = float(bbox.get("y", 0) or 0)
@@ -176,7 +176,7 @@ def trim_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_html(data: dict[str, Any], title: str) -> str:
+def build_html(data: Dict[str, Any], title: str) -> str:
     payload = json.dumps(data, ensure_ascii=False)
     safe_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return (

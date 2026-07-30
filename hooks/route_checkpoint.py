@@ -2,6 +2,7 @@
 """Resolve the next action for a feature checkpoint from the effective workflow."""
 
 from __future__ import annotations
+from typing import Dict, List, Optional, Tuple
 
 import argparse
 import json
@@ -42,7 +43,7 @@ BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 PROFILE_CHOICE_CHECKPOINT = "prd_done"
 
 
-def _state_next_action(node: dict, node_status: str) -> dict[str, str]:
+def _state_next_action(node: dict, node_status: str) -> Dict[str, str]:
     for state in node.get("states", []):
         if isinstance(state, dict) and state.get("nodeStatus", state.get("id")) == node_status:
             action = state.get("nextAction", {})
@@ -50,11 +51,11 @@ def _state_next_action(node: dict, node_status: str) -> dict[str, str]:
     return {}
 
 
-def _profile_options() -> list[dict[str, str]]:
+def _profile_options() -> List[Dict[str, str]]:
     return configured_profile_options(read_json(BOARD_CONFIG_PATH))
 
 
-def _allowed_next(config: dict, checkpoint: str) -> list[str]:
+def _allowed_next(config: dict, checkpoint: str) -> List[str]:
     transitions = config.get("workflow", {}).get("checkpoints", {}).get("transitions", {})
     if not isinstance(transitions, dict):
         return []
@@ -67,8 +68,8 @@ def _allowed_next(config: dict, checkpoint: str) -> list[str]:
 def _recommended_next_skill(
     workspace: Path,
     workflow_profile: str,
-    allowed_next: list[str],
-    workflow_decisions: dict[str, str] | None = None,
+    allowed_next: List[str],
+    workflow_decisions: Optional[Dict[str, str]] = None,
 ) -> str:
     if not allowed_next:
         return ""
@@ -88,7 +89,7 @@ def _recommended_next_skill(
     return ""
 
 
-def _recommended_next_skill_for_record(workspace: Path, record: dict, allowed_next: list[str]) -> str:
+def _recommended_next_skill_for_record(workspace: Path, record: dict, allowed_next: List[str]) -> str:
     if not allowed_next:
         return ""
     try:
@@ -102,8 +103,8 @@ def _recommended_next_skill_for_record(workspace: Path, record: dict, allowed_ne
     return ""
 
 
-def _profile_choice_payload(workspace: Path, checkpoint: str) -> list[dict[str, object]]:
-    choices: list[dict[str, object]] = []
+def _profile_choice_payload(workspace: Path, checkpoint: str) -> List[Dict[str, object]]:
+    choices: List[Dict[str, object]] = []
     if checkpoint != PROFILE_CHOICE_CHECKPOINT:
         return choices
     for option in _profile_options():
@@ -126,7 +127,7 @@ def _profile_choice_payload(workspace: Path, checkpoint: str) -> list[dict[str, 
     return choices
 
 
-def _pending_dynamic_stage(checkpoint: str, workflow_decisions: dict[str, str]) -> dict | None:
+def _pending_dynamic_stage(checkpoint: str, workflow_decisions: Dict[str, str]) -> Optional[dict]:
     for stage in configured_dynamic_stages(read_json(BOARD_CONFIG_PATH)):
         if stage["choiceCheckpoint"] != checkpoint:
             continue
@@ -141,21 +142,21 @@ def _pending_dynamic_stage(checkpoint: str, workflow_decisions: dict[str, str]) 
 def _workflow_choice_payload(
     workspace: Path,
     workflow_profile: str,
-    workflow_decisions: dict[str, str],
+    workflow_decisions: Dict[str, str],
     checkpoint: str,
-) -> list[dict[str, object]]:
+) -> List[Dict[str, object]]:
     stage = _pending_dynamic_stage(checkpoint, workflow_decisions)
     if stage is None:
         return []
 
-    choices: list[dict[str, object]] = []
+    choices: List[Dict[str, object]] = []
     for decision, label_key, description_key, target_key in (
         (ENABLED_WORKFLOW_DECISION, "enableLabel", "enableDescription", "enableTargetCheckpoint"),
         (SKIPPED_WORKFLOW_DECISION, "skipLabel", "skipDescription", "skipTargetCheckpoint"),
     ):
         next_decisions = {**workflow_decisions, stage["id"]: decision}
         target = stage[target_key]
-        allowed_next: list[str] = []
+        allowed_next: List[str] = []
         try:
             config = load_effective_board_config(
                 BOARD_CONFIG_PATH,
@@ -186,7 +187,7 @@ def _workflow_choice_payload(
     return choices
 
 
-def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
+def resolve_route(workspace: Path, feature: str) -> Tuple[dict, int]:
     workspace = workspace.resolve()
     result = load_state_json_records_result(workspace)
     errors = list(result.fatal_errors)
@@ -299,7 +300,7 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
     }, 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Resolve next workflow action for a feature")
     parser.add_argument("--workspace", "-w", required=True)
     parser.add_argument("--feature", "-f", required=True)

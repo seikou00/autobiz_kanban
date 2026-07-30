@@ -2,6 +2,7 @@
 """Run Autodev artifact checks from board_config.json."""
 
 from __future__ import annotations
+from typing import Dict, List, Optional, Pattern, Set, Tuple
 
 import argparse
 import re
@@ -77,7 +78,7 @@ def section_text(text: str, heading: str) -> str:
     return match.group(1) if match else ""
 
 
-def parse_capability_index(text: str) -> list[dict[str, str]] | None:
+def parse_capability_index(text: str) -> Optional[List[Dict[str, str]]]:
     """解析 proposal 的 Capability Index 表。
 
     返回 None 表示 proposal 没有该节（legacy 格式）；返回 [] 表示有节但无有效行（「无」场景）。
@@ -86,7 +87,7 @@ def parse_capability_index(text: str) -> list[dict[str, str]] | None:
     body = section_text(text, "Capability Index")
     if not body:
         return None
-    rows: list[dict[str, str]] = []
+    rows: List[Dict[str, str]] = []
     for line in body.splitlines():
         line = line.strip()
         if not line.startswith("|"):
@@ -121,14 +122,14 @@ def index_placeholder_rows(text: str) -> int:
     return count
 
 
-def parse_operations_cell(cell: str) -> set[str]:
+def parse_operations_cell(cell: str) -> Set[str]:
     tokens = re.split(r"[,，、/+\s]+", cell.strip())
     return {token.upper() for token in tokens if token} & VALID_OPERATIONS
 
 
-def spec_actual_operations(text: str) -> set[str]:
+def spec_actual_operations(text: str) -> Set[str]:
     """spec 内实际承载 REQ 的操作段集合（strict 模式使用）。"""
-    operations: set[str] = set()
+    operations: Set[str] = set()
     for match in OPERATION_HEADING.finditer(text):
         start = match.end()
         next_section = re.search(r"^##\s", text[start:], re.MULTILINE)
@@ -140,9 +141,9 @@ def spec_actual_operations(text: str) -> set[str]:
 
 def malformed_contract_headings(
     text: str,
-    candidate_pattern: re.Pattern[str],
-    valid_ids: set[str],
-) -> list[str]:
+    candidate_pattern: Pattern[str],
+    valid_ids: Set[str],
+) -> List[str]:
     return [
         match.group(1)
         for match in candidate_pattern.finditer(text)
@@ -150,7 +151,7 @@ def malformed_contract_headings(
     ]
 
 
-def parse_open_questions(text: str) -> tuple[bool, list[dict[str, str]]] | None:
+def parse_open_questions(text: str) -> Optional[Tuple[bool, List[Dict[str, str]]]]:
     """解析 proposal 的 Open Questions 表。
 
     返回 ``(legacy, rows)``；``None`` 表示 proposal 没有该节。``legacy=True`` 表示表头缺
@@ -161,8 +162,8 @@ def parse_open_questions(text: str) -> tuple[bool, list[dict[str, str]]] | None:
     if not body:
         return None
 
-    header: list[str] = []
-    rows: list[dict[str, str]] = []
+    header: List[str] = []
+    rows: List[Dict[str, str]] = []
     for line in body.splitlines():
         line = line.strip()
         if not line.startswith("|"):
@@ -194,10 +195,10 @@ def parse_open_questions(text: str) -> tuple[bool, list[dict[str, str]]] | None:
     ]
 
 
-def decision_log_entries(text: str) -> dict[str, dict[str, str]]:
+def decision_log_entries(text: str) -> Dict[str, Dict[str, str]]:
     """解析 proposal 的 Decision Log：``{DEC-001: {决定/为什么/否决/约束}}``。"""
     body = section_text(text, "Decision Log")
-    entries: dict[str, dict[str, str]] = {}
+    entries: Dict[str, Dict[str, str]] = {}
     headings = list(DEC_HEADING.finditer(body))
     for index, match in enumerate(headings):
         start = match.end()
@@ -207,7 +208,7 @@ def decision_log_entries(text: str) -> dict[str, dict[str, str]]:
     return entries
 
 
-def is_filled(value: str | None) -> bool:
+def is_filled(value: Optional[str]) -> bool:
     """非空且不是 `[占位]` / TBD / 待补充 这类占位文本。"""
     return bool(value) and not PLACEHOLDER_TEXT.search(value)
 
@@ -227,7 +228,7 @@ def restates_question(resolution: str, question: str) -> bool:
     return len(normalized_resolution) >= 8 and normalized_resolution in normalized_question
 
 
-def find_template_guidance_residue(text: str) -> list[tuple[int, str]]:
+def find_template_guidance_residue(text: str) -> List[Tuple[int, str]]:
     """Return ``(line number, kind)`` for template-only markup in an artifact.
 
     Autodev contract artifacts use paragraphs, lists, and tables for explanatory
@@ -235,7 +236,7 @@ def find_template_guidance_residue(text: str) -> list[tuple[int, str]]:
     and must not survive generation. Fenced code blocks are ignored so examples
     containing shell redirects or quoted Markdown do not false-positive.
     """
-    residues: list[tuple[int, str]] = []
+    residues: List[Tuple[int, str]] = []
     fence_char = ""
     fence_length = 0
     seen_content = False
@@ -302,7 +303,7 @@ UNIT_TEST_VERDICT = re.compile(
 UNIT_TEST_PASS = {"PASS", "PASS_WITH_WARNINGS"}
 
 
-def spec_files(ctx: HookContext) -> list[Path]:
+def spec_files(ctx: HookContext) -> List[Path]:
     return sorted(
         path
         for path in ctx.feature_dir.glob("specs/**/*.md")
@@ -310,12 +311,12 @@ def spec_files(ctx: HookContext) -> list[Path]:
     )
 
 
-def spec_declared_ids(ctx: HookContext) -> set[str] | None:
+def spec_declared_ids(ctx: HookContext) -> Optional[Set[str]]:
     """specs/** 中真实存在的 REQ / CAP 稳定 ID；无 spec 文件时返回 None。"""
     specs = spec_files(ctx)
     if not specs:
         return None
-    declared: set[str] = set()
+    declared: Set[str] = set()
     for spec in specs:
         text = read_text(spec)
         declared.update(f"REQ-{cap}-{number}" for cap, number in REQ_HEADING.findall(text))
@@ -326,8 +327,8 @@ def spec_declared_ids(ctx: HookContext) -> set[str] | None:
 def validate_open_questions_rows(
     ctx: HookContext,
     text: str,
-    rows: list[dict[str, str]],
-    spec_ids: set[str] | None,
+    rows: List[Dict[str, str]],
+    spec_ids: Optional[Set[str]],
 ) -> int:
     """每行「已确认」都必须带跨文件证据，只翻 Status 不算消解。
 
@@ -442,9 +443,9 @@ def validate_specs_contract(ctx: HookContext) -> int:
         return fail_line(ctx, "missing_specs")
 
     failures = 0
-    seen_req_ids: dict[str, str] = {}
-    seen_scn_ids: dict[str, str] = {}
-    actual_paths: set[str] = set()
+    seen_req_ids: Dict[str, str] = {}
+    seen_scn_ids: Dict[str, str] = {}
+    actual_paths: Set[str] = set()
 
     for spec in specs:
         text = read_text(spec)
@@ -504,7 +505,7 @@ def validate_specs_contract(ctx: HookContext) -> int:
             elif not scn_matches:
                 failures += fail_line(ctx, "invalid_spec_missing_scenario", f" file={rel}")
 
-            req_ids_in_file: set[str] = set()
+            req_ids_in_file: Set[str] = set()
             for match in req_matches:
                 req_id = f"REQ-{match.group(1)}-{match.group(2)}"
                 if match.group(1) != capability:
@@ -655,8 +656,8 @@ def validate_plan_initial_tasks(ctx: HookContext) -> int:
             repair=PLAN_INITIAL_REPAIRS["invalid_initial_task_status"],
         )
     # 新格式任务块必须带「完成记录」字段且初始为「无」（code 阶段回写的落点）
-    missing_completion_records: list[str] = []
-    invalid_completion_records: list[str] = []
+    missing_completion_records: List[str] = []
+    invalid_completion_records: List[str] = []
     for task_id, block in plan_task_blocks(plan_text).items():
         evidence = TASK_EVIDENCE_LINE.search(block)
         if not evidence:
@@ -813,9 +814,9 @@ def validate_skill_config_schema(
     repo_root: Path,
     skill: str,
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Optional[Path] = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
+    workflow_decisions: Optional[Dict[str, str]] = None,
 ) -> None:
     config = load_artifact_config(
         repo_root,
@@ -833,9 +834,9 @@ def validate_config_schema(
     repo_root: Path,
     skill: str,
     *,
-    workspace_root: Path | None = None,
+    workspace_root: Optional[Path] = None,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
+    workflow_decisions: Optional[Dict[str, str]] = None,
 ) -> None:
     if skill != "all":
         validate_skill_config_schema(
@@ -879,9 +880,9 @@ def run_precheck(
     slug: str,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-    workflow_record: dict | None = None,
-) -> tuple[int, str]:
+    workflow_decisions: Optional[Dict[str, str]] = None,
+    workflow_record: Optional[dict] = None,
+) -> Tuple[int, str]:
     try:
         config = load_artifact_config(
             repo_root,
@@ -907,9 +908,9 @@ def run_postcheck(
     slug: str,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-    workflow_record: dict | None = None,
-) -> tuple[int, str]:
+    workflow_decisions: Optional[Dict[str, str]] = None,
+    workflow_record: Optional[dict] = None,
+) -> Tuple[int, str]:
     try:
         config = load_artifact_config(
             repo_root,
@@ -952,7 +953,7 @@ def run_check(
     slug: str,
     *,
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
+    workflow_decisions: Optional[Dict[str, str]] = None,
 ) -> int:
     if kind == "precheck":
         code, message = run_precheck(
@@ -979,7 +980,7 @@ def run_check(
     return code
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Run Autodev artifact checks")
     parser.add_argument("kind", choices=("precheck", "postcheck", "schema"))
     parser.add_argument("skill")
@@ -997,7 +998,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = Path(args.repo_root).resolve()
     workspace_root = Path(args.workspace_root).resolve()
-    workflow_decisions: dict[str, str] = {}
+    workflow_decisions: Dict[str, str] = {}
     for raw_decision in args.workflow_decision:
         if "=" not in raw_decision:
             print(f"SCHEMA_FAIL skill={args.skill} reason=invalid_workflow_decision detail={raw_decision}")

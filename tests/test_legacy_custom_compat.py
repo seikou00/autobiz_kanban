@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Dict
 
 import contextlib
 import io
@@ -28,7 +29,7 @@ def _legacy_custom_record(feature: str) -> dict:
     }
 
 
-def _write_state_json(project: Path, features: dict[str, object]) -> None:
+def _write_state_json(project: Path, features: Dict[str, object]) -> None:
     state_json = project / ".autobizdevops" / "state.json"
     state_json.write_text(
         json.dumps(

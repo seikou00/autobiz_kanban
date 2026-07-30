@@ -9,6 +9,7 @@ Protocol: skill-board-inspect-protocol.md
 """
 
 from __future__ import annotations
+from typing import Dict, List, Optional, Tuple
 
 import argparse
 import json
@@ -63,7 +64,7 @@ def _load_board_config() -> dict:
     return json.loads(BOARD_CONFIG_PATH.read_text(encoding="utf-8"))
 
 
-def _load_effective_config(workspace: Path, profile: str, workflow_decisions: dict[str, str] | None = None) -> dict:
+def _load_effective_config(workspace: Path, profile: str, workflow_decisions: Optional[Dict[str, str]] = None) -> dict:
     return load_effective_board_config(
         BOARD_CONFIG_PATH,
         repo_root=ROOT,
@@ -84,11 +85,11 @@ def _load_record_config(workspace: Path, record: dict) -> dict:
 
 def workflow_marker(
     profile: str,
-    decisions: object | None,
-    template: str | None = None,
-    workflow_nodes: object | None = None,
-    workflow_skipped: object | None = None,
-) -> tuple[str, str, dict[str, str]]:
+    decisions: Optional[object],
+    template: Optional[str] = None,
+    workflow_nodes: Optional[object] = None,
+    workflow_skipped: Optional[object] = None,
+) -> Tuple[str, str, Dict[str, str]]:
     workflow_profile = normalize_workflow_profile(profile)
     workflow_decisions = normalize_workflow_decisions(decisions)
     workflow_template = normalize_workflow_template(template)
@@ -123,7 +124,7 @@ def workflow_marker(
     return _with_skips("__".join([workflow_profile, *decision_parts])), workflow_profile, sorted_decisions
 
 
-def _feature_ref_dir(workspace: Path, feature: str, feature_dir: Path | None) -> str:
+def _feature_ref_dir(workspace: Path, feature: str, feature_dir: Optional[Path]) -> str:
     if feature_dir is not None:
         try:
             return feature_dir.resolve().relative_to(workspace.resolve()).as_posix()
@@ -132,7 +133,7 @@ def _feature_ref_dir(workspace: Path, feature: str, feature_dir: Path | None) ->
     return f".autobizdevops/features/{feature}"
 
 
-def _watch_refs(workspace: Path, feature: str, feature_dir: Path | None = None) -> list[dict]:
+def _watch_refs(workspace: Path, feature: str, feature_dir: Optional[Path] = None) -> List[dict]:
     feature_ref_dir = _feature_ref_dir(workspace, feature, feature_dir)
     return [
         {"path": ".autobizdevops/state.json", "purpose": "run-state"},
@@ -142,7 +143,7 @@ def _watch_refs(workspace: Path, feature: str, feature_dir: Path | None = None) 
     ]
 
 
-def _hook_log_refs(workspace: Path, feature: str, feature_dir: Path | None = None) -> list[dict]:
+def _hook_log_refs(workspace: Path, feature: str, feature_dir: Optional[Path] = None) -> List[dict]:
     feature_ref_dir = _feature_ref_dir(workspace, feature, feature_dir)
     return [
         {"id": "default", "path": f"{feature_ref_dir}/hooks.ndjson", "format": "ndjson"},
@@ -153,7 +154,7 @@ def build_run_payload(workspace: Path, feature: str, config: dict) -> dict:
     """Build the Feature Status payload used by both CLI and session context."""
     sync_result = check_or_fix_state_sync(workspace, fix=True)
     state_records = sync_result.records
-    state_record_errors: list[str] = []
+    state_record_errors: List[str] = []
     record = state_records.get(feature, {})
     workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
     workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
@@ -181,7 +182,7 @@ def build_run_payload(workspace: Path, feature: str, config: dict) -> dict:
     has_feature_dir = feature_dir is not None
 
     # Determine initial degraded state message
-    summary_parts: list[str] = []
+    summary_parts: List[str] = []
     if not state_exists:
         summary_parts.append("state.json 未找到，project 尚未初始化")
     elif not state_rows and not state_errors:
@@ -212,7 +213,7 @@ def build_run_payload(workspace: Path, feature: str, config: dict) -> dict:
         summary_parts.append(f"未知 checkpoint '{checkpoint}'，adapter 无法映射到流程节点")
 
     # Build nodes
-    run_nodes: list[dict] = []
+    run_nodes: List[dict] = []
     for idx, node in enumerate(nodes_config):
         node_status = derive_node_status(idx, current_idx, checkpoint or "", node, suffix_states)
         artifacts = scan_artifacts(
@@ -278,7 +279,7 @@ def _resolve_project_workspace(workspace: Path, project: str) -> Path:
 def _collect_project_runs(
     project_workspace: Path,
     config: dict,
-) -> list[dict]:
+) -> List[dict]:
     """返回某个 project 下所有 feature 的 runs 摘要列表。"""
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
@@ -291,7 +292,7 @@ def _collect_project_runs(
     # makes the board unable to surface a state.json repair problem.
     feature_names = sorted(set(state_records) | set(sync_result.raw_records))
 
-    runs: list[dict] = []
+    runs: List[dict] = []
     for feature in feature_names:
         record = state_records.get(feature)
         if record is None:
@@ -359,9 +360,9 @@ def _collect_project_runs(
     return runs
 
 
-def project_mode(workspace: Path, projects: list[str], config: dict) -> int:
+def project_mode(workspace: Path, projects: List[str], config: dict) -> int:
     """Handle --mode project with one or more projects."""
-    all_projects: dict[str, dict] = {}
+    all_projects: Dict[str, dict] = {}
     for project in projects:
         project_workspace = _resolve_project_workspace(workspace, project)
         if not project_workspace.is_dir():

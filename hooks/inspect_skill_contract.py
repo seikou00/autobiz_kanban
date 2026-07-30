@@ -2,6 +2,7 @@
 """Render a skill contract from board_config.json as Markdown."""
 
 from __future__ import annotations
+from typing import Dict, List, Optional, Set, Tuple
 
 import argparse
 import json
@@ -35,7 +36,7 @@ from board_core.workflow_compiler import (  # noqa: E402
 )
 
 
-def _artifact_lines(title: str, artifacts: tuple, *, heading: str = "##") -> list[str]:
+def _artifact_lines(title: str, artifacts: tuple, *, heading: str = "##") -> List[str]:
     lines = [f"{heading} {title}"]
     if not artifacts:
         lines.append("- 无")
@@ -101,9 +102,9 @@ def _missing_handling_line(artifact: ArtifactSpec) -> str:
 
 def render_contract_plain(
     contract: SkillContract,
-    workflow_context: dict | None = None,
-    feature_dir: Path | None = None,
-    extra_missing_inputs: tuple[ArtifactSpec, ...] = (),
+    workflow_context: Optional[dict] = None,
+    feature_dir: Optional[Path] = None,
+    extra_missing_inputs: Tuple[ArtifactSpec, ...] = (),
 ) -> str:
     """Emit only how missing inputs are handled — nothing else.
 
@@ -122,8 +123,8 @@ def render_contract_plain(
     contract but should still expose their degrade guidance in this plain view.
     """
     baseline = feature_dir is None
-    candidates: list[ArtifactSpec] = []
-    seen_paths: set[str] = set()
+    candidates: List[ArtifactSpec] = []
+    seen_paths: Set[str] = set()
     for artifact in (*contract.inputs, *extra_missing_inputs):
         if artifact.path in seen_paths:
             continue
@@ -176,7 +177,7 @@ def contract_to_dict(contract: SkillContract) -> dict:
     }
 
 
-def _profile_names(repo_root: Path) -> tuple[str, ...]:
+def _profile_names(repo_root: Path) -> Tuple[str, ...]:
     return configured_profile_names(read_json(repo_root / "board_core" / "board_config.json"))
 
 
@@ -184,15 +185,15 @@ def _find_contract(
     repo_root: Path,
     *,
     skill: str,
-    workspace: Path | None,
+    workspace: Optional[Path],
     workflow_profile: str,
-    workflow_decisions: dict[str, str],
+    workflow_decisions: Dict[str, str],
 ) -> SkillContract:
     profiles = (workflow_profile,)
     if workspace is None and workflow_profile == BASE_WORKFLOW_PROFILE and not workflow_decisions:
         profiles = _profile_names(repo_root)
 
-    last_error: BoardConfigError | None = None
+    last_error: Optional[BoardConfigError] = None
     for profile in profiles:
         try:
             contracts = load_repo_workflow_contracts(
@@ -207,7 +208,7 @@ def _find_contract(
     raise last_error or BoardConfigError(f"unknown skill in board_config.json: {skill}")
 
 
-def _resolve_feature_workspace(workspace_arg: str | None) -> Path:
+def _resolve_feature_workspace(workspace_arg: Optional[str]) -> Path:
     if workspace_arg:
         return Path(workspace_arg).resolve()
     from hooks.paths import get_plugin_output_workspace  # noqa: PLC0415
@@ -230,7 +231,7 @@ def _dropped_input_artifacts(
     workspace: Path,
     node_id: str,
     record: dict,
-) -> tuple[ArtifactSpec, ...]:
+) -> Tuple[ArtifactSpec, ...]:
     effective = load_record_effective_board_config(
         repo_root / "board_core" / "board_config.json",
         repo_root=repo_root,
@@ -268,7 +269,7 @@ def _find_feature_contract(
     skill: str,
     feature: str,
     workspace: Path,
-) -> tuple[SkillContract, dict, tuple[ArtifactSpec, ...]]:
+) -> Tuple[SkillContract, dict, Tuple[ArtifactSpec, ...]]:
     result = load_state_json_records_result(workspace)
     if not result.exists:
         raise BoardConfigError(f"state.json 未找到: {workspace}")
@@ -301,7 +302,7 @@ def _find_feature_contract(
     return contract, workflow_context, extra_missing_inputs
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Render a board_config-backed skill contract")
     parser.add_argument("skill", help="skill name, e.g. autodev-plan")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
@@ -329,8 +330,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     workflow_context: dict = {}
-    feature_dir: Path | None = None
-    extra_missing_inputs: tuple[ArtifactSpec, ...] = ()
+    feature_dir: Optional[Path] = None
+    extra_missing_inputs: Tuple[ArtifactSpec, ...] = ()
     try:
         repo_root = Path(args.repo_root).resolve()
         if args.feature is not None:

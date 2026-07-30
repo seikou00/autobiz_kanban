@@ -1,6 +1,7 @@
 """Workflow node resolution — checkpoint→node mapping, status derivation."""
 
 from __future__ import annotations
+from typing import Dict, List, Optional, Tuple, Union
 
 import copy
 
@@ -51,7 +52,7 @@ ARTIFACT_TYPES = {
 }
 
 
-def extract_checkpoint_suffix(checkpoint: str) -> str | None:
+def extract_checkpoint_suffix(checkpoint: str) -> Optional[str]:
     """Return the state suffix portion of a checkpoint.
 
     e.g. 'discuss_in_progress' → 'in_progress'
@@ -73,8 +74,8 @@ def extract_checkpoint_suffix(checkpoint: str) -> str | None:
 
 
 def find_current_node(
-    nodes: list[dict], checkpoint: str,
-) -> tuple[int, str | None]:
+    nodes: List[dict], checkpoint: str,
+) -> Tuple[int, Optional[str]]:
     """Return (index_into_nodes, node_id) for the checkpoint.
 
     Returns (-1, None) when no match is found.
@@ -86,13 +87,13 @@ def find_current_node(
 
 
 def find_effective_current_node(
-    nodes: list[dict],
+    nodes: List[dict],
     checkpoint: str,
-    needs_fix_from_checkpoint: str | None = None,
+    needs_fix_from_checkpoint: Optional[str] = None,
     *,
-    stage: str | None = None,
-    stage_labels: dict[str, str] | None = None,
-) -> tuple[int, str | None]:
+    stage: Optional[str] = None,
+    stage_labels: Optional[Dict[str, str]] = None,
+) -> Tuple[int, Optional[str]]:
     """Resolve the display/routing node for a checkpoint.
 
     ``needs_fix`` is a workflow-level checkpoint rather than a node-owned
@@ -108,7 +109,7 @@ def find_effective_current_node(
     if not stage or not isinstance(stage_labels, dict):
         return -1, None
 
-    matches: dict[str, int] = {}
+    matches: Dict[str, int] = {}
     for idx, node in enumerate(nodes):
         for node_checkpoint in node.get("checkpoints", []):
             if stage_labels.get(node_checkpoint) == stage:
@@ -120,7 +121,7 @@ def find_effective_current_node(
     return idx, node_id
 
 
-def node_start_checkpoint(node: dict) -> str | None:
+def node_start_checkpoint(node: dict) -> Optional[str]:
     """Return the checkpoint that enters the node (its *_in_progress or archived)."""
     checkpoints = node.get("checkpoints", [])
     if not isinstance(checkpoints, list):
@@ -134,12 +135,12 @@ def node_start_checkpoint(node: dict) -> str | None:
 
 
 def validate_skip_request(
-    nodes: list[dict],
+    nodes: List[dict],
     current_checkpoint: str,
-    skip_ids: list[str] | tuple[str, ...],
+    skip_ids: Union[List[str], Tuple[str, ...]],
     *,
-    locked_nodes: list[str] | tuple[str, ...] = (),
-) -> list[str]:
+    locked_nodes: Union[List[str], Tuple[str, ...]] = (),
+) -> List[str]:
     """Return error strings for a mid-flight node skip request.
 
     Rules: ids must be active chain members; locked nodes (skipPolicy) are
@@ -154,7 +155,7 @@ def validate_skip_request(
     if current_checkpoint == "needs_fix":
         return ["当前处于 needs_fix 阻断状态，不能跳过节点；请先按修复建议回流到对应节点"]
 
-    errors: list[str] = []
+    errors: List[str] = []
     index_by_id = {str(node.get("id", "")): idx for idx, node in enumerate(nodes)}
     active_ids = {str(node.get("id", "")) for node in nodes if not node.get("skipped")}
     locked = {str(item).strip() for item in locked_nodes}
@@ -195,10 +196,10 @@ def validate_skip_request(
 
 
 def landing_checkpoint_after_skip(
-    nodes: list[dict],
+    nodes: List[dict],
     current_checkpoint: str,
-    skip_ids: list[str] | tuple[str, ...],
-) -> str | None:
+    skip_ids: Union[List[str], Tuple[str, ...]],
+) -> Optional[str]:
     """Return the checkpoint to land on after the skip, or None when unchanged.
 
     Only skipping the current node moves the checkpoint: it lands on the start
@@ -216,13 +217,13 @@ def landing_checkpoint_after_skip(
 
 
 def skippable_node_ids(
-    nodes: list[dict],
+    nodes: List[dict],
     current_checkpoint: str,
     *,
-    locked_nodes: list[str] | tuple[str, ...] = (),
-) -> list[str]:
+    locked_nodes: Union[List[str], Tuple[str, ...]] = (),
+) -> List[str]:
     """Return node ids that a single-node skip request would currently accept."""
-    result: list[str] = []
+    result: List[str] = []
     for node in nodes:
         if node.get("skipped"):
             continue
@@ -290,7 +291,7 @@ def derive_current_node_status(
     return _normalize_node_status(state.get("nodeStatus"))
 
 
-def node_status_label(node_status: str, node: dict | None = None) -> str:
+def node_status_label(node_status: str, node: Optional[dict] = None) -> str:
     normalized_status = _normalize_node_status(node_status)
     if node is not None:
         for state in node.get("states", []):
@@ -309,7 +310,7 @@ def derive_current_node_status_label(
     checkpoint: str,
     suffix_states: dict,
     current_idx: int,
-    current_node: dict | None = None,
+    current_node: Optional[dict] = None,
 ) -> str:
     current_node_status = derive_current_node_status(checkpoint, suffix_states, current_idx)
     if current_node is not None:
@@ -324,9 +325,9 @@ def derive_current_node_status_label(
     return DEFAULT_NODE_STATUS_LABELS[current_node_status]
 
 
-def build_workflow_fallback_states(config: dict) -> list[dict]:
+def build_workflow_fallback_states(config: dict) -> List[dict]:
     """Build workflow-level fallback states for statuses not tied to a node."""
-    by_status: dict[str, dict] = {
+    by_status: Dict[str, dict] = {
         "unknown": {
             "nodeStatus": "unknown",
         },
@@ -339,11 +340,11 @@ def build_workflow_fallback_states(config: dict) -> list[dict]:
     return list(by_status.values())
 
 
-def _normalize_next_action(value: object, *, context: str) -> dict[str, str]:
+def _normalize_next_action(value: object, *, context: str) -> Dict[str, str]:
     if not isinstance(value, dict):
         raise BoardConfigError(f"{context}.nextAction must be an object")
 
-    next_action: dict[str, str] = {}
+    next_action: Dict[str, str] = {}
     for field in NEXT_ACTION_FIELDS:
         item = value.get(field)
         if not isinstance(item, str) or not item.strip():
@@ -352,13 +353,13 @@ def _normalize_next_action(value: object, *, context: str) -> dict[str, str]:
     return next_action
 
 
-def _normalize_node_states(node: dict) -> list[dict]:
+def _normalize_node_states(node: dict) -> List[dict]:
     node_id = node.get("id", "<unknown>")
     states = node.get("states", [])
     if not isinstance(states, list):
         raise BoardConfigError(f"{node_id}.states must be a list")
 
-    clean_states: list[dict] = []
+    clean_states: List[dict] = []
     for index, state in enumerate(states):
         context = f"{node_id}.states[{index}]"
         if not isinstance(state, dict):
@@ -379,9 +380,9 @@ def _normalize_node_states(node: dict) -> list[dict]:
     return clean_states
 
 
-def _normalize_artifact_definitions(node: dict) -> list[dict]:
+def _normalize_artifact_definitions(node: dict) -> List[dict]:
     node_id = node.get("id", "<unknown>")
-    clean_artifacts: list[dict] = []
+    clean_artifacts: List[dict] = []
     for index, artifact in enumerate(artifact_dicts(node, "outputs")):
         context = f"{node_id}.artifactDefinitions[{index}]"
         artifact_type = _normalize_artifact_type(artifact.get("artifactType"))
@@ -422,7 +423,7 @@ def build_workflow_shell(config: dict) -> dict:
                 "skipPolicy",
             }
     }
-    clean_nodes: list[dict] = []
+    clean_nodes: List[dict] = []
     for node in workflow["nodes"]:
         clean = {
             k: v

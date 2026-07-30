@@ -2,6 +2,7 @@
 """Pre-tool guard that validates workspace init before reading plugin files."""
 
 from __future__ import annotations
+from typing import List
 
 import json
 import os
@@ -57,11 +58,11 @@ def is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
-def extract_candidate_paths(value: object) -> list[str]:
+def extract_candidate_paths(value: object) -> List[str]:
     if not isinstance(value, dict):
         return []
 
-    paths: list[str] = []
+    paths: List[str] = []
     for key in PATH_KEYS:
         raw = value.get(key)
         if isinstance(raw, str) and raw.strip():
@@ -72,12 +73,12 @@ def extract_candidate_paths(value: object) -> list[str]:
     return paths
 
 
-def plugin_read_paths(payload: dict, plugin_root: Path = PLUGIN_ROOT) -> list[Path]:
+def plugin_read_paths(payload: dict, plugin_root: Path = PLUGIN_ROOT) -> List[Path]:
     tool_input = payload.get("tool_input", {})
     cwd = Path(payload.get("cwd") or Path.cwd()).resolve(strict=False)
     root = plugin_root.resolve(strict=False)
 
-    matches: list[Path] = []
+    matches: List[Path] = []
     for raw_path in extract_candidate_paths(tool_input):
         candidate = normalize_path(raw_path, cwd)
         if is_relative_to(candidate, root):

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Tuple
 
 import ast
 import unittest
@@ -149,7 +150,7 @@ class SuffixDriftTest(unittest.TestCase):
     """
 
     @staticmethod
-    def _module_constant(name: str) -> tuple[str, ...]:
+    def _module_constant(name: str) -> Tuple[str, ...]:
         source = (
             Path(__file__).resolve().parents[1] / "hooks" / "state_checkpoint.py"
         ).read_text(encoding="utf-8")

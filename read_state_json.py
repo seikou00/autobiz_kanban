@@ -12,7 +12,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 
 ROOT = Path(__file__).resolve().parent
@@ -34,7 +34,7 @@ from board_core.state_store import (  # type: ignore[import-untyped]
 SCHEMA_VERSION = "autobizdevops.state.read.v1"
 
 
-def _build_payload(workspace: Path) -> tuple[dict[str, Any], int]:
+def _build_payload(workspace: Path) -> Tuple[Dict[str, Any], int]:
     result = load_state_json_records_result(workspace)
     state_json_path = get_state_json_path(workspace)
     errors = list(result.fatal_errors)
@@ -42,7 +42,7 @@ def _build_payload(workspace: Path) -> tuple[dict[str, Any], int]:
     if not result.exists:
         errors.append(f"state.json 未找到: {state_json_path}")
 
-    payload: dict[str, Any] = {
+    payload: Dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "workspace": str(workspace),
         "stateJsonPath": str(state_json_path),
@@ -58,7 +58,7 @@ def _build_payload(workspace: Path) -> tuple[dict[str, Any], int]:
     return payload, 0 if payload["ok"] else 1
 
 
-def _read_feature_checkpoint(workspace: Path, feature: str) -> tuple[str, int]:
+def _read_feature_checkpoint(workspace: Path, feature: str) -> Tuple[str, int]:
     result = load_state_json_records_result(workspace)
     state_json_path = get_state_json_path(workspace)
 
@@ -83,7 +83,7 @@ def _read_feature_checkpoint(workspace: Path, feature: str) -> tuple[str, int]:
     return record.get("checkpoint", ""), 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if contains_workspace_argument(raw_args):
         print(STATE_SCRIPTS_WORKSPACE_ARGUMENT_ERROR, file=sys.stderr)

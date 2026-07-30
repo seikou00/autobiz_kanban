@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 
 BASE_WORKFLOW_PROFILE = "standard"
@@ -51,8 +51,8 @@ def read_json(path: Path) -> dict:
     return payload
 
 
-def overlay_paths(repo_root: Path, workspace: Path | None) -> list[Path]:
-    paths: list[Path] = []
+def overlay_paths(repo_root: Path, workspace: Optional[Path]) -> List[Path]:
+    paths: List[Path] = []
     plugin_dir = repo_root / "board_core" / PLUGIN_OVERLAY_DIR_NAME
     if plugin_dir.is_dir():
         paths.extend(sorted(plugin_dir.glob("*.json")))
@@ -63,7 +63,7 @@ def overlay_paths(repo_root: Path, workspace: Path | None) -> list[Path]:
     return paths
 
 
-def _overlay_for_profile(payload: dict, path: Path, profile: str) -> dict | None:
+def _overlay_for_profile(payload: dict, path: Path, profile: str) -> Optional[dict]:
     profiles = payload.get("profiles")
     if isinstance(profiles, dict):
         selected = profiles.get(profile)
@@ -81,7 +81,7 @@ def _overlay_for_profile(payload: dict, path: Path, profile: str) -> dict | None
     return None
 
 
-def normalize_workflow_profile(profile: str | None) -> str:
+def normalize_workflow_profile(profile: Optional[str]) -> str:
     if profile is None:
         return BASE_WORKFLOW_PROFILE
     cleaned = str(profile).strip()
@@ -90,7 +90,7 @@ def normalize_workflow_profile(profile: str | None) -> str:
     return cleaned
 
 
-def _configured_profile_overlay(base_config: dict, profile: str) -> dict | None:
+def _configured_profile_overlay(base_config: dict, profile: str) -> Optional[dict]:
     workflow = base_config.get("workflow")
     if not isinstance(workflow, dict):
         return None
@@ -107,7 +107,7 @@ def _configured_profile_overlay(base_config: dict, profile: str) -> dict | None:
     return selected
 
 
-def configured_profile_names(base_config: dict) -> tuple[str, ...]:
+def configured_profile_names(base_config: dict) -> Tuple[str, ...]:
     workflow = base_config.get("workflow")
     if not isinstance(workflow, dict):
         return (BASE_WORKFLOW_PROFILE,)
@@ -124,11 +124,11 @@ def configured_profile_names(base_config: dict) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
-def configured_profile_options(base_config: dict) -> list[dict[str, str]]:
+def configured_profile_options(base_config: dict) -> List[Dict[str, str]]:
     workflow = base_config.get("workflow")
     profiles = workflow.get("profiles", {}) if isinstance(workflow, dict) else {}
     profiles = profiles if isinstance(profiles, dict) else {}
-    result: list[dict[str, str]] = []
+    result: List[Dict[str, str]] = []
     for profile in configured_profile_names(base_config):
         raw = profiles.get(profile, {})
         raw = raw if isinstance(raw, dict) else {}
@@ -142,14 +142,14 @@ def configured_profile_options(base_config: dict) -> list[dict[str, str]]:
     return result
 
 
-def normalize_workflow_template(template: str | None) -> str:
+def normalize_workflow_template(template: Optional[str]) -> str:
     if template is None:
         return BASE_WORKFLOW_TEMPLATE
     cleaned = str(template).strip()
     return cleaned or BASE_WORKFLOW_TEMPLATE
 
 
-def _legacy_custom_template_spec(template: str) -> dict | None:
+def _legacy_custom_template_spec(template: str) -> Optional[dict]:
     if template != LEGACY_CUSTOM_WORKFLOW_TEMPLATE:
         return None
     return {
@@ -162,7 +162,7 @@ def _legacy_custom_template_spec(template: str) -> dict | None:
     }
 
 
-def workflow_template_uses_nodes(base_config: dict, template: str | None) -> bool:
+def workflow_template_uses_nodes(base_config: dict, template: Optional[str]) -> bool:
     """Whether this template stores a per-record workflowNodes list.
 
     The configured template registry intentionally does not expose the retired
@@ -175,7 +175,7 @@ def workflow_template_uses_nodes(base_config: dict, template: str | None) -> boo
     return configured_workflow_templates(base_config).get(template, {}).get("kind") == "custom"
 
 
-def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
+def configured_workflow_templates(base_config: dict) -> Dict[str, dict]:
     """Validated workflow.templates registry; standard is always present."""
     workflow = base_config.get("workflow")
     raw = workflow.get("templates", {}) if isinstance(workflow, dict) else {}
@@ -184,7 +184,7 @@ def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
     if not isinstance(raw, dict):
         raise WorkflowCompileError("workflow.templates must be an object")
 
-    templates: dict[str, dict] = {}
+    templates: Dict[str, dict] = {}
     for template_id, spec in raw.items():
         if not isinstance(template_id, str) or not template_id.strip():
             raise WorkflowCompileError("workflow.templates keys must be non-empty strings")
@@ -237,7 +237,7 @@ def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
     return templates
 
 
-def configured_template_options(base_config: dict) -> list[dict[str, object]]:
+def configured_template_options(base_config: dict) -> List[Dict[str, object]]:
     templates = configured_workflow_templates(base_config)
     workflow = base_config.get("workflow")
     base_nodes = workflow.get("nodes", []) if isinstance(workflow, dict) else []
@@ -247,7 +247,7 @@ def configured_template_options(base_config: dict) -> list[dict[str, object]]:
         if isinstance(node, dict) and isinstance(node.get("id"), str)
     ]
 
-    def _display_nodes(template: dict) -> list[str]:
+    def _display_nodes(template: dict) -> List[str]:
         if template["kind"] == "nodeSubset":
             return list(template["nodes"])
         if template["kind"] == "profile":
@@ -255,10 +255,10 @@ def configured_template_options(base_config: dict) -> list[dict[str, object]]:
         return []  # custom: 由用户选择，UI 走 nodes/closure 端点
 
     ordered = [BASE_WORKFLOW_TEMPLATE] + [name for name in templates if name != BASE_WORKFLOW_TEMPLATE]
-    options: list[dict[str, object]] = []
+    options: List[Dict[str, object]] = []
     for name in ordered:
         template = templates[name]
-        option: dict[str, object] = {
+        option: Dict[str, object] = {
             "id": template["id"],
             "templateType": TEMPLATE_TYPE_BY_KIND.get(template["kind"], template["kind"]),
             "label": template["label"],
@@ -274,10 +274,10 @@ def configured_template_options(base_config: dict) -> list[dict[str, object]]:
 
 def resolve_template_subset(
     base_config: dict,
-    template: str | None,
+    template: Optional[str],
     *,
     workflow_nodes: object = None,
-) -> list[str] | None:
+) -> Optional[List[str]]:
     """Resolve a template to its node subset, or None for full-workflow templates.
 
     nodeSubset templates take nodes from the registry; custom templates take
@@ -312,7 +312,7 @@ def resolve_template_subset(
     return merged_nodes
 
 
-def normalize_workflow_skipped_nodes(value: object | None) -> tuple[str, ...]:
+def normalize_workflow_skipped_nodes(value: Optional[object]) -> Tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, (list, tuple)) or any(
@@ -345,16 +345,16 @@ def configured_skip_policy(base_config: dict) -> dict:
     return {"lockedNodes": tuple(dict.fromkeys(item.strip() for item in locked))}
 
 
-def _active_nodes(nodes: list[dict]) -> list[dict]:
+def _active_nodes(nodes: List[dict]) -> List[dict]:
     return [node for node in nodes if not node.get("skipped")]
 
 
 def _mark_skipped_nodes(
-    nodes: list[dict],
-    skipped_ids: tuple[str, ...],
+    nodes: List[dict],
+    skipped_ids: Tuple[str, ...],
     *,
     context: str = "workflowSkippedNodes",
-) -> list[dict]:
+) -> List[dict]:
     """Mark skipped nodes in place and return the active sublist.
 
     Skipped nodes stay in the node array (the board renders them as 已跳过) but
@@ -367,7 +367,7 @@ def _mark_skipped_nodes(
     if unknown:
         raise WorkflowCompileError(f"{context} references unknown nodes: {', '.join(unknown)}")
     skipped_set = set(skipped_ids)
-    active: list[dict] = []
+    active: List[dict] = []
     for node in nodes:
         if str(node.get("id", "")) in skipped_set:
             node["skipped"] = True
@@ -378,7 +378,7 @@ def _mark_skipped_nodes(
     return active
 
 
-def normalize_workflow_skipped_nodes(value: object | None) -> tuple[str, ...]:
+def normalize_workflow_skipped_nodes(value: Optional[object]) -> Tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, (list, tuple)) or any(
@@ -411,16 +411,16 @@ def configured_skip_policy(base_config: dict) -> dict:
     return {"lockedNodes": tuple(dict.fromkeys(item.strip() for item in locked))}
 
 
-def _active_nodes(nodes: list[dict]) -> list[dict]:
+def _active_nodes(nodes: List[dict]) -> List[dict]:
     return [node for node in nodes if not node.get("skipped")]
 
 
 def _mark_skipped_nodes(
-    nodes: list[dict],
-    skipped_ids: tuple[str, ...],
+    nodes: List[dict],
+    skipped_ids: Tuple[str, ...],
     *,
     context: str = "workflowSkippedNodes",
-) -> list[dict]:
+) -> List[dict]:
     """Mark skipped nodes in place and return the active sublist.
 
     Skipped nodes stay in the node array (the board renders them as 已跳过) but
@@ -433,7 +433,7 @@ def _mark_skipped_nodes(
     if unknown:
         raise WorkflowCompileError(f"{context} references unknown nodes: {', '.join(unknown)}")
     skipped_set = set(skipped_ids)
-    active: list[dict] = []
+    active: List[dict] = []
     for node in nodes:
         if str(node.get("id", "")) in skipped_set:
             node["skipped"] = True
@@ -444,13 +444,13 @@ def _mark_skipped_nodes(
     return active
 
 
-def normalize_workflow_decisions(decisions: object | None) -> dict[str, str]:
+def normalize_workflow_decisions(decisions: Optional[object]) -> Dict[str, str]:
     if decisions is None:
         return {}
     if not isinstance(decisions, dict):
         raise WorkflowCompileError("workflowDecisions must be an object")
 
-    normalized: dict[str, str] = {}
+    normalized: Dict[str, str] = {}
     for stage_id, decision in decisions.items():
         if not isinstance(stage_id, str) or not stage_id.strip():
             raise WorkflowCompileError("workflowDecisions keys must be non-empty strings")
@@ -464,7 +464,7 @@ def normalize_workflow_decisions(decisions: object | None) -> dict[str, str]:
     return normalized
 
 
-def _dynamic_stage_anchor(spec: dict, *, context: str) -> tuple[str, str]:
+def _dynamic_stage_anchor(spec: dict, *, context: str) -> Tuple[str, str]:
     insert_after = spec.get("insertAfter")
     insert_before = spec.get("insertBefore")
     if bool(insert_after) == bool(insert_before):
@@ -527,7 +527,7 @@ def _read_dynamic_stage(spec: object, *, context: str) -> dict:
     }
 
 
-def configured_dynamic_stages(base_config: dict) -> tuple[dict, ...]:
+def configured_dynamic_stages(base_config: dict) -> Tuple[dict, ...]:
     workflow = base_config.get("workflow")
     if not isinstance(workflow, dict):
         return ()
@@ -537,8 +537,8 @@ def configured_dynamic_stages(base_config: dict) -> tuple[dict, ...]:
     if not isinstance(raw_stages, list):
         raise WorkflowCompileError("workflow.dynamicStages must be a list")
 
-    stages: list[dict] = []
-    seen: set[str] = set()
+    stages: List[dict] = []
+    seen: Set[str] = set()
     for index, raw_stage in enumerate(raw_stages):
         stage = _read_dynamic_stage(raw_stage, context=f"workflow.dynamicStages[{index}]")
         stage_id = stage["id"]
@@ -549,12 +549,12 @@ def configured_dynamic_stages(base_config: dict) -> tuple[dict, ...]:
     return tuple(sorted(stages, key=lambda stage: (stage["order"], stage["id"])))
 
 
-def load_profile_overlays(repo_root: Path, workspace: Path | None, profile: str) -> list[dict]:
+def load_profile_overlays(repo_root: Path, workspace: Optional[Path], profile: str) -> List[dict]:
     profile = normalize_workflow_profile(profile)
     if profile == BASE_WORKFLOW_PROFILE:
         return []
 
-    selected: list[dict] = []
+    selected: List[dict] = []
     for path in overlay_paths(repo_root, workspace):
         overlay = _overlay_for_profile(read_json(path), path, profile)
         if overlay is not None:
@@ -568,7 +568,7 @@ def _read_string(value: object, *, context: str) -> str:
     return value.strip()
 
 
-def _read_string_list(value: object, *, context: str) -> list[str]:
+def _read_string_list(value: object, *, context: str) -> List[str]:
     if value is None:
         return []
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
@@ -576,7 +576,7 @@ def _read_string_list(value: object, *, context: str) -> list[str]:
     return [item.strip() for item in value]
 
 
-def _artifact_dicts(node: dict, direction: str) -> list[dict]:
+def _artifact_dicts(node: dict, direction: str) -> List[dict]:
     artifacts = node.get("artifacts")
     if isinstance(artifacts, dict):
         value = artifacts.get(direction, [])
@@ -595,7 +595,7 @@ def _phase_for_node(node: dict, *, context: str) -> str:
     return phase
 
 
-def _find_skill_file(repo_root: Path, skill: str) -> Path | None:
+def _find_skill_file(repo_root: Path, skill: str) -> Optional[Path]:
     skills_dir = repo_root / "skills"
     if not skills_dir.is_dir():
         return None
@@ -605,14 +605,14 @@ def _find_skill_file(repo_root: Path, skill: str) -> Path | None:
     return None
 
 
-def _validate_skill(repo_root: Path | None, skill: str, *, context: str) -> None:
+def _validate_skill(repo_root: Optional[Path], skill: str, *, context: str) -> None:
     if repo_root is None:
         return
     if _find_skill_file(repo_root, skill) is None:
         raise WorkflowCompileError(f"{context}.skill is not installed: {skill}")
 
 
-def _build_next_action(skill: str, label: str) -> dict[str, str]:
+def _build_next_action(skill: str, label: str) -> Dict[str, str]:
     return {
         "slashSkill": skill,
         "userMessage": f"请使用 /{skill} 继续推进当前 Feature。",
@@ -620,19 +620,19 @@ def _build_next_action(skill: str, label: str) -> dict[str, str]:
     }
 
 
-def _read_next_action_override(value: object, *, context: str) -> dict[str, dict[str, str]]:
+def _read_next_action_override(value: object, *, context: str) -> Dict[str, Dict[str, str]]:
     if value is None:
         return {}
     if not isinstance(value, dict):
         raise WorkflowCompileError(f"{context}.nextAction must be an object")
 
-    result: dict[str, dict[str, str]] = {}
+    result: Dict[str, Dict[str, str]] = {}
     for state_id, action in value.items():
         if state_id not in {"not_started", "in_progress", "done", "archived"}:
             raise WorkflowCompileError(f"{context}.nextAction contains unknown state: {state_id}")
         if not isinstance(action, dict):
             raise WorkflowCompileError(f"{context}.nextAction.{state_id} must be an object")
-        normalized: dict[str, str] = {}
+        normalized: Dict[str, str] = {}
         for field in NEXT_ACTION_FIELDS:
             item = action.get(field)
             if not isinstance(item, str) or not item.strip():
@@ -644,7 +644,7 @@ def _read_next_action_override(value: object, *, context: str) -> dict[str, dict
     return result
 
 
-def _build_dynamic_node(spec: dict, *, repo_root: Path | None, context: str) -> dict:
+def _build_dynamic_node(spec: dict, *, repo_root: Optional[Path], context: str) -> dict:
     if not isinstance(spec, dict):
         raise WorkflowCompileError(f"{context} must be an object")
 
@@ -694,7 +694,7 @@ def _build_dynamic_node(spec: dict, *, repo_root: Path | None, context: str) -> 
     }
 
 
-def _insert_dynamic_node(nodes: list[dict], node: dict, spec: dict, *, context: str) -> None:
+def _insert_dynamic_node(nodes: List[dict], node: dict, spec: dict, *, context: str) -> None:
     insert_after = spec.get("insertAfter")
     insert_before = spec.get("insertBefore")
     if bool(insert_after) == bool(insert_before):
@@ -709,7 +709,7 @@ def _insert_dynamic_node(nodes: list[dict], node: dict, spec: dict, *, context: 
 
 
 def _dynamic_stage_overlay(stage: dict) -> dict:
-    nodes: list[dict] = []
+    nodes: List[dict] = []
     previous_node_id = ""
     for index, raw_node in enumerate(stage["nodes"]):
         if not isinstance(raw_node, dict):
@@ -732,7 +732,7 @@ def _state_id(state: dict) -> str:
     return ""
 
 
-def _find_state(node: dict, state_id: str) -> dict | None:
+def _find_state(node: dict, state_id: str) -> Optional[dict]:
     for state in node.get("states", []):
         if isinstance(state, dict) and _state_id(state) == state_id:
             return state
@@ -765,7 +765,7 @@ def _state_template(node: dict, state_id: str) -> dict:
     return template
 
 
-def _compatible_state(node: dict, state_id: str, target_skill: str) -> dict | None:
+def _compatible_state(node: dict, state_id: str, target_skill: str) -> Optional[dict]:
     state = _find_state(node, state_id)
     if state is None:
         return None
@@ -775,7 +775,7 @@ def _compatible_state(node: dict, state_id: str, target_skill: str) -> dict | No
     return _normalize_state_identity(state, state_id)
 
 
-def _build_archived_next_action(skill: str, label: str) -> dict[str, str]:
+def _build_archived_next_action(skill: str, label: str) -> Dict[str, str]:
     return {
         "slashSkill": skill,
         "userMessage": f"请使用 /{skill} 查看当前 Feature 的归档状态。",
@@ -788,7 +788,7 @@ def _derive_state(
     state_id: str,
     target_skill: str,
     target_label: str,
-    overrides: dict[str, dict[str, str]],
+    overrides: Dict[str, Dict[str, str]],
     *,
     archived: bool = False,
 ) -> dict:
@@ -810,7 +810,7 @@ def _derive_state(
     return state
 
 
-def _next_node_skill(nodes: list[dict], index: int) -> tuple[str, str]:
+def _next_node_skill(nodes: List[dict], index: int) -> Tuple[str, str]:
     for next_node in nodes[index + 1 :]:
         if next_node.get("skipped"):
             continue
@@ -823,7 +823,7 @@ def _next_node_skill(nodes: list[dict], index: int) -> tuple[str, str]:
     return str(skill), str(label)
 
 
-def _derive_node_states(nodes: list[dict]) -> None:
+def _derive_node_states(nodes: List[dict]) -> None:
     for index, node in enumerate(nodes):
         skill = str(node.get("skill", ""))
         label = str(node.get("label", ""))
@@ -853,7 +853,7 @@ def _derive_node_states(nodes: list[dict]) -> None:
         node["states"] = states
 
 
-def _start_checkpoint(node: dict) -> str | None:
+def _start_checkpoint(node: dict) -> Optional[str]:
     checkpoints = node.get("checkpoints", [])
     if not isinstance(checkpoints, list):
         return None
@@ -865,7 +865,7 @@ def _start_checkpoint(node: dict) -> str | None:
     return None
 
 
-def _done_checkpoint(node: dict) -> str | None:
+def _done_checkpoint(node: dict) -> Optional[str]:
     checkpoints = node.get("checkpoints", [])
     if not isinstance(checkpoints, list):
         return None
@@ -877,7 +877,7 @@ def _done_checkpoint(node: dict) -> str | None:
     return None
 
 
-def _derive_stage_labels(nodes: list[dict], base_labels: dict[str, str]) -> dict[str, str]:
+def _derive_stage_labels(nodes: List[dict], base_labels: Dict[str, str]) -> Dict[str, str]:
     labels = dict(base_labels)
     for node in nodes:
         node_label = str(node.get("label", ""))
@@ -891,10 +891,10 @@ def _derive_stage_labels(nodes: list[dict], base_labels: dict[str, str]) -> dict
     return labels
 
 
-def _derive_checkpoint_transitions(nodes: list[dict], base_checkpoint_config: dict) -> dict[str, list[str]]:
+def _derive_checkpoint_transitions(nodes: List[dict], base_checkpoint_config: dict) -> Dict[str, List[str]]:
     old_transitions = base_checkpoint_config.get("transitions", {})
     old_transitions = old_transitions if isinstance(old_transitions, dict) else {}
-    transitions: dict[str, list[str]] = {}
+    transitions: Dict[str, List[str]] = {}
 
     for node in nodes:
         start = _start_checkpoint(node)
@@ -917,18 +917,18 @@ def _derive_checkpoint_transitions(nodes: list[dict], base_checkpoint_config: di
     old_needs_fix_targets = old_transitions.get("needs_fix", [])
     if isinstance(old_needs_fix_targets, list):
         known_starts = {item for item in (_start_checkpoint(node) for node in nodes) if item}
-        dynamic_starts = {
-            start
-            for node in nodes
-            if node.get("_dynamic") and (start := _start_checkpoint(node)) and start != "archived"
-        }
+        dynamic_starts = set()
+        for node in nodes:
+            start = _start_checkpoint(node)
+            if node.get("_dynamic") and start and start != "archived":
+                dynamic_starts.add(start)
         transitions["needs_fix"] = sorted((set(old_needs_fix_targets) & known_starts) | dynamic_starts)
     if "archived" in {checkpoint for node in nodes for checkpoint in node.get("checkpoints", [])}:
         transitions.setdefault("archived", [])
     return transitions
 
 
-def _derive_initial_checkpoints(nodes: list[dict], base_checkpoint_config: dict) -> list[str]:
+def _derive_initial_checkpoints(nodes: List[dict], base_checkpoint_config: dict) -> List[str]:
     known = {checkpoint for node in nodes for checkpoint in node.get("checkpoints", [])}
     initial = [
         checkpoint
@@ -941,8 +941,8 @@ def _derive_initial_checkpoints(nodes: list[dict], base_checkpoint_config: dict)
     return initial
 
 
-def _derive_ui_transitions(nodes: list[dict]) -> list[dict]:
-    transitions: list[dict] = []
+def _derive_ui_transitions(nodes: List[dict]) -> List[dict]:
+    transitions: List[dict] = []
     for index, node in enumerate(nodes[:-1]):
         next_node = nodes[index + 1]
         from_state = "archived" if _done_checkpoint(node) == "archived" else "done"
@@ -957,7 +957,7 @@ def _derive_ui_transitions(nodes: list[dict]) -> list[dict]:
     return transitions
 
 
-def _validate_dynamic_stage_targets(nodes: list[dict], transitions: dict[str, list[str]], stages: Iterable[dict]) -> None:
+def _validate_dynamic_stage_targets(nodes: List[dict], transitions: Dict[str, List[str]], stages: Iterable[dict]) -> None:
     checkpoint_to_node = {
         checkpoint: node
         for node in nodes
@@ -980,10 +980,10 @@ def _validate_dynamic_stage_targets(nodes: list[dict], transitions: dict[str, li
 
 
 def _validate_dynamic_stage_definitions(
-    nodes: list[dict],
+    nodes: List[dict],
     dynamic_stages: Iterable[dict],
     *,
-    repo_root: Path | None,
+    repo_root: Optional[Path],
 ) -> None:
     node_ids = {node.get("id") for node in nodes if isinstance(node.get("id"), str)}
     known_checkpoints = {
@@ -1017,9 +1017,9 @@ def _validate_dynamic_stage_definitions(
             )
 
 
-def _validate_unique_nodes_and_checkpoints(nodes: list[dict]) -> None:
-    seen_nodes: set[str] = set()
-    seen_checkpoints: dict[str, str] = {}
+def _validate_unique_nodes_and_checkpoints(nodes: List[dict]) -> None:
+    seen_nodes: Set[str] = set()
+    seen_checkpoints: Dict[str, str] = {}
     for node in nodes:
         node_id = str(node.get("id", ""))
         if node_id in seen_nodes:
@@ -1033,9 +1033,9 @@ def _validate_unique_nodes_and_checkpoints(nodes: list[dict]) -> None:
             seen_checkpoints[checkpoint] = node_id
 
 
-def _validate_artifact_dependencies(nodes: list[dict]) -> None:
-    available: set[str] = set()
-    output_owner: dict[str, str] = {}
+def _validate_artifact_dependencies(nodes: List[dict]) -> None:
+    available: Set[str] = set()
+    output_owner: Dict[str, str] = {}
     for node in nodes:
         node_id = str(node.get("id", ""))
         input_paths = set()
@@ -1062,12 +1062,12 @@ def _validate_artifact_dependencies(nodes: list[dict]) -> None:
             available.add(path)
 
 
-def _renumber_nodes(nodes: list[dict]) -> None:
+def _renumber_nodes(nodes: List[dict]) -> None:
     for index, node in enumerate(nodes, start=1):
         node["order"] = index * 10
 
 
-def _enabled_phases(overlays: Iterable[dict]) -> set[str]:
+def _enabled_phases(overlays: Iterable[dict]) -> Set[str]:
     enabled = set(DEFAULT_ENABLED_DYNAMIC_PHASES)
     for overlay in overlays:
         declared = overlay.get("enabledDynamicPhases")
@@ -1084,11 +1084,11 @@ def _enabled_phases(overlays: Iterable[dict]) -> set[str]:
 def _assemble_effective(
     effective: dict,
     workflow: dict,
-    nodes: list[dict],
+    nodes: List[dict],
     *,
     profile: str,
-    decisions: dict[str, str],
-    enabled_stages: list[dict] | None = None,
+    decisions: Dict[str, str],
+    enabled_stages: Optional[List[dict]] = None,
 ) -> dict:
     """Validate nodes and derive states/checkpoints/transitions into the effective config.
 
@@ -1124,12 +1124,12 @@ def _assemble_effective(
 def compile_board_config(
     base_config: dict,
     *,
-    repo_root: Path | None = None,
-    workspace: Path | None = None,
+    repo_root: Optional[Path] = None,
+    workspace: Optional[Path] = None,
     profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: object | None = None,
-    overlays: list[dict] | None = None,
-    skipped_nodes: object | None = None,
+    workflow_decisions: Optional[object] = None,
+    overlays: Optional[List[dict]] = None,
+    skipped_nodes: Optional[object] = None,
 ) -> dict:
     """Compile a profile-specific effective workflow config."""
     profile = normalize_workflow_profile(profile)
@@ -1197,7 +1197,7 @@ def compile_board_config(
         for stage in dynamic_stages
         if decisions.get(stage["id"]) == ENABLED_WORKFLOW_DECISION
     ]
-    dropped: dict[str, list[str]] = {}
+    dropped: Dict[str, List[str]] = {}
     if skipped:
         # Skips apply after overlay/dynamic insertion so dynamic nodes are
         # skippable too. Stages whose checkpoints left the active chain must
@@ -1233,7 +1233,7 @@ def compile_board_config(
     return effective
 
 
-def _drop_broken_inputs(nodes: list[dict]) -> dict[str, list[str]]:
+def _drop_broken_inputs(nodes: List[dict]) -> Dict[str, List[str]]:
     """Remove inputs whose producer is not in the active node list.
 
     Walks active nodes in order tracking produced output paths. Any input
@@ -1242,8 +1242,8 @@ def _drop_broken_inputs(nodes: list[dict]) -> dict[str, list[str]]:
     skills neither read it nor ask the user for it. Returns the removed
     paths per node id, in input order.
     """
-    available: set[str] = set()
-    dropped: dict[str, list[str]] = {}
+    available: Set[str] = set()
+    dropped: Dict[str, List[str]] = {}
     for node in nodes:
         node_id = str(node.get("id", ""))
         artifacts = node.get("artifacts")
@@ -1265,7 +1265,7 @@ def _drop_broken_inputs(nodes: list[dict]) -> dict[str, list[str]]:
     return dropped
 
 
-def _filter_checkpoint_config(workflow: dict, nodes: list[dict]) -> None:
+def _filter_checkpoint_config(workflow: dict, nodes: List[dict]) -> None:
     """Restrict base checkpoint config to checkpoints declared by the given nodes.
 
     Keeps needs_fix so the shared repair checkpoint stays usable in every template.
@@ -1307,8 +1307,8 @@ def compile_node_subset(
     node_ids: Iterable[str],
     *,
     profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: object | None = None,
-    skipped_nodes: object | None = None,
+    workflow_decisions: Optional[object] = None,
+    skipped_nodes: Optional[object] = None,
 ) -> dict:
     """Compile an effective workflow keeping only the selected base nodes.
 
@@ -1372,14 +1372,14 @@ def compile_node_subset(
 
 
 def load_effective_board_config(
-    config_path: Path | None = None,
+    config_path: Optional[Path] = None,
     *,
-    repo_root: Path | None = None,
-    workspace: Path | None = None,
+    repo_root: Optional[Path] = None,
+    workspace: Optional[Path] = None,
     profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: object | None = None,
-    overlays: list[dict] | None = None,
-    skipped_nodes: object | None = None,
+    workflow_decisions: Optional[object] = None,
+    overlays: Optional[List[dict]] = None,
+    skipped_nodes: Optional[object] = None,
 ) -> dict:
     path = config_path or default_config_path()
     base_config = read_json(path)
@@ -1396,10 +1396,10 @@ def load_effective_board_config(
 
 
 def load_record_effective_board_config(
-    config_path: Path | None = None,
+    config_path: Optional[Path] = None,
     *,
-    repo_root: Path | None = None,
-    workspace: Path | None = None,
+    repo_root: Optional[Path] = None,
+    workspace: Optional[Path] = None,
     record: dict,
 ) -> dict:
     """Compile the effective workflow config for a state record (template-aware)."""

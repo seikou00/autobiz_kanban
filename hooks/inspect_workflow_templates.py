@@ -6,6 +6,7 @@ catalog in one call; closure mode solves a node selection interactively.
 """
 
 from __future__ import annotations
+from typing import List, Optional
 
 import argparse
 import json
@@ -31,10 +32,10 @@ BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 SCHEMA_VERSION = "autobizdevops.workflow.templates.v2"
 
 
-def _node_catalog(base_config: dict) -> list[dict]:
+def _node_catalog(base_config: dict) -> List[dict]:
     workflow = base_config.get("workflow", {})
     nodes = workflow.get("nodes", []) if isinstance(workflow, dict) else []
-    catalog: list[dict] = []
+    catalog: List[dict] = []
     for node in nodes:
         if not isinstance(node, dict) or not isinstance(node.get("id"), str):
             continue
@@ -67,7 +68,7 @@ def _node_catalog(base_config: dict) -> list[dict]:
     return catalog
 
 
-def _closure_payload(base_config: dict, node_ids: list[str], *, auto_include: bool) -> dict:
+def _closure_payload(base_config: dict, node_ids: List[str], *, auto_include: bool) -> dict:
     result = solve_node_closure(base_config, node_ids, auto_include_producers=auto_include)
     effective = compile_node_subset(base_config, list(result.nodes))
     checkpoints = effective.get("workflow", {}).get("checkpoints", {})
@@ -82,7 +83,7 @@ def _closure_payload(base_config: dict, node_ids: list[str], *, auto_include: bo
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect workflow templates / node catalog / closure")
     parser.add_argument(
         "--mode",

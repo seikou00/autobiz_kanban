@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import List
 
 import unittest
 from pathlib import Path
@@ -87,7 +88,7 @@ class RequestUserInputProtocolTest(unittest.TestCase):
             self.assertNotIn(forbidden_rule, content)
 
     def test_every_usage_loads_the_shared_protocol(self) -> None:
-        missing: list[str] = []
+        missing: List[str] = []
 
         for path in sorted(SKILLS.rglob("*.md")):
             if path == PROTOCOL:
