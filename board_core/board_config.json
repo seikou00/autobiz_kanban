@@ -5,8 +5,15 @@
     "sshUrl": "git@gitee.itc.cmbchina.cn:S992391/LF39_Product_Knowledge.git",
     "ref": "master"
   },
+  "knowledge_config": {
+    "sync_type": "invoke_session",
+    "nextAction": {
+      "slashSkill": "knowledge-sync",
+      "userMessage": "请针对${projectCode}项目发起知识沉淀，这个是 token：${leanToken}",
+      "dialogTips": "发起知识沉淀"
+    }
+  },
   "supported_deploy_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
-  "enable_task_tool": false,
   "inspectCommands": {
     "darwin": {
       "knowledge_path": "${pluginPath}/sys",
