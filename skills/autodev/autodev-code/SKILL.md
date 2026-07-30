@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.3.0729
+version: v1.3.0730
 ---
 
 # /autodev-code — 代码执行
@@ -79,12 +79,25 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 
 ### 全部任务完成后的验证
 
-如果task工具可用，使用task工具，先从git cache中获取当前改动的代码，对照 PLAN.md 与 design.md 同时审查三个方面：
+使用task工具，先从git cache中获取当前改动的代码，对照 PLAN.md 与 design.md 同时审查三个方面：
 1. 使用explore-autodev角色，逐 TASK 对照「做什么 / 规格依据 / 设计依据」核对 diff：每个任务的改动是否兑现其引用的 REQ/SCN 行为与 API/DATA/D 形态，有无未覆盖项、有无越界改动；
 2. 使用code-reviewer-autodev角色，查看代码是否有不满足设计与需求的地方；
 3. 使用code-simplifier-autodev角色，代码是否有冗余或不合理的地方。
-如任一子代理返回有问题，则需要修复代码。
-如果task不可用则不用执行上面的内容。继续任务。
+task 工具不可用时跳过本节，继续任务。
+
+回检结论逐条分类：先读 diff 与被引用的 REQ/SCN/API/DATA/D 原文复核该条是否成立，再按下表动作；同一文件的多条结论一次性改完。
+
+| 分类 | 判定 | 动作 |
+|------|------|------|
+| 代码可修 | 实现与引用的行为或已定形态不符、缺失、越界改动 | 在对应 TASK 范围内最小修复，重跑该任务「验证方法」 |
+| 质量整理 | 冗余、重复、命名/分层与既有风格不一致、错误处理或日志缺口 | 行为不变的最小整理；风险大于收益时不改并说明 |
+| 契约冲突 | 结论要求的做法与已定 REQ/SCN 或 API/DATA/D 冲突 | 按「实现差异协议」处理，不得先改代码 |
+| 结论不成立 | 复核后与 diff 实际不符 | 不改代码，在回复中引 file:line 说明 |
+
+- Critical / Major 结论必须处理；低置信与风格类结论只在同一处顺手整理，不因此扩大改动范围。
+- 修复限于有任务依据的文件，且不得为消掉结论削弱校验、安全、日志、错误处理。
+- code-simplifier 已直接改动的文件同样逐条复核：采纳的重跑相关任务「验证方法」，不采纳的还原。
+- 修复触达的任务在 PLAN.md 完成记录补记本轮改动与重跑结果；全部结论闭合后再进入下面的编译验证。
 
 PLAN.md 队列无「待做」「进行中」后，进行编译验证（优先 系统约束 ）。失败回到相关任务，不推进。通过后先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。再推进 checkpoint：
 

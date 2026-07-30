@@ -186,6 +186,41 @@ class RenderShapeTest(unittest.TestCase):
             prompt,
         )
 
+    def test_mandatory_reads_cannot_be_skipped_during_requirements_discussion(self):
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        self.assertIn(
+            "不得把“任务”缩义为代码修改",
+            prompt,
+        )
+        self.assertIn(
+            "本门禁覆盖需求澄清、需求分析、向用户提问、设计、编码",
+            prompt,
+        )
+        self.assertIn(
+            "“必须读取”“先读取”“必读”文件必须逐个通过文件读取、搜索或 shell 工具实际打开",
+            prompt,
+        )
+        self.assertIn(
+            "明确的必读指令高于模型对文件相关性的主观判断",
+            prompt,
+        )
+        self.assertIn(
+            "不得以“当前不是代码阶段”“需求澄清不需要”",
+            prompt,
+        )
+        self.assertIn(
+            "在该阶段首次分析、提问或答复前用工具打开该文件",
+            prompt,
+        )
+        self.assertIn(
+            "未取得工具读取证据前，不得声称已读、不得继续实质分析",
+            prompt,
+        )
+
 
 class RuntimePolicyTest(unittest.TestCase):
     @staticmethod
