@@ -55,7 +55,9 @@ from hooks.resolve_frontend_html_route import (  # noqa: E402
 from hooks.ui_context import (  # noqa: E402
     UIContextError,
     load_ui_context,
+    ui_context_indexes,
     ui_context_path,
+    validate_ui_context_data,
 )
 
 FRONTEND_REVIEW_PASS = {"passed", "has-suggestions", "skipped-by-user"}

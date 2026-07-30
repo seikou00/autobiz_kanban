@@ -100,7 +100,11 @@ def _write_design(feature_dir: Path) -> None:
             [
                 "# 技术设计: cap",
                 "## 1. Context / 输入上下文",
-                "## 2. Spec Traceability / 规格追踪",
+                "## 2. Code Evidence / 代码探索证据",
+                "| ID | 事实 | 位置 |",
+                "|----|------|------|",
+                "| EVD-01 | no-op | src/cap.py |",
+                "## 3. Spec Traceability / 规格追踪",
                 "| Spec | Requirement / Scenario | Design Coverage |",
                 "|------|------------------------|-----------------|",
                 "| specs/cap/spec.md | Requirement [REQ-001] / Scenario [SCN-001] | API-001 / DATA-001 / D-001 |",

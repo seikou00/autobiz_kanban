@@ -97,6 +97,7 @@ class NeedsFixStateTest(unittest.TestCase):
         (self.feature_dir / "proposal.md").write_text("proposal\n", encoding="utf-8")
         (self.feature_dir / "design.md").write_text("design\n", encoding="utf-8")
         (self.feature_dir / "PLAN.md").write_text("plan\n", encoding="utf-8")
+        (self.feature_dir / "plan.json").write_text("{}\n", encoding="utf-8")
         specs_dir = self.feature_dir / "specs"
         specs_dir.mkdir()
         (specs_dir / "requirements.md").write_text("requirements\n", encoding="utf-8")
