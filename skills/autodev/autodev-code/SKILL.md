@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.3.0729
+version: v1.3.0730
 allowed-tools: execute task_output read_file grep glob write_file edit_file
 ---
 

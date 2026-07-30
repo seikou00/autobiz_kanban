@@ -35,6 +35,8 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 按检查脚本给出的降级方式处理缺失输入。读取现有产物、项目约束和当前 feature 直接相关的代码与配置；以 `specs/**/*.md` 的 Requirement / Scenario 作为 pass/fail 的主要行为依据。
 
+读取 `plan.json.deferredValidationIssues[]` 及对应 batch plan 明细。Code 延期项不是 PASS：能映射到用户主链路的 `scope=task` 问题必须进入 P0/P1 E2E 用例；`scope=batch/project` 的集成、环境问题必须在服务启动/扩大验证时复核。用例或报告记录原 `issueId` 与 `evidenceIds`，通过新鲜 E2E evidence 证明已解决；无法在本阶段复核时保留为 manual/missing，不得静默丢弃。
+
 当前 checkpoint 为 `e2e_in_progress` 时进入恢复模式：读取已有三个 E2E 产物，恢复未完成用例和修复轮次，只覆盖 E2E 产物并继续已记录的修复闭环。
 
 开始或恢复执行后写入并刷新状态：

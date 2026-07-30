@@ -1,7 +1,7 @@
 ---
 name: autodev-utest
 description: "Dev 阶段单元测试生成与单测驱动最小修复技能。"
-version: v1.2.1701
+version: v1.2.1702
 ---
 
 ## 缺失产物处理
@@ -61,6 +61,7 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 读取输入：
 - 项目相关约束
 - 与当前 feature 相关的源码、已有测试、构建配置
+- `plan.json.deferredValidationIssues[]` 以及对应 `plans/Bxxx/plan.json` 中的 TASK/Batch 延期详情。它们是 Code 阶段未解决验证项，不是 PASS；按 `taskId/commandId/errorCategory/evidenceIds` 建立优先测试或环境复核目标。
 
 输出产物：
 
@@ -127,6 +128,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_prog
 从输入产物中提取测试所需的行为契约、覆盖重点、风险与受影响范围。
 
 生成测试矩阵，写入 `UNIT_TEST_REPORT.md` 的 `## Test Plan`：
+
+若存在 Code 延期问题，先处理 `scope=task` 且能映射到单元边界的项，并把其 `issueId`、原失败 evidence 和处理结果写入报告 Handoff/Failure Analysis；`scope=batch/project` 的编译、集成或环境项放入扩大验证。延期项无法由单测覆盖时保留给 E2E 或人工处理，不得把 Code 的 deferred 状态当成既有测试通过。
 
 ```markdown
 | ID | Source | Behavior | Test Target | Priority | Status |

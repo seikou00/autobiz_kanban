@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.2.1701
+version: v1.2.1702
 ---
 
 ## 缺失产物处理
