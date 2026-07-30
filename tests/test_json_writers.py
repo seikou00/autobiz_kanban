@@ -2130,12 +2130,6 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(remove.returncode, 0)
             self.assertIn("task_evidence_binding_requires_task_runner", remove.stdout)
 
-    @unittest.skip(
-        "aafc857 的机器契约剥离是有意的架构选择，dev_0803 的文档驱动路径为基线默认。"
-        "plan_json_* 验证器已在 VALIDATORS 注册但未挂到 dev.plan/dev.code，"
-        "故经 board_config 分派的 stage_gate 断言不成立。"
-        "启用条件：board_config 显式选择 JSON 路径（需要 profile 级 validators 覆盖机制，尚未实现）。"
-    )
     def test_stage_gate_matches_run_postcheck(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
@@ -2155,11 +2149,6 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(output.getvalue().strip(), "")
             self.assertFalse((feature_dir / "SMOKE_TEST_PLAN.json").exists())
 
-    @unittest.skip(
-        "同上：plan_scenario_coverage 未挂到 dev.plan，"
-        "stage_gate 不会产出 missing_plan_scenario_coverage。"
-        "plan_writer --structure 直调部分仍然有效，未受影响。"
-    )
     def test_plan_structure_passes_while_stage_gate_fails_on_missing_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
