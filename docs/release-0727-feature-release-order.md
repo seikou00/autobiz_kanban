@@ -461,16 +461,16 @@ f52ef45  机器契约层存在
 （324 行）与 `plan_initial_tasks` / `plan_execution_contract`，把 plan 校验
 重建成文档驱动形态。
 
-**该剥离已确认为有意的架构选择**（用户裁定），不是不完整的重构。因此本文
-所说的「移植 dev_workflow_py 的能力」，必须理解为**加法式适配**：
-新能力注册但默认不挂载，dev_0803 的文档驱动路径保持默认且可用。
-这与 §3 F00 原则「所有新策略默认关闭，保持基线行为」一致。
+**该剥离已确认为有意的架构选择**（用户裁定）。但目标同样明确：
+**全流程通过 JSON 流转，`dev.code` 等阶段读取 JSON 产物**。
+因此「适配」不是保留文档驱动为默认，而是把机器契约路径接回来并作为默认，
+dev_0803 在 `aafc857` 之后新建的文档驱动实现（`plan_execution_check.py` 等）
+在 JSON 路径挂载后让位。
 
 两个推论：
 
-1. §9.4 描述的 board_config 验证器互斥，是**两套都有效的设计之间的冲突**，
-   且 dev_0803 一侧是刻意选择的基线。不能用 JSON 路径覆盖它。
-   正确做法见 §9.9。
+1. §9.4 描述的 board_config 验证器互斥确实是两套都有效的设计之争，
+   裁定结果是 **JSON 路径胜出并挂载**。处置见 §9.9。
 2. 本文所说的「移植 dev_workflow_py 的能力」，对其中 7 个 hook 模块和 16 个测试文件
    而言，准确表述是**恢复 `aafc857` 删除的文件**。§9.6 把 28 个模块全部称为
    「纯新增」是错的，正确划分见 §9.7。
@@ -621,20 +621,22 @@ validation_groups  validation_policy  verify_decision_writer
 
 ## 10. 加法式适配（§9.9）
 
-### 9.9 board_config 的正确适配方式
+### 9.9 board_config 挂载 JSON 路径（已裁定）
 
-`aafc857` 的剥离是有意的，因此 `dev.plan` / `dev.code` 上：
+目标是全流程 JSON 流转，因此 `dev.plan` / `dev.code` 挂载机器契约验证器：
 
-- **保持** dev_0803 的文档型验证器为基线默认：
-  `plan_initial_tasks`、`plan_execution_contract`、`plan_finished_tasks`。
-- **注册但不挂载** 机器契约验证器：`plan_json_contract`、
-  `plan_json_initial_tasks`、`plan_ref_resolution`、`plan_task_granularity`、
-  `plan_scenario_coverage`、`plan_task_detail_schema`、
-  `evidence_detail_quality`、`evidence_integrity`、`code_done_gate` 等。
-  它们在 `artifact_check.py` 的 `VALIDATORS` 中可用（F01 已完成），
-  但不出现在任何 stage 的 `validators` 数组里。
+| stage | validators | artifacts |
+| --- | --- | --- |
+| `dev.plan` | `design_contract`、`plan_json_contract`、`plan_json_initial_tasks`、`plan_ref_resolution`、`plan_task_granularity`、`plan_scenario_coverage` | outputs 增加 `plan_json` |
+| `dev.code` | `plan_json_contract`、`plan_task_detail_schema`、`plan_ref_resolution`、`plan_finished_tasks`、`evidence_detail_quality`、`code_done_gate`、`evidence_integrity` | inputs 的 `plan`(PLAN.md) 换成 `plan_json`；outputs 增加 `evidence_stream` |
 
-即：F01 的价值是让这些验证器**可用**，不是让它们**生效**。
+`PLAN.md` 保留为人类视图（`dev.plan` outputs 仍含 `plan`），
+但不再是 `dev.code` 的机器事实源。
+
+dev_0803 的文档型验证器 `plan_initial_tasks` / `plan_execution_contract`
+随之不再挂载，其实现（`artifact_check.py` 中的函数、
+`skills/autodev/hooks/plan_execution_check.py`）保留在树里不删除，
+以便需要时回退。
 
 ### 9.10 两条路径无法用现有 profile 机制并存
 
@@ -642,11 +644,13 @@ validation_groups  validation_policy  verify_decision_writer
 （见 `frontend_before_specs`），没有节点字段的覆盖机制，
 `workflow_compiler.py` 中也没有 profile 级 `validators` 处理。
 
-因此「按 profile 选择验证器集」在当前代码里无法表达。要做到并存，需要
-新增 profile 级 `validators` 覆盖能力 —— 属于新设计，超出从
-`dev_workflow_py` 移植的范围，不应塞进 F01–F11 任何一个特性。
+因此「按 profile 同时保留文档流与 JSON 流」在当前代码里无法表达。
+这也意味着 §2 独立特性约束第 3 条（新行为通过显式配置启用）在
+`dev.plan` / `dev.code` 的验证器层面做不到 —— 挂载 JSON 路径就是切换，
+不是开关。
 
-在该能力落地之前，机器契约路径只能停留在「已注册、未挂载」状态。
+若日后需要两条路径共存，需新增 profile 级 `validators` 覆盖能力，
+属于新设计，不在 F01–F11 移植范围内。
 
 ### 9.11 受此影响的测试处置
 
@@ -658,21 +662,43 @@ validation_groups  validation_policy  verify_decision_writer
 | JSON 路径 | `PlanExecutionCheckTest` 2 项 |
 | 文档路径（基线，当前选择） | `test_json_writers` 的 stage_gate 2 项 |
 
-当前按基线处置：
+按裁定挂载 JSON 路径，处置为：
 
-- `PlanExecutionCheckTest` 恢复，`test_artifact_contracts` 78/78 无 skip。
-- `test_json_writers` 的 `test_stage_gate_matches_run_postcheck` 与
-  `test_plan_structure_passes_while_stage_gate_fails_on_missing_scenario`
-  标记 skip，原因中记明启用条件（board_config 显式选择 JSON 路径，
-  依赖 §9.10 的覆盖机制）。
+- `PlanExecutionCheckTest` 的 `test_plan_postcheck_passes_valid_execution_contract`
+  与 `test_plan_postcheck_blocks_dependency_cycle` 标记 skip，
+  原因记明 `plan_execution_contract` 不再挂载、依赖环检测由
+  `plan_json_contract` 的 `plan_dependency_cycle` 承担。
+  选择 skip 而非删除，保留 dev_0803 的实现与历史。
+- `test_json_writers` 全部有效，无 skip。
 - 两类测试中直调 `plan_check_main` / `detect_cycle` /
   `plan_writer --structure` 的用例都不经 `board_config` 分派，
   两种挂载下均有效，未受影响。
 
 ### 9.12 SKILL.md 合并方向
 
-同理，`autodev-plan/SKILL.md` 与 `autodev-code/SKILL.md` 的合并中，
-**dev_0803 的重写是权威版本**，`dev_workflow_py` 的内容以加法方式嵌入，
-而不是反过来。凡与文档驱动流程冲突的段落（例如把 `PLAN.md` 换成
-`plan.json` 作为唯一事实源、批次会话入口 `code-session`），
-在机器契约路径挂载之前都不应写入基线。
+`autodev-plan/SKILL.md` 与 `autodev-code/SKILL.md` 需要与 §9.9 的 board_config
+挂载保持一致，即以 **`dev_workflow_py` 的 JSON 流程为主干**：
+`plan.json` / `plans/Bxxx/plan.json` 为唯一事实源、批次会话入口
+`code-session`、批次探索闸门等段落都要写入。
+
+同时必须保留 dev_0803 在 `aafc857` 之后新增、且与 JSON 流程不冲突的内容。
+实测 `autodev-code/SKILL.md` 上 dev_0803 独有的内容有 7 类：
+
+```text
+缺失产物处理段（inspect_skill_contract.py）
+实现差异协议（EVD/design 与代码现实不符时的裁定流程）
+CONTEXT.md 领域词汇表锚点回填
+domain-context.md 引用
+ui-continuation-guide.md 续办意图引导
+task 工具三角色审查（explore-autodev / code-reviewer-autodev /
+  code-simplifier-autodev）
+modules_compile.json 编译清单
+```
+
+其中 `modules_compile.json` 与 JSON 流程的「准入不执行编译、批次质量模式
+以 `batchValidation` 为唯一事实源」直接冲突，应舍弃，由 F03 的批次验证取代。
+其余 6 类与路径方向无关，逐段嵌入 JSON 主干。
+
+`autodev-plan/SKILL.md` 简单得多：两侧 9 段中只有一段名称不同
+（dev_0803「生成 PLAN.md」对应 wpy「生成 plan.json 与批次」），
+前 149 行完全相同，取 wpy 侧后补回 dev_0803 的独有段落即可。
