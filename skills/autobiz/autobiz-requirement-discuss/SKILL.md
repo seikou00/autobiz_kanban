@@ -15,7 +15,7 @@ version: v1.2.1701
 ## 产物协议
 
 - 产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
-- `PRD_DISCUSS.md` 用于承接循环中的讨论结论、待确认项、假设与阶段性方案
+- `PRD_DISCUSS.md` 用于承接循环中的讨论结论、待确认项、假设、阶段性方案及讨论中新增资料的可追溯信息
 - 除非用户明确要求只停在讨论阶段，否则本技能应在收敛后结束。
 
 ## 核心能力
@@ -65,7 +65,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_in_progre
 > 3. 按 prd-formatter.md 模板改造需求文档并写入 PRD_DISCUSS.md
 > 4. 需求分析 — 角色选择与通用基础检查
 > 5. 需求分析 — 角色专项检查
-> 6. 角色选择前端则询问用户提供 HTML 文件位置并逐一分析
+> 6. 角色选择前端则询问用户提供 HTML 文件位置并逐一分析；将每个已提供的 HTML 文件作为讨论补充资料登记
 > 7. 需求分析 — 输出规范检查
 > 8. 问题清单展示与用户确认
 > 9. 对话式引导与 PRD_DISCUSS.md 调整
@@ -190,6 +190,7 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
     - 若用户通过客户端自动提供的 Other 自由输入补充说明 → 记录补充内容，继续下一问题
     - 若选择「后续补充并继续」→ 标记为待确认并继续其他问题，同一轮不得再次追问该内容
 5. **记录完整对话**：将每个问题的对话内容（问题、选项、用户选择、补充内容）记录到 PRD_DISCUSS.md
+6. **处理新增文件**：若用户在回答中提供文件，按“讨论过程中新增资料的处理”执行；其中，在角色选择前端时用户提供的每个 HTML 文件位置，均视为讨论补充资料，必须登记文件名称、原始文档绝对路径和“前端页面/交互分析”的用途。
 
 **示例对话流程：**
 
@@ -227,6 +228,7 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 4. **待确认事项**：待开发确认的高保真链接、接口文档、数据同步机制等
 5. **假设与风险**：基于什么假设、存在哪些风险
 6. **历次讨论记录**：按时间记录讨论过程和结论
+7. **讨论补充资料**：仅记录讨论过程中新增的补充文件的名称、原始文档绝对路径和用途；角色选择前端时用户提供的 HTML 文件位置也必须逐项记录为补充资料，用途标注为“前端页面/交互分析”。初始上传的原始需求文档不得出现在本清单中（其快照仅保存在 `prd_original`）；没有新增文件时也保留空清单说明
 
 #### 写作要求
 
@@ -275,7 +277,7 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "$
 脚本通过即视为以下清单已完成：
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险、讨论补充资料
 - `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 
