@@ -161,6 +161,31 @@ class RenderShapeTest(unittest.TestCase):
         self.assertEqual(res["sessionContext"], "")
         self.assertEqual(res["agentmdLoadStatus"], [])
 
+    def test_inlined_context_does_not_count_as_actual_file_read(self):
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        self.assertIn(
+            "SCOPE、SYSTEM、UNIT 是系统提示内联的导航与约束",
+            prompt,
+        )
+        self.assertIn("不表示已读取任何实际文件", prompt)
+        self.assertIn(
+            "只有本轮通过文件读取、搜索或 shell 工具打开对应路径后",
+            prompt,
+        )
+        self.assertIn("未产生工具读取证据时不得跳过", prompt)
+        self.assertIn(
+            "标记为“内联约束”，不得称为实际读取",
+            prompt,
+        )
+        self.assertIn(
+            "本轮通过工具实际打开了哪些文件路径",
+            prompt,
+        )
+
 
 class RuntimePolicyTest(unittest.TestCase):
     @staticmethod
