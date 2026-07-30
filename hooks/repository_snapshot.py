@@ -115,10 +115,20 @@ def capture_untracked_files(repo: Path) -> list[str]:
 def capture_repository_snapshot(repo: Path) -> dict[str, Any]:
     head = _run_text(repo, "rev-parse", "HEAD")
     index = _run_text(repo, "write-tree")
-    if head.returncode != 0 or index.returncode != 0:
+    if head.returncode != 0:
+        # A freshly initialized repository has a valid index and worktree but
+        # no commit object yet. Keep a stable, explicit baseline instead of
+        # treating the expected unborn HEAD as a broken Git repository.
+        branch = _run_text(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+        if branch.returncode != 0 or not branch.stdout.strip():
+            raise RepositorySnapshotError("git_snapshot_failed")
+        head_commit = f"unborn:{branch.stdout.strip()}"
+    else:
+        head_commit = head.stdout.strip()
+    if index.returncode != 0:
         raise RepositorySnapshotError("git_snapshot_failed")
     return {
-        "headCommit": head.stdout.strip(),
+        "headCommit": head_commit,
         "indexTree": index.stdout.strip(),
         "files": capture_file_snapshot(repo),
     }

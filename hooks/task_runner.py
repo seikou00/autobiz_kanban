@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence, read_records, stream_path  # noqa: E402
 from hooks.evidence_kernel import FileLock  # noqa: E402
+from hooks.code_exploration import CodeExplorationError, inspect_exploration_cache  # noqa: E402
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS,
@@ -80,6 +81,7 @@ from hooks.repository_snapshot import (  # noqa: E402
     unignored_runtime_artifact_paths,
 )
 from hooks.task_run_integrity import (  # noqa: E402
+    strict_task_run_integrity_error,
     task_run_integrity_error,
     task_run_integrity_sha256,
 )
@@ -748,6 +750,53 @@ def _active_feature_runs(feature_dir: Path, *, exclude: Path | None = None) -> l
     return sorted(active)
 
 
+def _latest_sealed_prior_task_run(
+    feature_dir: Path,
+    feature: str,
+    task: dict[str, Any],
+) -> dict[str, Any] | None:
+    task_id = str(task.get("id", ""))
+    expected_contract = task_contract_sha256(task)
+    candidates: list[dict[str, Any]] = []
+    for path in (feature_dir / ".task-runs" / task_id).glob("*.json"):
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(state, dict)
+            and state.get("featureId") == feature
+            and state.get("taskId") == task_id
+            and state.get("taskContractSha256") == expected_contract
+            and state.get("executionMode") == "code"
+            and state.get("status") in {"implemented", "done", "failed", "aborted"}
+            and isinstance(state.get("explorationGate"), dict)
+            and strict_task_run_integrity_error(state) is None
+        ):
+            candidates.append(state)
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda state: (str(state.get("startedAt", "")), str(state.get("runId", ""))),
+    )
+
+
+def _evidence_only_exploration_staleness(exploration: dict[str, Any]) -> bool:
+    stale_reasons = exploration.get("staleReasons")
+    return (
+        exploration.get("status") == "stale"
+        and not exploration.get("changedPaths")
+        and not exploration.get("criticalHits")
+        and isinstance(stale_reasons, list)
+        and bool(stale_reasons)
+        and all(
+            isinstance(reason, str) and reason.startswith("implementation_evidence_invalid:")
+            for reason in stale_reasons
+        )
+    )
+
+
 def _start_task_unlocked(
     workspace: Path,
     feature: str,
@@ -804,12 +853,6 @@ def _start_task_unlocked(
         repositories,
         contract_name=task_id,
     )
-    validation_test_targets = _maven_validation_test_targets(
-        [item for item in task.get("validationCommands", []) if isinstance(item, dict)],
-        repositories,
-    )
-    declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
-    repository_state = _repository_state(repositories)
     active = _active_feature_runs(feature_dir)
     if active:
         active_tasks = sorted({item.partition(":")[0] for item in active})
@@ -824,6 +867,105 @@ def _start_task_unlocked(
             requiredAction="inspect_and_retry_existing_run",
             activeRuns=active,
         )
+    execution_mode = task_execution_mode(task)
+    exploration_gate = None
+    if execution_mode == "code":
+        repository_gates: dict[str, Any] = {}
+        observed_exploration: dict[str, dict[str, Any]] = {}
+        unready_exploration: dict[str, dict[str, Any]] = {}
+        for repository_id, repository_root in repositories.items():
+            try:
+                exploration = inspect_exploration_cache(
+                    feature_dir,
+                    plan,
+                    task_id,
+                    repository_root,
+                )
+            except (CodeExplorationError, RepositorySnapshotError) as exc:
+                detail = str(exc)
+                raise TaskRunnerError(
+                    f"code_exploration_inspect_failed:{repository_id}:{detail}",
+                    requiredAction=(
+                        "repair_git_snapshot_and_retry_context"
+                        if "git_snapshot_failed" in detail
+                        else "repair_exploration_cache_and_retry_context"
+                    ),
+                    explorationBlocked=True,
+                    implementationAllowed=False,
+                ) from exc
+            status = exploration.get("status")
+            observed_exploration[repository_id] = {
+                "status": status,
+                "cachePath": exploration.get("cachePath"),
+                "cacheSha256": exploration.get("cacheSha256"),
+                "changedPaths": exploration.get("changedPaths", []),
+                "criticalHits": exploration.get("criticalHits", []),
+                "staleReasons": exploration.get("staleReasons", []),
+            }
+            if status not in {"fresh", "fresh_with_trusted_changes"}:
+                unready_exploration[repository_id] = exploration
+                continue
+            repository_gates[repository_id] = {
+                "status": status,
+                "cachePath": exploration.get("cachePath"),
+                "cacheSha256": exploration.get("cacheSha256"),
+            }
+        if unready_exploration:
+            prior_run = _latest_sealed_prior_task_run(feature_dir, feature, task)
+            prior_gate = prior_run.get("explorationGate") if isinstance(prior_run, dict) else None
+            prior_repositories = (
+                prior_gate.get("repositories") if isinstance(prior_gate, dict) else None
+            )
+            controlled_retry = isinstance(repair_context, dict) or all(
+                _evidence_only_exploration_staleness(item)
+                for item in unready_exploration.values()
+            )
+            if (
+                controlled_retry
+                and isinstance(prior_repositories, dict)
+                and set(prior_repositories) == set(repositories)
+            ):
+                exploration_gate = {
+                    "checkedAt": _utc_now(),
+                    "source": "inherited_after_recheck",
+                    "inheritedFromRunId": prior_run.get("runId"),
+                    "inheritedGateCheckedAt": prior_gate.get("checkedAt"),
+                    "observedRepositories": observed_exploration,
+                    "repositories": dict(prior_repositories),
+                }
+            else:
+                repository_id, exploration = next(iter(unready_exploration.items()))
+                status = exploration.get("status")
+                required_action = (
+                    "record_code_exploration_and_retry_start"
+                    if status in {"missing", "stale"}
+                    else "patch_code_exploration_and_retry_start"
+                    if status == "reusable_with_changes"
+                    else "rerun_code_task_context_before_start"
+                )
+                raise TaskRunnerError(
+                    f"code_exploration_not_ready:{repository_id}:{status}",
+                    requiredAction=required_action,
+                    explorationStatus=status,
+                    explorationPolicy=exploration.get("policy"),
+                    changedPaths=exploration.get("changedPaths", []),
+                    criticalHits=exploration.get("criticalHits", []),
+                    staleReasons=exploration.get("staleReasons", []),
+                    explorationBlocked=True,
+                    implementationAllowed=False,
+                )
+        else:
+            exploration_gate = {
+                "checkedAt": _utc_now(),
+                "source": "current_cache",
+                "repositories": repository_gates,
+            }
+    validation_test_targets = _maven_validation_test_targets(
+        [item for item in task.get("validationCommands", []) if isinstance(item, dict)],
+        repositories,
+    )
+    declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
+    repository_state = _repository_state(repositories)
 
     run_id = _new_run_id()
     state = {
@@ -833,6 +975,7 @@ def _start_task_unlocked(
         "batchId": batch_id,
         "taskId": task_id,
         "taskContractSha256": task_contract_sha256(task),
+        "executionMode": execution_mode,
         "status": "started",
         "codeWorkspace": str(next(iter(repositories.values()))),
         "requestedCodeWorkspaces": [item["requestedPath"] for item in scope_workspaces],
@@ -857,6 +1000,8 @@ def _start_task_unlocked(
         state["revalidation"] = dict(pending_revalidation)
     if isinstance(repair_context, dict):
         state["repairContext"] = dict(repair_context)
+    if isinstance(exploration_gate, dict):
+        state["explorationGate"] = exploration_gate
     state["integritySha256"] = task_run_integrity_sha256(state)
     path = _run_path(feature_dir, task_id, run_id)
     _save_run(path, state)

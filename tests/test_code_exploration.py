@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -46,6 +47,23 @@ class RepositorySnapshotTest(unittest.TestCase):
             self.assertEqual(snapshot["indexTree"], _git(repo, "write-tree"))
             self.assertEqual(set(snapshot["files"]), {"tracked.txt", "new.txt"})
             self.assertRegex(snapshot["files"]["tracked.txt"], r"^[0-9a-f]{64}$")
+
+    def test_snapshot_supports_unborn_head_without_commit(self) -> None:
+        from hooks.repository_snapshot import capture_repository_snapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "code"
+            repo.mkdir()
+            _git(repo, "init", "-b", "main")
+            (repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+            (repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+            _git(repo, "add", "staged.txt")
+
+            snapshot = capture_repository_snapshot(repo)
+
+            self.assertEqual(snapshot["headCommit"], "unborn:main")
+            self.assertEqual(snapshot["indexTree"], _git(repo, "write-tree"))
+            self.assertEqual(set(snapshot["files"]), {"staged.txt", "untracked.txt"})
 
     def test_snapshot_diff_preserves_task_runner_change_details(self) -> None:
         from hooks.repository_snapshot import snapshot_changes
@@ -620,7 +638,7 @@ class CodeExplorationWriterTest(unittest.TestCase):
         from tests.test_task_runner import _workspace
 
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp))
+            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
             body = Path(tmp) / "record.json"
             self._body(body)
             record = self._run_writer(
@@ -709,7 +727,7 @@ class CodeExplorationWriterTest(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp))
+            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
             batch = _read_batch(feature_dir)
@@ -813,7 +831,7 @@ class CodeExplorationWriterTest(unittest.TestCase):
         from tests.test_task_runner import _read_batch, _workspace, _write_batch
 
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp))
+            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
             batch = _read_batch(feature_dir)
@@ -955,7 +973,7 @@ class CodeExplorationWriterTest(unittest.TestCase):
         from tests.test_task_runner import _read_batch, _workspace, _write_batch
 
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp))
+            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
             batch = _read_batch(feature_dir)
@@ -1051,12 +1069,71 @@ class CodeExplorationWriterTest(unittest.TestCase):
 
 
 class CodeTaskContextCacheTest(unittest.TestCase):
+    def test_context_exploration_failure_is_machine_blocking(self) -> None:
+        from hooks.code_exploration import CodeExplorationError
+        from hooks.code_task_context import build_context
+        from tests.test_task_runner import _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "### Requirement [REQ-001]: capability\n"
+                "#### Scenario [SCN-001]: observable behavior\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "hooks.code_task_context.inspect_caches",
+                side_effect=CodeExplorationError("git_snapshot_failed"),
+            ):
+                result = build_context(
+                    workspace=workspace,
+                    feature="alpha",
+                    task_id="T001",
+                    code_workspaces=[repo],
+                )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["requiredAction"], "repair_git_snapshot_and_retry_context")
+            self.assertTrue(result.data["explorationBlocked"])
+            self.assertFalse(result.data["implementationAllowed"])
+
+    def test_context_allows_unborn_business_repository(self) -> None:
+        from hooks.code_task_context import build_context
+        from tests.test_task_runner import _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, _committed_repo = _workspace(Path(tmp))
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "### Requirement [REQ-001]: capability\n"
+                "#### Scenario [SCN-001]: observable behavior\n",
+                encoding="utf-8",
+            )
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "-b", "main")
+            (repo / "src.txt").write_text("source\n", encoding="utf-8")
+
+            result = build_context(
+                workspace=workspace,
+                feature="alpha",
+                task_id="T001",
+                code_workspaces=[repo],
+            )
+
+            self.assertTrue(result.ok, result.errors)
+            self.assertEqual(result.data["explorationCaches"][0]["status"], "missing")
+
     def test_context_returns_missing_cache_policy_for_business_repository(self) -> None:
         from hooks.code_task_context import build_context
         from tests.test_task_runner import _workspace
 
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp))
+            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
             spec_dir = feature_dir / "specs" / "cap"
             spec_dir.mkdir(parents=True)
             (spec_dir / "spec.md").write_text(
@@ -1106,7 +1183,7 @@ class CodeTaskContextCacheTest(unittest.TestCase):
         from tests.test_task_runner import _start, _workspace
 
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp))
+            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
             spec_dir = feature_dir / "specs" / "cap"
             spec_dir.mkdir(parents=True)
             (spec_dir / "spec.md").write_text(
@@ -1142,7 +1219,7 @@ class CodeTaskContextCacheTest(unittest.TestCase):
             frontend["executionLane"] = "frontend"
             frontend["findings"]["moduleMap"] = [{"path": "shared", "role": "frontend contract"}]
             frontend_path.write_text(json.dumps(frontend, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            _start(workspace, repo)
+            _start(workspace, repo, refresh_exploration=False)
 
             result = build_context(
                 workspace=workspace,

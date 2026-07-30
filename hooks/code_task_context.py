@@ -23,6 +23,7 @@ from hooks.json_writer_common import (  # noqa: E402
     render_result,
     resolve_feature,
     resolve_workspace,
+    with_result_data,
 )
 from hooks.code_exploration import CodeExplorationError  # noqa: E402
 from hooks.code_exploration_writer import inspect_caches  # noqa: E402
@@ -365,7 +366,18 @@ def build_context(
         try:
             data_out.update(inspect_caches(workspace, feature, task_id, code_workspaces))
         except CodeExplorationError as exc:
-            return fail("code_exploration_inspect_failed", str(exc), path=active_plan_path)
+            detail = str(exc)
+            action = (
+                "repair_git_snapshot_and_retry_context"
+                if "git_snapshot_failed" in detail
+                else "repair_exploration_cache_and_retry_context"
+            )
+            return with_result_data(
+                fail("code_exploration_inspect_failed", detail, path=active_plan_path),
+                requiredAction=action,
+                explorationBlocked=True,
+                implementationAllowed=False,
+            )
     else:
         data_out["explorationCaches"] = []
         data_out["explorationPolicy"] = {

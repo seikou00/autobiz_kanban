@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Block frontend code writes until the autodev-code HTML route is entered."""
+"""Block business-code writes until task and route gates authorize them."""
 
 from __future__ import annotations
 
@@ -24,9 +24,11 @@ from resolve_frontend_html_route import (  # noqa: E402
     ROUTE_SPEC_DRIVEN,
     ROUTE_STANDARD,
     evidence_path,
+    feature_dir,
     read_json,
     resolve_frontend_route,
 )
+from hooks.task_run_integrity import strict_task_run_integrity_error  # noqa: E402
 from ui_context import UIContextError, load_ui_context  # noqa: E402
 
 
@@ -53,6 +55,26 @@ FRONTEND_CODE_SUFFIXES = {
     ".mjs",
     ".cjs",
 }
+BACKEND_CODE_SUFFIXES = {
+    ".java",
+    ".kt",
+    ".kts",
+    ".groovy",
+    ".scala",
+    ".py",
+    ".go",
+    ".rs",
+    ".cs",
+    ".rb",
+    ".php",
+    ".xml",
+    ".sql",
+    ".properties",
+    ".yaml",
+    ".yml",
+    ".json",
+}
+BUSINESS_CODE_SUFFIXES = FRONTEND_CODE_SUFFIXES | BACKEND_CODE_SUFFIXES
 
 
 def read_stdin_text() -> str:
@@ -119,13 +141,13 @@ def current_checkpoint(workspace: Path, feature: str) -> str:
     return checkpoint if isinstance(checkpoint, str) else ""
 
 
-def block(reason: str) -> int:
+def block(reason: str, *, system_message: str | None = None) -> int:
     print(reason, file=sys.stderr)
     json.dump(
         {
             "decision": "block",
             "reason": reason,
-            "systemMessage": (
+            "systemMessage": system_message or (
                 "前端代码生成必须先进入 with-absolute-html 或 with-standard-html：运行 route resolver、"
                 "完整读取 route SKILL.md，创建 route write_todos，并由 route SKILL 转交 parser 后再写前端源码。"
             ),
@@ -138,6 +160,29 @@ def block(reason: str) -> int:
 
 def is_frontend_code_path(path: Path) -> bool:
     return path.suffix.lower() in FRONTEND_CODE_SUFFIXES
+
+
+def is_business_code_path(path: Path) -> bool:
+    return path.suffix.lower() in BUSINESS_CODE_SUFFIXES
+
+
+def is_managed_task_run_path(path: Path, workspace: Path, feature: str) -> bool:
+    managed_root = (feature_dir(workspace, feature) / ".task-runs").resolve(strict=False)
+    try:
+        path.resolve(strict=False).relative_to(managed_root)
+        return True
+    except ValueError:
+        return False
+
+
+def is_any_task_run_artifact_path(path: Path) -> bool:
+    parts = path.resolve(strict=False).parts
+    for index, part in enumerate(parts):
+        if part != ".autobizdevops":
+            continue
+        if index + 3 < len(parts) and parts[index + 1] == "features":
+            return ".task-runs" in parts[index + 3:]
+    return False
 
 
 def missing_protocol_flags(evidence: dict) -> list[str]:
@@ -212,11 +257,101 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
     return 0
 
 
+def validate_code_exploration_write(workspace: Path, feature: str) -> int:
+    target = feature_dir(workspace, feature)
+    active_runs: list[tuple[Path, dict]] = []
+    for path in (target / ".task-runs").glob("T*/*.json"):
+        payload = read_json(path)
+        if (
+            payload.get("featureId") == feature
+            and payload.get("status") not in {"implemented", "done", "failed", "aborted"}
+        ):
+            active_runs.append((path, payload))
+    if len(active_runs) != 1:
+        return block(
+            "business code write requires exactly one active task run: "
+            f"found={len(active_runs)}; next=run task_runner.py start after code exploration is fresh",
+            system_message="业务代码写入前必须存在一个由 task_runner 创建且带当前探索证明的活动 run。",
+        )
+    run_path, run = active_runs[0]
+    integrity_error = strict_task_run_integrity_error(run)
+    if integrity_error is not None:
+        return block(
+            f"active task run authorization invalid: {integrity_error}",
+            system_message="活动 task run 不是完整且可验证的 v2 runner 产物，禁止据此授权写代码。",
+        )
+    if run_path.parent.name != run.get("taskId") or run_path.stem != run.get("runId"):
+        return block(
+            "active task run path identity mismatch",
+            system_message="活动 task run 的路径身份与密封内容不一致，禁止据此授权写代码。",
+        )
+    if run.get("status") != "started":
+        return block(
+            f"task run status={run.get('status')} does not authorize source writes",
+            system_message="只有 started 状态的活动 task run 可以授权业务源码写入。",
+        )
+    execution_mode = run.get("executionMode")
+    if execution_mode != "code":
+        return block(
+            f"executionMode={execution_mode} does not permit business source writes",
+            system_message="verified_existing 与 external_dependency 任务不得写入业务源码。",
+        )
+    gate = run.get("explorationGate")
+    repository_gates = gate.get("repositories") if isinstance(gate, dict) else None
+    if (
+        not isinstance(gate, dict)
+        or gate.get("source") not in {"current_cache", "inherited_after_recheck"}
+        or not isinstance(repository_gates, dict)
+        or not repository_gates
+    ):
+        return block(
+            "active task run has no current sealed exploration proof; "
+            "next=finish or abort the legacy run, complete code exploration, and start a new run",
+            system_message="业务代码写入前必须由当前 start 基于实时缓存密封探索证明。",
+        )
+    if gate.get("source") == "inherited_after_recheck" and (
+        not isinstance(gate.get("inheritedFromRunId"), str)
+        or not isinstance(gate.get("observedRepositories"), dict)
+    ):
+        return block(
+            "inherited exploration proof is missing provenance",
+            system_message="继承的探索证明必须记录来源 run 和本次实际缓存状态。",
+        )
+    invalid = {
+        repository_id: item.get("status") if isinstance(item, dict) else None
+        for repository_id, item in repository_gates.items()
+        if not isinstance(item, dict)
+        or item.get("status") not in {"fresh", "fresh_with_trusted_changes"}
+    }
+    if invalid:
+        return block(
+            f"active task run exploration proof is invalid: {invalid}",
+            system_message="活动 task run 的探索证明不是 fresh，禁止写入业务源码。",
+        )
+    return 0
+
+
+def validate_frontend_exploration_write(workspace: Path, feature: str) -> int:
+    """Compatibility alias for callers using the original frontend-only name."""
+
+    return validate_code_exploration_write(workspace, feature)
+
+
 def main() -> int:
     raw_input = read_stdin_text()
     if not raw_input.strip():
         return 0
     payload = json.loads(raw_input)
+    cwd = Path(payload.get("cwd") or Path.cwd()).resolve(strict=False)
+    candidate_paths = [
+        normalize_path(raw_path, cwd)
+        for raw_path in extract_candidate_paths(payload.get("tool_input", {}))
+    ]
+    if any(is_any_task_run_artifact_path(path) for path in candidate_paths):
+        return block(
+            ".task-runs artifacts are runner-owned and cannot be edited directly",
+            system_message=".task-runs 只能由 task_runner 原子写入，禁止手工创建或修改。",
+        )
     feature = current_feature()
     if not feature:
         return 0
@@ -224,11 +359,13 @@ def main() -> int:
     if workspace is None or current_checkpoint(workspace, feature) != "code_in_progress":
         return 0
 
-    cwd = Path(payload.get("cwd") or Path.cwd()).resolve(strict=False)
-    tool_input = payload.get("tool_input", {})
-    for raw_path in extract_candidate_paths(tool_input):
-        if is_frontend_code_path(normalize_path(raw_path, cwd)):
+    for target_path in candidate_paths:
+        if is_frontend_code_path(target_path):
             result = validate_frontend_write(workspace, feature)
+            if result:
+                return result
+        if is_business_code_path(target_path):
+            result = validate_code_exploration_write(workspace, feature)
             if result:
                 return result
     return 0

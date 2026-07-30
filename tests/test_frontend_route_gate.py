@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -39,6 +40,7 @@ from hooks.resolve_frontend_html_route import (  # noqa: E402
     resolve_frontend_route,
     write_json,
 )
+from hooks.task_run_integrity import task_run_integrity_sha256  # noqa: E402
 
 
 def make_workspace(root: Path) -> Path:
@@ -202,6 +204,54 @@ def complete_evidence(route: str) -> dict:
     }
 
 
+def sealed_task_run(*, execution_mode: str = "code") -> dict:
+    run = {
+        "version": 2,
+        "runId": "run-1",
+        "featureId": "alpha",
+        "batchId": "B001",
+        "taskId": "T001",
+        "taskContractSha256": "contract",
+        "executionMode": execution_mode,
+        "status": "started",
+        "codeWorkspace": "/tmp/code",
+        "requestedCodeWorkspaces": ["/tmp/code"],
+        "resolvedGitRoots": ["/tmp/code"],
+        "workspacePrefixes": [""],
+        "scopeWorkspaces": [{"repository": "code", "resolvedGitRoot": "/tmp/code"}],
+        "scopePathBase": "requested_code_workspace",
+        "declaredScopePaths": [],
+        "resolvedScopePaths": [],
+        "repositories": [{"id": "code", "path": "/tmp/code", "snapshot": {}}],
+        "snapshotMode": "git_visible_file_content_sha256",
+        "stagingAffectsSnapshot": False,
+        "startedAt": "2026-07-30T00:00:00Z",
+        "snapshot": {},
+    }
+    if execution_mode == "code":
+        run["explorationGate"] = {
+            "checkedAt": "2026-07-30T00:00:00Z",
+            "source": "current_cache",
+            "repositories": {"code": {"status": "fresh", "cacheSha256": "cache"}},
+        }
+    run["integritySha256"] = task_run_integrity_sha256(run)
+    return run
+
+
+def write_task_run(workspace: Path, run: dict) -> Path:
+    path = (
+        workspace
+        / ".autobizdevops"
+        / "features"
+        / "alpha"
+        / ".task-runs"
+        / "T001"
+        / "run-1.json"
+    )
+    write_json(path, run)
+    return path
+
+
 class FrontendRouteResolverTests(unittest.TestCase):
     def test_ui_context_false_resolves_none_even_if_markdown_mentions_frontend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -215,6 +265,114 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertEqual(payload["source"], "UI_CONTEXT.json")
         self.assertEqual(payload["route"], ROUTE_NONE)
         self.assertFalse(payload["uiRequired"])
+
+    def test_frontend_exploration_write_blocks_without_active_task_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            output = io.StringIO()
+            error = io.StringIO()
+
+            with contextlib.redirect_stdout(output):
+                with contextlib.redirect_stderr(error):
+                    result = frontend_route_write_guard.validate_frontend_exploration_write(
+                        workspace,
+                        "alpha",
+                    )
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("exactly one active task run", error.getvalue())
+        self.assertIn("block", output.getvalue())
+
+    def test_frontend_exploration_write_allows_sealed_fresh_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_task_run(workspace, sealed_task_run())
+
+            result = frontend_route_write_guard.validate_frontend_exploration_write(
+                workspace,
+                "alpha",
+            )
+
+        self.assertEqual(result, 0)
+
+    def test_frontend_exploration_write_rejects_legacy_run_with_repair_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            run = sealed_task_run()
+            run["version"] = 1
+            run["repairContext"] = {}
+            run["integritySha256"] = task_run_integrity_sha256(run)
+            write_task_run(workspace, run)
+            error = io.StringIO()
+
+            with contextlib.redirect_stderr(error):
+                result = frontend_route_write_guard.validate_code_exploration_write(
+                    workspace,
+                    "alpha",
+                )
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("task_run_version_invalid", error.getvalue())
+
+    def test_frontend_exploration_write_rejects_missing_task_id_with_repair_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            run = sealed_task_run()
+            run["taskId"] = None
+            run["repairContext"] = {}
+            run["integritySha256"] = task_run_integrity_sha256(run)
+            write_task_run(workspace, run)
+            error = io.StringIO()
+
+            with contextlib.redirect_stderr(error):
+                result = frontend_route_write_guard.validate_code_exploration_write(
+                    workspace,
+                    "alpha",
+                )
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("task_run_taskId_invalid", error.getvalue())
+
+    def test_non_code_execution_mode_reports_source_writes_are_forbidden(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            write_task_run(workspace, sealed_task_run(execution_mode="verified_existing"))
+            error = io.StringIO()
+
+            with contextlib.redirect_stderr(error):
+                result = frontend_route_write_guard.validate_code_exploration_write(
+                    workspace,
+                    "alpha",
+                )
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("executionMode=verified_existing", error.getvalue())
+
+    def test_managed_task_run_paths_are_runner_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            run_path = (
+                workspace
+                / ".autobizdevops"
+                / "features"
+                / "alpha"
+                / ".task-runs"
+                / "T001"
+                / "forged.json"
+            )
+
+            self.assertTrue(
+                frontend_route_write_guard.is_managed_task_run_path(
+                    run_path,
+                    workspace,
+                    "alpha",
+                )
+            )
+
+    def test_backend_source_paths_use_business_code_write_gate(self) -> None:
+        self.assertTrue(frontend_route_write_guard.is_business_code_path(Path("Service.java")))
+        self.assertTrue(frontend_route_write_guard.is_business_code_path(Path("mapper.xml")))
+        self.assertFalse(frontend_route_write_guard.is_frontend_code_path(Path("Service.java")))
 
     def test_ui_context_required_without_html_resolves_spec_driven(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -865,6 +1023,73 @@ class FrontendRouteReadHookTests(unittest.TestCase):
 
 
 class FrontendRouteWriteGuardTests(unittest.TestCase):
+    def test_main_blocks_direct_task_run_json_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            forged_path = (
+                workspace
+                / ".autobizdevops"
+                / "features"
+                / "alpha"
+                / ".task-runs"
+                / "T001"
+                / "forged.json"
+            )
+            payload = json.dumps({"tool_input": {"file_path": str(forged_path)}})
+            error = io.StringIO()
+
+            with mock.patch.dict(os.environ, {"FEATURE_ID": "alpha"}):
+                with mock.patch.object(frontend_route_write_guard, "read_stdin_text", return_value=payload):
+                    with mock.patch.object(
+                        frontend_route_write_guard,
+                        "workspace_from_payload",
+                        return_value=workspace,
+                    ):
+                        with contextlib.redirect_stderr(error):
+                            result = frontend_route_write_guard.main()
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("runner-owned", error.getvalue())
+
+    def test_main_blocks_task_run_write_without_feature_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            forged_path = (
+                workspace
+                / ".autobizdevops"
+                / "features"
+                / "alpha"
+                / ".task-runs"
+                / "T001"
+                / "forged.json"
+            )
+            payload = json.dumps({"tool_input": {"file_path": str(forged_path)}})
+
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with mock.patch.object(frontend_route_write_guard, "read_stdin_text", return_value=payload):
+                    result = frontend_route_write_guard.main()
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+
+    def test_main_applies_exploration_gate_to_backend_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            payload = json.dumps({"tool_input": {"file_path": "/tmp/Service.java"}})
+            error = io.StringIO()
+
+            with mock.patch.dict(os.environ, {"FEATURE_ID": "alpha"}):
+                with mock.patch.object(frontend_route_write_guard, "read_stdin_text", return_value=payload):
+                    with mock.patch.object(
+                        frontend_route_write_guard,
+                        "workspace_from_payload",
+                        return_value=workspace,
+                    ):
+                        with contextlib.redirect_stderr(error):
+                            result = frontend_route_write_guard.main()
+
+        self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
+        self.assertIn("business code write requires exactly one active", error.getvalue())
+
     def test_frontend_write_allows_spec_driven_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))

@@ -31,9 +31,9 @@
           "command": "python hooks/frontend_route_write_guard.py",
           "timeout": 10,
           "onBlock": {
-            "reason": "前端 Route 检查不通过",
-            "systemMessage": "前端代码生成必须先解析 FRONTEND_ROUTE.json；HTML 路线需完成 route SKILL.md 的 write_todos 前置流程，spec-driven-ui 不需要 HTML parser。",
-            "additionalContext": "运行 resolve_frontend_html_route.py。absolute-html/standard-html 路线需完整读取 route SKILL.md、创建 route todos 并由 route SKILL 转交 parser；spec-driven-ui 按 UI_CONTEXT.json、specs、design 和 plan.json 直接实现。"
+            "reason": "代码写入闸门检查不通过",
+            "systemMessage": "业务代码写入必须由完整的 v2 task run 和当前探索证明授权；前端任务还必须完成 FRONTEND_ROUTE 协议。",
+            "additionalContext": "不要手工修改 .task-runs。先运行 code_task_context 并完成探索，再由 task_runner start；absolute-html/standard-html 还需完整读取 route SKILL、创建 route todos 并由 route SKILL 转交 parser。"
           },
           "persistAfterInterrupt": true
 

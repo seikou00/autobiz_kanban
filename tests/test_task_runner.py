@@ -48,6 +48,68 @@ def _write_batch(feature_dir: Path, batch: dict) -> None:
     _batch_path(feature_dir).write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _refresh_exploration_cache(feature_dir: Path, code: Path, *, task_id: str = "T001") -> None:
+    from hooks.code_exploration import SCHEMA_VERSION, utc_now
+    from hooks.repository_snapshot import capture_repository_snapshot
+
+    batch = _read_batch(feature_dir)
+    captured_at = utc_now()
+    lane = str(batch.get("executionLane", "backend"))
+    cache_path = feature_dir / "cache" / "code-exploration" / code.name / f"{lane}.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = capture_repository_snapshot(code)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "featureId": "alpha",
+                "repository": {"id": code.name, "root": str(code.resolve())},
+                "executionLane": lane,
+                "capturedAt": captured_at,
+                "capturedBatchId": str(batch.get("batchId", "B001")),
+                "capturedTaskId": task_id,
+                "gitSnapshot": snapshot,
+                "findings": {
+                    "moduleMap": [],
+                    "conventions": [],
+                    "integrationPoints": [],
+                    "testEntrypoints": [],
+                    "validationPatterns": [],
+                },
+                "exploredPaths": sorted(snapshot["files"]),
+                "sharedPaths": [],
+                "evidenceCoverage": {
+                    "explainedTaskIds": [],
+                    "completionEvidenceIds": [],
+                    "lastExplainedBatchId": None,
+                    "lastExplainedAt": captured_at,
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _ensure_exploration_ready(feature_dir: Path, code: Path, *, task_id: str = "T001") -> None:
+    from hooks.code_exploration import CodeExplorationError, inspect_exploration_cache
+    from hooks.plan_json import load_plan_bundle
+
+    try:
+        result = inspect_exploration_cache(
+            feature_dir,
+            load_plan_bundle(feature_dir),
+            task_id,
+            code,
+        )
+    except CodeExplorationError:
+        result = {"status": "stale"}
+    if result.get("status") not in {"fresh", "fresh_with_trusted_changes"}:
+        _refresh_exploration_cache(feature_dir, code, task_id=task_id)
+
+
 def _bind_workspace_contract(
     feature_dir: Path,
     batch: dict,
@@ -84,7 +146,13 @@ def _evidence(feature_dir: Path, evidence_id: str) -> dict:
     raise AssertionError(f"missing evidence {evidence_id}")
 
 
-def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = None) -> tuple[Path, Path, Path]:
+def _workspace(
+    root: Path,
+    *,
+    command_exit: int = 0,
+    deps: list[str] | None = None,
+    exploration_ready: bool = True,
+) -> tuple[Path, Path, Path]:
     workspace = root / "artifacts"
     feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
     feature_dir.mkdir(parents=True)
@@ -248,6 +316,8 @@ def _workspace(root: Path, *, command_exit: int = 0, deps: list[str] | None = No
             "tasks": tasks,
         },
     )
+    if exploration_ready:
+        _refresh_exploration_cache(feature_dir, code)
     return workspace, feature_dir, code
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -269,7 +339,10 @@ def _run_plan_writer(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _start(workspace: Path, code: Path) -> dict:
+def _start(workspace: Path, code: Path, *, refresh_exploration: bool = True) -> dict:
+    feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+    if refresh_exploration:
+        _ensure_exploration_ready(feature_dir, code)
     result = _run(
         "start", "--workspace", str(workspace), "--feature", "alpha",
         "--task-id", "T001", "--code-workspace", str(code),
@@ -372,6 +445,23 @@ def _configure_deferred_task_validation(feature_dir: Path) -> None:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_first_task_start_requires_fresh_code_exploration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp), exploration_ready=False)
+
+            result = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["error"], "code_exploration_not_ready:code:missing")
+            self.assertEqual(payload["requiredAction"], "record_code_exploration_and_retry_start")
+            self.assertTrue(payload["explorationBlocked"])
+            self.assertFalse(payload["implementationAllowed"])
+            self.assertFalse((feature_dir / ".task-runs" / "T001").exists())
+
     def test_deferred_batch_handoff_requires_task_validation_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, _ = _workspace(Path(tmp))
@@ -2299,6 +2389,13 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
             repair_payload = json.loads(repair.stdout)
             repair_context = repair_payload["repairContext"]
+            repair_gate = repair_payload["explorationGate"]
+            self.assertEqual(repair_gate["source"], "inherited_after_recheck")
+            self.assertEqual(repair_gate["inheritedFromRunId"], started["runId"])
+            self.assertEqual(
+                repair_gate["observedRepositories"]["code"]["status"],
+                "stale",
+            )
             self.assertEqual(
                 repair_context["parentFailedValidationRunId"],
                 validation_run["runId"],
@@ -3618,6 +3715,7 @@ class TaskRunnerTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            _refresh_exploration_cache(feature_dir, code)
             started = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(module),
@@ -3871,6 +3969,7 @@ class TaskRunnerTest(unittest.TestCase):
                     _git(code, "add", test.relative_to(code).as_posix())
                     _git(code, "commit", "-m", "add test baseline")
 
+                _refresh_exploration_cache(feature_dir, code)
                 started = _run(
                     "start", "--workspace", str(workspace), "--feature", "alpha",
                     "--task-id", "T001", "--code-workspace", str(module),
@@ -4482,6 +4581,31 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(run["abortWhy"], "abandon implementation")
             self.assertEqual(run["changedFilesAtAbort"], ["implemented.txt"])
             self.assertEqual(run["fileChangesAtAbort"][0]["operation"], "created")
+
+    def test_abort_does_not_reuse_fresh_gate_after_critical_path_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            started = _start(workspace, code)
+            self.assertEqual(started["explorationGate"]["source"], "current_cache")
+            aborted = _run(
+                "abort", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--run-id", started["runId"],
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(aborted.returncode, 0, aborted.stdout + aborted.stderr)
+
+            (code / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+            restarted = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+
+            self.assertNotEqual(restarted.returncode, 0)
+            payload = json.loads(restarted.stdout)
+            self.assertEqual(payload["error"], "code_exploration_not_ready:code:stale")
+            self.assertIn("pom.xml", payload["criticalHits"])
+            run_paths = list((feature_dir / ".task-runs" / "T001").glob("*.json"))
+            self.assertEqual(len(run_paths), 1)
 
     def test_resume_reuses_original_snapshot_and_completes_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5704,6 +5828,14 @@ class TaskRunnerTest(unittest.TestCase):
 
             (code / "retry-ready").write_text("ready\n", encoding="utf-8")
             second_run = _start(workspace, code)
+            self.assertEqual(
+                second_run["explorationGate"]["source"],
+                "inherited_after_recheck",
+            )
+            self.assertEqual(
+                second_run["explorationGate"]["inheritedFromRunId"],
+                first_run["runId"],
+            )
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
             completed = _run(
                 "complete", "--workspace", str(workspace), "--feature", "alpha",
