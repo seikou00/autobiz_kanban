@@ -15,7 +15,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
 ## explore
-使用task工具进入设计探索模式。未提供的上游产物根据缺失清单处理，不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+使用task工具，指定Explore-autodev角色，进入设计探索模式。未提供的上游产物根据缺失清单处理，不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
 > 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 plan.md` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
@@ -317,9 +317,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
 - [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 PLAN.md 已同步记录，并更新相关任务或风险项。
 
-如果task工具可用，使用task工具同时对比specs、proposal与design.md和plan.md文件进行严格的审查，主要从三个维度核查：1.技术选择是否合理，2.规格是否完全覆盖，3.测试是否合理和完备。
+使用task工具,指定critic-autodev角色，同时对比specs、proposal与design.md和plan.md文件进行严格的审查，主要从三个维度核查：1.技术选择是否合理，2.规格是否完全覆盖，3.测试是否合理和完备。
 如任一task工具返回有问题需要修复plan.md与design.md。
-如果task不可用则不用执行上面的内容。继续任务。
 ---
 
 ## 整体完成条件
