@@ -461,11 +461,16 @@ f52ef45  机器契约层存在
 （324 行）与 `plan_initial_tasks` / `plan_execution_contract`，把 plan 校验
 重建成文档驱动形态。
 
+**该剥离已确认为有意的架构选择**（用户裁定），不是不完整的重构。因此本文
+所说的「移植 dev_workflow_py 的能力」，必须理解为**加法式适配**：
+新能力注册但默认不挂载，dev_0803 的文档驱动路径保持默认且可用。
+这与 §3 F00 原则「所有新策略默认关闭，保持基线行为」一致。
+
 两个推论：
 
-1. §9.4 描述的 board_config 验证器互斥，本质是**一次回退与它所回退的对象**之间的冲突，
-   不是两套并行设计之争。据此，方案 3 中「F01 只是恢复被删掉的东西，不是覆盖更新的设计」
-   成立，board_config 走 JSON 路径。
+1. §9.4 描述的 board_config 验证器互斥，是**两套都有效的设计之间的冲突**，
+   且 dev_0803 一侧是刻意选择的基线。不能用 JSON 路径覆盖它。
+   正确做法见 §9.9。
 2. 本文所说的「移植 dev_workflow_py 的能力」，对其中 7 个 hook 模块和 16 个测试文件
    而言，准确表述是**恢复 `aafc857` 删除的文件**。§9.6 把 28 个模块全部称为
    「纯新增」是错的，正确划分见 §9.7。
@@ -536,8 +541,8 @@ F02 之前应按此标准重新审计一遍，不要复用初稿的文件清单�
    F01 只交付 hooks + `artifact_check.py` + Writer/Evidence 测试，
    `test_json_writers` 中 3 项 stage_gate 测试作为已知失败留到 F02 转绿。
 
-当前建议方案 3，理由是能让 F01 保持独立可提交，且 F02 无论如何都要动 `dev.plan`。
-方案 1 最贴合本文「新策略默认关闭」的原则，但需先确认 profile 机制能否表达这一点。
+**结论（已裁定）**：以上三个方案都建立在「可以覆盖 dev_0803 的验证器」这个
+前提上，而该前提是错的。正确做法见 §9.9。
 
 ### 9.5 测试文件的归属修订
 
@@ -606,5 +611,68 @@ validation_groups  validation_policy  verify_decision_writer
 3. 同一原因导致 `git log --diff-filter=D` 查不到删除提交，一度以为
    「文件不在树里但没有删除提交」。
 
-结论：涉及 git ref 拼接一律加引号（`"$A:$f"`）；比对脚本必须先用
-已知答案的样本自检，再用于判断。
+4. zsh 在 ref 与路径拼接处报 `bad substitution`，输出的 0 被当成「模板里没有该段」。
+5. `git show > 文件` 产出 0 字节空文件，后续 grep/sed 全部返回空，
+   空输出被读成「未命中」，据此得出「dev_0803 的 SKILL.md 残留悬空引用」
+   的错误结论，并一度用它来判断 `aafc857` 的性质。
+
+结论：涉及 git ref 拼接一律加引号（`"$A:$f"`）；导出到文件后先用
+`wc -c` 确认非空再比对；比对脚本必须先用已知答案的样本自检，再用于判断。
+
+## 10. 加法式适配（§9.9）
+
+### 9.9 board_config 的正确适配方式
+
+`aafc857` 的剥离是有意的，因此 `dev.plan` / `dev.code` 上：
+
+- **保持** dev_0803 的文档型验证器为基线默认：
+  `plan_initial_tasks`、`plan_execution_contract`、`plan_finished_tasks`。
+- **注册但不挂载** 机器契约验证器：`plan_json_contract`、
+  `plan_json_initial_tasks`、`plan_ref_resolution`、`plan_task_granularity`、
+  `plan_scenario_coverage`、`plan_task_detail_schema`、
+  `evidence_detail_quality`、`evidence_integrity`、`code_done_gate` 等。
+  它们在 `artifact_check.py` 的 `VALIDATORS` 中可用（F01 已完成），
+  但不出现在任何 stage 的 `validators` 数组里。
+
+即：F01 的价值是让这些验证器**可用**，不是让它们**生效**。
+
+### 9.10 两条路径无法用现有 profile 机制并存
+
+已确认 `workflow.profiles` 只支持通过 `insertBefore` 做**节点插入**
+（见 `frontend_before_specs`），没有节点字段的覆盖机制，
+`workflow_compiler.py` 中也没有 profile 级 `validators` 处理。
+
+因此「按 profile 选择验证器集」在当前代码里无法表达。要做到并存，需要
+新增 profile 级 `validators` 覆盖能力 —— 属于新设计，超出从
+`dev_workflow_py` 移植的范围，不应塞进 F01–F11 任何一个特性。
+
+在该能力落地之前，机器契约路径只能停留在「已注册、未挂载」状态。
+
+### 9.11 受此影响的测试处置
+
+两套验证器互斥是**对称**的：挂哪一套，另一套经 `board_config` 分派的
+测试就失效。实测数字：
+
+| board_config 挂载 | 失效测试 |
+| --- | --- |
+| JSON 路径 | `PlanExecutionCheckTest` 2 项 |
+| 文档路径（基线，当前选择） | `test_json_writers` 的 stage_gate 2 项 |
+
+当前按基线处置：
+
+- `PlanExecutionCheckTest` 恢复，`test_artifact_contracts` 78/78 无 skip。
+- `test_json_writers` 的 `test_stage_gate_matches_run_postcheck` 与
+  `test_plan_structure_passes_while_stage_gate_fails_on_missing_scenario`
+  标记 skip，原因中记明启用条件（board_config 显式选择 JSON 路径，
+  依赖 §9.10 的覆盖机制）。
+- 两类测试中直调 `plan_check_main` / `detect_cycle` /
+  `plan_writer --structure` 的用例都不经 `board_config` 分派，
+  两种挂载下均有效，未受影响。
+
+### 9.12 SKILL.md 合并方向
+
+同理，`autodev-plan/SKILL.md` 与 `autodev-code/SKILL.md` 的合并中，
+**dev_0803 的重写是权威版本**，`dev_workflow_py` 的内容以加法方式嵌入，
+而不是反过来。凡与文档驱动流程冲突的段落（例如把 `PLAN.md` 换成
+`plan.json` 作为唯一事实源、批次会话入口 `code-session`），
+在机器契约路径挂载之前都不应写入基线。
