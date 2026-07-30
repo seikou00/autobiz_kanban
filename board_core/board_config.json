@@ -362,11 +362,10 @@
           ],
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
-            { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true }
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
           ]
         },
-        "validators": ["design_contract", "plan_json_contract", "plan_json_initial_tasks", "plan_ref_resolution", "plan_task_granularity", "plan_scenario_coverage"]
+        "validators": ["design_contract", "plan_initial_tasks", "plan_execution_contract"]
       },
       {
         "id": "dev.code",
@@ -411,9 +410,9 @@
               "extract": {
                 "degrade": "无 design 时基于 已有产物 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
               } },
-            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
               "extract": {
-                "degrade": "无 plan.json 或结构已过时时，回到 /autodev-plan 清理并按当前唯一结构重新生成；不得建立旁路任务队列"
+                "degrade": "无 PLAN 契约时从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务），逐项实现并在完成摘要中记录任务与验证结果"
               } },
             { "id": "detail_design_optional", "label": "详细设计参考", "artifactType": "file", "path": "DETAIL_DESIGN.md", "required": false,
               "extract": {
@@ -421,13 +420,9 @@
               } }
           ],
           "outputs": [
-            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
-              "extract": {
-                "degrade": "缺失时由 task_runner 首次验证时在 Feature 产物目录原子创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
-              } }
           ]
         },
-        "validators": ["plan_json_contract", "plan_task_detail_schema", "plan_ref_resolution", "plan_finished_tasks", "evidence_detail_quality", "code_done_gate", "evidence_integrity"],
+        "validators": ["plan_finished_tasks"],
         "guards": ["code_compile"]
       },
       {

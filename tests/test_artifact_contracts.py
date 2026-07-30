@@ -744,11 +744,6 @@ class PlanExecutionCheckTest(ContractTestBase):
         self.assertEqual(code, 0, output)
         self.assertIn("verdict=PASS", output)
 
-    @unittest.skip(
-        "F02: dev.plan 走 JSON 路径后 plan_execution_contract 不再注册，"
-        "依赖环检测由 plan_json_contract 承担。本测试经 run_postcheck 分派，"
-        "因此失效；同类的 plan_check_main 直调测试仍然有效。"
-    )
     def test_plan_postcheck_passes_valid_execution_contract(self) -> None:
         self._write_upstream()
         self.write("PLAN.md", PLAN_OK)
@@ -1003,11 +998,6 @@ class PlanExecutionCheckTest(ContractTestBase):
             },
         )
 
-    @unittest.skip(
-        "F02: dev.plan 走 JSON 路径后 plan_execution_contract 不再注册，"
-        "依赖环检测由 plan_json_contract 承担（plan_dependency_cycle）。"
-        "本测试经 run_postcheck 分派，因此失效；detect_cycle 直调测试仍然有效。"
-    )
     def test_plan_postcheck_blocks_dependency_cycle(self) -> None:
         self._write_upstream()
         plan = PLAN_OK.replace(
