@@ -702,3 +702,102 @@ modules_compile.json 编译清单
 `autodev-plan/SKILL.md` 简单得多：两侧 9 段中只有一段名称不同
 （dev_0803「生成 PLAN.md」对应 wpy「生成 plan.json 与批次」），
 前 149 行完全相同，取 wpy 侧后补回 dev_0803 的独有段落即可。
+
+### §9.13 后端线合入完成后的两处遗留
+
+后端线（F00 -> F01 -> F02 -> F03 -> F04 -> F08 -> F10 -> F11）已全部合入
+`integration/dev_0803-feature-platform`。合入后仍有两处未由本轮解决，都不是
+合并引入，均在 `origin/dev_0803` 或 `dev_workflow_py` 净 worktree 上可复现。
+
+#### 一、`test_request_user_input_protocol` 与 AGENTS.md 自相矛盾（未修）
+
+`tests/test_request_user_input_protocol.py::test_specs_only_adjudicates_open_questions`
+断言 `skills/autodev/autodev-specs/SKILL.md` 必须包含
+「不把切分、命名或规格范围交给用户确认」。
+
+而 `AGENTS.md` 第 5 行把这句话本身列为技能编写反模式的示例：
+
+```text
+- 不要把需求或者改动目的写入技能中，保持技能克制、干净，例如"capability 切分、
+  Operations、Spec Path 和稳定 ID 由模型完成，不把切分、命名或规格范围交给用户
+  确认"不用写在技能中
+```
+
+两者直接冲突。该语义已由 `autodev-specs/SKILL.md:109`
+「全部条目裁定后直接生成 proposal 与 specs，不再确认 capability 切分或规格范围」
+以 AGENTS.md 合规的形式表达。
+
+在 `origin/dev_0803` 净 worktree 上同样失败（其余 4 条断言均通过，只缺这一条），
+属基线既有矛盾。修哪一侧是项目策略选择：改测试断言（承认 AGENTS.md 为准）
+或改技能文本（承认测试为准）。本轮不单方面裁定，保留失败并记录在此。
+
+#### 二、两套 spec ID 约定并存（已确认边界，未统一）
+
+合并后的 `artifact_check.py` 同时存在两套 spec 标题约定，各自服务一族校验器：
+
+| 约定 | 正则常量 | 标题形态 | 使用者 |
+| --- | --- | --- | --- |
+| wpy | `SPEC_REQUIREMENT_DEF_RE` / `SPEC_SCENARIO_DEF_RE` | `### Requirement [REQ-001]:` / `#### Scenario [SCN-001]:` | `_spec_definition_index`、`_spec_scenario_refs_by_path`（即全部下游 JSON 校验器的 scenario 索引来源） |
+| dev_0803 | `REQ_HEADING` / `SCN_HEADING` | `### REQ-<capability>-NNN:` / `#### SCN-<capability>-NNN-NN:` | `validate_specs_contract`、`spec_declared_ids`、`spec_actual_operations` |
+
+两族各自的测试都通过（`test_plan_json_and_evidence` / `test_json_writers` /
+`test_task_runner` 用 wpy 形态；`test_artifact_contracts` 用 dev_0803 形态），
+因此不是合并造成的破坏。但 `autodev-specs/SKILL.md`（保留 dev_0803 版）指导模型
+按 dev_0803 形态写 specs，而下游 JSON 校验器按 wpy 形态建索引：
+
+```text
+0803 形态 spec -> collect_spec_definition_index() -> REQ=[] SCN=[]
+wpy  形态 spec -> collect_spec_definition_index() -> REQ=['REQ-001'] SCN=['SCN-001']
+```
+
+后果：真实特性的 specs 若按技能指导写成 dev_0803 形态，
+`VERIFY_DECISION.json` / `E2E_RESULT.json` / `REVIEW_FINDINGS.json` /
+`UNIT_TEST_RESULT.json` 中每个 `scenarioRef` 都会报
+`unknown_verify_scenario_ref` / `unknown_scenario_coverage_ref`。
+
+另注：scenario ref 的比较对象是裸 ID（`SCN-001`），而
+`verify_decision_writer.py derive-scenario-coverage` 产出的是路径限定形式
+（`specs/cap/spec.md#SCN-001`），两者不相等。本轮 `test_needs_fix_state`
+的 fixture 因此使用裸 ID 传入 `update-scenario`。
+
+统一这套约定要同时改 `autodev-specs/SKILL.md`、两族校验器、writer 的 ref 形态
+以及两个测试文件的 fixture，跨 F01 已合入的校验器，属独立收口项，不在后端合入
+范围内。留待专门处理。
+
+### §9.14 测试归属表的补充：11 个原表未列的 `dev_workflow_py` 独有测试文件
+
+§ 前面的测试归属表只列了 4 项，实测 `dev_workflow_py` 相对基线共有 15 个独有
+测试文件，其中 11 个原表未列。逐个在合入后的 HEAD 上实跑分类：
+
+已随后端线合入（在 HEAD 上直接通过，为已合代码的额外覆盖）：
+
+| 文件 | 用例数 |
+| --- | --- |
+| `test_advisory_smoke.py` | 5 |
+| `test_plan_granularity.py` | 9 |
+| `test_inspect_skill_contract_plain.py` | 14 |
+| `test_biz_validate_prd.py` | 14 |
+| `test_biz_validate_contract_aware.py` | 5 |
+
+`test_biz_validate_contract_aware.py` 依赖 `test_biz_validate_prd.py` 做模块导入，
+两者必须同批合入。
+
+延后（依赖未合入的特性，失败原因已定位）：
+
+| 文件 | 失败 | 阻塞原因 / 归属 |
+| --- | --- | --- |
+| `test_workflow_skip.py` | ImportError | 需要 wpy 版 `update_checkpoint.validate_fix_request_for_needs_fix`；HEAD 保留 dev_0803 的 FIX_REQUEST 门禁实现 |
+| `test_skip_node_cli.py` | ImportError | 导入 `tests.test_workflow_skip`，随上一项 |
+| `test_state_json_source.py` | ImportError | 需要 dev_0803 已删除的 `validate_plan_json_for_checkpoint`（原表已记，F02） |
+| `test_dynamic_workflow.py` | 8 failures | 动态工作流轨道，不属 F00-F11 任一特性 |
+| `test_workflow_subset.py` | 6 failures + 1 error | 同上 |
+| `test_workflow_next_actions.py` | 25 failures | 同上 |
+| `test_skill_artifact_drift.py` | 1 failure | SKILL/产物漂移断言，依赖前端阶段装配 |
+| `test_artifact_check_id_contracts.py` | 7 failures | 原表已记，F05（UI Context / plan UI projection） |
+| `tests/test_frontend_route_gate.py` | 未引入 | F06 |
+| `tests/test_frontend_review_runner.py` | 未引入 | F07 |
+
+`test_workflow_skip.py` / `test_skip_node_cli.py` / `test_dynamic_workflow.py` /
+`test_workflow_subset.py` / `test_workflow_next_actions.py` 构成一条原分析完全
+遗漏的「动态工作流 / 阶段跳过」轨道（合计约 2200 行测试）。它既不在后端线也不在
+前端线，需要单独定特性编号与合入顺序。
