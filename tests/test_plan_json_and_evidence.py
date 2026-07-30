@@ -341,6 +341,29 @@ class PlanJsonTest(unittest.TestCase):
             validate_test_tasks(plan),
         )
 
+    def test_external_dependency_nonempty_validation_plan_reports_only_mode_error(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task.update({
+            "executionMode": "external_dependency",
+            "externalDependency": {
+                "system": "external-system",
+                "owner": "external-team",
+                "trackingRefs": ["design.md#D-001"],
+            },
+            "completionPolicy": "external_dependency_recorded",
+            "validationCommands": [],
+            "validationTestPlan": [{"malformed": True}],
+        })
+
+        errors = validate_test_tasks(plan)
+
+        self.assertIn("T001.external_dependency_validationTestPlan_forbidden", errors)
+        self.assertFalse(
+            any(error.startswith("T001.validationTestPlan") for error in errors),
+            errors,
+        )
+
     def test_plan_requires_workspace_roots_for_nonempty_scope_paths(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         plan["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]

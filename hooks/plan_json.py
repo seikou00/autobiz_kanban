@@ -49,7 +49,11 @@ INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
 VISUAL_SOURCE_ID_RE = re.compile(r"^VIS-\d{3}$")
 TASK_SET_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 FRONTEND_ROUTES = {"none", "spec-driven-ui", "absolute-html", "standard-html", "missing-html"}
-COMPLETION_POLICIES = {"all_required_validations_pass"}
+COMPLETION_POLICIES = {
+    "all_required_validations_pass",
+    "external_dependency_recorded",
+}
+TASK_EXECUTION_MODES = {"code", "verified_existing", "external_dependency"}
 BATCH_VALIDATION_MODES = {"commands", "task_covered"}
 TASK_VALIDATION_POLICY_MODES = {"deferred_batch"}
 TASK_VALIDATION_ORCHESTRATIONS = {"single_batch_subagent"}
@@ -65,6 +69,7 @@ TASK_VALIDATION_STATUSES = {
     "invalidated",
 }
 TASK_VALIDATION_ERROR_CATEGORIES = {
+    "external_dependency",
     "environment_failure",
     "source_compile_failure",
     "test_compile_failure",
@@ -93,7 +98,11 @@ BATCH_VALIDATION_STATUSES = {
     "passed",
     "deferred",
 }
-VALIDATION_DEFERRAL_REASONS = {"environment_failure", "repair_attempts_exhausted"}
+VALIDATION_DEFERRAL_REASONS = {
+    "environment_failure",
+    "repair_attempts_exhausted",
+    "external_dependency",
+}
 VALIDATION_DEFERRAL_SCOPES = {"task", "batch", "project"}
 VALIDATION_DEFERRAL_STATUS = "deferred"
 DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS = 2
@@ -165,6 +174,13 @@ def normalize_status(status: Any) -> str:
 
 def task_execution_lane(task: dict[str, Any]) -> str:
     return "frontend" if task.get("uiRequired") is True else "backend"
+
+
+def task_execution_mode(task: dict[str, Any]) -> str:
+    """Return the structured execution mode, defaulting legacy plans to code."""
+
+    value = task.get("executionMode")
+    return value if isinstance(value, str) and value in TASK_EXECUTION_MODES else "code"
 
 
 def deferred_task_validation_enabled(data: dict[str, Any]) -> bool:
@@ -613,10 +629,13 @@ def _validate_tasks_container(
             ):
                 errors.append(f"{task_id}.uiRefs.frontendRoute_invalid")
 
+        execution_mode = task_execution_mode(raw_task)
         commands = raw_task.get("validationCommands")
         if not isinstance(commands, list):
             errors.append(f"{task_id}.validationCommands_must_be_array")
-        elif not commands:
+        elif execution_mode == "external_dependency" and commands:
+            errors.append(f"{task_id}.external_dependency_validationCommands_forbidden")
+        elif execution_mode != "external_dependency" and not commands:
             errors.append(f"{task_id}.validationCommands_missing")
         else:
             required_coverage: set[str] = set()
@@ -636,9 +655,26 @@ def _validate_tasks_container(
                     required_coverage.update(
                         item for item in (command.get("covers") or []) if isinstance(item, str)
                     )
-            for criterion_id in sorted(_acceptance_ids(raw_task) - required_coverage):
-                errors.append(f"{task_id}.acceptanceCriteria_uncovered:{criterion_id}")
-        _validate_validation_test_plan(errors, raw_task, task_id)
+            if execution_mode != "external_dependency":
+                for criterion_id in sorted(_acceptance_ids(raw_task) - required_coverage):
+                    errors.append(f"{task_id}.acceptanceCriteria_uncovered:{criterion_id}")
+        raw_validation_test_plan = raw_task.get("validationTestPlan")
+        if execution_mode == "external_dependency":
+            if raw_validation_test_plan not in (None, []):
+                errors.append(f"{task_id}.external_dependency_validationTestPlan_forbidden")
+        else:
+            _validate_validation_test_plan(errors, raw_task, task_id)
+        validation_test_plan = raw_validation_test_plan
+        validation_test_plan = validation_test_plan if isinstance(validation_test_plan, list) else []
+        create_targets = [
+            target
+            for plan in validation_test_plan
+            if isinstance(plan, dict)
+            for target in plan.get("targets", [])
+            if isinstance(target, dict) and target.get("mode") == "create_in_code"
+        ]
+        if execution_mode == "verified_existing" and create_targets:
+            errors.append(f"{task_id}.verified_existing_create_in_code_forbidden")
 
     known_ids = known_task_ids or {task_id for task_id in task_ids if TASK_ID_RE.match(task_id)}
     for task_id, deps in deps_by_task.items():
@@ -1626,6 +1662,25 @@ def _validate_task_details(
     task: dict[str, Any],
     task_id: str,
 ) -> None:
+    raw_execution_mode = task.get("executionMode")
+    if raw_execution_mode is not None and raw_execution_mode not in TASK_EXECUTION_MODES:
+        errors.append(f"{task_id}.executionMode_invalid")
+    execution_mode = task_execution_mode(task)
+    external_dependency = task.get("externalDependency")
+    if execution_mode == "external_dependency":
+        if not isinstance(external_dependency, dict):
+            errors.append(f"{task_id}.externalDependency_missing")
+        else:
+            for field in ("system", "owner"):
+                value = external_dependency.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"{task_id}.externalDependency.{field}_missing")
+            tracking_refs = _string_list(external_dependency.get("trackingRefs"))
+            if not tracking_refs:
+                errors.append(f"{task_id}.externalDependency.trackingRefs_missing")
+    elif external_dependency is not None:
+        errors.append(f"{task_id}.externalDependency_forbidden")
+
     goal = task.get("goal")
     if not isinstance(goal, str) or not goal.strip():
         errors.append(f"{task_id}.goal_missing")
@@ -1725,8 +1780,16 @@ def _validate_task_details(
         errors.append(f"{task_id}.implementationPoints_too_many")
 
     _validate_acceptance_criteria(errors, task, task_id)
-    if task.get("completionPolicy") not in COMPLETION_POLICIES:
+    completion_policy = task.get("completionPolicy")
+    if completion_policy not in COMPLETION_POLICIES:
         errors.append(f"{task_id}.completionPolicy_invalid")
+    expected_completion_policy = (
+        "external_dependency_recorded"
+        if execution_mode == "external_dependency"
+        else "all_required_validations_pass"
+    )
+    if completion_policy in COMPLETION_POLICIES and completion_policy != expected_completion_policy:
+        errors.append(f"{task_id}.completionPolicy_executionMode_mismatch")
 
     validation_boundary = task.get("validationBoundary")
     if not isinstance(validation_boundary, str) or len(validation_boundary.strip()) < 10:

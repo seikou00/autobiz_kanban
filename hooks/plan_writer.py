@@ -49,6 +49,7 @@ from hooks.plan_json import (  # noqa: E402
     MAX_BATCH_TASKS,
     PROJECT_VALIDATION_KINDS,
     REPOSITORY_ID_RE,
+    TASK_EXECUTION_MODES,
     TASK_VALIDATION_KINDS,
     VISUAL_SOURCE_ID_RE,
     batch_plan_path,
@@ -58,6 +59,7 @@ from hooks.plan_json import (  # noqa: E402
     load_plan_bundle,
     normalize_status,
     task_execution_lane,
+    task_execution_mode,
     task_contract_sha256,
     task_covered_command_ids,
     task_set_digest,
@@ -119,6 +121,8 @@ DRAFT_GROUP_OWNED_FIELDS = {
     "splitRationale",
     "validationBoundary",
     "workspaceRef",
+    "executionMode",
+    "externalDependency",
 }
 DRAFT_DETAIL_FIELDS = {
     "goal",
@@ -331,6 +335,13 @@ def _task_group_ui_required_example() -> dict[str, Any]:
     return value
 
 
+def _task_group_external_dependency_example() -> dict[str, Any]:
+    value = _task_group_example().get("externalDependencyExample")
+    if not isinstance(value, dict):
+        raise RuntimeError("task_group_external_dependency_example_must_be_object")
+    return value
+
+
 def _matrix_exception_example() -> dict[str, Any]:
     scenario_refs = [f"specs/[capability]/spec.md#SCN-{index:03d}" for index in range(1, 7)]
     return {
@@ -518,6 +529,30 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(title, str) or not title.strip():
             errors.append({"reason": f"{task_id}.title_missing"})
 
+        raw_execution_mode = raw_group.get("executionMode")
+        if raw_execution_mode is not None and raw_execution_mode not in TASK_EXECUTION_MODES:
+            errors.append({"reason": f"{task_id}.executionMode_invalid"})
+        execution_mode = task_execution_mode(raw_group)
+        external_dependency = raw_group.get("externalDependency")
+        if execution_mode == "external_dependency":
+            if not isinstance(external_dependency, dict):
+                errors.append({"reason": f"{task_id}.externalDependency_missing"})
+            else:
+                for field in ("system", "owner"):
+                    value = external_dependency.get(field)
+                    if not isinstance(value, str) or not value.strip():
+                        errors.append({
+                            "reason": f"{task_id}.externalDependency.{field}_missing"
+                        })
+                _group_string_list(
+                    errors,
+                    external_dependency,
+                    task_id,
+                    "trackingRefs",
+                )
+        elif external_dependency is not None:
+            errors.append({"reason": f"{task_id}.externalDependency_forbidden"})
+
         deps = _group_string_list(
             errors,
             raw_group,
@@ -653,6 +688,12 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         "frontendRoute": ui_refs.get("frontendRoute"),
         "validationBoundary": item.get("validationBoundary"),
         "workspaceRef": item.get("workspaceRef"),
+        "executionMode": item.get("executionMode", "code"),
+        "externalDependency": (
+            copy.deepcopy(item.get("externalDependency"))
+            if isinstance(item.get("externalDependency"), dict)
+            else None
+        ),
         "splitRationale": item.get("splitRationale") or None,
     }
 
@@ -1269,10 +1310,12 @@ def _draft_task_workspace_contract(
 def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str]) -> dict[str, Any]:
     task_id = str(group.get("id"))
     ui_required = group.get("uiRequired") is True
+    execution_mode = group.get("executionMode", "code")
     ui_refs = copy.deepcopy(group.get("uiRefs")) if isinstance(group.get("uiRefs"), dict) else None
     task: dict[str, Any] = {
         "id": task_id,
         "title": group.get("title"),
+        "executionMode": execution_mode,
         "goal": "",
         "status": "todo",
         "deps": copy.deepcopy(group.get("deps", [])),
@@ -1303,13 +1346,19 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         "latestImplementationEvidenceId": None,
         "validationEvidenceIds": [],
         "implementationRevision": 0,
-        "completionPolicy": "all_required_validations_pass",
+        "completionPolicy": (
+            "external_dependency_recorded"
+            if execution_mode == "external_dependency"
+            else "all_required_validations_pass"
+        ),
         "completionEvidenceIds": [],
         "latestPassEvidenceId": None,
         "blockers": [],
     }
     if ui_refs is not None:
         task["uiRefs"] = ui_refs
+    if execution_mode == "external_dependency":
+        task["externalDependency"] = copy.deepcopy(group.get("externalDependency"))
     rationale = group.get("splitRationale")
     if isinstance(rationale, str) and rationale.strip():
         task["splitRationale"] = rationale
@@ -1480,7 +1529,11 @@ def _normalize_draft_task_detail(task: dict[str, Any], detail: dict[str, Any]) -
     candidate["latestImplementationEvidenceId"] = None
     candidate["validationEvidenceIds"] = []
     candidate["implementationRevision"] = 0
-    candidate["completionPolicy"] = "all_required_validations_pass"
+    candidate["completionPolicy"] = (
+        "external_dependency_recorded"
+        if task_execution_mode(candidate) == "external_dependency"
+        else "all_required_validations_pass"
+    )
     candidate["completionEvidenceIds"] = []
     candidate["latestPassEvidenceId"] = None
     return candidate
@@ -1539,6 +1592,11 @@ def _annotate_validation_test_plan(
     code_workspaces: list[str],
 ) -> dict[str, Any]:
     """Persist whether each planned Maven target is reused or created in Code."""
+
+    if task_execution_mode(task) == "external_dependency":
+        candidate = copy.deepcopy(task)
+        candidate["validationTestPlan"] = []
+        return candidate
 
     contexts = _code_workspace_contexts(code_workspaces)
     workspace_roots = task_workspace_roots(task)
@@ -1666,6 +1724,7 @@ def _workspace_roots_from_values(values: list[str] | None) -> dict[str, str]:
 
 
 def _normalize_task(task: dict[str, Any], task_id: str) -> None:
+    task.setdefault("executionMode", "code")
     scenario_refs = [
         ref for ref in task.get("specRefs", []) if isinstance(ref, str) and "SCN-" in ref
     ]
@@ -1707,7 +1766,14 @@ def _normalize_task(task: dict[str, Any], task_id: str) -> None:
             command.setdefault("covers", acceptance_ids)
             commands.append(command)
         task["validationCommands"] = commands
-    task.setdefault("completionPolicy", "all_required_validations_pass")
+    task.setdefault(
+        "completionPolicy",
+        (
+            "external_dependency_recorded"
+            if task_execution_mode(task) == "external_dependency"
+            else "all_required_validations_pass"
+        ),
+    )
     task.setdefault("completionEvidenceIds", [])
     task.setdefault("latestPassEvidenceId", None)
 
@@ -1727,6 +1793,7 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
     task: dict[str, Any] = {
         "id": task_id,
         "title": args.title,
+        "executionMode": "code",
         "goal": args.goal,
         "status": args.status,
         "deps": _split_values(args.dep),
@@ -2644,6 +2711,9 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "taskGroupInputExample": _task_group_example(),
                     "taskGroupMatrixExceptionExample": _task_group_matrix_exception_example(),
                     "taskGroupUiRequiredExample": _task_group_ui_required_example(),
+                    "taskGroupExternalDependencyExample": (
+                        _task_group_external_dependency_example()
+                    ),
                     "recommendedInputMode": "draft-batch",
                     "supportedInputModes": ["draft-batch", "body-file", "body-stdin", "body-json"],
                     "deprecatedInputModes": ["task-directory", "task-json", "cli-fields"],
@@ -2674,7 +2744,11 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "workspaceRef",
                     ],
                     "exampleOnlyTaskFields": ["matrixExceptionExample"],
-                    "exampleOnlyTaskGroupFields": ["matrixExceptionExample", "uiRequiredExample"],
+                    "exampleOnlyTaskGroupFields": [
+                        "externalDependencyExample",
+                        "matrixExceptionExample",
+                        "uiRequiredExample",
+                    ],
                     "groupOwnedTaskFields": sorted(DRAFT_GROUP_OWNED_FIELDS),
                     "requiredTaskDetailFields": sorted(DRAFT_REQUIRED_DETAIL_FIELDS),
                     "writerOwnedDetailFields": {
@@ -2684,6 +2758,21 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "scope": ["pages", "workspaceRoots"],
                     },
                     "fieldRules": {
+                        "executionMode": {
+                            "source": "task_group",
+                            "allowed": sorted(TASK_EXECUTION_MODES),
+                            "default": "code",
+                            "rules": {
+                                "code": "implementation changes are allowed and planned validation may use create_in_code",
+                                "verified_existing": "no implementation changes; validation must reuse an existing executable target",
+                                "external_dependency": "no local implementation or validation command; record structured dependency and defer with blocked Evidence",
+                            },
+                        },
+                        "externalDependency": {
+                            "requiredWhen": "executionMode=external_dependency",
+                            "forbiddenOtherwise": True,
+                            "requiredFields": ["system", "owner", "trackingRefs"],
+                        },
                         "workspaceRef": {
                             "required": True,
                             "type": "repository_id",
@@ -2731,6 +2820,16 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "missingTargetAction": "create_transient_test_in_code",
                         "createdTestRecordedAsChangedFile": False,
                         "runnerRequiresFreshSurefireOrFailsafeExecution": True,
+                        "byExecutionMode": {
+                            "code": ["reuse_existing", "create_in_code"],
+                            "verified_existing": ["reuse_existing"],
+                            "external_dependency": [],
+                        },
+                        "missingTargetActionByExecutionMode": {
+                            "code": "continue_current_implementation_and_create_validation_tests",
+                            "verified_existing": "return_to_plan_and_reuse_existing_validation",
+                            "external_dependency": "record_external_dependency_without_local_test",
+                        },
                     },
                     "taskValidationPolicy": {
                         "mode": "deferred_batch",
@@ -4396,12 +4495,12 @@ def _render_plan_md(data: dict[str, Any]) -> str:
         "",
         "## 任务总览",
         "",
-        "| Task ID | 任务 | 依赖 | 状态 |",
-        "| ------- | ---- | ---- | ---- |",
+        "| Task ID | 任务 | 执行模式 | 依赖 | 状态 |",
+        "| ------- | ---- | -------- | ---- | ---- |",
     ]
     for task in _tasks(data):
         lines.append(
-            f"| {task.get('id', '')} | {task.get('title', '')} | {_fmt(task.get('deps'))} | {task.get('status', '')} |"
+            f"| {task.get('id', '')} | {task.get('title', '')} | {task_execution_mode(task)} | {_fmt(task.get('deps'))} | {task.get('status', '')} |"
         )
     lines.extend(["", "## 任务详情", ""])
     for task in _tasks(data):
@@ -4410,6 +4509,7 @@ def _render_plan_md(data: dict[str, Any]) -> str:
                 f"### Task [{task.get('id', '')}]: {task.get('title', '')}",
                 "",
                 f"- 做什么: {task.get('goal', '')}",
+                f"- 执行模式: {task_execution_mode(task)}",
                 f"- 规格依据: {_fmt(task.get('specRefs'))}",
                 f"- api_id: {_fmt(task.get('apiIds'))}",
                 f"- data_id: {_fmt(task.get('dataIds'))}",
@@ -4429,6 +4529,14 @@ def _render_plan_md(data: dict[str, Any]) -> str:
             label = f"{criterion_id}: {text}" if criterion_id else text
             lines.append(f"  {index}. {label}")
         lines.append(f"- 非目标: {_fmt(task.get('nonGoals'))}")
+        external_dependency = task.get("externalDependency")
+        if isinstance(external_dependency, dict):
+            lines.append(
+                "- 外部依赖: "
+                f"system={external_dependency.get('system', '')}; "
+                f"owner={external_dependency.get('owner', '')}; "
+                f"trackingRefs={_fmt(external_dependency.get('trackingRefs'))}"
+            )
         if task.get("splitRationale"):
             lines.append(f"- 合并理由: {task.get('splitRationale')}")
         commands = task.get("validationCommands", [])

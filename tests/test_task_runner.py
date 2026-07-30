@@ -466,8 +466,9 @@ class TaskRunnerTest(unittest.TestCase):
                     "requestedCodeWorkspaces": [str(code.resolve())],
                     "batchSnapshotSha256": validation_payload["batchSnapshotSha256"],
                     "agentScope": "task_and_batch_validation_commands",
-                    "allowedCommands": ["validate-batch-task", "batch-check"],
-                    "allowedRunnerCommands": ["validate-batch-task", "batch-check"],
+                    "phase": "task_validation",
+                    "allowedCommands": ["validate-batch-task"],
+                    "allowedRunnerCommands": ["validate-batch-task"],
                     "commandAudience": "validation_subagent_only",
                     "executorDirective": {
                         "requiredExecutor": "batch_validation_subagent",
@@ -502,6 +503,7 @@ class TaskRunnerTest(unittest.TestCase):
                             "forbidSecondSubagentForDiagnostics": True,
                             "forbidDuplicateRunnerInvocation": True,
                             "forbidDirectBuildToolInvocation": True,
+                            "ordinaryFailure": "handoff_to_main_agent_without_batch_check",
                         },
                     },
                     "executionGroups": [
@@ -512,6 +514,8 @@ class TaskRunnerTest(unittest.TestCase):
                             "taskIds": ["T001"],
                         }
                     ],
+                    "nextActor": "validation_subagent",
+                    "validationSubagentTerminal": False,
                 },
             )
             resumed_session = _run(
@@ -624,7 +628,20 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(payload["runType"], "batch_task_validation")
             self.assertEqual(payload["runId"], validation_run["runId"])
             self.assertEqual(payload["failedValidationTaskId"], "T001")
-            self.assertEqual(payload["allowedCommands"], ["validate-batch-task", "batch-check"])
+            self.assertEqual(payload["requiredAction"], "handoff_validation_failure_to_main_agent")
+            self.assertEqual(payload["mainAgentRequiredAction"], "inspect_validation_run_and_reconcile")
+            self.assertEqual(payload["mainAgentAllowedRunnerCommands"], [])
+            self.assertEqual(payload["allowedCommands"], [])
+            self.assertEqual(payload["nextActor"], "main_agent")
+            self.assertTrue(payload["validationSubagentTerminal"])
+            self.assertEqual(payload["validationContext"]["allowedCommands"], [])
+            self.assertEqual(payload["validationContext"]["allowedRunnerCommands"], [])
+            self.assertEqual(
+                payload["validationContext"]["subagentProtocol"]["terminalResultPolicy"][
+                    "maxRepairAttempts"
+                ],
+                task_runner_module.DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS,
+            )
 
     def test_missing_validation_executable_is_recorded_and_deferred(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1509,11 +1526,34 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertNotEqual(failed.returncode, 0)
             failed_payload = json.loads(failed.stdout)
-            self.assertEqual(failed_payload["requiredAction"], "fix_or_retry_task_validation")
+            self.assertEqual(
+                failed_payload["requiredAction"],
+                "handoff_validation_failure_to_main_agent",
+            )
+            self.assertEqual(failed_payload["nextActor"], "main_agent")
+            self.assertTrue(failed_payload["validationSubagentTerminal"])
+            self.assertEqual(failed_payload["allowedCommands"], [])
+            self.assertEqual(
+                failed_payload["mainAgentAllowedRunnerCommands"],
+                ["start-validation-repair"],
+            )
+            self.assertEqual(
+                failed_payload["repairState"],
+                {"attempts": 0, "maxAttempts": 2, "exhausted": False},
+            )
             self.assertEqual(failed_payload["runType"], "batch_task_validation")
             self.assertEqual(failed_payload["errorCategory"], "behavior_test_failure")
             self.assertEqual(failed_payload["failedValidationTaskId"], "T001")
             self.assertEqual(failed_payload["repairOwnerTaskIds"], ["T001"])
+            self.assertIsNone(failed_payload["batchCheck"])
+            self.assertEqual(
+                failed_payload["validationContext"]["phase"],
+                "failed_handoff",
+            )
+            self.assertEqual(
+                failed_payload["validationContext"]["allowedCommands"],
+                [],
+            )
             self.assertEqual(
                 failed_payload["validationFailures"],
                 [{
@@ -1550,6 +1590,166 @@ class TaskRunnerTest(unittest.TestCase):
             task = _read_batch(feature_dir)["tasks"][0]
             self.assertEqual(task["validationEvidenceIds"], ["ev_0002", "ev_0003"])
             self.assertEqual(task["completionEvidenceIds"], ["ev_0003"])
+
+    def test_code_no_code_claim_requires_creating_declared_validation_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["validationTestPlan"] = [
+                {
+                    "commandId": "VAL-T001-01",
+                    "framework": "maven",
+                    "targets": [
+                        {
+                            "selector": "ScheduleServiceTest",
+                            "mode": "create_in_code",
+                            "sourceFiles": [],
+                        }
+                    ],
+                }
+            ]
+            _write_batch(feature_dir, batch)
+            _configure_deferred_task_validation(feature_dir)
+            started = _start(workspace, code)
+
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001",
+                "--run-id", started["runId"], "--code-workspace", str(code),
+                "--no-code-change-why", "the implementation already exists",
+                "--supporting-file", "existing.txt",
+            )
+
+            self.assertNotEqual(finished.returncode, 0)
+            payload = json.loads(finished.stdout)
+            self.assertEqual(
+                payload["error"],
+                "code_task_validation_test_creation_required",
+            )
+            self.assertEqual(
+                payload["requiredAction"],
+                "continue_current_implementation_and_create_validation_tests",
+            )
+            self.assertEqual(payload["selectors"], ["ScheduleServiceTest"])
+            self.assertFalse(
+                (
+                    code
+                    / "src/test/java/com/cmb/dw/rtl/bccustvst/service/schedule"
+                    / "ScheduleServiceTest.java"
+                ).exists()
+            )
+
+    def test_code_task_accepts_new_validation_test_as_transient_implementation_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["tasks"][0]["validationTestPlan"] = [
+                {
+                    "commandId": "VAL-T001-01",
+                    "framework": "maven",
+                    "targets": [
+                        {
+                            "selector": "ScheduleServiceTest",
+                            "mode": "create_in_code",
+                            "sourceFiles": [],
+                        }
+                    ],
+                }
+            ]
+            _write_batch(feature_dir, batch)
+            _configure_deferred_task_validation(feature_dir)
+            started = _start(workspace, code)
+            test = code / "src" / "test" / "java" / "ScheduleServiceTest.java"
+            test.parent.mkdir(parents=True)
+            test.write_text("class ScheduleServiceTest {}\n", encoding="utf-8")
+
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001",
+                "--run-id", started["runId"], "--code-workspace", str(code),
+            )
+
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            payload = json.loads(finished.stdout)
+            self.assertEqual(payload["completionMode"], "implemented")
+            self.assertEqual(payload["changedFiles"], [])
+            self.assertEqual(
+                payload["transientValidationFiles"],
+                ["src/test/java/ScheduleServiceTest.java"],
+            )
+
+    def test_external_dependency_records_blocked_evidence_without_test_or_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            task = batch["tasks"][0]
+            task.update(
+                {
+                    "executionMode": "external_dependency",
+                    "externalDependency": {
+                        "system": "LF39.05_bczhaohuapi",
+                        "owner": "zhaohu-team",
+                        "trackingRefs": ["design.md#D-005"],
+                    },
+                    "completionPolicy": "external_dependency_recorded",
+                    "validationCommands": [],
+                    "validationTestPlan": [],
+                }
+            )
+            _write_batch(feature_dir, batch)
+            _configure_deferred_task_validation(feature_dir)
+            started = _start(workspace, code)
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001",
+                "--run-id", started["runId"], "--code-workspace", str(code),
+                "--no-code-change-why", "owned by the external notification service",
+                "--supporting-file", "existing.txt",
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            validation_run = json.loads(
+                _run(
+                    "start-batch-task-validation", "--workspace", str(workspace),
+                    "--feature", "alpha", "--batch-id", "B001",
+                    "--code-workspace", str(code),
+                ).stdout
+            )
+            validated = _run(
+                "validate-batch-task", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001",
+                "--task-id", "T001", "--run-id", validation_run["runId"],
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+            payload = json.loads(validated.stdout)
+            self.assertEqual(payload["validationOutcome"], "passed_with_deferred")
+            self.assertEqual(
+                payload["requiredAction"],
+                "run_batch_check_in_validation_subagent",
+            )
+            self.assertEqual(payload["allowedCommands"], ["batch-check"])
+            issue = payload["deferredIssues"][0]
+            self.assertEqual(issue["reason"], "external_dependency")
+            self.assertEqual(issue["errorCategory"], "external_dependency")
+            self.assertEqual(issue["repairAttempts"], 0)
+            self.assertEqual(issue["maxRepairAttempts"], 0)
+            evidence = _evidence(feature_dir, issue["evidenceIds"][0])
+            self.assertEqual(evidence["action"], "validation")
+            self.assertEqual(evidence["validation"]["result"], "blocked")
+            self.assertEqual(
+                evidence["externalDependency"]["system"],
+                "LF39.05_bczhaohuapi",
+            )
+            self.assertFalse((code / "src/test").exists())
+
+            _check_batch(workspace, code)
+            project = _run(
+                "project-check", "--workspace", str(workspace),
+                "--feature", "alpha", "--code-workspace", str(code),
+            )
+            self.assertEqual(project.returncode, 0, project.stdout + project.stderr)
+            self.assertEqual(check_code_done(feature_dir), [])
 
     def test_deferred_validation_repair_invalidates_current_batch_pointers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2339,10 +2539,16 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(payload["errorCategory"], "source_compile_failure")
             self.assertEqual(payload["diagnosticPaths"], ["src/main/java/example/Second.java"])
             self.assertEqual(payload["repairOwnerTaskIds"], ["T002"])
-            self.assertEqual(payload["requiredAction"], "start_validation_repair")
+            self.assertEqual(
+                payload["requiredAction"],
+                "handoff_validation_failure_to_main_agent",
+            )
+            self.assertEqual(payload["mainAgentRequiredAction"], "start_validation_repair")
+            self.assertEqual(payload["nextActor"], "main_agent")
+            self.assertTrue(payload["validationSubagentTerminal"])
             self.assertEqual(
                 payload["allowedCommands"],
-                ["start-validation-repair", "start-batch-task-validation"],
+                [],
             )
             task_validation = _read_batch(feature_dir)["taskValidation"]
             self.assertEqual(task_validation["failedValidationTaskId"], "T001")
@@ -2354,8 +2560,15 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(session["failedValidationTaskId"], "T001")
             self.assertEqual(session["repairOwnerTaskIds"], ["T002"])
             self.assertEqual(
-                session["validationContext"]["allowedCommands"],
+                session["allowedCommands"],
                 ["start-validation-repair", "start-batch-task-validation"],
+            )
+            self.assertEqual(session["validationContext"]["allowedCommands"], [])
+            self.assertEqual(session["validationContext"]["nextActor"], "main_agent")
+            self.assertEqual(
+                session["validationContext"]["executorDirective"]
+                ["mainAgentAllowedRunnerCommands"],
+                ["start-validation-repair"],
             )
 
             wrong_owner = _run(
@@ -2607,7 +2820,15 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertNotEqual(recovered.returncode, 0)
             payload = json.loads(recovered.stdout)
             self.assertEqual(payload["error"], "task_validation_workspace_changed_after_pass")
-            self.assertEqual(payload["requiredAction"], "restore_batch_snapshot_and_retry_same_run")
+            self.assertEqual(payload["requiredAction"], "handoff_validation_failure_to_main_agent")
+            self.assertEqual(
+                payload["mainAgentRequiredAction"],
+                "restore_batch_snapshot_and_retry_same_run",
+            )
+            self.assertEqual(payload["mainAgentAllowedRunnerCommands"], [])
+            self.assertEqual(payload["allowedCommands"], [])
+            self.assertEqual(payload["nextActor"], "main_agent")
+            self.assertTrue(payload["validationSubagentTerminal"])
             self.assertEqual(_read_batch(feature_dir)["batchValidation"]["status"], "pending")
 
     def test_code_done_rejects_missing_batch_validation_pass(self) -> None:

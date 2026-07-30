@@ -348,6 +348,7 @@ def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
         group = {
             "id": task["id"],
             "title": task["title"],
+            "executionMode": task.get("executionMode", "code"),
             "deps": list(task.get("deps", [])),
             "uiRequired": task.get("uiRequired") is True,
             "workspaceRef": task.get("workspaceRef", "default"),
@@ -359,6 +360,8 @@ def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
                 "public behavior seam validated by one executable command",
             ),
         }
+        if isinstance(task.get("externalDependency"), dict):
+            group["externalDependency"] = dict(task["externalDependency"])
         if task.get("splitRationale"):
             group["splitRationale"] = task["splitRationale"]
         if task.get("uiRequired") is True:
@@ -691,6 +694,95 @@ class JsonWriterTests(unittest.TestCase):
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(root["taskSetStatus"], "finalized")
             self.assertTrue((feature_dir / "PLAN.md").is_file())
+
+    def test_plan_writer_external_dependency_has_no_local_validation_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            task = _plan_task_body()
+            task.update(
+                {
+                    "executionMode": "external_dependency",
+                    "externalDependency": {
+                        "system": "LF39.05_bczhaohuapi",
+                        "owner": "zhaohu-team",
+                        "trackingRefs": ["design.md#D-005"],
+                    },
+                    "validationCommands": [],
+                }
+            )
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            detail_path = root / "T001-detail.json"
+            detail_path.write_text(json.dumps(_draft_detail_body(task)), encoding="utf-8")
+            detailed = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+            self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+            preflight = _run(
+                "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
+            finalized = _run(
+                "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+            formal_task = _read_plan_tasks(feature_dir)[0]
+            self.assertEqual(formal_task["executionMode"], "external_dependency")
+            self.assertEqual(
+                formal_task["completionPolicy"],
+                "external_dependency_recorded",
+            )
+            self.assertEqual(formal_task["validationCommands"], [])
+            self.assertEqual(formal_task["validationTestPlan"], [])
+            self.assertEqual(
+                formal_task["externalDependency"]["trackingRefs"],
+                ["design.md#D-005"],
+            )
+            plan_md = (feature_dir / "PLAN.md").read_text(encoding="utf-8")
+            self.assertIn("执行模式: external_dependency", plan_md)
+            self.assertIn("system=LF39.05_bczhaohuapi", plan_md)
+
+    def test_plan_writer_rejects_create_in_code_for_verified_existing_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, module = _code_module(root)
+            task = _plan_task_body()
+            task["executionMode"] = "verified_existing"
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(module),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+
+            detail = _draft_detail_body(task)
+            detail["validationCommands"][0]["argv"] = ["mvn", "test", "-Dtest=MissingTest"]
+            detail_path = root / "T001-detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+            detailed = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+            self.assertNotEqual(detailed.returncode, 0)
+            self.assertIn("T001.verified_existing_create_in_code_forbidden", detailed.stdout)
+            draft_text = (
+                feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("MissingTest", draft_text)
 
     def test_plan_writer_prepare_draft_projects_backend_and_frontend_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1690,8 +1782,15 @@ class JsonWriterTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["exampleOnlyTaskGroupFields"],
-            ["matrixExceptionExample", "uiRequiredExample"],
+            [
+                "externalDependencyExample",
+                "matrixExceptionExample",
+                "uiRequiredExample",
+            ],
         )
+        external_example = contract["taskGroupExternalDependencyExample"]
+        self.assertEqual(external_example["executionMode"], "external_dependency")
+        self.assertTrue(external_example["externalDependency"]["trackingRefs"])
         group_exception = contract["taskGroupMatrixExceptionExample"]
         self.assertEqual(group_exception["mergedScenarioRefs"], group_exception["specRefs"][1:])
         self.assertIn("splitRationale", group_exception)
@@ -1721,6 +1820,22 @@ class JsonWriterTests(unittest.TestCase):
         )
         self.assertFalse(
             contract["validationTestPlanPolicy"]["createdTestRecordedAsChangedFile"]
+        )
+        self.assertEqual(
+            contract["validationTestPlanPolicy"]["byExecutionMode"],
+            {
+                "code": ["reuse_existing", "create_in_code"],
+                "verified_existing": ["reuse_existing"],
+                "external_dependency": [],
+            },
+        )
+        self.assertEqual(
+            contract["validationTestPlanPolicy"]["missingTargetActionByExecutionMode"],
+            {
+                "code": "continue_current_implementation_and_create_validation_tests",
+                "verified_existing": "return_to_plan_and_reuse_existing_validation",
+                "external_dependency": "record_external_dependency_without_local_test",
+            },
         )
         self.assertEqual(contract["batchValidationKinds"], sorted(BATCH_VALIDATION_KINDS))
         self.assertEqual(
