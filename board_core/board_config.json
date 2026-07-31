@@ -6,6 +6,13 @@
   },
   "supported_deploy_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
   "enable_task_tool": true,
+  "autoMode": {
+    "contextUsageThreshold": 0.9,
+    "maxErrorRetries": 2,
+    "maxStalledSteps": 3,
+    "maxFixReflows": 3,
+    "maxTotalSteps": 120
+  },
   "inspectCommands": {
     "darwin": {
       "knowledge_path": "${pluginPath}/sys",
@@ -19,7 +26,8 @@
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
+      "auto_next_step": "python3 ${pluginPath}/hooks/auto_next_step.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --event-json ${eventJson}"
     },
     "linux": {
       "knowledge_path": "${pluginPath}/sys",
@@ -33,7 +41,8 @@
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform linux --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform linux --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
+      "auto_next_step": "python ${pluginPath}/hooks/auto_next_step.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --event-json ${eventJson}"
     },
     "win32": {
       "knowledge_path": "${pluginPath}\\sys",
@@ -47,7 +56,8 @@
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --write-board-config",
-      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --platform win32 --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --platform win32 --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
+      "auto_next_step": "python ${pluginPath}\\hooks\\auto_next_step.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --event-json ${eventJson}"
     }
   },
   "workflow": {
