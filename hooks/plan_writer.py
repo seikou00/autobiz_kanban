@@ -92,23 +92,7 @@ from hooks.validation_policy import (  # noqa: E402
 PLAN_FILE = "plan.json"
 PLAN_MD_FILE = "PLAN.md"
 PLAN_WRITE_TRANSACTION_FILE = ".plan-write-transaction.json"
-SPEC_SCENARIO_DEF_RE = re.compile(
-    r"^####\s+(?:Scenario\s+\[(?P<bracketed>SCN-\d{3})\]"
-    r"|(?P<plain>SCN-[a-z0-9][a-z0-9-]*?-\d{3}-\d{2})):\s*\S",
-    re.MULTILINE,
-)
-
-
-def _spec_def_ids(pattern: "re.Pattern[str]", text: str) -> list[str]:
-    """抽取 spec 标题中定义的稳定 ID，兼容两种标题写法。
-
-    `### Requirement [REQ-001]:` 与 `### REQ-<capability>-001:` 均可识别；
-    scenario 同理。返回顺序与出现顺序一致，便于上游做重复检测。
-    """
-    ids: list[str] = []
-    for match in pattern.finditer(text):
-        ids.append(match.group("bracketed") or match.group("plain"))
-    return ids
+SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
 SCENARIO_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 TASK_GROUP_TASK_ID_RE = re.compile(r"^T\d{3}$")
 TASK_GROUP_REQUIREMENT_ID_RE = re.compile(r"\bREQ-\d{3}\b")
@@ -1677,10 +1661,7 @@ def _scenario_coverage(feature_dir: Path, task_items: list[dict[str, Any]]) -> t
     for spec_path in sorted((feature_dir / "specs").glob("**/*.md")):
         relative = spec_path.relative_to(feature_dir).as_posix()
         text = spec_path.read_text(encoding="utf-8")
-        expected.update(
-            f"{relative}#{scenario_id}"
-            for scenario_id in _spec_def_ids(SPEC_SCENARIO_DEF_RE, text)
-        )
+        expected.update(f"{relative}#{scenario_id}" for scenario_id in SPEC_SCENARIO_DEF_RE.findall(text))
 
     covered: set[str] = set()
     for task in task_items:

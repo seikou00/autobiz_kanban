@@ -13,11 +13,19 @@
 - [用户可见或系统外部可观察的变化]
 - [新增/修改/移除的能力]
 
-## Capability Index
+## Capabilities
 
-| Capability ID | Capability | Operations | Spec Path | Status |
-|---------------|------------|------------|-----------|--------|
-| CAP-[name] | [kebab-case-name] | ADDED | specs/[name]/spec.md | confirmed |
+### New Capabilities
+
+- `[capability-name]`: [能力说明，对应 specs/<capability-name>/spec.md]
+
+### Modified Capabilities
+
+- `[existing-capability]`: [修改原因与范围；无则写“无”]
+
+### Removed Capabilities
+
+- `[removed-capability]`: [移除原因；无则写“无”]
 
 ## Impact
 
@@ -31,16 +39,8 @@
 
 - [本轮明确不做的内容]
 
-## Decision Log
-
-### DEC-001: [决策标题]
-
-- **决定:** [定了什么行为、边界或口径]
-- **为什么:** [理由]
-- **否决:** [被否决的备选及原因；无真实备选写“无”]
-- **约束:** [关联的稳定 ID：`REQ-<capability>-NNN`；尚未落到具体 Requirement 时写 `CAP-<name>`]
-
 ## Open Questions
 
-| ID | Question | Impact | Resolution | Decision | Status |
-|----|----------|--------|------------|----------|--------|
+| ID | Question | Impact | Status |
+|----|----------|--------|--------|
+| Q-01 | [待确认问题；无则写“无”] | [影响] | 已确认/待确认 |

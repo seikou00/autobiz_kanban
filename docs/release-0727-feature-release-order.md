@@ -515,6 +515,8 @@ F02 之前应按此标准重新审计一遍，不要复用初稿的文件清单�
 （20 个常量 + 71 个函数），VALIDATORS 分派表取并集、同名键以 `dev_0803` 为准，
 并向 `from common import` 补 `plan_task_blocks` `task_count` `task_statuses`。
 合并后 3434 行、29 个验证器，`test_artifact_contracts` 78/78 通过。
+（本节记合并当时的实测。该文件与 `plan_execution_check.py` 后续随 D 式 回退整体删除，
+`validate_specs_contract` / `validate_proposal_contract` 也回退为 W 式短形态，见 §9.11 与 §9.13。）
 
 推论：F02–F08 无法通过"整份文件取某一侧"来切分，每个特性只能往这份合并文件里
 **追加函数与分派表条目**。
@@ -634,9 +636,13 @@ validation_groups  validation_policy  verify_decision_writer
 但不再是 `dev.code` 的机器事实源。
 
 dev_0803 的文档型验证器 `plan_initial_tasks` / `plan_execution_contract`
-随之不再挂载，其实现（`artifact_check.py` 中的函数、
-`skills/autodev/hooks/plan_execution_check.py`）保留在树里不删除，
-以便需要时回退。
+随之不再挂载。本节初版裁定其实现「保留在树里不删除，以便需要时回退」，
+该裁定后续被推翻：spec ID 约定回退到括号式（`REQ-001` / `SCN-001`）后，
+`plan_execution_check.py` 依赖的 `REQ_HEADING` / `SCN_HEADING` / `section_text`
+（capability 前缀式正则与 `Capability Index` 解析）随 D 式一并删除，
+该文件失去可编译的依赖基础。因此 `plan_execution_contract` 的实现
+与 `skills/autodev/hooks/plan_execution_check.py` 已从树中删除，
+回退路径改为经 git 历史取回。
 
 ### 9.10 两条路径无法用现有 profile 机制并存
 
@@ -662,7 +668,7 @@ dev_0803 的文档型验证器 `plan_initial_tasks` / `plan_execution_contract`
 | JSON 路径 | `PlanExecutionCheckTest` 2 项 |
 | 文档路径（基线，当前选择） | `test_json_writers` 的 stage_gate 2 项 |
 
-按裁定挂载 JSON 路径，处置为：
+按裁定挂载 JSON 路径，初版处置为：
 
 - `PlanExecutionCheckTest` 的 `test_plan_postcheck_passes_valid_execution_contract`
   与 `test_plan_postcheck_blocks_dependency_cycle` 标记 skip，
@@ -673,6 +679,16 @@ dev_0803 的文档型验证器 `plan_initial_tasks` / `plan_execution_contract`
 - 两类测试中直调 `plan_check_main` / `detect_cycle` /
   `plan_writer --structure` 的用例都不经 `board_config` 分派，
   两种挂载下均有效，未受影响。
+
+上述 skip 处置已随 §9.9 的裁定推翻而失效。`plan_execution_check.py` 删除后，
+`PlanExecutionCheckTest`（22 项）连同 `tests/test_artifact_contracts.py`
+整体删除 —— 该文件由 `d7350ab` 随 D 式引入，其余 6 个测试类是此后累积的，
+一并随文件移除。依赖环检测仍由 `plan_json_contract` 的
+`plan_dependency_cycle` 承担，`test_json_writers` 不受影响。
+
+由此丢失覆盖的四项，无其他测试文件承接，属已知缺口：
+`validate_design_contract`、`validate_plan_initial_tasks`、
+`validate_plan_finished_tasks`、`find_template_guidance_residue`。
 
 ### 9.12 SKILL.md 合并方向
 
@@ -770,31 +786,55 @@ spec 声明 3 个 Scenario，VERIFY_DECISION 全部数组留空、verdict=pass
 
 即错配不是让流程报错卡住，而是把 verify 的 scenario 覆盖门整个变成空操作。
 
-**处置**：取方向 A——让索引同时识别两种标题写法，技能与模板不动。共 6 个正则
-常量并集化 + 1 个抽取 helper，3 个文件 49 行：
+**初版处置（已被推翻）**：曾取方向 A——让索引同时识别两种标题写法，技能与模板
+不动，6 个正则常量并集化 + 1 个抽取 helper `_spec_def_ids()`，涉及
+`artifact_check.py`、`hooks/plan_writer.py`、`hooks/plan_granularity.py`
+三份重复副本（三份副本是这个缺陷能长期潜伏的原因之一：改一处不会让另两处跟上）。
+方向 A 零 fixture 改动、向后完全兼容，但把「两套约定并存」固化成了长期状态。
+
+**最终处置：取方向 B——统一到括号式（`REQ-001` / `SCN-001`），移除 D 式支持。**
+并集正则回退为括号式单一形态，三份副本同步；技能与模板改回教括号式，
+使「技能教的」与「校验器索引的」收敛到同一种写法。
 
 | 文件 | 改动 |
 | --- | --- |
-| `skills/autodev/hooks/artifact_check.py` | `REQ_ID`、`SCN_ID`、`SPEC_REQUIREMENT_DEF_RE`、`SPEC_SCENARIO_DEF_RE` 并集化 + `_spec_def_ids()` |
-| `hooks/plan_writer.py` | 该文件自带一份 `SPEC_SCENARIO_DEF_RE` 副本（非 import），同步 |
-| `hooks/plan_granularity.py` | 第三份 `SCN_ID` 副本，同步 |
+| `skills/autodev/hooks/artifact_check.py` | 4 个正则回退为括号式；删除 D 式孤儿实现 28 处 / 245 行（详见下表） |
+| `hooks/plan_writer.py` | `SPEC_SCENARIO_DEF_RE` 副本回退，删 `_spec_def_ids()` |
+| `hooks/plan_granularity.py` | `SCN_ID` 副本回退 |
+| `autodev-specs/SKILL.md` + `templates/{proposal,spec}.md` | 回退到 `77eb793` 的 W 式基线；版本号 v1.3.1706 → v1.4.1707 |
+| `autodev-plan/templates/{design,plan}.md` | 示例行的 D 式 ID 改为括号式 |
 
-三份重复副本是这个缺陷能长期潜伏的原因之一：改一处不会让另两处的行为跟上。
+`artifact_check.py` 的删除分三层，按不动点分析确定（种子 8 个 + 级联 15 个
++ 已零引用 4 个）：
 
-初版估「跨 F01 已合入校验器 + 技能 + writer + 两个测试 fixture」是高估。实测
-**零 fixture 改动**：并集正则在旧式输入下与原正则结果逐字节一致，向后完全兼容。
-全套测试（含 test_task_runner 127）在修复后全绿。
+| 层 | 符号 |
+| --- | --- |
+| 种子（直接孤儿） | `spec_declared_ids`、`validate_open_questions_rows`、`parse_open_questions`、`parse_capability_index`、`index_placeholder_rows`、`parse_operations_cell`、`malformed_contract_headings`、`validate_plan_execution_contract` |
+| 级联（删种子后才成孤儿） | `CAP_ID_HEADER`、`REQ_HEADING`、`VALID_OPERATIONS`、`PENDING_MARKERS`、`RESOLVED_STATUS`、`DEC_ID`、`DEC_HEADING`、`DECISION_FIELD`、`CONSTRAINT_ID`、`PLACEHOLDER_TEXT`、`NORMALIZE_STRIP`、`section_text`、`decision_log_entries`、`is_filled`、`restates_question` |
+| 已零引用 | `SCN_HEADING`、`OPERATION_HEADING`、`REQ_CANDIDATE_HEADING`、`SCN_CANDIDATE_HEADING` |
 
-**新增 `tests/test_spec_id_convention.py`** 钉死三点：两种写法都要能索引、
-两种写法都要能解析路径限定 ref、零覆盖的 VERIFY_DECISION 在两种写法下都必须被拦。
-三个用例在回退修复后全部失败，确认它们真的守住了这个不变式。
+随 D 式 一并移除的还有 `Capability Index` 双射校验、`Decision Log` 证据链
+（`3a870bc` 引入）与 `plan_execution_contract` 注册项。`Decision Log` 的
+删除是级联后果而非独立裁定：其校验入口 `validate_open_questions_rows`
+是 D 式 `约束` ID 的唯一消费者。
 
-**仍未做的**：两套约定长期并存本身是技术债。新式（`REQ-<capability>-NNN`）有
-capability 命名空间和 REQ 归属，语义容量严格更强，且被 dev.specs 的机械校验和
-模板强制；旧式（`REQ-NNN`）是全 feature 平坦 ID。建议后续统一到新式并移除旧式
-写法支持，但那要改 `test_json_writers` / `test_code_exploration` /
-`test_batched_plan` / `test_needs_fix_state` 的 fixture（旧式命中 26 处），
-属独立收口项，不适合夹在本次合并里。
+**例外：`validate_no_template_guidance` 的两处调用予以保留。** 它来自
+`cc73557`（晚于 W 式基线 `77eb793`），防的是模板指导语泄漏进产物，
+与 ID 约定无关，对 W 式产物同样成立。逐字回退会连带去掉 proposal / specs
+两处保护，因此在 `validate_proposal_contract` 与 `validate_specs_contract`
+中显式加回。五个模板经 `find_template_guidance_residue` 复扫均 clean。
+
+**`tests/test_spec_id_convention.py` 相应改写**：由「两种写法都要能索引」
+改为钉括号式单一写法，并新增 `test_spec_template_matches_indexer_patterns`
+—— 直接断言 `templates/spec.md` 的标题能被 `SPEC_REQUIREMENT_DEF_RE` /
+`SPEC_SCENARIO_DEF_RE` 命中。这条是方向 B 的关键守卫：错配的根因正是
+「模板教的」与「索引器认的」不是同一种写法，该断言让此类漂移在
+模板侧被立刻发现，而不是等到 verify 阶段覆盖门变成空操作。
+零覆盖必拦的用例保留。
+
+**方向 B 的取舍**：D 式（`REQ-<capability>-NNN`）有 capability 命名空间和
+REQ 归属，语义容量严格更强，这部分表达力是本次回退主动放弃的。换来的是
+单一约定、无并存技术债，以及不再需要维护三份并集正则副本。
 
 ### §9.14 测试归属表的补充：11 个原表未列的 `dev_workflow_py` 独有测试文件
 
