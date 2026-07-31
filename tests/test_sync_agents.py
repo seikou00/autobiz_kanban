@@ -321,7 +321,7 @@ class SyncRepoFallbackTest(unittest.TestCase):
         self.assertEqual(info, {"commit": "ssh-commit", "transport": "ssh"})
         self.assertEqual(
             [call.kwargs.get("timeout") for call in run_git.call_args_list],
-            [5, 5, None, None],
+            [20, 20, None, None],
         )
 
     def test_ssh_uses_same_plain_clone_and_checkout_strategy(self):

@@ -65,7 +65,7 @@ from board_core.contracts import BoardConfigError, load_board_config  # noqa: E4
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 DEFAULT_REF = "main"
-HTTPS_CLONE_TIMEOUT_SECONDS = 5
+HTTPS_CLONE_TIMEOUT_SECONDS = 20
 
 
 class _CloneUnavailableError(RuntimeError):
