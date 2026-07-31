@@ -30,8 +30,10 @@ PLUGIN_WORKSPACE / PROJECT_DIR / FEATURE_ID 环境变量）::
 场景统一返回 continue_current_session + autoSend:false，把说明写进 userMessage 落成
 pendingAutoDraft 填进输入框（renderer 侧已有「不覆盖用户已有草稿」保护）。
 
-本脚本对 state.json 只读；checkpoint 推进仍然只由技能经 update_checkpoint.py 完成。
-唯一写入是自己的记账文件 {FEATURE_DIR}/.auto-mode/state.json。
+除 `autoMode.autoEnterCodeAfterPlan` 外，本脚本对 state.json 只读；该策略只在托管模式
+完成 plan 时，复用 update_checkpoint.py 的校验与原子写入，把可选详细设计标记为跳过并
+进入 code。其他 checkpoint 推进仍然只由技能经 update_checkpoint.py 完成。唯一常规写入是
+自己的记账文件 {FEATURE_DIR}/.auto-mode/state.json。
 """
 
 from __future__ import annotations
@@ -55,6 +57,8 @@ from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.json_writer_common import atomic_write_json  # noqa: E402
 from hooks.paths import get_plugin_output_workspace  # noqa: E402
 from hooks.route_checkpoint import resolve_route  # noqa: E402
+from hooks.update_checkpoint import prepare_checkpoint_update, write_hook_logs  # noqa: E402
+from board_core.state_store import write_state_records  # noqa: E402
 from board_core.workflow_compiler import read_json  # noqa: E402
 
 
@@ -71,6 +75,7 @@ DEFAULT_AUTO_MODE_CONFIG = {
     "maxStalledSteps": 3,
     "maxFixReflows": 3,
     "maxTotalSteps": 120,
+    "autoEnterCodeAfterPlan": True,
 }
 
 # 托管续跑消息前缀：让模型知道本轮由托管模式自动发起，而不是用户新提的需求。
@@ -94,6 +99,10 @@ def auto_mode_config() -> dict[str, Any]:
         return merged
     for key, default in DEFAULT_AUTO_MODE_CONFIG.items():
         value = raw.get(key)
+        if isinstance(default, bool):
+            if isinstance(value, bool):
+                merged[key] = value
+            continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         if key == "contextUsageThreshold":
@@ -486,6 +495,69 @@ def route_next_action(route: dict[str, Any]) -> tuple[str, str]:
     return skill, message
 
 
+def auto_advance_plan_done_to_code(
+    *,
+    workspace: Path,
+    feature: str,
+    route: dict[str, Any],
+) -> str | None:
+    """在托管模式自动跳过所有可直接落到 code 的 plan 后动态阶段。
+
+    返回非空说明代表 checkpoint 已持久化为 code_in_progress。任何不满足当前
+    策略的动态选择或状态校验失败都保留原有的人工确认分支。
+    """
+    if route.get("checkpoint") != "plan_done" or not route.get("requiresWorkflowChoice"):
+        return None
+
+    choices = route.get("workflowChoices")
+    choices = [item for item in choices if isinstance(item, dict)] if isinstance(choices, list) else []
+    stage_ids: set[str] = set()
+    skip_decisions: dict[str, str] = {}
+    for choice in choices:
+        stage_id = choice.get("stageId")
+        if not isinstance(stage_id, str) or not stage_id:
+            continue
+        stage_ids.add(stage_id)
+        if (
+            choice.get("decision") == "skipped"
+            and choice.get("targetCheckpoint") == "code_in_progress"
+        ):
+            skip_decisions[stage_id] = "skipped"
+
+    if not stage_ids or set(skip_decisions) != stage_ids:
+        log("plan_done 存在不能直接落到 code 的动态选择，保留人工确认。")
+        return None
+
+    checkpoint_update = prepare_checkpoint_update(
+        workspace=workspace,
+        feature=feature,
+        checkpoint="code_in_progress",
+        workflow_decision_updates=skip_decisions,
+    )
+    if not checkpoint_update.ok:
+        errors = "；".join(checkpoint_update.errors) or "未知校验错误"
+        log(f"plan_done 自动进入 code 的 checkpoint 更新失败: {errors}")
+        try:
+            write_hook_logs(checkpoint_update, workspace=workspace, feature=feature)
+        except Exception as exc:
+            log(f"checkpoint 更新失败日志写入失败: {exc}")
+        return None
+
+    try:
+        write_state_records(workspace, checkpoint_update.records)
+    except Exception as exc:
+        log(f"plan_done 自动进入 code 的状态写入失败: {exc}")
+        return None
+    try:
+        write_hook_logs(checkpoint_update, workspace=workspace, feature=feature)
+    except Exception as exc:
+        # 状态已原子写入，日志失败不能阻断已经确定的后续 code 会话。
+        log(f"checkpoint 更新日志写入失败: {exc}")
+
+    stages = ", ".join(sorted(skip_decisions))
+    return f"已自动跳过可选阶段 {stages}，checkpoint 已进入 code_in_progress。"
+
+
 def auto_message(body: str, *, note: str = "") -> str:
     """统一给托管发起的消息加前缀，让模型知道这不是用户新提的需求。"""
     parts = [f"{AUTO_PREFIX} {body}".strip()]
@@ -520,6 +592,8 @@ def decide(
     run_state: dict[str, Any],
     fingerprint: str | None,
     config: dict[str, Any],
+    force_new_session: bool = False,
+    auto_advance_note: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """返回 (平台结果, 更新后的记账状态)。
 
@@ -718,6 +792,24 @@ def decide(
         return finish(
             result(True, "无法解析下一步技能，暂停自动推进。", [pause(auto_message(body))]),
             "pause:no_skill",
+        )
+
+    if force_new_session:
+        return finish(
+            result(
+                True,
+                f"{auto_advance_note}新开会话进入代码实现 /{skill}。",
+                [
+                    new_session(
+                        skill,
+                        auto_message(
+                            message,
+                            note=f"{auto_advance_note}{resume_note(route)}",
+                        ),
+                    )
+                ],
+            ),
+            "new_session:auto_plan_to_code",
         )
 
     node_status = str(route.get("currentNodeStatus") or "")
@@ -933,6 +1025,22 @@ def _run(argv: list[str]) -> int:
             write_run_state(target_feature_dir, run_state)
             return emit(result(False, f"Feature 状态读取失败：{errors_text}"))
 
+        auto_advance_note = ""
+        if event.get("outcome") == "success" and config["autoEnterCodeAfterPlan"]:
+            auto_advance_note = auto_advance_plan_done_to_code(
+                workspace=workspace,
+                feature=args.feature,
+                route=route_payload,
+            ) or ""
+            if auto_advance_note:
+                route_payload, _exit_code = resolve_route(workspace, args.feature)
+                if not route_payload.get("ok"):
+                    errors = route_payload.get("errors") or []
+                    errors_text = "；".join(str(e) for e in errors) if errors else "未知错误"
+                    remember_event(run_state, event_id)
+                    write_run_state(target_feature_dir, run_state)
+                    return emit(result(False, f"自动进入 code 后状态读取失败：{errors_text}"))
+
         # 只有平台传入来源业务 workspace 且 Git 可观测时才启用空转熔断。
         raw_workspace = event.get("sessionWorkspacePath")
         session_workspace_path = raw_workspace.strip() if isinstance(raw_workspace, str) else None
@@ -945,6 +1053,8 @@ def _run(argv: list[str]) -> int:
                 run_state=run_state,
                 fingerprint=fingerprint,
                 config=config,
+                force_new_session=bool(auto_advance_note),
+                auto_advance_note=auto_advance_note,
             )
         except Exception as exc:
             # 防御性：决策函数崩溃不得向平台抛异常（否则 execFileSync 崩溃，控制面收不到任何响应）。

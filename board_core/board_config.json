@@ -11,7 +11,8 @@
     "maxErrorRetries": 2,
     "maxStalledSteps": 3,
     "maxFixReflows": 3,
-    "maxTotalSteps": 120
+    "maxTotalSteps": 120,
+    "autoEnterCodeAfterPlan": true
   },
   "inspectCommands": {
     "darwin": {

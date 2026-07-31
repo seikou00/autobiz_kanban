@@ -36,6 +36,8 @@ from hooks.auto_next_step import (  # noqa: E402
     result,
     run_state_transaction,
 )
+from board_core.state_store import load_state_json_records_result, write_state_records  # noqa: E402
+from tests.test_dynamic_workflow import record as dynamic_record, write_plan_artifacts  # noqa: E402
 from tests.test_workflow_skip import make_workspace, seed_feature  # noqa: E402
 
 
@@ -738,6 +740,58 @@ class MainEntryTest(unittest.TestCase):
             self.assertEqual(len(actions), 1)
             self.assertEqual(actions[0]["actionType"], "create_new_session")
             self.assertTrue(actions[0]["nextAction"]["autoSend"])
+
+    def test_plan_done_auto_enters_code_and_records_skip_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            workspace = make_workspace(root)
+            target_feature_dir = feature_dir(workspace, "alpha")
+            target_feature_dir.mkdir(parents=True, exist_ok=True)
+            write_plan_artifacts(target_feature_dir)
+            write_state_records(workspace, {"alpha": dynamic_record("plan_done", profile="standard")})
+
+            _, payload = self._run([
+                "--plugin-workspace", str(root),
+                "--project", "workspace",
+                "--feature", "alpha",
+                "--event-json", json.dumps(_event(event_id="plan-to-code-001")),
+            ])
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"][0]["actionType"], "create_new_session")
+            self.assertEqual(payload["action"][0]["nextAction"]["slashSkill"], "autodev-code")
+            self.assertTrue(payload["action"][0]["nextAction"]["autoSend"])
+            records = load_state_json_records_result(workspace).records
+            self.assertEqual(records["alpha"]["checkpoint"], "code_in_progress")
+            self.assertEqual(
+                records["alpha"]["workflowDecisions"],
+                {"detail_design_before_code": "skipped"},
+            )
+
+    def test_plan_done_keeps_workflow_choice_when_auto_entry_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            workspace = make_workspace(root)
+            target_feature_dir = feature_dir(workspace, "alpha")
+            target_feature_dir.mkdir(parents=True, exist_ok=True)
+            write_plan_artifacts(target_feature_dir)
+            write_state_records(workspace, {"alpha": dynamic_record("plan_done", profile="standard")})
+            config = dict(DEFAULT_AUTO_MODE_CONFIG, autoEnterCodeAfterPlan=False)
+
+            with mock.patch("hooks.auto_next_step.auto_mode_config", return_value=config):
+                _, payload = self._run([
+                    "--plugin-workspace", str(root),
+                    "--project", "workspace",
+                    "--feature", "alpha",
+                    "--event-json", json.dumps(_event(event_id="plan-choice-001")),
+                ])
+
+            action = payload["action"][0]
+            self.assertEqual(action["actionType"], "continue_current_session")
+            self.assertFalse(action["nextAction"]["autoSend"])
+            records = load_state_json_records_result(workspace).records
+            self.assertEqual(records["alpha"]["checkpoint"], "plan_done")
+            self.assertEqual(records["alpha"].get("workflowDecisions", {}), {})
 
     def test_run_state_persisted_after_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
