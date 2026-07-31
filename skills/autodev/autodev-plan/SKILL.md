@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.2.1702
+version: v1.4.1711
 ---
 
 ## 缺失产物处理
@@ -252,7 +252,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 [D-xx 中影响实现路径的决策及备选方案]
 
 **待确认项**
-[所有待确认条目：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」或「读码差异」的行；逐条说明影响，读码差异条目按「spec/DEC 说 X，代码是 Y（EVD-xx）」呈现。]
+[所有待确认条目：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」或「读码差异」的行；逐条说明影响，读码差异条目按「spec/D-xx 说 X，代码是 Y（EVD-xx）」呈现。]
 ```
 
 展示后按以下两步确认，顺序不可颠倒：
@@ -493,6 +493,25 @@ Plan 阶段不再生成独立 smoke 计划。每个 Batch 的测试闭环必须�
 - [ ] specs 中每个 Requirement / Scenario 至少被一个任务覆盖
 - [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
 - [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 plan.json 已同步记录，并更新相关任务或风险项。
+
+#### 回检与修复
+
+使用task工具，指定critic-autodev角色，对比specs、proposal与design.md和PLAN.md文件进行严格的审查，主要从四个维度核查：1.技术选择是否合理，2.规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对），3.测试是否合理和完备，4.引用与事实是否相符（Code Evidence 各条与代码实际一致、Spec Traceability 引用的 REQ/SCN/D-xx 在上游真实存在）。
+
+回检结论逐条分类：先用 specs、design.md、PLAN.md 原文与源码复核该条是否成立，再按下表动作；受影响产物一次性改完，不逐条往返。
+
+| 分类 | 判定 | 动作 |
+|------|------|------|
+| 产物可修 | 技术方案、接口/数据形态、任务拆分、覆盖缺口、验证方法不足 | 技术结论改 design.md，执行结论改 PLAN.md，两边受影响处同步 |
+| 引用与事实不符 | Code Evidence 与代码不一致，或引用的 REQ/SCN/D-xx 不存在 | 更新 EVD-xx 与引用；与 spec/D-xx 冲突记 R-xx（Type=读码差异）走裁定门 |
+| 需用户裁定 | 有真实备选且改变实现路径，或与 design.md 中 `Status=已确认` 的 API/DATA/D 决策冲突 | 记 R-xx（Type=待确认），按「design.md 确认规则」第一步逐条裁定 |
+| 回流上游 | 行为契约本身缺失或矛盾 | 停止并建议回 `/autodev-specs`，不在本阶段补写行为契约 |
+| 结论不成立 | 复核后与产物、代码实际不符 | 不改产物，在回复中引 file:line 或产物原文说明 |
+
+- Critical / Major 结论必须处理；Open Questions 与低置信结论不据此改产物，其中涉及取舍的向用户发起确认，其余在回复中列出。
+- 只改被指出的条目；TASK/EVD/R/API/DATA/D 稳定 ID 不重排、不复用，已裁定行不因回检改写。
+- 不得靠删任务、缩小 Contract Coverage 或加「无需实现」豁免消除覆盖类结论。
+- 改完逐项重跑上面的「完成条件」；仍有未裁定的「需用户裁定」或存在「回流上游」条目时不推进 plan_done。
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.3.0730
+version: v1.4.1710
 allowed-tools: execute task_output read_file grep glob write_file edit_file
 ---
 
@@ -38,7 +38,6 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ### Code 会话入口
 
 每次进入 Code 阶段或在新对话恢复 Code 时，第一条 runner 命令必须是：
-
 ```bash
 python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 ```

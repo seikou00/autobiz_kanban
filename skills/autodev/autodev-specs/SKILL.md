@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.4.1707
+version: v1.5.1708
 ---
 
 ## 缺失产物处理
@@ -185,10 +185,25 @@ python "${pluginPath}/skills/autodev/hooks/artifact_check.py" postcheck autodev-
 - specs 只描述行为契约，不包含实现任务。
 - proposal 含 `Open Questions` 节：每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
 
-如task工具可用，则使用task工具，指定critic-autodev角色，对比prd.md与proposal和specs文件进行严格的审查，看是否spec已经完全覆盖需求范围，和是否有违反需求的地方。
-如task工具返回有问题需要修复specs或proposal。
-如果task不可用则不用执行上面的内容。继续任务。
-集中校验通过后推进 checkpoint：
+## 回检与修复
+
+使用task工具，指定critic-autodev角色，对比prd.md与proposal和specs文件进行严格的审查，看是否spec已经完全覆盖需求范围，和是否有违反需求的地方。
+
+回检结论逐条分类：先用 PRD、proposal、specs 原文复核该条是否成立，再按下表动作；受影响产物一次性改完。
+
+| 分类 | 判定 | 动作 |
+|------|------|------|
+| 产物可修 | 行为写漏、写错、操作分类错、索引与 spec 不对应 | 只改被指出的条目，保持 WHAT 层 |
+| 需用户裁定 | 结论要求在多个行为方案间取舍 | 补入讨论表，按「待确认问题裁定门」逐条裁定，结果落 `Open Questions` |
+| 回流上游 | 上游需求本身缺失、矛盾，或超出本轮范围 | 不扩写 specs；落 `Out of Scope` 或回到用户确认 |
+| 结论不成立 | 复核后与 PRD、产物实际不符 | 不改产物，在回复中引原文说明 |
+
+- Critical / Major 结论必须处理；Open Questions 与低置信结论不据此改产物，其中涉及取舍的按「需用户裁定」处理，其余在回复中列出。
+- 稳定 ID 不重排、不复用；`Status=已确认` 的 `Open Questions` 行不因回检改写。
+- 不得靠删 Requirement/Scenario 或缩小 `Capabilities` 消除覆盖类结论。
+- 改完重跑「集中校验」；仍有未裁定的「需用户裁定」条目时不推进 specs_done。
+
+集中校验与回检修复均通过后推进 checkpoint：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done

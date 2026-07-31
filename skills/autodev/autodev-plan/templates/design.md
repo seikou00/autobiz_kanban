@@ -21,7 +21,7 @@
 
 | Requirement | Scenarios | Decision | Design Coverage | Evidence |
 |-------------|-----------|----------|-----------------|----------|
-| REQ-001 | SCN-001, SCN-002 | DEC-001/无 | API-01 / DATA-01 / D-01 | EVD-001 |
+| REQ-001 | SCN-001, SCN-002 | D-001/无 | API-01 / DATA-01 / D-01 | EVD-001 |
 
 ## 4. API Decisions / 接口决策
 
@@ -58,4 +58,4 @@
 
 | ID | Type | Description | Impact | Owner/Next Step |
 |----|------|-------------|--------|-----------------|
-| R-01 | 风险/待确认/读码差异 | [描述；读码差异写明「spec/DEC 说 X，代码是 Y（EVD-xx）」] | [影响] | [下一步] |
+| R-01 | 风险/待确认/读码差异 | [描述；读码差异写明「spec/D-xx 说 X，代码是 Y（EVD-xx）」] | [影响] | [下一步] |

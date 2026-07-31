@@ -161,6 +161,66 @@ class RenderShapeTest(unittest.TestCase):
         self.assertEqual(res["sessionContext"], "")
         self.assertEqual(res["agentmdLoadStatus"], [])
 
+    def test_inlined_context_does_not_count_as_actual_file_read(self):
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        self.assertIn(
+            "<SCOPE>、<SYSTEM>、<UNIT> 是系统提示内联的导航与约束",
+            prompt,
+        )
+        self.assertIn("不表示已读取任何实际文件", prompt)
+        self.assertIn(
+            "只有本轮通过文件读取、搜索或 shell 工具打开对应路径后",
+            prompt,
+        )
+        self.assertIn("未产生工具读取证据时不得跳过", prompt)
+        self.assertIn(
+            "标记为“内联约束”，不得称为实际读取",
+            prompt,
+        )
+        self.assertIn(
+            "本轮通过工具实际打开了哪些文件路径",
+            prompt,
+        )
+
+    def test_mandatory_reads_cannot_be_skipped_during_requirements_discussion(self):
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        self.assertIn(
+            "不得把“任务”缩义为代码修改",
+            prompt,
+        )
+        self.assertIn(
+            "本门禁覆盖需求澄清、需求分析、向用户提问、设计、编码",
+            prompt,
+        )
+        self.assertIn(
+            "“必须读取”“先读取”“必读”文件必须逐个通过文件读取、搜索或 shell 工具实际打开",
+            prompt,
+        )
+        self.assertIn(
+            "明确的必读指令高于模型对文件相关性的主观判断",
+            prompt,
+        )
+        self.assertIn(
+            "不得以“当前不是代码阶段”“需求澄清不需要”",
+            prompt,
+        )
+        self.assertIn(
+            "在该阶段首次分析、提问或答复前用工具打开该文件",
+            prompt,
+        )
+        self.assertIn(
+            "未取得工具读取证据前，不得声称已读、不得继续实质分析",
+            prompt,
+        )
+
 
 class RuntimePolicyTest(unittest.TestCase):
     @staticmethod
@@ -828,7 +888,7 @@ class RenderWorkspaceTest(unittest.TestCase):
         self.assertIn("## 会话工作区指令", prompt)  # 工作区指令的 ## 标题
         self.assertIn("- 工作区约束", prompt)  # AGENTS.md 正文（用正文独有的项目符号校验，避免与 ## 标题串味）
         self.assertNotIn("<WORKSPACE", prompt)  # 不再用 WORKSPACE 标签
-        self.assertNotIn("<SYSTEM", prompt)  # 未选单元 → 无系统段
+        self.assertNotIn('<SYSTEM id=', prompt)  # 未选单元 → 无系统段
         # 工作区指令进 agentmdLoadStatus：deployUnitId=本地工作区、source=local、loaded=True。
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
@@ -985,9 +1045,9 @@ class RenderDomainContextTest(unittest.TestCase):
         prompt = res["sessionContext"]
         self.assertIn("<DOMAIN_CONTEXT", prompt)
         self.assertIn("**导出任务 (ExportTask)**", prompt)
-        self.assertNotIn("<SCOPE>", prompt)  # 词汇表不进适用范围表 → 无绑定行 → 整表跳过
-        self.assertNotIn("<UNIT", prompt)
-        self.assertNotIn("<SYSTEM", prompt)
+        self.assertNotIn("## 适用范围", prompt)  # 词汇表不进适用范围表 → 无绑定行 → 整表跳过
+        self.assertNotIn('<UNIT id=', prompt)
+        self.assertNotIn('<SYSTEM id=', prompt)
         self.assertEqual(res["message"], "未选择部署单元，仅注入领域词汇表")
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
