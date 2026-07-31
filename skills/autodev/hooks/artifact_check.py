@@ -2345,6 +2345,7 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
 
     covered_api_refs: set[str] = set()
     covered_data_refs: set[str] = set()
+    covered_decision_refs: set[str] = set()
     for index, task in enumerate(raw_tasks):
         context = f"tasks[{index}]"
         if not isinstance(task, dict):
@@ -2372,6 +2373,7 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
         decision_refs = set(_string_list_value(task.get("decisionIds")) or []) | set(re.findall(r"\bD-\d{3}\b", design_ref_text))
         covered_api_refs.update(api_refs)
         covered_data_refs.update(data_refs)
+        covered_decision_refs.update(decision_refs)
 
         if not decision_refs:
             failures += fail_line(ctx, "missing_plan_json_decision_ref", f" task={task_id}")
@@ -2396,6 +2398,8 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
         else:
             for data_id in sorted(design_ids["DATA"] - covered_data_refs):
                 failures += fail_line(ctx, "missing_plan_json_data_coverage", f" id={data_id}")
+    for decision_id in sorted(design_ids["D"] - covered_decision_refs):
+        failures += fail_line(ctx, "missing_plan_json_decision_coverage", f" id={decision_id}")
     return failures
 
 
