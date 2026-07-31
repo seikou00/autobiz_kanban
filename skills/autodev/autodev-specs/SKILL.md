@@ -60,7 +60,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
 > 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `集中校验并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
-使用task工具，指定Explore-autodev角色进行探索， 探索必须要读<AGENTS_INSTRUCTIONS></AGENTS_INSTRUCTIONS>里面提到的文件，再需要参考下面的要求，然后返回结构化的内容供主代理参考。
+使用task工具，指定Explore-autodev角色进行探索，task prompt 第一行必须传入系统约束中可参考的文件清单。
+子代理先读该清单、再顺其索引读相关约束文档，然后按下面的要求返回结构化内容供主代理参考。
 探索时必须：
 
 - 从上游需求输入提取目标、用户角色、主流程、验收标准、非目标。

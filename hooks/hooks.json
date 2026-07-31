@@ -1,6 +1,17 @@
 {
   "PreToolUse": [
     {
+      "matcher": "task|Task",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 hooks/augment_explore_task_prompt.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
+        }
+      ]
+    },
+    {
       "matcher": "write_file|edit_file",
       "hooks": [
         {
