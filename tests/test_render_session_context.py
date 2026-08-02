@@ -167,22 +167,11 @@ class RenderShapeTest(unittest.TestCase):
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
+        self.assertIn("不表示任何文件已被读取", prompt)
+        self.assertIn("复述不算读取", prompt)
+        self.assertIn("未用工具实际打开前，不得声称已读取", prompt)
         self.assertIn(
-            "<SCOPE>、<SYSTEM>、<UNIT> 是系统提示内联的导航与约束",
-            prompt,
-        )
-        self.assertIn("不表示已读取任何实际文件", prompt)
-        self.assertIn(
-            "只有本轮通过文件读取、搜索或 shell 工具打开对应路径后",
-            prompt,
-        )
-        self.assertIn("未产生工具读取证据时不得跳过", prompt)
-        self.assertIn(
-            "标记为“内联约束”，不得称为实际读取",
-            prompt,
-        )
-        self.assertIn(
-            "本轮通过工具实际打开了哪些文件路径",
+            "本轮通过工具实际打开了哪些文件路径，未打开的不得列入",
             prompt,
         )
 
@@ -192,10 +181,12 @@ class RenderShapeTest(unittest.TestCase):
             plugin_root=_plugin_root(),
         )
         prompt = res["sessionContext"]
+        # 协议按「任务」生效：非代码阶段（需求澄清等）不得据此判定整段不适用。
         self.assertIn(
-            "不得把“任务”缩义为代码修改",
+            "本协议按「任务」生效，覆盖需求澄清、需求分析、向用户提问、设计、编码",
             prompt,
         )
+        self.assertIn("不得因当前不是代码阶段而跳过", prompt)
         self.assertIn(
             "本门禁覆盖需求澄清、需求分析、向用户提问、设计、编码",
             prompt,
@@ -220,6 +211,8 @@ class RenderShapeTest(unittest.TestCase):
             "未取得工具读取证据前，不得声称已读、不得继续实质分析",
             prompt,
         )
+        self.assertIn("也不得据此开始实质分析、提问或答复", prompt)
+        self.assertIn("skill 的工作步骤不构成跳过本协议的理由", prompt)
 
 
 class RuntimePolicyTest(unittest.TestCase):
@@ -888,7 +881,8 @@ class RenderWorkspaceTest(unittest.TestCase):
         self.assertIn("## 会话工作区指令", prompt)  # 工作区指令的 ## 标题
         self.assertIn("- 工作区约束", prompt)  # AGENTS.md 正文（用正文独有的项目符号校验，避免与 ## 标题串味）
         self.assertNotIn("<WORKSPACE", prompt)  # 不再用 WORKSPACE 标签
-        self.assertNotIn('<SYSTEM id=', prompt)  # 未选单元 → 无系统段
+        # 断言系统段的开标签而非裸 "<SYSTEM"：启动协议正文本身会提到 <SYSTEM> 标签名。
+        self.assertNotIn('<SYSTEM id="sys-', prompt)  # 未选单元 → 无系统段
         # 工作区指令进 agentmdLoadStatus：deployUnitId=本地工作区、source=local、loaded=True。
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
@@ -1046,8 +1040,9 @@ class RenderDomainContextTest(unittest.TestCase):
         self.assertIn("<DOMAIN_CONTEXT", prompt)
         self.assertIn("**导出任务 (ExportTask)**", prompt)
         self.assertNotIn("## 适用范围", prompt)  # 词汇表不进适用范围表 → 无绑定行 → 整表跳过
+        # 断言各段的开标签而非裸标签名：启动协议正文本身会提到 <SCOPE>/<SYSTEM>/<UNIT>。
         self.assertNotIn('<UNIT id=', prompt)
-        self.assertNotIn('<SYSTEM id=', prompt)
+        self.assertNotIn('<SYSTEM id="sys-', prompt)
         self.assertEqual(res["message"], "未选择部署单元，仅注入领域词汇表")
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)

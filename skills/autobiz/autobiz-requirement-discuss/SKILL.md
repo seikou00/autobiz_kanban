@@ -1,30 +1,17 @@
 ---
 name: autobiz-requirement-discuss
 description: Biz 阶段需求澄清技能。
-version: v1.2.1701
+version: v1.2.1703
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清技能
 
 > 本技能专注需求澄清与讨论收敛，不直接输出正式 PRD。
 
-## 概述
-
-本技能用于引导产品经理完善需求文档，通过分析原始材料、输出问题清单、与 PM 逐轮确认，将讨论结论稳定沉淀到 `PRD_DISCUSS.md`。
-
 ## 产物协议
 
 - 产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
-- `PRD_DISCUSS.md` 用于承接循环中的讨论结论、待确认项、假设、阶段性方案及讨论中新增资料的可追溯信息
 - 除非用户明确要求只停在讨论阶段，否则本技能应在收敛后结束。
-
-## 核心能力
-
-- 需求文档分析：按照评估准则检查需求，识别缺失、冲突和模糊点
-- 问题清单生成：将问题按优先级整理成结构化清单
-- 对话式引导：通过逐轮问答收集补充信息并确认关键决策
-- 详细需求提取：从原始需求文档提取每个任务的**业务逻辑、字段定义、筛选条件、状态流转、验收标准等信息**，形成可开发的完整描述
-- 讨论稿沉淀：结合需求描述和用户讨论，并回检优化，把循环过程稳定写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
 
 ## 准备工作
 
@@ -35,17 +22,10 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 每次需要当前 checkpoint 时，运行上面的脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 
-### 加载参考文档
+### 本技能的参考文档
 
-在开始工作流程前，必须加载以下参考文档：
-
- `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md`
-   - 需求内容评估准则，包含检查项和优化建议
-
- `${pluginPath}/skills/references/ask-user-question.md`
-   - 使用 `request_user_input` 时的统一提问、选项和回答处理协议
-
-执行流程时，必须以评估准则作为判断依据，确保分析有据可依。
+- `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` — 需求内容评估准则，需求分析必须以它为判断依据
+- `${pluginPath}/skills/references/ask-user-question.md` — 使用 `request_user_input` 时的统一提问、选项和回答处理协议
 
 ###  更新状态
 
@@ -58,19 +38,15 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_in_progre
 
 ## 工作流程
 
-> **流程管控**：执行开始时，必须使用 `write_todos` 创建以下固定 todo 列表（逐项创建，不得自行修改变更），每完成一步立即标记完成，确保不跳过任何环节：
+> **流程管控**：执行开始时用 `write_todos` 建立 todo 列表，每完成一步立即标记完成。以下环节不得跳过，可按实际情况增补条目：
 >
-> 1. 建立需求上下文（读取原始材料）
-> 2. 创建 prd_original 文件夹并保存原始需求文档
-> 3. 按 prd-formatter.md 模板改造需求文档并写入 PRD_DISCUSS.md
-> 4. 需求分析 — 角色选择与通用基础检查
-> 5. 需求分析 — 角色专项检查
-> 6. 角色选择前端则询问用户提供 HTML 文件位置并逐一分析；将每个已提供的 HTML 文件作为讨论补充资料登记
-> 7. 需求分析 — 输出规范检查
-> 8. 问题清单展示与用户确认
-> 9. 对话式引导与 PRD_DISCUSS.md 调整
-> 10. 迭代检查（对照 analysis-guide 回检）
-> 11. 更新状态与校验
+> 1. 建立需求上下文：读取原始材料并保存到 prd_original
+> 2. 改造需求文档并写入 PRD_DISCUSS.md
+> 3. 需求分析
+> 4. 问题清单展示与用户确认
+> 5. 对话式引导与 PRD_DISCUSS.md 调整
+> 6. 迭代回检直到收敛
+> 7. 更新状态与校验
 
 
 
@@ -87,48 +63,25 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ### 缓存检测与清理
 
-在开始分析前，检测用户是否要求重新讨论：
-- 若用户明确提到"重新 DISCUSS"、"重新讨论"、"重新分析"、"重新梳理需求"等关键词
-- 且 `{FEATURE_DIR}/PRD_DISCUSS.md` 已存在
-
-则执行缓存清理：
-1. 删除 `{FEATURE_DIR}/PRD_DISCUSS.md`
-2. 清理问题清单缓存
-3. 重新执行完整 DISCUSS 流程
+用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `{FEATURE_DIR}/PRD_DISCUSS.md` 已存在时，先删除该文件再走完整流程。
 
 ### 建立需求上下文
 
-1. 读取产品经理上传的需求材料
-    - 优先读取 Word 文档（`.docx` / `.doc`）
-    - 若用户提供 Markdown、需求说明、会议纪要、飞书导出内容，也可作为输入
-2. **动态提取原始文档的所有章节内容**：按原始文档的实际目录结构逐章逐节提取，不预设固定的信息类别
-    - 识别并记录原始文档的完整章节树（章节编号、标题层级、子章节关系）
-    - 提取每个章节下的具体内容，完整详细
-3. 记录原始文档的目录结构、编号规范、术语和文风特点
-4. **创建 prd_original 文件夹并保存原始需求文档**：
-    - 在 `{FEATURE_DIR}` 下创建 `prd_original` 文件夹（如已存在则跳过）
-    - 将读取到的原始需求文档文件直接复制到 `{FEATURE_DIR}/prd_original/` 中
-    - 此操作用于保留原始需求快照，供后续验证使用
-
-Expected output: 已完成原始需求材料读取和复制保存，形成文档结构记录，为后续格式化与分析提供上下文。
+1. 读取需求材料：优先 Word 文档（`.docx` / `.doc`）；Markdown、需求说明、会议纪要、飞书导出内容也可作为输入
+2. 按原始文档的实际目录结构逐章逐节提取，不预设固定的信息类别；记录完整章节树与术语、文风特点，每节内容提取完整
+3. 将原始需求文档复制到 `{FEATURE_DIR}/prd_original/`（目录不存在则创建）保留快照
 
 ### 需求内容格式改造
 
-读取原始需求文档，按照 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 模板格式重写需求文档，将改造后的内容写入 `{FEATURE_DIR}/PRD_DISCUSS.md`。
-
-详细格式化流程请参考 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd-formatter.md` 执行。
+按 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的模板格式重写需求文档，写入 `{FEATURE_DIR}/PRD_DISCUSS.md`；格式化流程见同目录 `prd-formatter.md`。
 
 ### 需求分析
 
-【核心原则】严格按照 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成需求分析的问题清单。
-
-【关键约束】 - 仅输出有问题、需求有遗漏、需求不明确的事项；无问题则不制造问题
+严格按 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成问题清单。仅输出有问题、有遗漏、不明确的事项；无问题则不制造问题。
 
 ### 问题清单展示与用户确认
 
 ####  问题清单展示
-
-将发现的问题整理成结构化问题清单并按重要性分类，然后展示给用户。
 
 | 优先级 | 分类 | 说明 |
 |--------|------|------|
@@ -141,12 +94,15 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 ```markdown
 ## 问题清单
 
-| 序号 | 重要性 | 检查项 | 问题描述 | 功能定位       | 优化建议 |
-|------|--------|--------|----------|----------|----------|
-| 1 | P0 - 阻断性问题 | [检查项] | [问题描述] | [功能定位] | [优化建议] |
-| 2 | P1 - 重要问题 | [检查项] | [问题描述]| [功能定位]  | [优化建议] |
-| 3 | P2 - 优化建议 | [检查项] | [问题描述] | [功能定位] | [优化建议] |
+| 序号 | 重要性 | 检查项 | 问题描述 | 功能定位 | 领域依据 | 优化建议 |
+|------|--------|--------|----------|----------|----------|----------|
+| 1 | P0 - 阻断性问题 | [检查项] | [问题描述] | [功能定位] | [文件名 — 原文约束] | [优化建议] |
+| 2 | P1 - 重要问题 | [检查项] | [问题描述]| [功能定位] | 通用 | [优化建议] |
 ```
+
+「领域依据」填该条问题所依据的系统提示词 `<SYSTEM>`、`<UNIT>` 段落点名文档的文件名与原文约束（如 `core-entities.md — 用户关联实体: 角色/部门/岗位`），与既有实体、流程、约束无关的纯规范类问题填「通用」。
+
+整张表的「领域依据」全为「通用」时，说明未结合本系统既有实体、流程与约束检查，重做需求分析。
 
 #### 询问用户是否需要补充
 
@@ -168,10 +124,7 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 
 ### 对话式引导并调整 `PRD_DISCUSS.md`
 
-【关键方法】这一阶段是在完成问题清单确认后，基于所有的问题（生成和补充）逐项进行深度对话，结合原始需求文档和用户回复，把需求内容调整结果稳定沉淀到 `{FEATURE_DIR}/PRD_DISCUSS.md`。
-#### 深度对话引导策略
-
-基于『问题清单展示与用户确认』已确认的问题清单，按优先级（P0→P1→P2）逐项进行单独对话确认。
+对已确认的问题清单（含用户补充项）按 P0→P1→P2 逐项单独对话，结合原始需求文档和用户回复把调整结果沉淀到 `{FEATURE_DIR}/PRD_DISCUSS.md`。
 
 **对话流程（每个问题单独执行）：**
 
@@ -222,31 +175,22 @@ Expected output: 已完成原始需求材料读取和复制保存，形成文档
 
 `PRD_DISCUSS.md` 是固定文件名，每轮增量更新。必须包含：
 
-1. **需求摘要【核心】**：即完整需求内容
-2. **当前已确认结论**：本轮讨论后已确认的功能范围、审批流等结论
-3. **问题清单与处理状态**：P0/P1/P2 问题及处理状态
-4. **待确认事项**：待开发确认的高保真链接、接口文档、数据同步机制等
-5. **假设与风险**：基于什么假设、存在哪些风险
-6. **历次讨论记录**：按时间记录讨论过程和结论
-7. **讨论补充资料**：仅记录讨论过程中新增的补充文件的名称、原始文档绝对路径和用途；角色选择前端时用户提供的 HTML 文件位置也必须逐项记录为补充资料，用途标注为“前端页面/交互分析”。初始上传的原始需求文档不得出现在本清单中（其快照仅保存在 `prd_original`）；没有新增文件时也保留空清单说明
+1. **需求摘要【核心】**：完整需求内容
+2. **当前已确认结论**
+3. **问题清单与处理状态**：含「领域依据」列
+4. **待确认事项**
+5. **假设与风险**
+6. **历次讨论记录**：按时间记录
+7. **讨论补充资料**：讨论过程中新增文件的名称、绝对路径和用途；前端角色下用户提供的 HTML 文件逐项登记，用途填“前端页面/交互分析”。初始上传的原始需求文档不入本清单（快照在 `prd_original`）；无新增文件时保留空清单说明
 
 #### 写作要求
 
-- 讨论稿可以保留"待确认""候选方案""暂定结论"这类中间状态
-- 每次新增或修改都要明确哪些内容是已确认，哪些仍待确认
-- 讨论稿不要求完全标准化，但必须保证信息可追溯、语义稳定、便于后续提炼
+- 讨论稿可以保留"待确认""候选方案""暂定结论"这类中间状态，但每次新增或修改都要标明哪些已确认、哪些仍待确认
 - 若用户指定"只先讨论，不输出正式 PRD"，可以停留在本文件；否则提示用户运行 `/autobiz-prd-generate`
-
-Expected output: `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 已沉淀当前轮次的需求结论、待确认项和风险。
 
 ### 迭代直到收敛
 
-将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 与 `analysis-guide.md` 反复对照检查：
-
-1. 检查原问题是否已解决
-2. 检查是否引入新问题或新歧义
-3. 若仍存在 P0 / P1，继续回到『需求分析』至『对话式引导并沉淀 PRD_DISCUSS.md』环节
-4. 每轮都要向用户展示检查结果，由用户判断是否可以终止循环
+将 `{FEATURE_DIR}/PRD_DISCUSS.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都要向用户展示检查结果，由用户判断是否可以终止循环。
 
 #### 迭代终止条件
 
@@ -276,16 +220,9 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "$
 
 脚本通过即视为以下清单已完成：
 
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 已存在，且保留了完整收敛过程
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 包含需求摘要、已确认结论、问题清单与处理状态、待确认事项、假设与风险、讨论补充资料
-- `.autobizdevops/state.json` — Feature checkpoint 为 `discuss_done`
+- `{FEATURE_DIR}/PRD_DISCUSS.md` — 已存在，保留完整收敛过程，含上面「讨论沉淀生成」七节
+- Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 
 **Skill 完成。** 提醒用户：请回到特性面板新开新对话。
 如果用户仍在当前对话输入“继续”“下一步”等续办意图，必须读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；当前技能尚未完成时不得使用该引导。
-
-## 技能使用约束
-
-1. 本技能专注需求文档完善优化，不涉及代码实现检查
-2. 分析和输出必须严格参照参考文档
-3. 对话式引导中保持专业、友好的沟通态度
