@@ -3,15 +3,20 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
 
 from board_core.state_store import (
     load_state_json_records,
     parse_state_json_records_result,
     write_state_records,
 )
+from hooks.evidence_store import append_evidence
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.route_checkpoint import resolve_route
 from hooks.update_checkpoint import prepare_checkpoint_update, prepare_skip_update
@@ -60,9 +65,71 @@ class NeedsFixStateTest(unittest.TestCase):
         records[self.feature] = record
         write_state_records(self.project, records)
 
+    def _run_verify_writer(self, *args: str) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "hooks" / "verify_decision_writer.py"),
+                *args,
+                "--workspace",
+                str(self.project),
+                "--feature",
+                self.feature,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def _write_verify_artifacts(self) -> None:
+        """dev.verify 以 VERIFY_DECISION.json 与证据流为 required 机器事实源。
+
+        走真实 writer 建立产物，避免手写结构与校验器漂移。
+        """
+        spec = self.feature_dir / "specs" / "cap" / "spec.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(
+            "## ADDED Requirements\n\n"
+            "### Requirement [REQ-001]: capability\n\n"
+            "#### Scenario [SCN-001]: happy path\n",
+            encoding="utf-8",
+        )
+        (self.feature_dir / "proposal.md").write_text("# proposal\n", encoding="utf-8")
+        (self.feature_dir / "design.md").write_text("# design\n\n- D-001: 决策\n", encoding="utf-8")
+        (self.feature_dir / "VERIFY_REPORT.md").write_text("verify failed\n", encoding="utf-8")
+
+        record = append_evidence(
+            self.feature_dir,
+            {
+                "featureId": self.feature,
+                "checkpoint": "code_in_progress",
+                "nodeId": "dev.code",
+                "skill": "autodev-code",
+                "taskId": "T001",
+                "action": "validation",
+                "specRefs": ["specs/cap/spec.md#REQ-001", "#SCN-001"],
+                "designRefs": ["design.md#D-001"],
+                "changedFiles": ["src/example.py"],
+                "validation": {"command": "echo ok", "exitCode": 0, "result": "pass"},
+            },
+        )
+
+        self._run_verify_writer("init", "--from-specs")
+        self._run_verify_writer("derive-scenario-coverage")
+        self._run_verify_writer(
+            "update-scenario",
+            "--scenario-ref",
+            "SCN-001",
+            "--verdict",
+            "fail",
+            "--evidence-id",
+            record["evidenceId"],
+        )
+        self._run_verify_writer("set-verdict", "fail")
+
     def test_checkpoint_update_persists_and_clears_needs_fix_source(self) -> None:
         self._set_checkpoint("verify_in_progress")
-        (self.feature_dir / "VERIFY_REPORT.md").write_text("verify failed\n", encoding="utf-8")
+        self._write_verify_artifacts()
 
         blocked = prepare_checkpoint_update(
             workspace=self.project,
@@ -97,8 +164,9 @@ class NeedsFixStateTest(unittest.TestCase):
         (self.feature_dir / "proposal.md").write_text("proposal\n", encoding="utf-8")
         (self.feature_dir / "design.md").write_text("design\n", encoding="utf-8")
         (self.feature_dir / "PLAN.md").write_text("plan\n", encoding="utf-8")
+        (self.feature_dir / "plan.json").write_text("{}\n", encoding="utf-8")
         specs_dir = self.feature_dir / "specs"
-        specs_dir.mkdir()
+        specs_dir.mkdir(exist_ok=True)
         (specs_dir / "requirements.md").write_text("requirements\n", encoding="utf-8")
 
         resumed = prepare_checkpoint_update(

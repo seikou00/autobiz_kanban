@@ -1,0 +1,100 @@
+{
+  "featureId": "[feature]",
+  "groups": [
+    {
+      "id": "T001",
+      "title": "[single observable behavior]",
+      "executionMode": "code",
+      "deps": [],
+      "uiRequired": false,
+      "workspaceRef": "[backend-repository-id]",
+      "specRefs": [
+        "specs/[capability]/spec.md#REQ-001",
+        "specs/[capability]/spec.md#SCN-001"
+      ],
+      "mergedScenarioRefs": [],
+      "apiIds": [],
+      "validationBoundary": "[public seam plus one executable validation command or assertion]"
+    }
+  ],
+  "uiRequiredExample": {
+    "when": "the group implements a UI_CONTEXT page or interaction; copy real IDs and route from UI_CONTEXT.json",
+    "id": "T001",
+    "title": "[single observable UI behavior]",
+    "executionMode": "code",
+    "deps": [],
+    "uiRequired": true,
+    "workspaceRef": "[frontend-repository-id]",
+    "specRefs": [
+      "specs/[ui-capability]/spec.md#REQ-001",
+      "specs/[ui-capability]/spec.md#SCN-001"
+    ],
+    "mergedScenarioRefs": [],
+    "apiIds": [],
+    "uiRefs": {
+      "pageRefs": [
+        "PAGE-001"
+      ],
+      "interactionRefs": [
+        "UIX-001"
+      ],
+      "visualSourceRefs": [
+        "VIS-001"
+      ],
+      "frontendRoute": "absolute-html"
+    },
+    "validationBoundary": "one executable UI test validates the referenced page behavior against its required visual source"
+  },
+  "matrixExceptionExample": {
+    "when": "one group covers 6-12 scenarios that share one request/response or state-matrix validation loop",
+    "id": "T001",
+    "title": "[shared observable matrix behavior]",
+    "executionMode": "code",
+    "deps": [],
+    "uiRequired": false,
+    "workspaceRef": "[backend-repository-id]",
+    "specRefs": [
+      "specs/[capability]/spec.md#REQ-001",
+      "specs/[capability]/spec.md#SCN-001",
+      "specs/[capability]/spec.md#SCN-002",
+      "specs/[capability]/spec.md#SCN-003",
+      "specs/[capability]/spec.md#SCN-004",
+      "specs/[capability]/spec.md#SCN-005",
+      "specs/[capability]/spec.md#SCN-006"
+    ],
+    "mergedScenarioRefs": [
+      "specs/[capability]/spec.md#SCN-001",
+      "specs/[capability]/spec.md#SCN-002",
+      "specs/[capability]/spec.md#SCN-003",
+      "specs/[capability]/spec.md#SCN-004",
+      "specs/[capability]/spec.md#SCN-005",
+      "specs/[capability]/spec.md#SCN-006"
+    ],
+    "apiIds": [],
+    "validationBoundary": "one request returns the complete matrix and one executable assertion validates it",
+    "splitRationale": "SCN-001, SCN-003, and SCN-006 share the same request, response assertion, and validation loop, so they cannot be validated independently."
+  },
+  "externalDependencyExample": {
+    "when": "the observable outcome is owned and executable only in a repository or system outside this Feature",
+    "id": "T001",
+    "title": "[record externally owned outcome]",
+    "executionMode": "external_dependency",
+    "externalDependency": {
+      "system": "[external-system-or-repository]",
+      "owner": "[owning-team-or-person]",
+      "trackingRefs": [
+        "[ticket-or-design-reference]"
+      ]
+    },
+    "deps": [],
+    "uiRequired": false,
+    "workspaceRef": "[local-repository-id-used-for-supporting-evidence]",
+    "specRefs": [
+      "specs/[capability]/spec.md#REQ-001",
+      "specs/[capability]/spec.md#SCN-001"
+    ],
+    "mergedScenarioRefs": [],
+    "apiIds": [],
+    "validationBoundary": "record the external owner and tracking reference without creating local implementation or tests"
+  }
+}

@@ -168,7 +168,7 @@ class RenderShapeTest(unittest.TestCase):
         )
         prompt = res["sessionContext"]
         self.assertIn(
-            "SCOPE、SYSTEM、UNIT 是系统提示内联的导航与约束",
+            "<SCOPE>、<SYSTEM>、<UNIT> 是系统提示内联的导航与约束",
             prompt,
         )
         self.assertIn("不表示已读取任何实际文件", prompt)
@@ -888,7 +888,7 @@ class RenderWorkspaceTest(unittest.TestCase):
         self.assertIn("## 会话工作区指令", prompt)  # 工作区指令的 ## 标题
         self.assertIn("- 工作区约束", prompt)  # AGENTS.md 正文（用正文独有的项目符号校验，避免与 ## 标题串味）
         self.assertNotIn("<WORKSPACE", prompt)  # 不再用 WORKSPACE 标签
-        self.assertNotIn("<SYSTEM", prompt)  # 未选单元 → 无系统段
+        self.assertNotIn('<SYSTEM id=', prompt)  # 未选单元 → 无系统段
         # 工作区指令进 agentmdLoadStatus：deployUnitId=本地工作区、source=local、loaded=True。
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
@@ -1045,9 +1045,9 @@ class RenderDomainContextTest(unittest.TestCase):
         prompt = res["sessionContext"]
         self.assertIn("<DOMAIN_CONTEXT", prompt)
         self.assertIn("**导出任务 (ExportTask)**", prompt)
-        self.assertNotIn("<SCOPE>", prompt)  # 词汇表不进适用范围表 → 无绑定行 → 整表跳过
-        self.assertNotIn("<UNIT", prompt)
-        self.assertNotIn("<SYSTEM", prompt)
+        self.assertNotIn("## 适用范围", prompt)  # 词汇表不进适用范围表 → 无绑定行 → 整表跳过
+        self.assertNotIn('<UNIT id=', prompt)
+        self.assertNotIn('<SYSTEM id=', prompt)
         self.assertEqual(res["message"], "未选择部署单元，仅注入领域词汇表")
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)

@@ -6,7 +6,13 @@ from pathlib import Path
 
 from board_core.artifact_paths import has_glob, resolve_exact_relative_path
 
-SPECS_GLOB_PATH = "specs/**/*.md"
+GLOB_ARTIFACT_CONTRACTS = {
+    "specs": {"path": "specs/**/*.md", "suffix": ".md"},
+    "code_exploration_cache": {
+        "path": "cache/code-exploration/**/*.json",
+        "suffix": ".json",
+    },
+}
 ARTIFACT_STATUS_LABELS = {
     "generated": "已生成",
     "missing": "未生成",
@@ -21,13 +27,15 @@ def _relative_path(path: Path, workspace: Path) -> str:
     return path.relative_to(workspace).as_posix()
 
 
-def _validate_specs_glob(artifact: dict, path: str) -> None:
-    if artifact.get("id") != "specs" or not path.startswith("specs/"):
-        raise ValueError(f"only specs artifacts may use glob paths: {path}")
-    if path.count("/**/") != 1:
-        raise ValueError(f"specs glob path must contain exactly one '/**/': {path}")
-    if path != SPECS_GLOB_PATH:
-        raise ValueError(f"specs glob path must be {SPECS_GLOB_PATH}: {path}")
+def _validate_artifact_glob(artifact: dict, path: str) -> str:
+    artifact_id = artifact.get("id")
+    contract = GLOB_ARTIFACT_CONTRACTS.get(artifact_id)
+    if contract is None:
+        raise ValueError(f"unsupported artifact glob: {artifact_id}:{path}")
+    expected_path = contract["path"]
+    if path != expected_path:
+        raise ValueError(f"{artifact_id} glob path must be {expected_path}: {path}")
+    return contract["suffix"]
 
 
 def _artifact_label(artifact: dict) -> str:
@@ -43,13 +51,13 @@ def _set_artifact_status(entry: dict, status: str) -> None:
 
 def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> dict:
     path = artifact["path"]
-    _validate_specs_glob(artifact, path)
+    suffix = _validate_artifact_glob(artifact, path)
     matches = sorted(
         _relative_path(match, workspace)
         for match in feature_dir.glob(path)
         if (
             match.is_file()
-            and match.suffix == ".md"
+            and match.suffix == suffix
             and resolve_exact_relative_path(feature_dir, match.relative_to(feature_dir)) is not None
         )
     )

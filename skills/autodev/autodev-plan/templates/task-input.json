@@ -1,0 +1,67 @@
+{
+  "id": "T001",
+  "title": "[single observable behavior]",
+  "goal": "[observable outcome]",
+  "deps": [],
+  "uiRequired": false,
+  "workspaceRef": "default",
+  "scope": {
+    "modules": ["[module]"],
+    "entrypoints": [],
+    "pages": [],
+    "dataObjects": [],
+    "workspaceRoots": {
+      "default": "."
+    },
+    "paths": []
+  },
+  "implementationPoints": [
+    "[implement the behavior]",
+    "[cover its public boundary]"
+  ],
+  "acceptanceCriteria": [
+    {
+      "id": "AC-T001-01",
+      "text": "[observable acceptance result]",
+      "scenarioRefs": ["specs/[capability]/spec.md#SCN-001"]
+    }
+  ],
+  "validationBoundary": "[public seam plus one executable validation command or assertion]",
+  "nonGoals": [
+    "[explicit adjacent behavior or scope that this task will not change]"
+  ],
+  "specRefs": [
+    "specs/[capability]/spec.md#REQ-001",
+    "specs/[capability]/spec.md#SCN-001"
+  ],
+  "mergedScenarioRefs": [],
+  "matrixExceptionExample": {
+    "when": "task covers 6-12 scenarios that share one request/response or state-matrix validation loop",
+    "mergedScenarioRefs": [
+      "specs/[capability]/spec.md#SCN-001",
+      "specs/[capability]/spec.md#SCN-002",
+      "specs/[capability]/spec.md#SCN-003",
+      "specs/[capability]/spec.md#SCN-004",
+      "specs/[capability]/spec.md#SCN-005",
+      "specs/[capability]/spec.md#SCN-006"
+    ],
+    "splitRationale": "SCN-001, SCN-002, SCN-003, SCN-004, SCN-005, SCN-006 share one validation loop and cannot be validated independently.",
+    "requiredValidation": "one required behavior_test, integration_test, or e2e_test covers every acceptance criterion"
+  },
+  "designRefs": ["design.md#D-001"],
+  "apiIds": [],
+  "dataIds": [],
+  "decisionIds": ["D-001"],
+  "validationCommands": [
+    {
+      "id": "VAL-T001-01",
+      "argv": ["[executable]", "[task test arguments]"],
+      "cwd": ".",
+      "kind": "behavior_test",
+      "required": true,
+      "covers": ["AC-T001-01"]
+    }
+  ],
+  "expectedFiles": [],
+  "blockers": []
+}

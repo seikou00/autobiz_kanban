@@ -1,0 +1,35 @@
+{
+  "goal": "[observable outcome]",
+  "scope": {
+    "modules": ["[module]"],
+    "entrypoints": [],
+    "dataObjects": [],
+    "paths": []
+  },
+  "implementationPoints": [
+    "[implement the behavior]",
+    "[cover its public boundary]"
+  ],
+  "acceptanceCriteria": [
+    {
+      "text": "[observable acceptance result]",
+      "scenarioRefs": ["specs/[capability]/spec.md#SCN-001"]
+    }
+  ],
+  "nonGoals": [
+    "[explicit adjacent behavior or scope that this task will not change]"
+  ],
+  "designRefs": ["design.md#D-001"],
+  "dataIds": [],
+  "decisionIds": ["D-001"],
+  "validationCommands": [
+    {
+      "argv": ["[executable]", "[task test arguments]"],
+      "kind": "behavior_test",
+      "required": true,
+      "covers": [1]
+    }
+  ],
+  "expectedFiles": [],
+  "blockers": []
+}

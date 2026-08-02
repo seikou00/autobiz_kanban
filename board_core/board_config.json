@@ -144,9 +144,9 @@
                   "extract": {
                     "degrade": "无 design 时基于现有代码模式细化方案，并记录设计基准缺失"
                   } },
-                { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+                { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
                   "extract": {
-                    "degrade": "无 PLAN.md 时回到 /autodev-plan 重新生成，不能只依赖 design.md 推进详细设计"
+                    "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能只依赖 PLAN.md 推进详细设计"
                   } }
               ],
               "outputs": [
@@ -369,10 +369,11 @@
           ],
           "outputs": [
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true }
+            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true },
+            { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true }
           ]
         },
-        "validators": ["design_contract", "plan_initial_tasks", "plan_execution_contract"]
+        "validators": ["design_contract", "plan_json_contract", "plan_json_initial_tasks", "plan_ref_resolution", "plan_task_granularity", "plan_scenario_coverage"]
       },
       {
         "id": "dev.code",
@@ -417,9 +418,9 @@
               "extract": {
                 "degrade": "无 design 时基于 已有产物 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
               } },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "degrade": "无 PLAN 契约时从 proposal+specs 推导最小任务队列（2-5 个需求闭环任务），逐项实现并在完成摘要中记录任务与验证结果"
+                "degrade": "无 plan.json 或结构已过时时，回到 /autodev-plan 清理并按当前唯一结构重新生成；不得建立旁路任务队列"
               } },
             { "id": "detail_design_optional", "label": "详细设计参考", "artifactType": "file", "path": "DETAIL_DESIGN.md", "required": false,
               "extract": {
@@ -427,9 +428,17 @@
               } }
           ],
           "outputs": [
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
+              "extract": {
+                "degrade": "缺失时由 task_runner 首次验证时在 Feature 产物目录原子创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
+              } },
+            { "id": "code_exploration_cache", "label": "代码探索缓存", "artifactType": "json", "path": "cache/code-exploration/**/*.json", "required": false,
+              "extract": {
+                "degrade": "缺失或过期时由 Code 上下文返回 full_bounded_explore，不能以缓存替代 plan/evidence 验收"
+              } }
           ]
         },
-        "validators": ["plan_finished_tasks"],
+        "validators": ["plan_json_contract", "plan_task_detail_schema", "plan_ref_resolution", "evidence_detail_quality", "code_done_gate", "evidence_integrity"],
         "guards": ["code_compile"]
       },
       {
@@ -475,16 +484,21 @@
               "extract": {
                 "degrade": "无 design 时按现有代码模式评审实现合理性，并在报告中记录设计基准缺失"
               } },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "degrade": "无 PLAN 时以代码 diff 与提交记录核对实现闭环"
+                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
+              } },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
+              "extract": {
+                "degrade": "缺失时回到 code 阶段补齐证据流，不能用 Markdown 报告替代"
               } }
           ],
           "outputs": [
-            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": false },
+            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true }
           ]
         },
-        "validators": ["requirements_eval_verdict"]
+        "validators": ["review_findings_json"]
       },
       {
         "id": "dev.utest",
@@ -529,21 +543,31 @@
               "extract": {
                 "degrade": "无 design 时按现有代码结构定位被测单元"
               } },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "degrade": "无 PLAN 时以代码 diff 推导待测变更清单"
+                "degrade": "Source Bundle 未列出 plan.json 时使用本阶段轻量任务 ID 组织测试覆盖；若契约列出 plan.json 但文件缺失，则回到 /autodev-plan 生成，不能以 PLAN.md 替代机器事实源；存在 deferredValidationIssues 时必须作为 Code 未解决项进入单测计划或扩大验证"
               } },
-            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true,
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "degrade": "无评审报告时按 specs 覆盖优先级安排测试"
+                "degrade": "缺失时先补齐 code 阶段证据，不能用 Markdown 报告替代；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
+              } },
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": false,
+              "extract": {
+                "degrade": "缺失时跳过，不影响机器流程"
+              } },
+            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
+              "extract": {
+                "degrade": "无 REVIEW_FINDINGS.json 时回到 review 阶段补齐结构化评审结果"
               } }
           ],
           "outputs": [
-            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
-            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": true }
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": false },
+            { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": true },
+            { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": true },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["unit_test_report_contract"]
+        "validators": ["unit_test_result_json", "evidence_integrity"]
       },
       {
         "id": "dev.e2e",
@@ -588,17 +612,29 @@
               "extract": {
                 "degrade": "无 design 时从现有路由/入口探索驱动方式"
               } },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "degrade": "无 PLAN 时以 specs 场景为唯一覆盖基准"
+                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源；存在 deferredValidationIssues 时必须映射到 E2E 用例、环境复核或 manual/missing 结论"
               } },
-            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true,
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "degrade": "无评审报告时按 specs 场景优先级覆盖"
+                "degrade": "缺失时先补齐证据流，不能用 Markdown 报告替代；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
               } },
-            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true,
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": false,
               "extract": {
-                "degrade": "无单测报告时按全量主链路覆盖"
+                "degrade": "缺失时跳过，不影响机器流程"
+              } },
+            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
+              "extract": {
+                "degrade": "无 REVIEW_FINDINGS.json 时回到 review 阶段补齐结构化评审结果"
+              } },
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": false,
+              "extract": {
+                "degrade": "缺失时跳过，不影响机器流程"
+              } },
+            { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": true,
+              "extract": {
+                "degrade": "无 UNIT_TEST_RESULT.json 时回到单测阶段补齐结构化结果"
               } },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
@@ -607,11 +643,14 @@
           ],
           "outputs": [
             { "id": "e2e_cases", "label": "E2E 测试用例", "artifactType": "file", "path": "E2E_TEST_CASES.yaml", "required": true },
-            { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true },
-            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true }
+            { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": false },
+            { "id": "e2e_result_json", "label": "结构化 E2E 结果", "artifactType": "json", "path": "E2E_RESULT.json", "required": true },
+            { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false },
+            { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": []
+        "validators": ["e2e_result_json", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "dev.verify",
@@ -640,13 +679,25 @@
               "extract": {
                 "degrade": "无 design 时跳过设计核对，记录基准缺失"
               } },
-            { "id": "plan", "label": "执行计划", "artifactType": "file", "path": "PLAN.md", "required": true,
+            { "id": "plan_json", "label": "计划机器事实源", "artifactType": "json", "path": "plan.json", "required": true,
               "extract": {
-                "degrade": "无 PLAN 时以代码与报告核对交付闭环"
+                "degrade": "无 plan.json 时回到 /autodev-plan 重新生成，不能以 PLAN.md 替代机器事实源"
               } },
-            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true,
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
-                "degrade": "缺失时在验收报告中记为缺项"
+                "degrade": "缺失时先补齐证据流，不能给出完整通过结论"
+              } },
+            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
+              "extract": {
+                "degrade": "缺失时回到 review 阶段补齐结构化评审结果"
+              } },
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": false,
+              "extract": {
+                "degrade": "缺失时跳过，不影响机器流程"
+              } },
+            { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": true,
+              "extract": {
+                "degrade": "无 UNIT_TEST_RESULT.json 时回到单测阶段补齐结构化结果"
               } },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
@@ -656,20 +707,31 @@
               "extract": {
                 "degrade": "缺失时在验收报告中记为缺项"
               } },
-            { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": true,
+            { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": false,
               "extract": {
-                "degrade": "缺失时在验收报告中记为缺项"
+                "degrade": "缺失时跳过，不影响机器流程"
+              } },
+            { "id": "e2e_result_json", "label": "结构化 E2E 结果", "artifactType": "json", "path": "E2E_RESULT.json", "required": true,
+              "extract": {
+                "degrade": "无 E2E_RESULT.json 时回到 E2E 阶段补齐结构化结果"
               } },
             { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true,
               "extract": {
                 "degrade": "缺失时在验收报告中记为缺项"
+              } },
+            { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false,
+              "extract": {
+                "degrade": "缺失时 verify 根据本阶段裁决重新生成"
               } }
           ],
           "outputs": [
-            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true }
+            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": false },
+            { "id": "verify_decision_json", "label": "结构化验收决策", "artifactType": "json", "path": "VERIFY_DECISION.json", "required": true },
+            { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false },
+            { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": []
+        "validators": ["verify_decision_json", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "ops.cicd",
@@ -686,9 +748,13 @@
         "checkpoints": ["cicd_in_progress", "cicd_done"],
         "artifacts": {
           "inputs": [
-            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": true,
+            { "id": "verify_report", "label": "验收报告", "artifactType": "file", "path": "VERIFY_REPORT.md", "required": false,
               "extract": {
-                "degrade": "无验收报告时基于代码 diff 与可用阶段报告整理交付说明，并标注验收缺项"
+                "degrade": "缺失时跳过，不影响机器流程"
+              } },
+            { "id": "verify_decision_json", "label": "结构化验收决策", "artifactType": "json", "path": "VERIFY_DECISION.json", "required": true,
+              "extract": {
+                "degrade": "无 VERIFY_DECISION.json 时回到 verify 阶段补齐结构化验收决策"
               } },
             { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {

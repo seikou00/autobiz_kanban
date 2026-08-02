@@ -39,10 +39,12 @@ graph TD
 ### TASK-001: [需求闭环任务名]
 
 - **做什么:** [本任务交付的需求能力、用户可观察行为或验收闭环；不要写成单个文件/类/方法修改]
-- **规格依据:** REQ-[capability]-001
-- **场景依据:** SCN-[capability]-001-01, SCN-[capability]-001-02
+- **规格依据:** REQ-001
+- **场景依据:** SCN-001, SCN-002
 - **设计依据:** API-01, DATA-01, D-01
 - **代码证据:** EVD-001, EVD-002
+- **代码工作区:** [来自 plan.json.workspaceRef]
+- **验证边界:** [来自 plan.json.validationBoundary；写公开 seam 与对应的一条可执行校验或断言]
 - **验证方法:** [可执行检查命令或测试命令] 预期结果：[明确可观察结果]
 - **状态:** 待做
 - **完成记录:** 无
@@ -50,10 +52,12 @@ graph TD
 ### TASK-002: [需求闭环任务名]
 
 - **做什么:** [本任务交付的需求能力、用户可观察行为或验收闭环]
-- **规格依据:** REQ-[capability]-002
-- **场景依据:** SCN-[capability]-002-01
+- **规格依据:** REQ-002
+- **场景依据:** SCN-003
 - **设计依据:** API-02
 - **代码证据:** EVD-003
+- **代码工作区:** [来自 plan.json.workspaceRef]
+- **验证边界:** [来自 plan.json.validationBoundary；写公开 seam 与对应的一条可执行校验或断言]
 - **验证方法:** [可执行检查命令或测试命令] 预期结果：[明确可观察结果]
 - **状态:** 待做
 - **完成记录:** 无
@@ -64,7 +68,7 @@ graph TD
 
 | Contract Item | Type | 关联 Scenario | 覆盖任务 | 验证方法 |
 |---------------|------|---------------|----------|----------|
-| REQ-[capability]-001 | Behavior | SCN-[capability]-001-01, SCN-[capability]-001-02 | TASK-001 | [命令/测试] |
+| REQ-001 | Behavior | SCN-001, SCN-002 | TASK-001 | [命令/测试] |
 | API-01 / x-auto-no-http-api | API | - | TASK-002 / 无需实现:[原因] | [验证方法] |
 | DATA-01 / x-auto-no-sql | Data | - | TASK-001 | [验证方法] |
 | D-01 | Technical Decision | - | TASK-001 | [验证方法] |

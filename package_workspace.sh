@@ -33,7 +33,8 @@ if [[ ${#items[@]} -eq 0 ]]; then
 fi
 
 rm -f "$OUTPUT"
-zip -r "$OUTPUT" "${items[@]}"
+zip -r "$OUTPUT" "${items[@]}" \
+  -x "*/__pycache__/*" "*.pyc" "*/.DS_Store" ".DS_Store"
 
 if [[ "$OUTPUT" = /* ]]; then
   echo "Created $OUTPUT"

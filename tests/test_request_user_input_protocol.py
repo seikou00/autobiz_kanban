@@ -73,7 +73,10 @@ class RequestUserInputProtocolTest(unittest.TestCase):
         for required_rule in (
             "探索并生成待确认问题清单",
             "仅裁定讨论表中的待确认条目",
-            "不把切分、命名或规格范围交给用户确认",
+            # 「不把切分、命名或规格范围交给用户确认」不在此列：AGENTS.md 把该句
+            # 本身列为技能编写反模式（不要把需求或改动目的写入技能）。同一语义由
+            # 下一条「全部条目裁定后直接生成 proposal 与 specs」所在行的
+            # 「不再确认 capability 切分或规格范围」承载。
             "全部条目裁定后直接生成 proposal 与 specs",
             "不得使用「已准备好，稍后提供」",
         ):
