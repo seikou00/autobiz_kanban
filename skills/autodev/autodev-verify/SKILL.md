@@ -1,7 +1,7 @@
 ---
 name: autodev-verify
 description:进行报告汇总
-version: v1.2.1701
+version: v1.3.0803
 ---
 
 ## 缺失产物处理
@@ -20,6 +20,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature 
 本 skill 默认且只能由当前会话内联执行：
 
 - 当前会话直接读取 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md`、`e2e-run.log`、`proposal.md`、`specs/**/*.md`、`design.md`，生成 `VERIFY_REPORT.md` 并做最终分支决策。
+- 当前 Feature 的实际代码改动涉及新增或修改接口时，额外生成 `FEATURE_API_DETAIL.md`；该文件是可选额外交付物。
 - 不得把验收汇总或分支决策委派给下级 agent或子agent。
 
 本 skill 负责记录失败事实、问题来源和建议回流阶段，不默认把问题绑定回 Biz。
@@ -191,6 +192,42 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 ---
 
+## 生成 FEATURE_API_DETAIL.md（可选）
+
+只在当前 Feature 的实际代码改动涉及新增或修改接口时生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/FEATURE_API_DETAIL.md`。
+
+判断是否生成时，以代码为准：
+
+- 必须检查当前 Feature 实际改动涉及的接口入口、请求对象、响应对象、Service/Mapper/Repository、错误码和枚举定义。
+- 只有代码中能确认新增或修改接口入口，并能确认请求/响应定义时，才生成。
+- 上游文档提到接口变更但代码无法确认时，不生成；若 `VERIFY_REPORT.md` 已生成，在其中说明未生成原因。
+- 没有发现接口新增或修改时，不生成；若 `VERIFY_REPORT.md` 已生成，在其中说明未生成原因。
+
+生成前必须读取模板：
+
+```text
+${pluginPath}/skills/autodev/autodev-verify/references/feature-api-detail.md
+```
+
+写作约束：
+
+- 只写代码能确认的内容；不要根据 PRD、design 或测试报告补写接口细节。
+- 复杂入参、出参必须展开到字段级；遇到 `List<XxxVO>`、`Page<XxxVO>`、`Result<XxxVO>` 等包装类型，要继续展开内部对象字段。
+- 错误码、枚举值、SQL、外部接口调用、分页/排序/过滤、权限/租户/鉴权等内部逻辑，只有代码能确认时才写明。
+- 涉及 SQL 时，必须贴出 Mapper XML、注解 SQL、QueryWrapper/JPA 查询构造等代码中的具体查询片段；只写“SQL 位于某文件”不算完成。
+- 找不到实现类或内部逻辑时，只写到已确认的调用边界，不补写无法确认的实现细节。
+- 若 `VERIFY_REPORT.md` 已生成，按模板中的回写片段补充接口详细说明文档生成情况。
+
+### ⛔ 步骤完成检查 — 生成 FEATURE_API_DETAIL.md
+
+- [ ] 若生成 `FEATURE_API_DETAIL.md`：已确认当前 Feature 实际代码改动中存在新增或修改接口
+- [ ] 若生成 `FEATURE_API_DETAIL.md`：复杂入参 / 出参已经展开到字段级
+- [ ] 若生成 `FEATURE_API_DETAIL.md` 且接口涉及 SQL：已贴出代码中的具体 SQL / 动态 SQL / 查询构造片段，而不是只写文件路径
+- [ ] 若生成 `FEATURE_API_DETAIL.md`：每个核心结论都有代码依据
+- [ ] 若未生成 `FEATURE_API_DETAIL.md` 且 `VERIFY_REPORT.md` 已生成：已在 `VERIFY_REPORT.md` 说明原因
+
+---
+
 ## 分支决策
 
 ### 路径 A：全部通过 → `verify_done`
@@ -280,6 +317,7 @@ Skill 完成前必须满足：
 
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/VERIFY_REPORT.md` 已生成
 - [ ] 报告中每项裁定都指向 `UNIT_TEST_REPORT.md`、`E2E_REPORT.md` 或 `e2e-run.log` 的证据段落，或标注"需人工验证"
+- [ ] 当前 Feature 涉及新增或修改接口时，`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/FEATURE_API_DETAIL.md` 已生成；不涉及或代码依据不足时，`VERIFY_REPORT.md` 若存在已说明原因
 - [ ] 刷新后的 `CHECKPOINT` = `verify_done` / `needs_fix`（或路径 C 等待）
 - [ ] 验收摘要已写入报告（通过时）
 - [ ] 已知问题已更新（失败时）
@@ -294,7 +332,8 @@ Skill 完成前必须满足：
 
 1. 刷新后的 `CHECKPOINT` 停留在 `verify_in_progress`
 2. 重新读取 UNIT_TEST_REPORT.md、test-output.log、E2E_REPORT.md 和 e2e-run.log，重新生成 VERIFY_REPORT.md（允许覆盖）
-3. 重新做分支决策
+3. 重新检查实际代码改动；若涉及新增或修改接口，重新生成 FEATURE_API_DETAIL.md（允许覆盖）
+4. 重新做分支决策
 
 恢复完全幂等：不会破坏业务代码、不会重复启动服务、不会重复写测试。
 

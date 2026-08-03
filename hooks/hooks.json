@@ -73,5 +73,18 @@
         }
       ]
     }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "execute",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/artifact_sync_execute_hook.py",
+          "timeout": 120,
+          "persistAfterInterrupt": true
+        }
+      ]
+    }
   ]
 }
