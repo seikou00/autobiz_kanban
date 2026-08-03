@@ -6,7 +6,7 @@ import json
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 from board_core.contracts import (
     BoardConfigError,
@@ -40,8 +40,8 @@ WORKFLOW_CONTRACTS = load_workflow_contracts(BOARD_CONFIG_PATH)
 KNOWN_CHECKPOINTS = WORKFLOW_CONTRACTS.known_checkpoints
 DEFAULT_STAGE_BY_CHECKPOINT = WORKFLOW_CONTRACTS.stage_labels
 
-StateRecord = dict[str, Any]
-StateRecords = dict[str, StateRecord]
+StateRecord = Dict[str, Any]
+StateRecords = Dict[str, StateRecord]
 
 
 @dataclass(frozen=True)

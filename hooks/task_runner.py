@@ -827,7 +827,8 @@ def _start_task_unlocked(
             raise TaskRunnerError(f"task_implementation_already_ready:{task_id}")
     if task.get("blockers"):
         raise TaskRunnerError(f"task_has_blockers:{task_id}")
-    if unfinished := _unfinished_dependencies(plan, task):
+    unfinished = _unfinished_dependencies(plan, task)
+    if unfinished:
         raise TaskRunnerError("unfinished_task_dependencies:" + ",".join(unfinished))
     if normalize_status(task.get("status")) == "done":
         raise TaskRunnerError(f"task_already_done:{task_id}")
@@ -1414,11 +1415,8 @@ def _fresh_maven_failure_results(
     if not selectors:
         return []
     roots = _fresh_maven_report_roots(command_dir, before_reports)
-    return [
-        result
-        for selector in selectors
-        if (result := _maven_selector_report_result(roots, selector))["failures"]
-    ]
+    results = [_maven_selector_report_result(roots, selector) for selector in selectors]
+    return [result for result in results if result["failures"]]
 
 
 def _runtime_environment_failure_category(output: str) -> str | None:
@@ -5856,7 +5854,8 @@ def _run_project_checks_unlocked(
         bundle = load_plan_bundle(feature_dir)
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
-    if unfinished := bundle_unfinished_tasks(bundle):
+    unfinished = bundle_unfinished_tasks(bundle)
+    if unfinished:
         raise TaskRunnerError("project_check_requires_all_tasks_done:" + ",".join(unfinished))
     if bundle.root.get("activeBatchId") is not None or bundle.root.get("nextBatchId") is not None:
         raise TaskRunnerError("project_check_requires_all_batches_done")

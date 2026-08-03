@@ -16,6 +16,8 @@
     python performance_checker.py code_done
 """
 
+from __future__ import annotations
+
 import re
 import sys
 import json

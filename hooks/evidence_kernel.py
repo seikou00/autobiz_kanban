@@ -9,9 +9,8 @@ import json
 import os
 import re
 import tempfile
-from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, ContextManager
 
 
 LEGACY_SIDECAR_ARTIFACT_VERSION = 1
@@ -185,7 +184,7 @@ def check_record_artifacts(target_feature_dir: Path, record: dict[str, Any]) -> 
     return errors
 
 
-class FileLock(AbstractContextManager["FileLock"]):
+class FileLock(ContextManager["FileLock"]):
     """Cross-platform exclusive lock backed by one local file."""
 
     def __init__(self, path: Path) -> None:

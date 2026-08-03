@@ -6,10 +6,10 @@ from __future__ import annotations
 import hashlib
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 
-RepositoryMap = dict[str, Path]
+RepositoryMap = Dict[str, Path]
 REQUIRED_IGNORED_RUNTIME_PATHS = (".cmbdevclaw/large_tool_results/",)
 
 

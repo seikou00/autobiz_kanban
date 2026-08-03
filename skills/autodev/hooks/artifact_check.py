@@ -801,8 +801,11 @@ def _known_evidence_ids(ctx: HookContext) -> set[str]:
     try:
         return {
             evidence_id
-            for record in read_records(stream_path(ctx.feature_dir))
-            if isinstance((evidence_id := record.get("evidenceId")), str)
+            for evidence_id in (
+                record.get("evidenceId")
+                for record in read_records(stream_path(ctx.feature_dir))
+            )
+            if isinstance(evidence_id, str)
         }
     except EvidenceStoreError:
         return set()
@@ -811,9 +814,9 @@ def _known_evidence_ids(ctx: HookContext) -> set[str]:
 def _evidence_records_by_id(ctx: HookContext) -> dict[str, dict]:
     try:
         return {
-            evidence_id: record
+            record.get("evidenceId"): record
             for record in read_records(stream_path(ctx.feature_dir))
-            if isinstance((evidence_id := record.get("evidenceId")), str)
+            if isinstance(record.get("evidenceId"), str)
         }
     except EvidenceStoreError:
         return {}

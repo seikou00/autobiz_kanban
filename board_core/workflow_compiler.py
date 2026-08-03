@@ -919,8 +919,10 @@ def _derive_checkpoint_transitions(nodes: list[dict], base_checkpoint_config: di
         known_starts = {item for item in (_start_checkpoint(node) for node in nodes) if item}
         dynamic_starts = {
             start
-            for node in nodes
-            if node.get("_dynamic") and (start := _start_checkpoint(node)) and start != "archived"
+            for start in (
+                _start_checkpoint(node) if node.get("_dynamic") else None for node in nodes
+            )
+            if start and start != "archived"
         }
         transitions["needs_fix"] = sorted((set(old_needs_fix_targets) & known_starts) | dynamic_starts)
     if "archived" in {checkpoint for node in nodes for checkpoint in node.get("checkpoints", [])}:
