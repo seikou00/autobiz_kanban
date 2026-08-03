@@ -35,7 +35,11 @@
 2. 使用 `code-reviewer-autodev` 角色，查看代码是否有不满足设计与需求的地方；
 3. 使用 `code-simplifier-autodev` 角色，代码是否有冗余或不合理的地方。
 
-**禁止**：不得因回检结论修改任何业务源码、测试或配置；不得改写任何 `action=validation` evidence 或 `validationDisposition`；不得为回检启动新的 task run 或 `start-validation-repair`。
+`code-simplifier-autodev` 的默认契约是**直接改文件**（它的输出格式就是 `## Files Simplified` / `## Changes Applied`）。本阶段没有可用的改码通道，因此启动它时必须在 task prompt 中显式要求：只报告建议、给出 `file:line` 与替代写法，不要落笔修改任何文件。
+
+**主 agent 禁止**：不得因回检结论修改任何业务源码、测试或配置；不得改写任何 `action=validation` evidence 或 `validationDisposition`；不得为回检启动新的 task run 或 `start-validation-repair`。
+
+子代理若仍然改了文件（它有写权限，约束只在 prompt 层），不要自行还原——本阶段无法重验，静默还原可能覆盖用户自己的改动。改为在结论块中把「子代理已直接修改 <文件清单>，未经任何验证」作为一条 `仅列出` 结论如实记录，交由用户处置。
 
 <!-- section: 严重度词表 | stages: dev.specs,dev.plan -->
 ## 严重度词表
