@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.render_session_context import (  # noqa: E402
+    _agent_config,
     _heading_slug,
     _parse_selected,
     _runtime_policy,
@@ -275,6 +276,93 @@ class RuntimePolicyTest(unittest.TestCase):
                     policy["toolConfig"]["task"]["enabled"],
                     expected_enabled,
                 )
+
+    def _write_checkpoint(self, project, feature, checkpoint, **extra):
+        records, errors, exists = load_state_json_records(project)
+        self.assertTrue(exists)
+        self.assertEqual(errors, [])
+        record = dict(records[feature])
+        record["checkpoint"] = checkpoint
+        record["stage"] = checkpoint
+        record.update(extra)
+        records[feature] = record
+        write_state_records(project, records)
+
+    def test_prd_done_session_gets_the_specs_node_policy(self):
+        """回归：prd_done 时宿主已按 nextAction 拉起 /autodev-specs，会话必须拿到 specs 的能力。
+
+        改之前策略取的是 currentNodeId（biz.prd，solo + 禁 task），新开会话因此启动不了
+        autodev-specs 依赖的 Explore 子代理。
+        """
+        project, feature, arguments = self._feature_arguments()
+        self._write_checkpoint(project, feature, "prd_done")
+
+        policy = render([], **arguments)["agentConfig"]
+        self.assertEqual(policy["agentMode"], "multi")
+        self.assertTrue(policy["toolConfig"]["task"]["enabled"])
+        self.assertEqual(
+            [Path(item).name for item in policy["subagentConfig"]["customSubagentFiles"]],
+            ["explore.md", "critic.md"],
+        )
+
+    def test_done_checkpoint_resolves_policy_through_next_action(self):
+        """每个 *_done 的策略都必须等于 nextAction 目标节点的策略——与宿主路由同源。"""
+        config = json.loads(
+            (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
+        )
+        nodes = config["workflow"]["nodes"]
+        node_id_by_skill = {node["skill"]: node["id"] for node in nodes}
+        project, feature, arguments = self._feature_arguments()
+
+        checked = 0
+        for node in nodes:
+            done_checkpoints = [
+                checkpoint
+                for checkpoint in node["checkpoints"]
+                if checkpoint.endswith("_done")
+            ]
+            next_skills = [
+                state["nextAction"]["slashSkill"]
+                for state in node["states"]
+                if state.get("nodeStatus") == "done"
+            ]
+            if not done_checkpoints or not next_skills:
+                continue
+            target_node_id = node_id_by_skill[next_skills[0]]
+            with self.subTest(checkpoint=done_checkpoints[0]):
+                self._write_checkpoint(project, feature, done_checkpoints[0])
+                self.assertEqual(
+                    render([], **arguments)["agentConfig"],
+                    _agent_config(_runtime_policy(target_node_id)),
+                )
+                checked += 1
+        self.assertEqual(checked, len(nodes) - 1)  # ops.archive 无 done 状态
+
+    def test_in_progress_checkpoint_keeps_the_current_node_policy(self):
+        """in_progress 的 nextAction 指向节点自身，解析必须退化回当前节点、不得放开 task。"""
+        project, feature, arguments = self._feature_arguments()
+        self._write_checkpoint(project, feature, "prd_in_progress")
+
+        self.assertEqual(
+            render([], **arguments)["agentConfig"],
+            _agent_config(_runtime_policy("biz.prd")),
+        )
+        self.assertFalse(render([], **arguments)["agentConfig"]["toolConfig"]["task"]["enabled"])
+
+    def test_needs_fix_falls_back_to_the_returning_node_policy(self):
+        """needs_fix 映射出的 blocked 状态无人定义，反查落空后退回回流目标节点。"""
+        project, feature, arguments = self._feature_arguments()
+        self._write_checkpoint(
+            project,
+            feature,
+            "needs_fix",
+            needsFixFromCheckpoint="code_in_progress",
+        )
+
+        self.assertEqual(
+            render([], **arguments)["agentConfig"],
+            _agent_config(_runtime_policy("dev.code")),
+        )
 
     def test_explicit_node_id_overrides_project_and_feature_arguments(self):
         _project, _feature, arguments = self._feature_arguments("discuss_in_progress")

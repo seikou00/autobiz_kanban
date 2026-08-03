@@ -149,8 +149,16 @@ def _hook_log_refs(workspace: Path, feature: str, feature_dir: Path | None = Non
     ]
 
 
-def build_run_payload(workspace: Path, feature: str, config: dict) -> dict:
-    """Build the Feature Status payload used by both CLI and session context."""
+def build_run_context(workspace: Path, feature: str, config: dict) -> tuple[dict, dict]:
+    """Build the Feature Status payload plus the effective config it was built from.
+
+    ``config`` is the baseline board config.  A record that selects a profile,
+    template, dynamic stage or node skip compiles its own effective workflow
+    here.  Callers that look nodes up by ``skill`` / ``states`` /
+    ``runtimePolicy`` — session context resolving its runtime policy, for one —
+    must use the returned config: nodes inserted by profiles and dynamic stages
+    are not reachable through the baseline one.
+    """
     sync_result = check_or_fix_state_sync(workspace, fix=True)
     state_records = sync_result.records
     state_record_errors: list[str] = []
@@ -254,7 +262,13 @@ def build_run_payload(workspace: Path, feature: str, config: dict) -> dict:
     if workflow_skipped:
         output["run"]["workflowSkippedNodes"] = list(workflow_skipped)
 
-    return output
+    return output, config
+
+
+def build_run_payload(workspace: Path, feature: str, config: dict) -> dict:
+    """Build the Feature Status payload used by both CLI and session context."""
+    payload, _effective_config = build_run_context(workspace, feature, config)
+    return payload
 
 
 def run_mode(workspace: Path, feature: str, config: dict) -> int:

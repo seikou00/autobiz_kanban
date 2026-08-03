@@ -19,9 +19,23 @@ board_config.json 注册（样例，附件约定）::
     路径为空 / 对应文件缺失 / 全空白 → 不生成对应段。
 
   · 当前 workflow 节点通过 ``--plugin-workspace``、``--project``、``--feature``
-    显式定位，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口。
+    显式定位，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口
+    （显式给出时直接用该节点自身策略，绕过下面的 nextAction 解析）。
     节点、参数、配置或单个字段缺失时分别使用默认值：``agentMode = \"solo\"``、
     ``toolConfig.task.enabled = true``。
+
+``agentConfig`` 取哪个节点的 ``runtimePolicy``——**跟宿主路由同源**：宿主按当前节点状态的
+``states[nodeStatus].nextAction.slashSkill`` 拉起下一个 skill，运行时策略就取该 skill 所属节点的
+``runtimePolicy``，而不是 ``currentNodeId`` 自身的。这条规则无需区分状态：``not_started`` /
+``in_progress`` / ``archived`` 的 nextAction 恒等于节点自己的 skill，会自然退化回当前节点；只有
+``done`` 指向下一个节点。它修掉的是「会话策略滞后一个节点」——例如 ``prd_done`` 时宿主已经拉起
+``/autodev-specs``（需要 multi + 子代理），而 ``biz.prd`` 是 ``solo`` + 禁 task，会话拿不到子代理。
+
+策略解析必须用该 Feature **编译后**的 workflow（``build_run_context`` 的第二个返回值），基线
+``board_config.json`` 里查不到 profile 与动态阶段插入的节点。反查落空时按三级阶梯降级：
+nextAction 目标节点 → ``currentNodeId`` 自身节点 → 全局默认（``solo`` + task 开启）。
+``needs_fix`` 走第二级：它映射的 ``blocked`` 状态没有任何节点定义，退回 ``needsFixFromCheckpoint``
+定位到的回流目标节点，拿到的正是修复所需能力。
 
 输出（固定形状，注入项目模式系统提示词）::
 
@@ -99,7 +113,7 @@ from hooks.agents_repo import (  # noqa: E402
     sys_abs_display,
 )
 from hooks.paths import get_plugin_output_workspace_from_args  # noqa: E402
-from inspect_state import build_run_payload  # noqa: E402
+from inspect_state import build_run_context  # noqa: E402
 
 PLUGIN_ROOT_PLACEHOLDER = "{plugin_root}"  # md 正文里的占位符，替换为知识库根目录 <pluginPath>/sys
 PLUGIN_ROOT_WIN32_PATH_RE = re.compile(
@@ -137,12 +151,81 @@ def _find_workflow_node(value: object, node_id: str) -> Optional[dict]:
     return None
 
 
+def _find_node_by_skill(value: object, skill: str) -> Optional[dict]:
+    """按 ``skill`` 反查节点，查找范围与 :func:`_find_workflow_node` 一致。
+
+    每层先扫本层 ``nodes`` 再下钻，故主节点表优先于 profile / dynamic stage 里的原始声明。
+    """
+    if isinstance(value, dict):
+        nodes = value.get("nodes")
+        if isinstance(nodes, list):
+            for item in nodes:
+                if isinstance(item, dict) and item.get("skill") == skill:
+                    return item
+        for nested in value.values():
+            found = _find_node_by_skill(nested, skill)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_node_by_skill(nested, skill)
+            if found is not None:
+                return found
+    return None
+
+
+def _state_next_skill(node: dict, node_status: str) -> str:
+    """取节点在该状态下 ``nextAction.slashSkill``——即宿主接下来会拉起的 skill。"""
+    if not node_status:
+        return ""
+    for state in node.get("states", []):
+        if not isinstance(state, dict):
+            continue
+        if state.get("nodeStatus", state.get("id")) != node_status:
+            continue
+        action = state.get("nextAction")
+        skill = action.get("slashSkill") if isinstance(action, dict) else None
+        return skill.strip() if isinstance(skill, str) else ""
+    return ""
+
+
+def _policy_target_node_id(
+    config: object,
+    node_id: str,
+    node_status: str,
+) -> str:
+    """把「当前节点 + 状态」解析成「运行时策略该取哪个节点」。
+
+    与宿主路由同源：走 ``states[nodeStatus].nextAction.slashSkill`` 反查节点，所以 ``*_done`` 会
+    落到下一个节点，其余状态自然退化回当前节点。任一环节落空（节点查不到、无该状态、slashSkill
+    为空、该 skill 无对应节点）都退回 ``node_id``，即保持旧口径。
+    """
+    workflow = config.get("workflow") if isinstance(config, dict) else None
+    if not isinstance(workflow, dict):
+        return node_id
+    node = _find_workflow_node(workflow, node_id)
+    if not isinstance(node, dict):
+        return node_id
+    skill = _state_next_skill(node, node_status)
+    if not skill:
+        return node_id
+    target = _find_node_by_skill(workflow, skill)
+    target_id = target.get("id") if isinstance(target, dict) else None
+    if not isinstance(target_id, str) or not target_id.strip():
+        return node_id
+    return target_id.strip()
+
+
 def _runtime_policy(
     node_id: Optional[str],
     *,
     board_config_path: Optional[Path] = None,
+    config: Optional[dict] = None,
 ) -> dict:
-    """读取当前 workflow 节点的 ``runtimePolicy``，并补齐稳定默认值。
+    """读取指定 workflow 节点的 ``runtimePolicy``，并补齐稳定默认值。
+
+    ``config`` 传入已编译的有效配置时直接使用（session context 走这条路，基线配置里查不到
+    profile 与动态阶段插入的节点）；未传入时按 ``board_config_path`` 读基线配置。
 
     session context 是会话启动链路；节点 id 缺失、配置文件不可用或字段类型错误时
     都不应阻断会话，而是逐字段回退到 ``solo`` / ``task.enabled=true``。
@@ -153,11 +236,12 @@ def _runtime_policy(
     current_node_id = (node_id or "").strip()
 
     if current_node_id:
-        path = board_config_path or BOARD_CONFIG_PATH
-        try:
-            config = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            config = {}
+        if config is None:
+            path = board_config_path or BOARD_CONFIG_PATH
+            try:
+                config = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                config = {}
 
         workflow = config.get("workflow") if isinstance(config, dict) else None
         if isinstance(workflow, dict):
@@ -198,22 +282,39 @@ def _runtime_policy(
     return result
 
 
-def _session_node_id(
+def _run_node_status(run: object, node_id: str) -> str:
+    """从 Feature Status 的 ``run.nodes`` 里取该节点的 ``nodeStatus``。"""
+    nodes = run.get("nodes") if isinstance(run, dict) else None
+    if not isinstance(nodes, list):
+        return ""
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("id") != node_id:
+            continue
+        status = node.get("nodeStatus")
+        return status.strip() if isinstance(status, str) else ""
+    return ""
+
+
+def _session_policy_node(
     node_id: Optional[str] = None,
     *,
     plugin_workspace: Optional[str] = None,
     project: Optional[str] = None,
     feature: Optional[str] = None,
     board_config_path: Optional[Path] = None,
-) -> str:
-    """解析当前节点：显式调试值优先，否则使用调用参数复用 Feature Status。
+) -> Tuple[str, Optional[dict]]:
+    """解析运行时策略该取哪个节点，并带回解析所用的有效配置。
+
+    显式 ``--node-id`` 是调试覆盖入口：直接用该节点自身策略，不做 nextAction 解析。否则复用
+    Feature Status 的 ``run.currentNodeId`` 与该节点的 ``nodeStatus``，按
+    :func:`_policy_target_node_id` 解析到宿主接下来实际会拉起的那个节点。
 
     session context 不应因参数、状态或配置异常中断；任何失败均返回空节点，由 runtime policy
     使用 ``solo`` / ``task.enabled=true`` 默认值。
     """
     explicit = (node_id or "").strip()
     if explicit:
-        return explicit
+        return explicit, None
 
     try:
         workspace = get_plugin_output_workspace_from_args(plugin_workspace, project)
@@ -221,17 +322,20 @@ def _session_node_id(
         if not current_feature:
             raise ValueError("--feature 不能为空")
         path = board_config_path or BOARD_CONFIG_PATH
-        config = json.loads(path.read_text(encoding="utf-8"))
-        payload = build_run_payload(workspace, current_feature, config)
+        base_config = json.loads(path.read_text(encoding="utf-8"))
+        payload, config = build_run_context(workspace, current_feature, base_config)
         run = payload.get("run") if isinstance(payload, dict) else None
         current_node_id = run.get("currentNodeId") if isinstance(run, dict) else None
     except Exception:
-        return ""
+        return "", None
 
     if not isinstance(current_node_id, str):
-        return ""
+        return "", None
     current_node_id = current_node_id.strip()
-    return "" if not current_node_id or current_node_id == "unknown" else current_node_id
+    if not current_node_id or current_node_id == "unknown":
+        return "", None
+    node_status = _run_node_status(run, current_node_id)
+    return _policy_target_node_id(config, current_node_id, node_status), config
 
 
 def _session_runtime_policy(
@@ -242,14 +346,18 @@ def _session_runtime_policy(
     feature: Optional[str] = None,
     board_config_path: Optional[Path] = None,
 ) -> dict:
-    current_node_id = _session_node_id(
+    policy_node_id, config = _session_policy_node(
         node_id,
         plugin_workspace=plugin_workspace,
         project=project,
         feature=feature,
         board_config_path=board_config_path,
     )
-    return _runtime_policy(current_node_id, board_config_path=board_config_path)
+    return _runtime_policy(
+        policy_node_id,
+        board_config_path=board_config_path,
+        config=config,
+    )
 
 
 def _prepend_plugin_root_path(
