@@ -114,3 +114,5 @@ __pycache__/
 # Agents 知识库克隆缓存（sync_agents.py 写入，非源码）
 # =========================
 /sys/
+
+.trellis

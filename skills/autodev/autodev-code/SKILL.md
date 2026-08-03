@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.4.1710
+version: v1.7.0803
 allowed-tools: execute task_output read_file grep glob write_file edit_file
 ---
 
@@ -242,11 +242,13 @@ python "${pluginPath}/hooks/task_runner.py" project-check --feature "${feature}"
 
 Project 验证同样遵循环境失败立即延期、普通失败最多 2 次修复后延期的策略；延期写入 `projectValidationDisposition`，随后入口返回 `code_done_ready`。
 
-如果 task 工具可用，使用 task 工具，先从 git 中获取本轮改动的代码，对照 `plan.json` 与 `design.md` 同时审查三个方面：
-1. 使用 explore-autodev 角色，逐 TASK 对照 `goal` / `specRefs` / `designRefs` 核对 diff：每个任务的改动是否兑现其引用的 REQ/SCN 行为与 API/DATA/D 形态，有无未覆盖的 `acceptanceCriteria`、有无越过 `scope` / `nonGoals` 的改动；
-2. 使用 code-reviewer-autodev 角色，查看代码是否有不满足设计与需求的地方；
-3. 使用 code-simplifier-autodev 角色，代码是否有冗余或不合理的地方。
-如任一子代理返回有问题，则需要修复代码。该审查是主 agent 的只读复核，不替代 runner 的批次验证与 Evidence，不得据此改写任何 `action=validation` evidence 或 `validationDisposition`。如果 task 不可用则不用执行上面的内容，继续任务。
+### 回检与交接
+
+本节完整协议由脚本渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。
+
+```bash
+python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
+```
 
 推进 `code_done` 前先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。
 

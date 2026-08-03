@@ -250,14 +250,15 @@ class RuntimePolicyTest(unittest.TestCase):
 
     def test_explicit_project_and_feature_select_node_policy(self):
         project, feature, arguments = self._feature_arguments()
+        # biz.* 无子代理配置，保持 solo；dev.* 自 e3abd1f 起改为 multi 以配合子代理注入。
         cases = (
-            ("discuss_in_progress", False),
-            ("prd_in_progress", False),
-            ("specs_in_progress", True),
-            ("code_in_progress", True),
+            ("discuss_in_progress", "solo", False),
+            ("prd_in_progress", "solo", False),
+            ("specs_in_progress", "multi", True),
+            ("code_in_progress", "multi", True),
         )
 
-        for checkpoint, expected_enabled in cases:
+        for checkpoint, expected_agent_mode, expected_enabled in cases:
             with self.subTest(checkpoint=checkpoint):
                 records, errors, exists = load_state_json_records(project)
                 self.assertTrue(exists)
@@ -269,7 +270,7 @@ class RuntimePolicyTest(unittest.TestCase):
                 write_state_records(project, records)
 
                 policy = render([], **arguments)["agentConfig"]
-                self.assertEqual(policy["agentMode"], "solo")
+                self.assertEqual(policy["agentMode"], expected_agent_mode)
                 self.assertEqual(
                     policy["toolConfig"]["task"]["enabled"],
                     expected_enabled,
@@ -339,10 +340,11 @@ class RuntimePolicyTest(unittest.TestCase):
             self.assertEqual(policy["agentMode"], "solo")
             self.assertFalse(policy["toolCustomConfig"]["task"]["enabled"])
 
-        # dev.specs 起各节点配置了子代理，子代理只能经 task 工具启动，因此必须放开 task。
+        # dev.specs 起各节点配置了子代理，子代理只能经 task 工具启动，因此必须放开 task；
+        # 同时自 e3abd1f（配合 devclaw1.4.9）起 agentMode 为 multi。
         for node_id in ("dev.specs", "dev.plan", "dev.code", "dev.utest"):
             policy = _runtime_policy(node_id)
-            self.assertEqual(policy["agentMode"], "solo")
+            self.assertEqual(policy["agentMode"], "multi")
             self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
 
     def test_board_config_nodes_with_subagents_keep_task_enabled(self):
