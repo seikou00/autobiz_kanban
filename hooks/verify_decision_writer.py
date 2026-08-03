@@ -5,8 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,14 +30,12 @@ from hooks.result_writer_common import (  # noqa: E402
     coverage_decision_sets,
     derive_coverage_from_evidence,
     empty_coverage,
-    ui_summary_from_coverage,
 )
 
 
 FILE_NAME = "VERIFY_DECISION.json"
 VERDICTS = {"pass", "fail", "manual"}
 ROW_VERDICTS = {"pass", "fail", "manual", "missing"}
-SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 
 
 def _path(workspace: Path, feature: str) -> Path:
@@ -51,9 +47,8 @@ def _feature_dir(workspace: Path, feature: str) -> Path:
 
 
 def _initial(feature_dir: Path) -> dict[str, Any]:
-    rows = _with_ui_applicability(feature_dir, empty_coverage(feature_dir))
+    rows = empty_coverage(feature_dir)
     return _sync_summary(
-        feature_dir,
         {
             "version": 1,
             "verdict": "fail",
@@ -76,49 +71,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     return data
 
 
-def _ui_scenarios(feature_dir: Path) -> tuple[bool, set[str], bool]:
-    path = feature_dir / "UI_CONTEXT.json"
-    if not path.is_file():
-        return False, set(), False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False, set(), True
-    if not isinstance(data, dict):
-        return False, set(), True
-    ui_required = data.get("uiRequired") is True
-    result: set[str] = set()
-    caps = data.get("capabilities")
-    if isinstance(caps, list):
-        for cap in caps:
-            if isinstance(cap, dict) and cap.get("uiRequired") is not False:
-                refs = cap.get("specRefs")
-                if isinstance(refs, list):
-                    result.update(SCN_ID_RE.findall(" ".join(str(ref) for ref in refs if isinstance(ref, str))))
-    return ui_required, result, True
-
-
-def _with_ui_applicability(feature_dir: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    ui_required, ui_scenarios, has_ui_context = _ui_scenarios(feature_dir)
-    if not has_ui_context:
-        return rows
-    result: list[dict[str, Any]] = []
-    for row in rows:
-        next_row = dict(row)
-        scenario = next_row.get("scenarioRef")
-        verdict = str(next_row.get("verdict", "")).lower()
-        if not ui_required or scenario not in ui_scenarios:
-            next_row["uiApplicability"] = "not_applicable"
-        elif verdict == "manual":
-            next_row["uiApplicability"] = "manual"
-        elif verdict == "missing":
-            next_row["uiApplicability"] = "missing"
-        else:
-            next_row["uiApplicability"] = "required"
-        result.append(next_row)
-    return result
-
-
 def _derive_verdict(rows: list[dict[str, Any]]) -> str:
     verdicts = {str(row.get("verdict", "")).lower() for row in rows if isinstance(row, dict)}
     if not rows or "fail" in verdicts or "missing" in verdicts:
@@ -136,10 +88,9 @@ def _next_checkpoint(verdict: str) -> str:
     return "needs_fix"
 
 
-def _sync_summary(feature_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
+def _sync_summary(data: dict[str, Any]) -> dict[str, Any]:
     rows = data.get("scenarioCoverage")
     rows = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-    rows = _with_ui_applicability(feature_dir, rows)
     data["scenarioCoverage"] = rows
     decisions = coverage_decision_sets(rows)
     data.update(decisions)
@@ -161,12 +112,11 @@ def _sync_summary(feature_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
         verdict = _derive_verdict(rows)
     data["verdict"] = verdict
     data["nextCheckpoint"] = _next_checkpoint(verdict)
-    data["uiSummary"] = ui_summary_from_coverage(feature_dir, rows)
     return data
 
 
 def _write(workspace: Path, feature: str, data: dict[str, Any]) -> WriterResult:
-    data = _sync_summary(_feature_dir(workspace, feature), data)
+    data = _sync_summary(data)
     changed = atomic_write_json(_path(workspace, feature), data)
     return WriterResult(ok=True, path=_path(workspace, feature), changed=changed)
 

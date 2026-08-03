@@ -18,15 +18,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.ui_context import DECISION_SOURCES, DECISION_STATUSES, VISUAL_SOURCE_ROUTES, VISUAL_SOURCE_TYPES  # noqa: E402
-
-# 前端线（F05 前端计划与 UI 契约、F06 前端实现与高保真路由）按发板计划延后合入，
-# 见 docs/release-0727-feature-release-order.md。这些断言依赖尚未入板的
-# UI_CONTEXT 资产/装配与 autodev-code 前端 route 目录树，合入对应特性时移除下面的跳过标记。
-_DEFER_F05 = unittest.skip("deferred: F05 前端计划与 UI 契约尚未合入")
-_DEFER_F06 = unittest.skip("deferred: F06 前端实现与高保真路由尚未合入")
-
-
 def _board_config() -> dict:
     return json.loads((ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8"))
 
@@ -133,30 +124,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
 
-    @_DEFER_F05
-    def test_plan_stage_keeps_granularity_and_json_validators(self) -> None:
-        required_validators = {
-            "ui_context_json",
-            "plan_json_contract",
-            "plan_json_initial_tasks",
-            "plan_ref_resolution",
-            "plan_task_granularity",
-            "plan_scenario_coverage",
-        }
-        offenders: list[str] = []
-        for context, node in _iter_nodes(_board_config()):
-            if not isinstance(node, dict) or node.get("id") != "dev.plan":
-                continue
-            validators = node.get("validators", [])
-            if not isinstance(validators, list):
-                offenders.append(f"{context}[dev.plan]: validators_not_list")
-                continue
-            missing = sorted(required_validators - set(validators))
-            if missing:
-                offenders.append(f"{context}[dev.plan]: {','.join(missing)}")
-            if "smoke_test_plan_json" in validators:
-                offenders.append(f"{context}[dev.plan]: advisory_smoke_must_not_be_required")
-        self.assertEqual(offenders, [], "dev.plan validators drifted: " + ", ".join(offenders))
 
     def test_standard_workflow_does_not_depend_on_advisory_smoke_artifacts(self) -> None:
         offenders: list[str] = []
@@ -228,111 +195,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(offenders),
         )
 
-    @_DEFER_F05
-    def test_ui_context_flows_through_downstream_dev_stages(self) -> None:
-        required_nodes = {"dev.review", "dev.utest", "dev.e2e", "dev.verify"}
-        missing: list[str] = []
-        for context, node in _iter_nodes(_board_config()):
-            if not isinstance(node, dict) or node.get("id") not in required_nodes:
-                continue
-            inputs = (node.get("artifacts") or {}).get("inputs", [])
-            ui_input = next(
-                (
-                    artifact
-                    for artifact in inputs
-                    if isinstance(artifact, dict) and artifact.get("path") == "UI_CONTEXT.json"
-                ),
-                None,
-            )
-            if ui_input is None or ui_input.get("required") is not True:
-                missing.append(f"{context}[{node.get('id', '?')}]")
-        self.assertEqual(missing, [], "downstream dev stages must read UI_CONTEXT.json: " + ", ".join(missing))
-
-    @_DEFER_F05
-    def test_ui_context_validator_on_downstream_dev_stages(self) -> None:
-        required_nodes = {"dev.review", "dev.utest", "dev.e2e", "dev.verify"}
-        missing: list[str] = []
-        for context, node in _iter_nodes(_board_config()):
-            if not isinstance(node, dict) or node.get("id") not in required_nodes:
-                continue
-            validators = node.get("validators", [])
-            if not isinstance(validators, list) or "ui_context_json" not in validators:
-                missing.append(f"{context}[{node.get('id', '?')}]")
-        self.assertEqual(missing, [], "downstream dev stages must validate UI_CONTEXT.json: " + ", ".join(missing))
-
-    @_DEFER_F05
-    def test_biz_skills_keep_ui_context_convergence_guidance(self) -> None:
-        self.assertTrue(
-            (ROOT / "skills/autobiz/references/ui-context.md").is_file(),
-            "UI_CONTEXT reference template must be tracked with Biz skills",
-        )
-        required_phrases = {
-            "skills/autobiz/autobiz-requirement-discuss/SKILL.md": [
-                "UI_CONTEXT.json",
-                "skills/autobiz/references/ui-context.md",
-                "uiRequired",
-                "页面数",
-                "核心交互",
-                "空态",
-                "错误态",
-                "高保真",
-                "visualSources[]",
-                "capabilities[].specRefs",
-                "格式符合 `ui-context.md`",
-            ],
-            "skills/autobiz/autobiz-prd-generate/SKILL.md": [
-                "skills/autobiz/references/ui-context.md",
-                "`UI_CONTEXT.json` 是 UI 范围机器事实源",
-                "不要从 PRD 正文重新推导",
-                "页面数",
-                "核心交互",
-                "空态",
-                "错误态",
-                "高保真",
-                "visualSources[]",
-                "capabilities[].specRefs",
-            ],
-        }
-        missing: list[str] = []
-        for relative_path, phrases in required_phrases.items():
-            content = (ROOT / relative_path).read_text(encoding="utf-8")
-            for phrase in phrases:
-                if phrase not in content:
-                    missing.append(f"{relative_path}: {phrase}")
-        self.assertEqual(
-            missing,
-            [],
-            "Biz discuss/prd skills must keep UI_CONTEXT convergence guidance: " + ", ".join(missing),
-        )
-
-    @_DEFER_F05
-    def test_ui_context_reference_tracks_validator_enums(self) -> None:
-        content = (ROOT / "skills/autobiz/references/ui-context.md").read_text(encoding="utf-8")
-        missing: list[str] = []
-        for group_name, values in {
-            "decisionStatus": DECISION_STATUSES,
-            "decisionSource": DECISION_SOURCES,
-            "visualSources.type": VISUAL_SOURCE_TYPES,
-            "visualSources.route": VISUAL_SOURCE_ROUTES,
-        }.items():
-            for value in sorted(values):
-                if value not in content:
-                    missing.append(f"{group_name}:{value}")
-        self.assertEqual(missing, [], "ui-context.md must document validator enum values: " + ", ".join(missing))
-
-    @_DEFER_F05
-    def test_specs_skill_keeps_ui_context_lock_guidance(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-specs/SKILL.md").read_text(encoding="utf-8")
-        required = [
-            "UI_CONTEXT.json",
-            "decisionStatus` 固化为 `locked`",
-            "必须至少有一个 UI capability",
-            "REQ-xxx",
-            "SCN-xxx",
-            "specRefs",
-        ]
-        missing = [phrase for phrase in required if phrase not in content]
-        self.assertEqual(missing, [], "autodev-specs must keep UI_CONTEXT lock guidance: " + ", ".join(missing))
 
     def test_biz_validate_invocation_paths_are_plugin_relative(self) -> None:
         stale_patterns = {
@@ -367,43 +229,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         ]
         self.assertEqual(missing, [], "Biz skill docs must show the unified biz_validate.py command path")
 
-    @_DEFER_F06
-    def test_autodev_code_frontend_routes_use_references_directory(self) -> None:
-        references_root = ROOT / "skills/autodev/autodev-code/references/frontend-html"
-        legacy_root = ROOT / "skills/autodev/autodev-code/deps"
-        self.assertTrue(references_root.is_dir(), "autodev-code frontend route assets must live under references/")
-        self.assertFalse(legacy_root.exists(), "autodev-code must not keep the legacy deps/ route directory")
-
-        banned_patterns = {
-            "autodev-code/deps",
-            "deps/frontend-html",
-            "with-absolute-html/deps",
-            "with-standard-html/deps",
-            "deps/html-parser",
-            "deps/standard-html-parser",
-            "route SKILL/deps",
-            "当前路线依赖",
-        }
-        scan_roots = [
-            ROOT / "hooks",
-            ROOT / "skills/autodev",
-            ROOT / "tests",
-            ROOT / "docs/ui-json-convergence-adaptation.md",
-        ]
-        offenders: list[str] = []
-        self_path = Path(__file__).resolve()
-        for scan_root in scan_roots:
-            paths = [scan_root] if scan_root.is_file() else scan_root.rglob("*")
-            for path in paths:
-                if path.resolve() == self_path:
-                    continue
-                if not path.is_file() or path.suffix not in {".py", ".md", ".json", ".txt"}:
-                    continue
-                content = path.read_text(encoding="utf-8", errors="ignore")
-                for pattern in banned_patterns:
-                    if pattern in content:
-                        offenders.append(f"{path.relative_to(ROOT)}: {pattern}")
-        self.assertEqual(offenders, [], "autodev-code route docs/tools must use references/ paths")
 
     def test_plan_template_has_one_task_input_example(self) -> None:
         template_dir = ROOT / "skills/autodev/autodev-plan/templates"
@@ -505,22 +330,22 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-plan skill must define the deterministic task writer protocol: " + ", ".join(missing),
         )
 
-    def test_plan_skill_keeps_ui_projection_generation_guidance(self) -> None:
+    def test_plan_skill_keeps_ui_task_generation_guidance(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         required = [
             "templates/task-detail-input.json",
             "不得先自由生成再依赖 validator 反复修字段",
-            "UI_CONTEXT.uiRequired=false",
-            "UI_CONTEXT.uiRequired=true",
-            "UI_CONTEXT.uiRequired=true` 时，只为 UI capability 生成 `uiRequired=true`",
+            "按本 Feature 内页面与交互出现顺序自行分配",
+            "`visualSourceRefs` 写空数组",
+            "`frontendRoute` 写 `spec-driven-ui`",
             "模板中的 API/Data/Decision ID 都是占位示例",
             "不要为了过校验强行编造",
             "空数组 `[]`",
             "x-auto-no-http-api: true",
             "x-auto-no-sql: true",
-            "`uiRequired` 是 task 顶层字段",
+            "`uiRequired` 是 task 顶层 bool 字段",
             "不在 `uiRefs` 内部",
-            "禁止原样复制占位 ID",
+            "不得为通过分组预检虚构 PAGE/UIX",
             "必须显式写 `uiRequired:false`",
         ]
         missing = [phrase for phrase in required if phrase not in content]
