@@ -329,7 +329,7 @@
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true }
           ]
         },
-        "validators": ["proposal_contract", "specs_contract"]
+        "validators": ["proposal_contract", "specs_contract", "capability_spec_correspondence"]
       },
       {
         "id": "dev.plan",
@@ -650,7 +650,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["e2e_result_json", "fix_request_json", "evidence_integrity"]
+        "validators": ["e2e_result_json", "e2e_cases_contract", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "dev.verify",

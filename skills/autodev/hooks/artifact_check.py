@@ -60,16 +60,37 @@ from hooks.ui_context import (  # noqa: E402
     validate_ui_context_data,
 )
 
-FRONTEND_REVIEW_PASS = {"passed", "has-suggestions", "skipped-by-user"}
 UI_APPLICABILITIES = {"required", "not_applicable", "manual", "missing"}
 E2E_ID = re.compile(r"\bE2E-[A-Za-z0-9_-]+-\d{3}\b")
 REQ_ID = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
 TASK_ID = re.compile(r"\bT\d{3}\b")
 EVIDENCE_ID = re.compile(r"\bev_\d{4}\b")
-SMOKE_ID = re.compile(r"SMK-\d{3}")
 SPEC_REQUIREMENT_DEF_RE = re.compile(r"^###\s+Requirement\s+\[(REQ-\d{3})\]:\s+.+$", re.MULTILINE)
 SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
+# 带 REQ-/SCN- 记号的标题行；与上面两个正则的差集就是索引器看不见的写法
+CONTRACT_HEADING_CANDIDATE = re.compile(r"^#{1,6}[ \t]+.*?\b(?:REQ|SCN)-\S")
+# proposal 的 `## Capabilities` 段：到下一个同级标题为止
+CAPABILITIES_SECTION = re.compile(
+    r"^##\s+Capabilities\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+# `- \`order-export\`: 说明`。占位 `[capability-name]` 与「无」都匹配不上 kebab-case
+CAPABILITY_ITEM = re.compile(
+    r"^[ \t]*[-*][ \t]+`?(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)`?[ \t]*[:：]",
+    re.MULTILINE,
+)
+# `### New Capabilities` 等分组小标题，切开 `## Capabilities` 段的三组
+CAPABILITY_GROUP_HEADING = re.compile(
+    r"^###\s+(?P<group>New|Modified|Removed)\s+Capabilities\s*$",
+    re.MULTILINE,
+)
+# spec 的 `## ADDED Requirements` 等操作段
+SPEC_OPERATION_SECTION = re.compile(
+    r"^##\s+(?P<operation>ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+GROUP_TO_OPERATION = {"New": "ADDED", "Modified": "MODIFIED", "Removed": "REMOVED"}
 DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DATA_DEF_RE = re.compile(r"^\|\s*(DATA-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
@@ -78,7 +99,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SMOKE_TYPES = {"startup", "api", "ui", "cli", "migration", "health", "custom"}
 SMOKE_SEAM_TYPES = {"startup", "api", "http", "ui", "cli", "job", "migration", "health", "custom"}
 SMOKE_RESULTS = {"pass", "fail", "blocked", "skipped"}
-SMOKE_VERDICTS = {"PASS", "FAIL", "BLOCKED", "SKIPPED", "NOT_APPLICABLE"}
 SMOKE_SOURCE_PREFIXES = (
     "src/test/",
     "test/smoke/",
@@ -88,28 +108,11 @@ SMOKE_SOURCE_PREFIXES = (
     "cypress/e2e/smoke/",
     "playwright/smoke/",
 )
-PENDING_STATUS = re.compile(r"待做|进行中|in[-_ ]?progress|todo|pending", re.IGNORECASE)
 # 表格单元格恰好为「待确认 / 读码差异」时命中；`风险/待确认` 这类枚举说明或「」引用不命中
 PENDING_CELL = re.compile(r"\|\s*(待确认|读码差异)\s*\|")
-TASK_STATUS_LINE = re.compile(r"^[ \t]*[-*][ \t]*\*\*状态:\*\*[ \t]*(.+)$", re.MULTILINE)
-TASK_EVIDENCE_LINE = re.compile(r"^[ \t]*[-*][ \t]*\*\*完成记录:\*\*[ \t]*(.+)$", re.MULTILINE)
-# design 决策表首列 ID（API/DATA/D；EVD 是证据不是待实现决策，不参与覆盖检查）
-DESIGN_DECISION_ROW = re.compile(r"^\|\s*`?((?:API|DATA)-\d{1,3}|D-\d{1,3})`?\s*\|", re.MULTILINE)
 FENCE_OPEN_LINE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 BLOCKQUOTE_LINE = re.compile(r"^[ \t]{0,3}>")
 TEMPLATE_WRAPPER_HEADINGS = {"# 技术设计模板", "# 计划模板"}
-# proposal Open Questions：「已确认」不是可以自己给自己发的状态，必须带跨文件证据
-PLAN_INITIAL_REPAIRS = {
-    "missing_plan": "创建 PLAN.md，并按 autodev-plan/templates/plan.md 生成任务总览、任务详情和 Contract Coverage。",
-    "invalid_plan_structure": "在 PLAN.md 中补齐二级标题「## 任务总览」和「## 任务详情」。",
-    "missing_plan_contract_coverage": "在 PLAN.md 中补齐「## Contract Coverage / 契约覆盖」及覆盖表。",
-    "invalid_plan_no_tasks": "在「任务详情」中至少新增一个「### TASK-NNN: 任务名」任务块，并在任务总览增加同 ID 行。",
-    "missing_task_statuses": "在每个「### TASK-NNN:」任务块内加入独立一行「- **状态:** 待做」；保留列表符号、半角冒号和中文状态。",
-    "invalid_initial_task_status": "将每个任务块的状态行改为「- **状态:** 待做」；Plan 阶段不得写 pending、进行中或完成。",
-    "task_missing_completion_record_field": "在报错 task 的任务块内加入独立一行「- **完成记录:** 无」；保留列表符号和半角冒号。",
-    "invalid_initial_completion_record": "将报错 task 的完成记录行改为「- **完成记录:** 无」；执行证据只由 Code 阶段回写。",
-    "plan_has_pending_cells": "逐个消解 PLAN.md 表格中的「待确认」或「读码差异」单元格并写入确定值；无法裁定时停留在 Plan 阶段。",
-}
 
 
 def find_template_guidance_residue(text: str) -> list[tuple[int, str]]:
@@ -178,13 +181,7 @@ def validate_no_template_guidance(
     return failures
 
 
-VALID_VERDICT = re.compile(r"verdict\s*[:=]\s*(PASS_WITH_WARNINGS|PASS|FAIL|DEGRADED)\b", re.IGNORECASE)
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
-UNIT_TEST_VERDICT = re.compile(
-    r"verdict\W*[:=]\W*(PASS_WITH_WARNINGS|PASS|FAIL|BLOCKED)\b",
-    re.IGNORECASE,
-)
-UNIT_TEST_PASS = {"PASS", "PASS_WITH_WARNINGS"}
 
 
 def spec_files(ctx: HookContext) -> list[Path]:
@@ -208,10 +205,188 @@ def validate_proposal_contract(ctx: HookContext) -> int:
         "Capabilities",
         "Impact",
         "Out of Scope",
+        # 只校验节存在。`Status` 取值不查：「已确认」是模型能自己给自己写的
+        # 状态词，给它加校验只会教出伪造，不会换来真实裁定。
+        "Open Questions",
     ]
     for section in required_sections:
-        if section not in text:
-            failures += fail_line(ctx, "invalid_proposal_missing_section", f" section={section!r}")
+        if not has_heading(text, section):
+            failures += fail_line(
+                ctx,
+                "invalid_proposal_missing_section",
+                f" section={section!r}",
+                repair=f"在 proposal.md 补齐「## {section}」节；Open Questions 无待确认项时正文写「无」。",
+            )
+    return failures
+
+
+def has_heading(text: str, name: str) -> bool:
+    """Whether ``name`` appears as a Markdown heading, not just anywhere in prose.
+
+    Substring matching made "delete the whole section" a free pass: a proposal
+    that merely mentions "Open Questions" in a sentence satisfied it. Requiring
+    a heading is what makes the section actually mandatory.
+    """
+    pattern = r"^#{1,6}[ \t]+.*" + re.escape(name)
+    return re.search(pattern, text, re.MULTILINE) is not None
+
+
+def proposal_capability_groups(text: str) -> dict[str, str]:
+    """Map each capability under ``## Capabilities`` to its New/Modified/Removed group.
+
+    The section body runs from the ``## Capabilities`` heading to the next
+    same-level heading, then splits at the ``### <group> Capabilities`` subheadings.
+    Template placeholders (``[capability-name]``) and the ``无`` filler used for
+    empty groups never match the kebab-case pattern, so they drop out without
+    special-casing. Items listed before any group heading are ignored: they have
+    no declared operation to check against.
+    """
+    section = CAPABILITIES_SECTION.search(text)
+    if not section:
+        return {}
+    body = section.group("body")
+
+    groups: dict[str, str] = {}
+    headings = list(CAPABILITY_GROUP_HEADING.finditer(body))
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        for item in CAPABILITY_ITEM.finditer(body[heading.end() : end]):
+            groups[item.group("name")] = heading.group("group")
+    return groups
+
+
+def proposal_capabilities(text: str) -> set[str]:
+    """Kebab-case capability names listed under ``## Capabilities``, any group."""
+    section = CAPABILITIES_SECTION.search(text)
+    if not section:
+        return set()
+    return {
+        match.group("name")
+        for match in CAPABILITY_ITEM.finditer(section.group("body"))
+    }
+
+
+def spec_operations_with_requirements(text: str) -> set[str]:
+    """Operations whose section actually defines a Requirement.
+
+    Presence of the heading is not the signal. Every spec carries all three
+    sections so the file shape stays uniform, and the unused ones are left
+    empty -- so what distinguishes a New capability from a Modified one is
+    which sections have Requirements under them, not which headings exist.
+    """
+    return {
+        match.group("operation")
+        for match in SPEC_OPERATION_SECTION.finditer(text)
+        if SPEC_REQUIREMENT_DEF_RE.search(match.group("body"))
+    }
+
+
+def spec_capability_dirs(ctx: HookContext) -> set[str]:
+    """Capability directory names following the ``specs/<capability>/spec.md`` shape."""
+    return {
+        path.parent.name
+        for path in ctx.feature_dir.glob("specs/*/spec.md")
+        if path.is_file() and path.stat().st_size > 0
+    }
+
+
+def validate_capability_spec_correspondence(ctx: HookContext) -> int:
+    """Both directions of ``Capabilities`` <-> ``specs/<capability>/spec.md``.
+
+    Listing a capability without writing its spec, and shipping a spec the
+    proposal never claims, are both mechanical facts about files. Neither is
+    something the agent should be asked to self-certify in its reply.
+    """
+    proposal = ctx.file("proposal.md")
+    if not is_nonempty(proposal):
+        # `proposal_contract` owns this failure; do not report it twice.
+        return 0
+
+    text = read_text(proposal)
+    if not CAPABILITIES_SECTION.search(text):
+        # Missing section is `invalid_proposal_missing_section`, not a mismatch.
+        return 0
+
+    declared = proposal_capabilities(text)
+    present = spec_capability_dirs(ctx)
+
+    failures = 0
+    missing_specs = sorted(declared - present)
+    if missing_specs:
+        failures += fail_line(
+            ctx,
+            "proposal_capability_missing_spec",
+            f" capabilities={','.join(missing_specs)}",
+            repair=(
+                "为报错的每个 capability 生成 specs/<capability>/spec.md；"
+                "若该 capability 不该单独成 spec，回 proposal.md 将其移除或并入其他 capability。"
+            ),
+        )
+    unlisted = sorted(present - declared)
+    if unlisted:
+        failures += fail_line(
+            ctx,
+            "spec_missing_proposal_capability",
+            f" capabilities={','.join(unlisted)}",
+            repair=(
+                "把报错的每个 capability 按 New / Modified / Removed 补进 proposal.md 的「## Capabilities」节；"
+                "若该 spec 不属于本轮范围，删除对应 specs/<capability>/ 目录。"
+            ),
+        )
+    failures += _capability_operation_failures(ctx, text, declared & present)
+    return failures
+
+
+def _capability_operation_failures(
+    ctx: HookContext,
+    proposal_text: str,
+    capabilities: set[str],
+) -> int:
+    """Check each capability's declared group against the operations its spec uses.
+
+    The rule is deliberately asymmetric. A declared group always obliges the
+    matching operation, but only ``New`` also forbids the others: a brand-new
+    capability has no pre-existing Requirements to modify or remove, so content
+    under those sections contradicts the declaration. A ``Modified`` capability
+    adding a Requirement alongside its edits is ordinary, and flagging it would
+    make the check fire on correct specs.
+    """
+    groups = proposal_capability_groups(proposal_text)
+    failures = 0
+    for capability in sorted(capabilities):
+        group = groups.get(capability)
+        if group is None:
+            # Listed outside any group heading; `proposal_contract` owns the shape.
+            continue
+        expected = GROUP_TO_OPERATION[group]
+        spec = ctx.feature_dir / "specs" / capability / "spec.md"
+        if not is_nonempty(spec):
+            continue
+        actual = spec_operations_with_requirements(read_text(spec))
+        if expected not in actual:
+            failures += fail_line(
+                ctx,
+                "capability_operation_missing",
+                f" capability={capability} group={group} expected={expected}",
+                repair=(
+                    f"在 specs/{capability}/spec.md 的「## {expected} Requirements」段下写出 Requirement；"
+                    f"若该能力实际不是 {group}，改 proposal.md 把它挪到正确的分组。"
+                ),
+            )
+        if group == "New":
+            contradicting = sorted(actual - {"ADDED"})
+            if contradicting:
+                failures += fail_line(
+                    ctx,
+                    "capability_operation_contradicts_new",
+                    f" capability={capability} operations={','.join(contradicting)}",
+                    repair=(
+                        f"specs/{capability}/spec.md 声明为 New，不该有存量需求可改可删："
+                        f"把 {'/'.join(contradicting)} 段下的 Requirement 移到「## ADDED Requirements」"
+                        f"（段标题可以保留，留空即可）；若该能力实际是在改存量，"
+                        "改 proposal.md 把它挪到 Modified / Removed 组。"
+                    ),
+                )
     return failures
 
 
@@ -234,7 +409,72 @@ def validate_specs_contract(ctx: HookContext) -> int:
             failures += fail_line(ctx, "invalid_spec_missing_requirement", f" file={rel}")
         if not re.search(r"^####\s+Scenario\s+\[SCN-\d{3}\]:\s+.+", text, re.MULTILINE):
             failures += fail_line(ctx, "invalid_spec_missing_scenario", f" file={rel}")
+        malformed = malformed_contract_headings(text)
+        if malformed:
+            failures += fail_line(
+                ctx,
+                "spec_contract_heading_malformed",
+                f" file={rel} headings={'; '.join(malformed)}",
+                repair=(
+                    "把报错的标题改成规范写法："
+                    "「### Requirement [REQ-NNN]: <标题>」/「#### Scenario [SCN-NNN]: <标题>」。"
+                    "NNN 是三位数字，方括号和层级都不能省——索引器只认这一种写法，"
+                    "其余写法会被静默跳过，该 Requirement 对下游覆盖检查等于不存在。"
+                ),
+            )
+        barren = requirements_without_scenario(text)
+        if barren:
+            failures += fail_line(
+                ctx,
+                "spec_requirement_without_scenario",
+                f" file={rel} requirements={','.join(barren)}",
+                repair=(
+                    "为报错的每个 Requirement 补至少一个「#### Scenario [SCN-NNN]: <标题>」；"
+                    "REMOVED Requirement 用 Scenario 描述旧入口被触发时的期望响应。"
+                ),
+            )
     return failures
+
+
+def malformed_contract_headings(text: str) -> list[str]:
+    """Heading lines carrying a REQ-/SCN- token that the ID indexer will not see.
+
+    The indexer accepts exactly one spelling. A heading one bracket or one ``#``
+    away from it is not a syntax error anywhere — it simply vanishes, and the
+    Requirement it names drops out of every downstream coverage check while the
+    file still passes because its *other* headings are well formed. That silent
+    partial loss is why this has to be caught at the spec itself.
+    """
+    malformed: list[str] = []
+    for line in text.splitlines():
+        if not CONTRACT_HEADING_CANDIDATE.match(line):
+            continue
+        if SPEC_REQUIREMENT_DEF_RE.match(line) or SPEC_SCENARIO_DEF_RE.match(line):
+            continue
+        malformed.append(line.strip())
+    return malformed
+
+
+def requirements_without_scenario(text: str) -> list[str]:
+    """Requirement IDs whose own block carries no Scenario heading.
+
+    A file-level "has at least one REQ and one SCN" check passes when three
+    Requirements share a single Scenario, so slice per Requirement instead.
+    Uses the same two module-level patterns the ID indexer uses; introducing a
+    third spelling here is what let coverage go vacuous before.
+    """
+    matches = list(SPEC_REQUIREMENT_DEF_RE.finditer(text))
+    barren: list[str] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        block = text[match.end():end]
+        # A new `## ` section ends the Requirement even without a following `### `.
+        next_section = re.search(r"^##\s+\S", block, re.MULTILINE)
+        if next_section:
+            block = block[: next_section.start()]
+        if not SPEC_SCENARIO_DEF_RE.search(block):
+            barren.append(match.group(1))
+    return barren
 
 
 def repo_root_from_this_file() -> Path:
@@ -268,183 +508,6 @@ def validate_design_contract(ctx: HookContext) -> int:
     pending = PENDING_CELL.findall(text)
     if pending:
         failures += fail_line(ctx, "design_has_pending_cells", f" count={len(pending)}")
-    return failures
-
-
-def validate_plan_initial_tasks(ctx: HookContext) -> int:
-    plan = ctx.file("PLAN.md")
-    if not is_nonempty(plan):
-        return fail_line(
-            ctx,
-            "missing_plan",
-            repair=PLAN_INITIAL_REPAIRS["missing_plan"],
-        )
-    plan_text = read_text(plan)
-    failures = validate_no_template_guidance(ctx, plan, plan_text)
-    if "任务总览" not in plan_text or "任务详情" not in plan_text:
-        failures += fail_line(
-            ctx,
-            "invalid_plan_structure",
-            repair=PLAN_INITIAL_REPAIRS["invalid_plan_structure"],
-        )
-    # 新模板要求单一覆盖表；legacy 双覆盖表 PLAN 仍可回放
-    if "Contract Coverage" not in plan_text and "Specs 行为覆盖" not in plan_text:
-        failures += fail_line(
-            ctx,
-            "missing_plan_contract_coverage",
-            repair=PLAN_INITIAL_REPAIRS["missing_plan_contract_coverage"],
-        )
-    if task_count(plan) <= 0:
-        failures += fail_line(
-            ctx,
-            "invalid_plan_no_tasks",
-            repair=PLAN_INITIAL_REPAIRS["invalid_plan_no_tasks"],
-        )
-    statuses = task_statuses(plan)
-    if not statuses:
-        failures += fail_line(
-            ctx,
-            "missing_task_statuses",
-            repair=PLAN_INITIAL_REPAIRS["missing_task_statuses"],
-        )
-    elif any("待做" not in status for status in statuses):
-        failures += fail_line(
-            ctx,
-            "invalid_initial_task_status",
-            repair=PLAN_INITIAL_REPAIRS["invalid_initial_task_status"],
-        )
-    # 新格式任务块必须带「完成记录」字段且初始为「无」（code 阶段回写的落点）
-    missing_completion_records: list[str] = []
-    invalid_completion_records: list[str] = []
-    for task_id, block in plan_task_blocks(plan_text).items():
-        evidence = TASK_EVIDENCE_LINE.search(block)
-        if not evidence:
-            missing_completion_records.append(task_id)
-        elif evidence.group(1).strip() != "无":
-            invalid_completion_records.append(task_id)
-    if missing_completion_records:
-        failures += fail_line(
-            ctx,
-            "task_missing_completion_record_field",
-            f" tasks={','.join(missing_completion_records)}",
-            repair=PLAN_INITIAL_REPAIRS["task_missing_completion_record_field"],
-        )
-    if invalid_completion_records:
-        failures += fail_line(
-            ctx,
-            "invalid_initial_completion_record",
-            f" tasks={','.join(invalid_completion_records)}",
-            repair=PLAN_INITIAL_REPAIRS["invalid_initial_completion_record"],
-        )
-    pending = PENDING_CELL.findall(plan_text)
-    if pending:
-        failures += fail_line(
-            ctx,
-            "plan_has_pending_cells",
-            f" count={len(pending)}",
-            repair=PLAN_INITIAL_REPAIRS["plan_has_pending_cells"],
-        )
-    return failures
-
-
-def validate_plan_finished_tasks(ctx: HookContext) -> int:
-    plan = ctx.file("PLAN.md")
-    if not is_nonempty(plan):
-        # PLAN.md not in this workflow's contract (e.g. lean): degrade,
-        # task closure lives in the completion summary instead.
-        if not ctx.requires_artifact("PLAN.md"):
-            info(ctx, "plan_not_in_contract_degrade")
-            return 0
-        return fail_line(ctx, "missing_plan")
-    plan_text = read_text(plan)
-    failures = validate_no_template_guidance(ctx, plan, plan_text)
-    if task_count(plan) <= 0:
-        failures += fail_line(ctx, "invalid_plan_no_tasks")
-    statuses = task_statuses(plan)
-    if not statuses:
-        failures += fail_line(ctx, "missing_task_statuses")
-    elif any(PENDING_STATUS.search(status) for status in statuses):
-        failures += fail_line(ctx, "plan_has_pending_tasks")
-    elif any("失败" in status for status in statuses):
-        failures += fail_line(ctx, "plan_has_failed_tasks")
-    elif any("完成" not in status for status in statuses):
-        failures += fail_line(ctx, "invalid_task_status")
-    pending = PENDING_CELL.findall(plan_text)
-    if pending:
-        failures += fail_line(ctx, "plan_has_pending_cells", f" count={len(pending)}")
-    # 状态「完成」的任务必须留下执行证据；防止批量刷状态的橡皮图章
-    for task_id, block in plan_task_blocks(plan_text).items():
-        status_match = TASK_STATUS_LINE.search(block)
-        status = status_match.group(1).strip() if status_match else ""
-        if "完成" in status:
-            evidence = TASK_EVIDENCE_LINE.search(block)
-            value = evidence.group(1).strip() if evidence else ""
-            if value in ("", "无"):
-                failures += fail_line(ctx, "task_missing_completion_evidence", f" task={task_id}")
-    # design 每个 API/DATA/D 决策必须在 PLAN 中出现（实现任务引用或「无需实现」标注行）
-    design = ctx.file("design.md")
-    if is_nonempty(design):
-        for decision_id in sorted(set(DESIGN_DECISION_ROW.findall(read_text(design)))):
-            if decision_id not in plan_text:
-                failures += fail_line(ctx, "design_decision_uncovered", f" id={decision_id}")
-    return failures
-
-
-def validate_requirements_eval_verdict(ctx: HookContext) -> int:
-    eval_report = ctx.file("REQUIREMENTS_EVAL.md")
-    if not is_nonempty(eval_report):
-        return fail_line(ctx, "missing_requirements_eval")
-
-    content = read_text(eval_report)
-    if not re.search(r"verdict\s*[:=]", content, re.IGNORECASE):
-        return fail_line(ctx, "missing_verdict_in_eval")
-    verdict_match = VALID_VERDICT.search(content)
-    if not verdict_match:
-        return fail_line(ctx, "invalid_verdict")
-    if verdict_match.group(1).upper() not in TERMINAL_PASS:
-        return fail_line(ctx, "non_terminal_verdict")
-    return 0
-
-
-def validate_unit_test_report_contract(ctx: HookContext) -> int:
-    report = ctx.file("UNIT_TEST_REPORT.md")
-    log = ctx.file("test-output.log")
-    failures = 0
-
-    if not is_nonempty(report):
-        return fail_line(ctx, "missing_unit_test_report")
-    if not is_nonempty(log):
-        failures += fail_line(ctx, "missing_test_output_log")
-
-    content = read_text(report)
-    required_sections = [
-        "Test Plan",
-        "Execution Summary",
-        "Coverage Matrix",
-        "Failure Analysis",
-        "Fix Attempts",
-        "Commands",
-        "Handoff",
-    ]
-    for section in required_sections:
-        if section not in content:
-            failures += fail_line(ctx, "invalid_unit_test_report_missing_section", f" section={section!r}")
-
-    if not re.search(r"verdict\W*[:=]", content, re.IGNORECASE):
-        failures += fail_line(ctx, "missing_unit_test_verdict")
-    else:
-        verdict_match = UNIT_TEST_VERDICT.search(content)
-        if not verdict_match:
-            failures += fail_line(ctx, "invalid_unit_test_verdict")
-        elif verdict_match.group(1).upper() not in UNIT_TEST_PASS:
-            failures += fail_line(ctx, "non_terminal_unit_test_verdict")
-
-    if "test-output.log" not in content:
-        failures += fail_line(ctx, "missing_test_log_reference")
-    if not re.search(r"\|\s*Source\s*\|\s*Requirement\s*\|\s*Test\s*\|\s*Result\s*\|", content):
-        failures += fail_line(ctx, "missing_coverage_matrix_table")
-    if not re.search(r"\|\s*ID\s*\|\s*Classification\s*\|\s*Files Changed\s*\|", content):
-        failures += fail_line(ctx, "missing_fix_attempts_table")
     return failures
 
 
@@ -811,17 +874,6 @@ def _known_evidence_ids(ctx: HookContext) -> set[str]:
         return set()
 
 
-def _evidence_records_by_id(ctx: HookContext) -> dict[str, dict]:
-    try:
-        return {
-            record.get("evidenceId"): record
-            for record in read_records(stream_path(ctx.feature_dir))
-            if isinstance(record.get("evidenceId"), str)
-        }
-    except EvidenceStoreError:
-        return {}
-
-
 def _evidence_stream_exists(ctx: HookContext) -> bool:
     return stream_path(ctx.feature_dir).is_file()
 
@@ -843,15 +895,6 @@ def _check_string_field(ctx: HookContext, item: dict, field: str, *, context: st
     if value is None and not required:
         return 0
     if not isinstance(value, str) or not value.strip():
-        return fail_line(ctx, "invalid_json_field", f" item={context} field={field}")
-    return 0
-
-
-def _check_bool_field(ctx: HookContext, item: dict, field: str, *, context: str, required: bool = True) -> int:
-    value = item.get(field)
-    if value is None and not required:
-        return 0
-    if not isinstance(value, bool):
         return fail_line(ctx, "invalid_json_field", f" item={context} field={field}")
     return 0
 
@@ -944,15 +987,6 @@ def _check_trace_refs(
     return spec_refs, evidence_ids, failures
 
 
-def _smoke_source_path_allowed(path: str) -> bool:
-    normalized = path.replace("\\", "/").strip()
-    if not normalized or normalized.startswith("/") or normalized.endswith("/"):
-        return False
-    if any(part == ".." for part in normalized.split("/")):
-        return False
-    return any(normalized.startswith(prefix) for prefix in SMOKE_SOURCE_PREFIXES)
-
-
 def _git_repo_root(root: Path) -> Path | None:
     try:
         completed = subprocess.run(
@@ -967,48 +1001,6 @@ def _git_repo_root(root: Path) -> Path | None:
         return None
     value = completed.stdout.strip()
     return Path(value).resolve() if value else None
-
-
-def _git_path_state(root: Path, source_path: str) -> tuple[bool, bool] | None:
-    repo_root = _git_repo_root(root)
-    if repo_root is None:
-        return None
-    absolute_path = (root / source_path).resolve()
-    try:
-        relative_path = absolute_path.relative_to(repo_root)
-    except ValueError:
-        return None
-    rel = relative_path.as_posix()
-    try:
-        tracked = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--", rel],
-            text=True,
-            capture_output=True,
-            check=False,
-        ).returncode == 0
-        ignored = subprocess.run(
-            ["git", "-C", str(repo_root), "check-ignore", "--quiet", "--no-index", "--", rel],
-            text=True,
-            capture_output=True,
-            check=False,
-        ).returncode == 0
-    except OSError:
-        return None
-    return tracked, ignored
-
-
-def _check_smoke_source_git_ignored(ctx: HookContext, source_path: str, *, test_id: str) -> int:
-    state = _git_path_state(ctx.root, source_path)
-    if state is None:
-        info(ctx, "smoke_source_git_ignore_check_skipped", f" id={test_id} path={source_path}")
-        return 0
-    tracked, ignored = state
-    failures = 0
-    if tracked:
-        failures += fail_line(ctx, "tracked_smoke_source_file", f" id={test_id} path={source_path}")
-    if not ignored:
-        failures += fail_line(ctx, "unignored_smoke_source_file", f" id={test_id} path={source_path}")
-    return failures
 
 
 def _load_ui_context_for_json_checks(ctx: HookContext) -> tuple[dict | None, int]:
@@ -1146,93 +1138,6 @@ def _check_ui_projection(
         )
         failures += field_failures
     return failures
-
-
-def _check_smoke_scenario_refs(
-    ctx: HookContext,
-    item: dict,
-    *,
-    context: str,
-    spec_ids: dict[str, set[str]],
-) -> int:
-    values, failures = _check_string_array_field(
-        ctx,
-        item,
-        "scenarioRefs",
-        context=context,
-        required=True,
-    )
-    if not values:
-        return failures
-    if len(values) != 1:
-        failures += fail_line(ctx, "invalid_smoke_vertical_slice_scope", f" item={context} field=scenarioRefs")
-    scenario_ids: set[str] = set()
-    for value in values:
-        found = set(SCN_ID.findall(value))
-        if not found:
-            failures += fail_line(ctx, "missing_smoke_scenario_ref", f" item={context} value={value}")
-        scenario_ids.update(found)
-    if len(scenario_ids) != 1:
-        failures += fail_line(ctx, "invalid_smoke_vertical_slice_scope", f" item={context} scenarioCount={len(scenario_ids)}")
-    for scenario_id in sorted(scenario_ids):
-        if scenario_id not in spec_ids["SCN"]:
-            failures += fail_line(ctx, "unknown_smoke_scenario_ref", f" item={context} id={scenario_id}")
-    return failures
-
-
-def _check_smoke_tdd_contract(ctx: HookContext, item: dict, *, context: str) -> int:
-    failures = 0
-    seam = item.get("seam")
-    if not isinstance(seam, dict):
-        failures += fail_line(ctx, "missing_smoke_seam", f" item={context}")
-    else:
-        seam_type = seam.get("type")
-        if not isinstance(seam_type, str) or seam_type.strip().lower() not in SMOKE_SEAM_TYPES:
-            failures += fail_line(ctx, "invalid_smoke_seam_type", f" item={context}")
-        failures += _check_string_field(ctx, seam, "entrypoint", context=f"{context}.seam")
-        failures += _check_string_field(ctx, seam, "observable", context=f"{context}.seam")
-
-    vertical_slice = item.get("verticalSlice")
-    if not isinstance(vertical_slice, dict):
-        failures += fail_line(ctx, "missing_smoke_vertical_slice", f" item={context}")
-    else:
-        failures += _check_string_field(ctx, vertical_slice, "trigger", context=f"{context}.verticalSlice")
-        failures += _check_string_field(ctx, vertical_slice, "expectedOutcome", context=f"{context}.verticalSlice")
-
-    mock_policy = item.get("mockPolicy")
-    if not isinstance(mock_policy, dict):
-        failures += fail_line(ctx, "missing_smoke_mock_policy", f" item={context}")
-    else:
-        if mock_policy.get("externalOnly") is not True:
-            failures += fail_line(ctx, "invalid_smoke_mock_policy", f" item={context}")
-        _, mock_failures = _check_string_array_field(
-            ctx,
-            mock_policy,
-            "allowedMocks",
-            context=f"{context}.mockPolicy",
-            required=False,
-            allow_empty=True,
-        )
-        failures += mock_failures
-    return failures
-
-
-def _smoke_plan_tests(ctx: HookContext) -> tuple[dict[str, dict], int]:
-    data, failures = load_json_artifact(ctx, "SMOKE_TEST_PLAN.json", required=False)
-    if data is None:
-        return {}, failures
-    tests = data.get("tests")
-    if not isinstance(tests, list):
-        return {}, failures + fail_line(ctx, "invalid_smoke_test_plan_items")
-    result: dict[str, dict] = {}
-    for index, item in enumerate(tests):
-        if not isinstance(item, dict):
-            failures += fail_line(ctx, "invalid_smoke_test_item", f" item=tests[{index}]")
-            continue
-        test_id = item.get("id")
-        if isinstance(test_id, str) and SMOKE_ID.fullmatch(test_id):
-            result[test_id] = item
-    return result, failures
 
 
 def _scenario_covering_evidence(ctx: HookContext) -> dict[str, set[str]]:
@@ -1948,27 +1853,6 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     return failures
 
 
-def validate_ui_context_json(ctx: HookContext) -> int:
-    data, failures = load_json_artifact(
-        ctx,
-        "UI_CONTEXT.json",
-        required=ctx.requires_artifact("UI_CONTEXT.json"),
-    )
-    if data is None:
-        return failures
-    spec_ids, spec_failures = collect_spec_definition_index(ctx)
-    failures += spec_failures
-    for error in validate_ui_context_data(
-        data,
-        feature_id=ctx.slug,
-        require_locked=ctx.requires_artifact("UI_CONTEXT.json"),
-        defined_requirements=spec_ids["REQ"],
-        defined_scenarios=spec_ids["SCN"],
-    ):
-        failures += fail_line(ctx, "invalid_ui_context_json", f" detail={error}")
-    return failures
-
-
 def _load_ui_context_for_projection(ctx: HookContext) -> tuple[dict | None, int]:
     try:
         data = load_ui_context(ctx.feature_dir)
@@ -2120,203 +2004,6 @@ def validate_plan_ui_projection(ctx: HookContext) -> int:
     return failures
 
 
-def validate_smoke_test_plan_json(ctx: HookContext) -> int:
-    data, failures = load_json_artifact(
-        ctx,
-        "SMOKE_TEST_PLAN.json",
-        required=ctx.requires_artifact("SMOKE_TEST_PLAN.json"),
-    )
-    if data is None:
-        return failures
-    if data.get("version") != 1:
-        failures += fail_line(ctx, "invalid_smoke_test_plan_version")
-    failures += _check_string_field(ctx, data, "featureId", context="SMOKE_TEST_PLAN")
-    if data.get("flowBlocking") is not False:
-        failures += fail_line(ctx, "invalid_smoke_flow_blocking")
-
-    tests = data.get("tests")
-    if not isinstance(tests, list):
-        return failures + fail_line(ctx, "invalid_smoke_test_plan_items")
-    if not tests:
-        skip_reason = data.get("skipReason")
-        if not isinstance(skip_reason, str) or not skip_reason.strip():
-            failures += fail_line(ctx, "missing_smoke_skip_reason")
-        return failures
-
-    known_tasks = _known_plan_task_ids(ctx)
-    spec_ids, spec_failures = collect_spec_definition_index(ctx)
-    failures += spec_failures
-    seen: set[str] = set()
-    for index, item in enumerate(tests):
-        context = f"tests[{index}]"
-        if not isinstance(item, dict):
-            failures += fail_line(ctx, "invalid_smoke_test_item", f" item={context}")
-            continue
-        test_id = item.get("id")
-        if not isinstance(test_id, str) or not SMOKE_ID.fullmatch(test_id):
-            failures += fail_line(ctx, "invalid_smoke_test_id", f" item={context}")
-        elif test_id in seen:
-            failures += fail_line(ctx, "duplicate_smoke_test_id", f" item={context} id={test_id}")
-        else:
-            seen.add(test_id)
-
-        task_id = item.get("taskId")
-        if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
-            failures += fail_line(ctx, "invalid_smoke_task_id", f" item={context} taskId={task_id}")
-        elif known_tasks and task_id not in known_tasks:
-            failures += fail_line(ctx, "unknown_smoke_task_id", f" item={context} taskId={task_id}")
-
-        failures += _check_string_field(ctx, item, "title", context=context)
-        smoke_type = item.get("smokeType")
-        if not isinstance(smoke_type, str) or smoke_type.strip().lower() not in SMOKE_TYPES:
-            failures += fail_line(ctx, "invalid_smoke_type", f" item={context}")
-        failures += _check_string_field(ctx, item, "command", context=context)
-        source_path = item.get("sourcePath")
-        if not isinstance(source_path, str) or not _smoke_source_path_allowed(source_path):
-            failures += fail_line(ctx, "invalid_smoke_source_path", f" item={context} path={source_path}")
-        expected_signals, expected_failures = _check_string_array_field(
-            ctx,
-            item,
-            "expectedSignals",
-            context=context,
-            required=True,
-        )
-        failures += expected_failures
-        if not expected_signals:
-            failures += fail_line(ctx, "missing_smoke_expected_signals", f" item={context}")
-        _, precondition_failures = _check_string_array_field(
-            ctx,
-            item,
-            "preconditions",
-            context=context,
-            required=False,
-            allow_empty=True,
-        )
-        failures += precondition_failures
-        timeout_seconds = item.get("timeoutSeconds")
-        if timeout_seconds is not None and (not isinstance(timeout_seconds, int) or timeout_seconds <= 0):
-            failures += fail_line(ctx, "invalid_smoke_timeout", f" item={context}")
-        failures += _check_smoke_tdd_contract(ctx, item, context=context)
-        failures += _check_smoke_scenario_refs(ctx, item, context=context, spec_ids=spec_ids)
-    return failures
-
-
-def validate_smoke_result_json(ctx: HookContext) -> int:
-    result_path = ctx.file("SMOKE_RESULT.json")
-    if not is_nonempty(result_path):
-        planned_tests, plan_failures = _smoke_plan_tests(ctx)
-        if ctx.requires_artifact("SMOKE_RESULT.json") or planned_tests:
-            return plan_failures + fail_line(ctx, "missing_json_artifact", " file=SMOKE_RESULT.json")
-        info(ctx, "json_artifact_missing_degrade", " file=SMOKE_RESULT.json")
-        return plan_failures
-
-    data, failures = load_json_artifact(ctx, "SMOKE_RESULT.json", required=True)
-    if data is None:
-        return failures
-    if data.get("version") != 1:
-        failures += fail_line(ctx, "invalid_smoke_result_version")
-    failures += _check_string_field(ctx, data, "featureId", context="SMOKE_RESULT")
-    if data.get("flowBlocking") is not False:
-        failures += fail_line(ctx, "invalid_smoke_flow_blocking")
-    verdict = data.get("verdict")
-    normalized_verdict = verdict.upper() if isinstance(verdict, str) else ""
-    if normalized_verdict not in SMOKE_VERDICTS:
-        failures += fail_line(ctx, "invalid_smoke_result_verdict")
-
-    results = data.get("results")
-    if not isinstance(results, list):
-        return failures + fail_line(ctx, "invalid_smoke_result_items")
-
-    planned_tests, plan_failures = _smoke_plan_tests(ctx)
-    failures += plan_failures
-    expected_ids = set(planned_tests)
-    seen_ids: set[str] = set()
-    evidence_records = _evidence_records_by_id(ctx)
-    known_tasks = _known_plan_task_ids(ctx)
-    non_pass_results: list[str] = []
-    result_statuses: list[str] = []
-    for index, item in enumerate(results):
-        context = f"results[{index}]"
-        if not isinstance(item, dict):
-            failures += fail_line(ctx, "invalid_smoke_result_item", f" item={context}")
-            continue
-        test_id = item.get("testId")
-        if not isinstance(test_id, str) or not SMOKE_ID.fullmatch(test_id):
-            failures += fail_line(ctx, "invalid_smoke_result_test_id", f" item={context}")
-        else:
-            if test_id in seen_ids:
-                failures += fail_line(ctx, "duplicate_smoke_result_test_id", f" item={context} id={test_id}")
-            seen_ids.add(test_id)
-            if expected_ids and test_id not in expected_ids:
-                failures += fail_line(ctx, "unknown_smoke_result_test_id", f" item={context} id={test_id}")
-
-        task_id = item.get("taskId")
-        if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
-            failures += fail_line(ctx, "invalid_smoke_result_task_id", f" item={context} taskId={task_id}")
-        elif known_tasks and task_id not in known_tasks:
-            failures += fail_line(ctx, "unknown_smoke_result_task_id", f" item={context} taskId={task_id}")
-
-        failures += _check_string_field(ctx, item, "command", context=context)
-        exit_code = item.get("exitCode")
-        if not isinstance(exit_code, int):
-            failures += fail_line(ctx, "invalid_smoke_result_exit_code", f" item={context}")
-        result = item.get("result")
-        normalized_result = result.strip().lower() if isinstance(result, str) else ""
-        if normalized_result not in SMOKE_RESULTS:
-            failures += fail_line(ctx, "invalid_smoke_result_status", f" item={context}")
-        else:
-            result_statuses.append(normalized_result)
-            if normalized_result != "pass":
-                non_pass_results.append(str(test_id))
-        if normalized_result == "pass" and isinstance(exit_code, int) and exit_code != 0:
-            failures += fail_line(ctx, "smoke_result_exit_code_mismatch", f" item={context}")
-
-        evidence_id = item.get("evidenceId")
-        if not isinstance(evidence_id, str) or not EVIDENCE_ID.fullmatch(evidence_id):
-            failures += fail_line(ctx, "invalid_smoke_result_evidence_id", f" item={context}")
-        else:
-            record = evidence_records.get(evidence_id)
-            if not record:
-                failures += fail_line(ctx, "unknown_smoke_result_evidence_id", f" item={context} evidenceId={evidence_id}")
-            elif record.get("action") != "smoke":
-                failures += fail_line(ctx, "smoke_result_evidence_not_smoke", f" item={context} evidenceId={evidence_id}")
-            else:
-                smoke = record.get("smoke")
-                record_test_id = smoke.get("testId") if isinstance(smoke, dict) else None
-                if isinstance(test_id, str) and record_test_id != test_id:
-                    failures += fail_line(ctx, "smoke_result_evidence_test_mismatch", f" item={context} evidenceId={evidence_id}")
-
-        output_tail_path = item.get("outputTailPath")
-        if normalized_result in {"fail", "blocked"} and (not isinstance(output_tail_path, str) or not output_tail_path.strip()):
-            failures += fail_line(ctx, "missing_smoke_result_output_tail", f" item={context}")
-        if normalized_result in {"fail", "blocked"}:
-            failures += _check_string_field(ctx, item, "failureSummary", context=context)
-
-    missing_results = expected_ids - seen_ids
-    if missing_results and (ctx.requires_artifact("SMOKE_RESULT.json") or expected_ids):
-        failures += fail_line(ctx, "missing_smoke_result_rows", f" ids={','.join(sorted(missing_results))}")
-    result_status_set = set(result_statuses)
-    if normalized_verdict == "PASS" and (not results or non_pass_results):
-        detail = f" ids={','.join(sorted(non_pass_results))}" if non_pass_results else ""
-        failures += fail_line(ctx, "invalid_smoke_result_summary", detail)
-    if normalized_verdict == "FAIL" and "fail" not in result_status_set:
-        failures += fail_line(ctx, "invalid_smoke_result_summary")
-    if normalized_verdict == "BLOCKED" and ("fail" in result_status_set or "blocked" not in result_status_set):
-        failures += fail_line(ctx, "invalid_smoke_result_summary")
-    if normalized_verdict == "SKIPPED" and result_status_set != {"skipped"}:
-        failures += fail_line(ctx, "invalid_smoke_result_summary")
-    if normalized_verdict == "NOT_APPLICABLE" and results:
-        failures += fail_line(ctx, "invalid_smoke_result_summary")
-    for test_id, plan_item in planned_tests.items():
-        source_path = plan_item.get("sourcePath")
-        if isinstance(source_path, str) and source_path:
-            if not (ctx.root / source_path).is_file():
-                failures += fail_line(ctx, "missing_smoke_source_file", f" id={test_id} path={source_path}")
-            else:
-                failures += _check_smoke_source_git_ignored(ctx, source_path, test_id=test_id)
-    return failures
-
-
 def _boolean_marker_value(text: str, marker: str) -> bool | None:
     match = re.search(rf"{re.escape(marker)}\W*:\W*(true|false)\b", text, re.IGNORECASE)
     if not match:
@@ -2408,13 +2095,6 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
 
 def _plan_task_string_list(task: dict, field: str) -> list[str]:
     return _string_list_value(task.get(field)) or []
-
-
-def _plan_task_ui_refs(task: dict, field: str) -> list[str]:
-    ui_refs = task.get("uiRefs")
-    if not isinstance(ui_refs, dict):
-        return []
-    return _string_list_value(ui_refs.get(field)) or []
 
 
 def _spec_scenario_refs_by_path(ctx: HookContext) -> dict[str, set[str]]:
@@ -2602,86 +2282,6 @@ def validate_code_done_gate(ctx: HookContext) -> int:
     return failures
 
 
-def validate_frontend_route_gate(ctx: HookContext) -> int:
-    try:
-        ui_context = load_ui_context(ctx.feature_dir)
-    except UIContextError as exc:
-        return fail_line(ctx, "invalid_ui_context_json", f" detail={exc}")
-    if isinstance(ui_context, dict) and ui_context.get("uiRequired") is False:
-        return 0
-
-    evidence_file = frontend_evidence_path(ctx.root, ctx.slug)
-    evidence = read_frontend_json(evidence_file)
-
-    if not evidence:
-        try:
-            resolved = resolve_frontend_route(ctx.root, ctx.slug, write_evidence=False)
-        except FrontendRouteError as exc:
-            return fail_line(ctx, "invalid_frontend_route_source", f" detail={exc}")
-        if resolved.get("triggered"):
-            return fail_line(
-                ctx,
-                "missing_frontend_route_evidence",
-                f" route={resolved.get('route')} evidence={evidence_file}",
-            )
-        return 0
-
-    route = evidence.get("route")
-    if route == ROUTE_NONE and evidence.get("triggered") is not True:
-        return 0
-    if route == ROUTE_SPEC_DRIVEN:
-        review_status = evidence.get("reviewStatus")
-        if review_status not in FRONTEND_REVIEW_PASS:
-            return fail_line(
-                ctx,
-                "frontend_review_not_passed_or_skipped",
-                f" reviewStatus={review_status!r} evidence={evidence_file}",
-            )
-        return 0
-    if route == ROUTE_MISSING and evidence.get("source") == "UI_CONTEXT.json":
-        review_status = evidence.get("reviewStatus")
-        if review_status not in FRONTEND_REVIEW_PASS:
-            return fail_line(
-                ctx,
-                "frontend_review_not_passed_or_skipped",
-                f" reviewStatus={review_status!r} evidence={evidence_file}",
-            )
-        return 0
-    if route == ROUTE_MISSING:
-        return fail_line(ctx, "frontend_html_source_missing", f" evidence={evidence_file}")
-    if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
-        return fail_line(ctx, "invalid_frontend_route", f" route={route!r} evidence={evidence_file}")
-
-    failures = 0
-    required_flags = (
-        "routeSkillRead",
-        "routeSkillReadComplete",
-        "routeTodosCreated",
-        "routeTodosCompleted",
-        "parserRead",
-    )
-    for flag in required_flags:
-        if evidence.get(flag) is not True:
-            failures += fail_line(ctx, f"frontend_route_{flag}_missing", f" evidence={evidence_file}")
-
-    review_status = evidence.get("reviewStatus")
-    if review_status not in FRONTEND_REVIEW_PASS:
-        failures += fail_line(
-            ctx,
-            "frontend_review_not_passed_or_skipped",
-            f" reviewStatus={review_status!r} evidence={evidence_file}",
-        )
-    route_run_id = evidence.get("routeRunId")
-    review_route_run_id = evidence.get("reviewRouteRunId")
-    if isinstance(route_run_id, str) and route_run_id.strip() and review_route_run_id != route_run_id:
-        failures += fail_line(
-            ctx,
-            "frontend_review_route_run_mismatch",
-            f" routeRunId={route_run_id!r} reviewRouteRunId={review_route_run_id!r} evidence={evidence_file}",
-        )
-    return failures
-
-
 def validate_evidence_integrity(ctx: HookContext) -> int:
     if not ctx.requires_artifact("evidence/EVIDENCE.jsonl"):
         info(ctx, "evidence_not_in_contract_degrade")
@@ -2721,29 +2321,23 @@ def validate_evidence_detail_quality(ctx: HookContext) -> int:
     return failures
 
 
-def _ctx_requiring_json(ctx: HookContext, artifact: str) -> HookContext:
-    if ctx.requires_artifact(artifact):
-        return ctx
-    return HookContext(
-        skill=ctx.skill,
-        slug=ctx.slug,
-        root=ctx.root,
-        required_inputs=ctx.required_inputs,
-        required_outputs=(*ctx.required_outputs, artifact),
-    )
+def validate_e2e_cases_contract(ctx: HookContext) -> int:
+    """``E2E_TEST_CASES.yaml`` 与运行日志的形状检查。
 
-
-def validate_e2e_report_contract(ctx: HookContext) -> int:
-    info(ctx, "legacy_markdown_validator_uses_json_source", " validator=e2e_report_contract json=E2E_RESULT.json")
-    json_failures = validate_e2e_result_json(_ctx_requiring_json(ctx, "E2E_RESULT.json"))
-    if json_failures:
-        return json_failures
+    与 ``e2e_result_json`` 分工：那个查执行结果的 JSON 结构，这个查用例文件
+    本身——每个用例带得上 E2E/REQ/SCN 三种 ID、声明了执行方式与 UI 需求、
+    并且真有一份运行日志。结果 JSON 合法不代表用例文件写全了。
+    """
     cases = ctx.file("E2E_TEST_CASES.yaml")
     log = ctx.file("e2e-run.log")
-    failures = 0
 
     if not is_nonempty(cases):
+        if not ctx.requires_artifact("E2E_TEST_CASES.yaml"):
+            info(ctx, "e2e_cases_not_in_contract_degrade")
+            return 0
         return fail_line(ctx, "missing_e2e_cases")
+
+    failures = 0
     if not is_nonempty(log):
         failures += fail_line(ctx, "missing_e2e_run_log")
 
@@ -2761,15 +2355,11 @@ def validate_e2e_report_contract(ctx: HookContext) -> int:
     return failures
 
 
-def validate_verify_report_contract(ctx: HookContext) -> int:
-    info(ctx, "legacy_markdown_validator_uses_json_source", " validator=verify_report_contract json=VERIFY_DECISION.json")
-    return validate_verify_decision_json(_ctx_requiring_json(ctx, "VERIFY_DECISION.json"))
-
-
 VALIDATORS = {
+    "e2e_cases_contract": validate_e2e_cases_contract,
     "proposal_contract": validate_proposal_contract,
     "specs_contract": validate_specs_contract,
-    "ui_context_json": validate_ui_context_json,
+    "capability_spec_correspondence": validate_capability_spec_correspondence,
     "design_contract": validate_design_contract,
     "plan_json_contract": validate_plan_json_contract,
     "plan_json_initial_tasks": validate_plan_json_initial_tasks,
@@ -2778,23 +2368,14 @@ VALIDATORS = {
     "plan_ref_resolution": validate_plan_ref_resolution,
     "plan_task_detail_schema": validate_plan_task_detail_schema,
     "plan_ui_projection": validate_plan_ui_projection,
-    "plan_finished_tasks": validate_plan_finished_tasks,
-    "frontend_route_gate": validate_frontend_route_gate,
     "evidence_detail_quality": validate_evidence_detail_quality,
     "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,
-    "requirements_eval_verdict": validate_requirements_eval_verdict,
     "review_findings_json": validate_review_findings_json,
-    "unit_test_report_contract": validate_unit_test_report_contract,
     "unit_test_result_json": validate_unit_test_result_json,
-    "e2e_report_contract": validate_e2e_report_contract,
     "e2e_result_json": validate_e2e_result_json,
-    "verify_report_contract": validate_verify_report_contract,
     "verify_decision_json": validate_verify_decision_json,
     "fix_request_json": validate_fix_request_json,
-    "smoke_test_plan_json": validate_smoke_test_plan_json,
-    "smoke_result_json": validate_smoke_result_json,
-    "plan_initial_tasks": validate_plan_initial_tasks,
 }
 
 

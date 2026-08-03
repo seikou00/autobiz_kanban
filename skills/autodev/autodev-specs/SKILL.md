@@ -116,12 +116,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 生成前一次性建立规格清单，列出每个 capability 的名称、分类与 `REQ IDs / SCN IDs`。同一份清单用于生成 proposal 与全部 specs，不逐文件临时起名。
 
-将 capability 变更分类写入 proposal 的 `## Capabilities` 节，按 New / Modified / Removed 分组，名称使用 kebab-case，后续 `specs/**/*.md` 必须与其一一对应。探索中形成的判定依据与既有行为来源在对话中说明，本节只留结论。
-
-ID 规则：
-
-- Requirement 使用 `REQ-NNN`（NNN 三位递增）；Scenario 使用 `SCN-NNN`。
-- 改标题不改 ID；Requirement 删除后其 ID 不复用；ID 在同一 feature 内全局唯一。
+capability 的变更分类写进 `## Capabilities` 节。探索中形成的判定依据与既有行为来源在对话中说明，本节只留结论。
 
 分类规则：
 
@@ -131,13 +126,12 @@ ID 规则：
 - 同一用户目标同时包含新增独立能力和修改既有能力时，拆成不同 capability 或同一 spec 内不同 Requirement，不得用一个分类吞掉全部变化。
 - 无法判断是否已有行为时，先搜索既有 specs、代码入口、接口、菜单、配置和测试；仍不确定则回到用户确认，不要猜测分类。
 - 本轮某个分组无 capability 时该组写 `无`；不得保留占位行。
-- 一旦列入 `Capabilities`，必须存在对应的真实 `specs/<capability>/spec.md`；同一用户目标混合新增与修改时，拆分 capability 或用不同 Requirement 表达，不得用单一分类吞掉全部变化。
 
 必须包含：
 
 - **Why**：为什么要做。
 - **What Changes**：用户可见或系统外部可观察变化。
-- **Capabilities**：按 New / Modified / Removed 分组列出本轮能力，名称使用 kebab-case；每个 capability 必须对应一个 `specs/<capability>/spec.md`。
+- **Capabilities**：按 New / Modified / Removed 分组列出本轮能力，名称使用 kebab-case。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
 - **Open Questions**：discussion 表中的每条待确认项落一行，按上面「待确认问题裁定门」的消解定义填 `Status`；本轮无待确认项时本节正文只写「无」。
@@ -149,11 +143,9 @@ ID 规则：
 规则：
 
 - 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
-- 每个 capability 一个 spec 文件：`specs/<capability>/spec.md`。
-- **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`。不得以任何理由跳过。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability，保持两边严格对应；禁止单方面少生成。
-- MODIFIED/REMOVED 操作的 Requirement 用 `## MODIFIED Requirements` / `## REMOVED Requirements` 承载完整新行为或移除说明，同样不可省略。
+- **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability；禁止单方面少生成。集中校验的 `capability_spec_correspondence` 双向判定这条，无需在回复中自行输出对照表。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
-- Requirement 使用 `### Requirement [REQ-NNN]: <标题>`（三位递增；改标题不改 ID；删除后 ID 不复用）。
+- Requirement 使用 `### Requirement [REQ-NNN]: <标题>`（NNN 三位递增；改标题不改 ID；删除后 ID 不复用；ID 在同一 feature 内全局唯一）。
 - Scenario 使用四级标题 `#### Scenario [SCN-NNN]: <标题>`，归属本文件中已存在的 REQ。
 - 每个 Requirement 至少一个 Scenario；REMOVED Requirement 也必须用 Scenario 描述旧入口被触发时的期望响应。
 - 使用 SHALL/MUST 表达可验证行为。
@@ -161,7 +153,8 @@ ID 规则：
 - `ADDED Requirements` 只写新增行为；如果只是已有行为增加条件、字段、状态或分支，放入 `MODIFIED Requirements`。
 - `MODIFIED Requirements` 必须写修改后的完整行为，并在 Requirement 正文或 Scenario 中覆盖旧行为受影响的触发条件和新期望；不要只写“新增字段”“调整逻辑”这类差异片段。
 - `REMOVED Requirements` 必须写旧能力的移除原因、迁移/兼容方式，并用 Scenario 描述旧入口、旧条件或旧分支被触发时系统应该如何响应。
-- 某个操作段无内容时写“无”；不要保留模板占位 Requirement。
+- 某个操作段无内容时保留段标题，段下不写 Requirement（留空或写“无”均可）；不要把“无”写进 Requirement 正文而保留标题，也不要保留模板占位 Requirement。
+- 操作段要与 proposal 的分组对上：`New Capabilities` 的 spec 在 `ADDED Requirements` 下写 Requirement，且 `MODIFIED`/`REMOVED` 段下不得有 Requirement（全新能力没有存量可改可删）；`Modified`/`Removed` 的 spec 必须在同名操作段下写 Requirement，另加 `ADDED` 是允许的。`capability_spec_correspondence` 判定这条。
 - 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
 
 ## 集中校验
@@ -179,12 +172,10 @@ python "${pluginPath}/skills/autodev/hooks/artifact_check.py" postcheck autodev-
 
 ## 完成条件
 
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md` 已生成。
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/` 下至少存在一个 `spec.md`。
-- **能力对应**：`Capabilities` 每一项都存在对应的 `specs/<capability>/spec.md`，`specs/*/spec.md` 每个文件都能在 `Capabilities` 中找到出处；推进 specs_done 前在回复中输出对照表 `<capability> → specs/<capability>/spec.md ✓`，缺任何一行不得推进。REQ/SCN ID 格式与唯一性校验失败无法写入 specs_done。
-- 每个 spec 至少包含一个 Requirement 和一个 Scenario。
+- 「输入与输出」列出的两个产物都已生成，`specs/` 下至少存在一个 `spec.md`。
+- 集中校验通过。能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
 - specs 只描述行为契约，不包含实现任务。
-- proposal 含 `Open Questions` 节：每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
+- `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
 
 ## 回检与修复
 
