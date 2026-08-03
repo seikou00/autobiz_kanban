@@ -41,26 +41,7 @@ from hooks.plan_json import (  # noqa: E402
 )
 from hooks.code_task_context import resolve_task_refs  # noqa: E402
 from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
-from hooks.resolve_frontend_html_route import (  # noqa: E402
-    FrontendRouteError,
-    ROUTE_ABSOLUTE,
-    ROUTE_MISSING,
-    ROUTE_NONE,
-    ROUTE_SPEC_DRIVEN,
-    ROUTE_STANDARD,
-    evidence_path as frontend_evidence_path,
-    read_json as read_frontend_json,
-    resolve_frontend_route,
-)
-from hooks.ui_context import (  # noqa: E402
-    UIContextError,
-    load_ui_context,
-    ui_context_indexes,
-    ui_context_path,
-    validate_ui_context_data,
-)
 
-UI_APPLICABILITIES = {"required", "not_applicable", "manual", "missing"}
 E2E_ID = re.compile(r"\bE2E-[A-Za-z0-9_-]+-\d{3}\b")
 REQ_ID = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
@@ -847,19 +828,6 @@ def _load_plan_data(ctx: HookContext) -> dict | None:
     return None if errors or plan is None else plan
 
 
-def _plan_ui_task_ids(ctx: HookContext) -> set[str]:
-    plan = _load_plan_data(ctx)
-    if plan is None:
-        return set()
-    return {
-        task["id"]
-        for task in plan.get("tasks", [])
-        if isinstance(task, dict)
-        and isinstance(task.get("id"), str)
-        and task.get("uiRequired") is True
-    }
-
-
 def _known_evidence_ids(ctx: HookContext) -> set[str]:
     try:
         return {
@@ -1003,143 +971,6 @@ def _git_repo_root(root: Path) -> Path | None:
     return Path(value).resolve() if value else None
 
 
-def _load_ui_context_for_json_checks(ctx: HookContext) -> tuple[dict | None, int]:
-    if not ctx.requires_artifact("UI_CONTEXT.json") and not is_nonempty(ui_context_path(ctx.feature_dir)):
-        return None, 0
-    try:
-        data = load_ui_context(ctx.feature_dir)
-    except UIContextError as exc:
-        return None, fail_line(ctx, "invalid_ui_context_json", f" detail={exc}")
-    if data is None:
-        if ctx.requires_artifact("UI_CONTEXT.json"):
-            return None, fail_line(ctx, "missing_json_artifact", " file=UI_CONTEXT.json")
-        return None, 0
-    return data, 0
-
-
-def _ui_scenario_refs(ui_data: dict | None) -> set[str]:
-    if not isinstance(ui_data, dict) or ui_data.get("uiRequired") is not True:
-        return set()
-    refs: set[str] = set()
-    for field in ("capabilities", "interactions"):
-        values = ui_data.get(field)
-        if not isinstance(values, list):
-            continue
-        for item in values:
-            if not isinstance(item, dict):
-                continue
-            if field == "capabilities" and item.get("uiRequired") is False:
-                continue
-            spec_refs = item.get("specRefs")
-            if isinstance(spec_refs, list):
-                refs.update(_scenario_refs_from_spec_refs([ref for ref in spec_refs if isinstance(ref, str)]))
-    return refs
-
-
-def _item_maps_to_ui(
-    *,
-    task_id: object,
-    spec_refs: list[str],
-    ui_scenarios: set[str],
-    ui_task_ids: set[str],
-) -> bool:
-    return (
-        isinstance(task_id, str)
-        and task_id in ui_task_ids
-    ) or bool(_scenario_refs_from_spec_refs(spec_refs) & ui_scenarios)
-
-
-def _check_ui_ref_field(
-    ctx: HookContext,
-    item: dict,
-    field: str,
-    *,
-    context: str,
-    known_refs: set[str],
-    required: bool,
-) -> tuple[list[str], int]:
-    refs, failures = _check_string_array_field(
-        ctx,
-        item,
-        field,
-        context=context,
-        required=required,
-        allow_empty=not required,
-    )
-    for ref in refs:
-        if ref not in known_refs:
-            failures += fail_line(ctx, "unknown_json_ui_ref", f" item={context} field={field} ref={ref}")
-    return refs, failures
-
-
-def _check_ui_projection(
-    ctx: HookContext,
-    item: dict,
-    *,
-    context: str,
-    spec_refs: list[str],
-    ui_data: dict | None,
-    require_ui_required_when_mapped: bool,
-    require_refs_when_ui: bool,
-    validate_ref_fields: bool,
-) -> int:
-    if ui_data is None:
-        return 0
-
-    failures = 0
-    ui_required_value = item.get("uiRequired")
-    if ui_required_value is not None and not isinstance(ui_required_value, bool):
-        failures += fail_line(ctx, "invalid_json_field", f" item={context} field=uiRequired")
-
-    feature_ui_required = ui_data.get("uiRequired") is True
-    ui_scenarios = _ui_scenario_refs(ui_data)
-    ui_task_ids = _plan_ui_task_ids(ctx)
-    maps_to_ui = _item_maps_to_ui(
-        task_id=item.get("taskId"),
-        spec_refs=spec_refs,
-        ui_scenarios=ui_scenarios,
-        ui_task_ids=ui_task_ids,
-    )
-
-    if not feature_ui_required:
-        if ui_required_value is True:
-            failures += fail_line(ctx, "ui_required_true_when_feature_not_ui", f" item={context}")
-        for field in ("pageRefs", "interactionRefs", "visualSourceRefs"):
-            refs = _string_list_value(item.get(field)) if field in item else []
-            if refs:
-                failures += fail_line(ctx, "ui_refs_when_feature_not_ui", f" item={context} field={field}")
-        return failures
-
-    if require_ui_required_when_mapped and maps_to_ui and ui_required_value is not True:
-        failures += fail_line(ctx, "missing_json_ui_required_projection", f" item={context}")
-    if ui_required_value is False and maps_to_ui:
-        failures += fail_line(ctx, "json_ui_required_false_for_ui_item", f" item={context}")
-    if ui_required_value is True and not maps_to_ui:
-        failures += fail_line(ctx, "json_ui_required_true_for_non_ui_item", f" item={context}")
-
-    if not validate_ref_fields:
-        return failures
-
-    indexes = ui_context_indexes(ui_data)
-    should_require_refs = require_refs_when_ui and ui_required_value is True
-    for field, known in (
-        ("pageRefs", indexes["page"]),
-        ("interactionRefs", indexes["interaction"]),
-        ("visualSourceRefs", indexes["visualSource"]),
-    ):
-        required = should_require_refs and field in {"pageRefs", "interactionRefs"}
-        _, field_failures = _check_ui_ref_field(
-            ctx,
-            item,
-            field,
-            context=context,
-            known_refs=known,
-            required=required,
-        )
-        failures += field_failures
-    return failures
-
-
 def _scenario_covering_evidence(ctx: HookContext) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     try:
@@ -1187,8 +1018,7 @@ def _validate_scenario_coverage(
     require_pass_evidence: bool,
     covering_evidence: dict[str, set[str]] | None = None,
     spec_ids: dict[str, set[str]] | None = None,
-    ui_data: dict | None = None,
-    validate_ui_applicability: bool = False,
+
 ) -> int:
     failures = 0
     if spec_ids is None:
@@ -1207,8 +1037,6 @@ def _validate_scenario_coverage(
     known_evidence = _known_evidence_ids(ctx)
     evidence_by_scenario = covering_evidence if covering_evidence is not None else _scenario_covering_evidence(ctx)
     allowed_verdicts = {"pass", "fail", "manual", "missing"}
-    ui_scenarios = _ui_scenario_refs(ui_data) if validate_ui_applicability else set()
-    feature_ui_required = ui_data.get("uiRequired") is True if ui_data is not None else False
     for index, row in enumerate(matrix):
         context = f"{field}[{index}]"
         if not isinstance(row, dict):
@@ -1244,149 +1072,10 @@ def _validate_scenario_coverage(
                 failures += fail_line(ctx, "scenario_coverage_pass_without_evidence", f" item={context} id={scenario_ref}")
             elif not any(evidence_id in covering_ids for evidence_id in row_evidence):
                 failures += fail_line(ctx, "scenario_coverage_pass_evidence_mismatch", f" item={context} id={scenario_ref}")
-        if validate_ui_applicability:
-            applicability = row.get("uiApplicability")
-            if not isinstance(applicability, str) or applicability not in UI_APPLICABILITIES:
-                failures += fail_line(ctx, "invalid_scenario_coverage_ui_applicability", f" item={context}")
-            elif ui_data is not None:
-                scenario_is_ui = scenario_ref in ui_scenarios
-                if not feature_ui_required and applicability != "not_applicable":
-                    failures += fail_line(ctx, "invalid_scenario_coverage_ui_applicability", f" item={context} expected=not_applicable")
-                elif feature_ui_required and scenario_is_ui:
-                    expected = normalized_verdict if normalized_verdict in {"manual", "missing"} else "required"
-                    if applicability != expected:
-                        failures += fail_line(ctx, "invalid_scenario_coverage_ui_applicability", f" item={context} expected={expected}")
-                elif feature_ui_required and not scenario_is_ui and applicability != "not_applicable":
-                    failures += fail_line(ctx, "invalid_scenario_coverage_ui_applicability", f" item={context} expected=not_applicable")
 
     missing_rows = defined_scenarios - seen_scenarios
     if missing_rows:
         failures += fail_line(ctx, "missing_scenario_coverage_rows", f" field={field} ids={','.join(sorted(missing_rows))}")
-    return failures
-
-
-def _check_verify_ui_summary(
-    ctx: HookContext,
-    data: dict,
-    *,
-    ui_data: dict | None,
-) -> int:
-    if ui_data is None:
-        return 0
-    failures = 0
-    ui_summary = data.get("uiSummary")
-    if not isinstance(ui_summary, dict):
-        return fail_line(ctx, "missing_verify_ui_summary")
-    feature_ui_required = ui_data.get("uiRequired") is True
-    if ui_summary.get("uiRequired") is not feature_ui_required:
-        failures += fail_line(ctx, "verify_ui_summary_required_mismatch")
-
-    fields = {
-        "passedUiScenarioRefs": set(data.get("passedScenarioRefs", [])) if isinstance(data.get("passedScenarioRefs"), list) else set(),
-        "failedUiScenarioRefs": set(data.get("failedScenarioRefs", [])) if isinstance(data.get("failedScenarioRefs"), list) else set(),
-        "manualUiScenarioRefs": set(data.get("manualVerificationRefs", [])) if isinstance(data.get("manualVerificationRefs"), list) else set(),
-        "missingUiScenarioRefs": set(data.get("missingScenarioRefs", [])) if isinstance(data.get("missingScenarioRefs"), list) else set(),
-    }
-    ui_scenarios = _ui_scenario_refs(ui_data)
-    not_applicable_expected = set()
-    matrix = data.get("scenarioCoverage")
-    if isinstance(matrix, list):
-        for row in matrix:
-            if not isinstance(row, dict):
-                continue
-            scenario_ref = row.get("scenarioRef")
-            if isinstance(scenario_ref, str) and scenario_ref not in ui_scenarios:
-                not_applicable_expected.add(scenario_ref)
-
-    for field, decision_refs in fields.items():
-        refs, ref_failures = _check_string_array_field(
-            ctx,
-            ui_summary,
-            field,
-            context="VERIFY_DECISION.uiSummary",
-            required=True,
-            allow_empty=True,
-        )
-        failures += ref_failures
-        ref_set = set(refs)
-        if feature_ui_required:
-            expected = decision_refs & ui_scenarios
-            if ref_set != expected:
-                failures += fail_line(ctx, "verify_ui_summary_decision_mismatch", f" field={field}")
-        elif ref_set:
-            failures += fail_line(ctx, "verify_ui_summary_when_feature_not_ui", f" field={field}")
-
-    not_applicable, not_applicable_failures = _check_string_array_field(
-        ctx,
-        ui_summary,
-        "notApplicableScenarioRefs",
-        context="VERIFY_DECISION.uiSummary",
-        required=True,
-        allow_empty=True,
-    )
-    failures += not_applicable_failures
-    if set(not_applicable) != not_applicable_expected:
-        failures += fail_line(ctx, "verify_ui_summary_not_applicable_mismatch")
-    return failures
-
-
-def _check_verify_ui_pass_evidence(
-    ctx: HookContext,
-    data: dict,
-    *,
-    ui_data: dict | None,
-) -> int:
-    if ui_data is None or ui_data.get("uiRequired") is not True:
-        return 0
-    failures = 0
-    ui_scenarios = _ui_scenario_refs(ui_data)
-    if not ui_scenarios:
-        return 0
-    e2e_evidence = _e2e_scenario_covering_evidence(ctx)
-    manual_refs = set(data.get("manualVerificationRefs", [])) if isinstance(data.get("manualVerificationRefs"), list) else set()
-    matrix = data.get("scenarioCoverage")
-    if not isinstance(matrix, list):
-        return 0
-    for index, row in enumerate(matrix):
-        if not isinstance(row, dict):
-            continue
-        scenario_ref = row.get("scenarioRef")
-        verdict = row.get("verdict")
-        if not isinstance(scenario_ref, str) or scenario_ref not in ui_scenarios:
-            continue
-        if isinstance(verdict, str) and verdict.lower() == "pass":
-            evidence_ids = _string_list_value(row.get("evidenceIds")) or []
-            if not any(evidence_id in e2e_evidence.get(scenario_ref, set()) for evidence_id in evidence_ids):
-                failures += fail_line(ctx, "verify_ui_pass_without_e2e_evidence", f" item=scenarioCoverage[{index}] id={scenario_ref}")
-        elif isinstance(verdict, str) and verdict.lower() == "manual" and scenario_ref not in manual_refs:
-            failures += fail_line(ctx, "verify_ui_manual_decision_mismatch", f" item=scenarioCoverage[{index}] id={scenario_ref}")
-    return failures
-
-
-def _check_failed_ui_refs(ctx: HookContext, data: dict, *, ui_data: dict | None) -> int:
-    value = data.get("failedUiRefs")
-    if value is None:
-        return 0
-    if not isinstance(value, dict):
-        return fail_line(ctx, "invalid_json_field", " item=FIX_REQUEST field=failedUiRefs")
-    if ui_data is None:
-        return fail_line(ctx, "ui_projection_without_ui_context", " item=FIX_REQUEST.failedUiRefs")
-    failures = 0
-    indexes = ui_context_indexes(ui_data)
-    for field, known in (
-        ("pageRefs", indexes["page"]),
-        ("interactionRefs", indexes["interaction"]),
-        ("visualSourceRefs", indexes["visualSource"]),
-    ):
-        _, field_failures = _check_ui_ref_field(
-            ctx,
-            value,
-            field,
-            context="FIX_REQUEST.failedUiRefs",
-            known_refs=known,
-            required=False,
-        )
-        failures += field_failures
     return failures
 
 
@@ -1503,8 +1192,6 @@ def validate_review_findings_json(ctx: HookContext) -> int:
     findings = data.get("findings")
     if not isinstance(findings, list):
         return failures + fail_line(ctx, "invalid_review_findings_items")
-    ui_data, ui_failures = _load_ui_context_for_json_checks(ctx)
-    failures += ui_failures
     severities = {"blocker", "high", "medium", "low", "info", "minor", "important"}
     for index, finding in enumerate(findings):
         context = f"findings[{index}]"
@@ -1516,18 +1203,8 @@ def validate_review_findings_json(ctx: HookContext) -> int:
         severity = finding.get("severity")
         if not isinstance(severity, str) or severity.strip().lower() not in severities:
             failures += fail_line(ctx, "invalid_review_finding_severity", f" item={context}")
-        spec_refs, _, trace_failures = _check_trace_refs(ctx, finding, context=context, require_task=True, require_evidence=True)
+        _, _, trace_failures = _check_trace_refs(ctx, finding, context=context, require_task=True, require_evidence=True)
         failures += trace_failures
-        failures += _check_ui_projection(
-            ctx,
-            finding,
-            context=context,
-            spec_refs=spec_refs,
-            ui_data=ui_data,
-            require_ui_required_when_mapped=True,
-            require_refs_when_ui=True,
-            validate_ref_fields=True,
-        )
         suggested = finding.get("suggestedCheckpoint")
         if suggested is not None and (not isinstance(suggested, str) or not suggested.strip()):
             failures += fail_line(ctx, "invalid_json_field", f" item={context} field=suggestedCheckpoint")
@@ -1552,26 +1229,14 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
     targets = data.get("targets")
     if not isinstance(targets, list) or not targets:
         return failures + fail_line(ctx, "invalid_unit_test_targets")
-    ui_data, ui_failures = _load_ui_context_for_json_checks(ctx)
-    failures += ui_failures
     for index, target in enumerate(targets):
         context = f"targets[{index}]"
         if not isinstance(target, dict):
             failures += fail_line(ctx, "invalid_unit_test_target", f" item={context}")
             continue
         failures += _check_string_field(ctx, target, "targetId", context=context)
-        spec_refs, _, trace_failures = _check_trace_refs(ctx, target, context=context, require_task=True, require_evidence=True)
+        _, _, trace_failures = _check_trace_refs(ctx, target, context=context, require_task=True, require_evidence=True)
         failures += trace_failures
-        failures += _check_ui_projection(
-            ctx,
-            target,
-            context=context,
-            spec_refs=spec_refs,
-            ui_data=ui_data,
-            require_ui_required_when_mapped=True,
-            require_refs_when_ui=False,
-            validate_ref_fields=False,
-        )
         result = target.get("result")
         if not isinstance(result, str) or result.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED", "SKIP"}:
             failures += fail_line(ctx, "invalid_unit_test_target_result", f" item={context}")
@@ -1613,8 +1278,6 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
     cases = data.get("cases")
     if not isinstance(cases, list) or not cases:
         return failures + fail_line(ctx, "invalid_e2e_result_cases")
-    ui_data, ui_failures = _load_ui_context_for_json_checks(ctx)
-    failures += ui_failures
     for index, case in enumerate(cases):
         context = f"cases[{index}]"
         if not isinstance(case, dict):
@@ -1624,18 +1287,8 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
         case_id = case.get("caseId")
         if isinstance(case_id, str) and not E2E_ID.fullmatch(case_id):
             failures += fail_line(ctx, "invalid_e2e_result_case_id", f" item={context}")
-        spec_refs, _, trace_failures = _check_trace_refs(ctx, case, context=context, require_task=True, require_evidence=True)
+        _, _, trace_failures = _check_trace_refs(ctx, case, context=context, require_task=True, require_evidence=True)
         failures += trace_failures
-        failures += _check_ui_projection(
-            ctx,
-            case,
-            context=context,
-            spec_refs=spec_refs,
-            ui_data=ui_data,
-            require_ui_required_when_mapped=True,
-            require_refs_when_ui=True,
-            validate_ref_fields=True,
-        )
         failures += _check_string_field(ctx, case, "executionMode", context=context)
         steps = case.get("steps")
         if not isinstance(steps, list):
@@ -1685,8 +1338,6 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
     defined_scenarios = set(spec_ids["SCN"])
     covered_by_evidence = _scenario_covering_evidence(ctx)
     known_evidence = _known_evidence_ids(ctx)
-    ui_data, ui_failures = _load_ui_context_for_json_checks(ctx)
-    failures += ui_failures
 
     passed, passed_failures = _check_string_array_field(
         ctx,
@@ -1751,8 +1402,6 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
         require_pass_evidence=True,
         covering_evidence=covered_by_evidence,
         spec_ids=spec_ids,
-        ui_data=ui_data,
-        validate_ui_applicability=ui_data is not None,
     )
     failures += _check_verify_scenario_decisions(
         ctx,
@@ -1767,8 +1416,6 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
     passed_without_evidence = [scenario for scenario in passed if not covered_by_evidence.get(scenario)]
     if passed_without_evidence:
         failures += fail_line(ctx, "verify_passed_scenario_without_evidence", f" ids={','.join(sorted(passed_without_evidence))}")
-    failures += _check_verify_ui_summary(ctx, data, ui_data=ui_data)
-    failures += _check_verify_ui_pass_evidence(ctx, data, ui_data=ui_data)
     return failures
 
 
@@ -1847,160 +1494,6 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     for design_ref in data.get("failedDesignRefs", []) if isinstance(data.get("failedDesignRefs"), list) else []:
         if isinstance(design_ref, str) and known_design_refs and design_ref not in known_design_refs:
             failures += fail_line(ctx, "unknown_fix_request_design_ref", f" ref={design_ref}")
-    ui_data, ui_failures = _load_ui_context_for_json_checks(ctx)
-    failures += ui_failures
-    failures += _check_failed_ui_refs(ctx, data, ui_data=ui_data)
-    return failures
-
-
-def _load_ui_context_for_projection(ctx: HookContext) -> tuple[dict | None, int]:
-    try:
-        data = load_ui_context(ctx.feature_dir)
-    except UIContextError as exc:
-        return None, fail_line(ctx, "invalid_ui_context_json", f" detail={exc}")
-    if data is None:
-        if ctx.requires_artifact("UI_CONTEXT.json"):
-            return None, fail_line(ctx, "missing_json_artifact", " file=UI_CONTEXT.json")
-        info(ctx, "ui_context_not_in_contract_degrade")
-        return None, 0
-    return data, 0
-
-
-def _visual_source_expected_frontend_route(source: dict) -> str | None:
-    route = source.get("route")
-    if isinstance(route, str) and route in {
-        ROUTE_SPEC_DRIVEN,
-        ROUTE_ABSOLUTE,
-        ROUTE_STANDARD,
-        ROUTE_MISSING,
-    }:
-        return route
-    source_type = source.get("type")
-    if source_type == "high_fidelity_html":
-        return ROUTE_ABSOLUTE
-    if source_type == "standard_html":
-        return ROUTE_STANDARD
-    return None
-
-
-def validate_plan_ui_projection(ctx: HookContext) -> int:
-    ui_data, failures = _load_ui_context_for_projection(ctx)
-    if ui_data is None:
-        return failures
-    indexes = ui_context_indexes(ui_data)
-    visual_sources_by_id = {
-        item["sourceId"]: item
-        for item in ui_data.get("visualSources", [])
-        if isinstance(item, dict) and isinstance(item.get("sourceId"), str)
-    }
-    capabilities = [
-        item
-        for item in ui_data.get("capabilities", [])
-        if isinstance(item, dict) and item.get("uiRequired") is not False
-    ]
-
-    plan_data, errors = load_and_validate_plan(plan_json_path(ctx.feature_dir))
-    if errors or plan_data is None:
-        return failures
-
-    raw_tasks = plan_data.get("tasks")
-    if not isinstance(raw_tasks, list):
-        return failures
-
-    feature_ui_required = ui_data.get("uiRequired") is True
-    ui_task_count = 0
-    for index, task in enumerate(raw_tasks):
-        if not isinstance(task, dict):
-            continue
-        task_id = task.get("id") if isinstance(task.get("id"), str) else f"tasks[{index}]"
-        task_ui_required = task.get("uiRequired") is True
-        ui_refs = task.get("uiRefs")
-
-        if not feature_ui_required:
-            if task_ui_required:
-                failures += fail_line(ctx, "plan_ui_task_when_feature_not_ui", f" task={task_id}")
-            if isinstance(ui_refs, dict) and ui_refs:
-                failures += fail_line(ctx, "plan_ui_refs_when_feature_not_ui", f" task={task_id}")
-            continue
-
-        if not task_ui_required:
-            if isinstance(ui_refs, dict) and ui_refs:
-                failures += fail_line(ctx, "plan_ui_refs_for_non_ui_task", f" task={task_id}")
-            continue
-
-        if task_ui_required:
-            ui_task_count += 1
-            if not isinstance(ui_refs, dict):
-                failures += fail_line(ctx, "plan_ui_task_missing_uiRefs", f" task={task_id}")
-                continue
-            for field, known in (
-                ("pageRefs", indexes["page"]),
-                ("interactionRefs", indexes["interaction"]),
-                ("visualSourceRefs", indexes["visualSource"]),
-            ):
-                refs = _string_list_value(ui_refs.get(field))
-                if refs is None:
-                    failures += fail_line(ctx, "invalid_plan_ui_refs", f" task={task_id} field={field}")
-                    continue
-                if field in {"pageRefs", "interactionRefs"} and not refs:
-                    failures += fail_line(ctx, "missing_plan_ui_refs", f" task={task_id} field={field}")
-                for ref in refs:
-                    if ref not in known:
-                        failures += fail_line(ctx, "unknown_plan_ui_ref", f" task={task_id} field={field} ref={ref}")
-            frontend_route = ui_refs.get("frontendRoute")
-            if not isinstance(frontend_route, str) or frontend_route not in {
-                ROUTE_NONE,
-                ROUTE_SPEC_DRIVEN,
-                ROUTE_ABSOLUTE,
-                ROUTE_STANDARD,
-                ROUTE_MISSING,
-            }:
-                failures += fail_line(ctx, "invalid_plan_ui_frontend_route", f" task={task_id}")
-                continue
-            visual_refs = _string_list_value(ui_refs.get("visualSourceRefs")) or []
-            task_spec_refs = set(_string_list_value(task.get("specRefs")) or [])
-            matching_capabilities = [
-                capability
-                for capability in capabilities
-                if task_spec_refs.intersection(_string_list_value(capability.get("specRefs")) or [])
-            ]
-            if matching_capabilities and any(
-                "visualSourceRefs" in capability for capability in matching_capabilities
-            ):
-                expected_visual_refs = {
-                    ref
-                    for capability in matching_capabilities
-                    for ref in (_string_list_value(capability.get("visualSourceRefs")) or [])
-                }
-                if set(visual_refs) != expected_visual_refs:
-                    failures += fail_line(
-                        ctx,
-                        "plan_ui_visual_source_projection_mismatch",
-                        (
-                            f" task={task_id} expected={','.join(sorted(expected_visual_refs)) or 'none'}"
-                            f" actual={','.join(sorted(visual_refs)) or 'none'}"
-                        ),
-                    )
-                if not expected_visual_refs and frontend_route != ROUTE_SPEC_DRIVEN:
-                    failures += fail_line(
-                        ctx,
-                        "plan_ui_route_without_visual_source",
-                        f" task={task_id} expected={ROUTE_SPEC_DRIVEN} actual={frontend_route}",
-                    )
-            for visual_ref in visual_refs:
-                visual_source = visual_sources_by_id.get(visual_ref)
-                if visual_source is None:
-                    continue
-                expected_route = _visual_source_expected_frontend_route(visual_source)
-                if expected_route is not None and frontend_route != expected_route:
-                    failures += fail_line(
-                        ctx,
-                        "plan_ui_frontend_route_mismatch",
-                        f" task={task_id} visualSource={visual_ref} expected={expected_route} actual={frontend_route}",
-                    )
-
-    if feature_ui_required and ui_task_count == 0:
-        failures += fail_line(ctx, "plan_ui_required_without_ui_task")
     return failures
 
 
@@ -2253,7 +1746,6 @@ def validate_plan_json_contract(ctx: HookContext) -> int:
     if data is None:
         return fail_line(ctx, "missing_plan_json")
     failures += _validate_plan_json_traceability(ctx, data)
-    failures += validate_plan_ui_projection(ctx)
     return failures
 
 
@@ -2367,7 +1859,6 @@ VALIDATORS = {
     "plan_scenario_coverage": validate_plan_scenario_coverage,
     "plan_ref_resolution": validate_plan_ref_resolution,
     "plan_task_detail_schema": validate_plan_task_detail_schema,
-    "plan_ui_projection": validate_plan_ui_projection,
     "evidence_detail_quality": validate_evidence_detail_quality,
     "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,

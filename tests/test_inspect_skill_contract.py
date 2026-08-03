@@ -53,7 +53,7 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertIn("PRD_DISCUSS.md", output)
         self.assertIn("无讨论稿时先与用户完成需求澄清，再生成 PRD", output)
 
-    def test_plain_lean_workflow_requires_prd_but_not_ui_context(self) -> None:
+    def test_plain_lean_workflow_requires_prd_only(self) -> None:
         feature = "lean-entry"
         self._create_feature(feature, workflow_template="lean")
 

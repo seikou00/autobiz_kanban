@@ -187,6 +187,8 @@ db61505 e74c944 2c05bc6 aece01a 013a968
 
 ### F05：前端计划与 UI 契约
 
+> 2026-08-03 决定不合入。前端走 `frontend_before_specs` profile 的 `dev.frontend` 节点（PRD + HTML 直接实现），不再引入 `UI_CONTEXT.json` 事实源。`f00`/`f04` 随底座带回的 `hooks/ui_context.py`、`ui_context_writer.py`、`resolve_frontend_html_route.py`、`frontend_route_write_guard.py` 与 `artifact_check.py` 的 `plan_ui_projection` 已一并摘除；`uiRequired` 作为 lane 开关保留。本节及下面的 F06 仅作历史记录。
+
 能力范围：
 
 - Frontend Lane 计划生成。
@@ -207,6 +209,8 @@ db61505 e74c944 2c05bc6 aece01a 013a968
 验收：纯后端计划不产生前端任务；纯前端和前后端混合计划的 Lane、依赖和 UI 引用正确。
 
 ### F06：前端实现与高保真路由
+
+> 2026-08-03 决定不合入，理由同 F05。高保真/标准 HTML 分流由 `/autodev-frontend` 内部的 `route/with-absolute-html`、`route/with-standard-html` 负责，不经 Plan 阶段的 `frontendRoute` 投影。
 
 能力范围：
 
