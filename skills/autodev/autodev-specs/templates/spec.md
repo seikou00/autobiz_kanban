@@ -17,7 +17,7 @@ The system SHALL [外部可观察行为]。
 
 ### Requirement [REQ-002]: [已有能力名]
 
-The system SHALL [修改后的完整新行为]。改已有行为时写完整的新行为，不要只写差异。
+The system SHALL [修改后的完整新行为]。
 
 #### Scenario [SCN-002]: [场景名]
 
