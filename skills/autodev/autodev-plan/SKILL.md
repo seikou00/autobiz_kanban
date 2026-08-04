@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.8.0803
+version: v1.8.0804
 ---
 
 ## 缺失产物处理
@@ -202,7 +202,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 按 `${pluginPath}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
 - **Context / 输入上下文**：引用 proposal 和 specs，说明当前代码现状和约束。
-- **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。
+- **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。`Decision` 列填 proposal `## Decision Log` 里对应的 `DEC-NNN`——那是 specs 阶段为该 Requirement 定下的取舍及其否决项，实现遇阻要偏离时先看这里有没有权衡过；该 Requirement 无此类决策时写「无」。技术决策是 `Design Coverage` 列的 `D-NNN`，不要混进 `Decision` 列。`design_contract` 判定引用的 `DEC-NNN` 在 proposal 中真实存在。
 - **API Decisions / 接口决策**：
   - 不再生成独立接口契约文件。
   - 如本轮不涉及 HTTP/API，必须写 `x-auto-no-http-api: true` 并说明原因。
@@ -497,4 +497,4 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
 CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-**Skill 完成。**
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
