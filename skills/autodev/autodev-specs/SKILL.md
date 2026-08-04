@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.9.0804
+version: v1.9.08041
 ---
 
 ## 缺失产物处理
@@ -60,8 +60,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
 > 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `集中校验并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
-使用task工具，指定Explore-autodev角色进行探索，task prompt 第一行必须传入系统约束中可参考的文件清单。
-子代理先读该清单、再顺其索引读相关约束文档，然后按下面的要求返回结构化内容供主代理参考。
+使用task工具，指定Explore-autodev角色进行探索。
+子代理按下面的要求返回结构化内容供主代理参考。
 探索时必须：
 
 - 从上游需求输入提取目标、用户角色、主流程、验收标准、非目标。
@@ -99,7 +99,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 - 仅裁定讨论表中的待确认条目；没有条目时直接生成产物。
 - 消解定义：裁定即消解，但**裁定必须落盘才算数**。生成 proposal 时每条落为 `Open Questions` 一行，`Status=已确认`，裁定结论体现在对应的 Requirement/Scenario 上。
-- 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与讨论表条目 ID 对应（如 `SPEC-01` → `spec_01`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
+- 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与讨论表条目 ID 对应（如 `SPEC-001` → `spec_001`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
 - 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前建议确认 (Recommended)」：采纳讨论表中的当前建议；②「采纳备选：<方案>」：选项自身携带具体方案；③「需要调整」：用户将给出修改意见，吸收后更新讨论表、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 specs 阶段、不推进。
 - 信息缺口不得使用「已准备好，稍后提供」或「后续补充并继续」；现在提供材料时由用户在「其他」中填写。
 - **禁止自行确认**：`已确认` 只能是用户裁定的结果。不得以「这是外部接口细节」「不影响行为契约的定义」「specs 阶段只关心 WHAT」等任何理由，自己把 Status 写成 `已确认`。判定某条不影响行为契约不是跳过裁定的理由，必须由用户裁定。
@@ -145,14 +145,15 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 - 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
 - **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability；禁止单方面少生成。集中校验的 `capability_spec_correspondence` 双向判定这条，无需在回复中自行输出对照表。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
-- Requirement 使用 `### Requirement [REQ-NNN]: <标题>`（NNN 三位递增；改标题不改 ID；删除后 ID 不复用；ID 在同一 feature 内全局唯一）。
-- Scenario 使用四级标题 `#### Scenario [SCN-NNN]: <标题>`，归属本文件中已存在的 REQ。
+- Requirement 使用 `### Requirement [REQ-NNN]: <标题>`（NNN 三位；按文档顺序递增，允许跳号；改标题不改 ID；删除后 ID 不复用；ID 在同一 feature 内全局唯一，跨 spec 文件也不得重号）。
+- Scenario 使用四级标题 `#### Scenario [SCN-NNN]: <标题>`，必须写在所属 Requirement 标题之下；写在首个 Requirement 之前或操作段标题正下方即不归属任何 Requirement。
 - 每个 Requirement 至少一个 Scenario；REMOVED Requirement 也必须用 Scenario 描述旧入口被触发时的期望响应。
 - 使用 SHALL/MUST 表达可验证行为。
 - 每个 Requirement 只能放入一个操作段：`ADDED Requirements`、`MODIFIED Requirements` 或 `REMOVED Requirements`。
 - `ADDED Requirements` 只写新增行为；如果只是已有行为增加条件、字段、状态或分支，放入 `MODIFIED Requirements`。
 - `MODIFIED Requirements` 必须写修改后的完整行为，并在 Requirement 正文或 Scenario 中覆盖旧行为受影响的触发条件和新期望；不要只写“新增字段”“调整逻辑”这类差异片段。
-- `REMOVED Requirements` 必须写旧能力的移除原因、迁移/兼容方式，并用 Scenario 描述旧入口、旧条件或旧分支被触发时系统应该如何响应。
+- `REMOVED Requirements` 必须用 `**Reason:** <移除原因>` 与 `**Migration:** <迁移方式>` 两行写清移除原因与迁移/兼容方式（写实际内容，占位符不算填），并用 Scenario 描述旧入口、旧条件或旧分支被触发时系统应该如何响应。
+- 模板槽位必须全部替换成实际内容：`[能力名]`、`[触发条件]` 这类方括号占位以及 `TBD`／`待补充`／`待提供`／`待定` 都不得留在产物里（`[REQ-NNN]`／`[SCN-NNN]` 是 ID 语法，Markdown 链接也不算槽位）。
 - 某个操作段无内容时保留段标题，段下不写 Requirement（留空或写“无”均可）；不要把“无”写进 Requirement 正文而保留标题，也不要保留模板占位 Requirement。
 - 操作段要与 proposal 的分组对上：`New Capabilities` 的 spec 在 `ADDED Requirements` 下写 Requirement，且 `MODIFIED`/`REMOVED` 段下不得有 Requirement（全新能力没有存量可改可删）；`Modified`/`Removed` 的 spec 必须在同名操作段下写 Requirement，另加 `ADDED` 是允许的。`capability_spec_correspondence` 判定这条。
 - 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
@@ -191,6 +192,4 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
 ```
 
-**Skill 完成。**
-提醒用户：请回到特性面板新开新对话。
-如果用户仍在当前对话输入“继续”“下一步”等续办意图，必须读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；当前技能尚未完成时不得使用该引导。
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

@@ -51,6 +51,22 @@ SPEC_REQUIREMENT_DEF_RE = re.compile(r"^###\s+Requirement\s+\[(REQ-\d{3})\]:\s+.
 SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
 # 带 REQ-/SCN- 记号的标题行；与上面两个正则的差集就是索引器看不见的写法
 CONTRACT_HEADING_CANDIDATE = re.compile(r"^#{1,6}[ \t]+.*?\b(?:REQ|SCN)-\S")
+# 二级标题（操作段）；`###` 不算，否则 Requirement 标题会被当成段边界
+SECTION_HEADING = re.compile(r"^##(?!#)\s+\S")
+REMOVED_SECTION = re.compile(
+    r"^##\s+REMOVED\s+Requirements\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+REMOVED_FIELD = re.compile(
+    r"^\*\*(?P<name>Reason|Migration)[:：]\*\*(?P<value>.*)$", re.MULTILINE
+)
+# `[能力名]` 这类待填槽位。排除 `[REQ-001]`/`[SCN-001]`（真 ID 语法）、
+# Markdown 链接 `[文字](url)`、以及任务勾选框 `[ ]` / `[x]`。
+PLACEHOLDER_BRACKET = re.compile(
+    r"\[(?!(?:REQ|SCN)-\d{3}\])(?![ xX]\])(?P<slot>[^\]\n]{1,40})\](?!\()"
+)
+PLACEHOLDER_WORD = re.compile(r"TBD|待补充|待提供|待定|占位", re.IGNORECASE)
+PLACEHOLDER_TEXT = re.compile(r"\[[^\]\n]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
 # proposal 的 `## Capabilities` 段：到下一个同级标题为止
 CAPABILITIES_SECTION = re.compile(
     r"^##\s+Capabilities\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
@@ -414,6 +430,84 @@ def validate_specs_contract(ctx: HookContext) -> int:
                     "REMOVED Requirement 用 Scenario 描述旧入口被触发时的期望响应。"
                 ),
             )
+        orphans = scenarios_without_requirement(text)
+        if orphans:
+            failures += fail_line(
+                ctx,
+                "spec_scenario_without_requirement",
+                f" file={rel} scenarios={','.join(orphans)}",
+                repair=(
+                    "把报错的每个 Scenario 移到它所属的「### Requirement [REQ-NNN]:」标题之下；"
+                    "Scenario 出现在首个 Requirement 之前或操作段标题正下方时不归属任何 Requirement。"
+                ),
+            )
+        disordered = out_of_order_ids(text)
+        if disordered:
+            failures += fail_line(
+                ctx,
+                "spec_id_out_of_order",
+                f" file={rel} ids={','.join(disordered)}",
+                repair=(
+                    "按文档顺序重排 REQ/SCN 编号，使其数值递增。"
+                    "允许跳号（删除后 ID 不复用会留下空档），但后出现的编号不得小于先出现的。"
+                ),
+            )
+        missing_fields = removed_requirements_missing_fields(text)
+        if missing_fields:
+            failures += fail_line(
+                ctx,
+                "removed_requirement_missing_field",
+                f" file={rel} fields={','.join(missing_fields)}",
+                repair=(
+                    "为「## REMOVED Requirements」下报错的 Requirement 补齐"
+                    "「**Reason:** <移除原因>」与「**Migration:** <迁移方式>」，写实际内容而非占位符。"
+                ),
+            )
+        residue = placeholder_residue(text)
+        if residue:
+            failures += fail_line(
+                ctx,
+                "spec_placeholder_residue",
+                f" file={rel} placeholders={'; '.join(sorted(set(residue))[:8])}",
+                repair=(
+                    "把报错的模板槽位替换成实际内容。"
+                    "`[REQ-NNN]` / `[SCN-NNN]` 是 ID 语法不算槽位，Markdown 链接也不算。"
+                ),
+            )
+    failures += _duplicate_ids_across_specs(ctx, specs)
+    return failures
+
+
+def _duplicate_ids_across_specs(ctx: HookContext, specs: list[Path]) -> int:
+    """One REQ/SCN ID must name one thing across the whole feature.
+
+    ``collect_spec_definition_index`` merges every spec's IDs into one flat set
+    that five validators consume, ``_validate_scenario_coverage`` among them.
+    A number reused in a second capability collapses into a single entry there,
+    so covering one of them marks both covered -- the same vacuous-coverage
+    shape the ID convention mismatch produced.
+    """
+    owners: dict[str, list[str]] = {}
+    for spec in specs:
+        text = read_text(spec)
+        rel = spec.relative_to(ctx.feature_dir).as_posix()
+        for pattern in (SPEC_REQUIREMENT_DEF_RE, SPEC_SCENARIO_DEF_RE):
+            for spec_id in set(pattern.findall(text)):
+                owners.setdefault(spec_id, []).append(rel)
+
+    failures = 0
+    for spec_id, files in sorted(owners.items()):
+        if len(files) > 1:
+            failures += fail_line(
+                ctx,
+                "duplicate_spec_id_across_specs",
+                f" id={spec_id} files={','.join(sorted(files))}",
+                repair=(
+                    f"{spec_id} 在多个 spec 中重复定义。ID 在同一 feature 内必须全局唯一——"
+                    "覆盖检查按扁平 ID 集合判定，重号会让覆盖其中一个就算覆盖全部。"
+                    "给其中一处换一个未使用的编号，并同步所有引用它的地方。"
+                ),
+            )
     return failures
 
 
@@ -434,6 +528,88 @@ def malformed_contract_headings(text: str) -> list[str]:
             continue
         malformed.append(line.strip())
     return malformed
+
+
+def out_of_order_ids(text: str) -> list[str]:
+    """REQ/SCN IDs whose number does not exceed every ID before it in the file.
+
+    The rule is ascending, not contiguous. "删除后 ID 不复用" guarantees gaps
+    (delete REQ-002 and 001/003 remain), so requiring contiguity would fire on
+    exactly the state the other rule mandates. Equal numbers are left to the
+    duplicate check so one mistake is not reported twice.
+    """
+    violations: list[str] = []
+    for pattern in (SPEC_REQUIREMENT_DEF_RE, SPEC_SCENARIO_DEF_RE):
+        highest = 0
+        for match in pattern.finditer(text):
+            number = int(match.group(1).rsplit("-", 1)[1])
+            if number < highest:
+                violations.append(match.group(1))
+            highest = max(highest, number)
+    return violations
+
+
+def scenarios_without_requirement(text: str) -> list[str]:
+    """Scenario IDs that no Requirement owns.
+
+    ``requirements_without_scenario`` checks the other direction. A Scenario
+    placed before the file's first Requirement, or directly under an operation
+    section heading, belongs to nothing -- it is indexed as a defined scenario
+    and then demands coverage for a behaviour no Requirement states.
+    """
+    orphans: list[str] = []
+    current_requirement: str | None = None
+    for line in text.splitlines():
+        if SECTION_HEADING.match(line):
+            # A new `## ` section closes the Requirement that came before it.
+            current_requirement = None
+            continue
+        requirement = SPEC_REQUIREMENT_DEF_RE.match(line)
+        if requirement:
+            current_requirement = requirement.group(1)
+            continue
+        scenario = SPEC_SCENARIO_DEF_RE.match(line)
+        if scenario and current_requirement is None:
+            orphans.append(scenario.group(1))
+    return orphans
+
+
+def removed_requirements_missing_fields(text: str) -> list[str]:
+    """``<REQ-ID>:<field>`` for REMOVED Requirements lacking Reason/Migration.
+
+    A removal that does not say why or how to migrate leaves downstream stages
+    guessing what to do with the old entry point.
+    """
+    section = REMOVED_SECTION.search(text)
+    if not section:
+        return []
+    body = section.group("body")
+    missing: list[str] = []
+    matches = list(SPEC_REQUIREMENT_DEF_RE.finditer(body))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        block = body[match.end() : end]
+        found = {
+            field.group("name"): field.group("value").strip()
+            for field in REMOVED_FIELD.finditer(block)
+        }
+        for name in ("Reason", "Migration"):
+            value = found.get(name)
+            if not value or PLACEHOLDER_TEXT.search(value):
+                missing.append(f"{match.group(1)}:{name}")
+    return missing
+
+
+def placeholder_residue(text: str) -> list[str]:
+    """Template placeholders left in a generated artifact.
+
+    ``[REQ-001]`` / ``[SCN-001]`` are the real ID syntax and Markdown links are
+    ordinary prose, so both are excluded -- what is left is a slot the author
+    was supposed to fill.
+    """
+    residue = [match.group(0) for match in PLACEHOLDER_BRACKET.finditer(text)]
+    residue += [match.group(0) for match in PLACEHOLDER_WORD.finditer(text)]
+    return residue
 
 
 def requirements_without_scenario(text: str) -> list[str]:
