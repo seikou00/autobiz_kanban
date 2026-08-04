@@ -10,16 +10,14 @@ version: v1.8.0804
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "${feature}" --plain
 ```
 
-读取本技能或任何上游产物时，如果工具返回 `content truncated`、分页提示或只显示部分行，必须继续按 offset/limit 读取直到 EOF；未完整读取前不得声称“已读取完整说明/完整产物”。
-
 # /autodev-plan - Executable Task Plan
 
 ## explore
-使用task工具，指定Explore-autodev角色，进入设计探索模式。未提供的上游产物根据缺失清单处理，不要硬等。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+使用task工具，指定Explore-autodev角色，进入设计探索模式。未提供的上游产物根据缺失清单处理。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
 > 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 plan.json` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
-**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取已有的设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划，需要进入后续 code 阶段才实现。
+**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取已有的设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划。
 
 **这是一种工作姿态，不是固定流程。** 没有必须照搬的问题清单，也没有强制产物。你的任务是作为技术设计伙伴，把 specs 中的行为契约变成可实现、可验证的设计上下文：明确接口、数据、模块边界、风险、待确认项，以及后续 Plan 可以使用的结论。
 
@@ -55,7 +53,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 - 找到最可能的集成点和受影响文件
 - 识别现有命名、错误体、分页、鉴权、租户、审计、日志等风格
 - 隐性知识你需要理解现有系统完成探索，并将隐性知识与我讨论
-- 任务、需求和设计决策都必须使用稳定 ID：Task `T001`、Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、Decision `D-001`
+- 任务、需求和设计决策都必须使用稳定 ID：Task `T001`、Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。另有规格决策 `DEC-001`——由 specs 阶段在 proposal 的 `## Decision Log` 定义，本阶段只引用不新增；两者都叫「决策」但方向相反，`D` 是本阶段产出，`DEC` 是上游输入。
 
 **比较选项**
 
@@ -79,7 +77,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 探索开始时，优先确认当前 Feature：
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
@@ -190,7 +188,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 #### 写入checkpoint
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ---
@@ -494,7 +491,6 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

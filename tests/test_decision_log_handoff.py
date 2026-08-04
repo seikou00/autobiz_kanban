@@ -151,6 +151,21 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
         self.assertIn("DEC-NNN", plan)
         self.assertIn("Decision Log", plan)
 
+    def test_plan_skill_separates_dec_from_d(self) -> None:
+        """`D-NNN` 与 `DEC-NNN` 都叫「决策」，方向却相反，必须在稳定 ID 清单处分清。
+
+        a6868a2 删掉 Decision Log 后只剩一种决策，把 `D-001` 直呼「Decision」是
+        自洽的；恢复 DEC 通道后这个裸名就同时指两个东西。plan 阶段若据此自造
+        `DEC-NNN`，会撞上 design_decision_ref_unresolved 而报错原因看着莫名其妙。
+        """
+        plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        id_list = next(
+            line for line in plan.splitlines() if "Requirement `REQ-001`" in line
+        )
+        self.assertIn("技术决策 `D-001`", id_list, "D-001 必须限定为技术决策，不能裸称 Decision")
+        self.assertIn("DEC-001", id_list, "同一处必须点出规格决策 DEC-001")
+        self.assertIn("只引用不新增", id_list, "必须写明 DEC 是上游输入、本阶段不新增")
+
 
 if __name__ == "__main__":
     unittest.main()
