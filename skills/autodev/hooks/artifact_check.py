@@ -66,6 +66,9 @@ PLACEHOLDER_BRACKET = re.compile(
     r"\[(?!(?:REQ|SCN)-\d{3}\])(?![ xX]\])(?P<slot>[^\]\n]{1,40})\](?!\()"
 )
 PLACEHOLDER_WORD = re.compile(r"TBD|待补充|待提供|待定|占位", re.IGNORECASE)
+# specs 阶段决策：proposal `## Decision Log` 定义，design 规格追踪表引用
+DECISION_ID = re.compile(r"\bDEC-\d{3}\b")
+DECISION_HEADING = re.compile(r"^###\s+(DEC-\d{3})\s*[:：]", re.MULTILINE)
 PLACEHOLDER_TEXT = re.compile(r"\[[^\]\n]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
 # proposal 的 `## Capabilities` 段：到下一个同级标题为止
 CAPABILITIES_SECTION = re.compile(
@@ -665,7 +668,42 @@ def validate_design_contract(ctx: HookContext) -> int:
     pending = PENDING_CELL.findall(text)
     if pending:
         failures += fail_line(ctx, "design_has_pending_cells", f" count={len(pending)}")
+    failures += _unresolved_decision_refs(ctx, text)
     return failures
+
+
+def _unresolved_decision_refs(ctx: HookContext, design_text: str) -> int:
+    """Every ``DEC-NNN`` design cites must exist in the proposal's Decision Log.
+
+    Reference resolution only. Whether a decision is well argued, and whether
+    every Requirement needs one, are judgements a script cannot make -- and the
+    2026-07-29 trace showed that demanding a self-issued status word here just
+    teaches the model to forge one. Existence is a fact about files, so that is
+    all this checks; ``无`` stays a legal cell value.
+    """
+    cited = set(DECISION_ID.findall(design_text))
+    if not cited:
+        return 0
+
+    proposal = ctx.file("proposal.md")
+    if not is_nonempty(proposal):
+        # `proposal_contract` owns a missing proposal; do not report it twice.
+        return 0
+
+    defined = set(DECISION_HEADING.findall(read_text(proposal)))
+    missing = sorted(cited - defined)
+    if not missing:
+        return 0
+    return fail_line(
+        ctx,
+        "design_decision_ref_unresolved",
+        f" ids={','.join(missing)}",
+        repair=(
+            "design.md 规格追踪表引用的 DEC 编号在 proposal.md 的「## Decision Log」中不存在。"
+            "补上对应的「### DEC-NNN: <标题>」，或把该单元格改成实际存在的编号／「无」。"
+            "技术决策用 Design Coverage 列的 D-NNN，不要写进 Decision 列。"
+        ),
+    )
 
 
 def validate_skill_config_schema(

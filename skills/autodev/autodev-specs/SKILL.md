@@ -134,6 +134,7 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 - **Capabilities**：按 New / Modified / Removed 分组列出本轮能力，名称使用 kebab-case。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
+- **Decision Log**：本阶段定下的关键取舍，每条一个 `### DEC-NNN`，写决定/为什么/否决/约束。`design.md` 的规格追踪表按 `DEC-NNN` 引用本节，是 specs 阶段决策传到 plan 的唯一通道——不记的取舍只留在对话里，下游拿到结论拿不到理由。记录门槛见模板；无满足门槛的决策时本节正文只写「无」。
 - **Open Questions**：discussion 表中的每条待确认项落一行，按上面「待确认问题裁定门」的消解定义填 `Status`；本轮无待确认项时本节正文只写「无」。
 
 ## 生成 specs/**/*.md

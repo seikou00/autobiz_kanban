@@ -19,9 +19,11 @@
 
 ## 3. Spec Traceability / 规格追踪
 
+`Decision` 列引用 proposal `## Decision Log` 的 `DEC-NNN`，即该 Requirement 背后 specs 阶段的取舍；本 Requirement 无此类决策时写「无」。技术决策写在 `Design Coverage` 列的 `D-NNN`，两列不是一回事。
+
 | Requirement | Scenarios | Decision | Design Coverage | Evidence |
 |-------------|-----------|----------|-----------------|----------|
-| REQ-001 | SCN-001, SCN-002 | D-001/无 | API-001 / DATA-001 / D-001 | EVD-001 |
+| REQ-001 | SCN-001, SCN-002 | DEC-001/无 | API-001 / DATA-001 / D-001 | EVD-001 |
 
 ## 4. API Decisions / 接口决策
 
