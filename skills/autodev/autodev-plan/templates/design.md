@@ -28,18 +28,18 @@
 - **x-auto-no-http-api:** [true/false]
 - **说明:** [无 HTTP/API 时说明原因；有 API 时说明入口和契约。]
 
-| ID | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |
-|----|--------|--------------|---------|----------|--------|-------------------|--------|
-| API-01 | [GET/POST/无] | [路径或函数入口] | [请求约束] | [响应约束] | [错误处理] | [权限/租户/审计假设] | 已确认 |
+| ID      | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |
+|---------|--------|--------------|---------|----------|--------|-------------------|--------|
+| API-001 | [GET/POST/无] | [路径或函数入口] | [请求约束] | [响应约束] | [错误处理] | [权限/租户/审计假设] | 已确认 |
 
 ## 5. Data Decisions / 数据决策
 
 - **x-auto-no-sql:** [true/false]
 - **说明:** [无数据库变更时说明原因；有数据变更时说明表、字段、索引、迁移。]
 
-| ID | Table/Model | Change | Fields | Index/Migration | Rollback | Status |
-|----|-------------|--------|--------|-----------------|----------|--------|
-| DATA-01 | [表/模型] | [新增/修改/无] | [字段和含义] | [索引/迁移] | [回滚方式] | 已确认 |
+| ID       | Table/Model | Change | Fields | Index/Migration | Rollback | Status |
+|----------|-------------|--------|--------|-----------------|----------|--------|
+| DATA-001 | [表/模型] | [新增/修改/无] | [字段和含义] | [索引/迁移] | [回滚方式] | 已确认 |
 
 ## 6. Technical Design / 技术设计
 
@@ -47,15 +47,15 @@
 [基于 Code Evidence 的综合描述；单条事实引用 EVD-xx，不另行复述。]
 
 ### Decisions
-| ID | Decision | Rationale | Alternatives | Status |
-|----|----------|-----------|--------------|--------|
-| D-01 | [技术决策] | [原因] | [备选方案] | 已确认 |
+| ID    | Decision | Rationale | Alternatives | Status |
+|-------|----------|-----------|--------------|--------|
+| D-001 | [技术决策] | [原因] | [备选方案] | 已确认 |
 
 ### Integration Points
 - [模块/文件/入口路径]
 
 ## 7. Risks / Open Questions
 
-| ID | Type | Description | Impact | Owner/Next Step |
-|----|------|-------------|--------|-----------------|
-| R-01 | 风险/待确认/读码差异 | [描述；读码差异写明「spec/D-xx 说 X，代码是 Y（EVD-xx）」] | [影响] | [下一步] |
+| ID    | Type | Description | Impact | Owner/Next Step |
+|-------|------|-------------|--------|-----------------|
+| R-001 | 风险/待确认/读码差异 | [描述；读码差异写明「spec/D-xx 说 X，代码是 Y（EVD-xx）」] | [影响] | [下一步] |
