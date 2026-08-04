@@ -90,6 +90,7 @@ VALIDATION_KINDS = TASK_VALIDATION_KINDS | BATCH_VALIDATION_KINDS
 MAX_BATCH_TASKS = 5
 BATCH_STRATEGY = "spec_capability_execution_lane_topological"
 EXECUTION_LANES = {"backend", "frontend"}
+IMPLEMENTATION_SCOPES = {"full_stack", "backend_only", "frontend_only"}
 TASK_SET_STATUSES = {"collecting", "finalized"}
 FEATURE_STATUSES = {"todo", "in_progress", "awaiting_next_conversation", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
@@ -177,6 +178,27 @@ def normalize_status(status: Any) -> str:
 
 def task_execution_lane(task: dict[str, Any]) -> str:
     return "frontend" if task.get("uiRequired") is True else "backend"
+
+
+def implementation_scope_task_errors(scope: Any, tasks: list[dict[str, Any]]) -> list[str]:
+    """Reject tasks outside the Feature's selected implementation scope."""
+
+    if scope is None:
+        return []
+    if scope not in IMPLEMENTATION_SCOPES:
+        return ["plan_json_implementationScope_invalid"]
+    if scope == "full_stack":
+        return []
+    errors: list[str] = []
+    expected_lane = "backend" if scope == "backend_only" else "frontend"
+    for task in tasks:
+        task_id = str(task.get("id", "task"))
+        actual_lane = task_execution_lane(task)
+        if actual_lane != expected_lane:
+            errors.append(
+                f"{task_id}.implementation_scope_{expected_lane}_only_required:{scope}"
+            )
+    return errors
 
 
 def task_execution_mode(task: dict[str, Any]) -> str:
@@ -709,6 +731,9 @@ def validate_plan_data(
     feature_id = data.get("featureId")
     if not isinstance(feature_id, str) or not feature_id.strip():
         errors.append("plan_json_missing_feature_id")
+    implementation_scope = data.get("implementationScope")
+    if implementation_scope is not None and implementation_scope not in IMPLEMENTATION_SCOPES:
+        errors.append("plan_json_implementationScope_invalid")
     if data.get("taskSetStatus") not in TASK_SET_STATUSES:
         errors.append("plan_json_taskSetStatus_invalid")
     digest = data.get("taskSetDigest")
@@ -2028,6 +2053,14 @@ def validate_plan_bundle_data(
     )
     if errors:
         return errors
+    scope_errors = implementation_scope_task_errors(root.get("implementationScope"), [
+        task
+        for batch in batch_data.values()
+        for task in tasks(batch)
+        if isinstance(task, dict)
+    ])
+    if scope_errors:
+        return scope_errors
     return _bundle_consistency_errors(
         root,
         batch_data,
@@ -2081,7 +2114,7 @@ def load_plan_bundle(
     if load_errors:
         raise PlanJsonError(";".join(load_errors))
 
-    errors = _bundle_consistency_errors(
+    errors = validate_plan_bundle_data(
         root,
         batch_data,
         require_initial_status=require_initial_status,

@@ -33,6 +33,7 @@ from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done, check_integrity, check_plan_evidence_refs  # noqa: E402
 from hooks.evidence_store import EvidenceStoreError, read_records, stream_path, validate_detail_fields  # noqa: E402
+from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
     load_and_validate_plan,
@@ -182,6 +183,31 @@ def spec_files(ctx: HookContext) -> list[Path]:
     )
 
 
+def _implementation_scope_contract_errors(ctx: HookContext) -> tuple[str, list[str]]:
+    """Load the optional scope contract without breaking legacy Features."""
+
+    manifest = scope_path(ctx.feature_dir)
+    if not manifest.is_file():
+        return "full_stack", []
+    return load_scope(ctx.feature_dir, required=True)
+
+
+def _report_implementation_scope_errors(ctx: HookContext) -> int:
+    _, errors = _implementation_scope_contract_errors(ctx)
+    failures = 0
+    for error in errors:
+        failures += fail_line(
+            ctx,
+            "invalid_implementation_scope",
+            f" detail={error}",
+            repair=(
+                "使用 hooks/implementation_scope.py set 写入 full_stack、backend_only 或 "
+                "frontend_only，并确保 featureId 与当前 Feature 一致。"
+            ),
+        )
+    return failures
+
+
 def validate_proposal_contract(ctx: HookContext) -> int:
     proposal = ctx.file("proposal.md")
     if not is_nonempty(proposal):
@@ -189,6 +215,7 @@ def validate_proposal_contract(ctx: HookContext) -> int:
 
     text = read_text(proposal)
     failures = validate_no_template_guidance(ctx, proposal, text)
+    failures += _report_implementation_scope_errors(ctx)
     required_sections = [
         "Why",
         "What Changes",
@@ -388,7 +415,7 @@ def validate_specs_contract(ctx: HookContext) -> int:
     if not specs:
         return fail_line(ctx, "missing_specs")
 
-    failures = 0
+    failures = _report_implementation_scope_errors(ctx)
     for spec in specs:
         text = read_text(spec)
         rel = spec.relative_to(ctx.feature_dir)
@@ -1798,6 +1825,18 @@ def validate_plan_json_contract(ctx: HookContext) -> int:
         return failures
     if data is None:
         return fail_line(ctx, "missing_plan_json")
+    implementation_scope, scope_errors = _implementation_scope_contract_errors(ctx)
+    for error in scope_errors:
+        failures += fail_line(ctx, "invalid_implementation_scope", f" detail={error}")
+    if scope_path(ctx.feature_dir).is_file() and not scope_errors:
+        plan_scope = data.get("implementationScope")
+        if plan_scope != implementation_scope:
+            failures += fail_line(
+                ctx,
+                "plan_implementation_scope_mismatch",
+                f" plan={plan_scope!r} feature={implementation_scope!r}",
+                repair="回到 /autodev-plan 重新生成 plan.json，禁止手工修改 uiRequired 绕过范围门禁。",
+            )
     failures += _validate_plan_json_traceability(ctx, data)
     return failures
 

@@ -28,6 +28,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 - **怎么实现 / 怎么拆编码任务**：交给后续设计与计划阶段
 - **怎么改代码**：交给后续编码阶段
 
+## 实现范围
+
+生成 proposal/specs 前读取 `IMPLEMENTATION_SCOPE.json`。`backend_only` 只生成后端可实现、可验证的行为，禁止页面、交互和前端路由 Scenario；`frontend_only` 只生成前端行为，后端 API 只能作为外部依赖；`full_stack` 保持现有行为。范围缺失时按兼容规则视为 `full_stack`，但新 Feature 应在 Discuss 阶段先写入范围文件。
+
 ## 输入与输出
 
 读取输入:

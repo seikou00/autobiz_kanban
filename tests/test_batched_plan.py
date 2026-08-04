@@ -294,6 +294,22 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_load_plan_bundle_rejects_task_outside_implementation_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "feature"
+            feature_dir.mkdir()
+            write_bundle(feature_dir, [[task("T001")]])
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["implementationScope"] = "frontend_only"
+            write_plan_json(root_path, root)
+
+            with self.assertRaisesRegex(
+                PlanJsonError,
+                "T001\\.implementation_scope_frontend_only_required:frontend_only",
+            ):
+                load_plan_bundle(feature_dir)
+
     def test_backend_maven_test_does_not_replace_batch_compile_closure(self) -> None:
         item = task("T001")
         item["validationCommands"][0].update({

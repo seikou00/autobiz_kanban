@@ -12,6 +12,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 # /autodev-plan - Executable Task Plan
 
+进入 Plan 时读取 `${FEATURE_DIR}/IMPLEMENTATION_SCOPE.json`。`backend_only` 只允许生成 `uiRequired=false` 的 backend task；`frontend_only` 只允许生成 `uiRequired=true` 的 frontend task；`full_stack` 保持现有行为。Plan writer 会在分组预检、Draft 和正式计划校验中重复执行该门禁。
+
 ## explore
 使用task工具，指定Explore-autodev角色，进入设计探索模式。未提供的上游产物根据缺失清单处理。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 

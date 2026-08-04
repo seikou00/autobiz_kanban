@@ -6,6 +6,16 @@ version: v1.2.08041
 
 # /autobiz-prd-generate — Biz 阶段 PRD 生成
 
+## 实现范围
+
+生成 PRD 前读取 Feature 的 `IMPLEMENTATION_SCOPE.json`：
+
+```bash
+python "${pluginPath}/hooks/implementation_scope.py" validate --feature "${feature}"
+```
+
+`backend_only` 的 PRD 只保留 API、数据、权限、状态和后端异常；`frontend_only` 只保留页面、交互、前端校验和展示状态；`full_stack` 保持完整范围。PRD 必须包含 `## 当前实现范围`，被剥离内容保留在 `SCOPE_SPLIT.md`。
+
 ## 工作流程
 
 ### 前置检查
