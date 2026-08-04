@@ -13,7 +13,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 # /autodev-plan - Executable Task Plan
 
 ## explore
-使用task工具，指定Explore-autodev角色，进入设计探索模式。未提供的上游产物根据缺失清单处理。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
+进入设计探索模式。未提供的上游产物根据缺失清单处理。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
 
 > 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 plan.json` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
 
@@ -24,7 +24,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 ---
 
 ### 探索姿态
-
+使用task工具进行探索，指定Explore-autodev角色，探索必须要读<AGENTS_INSTRUCTIONS></AGENTS_INSTRUCTIONS>里面提到的文件，再按下面列举的要求，最后需要返回完整详尽的结构化文档结果让主代理参考。
 - **好奇而不武断** - 顺着用户表达、proposal 和 specs 自然追问，不预设唯一答案。
 - **展开线索而不审问** - 同时呈现几个值得看的方向，让用户选择最相关的，不要把对话压成机械问卷。
 - **扎根现实** - 优先读取 proposal、specs、已有代码、现有接口、数据表、测试和约定；不要只做抽象讨论，也不要假装理解——不清楚就查代码或追问。
@@ -181,16 +181,16 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ### PLAN阶段
 先生成 `design.md`，再基于这些输入与 design 生成 `plan.json`，并同步生成 `PLAN.md` 。
 
-#### 写入checkpoint
+#### 更新状态
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）"
 ```
 
 ---
 
 #### 生成 design.md
 
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md`。`design.md` 是后续编码、测试和验收的稳定技术设计契约，承载 API、数据、架构、迁移和风险决策；行为契约以 `specs/**/*.md` 为准，不在 design.md 中重复维护完整 specs。
+本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md`。`design.md` 是稳定技术设计契约，承载 API、数据、架构、迁移和风险决策；行为契约以 `specs/**/*.md` 为准，不在 design.md 中重复维护完整 specs。
 
 按 `${pluginPath}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
@@ -231,21 +231,21 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 [摘录 Data Decisions 表格；无数据变更时一句话说明原因]
 
 **关键技术决策**
-[D-xx 中影响实现路径的决策及备选方案]
+[D-xxx 中影响实现路径的决策及备选方案]
 
 **待确认项**
-[所有待确认条目：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」或「读码差异」的行；逐条说明影响，读码差异条目按「spec/D-xx 说 X，代码是 Y（EVD-xx）」呈现。]
+[所有待确认条目：API-xxx / DATA-xxx / D-xxx 中 Status 为「待确认」的行，以及 R-xxx 中 Type 为「待确认」或「读码差异」的行；逐条说明影响，读码差异条目按「spec/D-xxx 说 X，代码是 Y（EVD-xxx）」呈现。]
 ```
 
 展示后按以下两步确认，顺序不可颠倒：
 
 **待确认项逐条裁定**
 
-- 范围：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」或「读码差异」的行；没有待裁定条目时跳过本步，直接进入第二步。读码差异条目的选项闭集同样适用：裁定结果只能是「spec 基线过时，按代码现实修订（结果回写 spec/design 对应处）」「plan 读码有误，修正 Evidence」「行为契约需要变更，回 /autodev-specs」三者之一的具体化，不存在「按代码先做」的默认出口。
+- 范围：API-xxx / DATA-xxx / D-xxx 中 Status 为「待确认」的行，以及 R-xxx 中 Type 为「待确认」或「读码差异」的行；没有待裁定条目时跳过本步，直接进入第二步。读码差异条目的选项闭集同样适用：裁定结果只能是「spec 基线过时，按代码现实修订（结果回写 spec/design 对应处）」「plan 读码有误，修正 Evidence」「行为契约需要变更，回 /autodev-specs」三者之一的具体化，不存在「按代码先做」的默认出口。
 - 消解定义：裁定即消解。一个条目被消解 = design.md 对应行 Status/Type 回写「已确认」，**且**裁定产生的具体内容（采纳的方案、用户提供的链接/字段）已写进对应行或章节。每个预设选项选中后必须能立即达成消解或明确暂停推进；两者之外的选项非法。
-- 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与条目 ID 对应（如 `pending_r_01`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
+- 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与条目 ID 对应（如 `pending_r_001`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
 - 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前设计确认 (Recommended)」：采纳设计中已写出的方案；②「采纳备选：<方案>」：选项自身携带具体替代方案；③「需要调整」：用户将给出修改意见，吸收后更新章节、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 plan 阶段、不推进。
-- 信息缺口型条目（缺接口文档 url、字段定义、外部约定等）：`question` 中直接写「若现在能提供，请在『其他』中粘贴链接或具体内容」；预设选项只从「调整设计移除该依赖」「暂停，拿到材料后继续」中取。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口——该出口已从选项闭集移除，不得以任何措辞重新引入。用户在「其他」提供内容 → 内容写进 design.md → 回写「已确认」。共享协议第 3 节的「后续补充并继续」模板是探索/讨论阶段收集信息用的，这个阶段禁止搬进裁定门。
+- 信息缺口型条目（缺接口文档 url、字段定义、外部约定等）：`question` 中直接写「若现在能提供，请在『其他』中粘贴链接或具体内容」；预设选项只从「调整设计移除该依赖」「暂停，拿到材料后继续」中取。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口——该出口已从选项闭集移除，不得以任何措辞重新引入。用户在「其他」提供内容 → 内容写进 design.md → 回写「已确认」。共享协议第 3 节的「后续补充并继续」模板在这个阶段禁止搬进裁定门。
 - 回写：拿到裁定后立即回写 design.md 对应行——回写「已确认」的前提是信息实体落地：用户答复中给出的链接/字段/方案必须先写进对应行或章节。**声称拥有 ≠ 提供**：用户仅声称「我有 / 稍后给」而未提供实体时，该条**未消解**：追问一次索取内容，仍未提供则按「调整设计移除该依赖 / 暂停」重发裁定。不得有延后选择，后续阶段不会检查待确认；裁定改变设计内容时更新对应章节并重新展示变更部分。
 - 消解自查：全部裁定回写后、发起第二步之前，自查 design.md 各表单元格无「待确认」「读码差异」、回写内容无 TBD/待补充/待提供/占位 等词、无对缺失材料的引用（「根据实际文档」「以实际接口为准」「编码阶段补充」等）；任一命中回到第一步。plan_done 的 postcheck 会机械校验残留单元格，绕过自查也无法推进。
 - 顺序硬约束：所有待确认条目都拿到用户裁定之前，禁止发起第二步的整体确认门。
@@ -481,8 +481,8 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
 
 ---
 
-## 整体完成条件
-- `design.md`、`plan.json`、`PLAN.md` 已完成
+## 完成
+
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done

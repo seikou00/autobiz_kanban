@@ -269,6 +269,5 @@ python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_done
 - 队列所有任务「完成」，且都有 `action=implementation` evidence。每个 TASK 的 required validation 要么全部通过并覆盖全部 AC，要么具有结构完整、Evidence 可回链的 `validationDisposition.status=deferred`——延期必须保留真实 FAIL/BLOCKED evidence、失败原因、repair 次数和 UTEST/E2E 交接阶段，不得伪造成 completion pass。未记录的失败仍阻断。task/batch/project 三级同此判定：PASS 校验 evidence 顺序，deferred 校验 issue、失败 evidence 与 run 终态闭环。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 task/batch/project validation evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
 - 每批 `taskValidation.status` 已进入 `passed` 或 `passed_with_deferred`，且额外批次质量门禁已通过或记录为 deferred；存在批次修复时按上方重验证流程产生 `attemptType=batch_revalidation` 的新完成 evidence。非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
-- 刷新后的 `CHECKPOINT` 为 `code_done`。
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

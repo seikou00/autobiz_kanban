@@ -213,8 +213,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ### 更新状态
 
-使用统一脚本将当前 Feature 推进到 `discuss_done`：
-
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_done
 ```
