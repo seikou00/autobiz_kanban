@@ -185,7 +185,12 @@ def build_run_context(workspace: Path, feature: str, config: dict) -> tuple[dict
     ]
     state_exists = sync_result.state_exists
     checkpoint = state_rows.get(feature)
-    feature_dir = find_feature_dir(workspace, feature)
+    archive_iteration = record.get("iteration") if checkpoint == "archived" else None
+    feature_dir = find_feature_dir(
+        workspace,
+        feature,
+        archive_iteration=archive_iteration,
+    )
     has_feature_dir = feature_dir is not None
 
     # Determine initial degraded state message
