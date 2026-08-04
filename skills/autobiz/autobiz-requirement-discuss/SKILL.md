@@ -1,7 +1,7 @@
 ---
 name: autobiz-requirement-discuss
 description: Biz 阶段需求澄清技能。
-version: v1.2.0804
+version: v1.2.08041
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清技能
@@ -64,15 +64,9 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 
 同时在 `PRD_DISCUSS.md` 写入 `## 当前实现范围`。被剥离的交付内容记录到 Feature 目录的 `SCOPE_SPLIT.md`，不得作为本轮实现范围继续传播。
 
-**确定 FEATURE_DIR：**
-
-```
-FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
-```
-
 ### 缓存检测与清理
 
-用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `{FEATURE_DIR}/PRD_DISCUSS.md` 已存在时，先删除该文件再走完整流程。
+用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 已存在时，先删除该文件再走完整流程。
 
 ## 缺失产物处理
 
@@ -109,17 +103,17 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 根据 `<UNIT>` 阅读规则，需求澄清阶段按照 `deployUnit` 必须读取相应领域知识文档，并将其作为需求分析的背景知识；未读取到时不影响需求澄清流程。
 
 ### 保存原始材料快照
-将原始需求文档复制到 `{FEATURE_DIR}/prd_original/`（目录不存在则创建）保留快照
+将原始需求文档复制到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/prd_original/`（目录不存在则创建）保留快照
 
 ### 需求内容格式改造
 
-- 按 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的模板格式重写需求文档
-- 写入 `{FEATURE_DIR}/PRD_DISCUSS.md`
+- 按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的模板格式重写需求文档
+- 写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
 - 格式化流程见同目录 `prd-formatter.md`。
 
 ### 需求分析
 
-- 严格按 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成问题清单。
+- 严格按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成问题清单。
 - 仅输出有问题、有遗漏、不明确的事项；无问题则不制造问题。
 
 ### 问题清单展示与用户确认
@@ -167,7 +161,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ### 对话式引导并调整 `PRD_DISCUSS.md`
 
-对已确认的问题清单（含用户补充项）按 P0→P1→P2 逐项单独对话，结合原始需求文档和用户回复把调整结果沉淀到 `{FEATURE_DIR}/PRD_DISCUSS.md`。
+对已确认的问题清单（含用户补充项）按 P0→P1→P2 逐项单独对话，结合原始需求文档和用户回复把调整结果沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。
 
 **对话流程（每个问题单独执行）：**
 
@@ -233,7 +227,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ### 迭代直到收敛
 
-将 `{FEATURE_DIR}/PRD_DISCUSS.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都要向用户展示检查结果，由用户判断是否可以终止循环。
+将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都要向用户展示检查结果，由用户判断是否可以终止循环。
 
 #### 迭代终止条件
 
@@ -261,7 +255,7 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "$
 
 脚本通过即视为以下清单已完成：
 
-- `{FEATURE_DIR}/PRD_DISCUSS.md` — 已存在，保留完整收敛过程，含上面「讨论沉淀生成」七节
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 已存在，保留完整收敛过程，含上面「讨论沉淀生成」七节
 - Feature checkpoint 为 `discuss_done`
 - 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
 

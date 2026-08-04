@@ -1,7 +1,7 @@
 ---
 name: autoops
 description: Autoops Ops 阶段根路由器。基于 checkpoint 路由到 CI/CD 或归档子技能，负责 Ops 阶段准入、技能调度与终态识别。
-version: v1.1.2609
+version: v1.1.0804
 ---
 
 # /autoops — Ops 阶段根路由器
@@ -43,7 +43,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_next_skill.py" --json
+python "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 ---

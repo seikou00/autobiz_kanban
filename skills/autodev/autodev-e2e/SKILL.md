@@ -1,7 +1,7 @@
 ---
 name: autodev-e2e
 description: E2E 验证单个 Autodev feature 的真实用户主链路。用于 autodev-utest 完成后进入 E2E 阶段，或从 e2e_in_progress 恢复执行；生成 E2E_TEST_CASES.yaml、E2E_REPORT.md、e2e-run.log，并裁定 e2e_done 或 needs_fix。
-version: v1.1.0804
+version: v1.1.08041
 ---
 
 # /autodev-e2e - 端到端测试
@@ -10,15 +10,11 @@ version: v1.1.0804
 
 ## 运行契约
 
-```text
-FEATURE_DIR=${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
-```
-
 写入：
 
-- `${FEATURE_DIR}/E2E_TEST_CASES.yaml`
-- `${FEATURE_DIR}/E2E_REPORT.md`
-- `${FEATURE_DIR}/e2e-run.log`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_REPORT.md`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/e2e-run.log`
 - 当前 feature 直接相关的最小代码修复，仅限 `code_fixable`
 
 保持上游产物只读，保留核心用例与断言，并以真实命令、退出码和执行结果形成证据。由当前会话完成上下文建立、用例生成、执行、归因、修复和报告；后台进程只运行服务或测试命令。

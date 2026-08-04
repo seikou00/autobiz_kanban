@@ -1,7 +1,7 @@
 ---
 name: autodev-verify
 description: 进行报告汇总
-version: v1.4.08041
+version: v1.4.08042
 ---
 
 ## 缺失产物处理

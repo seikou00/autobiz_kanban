@@ -1,7 +1,7 @@
 ---
 name: autoops-cicd
 description: CI/CD 阶段技能。
-version: v1.1.0804
+version: v1.1.08041
 author: zhangQiuFeng
 ---
 
@@ -53,9 +53,8 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 3. 每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
-4. 若尚未执行 workspace 初始化，先执行 `python hooks/init_workspace.py .`
-5. 读取仓库构建配置、流水线配置、已有流程产物和用户输入，整理 CI/CD 所需上下文
-6. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
+4. 读取仓库构建配置、流水线配置、已有流程产物和用户输入，整理 CI/CD 所需上下文
+5. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress --stage "CI/CD（来源: Dev 验收）" --allow-create
@@ -80,7 +79,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress 
 3. 轮询命令保持现有约定：
 
 ```bash
-python hooks/poll_pipeline_status.py --pipelineCode <pipeline_code> --pipelineNum <pipeline_build_num>
+python "${pluginPath}/skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py" --pipelineCode <pipeline_code> --pipelineNum <pipeline_build_num>
 ```
 
 4. 该脚本为耗时操作，可后台运行

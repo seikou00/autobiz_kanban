@@ -1,6 +1,6 @@
 # FEATURE_API_DETAIL.md 生成模板
 
-用于 `/autodev-verify` 阶段生成 `{FEATURE_DIR}/FEATURE_API_DETAIL.md`。
+用于 `/autodev-verify` 阶段生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/FEATURE_API_DETAIL.md`。
 
 只在当前 Feature 的实际代码改动涉及新增或修改接口时生成。没有接口新增或修改时，不生成该文件。
 
@@ -48,7 +48,7 @@
 ````markdown
 # Feature 接口详细说明
 
-- **Feature:** {FEATURE_ID}
+- **Feature:** ${feature}
 - **生成时间:** {当前时间}
 - **生成依据:** 当前 Feature 实际代码改动
 - **说明:** 本文档仅记录当前 Feature 新增或修改的接口。无法从代码确认的信息会标注为“代码中未确认”。

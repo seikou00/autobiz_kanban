@@ -158,7 +158,7 @@ description: 需求文档质量评估与问题诊断
 ### 6.2 关键约束
 
 > - 所有检查项必须在分析时逐一检查，禁止跳过任何一项
-> - 生成问题清单前，必须先加载 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/default-rules.md`。对于默认规则已覆盖的内容，**禁止**生成对应的问题清单
+> - 生成问题清单前，必须先加载 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/default-rules.md`。对于默认规则已覆盖的内容，**禁止**生成对应的问题清单
 
 ### 6.3 简练原则
 

@@ -1,7 +1,7 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.7.0804
+version: v1.7.08041
 ---
 
 # /autodev-code — 代码执行
@@ -20,7 +20,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 
 
 ```bash
-python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}"
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 准入只验证 Plan 声明的 workspace、validation cwd 与项目 manifest 是否匹配，不执行编译命令。批次质量模式和命令以 `batchValidation.mode` / `batchValidation.commands` 为准。
@@ -30,7 +30,7 @@ python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}"
 开始编码前推进到 `code_in_progress`：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_in_progress
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 ```
 
 ## 执行协议
@@ -255,8 +255,8 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
 项目级验证收敛后：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/stage_gate.py" validate --stage dev.code --feature "{FEATURE_ID}"
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_done
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.code --feature "${feature}"
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 ```
 ## 写入边界
 
