@@ -30,6 +30,7 @@ from hooks.paths import (
 from board_core.artifact_paths import resolve_exact_relative_path
 from board_core.contracts import BoardConfigError, SkillContract, load_record_workflow_contracts
 from board_core.state_store import check_or_fix_state_sync
+from hooks.implementation_scope import load_scope, scope_path
 
 # 正式稿标题/禁用标题/必需段落的单一事实源在 prd_rules.py，
 # 搬运脚本 prd_transplant.py 与本校验脚本共用同一份规则。
@@ -118,6 +119,17 @@ def exact_file(feature_dir: Path, name: str) -> Optional[Path]:
     return path if path is not None and path.is_file() else None
 
 
+def _implementation_scope_errors(feature_dir: Path, content: Optional[str] = None) -> List[str]:
+    """Validate the optional scope contract and its visible document marker."""
+
+    if not scope_path(feature_dir).is_file():
+        return []
+    _, errors = load_scope(feature_dir, required=True)
+    if content is not None and "当前实现范围" not in content:
+        errors.append("文档缺少必要章节: 当前实现范围")
+    return errors
+
+
 def _fail(message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     result = {"ok": False, "message": message}
     if details:
@@ -159,6 +171,7 @@ def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
             missing = [s for s in required_sections if s not in content]
             if missing:
                 errors.append(f"PRD_DISCUSS.md 缺少必要章节: {', '.join(missing)}")
+            errors.extend(_implementation_scope_errors(feature_dir, content))
 
     _check_done_checkpoint(record, contract, errors)
 
@@ -195,6 +208,7 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
         errors.append(f"PRD.md 不存在: {feature_dir / 'PRD.md'}")
     else:
         content = prd_md.read_text(encoding="utf-8")
+        errors.extend(_implementation_scope_errors(feature_dir, content))
         first_line = content.splitlines()[0].strip() if content.splitlines() else ""
         if first_line != FORMAL_PRD_TITLE:
             errors.append(f"PRD.md 必须以 {FORMAL_PRD_TITLE} 开头")

@@ -31,6 +31,39 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_in_progre
 ```
 
 
+## 工作流程
+
+> **流程管控**：执行开始时用 `write_todos` 建立 todo 列表，每完成一步立即标记完成。以下环节不得跳过，可按实际情况增补条目：
+>
+> 1. 建立需求上下文：读取原始材料并保存到 prd_original
+> 2. 改造需求文档并写入 PRD_DISCUSS.md
+> 3. 需求分析
+> 4. 问题清单展示与用户确认
+> 5. 对话式引导与 PRD_DISCUSS.md 调整
+> 6. 迭代回检直到收敛
+> 7. 更新状态与校验
+
+
+
+### 实现范围选择
+
+在需求分析角色选择之外，必须单独确认本 Feature 的实现范围：
+
+- `full_stack`：前后端都实现
+- `backend_only`：只实现后端
+- `frontend_only`：只实现前端
+
+角色选择只决定分析关注点，不等于实现范围。用户确认后立即写入：
+
+```bash
+python "${pluginPath}/hooks/implementation_scope.py" set \
+  --feature "${feature}" \
+  --scope "${implementationScope}" \
+  --source user_confirmed
+```
+
+同时在 `PRD_DISCUSS.md` 写入 `## 当前实现范围`。被剥离的交付内容记录到 Feature 目录的 `SCOPE_SPLIT.md`，不得作为本轮实现范围继续传播。
+
 **确定 FEATURE_DIR：**
 
 ```
