@@ -1,7 +1,7 @@
 ---
 name: autodev-reviewer
 description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，启动 source-read-only 的独立 reviewer 子代理核验真实仓库状态，落盘 REQUIREMENTS_EVAL.md，并按 verdict 走修复复审闭环。
-version: v1.3.0713
+version: v1.3.0804
 ---
 
 ## 缺失产物处理
@@ -105,10 +105,8 @@ Verdict: <PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED>
 ```
 
 只有最终 verdict 是 `PASS` 或 `PASS_WITH_WARNINGS` 时，本 skill 才算完成。
-**Skill 完成。**
 
-提醒用户：请回到特性面板新开新对话。
-如果用户仍在当前对话输入“继续”“下一步”等续办意图，必须读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；当前技能尚未完成时不得使用该引导。
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
 
 ## 参考文件
 

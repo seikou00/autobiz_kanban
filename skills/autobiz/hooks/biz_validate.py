@@ -38,6 +38,7 @@ from prd_rules import (  # noqa: F401  （re-export，供外部按原名引用�
     FORBIDDEN_PRD_SECTION_TITLES,
     FORMAL_PRD_TITLE,
     FORMAL_SECTION_MAX_LEVEL,
+    PENDING_MARKER,
     REQUIRED_PRD_SECTIONS,
     heading_matches,
     iter_headings,
@@ -224,6 +225,12 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
         ]
         if forbidden_headings:
             errors.append(f"PRD.md 不应包含正式稿禁用标题: {', '.join(forbidden_headings)}")
+
+        if PENDING_MARKER in content:
+            errors.append(
+                f"PRD.md 仍含 {PENDING_MARKER}：请逐项获取用户裁定，"
+                "将具体结论写入 PRD.md 对应正文后移除标记"
+            )
 
     _check_done_checkpoint(record, contract, errors)
 

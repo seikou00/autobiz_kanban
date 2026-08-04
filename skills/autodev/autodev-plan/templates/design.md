@@ -21,7 +21,7 @@
 
 | Requirement | Scenarios | Decision | Design Coverage | Evidence |
 |-------------|-----------|----------|-----------------|----------|
-| REQ-001 | SCN-001, SCN-002 | D-001/无 | API-001 / DATA-001 / D-001 | EVD-001 |
+| REQ-001 | SCN-001, SCN-002 | DEC-001/无 | API-001 / DATA-001 / D-001 | EVD-001 |
 
 ## 4. API Decisions / 接口决策
 

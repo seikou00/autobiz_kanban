@@ -1,7 +1,7 @@
 ---
 name: autoops-cicd
 description: CI/CD 阶段技能。
-version: v1.1.1604
+version: v1.1.0804
 author: zhangQiuFeng
 ---
 
@@ -127,6 +127,4 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_done
 1. 需要再次触发流水线或重新整理清单时，按共享 `ask-user-question.md` 协议发起选择，推荐项必须放第一位，选项至少包含 `不再重跑 (Recommended)` / `重新触发流水线或重整清单`；若当前模式不支持 `request_user_input`，必须显式追问：`是否需要再次执行流水线或重新整理清单？请回复“重跑”或“不重跑”。`
 2. 未拿到用户明确同意前，不得擅自重跑。
 
-**Skill 完成。**
-提醒用户：请回到特性面板新开新对话。
-如果用户仍在当前对话输入“继续”“下一步”等续办意图，必须读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；当前技能尚未完成时不得使用该引导。
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

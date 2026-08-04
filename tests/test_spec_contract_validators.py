@@ -358,24 +358,26 @@ class CapabilityOperationConsistencyTest(SpecContractValidatorTestBase):
         text = proposal_text(["order-export"], modified=["billing"], removed=["legacy-sync"])
         self.assertEqual(set(proposal_capability_groups(text)), proposal_capabilities(text))
 
-    def test_spec_template_teaches_the_empty_section_rule(self) -> None:
-        """模板必须教「段标题保留、段下不写 Requirement」，否则照抄模板就会被拦。
+    def test_spec_template_keeps_all_three_operation_sections(self) -> None:
+        """模板保持三段式，用不到的段由作者留空——校验器数的是段下的 Requirement。
 
-        模板三段全带示例是有意的（要展示三种形状），所以规则说不清楚时，
-        照抄的 New 能力会带着 MODIFIED/REMOVED 示例撞上 contradicts_new。
-        这条钉的是模板与校验器不得再分叉。
+        规则文本本身钉在 SKILL.md（见下一条），不在这里重复断言：模板里的
+        措辞可以被精简，段结构不能变。
         """
         template = (ROOT / "skills/autodev/autodev-specs/templates/spec.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("删掉该段下的", template)
-        self.assertIn("不得有 Requirement", template)
+        for operation in ("ADDED", "MODIFIED", "REMOVED"):
+            with self.subTest(operation=operation):
+                self.assertIn(f"## {operation} Requirements", template)
 
     def test_specs_skill_teaches_the_group_to_operation_rule(self) -> None:
+        """规则与校验器不得分叉：SKILL 教的写法必须正是校验器放行的写法。"""
         skill = (ROOT / "skills/autodev/autodev-specs/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("capability_spec_correspondence", skill)
         self.assertIn("ADDED Requirements", skill)
         self.assertIn("不得有 Requirement", skill)
+        self.assertIn("段下不写 Requirement", skill)
 
 
 class MalformedContractHeadingTest(SpecContractValidatorTestBase):

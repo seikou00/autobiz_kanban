@@ -1,6 +1,7 @@
 ---
 name: autodev-e2e
 description: E2E 验证单个 Autodev feature 的真实用户主链路。用于 autodev-utest 完成后进入 E2E 阶段，或从 e2e_in_progress 恢复执行；生成 E2E_TEST_CASES.yaml、E2E_REPORT.md、e2e-run.log，并裁定 e2e_done 或 needs_fix。
+version: v1.1.0804
 ---
 
 # /autodev-e2e - 端到端测试
@@ -149,4 +150,4 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 
 ## 完成交接
 
-技能完成后，提醒用户回到特性面板新开对话。若用户随后在当前对话输入“继续”或“下一步”，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；技能未完成时继续执行上述步骤。
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
