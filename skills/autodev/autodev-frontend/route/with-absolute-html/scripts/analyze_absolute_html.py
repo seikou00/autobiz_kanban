@@ -198,6 +198,14 @@ CHART_TYPE_HINTS = {
 }
 
 
+def is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def parse_style(style: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for part in style.split(";"):
@@ -475,7 +483,7 @@ def collect_component_doc_entries(
             entry["sourceType"] = source
             entry["sourceRank"] = new_rank
         try:
-            display_path = str(doc_path.relative_to(project_root)) if project_root and doc_path.is_relative_to(project_root) else str(doc_path)
+            display_path = str(doc_path.relative_to(project_root)) if project_root and is_relative_to(doc_path, project_root) else str(doc_path)
         except ValueError:
             display_path = str(doc_path)
         entry["paths"].append(display_path)
@@ -2615,7 +2623,7 @@ def scan_project_components(project_root: Path | None) -> list[dict[str, Any]]:
                 entry["sourceType"] = source
                 entry["sourceRank"] = new_rank
             try:
-                display_path = str(path.relative_to(project_root)) if project_root and path.is_relative_to(project_root) else str(path.relative_to(skill_root))
+                display_path = str(path.relative_to(project_root)) if project_root and is_relative_to(path, project_root) else str(path.relative_to(skill_root))
             except ValueError:
                 display_path = str(path)
             entry["paths"].append(display_path)
