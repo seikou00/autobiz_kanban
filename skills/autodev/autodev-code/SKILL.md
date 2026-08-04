@@ -2,7 +2,6 @@
 name: autodev-code
 description: 进行代码实现。
 version: v1.7.0803
-allowed-tools: execute task_output read_file grep glob write_file edit_file
 ---
 
 # /autodev-code — 代码执行
@@ -19,7 +18,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 
 
 ```bash
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}"
 ```
 
 准入只验证 Plan 声明的 workspace、validation cwd 与项目 manifest 是否匹配，不执行编译命令。批次质量模式和命令以 `batchValidation.mode` / `batchValidation.commands` 为唯一事实源。
@@ -30,7 +29,6 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 
 ```bash
 python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_in_progress
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 
 ## 执行协议
@@ -43,7 +41,7 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 ```
 
-该命令只读取根计划和批次摘要；若根计划处于 `awaiting_next_conversation`，它会校验并消费 `BATCH_HANDOFF.json`，自动激活 `nextBatchId`，无需用户提供 batch ID。必须严格按返回的 `action` 分支：
+若根计划处于 `awaiting_next_conversation`，它会校验并消费 `BATCH_HANDOFF.json`，自动激活 `nextBatchId`，无需用户提供 batch ID。必须严格按返回的 `action` 分支：
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_task_validation`：当前批次所有 TASK 实现均已收口为 `implemented`；创建 deferred validation run，并启动一个批次级只验证子代理，由它串行运行该批全部 TASK 与 batch 校验命令。
