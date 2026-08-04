@@ -233,6 +233,11 @@ def build_run_context(workspace: Path, feature: str, config: dict) -> tuple[dict
             workspace,
             artifact_dicts(node, "outputs"),
         )
+        if checkpoint == "archived":
+            archived_label = suffix_states["archived"]["label"]
+            for artifact in artifacts:
+                if artifact.get("artifactStatus") == "generated":
+                    artifact["artifactStatusLabel"] = archived_label
         run_nodes.append({
             "id": node["id"],
             "nodeStatus": node_status,

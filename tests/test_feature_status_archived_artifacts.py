@@ -10,6 +10,24 @@ from inspect_state import _load_board_config, build_run_payload
 
 
 class ArchivedFeatureStatusTest(unittest.TestCase):
+    def test_active_generated_artifact_keeps_generated_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve() / "demo"
+            project.mkdir()
+            init_workspace(project)
+
+            feature = "active-feature"
+            create_feature(project, feature)
+            feature_dir = project / ".autobizdevops" / "features" / feature
+            (feature_dir / "PRD.md").write_text("# active\n", encoding="utf-8")
+
+            payload = build_run_payload(project, feature, _load_board_config())
+
+        prd_node = next(node for node in payload["run"]["nodes"] if node["id"] == "biz.prd")
+        prd_artifact = next(artifact for artifact in prd_node["artifacts"] if artifact["id"] == "prd")
+        self.assertEqual(prd_artifact["artifactStatus"], "generated")
+        self.assertEqual(prd_artifact["artifactStatusLabel"], "已生成")
+
     def test_uses_state_selected_archive_iteration_for_artifacts_and_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp).resolve() / "demo"
@@ -48,7 +66,14 @@ class ArchivedFeatureStatusTest(unittest.TestCase):
         prd_artifact = next(artifact for artifact in prd_node["artifacts"] if artifact["id"] == "prd")
         self.assertEqual(prd_artifact["path"], f"{expected_dir}/PRD.md")
         self.assertEqual(prd_artifact["artifactStatus"], "generated")
-        self.assertEqual(prd_artifact["artifactStatusLabel"], "已生成")
+        self.assertEqual(prd_artifact["artifactStatusLabel"], "已归档")
+
+        discuss_node = next(node for node in run["nodes"] if node["id"] == "biz.discuss")
+        discuss_artifact = next(
+            artifact for artifact in discuss_node["artifacts"] if artifact["id"] == "prd_discuss"
+        )
+        self.assertEqual(discuss_artifact["artifactStatus"], "missing")
+        self.assertEqual(discuss_artifact["artifactStatusLabel"], "未生成")
 
 
 if __name__ == "__main__":
