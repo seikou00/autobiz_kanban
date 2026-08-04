@@ -74,8 +74,8 @@ source:
   proposal_capability:
     - comments
   design_contract:
-    - api_decision: API-01
-    - data_decision: DATA-01
+    - api_decision: API-001
+    - data_decision: DATA-001
   specs_contract:
     - spec: specs/comments/spec.md
       requirement: Requirement: comment creation
@@ -210,7 +210,7 @@ source:
       requirement: Requirement: comment creation
       scenario: Scenario: create comment successfully
   design_contract:
-    - api_decision: API-01
+    - api_decision: API-001
 preconditions:
   - 用户已登录
 test_data:
