@@ -5,7 +5,8 @@
 用法:
     python skills/autobiz/hooks/prd_transplant.py --feature <slug> [--force] [--json]
 
-脚本只做确定性动作：改标题、整段删讨论态章节、删讨论稿说明句；正文一字不改。
+脚本只做确定性动作：改标题、删讨论记录/正式稿无关章节、删讨论稿说明句；正文一字不改。
+待确认章节与【待确认】标记保留在 PRD.md，供 PRD 阶段逐项裁定。
 `用户故事`/`验收口径`/`验收标准`/`关键约束` 四段仍由技能追加到 PRD.md 末尾。
 """
 
@@ -36,9 +37,9 @@ PRD_TRANSPLANT_WORKSPACE_ARGUMENT_ERROR = (
 # 与 board_config.json 中 biz.prd 输入 prd_discuss 的 degrade 文案保持一致
 MISSING_DISCUSS_HINT = "无讨论稿时先与用户完成需求澄清，再生成 PRD"
 NEXT_STEP_HINT = (
-    "把 "
+    "先在 PRD.md 逐项裁定并消解待确认章节/标记，再把 "
     + " / ".join(f"## {section}" for section in REQUIRED_PRD_SECTIONS)
-    + " 追加到 PRD.md 末尾；正文不得改写"
+    + " 追加到 PRD.md 末尾；除裁定回写外正文不得改写"
 )
 
 
@@ -108,6 +109,16 @@ def transplant(feature: Optional[str], workspace: Path, *, force: bool = False) 
             "dropped_notices": [
                 {"line": line_no, "text": text} for line_no, text in result.dropped_notices
             ],
+            "pending_sections": [
+                {
+                    "title": section.title,
+                    "level": section.level,
+                    "start_line": section.start_line,
+                    "end_line": section.end_line,
+                    "line_count": section.line_count,
+                }
+                for section in result.pending_sections
+            ],
             "pending_markers": [
                 {"line": line_no, "text": text} for line_no, text in result.pending_markers
             ],
@@ -149,9 +160,18 @@ def _print_human(result: Dict[str, Any]) -> None:
         lines = ", ".join(f"L{item['line']}" for item in notices)
         print(f"   已删除讨论稿说明句: {len(notices)} 行 ({lines})")
 
+    pending_sections: List[Dict[str, Any]] = result["pending_sections"]
+    if pending_sections:
+        print("   待确认章节（已保留在 PRD.md，必须逐项裁定）:")
+        for section in pending_sections:
+            print(
+                f"     - {section['title']} "
+                f"(L{section['start_line']}-L{section['end_line']}, {section['line_count']} 行)"
+            )
+
     markers: List[Dict[str, Any]] = result["pending_markers"]
     if markers:
-        print(f"   {PENDING_MARKER}告警: {len(markers)} 处（脚本未改动，需先与用户确认再落稿）")
+        print(f"   {PENDING_MARKER}告警: {len(markers)} 处（已保留，必须逐项裁定）")
         for item in markers:
             print(f"     - L{item['line']}: {item['text']}")
 

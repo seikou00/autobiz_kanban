@@ -10,6 +10,21 @@ PROTOCOL = SKILLS / "references" / "ask-user-question.md"
 DISCUSS_SKILL = SKILLS / "autobiz" / "autobiz-requirement-discuss" / "SKILL.md"
 PLAN_SKILL = SKILLS / "autodev" / "autodev-plan" / "SKILL.md"
 SPECS_SKILL = SKILLS / "autodev" / "autodev-specs" / "SKILL.md"
+PRD_SKILL = SKILLS / "autobiz" / "autobiz-prd-generate" / "SKILL.md"
+
+# plan 的裁定门是三处里被绕过后逐条补厚的那一处，prd/specs 按它对齐。
+# 这些串在三处都要在场，缺任何一处即为措辞重新漂移。
+SHARED_ADJUDICATION_RULES = (
+    "声称拥有 ≠ 提供",
+    "暂停，拿到材料后继续",
+    "延后判定按语义不按字面",
+    "不存在「先假设 / 先按默认方案 / 先占位」后推进的出口",
+    "该出口已从选项闭集移除，不得以任何措辞重新引入",
+    "禁止搬进裁定门",
+    "消解自查",
+    "展示不等于裁定",
+    "凡选中后条目仍处于待确认状态的选项都是非法选项",
+)
 
 
 class RequestUserInputProtocolTest(unittest.TestCase):
@@ -48,17 +63,9 @@ class RequestUserInputProtocolTest(unittest.TestCase):
     def test_plan_adjudication_gate_forbids_placeholder_options(self) -> None:
         content = PLAN_SKILL.read_text(encoding="utf-8")
 
-        for required_rule in (
+        for required_rule in SHARED_ADJUDICATION_RULES + (
             "裁定即消解",
-            "凡选中后条目仍处于待确认状态的选项都是非法选项",
-            "声称拥有 ≠ 提供",
             "信息实体",
-            "暂停，拿到材料后继续",
-            "延后判定按语义不按字面",
-            "不存在「先假设 / 先按默认方案 / 先占位」后推进的出口",
-            "该出口已从选项闭集移除，不得以任何措辞重新引入",
-            "消解自查",
-            "禁止搬进裁定门",
         ):
             self.assertIn(required_rule, content)
 
@@ -66,6 +73,24 @@ class RequestUserInputProtocolTest(unittest.TestCase):
 
         protocol = PROTOCOL.read_text(encoding="utf-8")
         self.assertIn("逐条裁定环节禁止使用延后类预设选项", protocol)
+
+    def test_prd_and_specs_gates_match_plan_strictness(self) -> None:
+        for skill in (PRD_SKILL, SPECS_SKILL):
+            content = skill.read_text(encoding="utf-8")
+            for required_rule in SHARED_ADJUDICATION_RULES:
+                self.assertIn(
+                    required_rule,
+                    content,
+                    f"{skill.name} 裁定门缺少与 plan 对齐的条款: {required_rule}",
+                )
+
+    def test_prd_gate_does_not_number_pending_items(self) -> None:
+        content = PRD_SKILL.read_text(encoding="utf-8")
+
+        # 裁定逐条进行，条目自身不再编号；`id` 由内容概括而来。
+        self.assertNotIn("PRD-001", content)
+        self.assertIn("同一决策去重后逐条裁定", content)
+        self.assertIn("`id` 用条目内容的简短 snake_case 概括", content)
 
     def test_specs_only_adjudicates_open_questions(self) -> None:
         content = SPECS_SKILL.read_text(encoding="utf-8")

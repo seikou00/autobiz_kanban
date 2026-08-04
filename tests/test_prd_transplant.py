@@ -1,4 +1,4 @@
-"""PRD_DISCUSS.md -> PRD.md 搬运脚本：标题改写、讨论态章节整段删除、正文逐字保真。"""
+"""PRD_DISCUSS.md -> PRD.md 搬运脚本：待确认内容保留、其余正文逐字保真。"""
 
 from __future__ import annotations
 
@@ -118,6 +118,15 @@ DISCUSS_FULL = """# 需求摘要
 - 依赖财务中台 v2.3
 """
 
+DISCUSS_RESOLVED = DISCUSS_FULL.replace("部门负责人【待确认】", "部门负责人").replace(
+    "## 待确认事项\n\n"
+    "- 高保真链接待 UED 提供\n"
+    "- 接口文档待后端补充\n\n"
+    "### 待确认事项明细\n\n"
+    "- 数据同步机制未定\n\n",
+    "",
+)
+
 
 class TransplantRulesTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -151,13 +160,17 @@ class TransplantRulesTest(unittest.TestCase):
         self.assertIn("历次讨论记录", titles)
         self.assertIn("外部依赖", titles)
 
-    def test_forbidden_sections_dropped(self) -> None:
-        for dropped in ("待确认事项", "高保真链接待 UED 提供", "数据同步机制未定", "外部依赖", "依赖财务中台"):
+    def test_non_pending_forbidden_sections_dropped(self) -> None:
+        for dropped in ("外部依赖", "依赖财务中台"):
             self.assertNotIn(dropped, self.result.text)
 
-    def test_nested_forbidden_heading_not_double_reported(self) -> None:
+    def test_pending_sections_preserved_for_prd_resolution(self) -> None:
+        for retained in ("待确认事项", "高保真链接待 UED 提供", "数据同步机制未定"):
+            self.assertIn(retained, self.result.text)
+
+    def test_nested_pending_heading_not_double_reported(self) -> None:
         # `### 待确认事项明细` 在 `## 待确认事项` 区间内，只上报外层一次
-        titles = [section.title for section in self.result.dropped_sections]
+        titles = [section.title for section in self.result.pending_sections]
         self.assertEqual(titles.count("待确认事项"), 1)
         self.assertNotIn("待确认事项明细", titles)
 
@@ -235,7 +248,7 @@ class TransplantRulesTest(unittest.TestCase):
         """搬运结果 + 模型追加的四段，应当通过 biz_validate 的标题类规则。"""
         import biz_validate
 
-        content = self.result.text + (
+        content = plan_transplant(DISCUSS_RESOLVED).text + (
             "\n## 用户故事\n\n- 作为申请人，我希望批量上传票据\n"
             "\n## 验收口径\n\n- 用户视角：可提交\n"
             "\n## 验收标准\n\n- 单次最多 20 张\n"
@@ -318,6 +331,7 @@ class TransplantCliTest(unittest.TestCase):
         )
         self.assertIn("[通过]", output)
         self.assertIn("历次讨论记录", output)
+        self.assertIn("待确认章节（已保留在 PRD.md", output)
         self.assertIn("【待确认】告警: 1 处", output)
         self.assertIn("## 用户故事", output)
 
@@ -349,6 +363,7 @@ class TransplantCliTest(unittest.TestCase):
         self.assertEqual(payload["feature"], self.feature)
         self.assertEqual(payload["retitled"], ["# 需求摘要", FORMAL_PRD_TITLE])
         self.assertIn("历次讨论记录", [s["title"] for s in payload["dropped_sections"]])
+        self.assertEqual(len(payload["pending_sections"]), 1)
         self.assertEqual(len(payload["pending_markers"]), 1)
 
     def test_rejects_workspace_argument(self) -> None:

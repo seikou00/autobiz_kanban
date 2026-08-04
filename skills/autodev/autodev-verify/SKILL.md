@@ -1,7 +1,7 @@
 ---
 name: autodev-verify
-description:进行报告汇总
-version: v1.4.0804
+description: 进行报告汇总
+version: v1.4.08041
 ---
 
 ## 缺失产物处理
@@ -339,5 +339,4 @@ Skill 完成前必须满足：
 
 ---
 
-Skill 完成提醒用户：请回到特性面板新开新对话。
-如果用户仍在当前对话输入“继续”“下一步”等续办意图，必须读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；当前技能尚未完成时不得使用该引导。
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
