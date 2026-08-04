@@ -37,7 +37,10 @@ REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 API_ID_RE = re.compile(r"^API-\d{3}$")
 DATA_ID_RE = re.compile(r"^DATA-\d{3}$")
-DECISION_ID_RE = re.compile(r"^D-\d{3}$")
+# 技术决策：plan 阶段写进 design 技术决策表，任务用 `decisionIds` 引用。
+# 别与规格决策 `DEC-NNN` 混淆，那个由 specs 阶段在 proposal 定义
+# （见 skills/autodev/hooks/artifact_check.SPEC_DECISION_ID）。
+TECH_DECISION_ID_RE = re.compile(r"^D-\d{3}$")
 EVIDENCE_ID_RE = re.compile(r"^ev_\d{4}$")
 ACCEPTANCE_ID_RE = re.compile(r"^AC-T\d{3}-\d{2,3}$")
 VALIDATION_ID_RE = re.compile(r"^VAL-T\d{3}-\d{2,3}$")
@@ -510,7 +513,7 @@ def _validate_tasks_container(
             _validate_string_list(errors, raw_task, task_id, "mergedScenarioRefs", required=False)
         _validate_string_list(errors, raw_task, task_id, "apiIds", required=False, item_re=API_ID_RE)
         _validate_string_list(errors, raw_task, task_id, "dataIds", required=False, item_re=DATA_ID_RE)
-        _validate_string_list(errors, raw_task, task_id, "decisionIds", item_re=DECISION_ID_RE)
+        _validate_string_list(errors, raw_task, task_id, "decisionIds", item_re=TECH_DECISION_ID_RE)
         evidence_ids = _validate_string_list(
             errors,
             raw_task,

@@ -53,7 +53,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 - 找到最可能的集成点和受影响文件
 - 识别现有命名、错误体、分页、鉴权、租户、审计、日志等风格
 - 隐性知识你需要理解现有系统完成探索，并将隐性知识与我讨论
-- 任务、需求和设计决策都必须使用稳定 ID：Task `T001`、Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。另有规格决策 `DEC-001`——由 specs 阶段在 proposal 的 `## Decision Log` 定义，本阶段只引用不新增；两者都叫「决策」但方向相反，`D` 是本阶段产出，`DEC` 是上游输入。
+- 任务、需求和设计决策都必须使用稳定 ID：Task `T001`、Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。`D-NNN` 由本阶段写进 design 技术决策表，并且每个任务的 `decisionIds` 至少引用一个；design 里的每条 `D-NNN` 也都必须被某个任务引到，双向由 `plan_json_contract` 判定。
+- 规格决策 `DEC-001` ：由 specs 阶段在 proposal 的 `## Decision Log` 节定义，本阶段只在 design 追踪表的 `Decision` 列引用、不新增，该 Requirement 无此类决策时写「无」。`design_contract` 只判引用能否在该节内解析，不要求每个 Requirement 都有。两者都叫「决策」，区别是 `D` 本阶段产出且引用强制，`DEC` 上游输入且可为空。
 
 **比较选项**
 

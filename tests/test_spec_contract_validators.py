@@ -68,6 +68,10 @@ PROPOSAL_TAIL = """
 
 - 不做批量删除
 
+## Decision Log
+
+无
+
 ## Open Questions
 
 无

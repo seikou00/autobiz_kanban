@@ -51,9 +51,15 @@ SPEC_REQUIREMENT_DEF_RE = re.compile(r"^###\s+Requirement\s+\[(REQ-\d{3})\]:\s+.
 SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
 # 带 REQ-/SCN- 记号的标题行；与上面两个正则的差集就是索引器看不见的写法
 CONTRACT_HEADING_CANDIDATE = re.compile(r"^#{1,6}[ \t]+.*?\b(?:REQ|SCN)-\S")
-# specs 阶段决策：proposal `## Decision Log` 定义，design 规格追踪表引用
-DECISION_ID = re.compile(r"\bDEC-\d{3}\b")
-DECISION_HEADING = re.compile(r"^###\s+(DEC-\d{3})\s*[:：]", re.MULTILINE)
+# 规格决策 DEC-NNN：specs 阶段在 proposal `## Decision Log` 定义，design 追踪表引用。
+# 与技术决策 `D-NNN`（plan 阶段自产，见 hooks/plan_json.TECH_DECISION_ID_RE）不是一回事，
+# 两个正则互不误抓：`\bD-\d{3}\b` 要求 D 后紧跟 `-`，`DEC-001` 的 D 后是 E。
+SPEC_DECISION_ID = re.compile(r"\bDEC-\d{3}\b")
+SPEC_DECISION_HEADING = re.compile(r"^###\s+(DEC-\d{3})\s*[:：]", re.MULTILINE)
+DECISION_LOG_SECTION = re.compile(
+    r"^##\s+Decision Log\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
 # proposal 的 `## Capabilities` 段：到下一个同级标题为止
 CAPABILITIES_SECTION = re.compile(
     r"^##\s+Capabilities\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
@@ -189,6 +195,9 @@ def validate_proposal_contract(ctx: HookContext) -> int:
         "Capabilities",
         "Impact",
         "Out of Scope",
+        # design 的 `Decision` 列按 DEC-NNN 引用本节；节不存在时那些引用
+        # 无处解析，缺口要在 specs 阶段就报，不能拖到 plan 才发现。
+        "Decision Log",
         # 只校验节存在。`Status` 取值不查：「已确认」是模型能自己给自己写的
         # 状态词，给它加校验只会教出伪造，不会换来真实裁定。
         "Open Questions",
@@ -499,13 +508,17 @@ def validate_design_contract(ctx: HookContext) -> int:
 def _unresolved_decision_refs(ctx: HookContext, design_text: str) -> int:
     """Every ``DEC-NNN`` design cites must exist in the proposal's Decision Log.
 
+    The lookup is scoped to the section, not the whole file: a ``### DEC-001:``
+    heading dropped anywhere else in the proposal would otherwise resolve the
+    reference, which makes the check report something weaker than it claims.
+
     Reference resolution only. Whether a decision is well argued, and whether
     every Requirement needs one, are judgements a script cannot make -- and the
     2026-07-29 trace showed that demanding a self-issued status word here just
     teaches the model to forge one. Existence is a fact about files, so that is
     all this checks; ``无`` stays a legal cell value.
     """
-    cited = set(DECISION_ID.findall(design_text))
+    cited = set(SPEC_DECISION_ID.findall(design_text))
     if not cited:
         return 0
 
@@ -514,7 +527,8 @@ def _unresolved_decision_refs(ctx: HookContext, design_text: str) -> int:
         # `proposal_contract` owns a missing proposal; do not report it twice.
         return 0
 
-    defined = set(DECISION_HEADING.findall(read_text(proposal)))
+    section = DECISION_LOG_SECTION.search(read_text(proposal))
+    defined = set(SPEC_DECISION_HEADING.findall(section.group("body"))) if section else set()
     missing = sorted(cited - defined)
     if not missing:
         return 0
@@ -523,8 +537,9 @@ def _unresolved_decision_refs(ctx: HookContext, design_text: str) -> int:
         "design_decision_ref_unresolved",
         f" ids={','.join(missing)}",
         repair=(
-            "design.md 规格追踪表引用的 DEC 编号在 proposal.md 的「## Decision Log」中不存在。"
-            "补上对应的「### DEC-NNN: <标题>」，或把该单元格改成实际存在的编号／「无」。"
+            "design.md 规格追踪表引用的 DEC 编号在 proposal.md 的「## Decision Log」节内不存在。"
+            "在该节下补上「### DEC-NNN: <标题>」，或把该单元格改成实际存在的编号／「无」。"
+            "只认该节内的定义，写在 proposal 别处不算。"
             "技术决策用 Design Coverage 列的 D-NNN，不要写进 Decision 列。"
         ),
     )
