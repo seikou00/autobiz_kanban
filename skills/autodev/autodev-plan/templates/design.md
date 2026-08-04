@@ -21,15 +21,15 @@
 
 | Requirement | Scenarios | Decision | Design Coverage | Evidence |
 |-------------|-----------|----------|-----------------|----------|
-| REQ-001 | SCN-001, SCN-002 | D-001/无 | API-01 / DATA-01 / D-01 | EVD-001 |
+| REQ-001 | SCN-001, SCN-002 | D-001/无 | API-001 / DATA-001 / D-001 | EVD-001 |
 
 ## 4. API Decisions / 接口决策
 
 - **x-auto-no-http-api:** [true/false]
 - **说明:** [无 HTTP/API 时说明原因；有 API 时说明入口和契约。]
 
-| ID      | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |
-|---------|--------|--------------|---------|----------|--------|-------------------|--------|
+| ID | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |
+|----|--------|--------------|---------|----------|--------|-------------------|--------|
 | API-001 | [GET/POST/无] | [路径或函数入口] | [请求约束] | [响应约束] | [错误处理] | [权限/租户/审计假设] | 已确认 |
 
 ## 5. Data Decisions / 数据决策
@@ -37,8 +37,8 @@
 - **x-auto-no-sql:** [true/false]
 - **说明:** [无数据库变更时说明原因；有数据变更时说明表、字段、索引、迁移。]
 
-| ID       | Table/Model | Change | Fields | Index/Migration | Rollback | Status |
-|----------|-------------|--------|--------|-----------------|----------|--------|
+| ID | Table/Model | Change | Fields | Index/Migration | Rollback | Status |
+|----|-------------|--------|--------|-----------------|----------|--------|
 | DATA-001 | [表/模型] | [新增/修改/无] | [字段和含义] | [索引/迁移] | [回滚方式] | 已确认 |
 
 ## 6. Technical Design / 技术设计
@@ -47,8 +47,9 @@
 [基于 Code Evidence 的综合描述；单条事实引用 EVD-xx，不另行复述。]
 
 ### Decisions
-| ID    | Decision | Rationale | Alternatives | Status |
-|-------|----------|-----------|--------------|--------|
+
+| ID | Decision | Rationale | Alternatives | Status |
+|----|----------|-----------|--------------|--------|
 | D-001 | [技术决策] | [原因] | [备选方案] | 已确认 |
 
 ### Integration Points

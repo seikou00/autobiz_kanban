@@ -1,7 +1,7 @@
 ---
 name: autodev-verify
 description:进行报告汇总
-version: v1.3.0803
+version: v1.4.0804
 ---
 
 ## 缺失产物处理
@@ -160,7 +160,7 @@ specs/[capability]/spec.md / Requirement / Scenario
 
 | # | Contract Item | 裁定 | 证据来源 |
 |---|-----------|------|---------|
-| 1 | specs/[capability]/spec.md / Requirement / Scenario / API-01 / DATA-01 | ✓ 通过 | UNIT_TEST_REPORT §C1 + E2E_REPORT §E2E-001 |
+| 1 | specs/[capability]/spec.md / Requirement / Scenario / API-001 / DATA-001 | ✓ 通过 | UNIT_TEST_REPORT §C1 + E2E_REPORT §E2E-001 |
 
 或：本轮 `x-auto-no-http-api: true`，无 HTTP/API 契约验证项；`x-auto-no-sql: true`，无数据库变更验证项。
 

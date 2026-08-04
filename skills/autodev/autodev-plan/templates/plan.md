@@ -29,7 +29,7 @@ graph TD
 
 | Task ID  | 任务           | 依赖     | 覆盖契约项                     | 状态 |
 | -------- | -------------- | -------- | ------------------------------ | ---- |
-| TASK-001 | [需求闭环名称] | 无       | REQ-… / API-01 / DATA-01 / D-01 | 待做 |
+| TASK-001 | [需求闭环名称] | 无       | REQ-… / API-001 / DATA-001 / D-001 | 待做 |
 | TASK-002 | [需求闭环名称] | TASK-001 | REQ-… / API-… | 待做 |
 
 ---
@@ -41,7 +41,7 @@ graph TD
 - **做什么:** [本任务交付的需求能力、用户可观察行为或验收闭环；不要写成单个文件/类/方法修改]
 - **规格依据:** REQ-001
 - **场景依据:** SCN-001, SCN-002
-- **设计依据:** API-01, DATA-01, D-01
+- **设计依据:** API-001, DATA-001, D-001
 - **代码证据:** EVD-001, EVD-002
 - **代码工作区:** [来自 plan.json.workspaceRef]
 - **验证边界:** [来自 plan.json.validationBoundary；写公开 seam 与对应的一条可执行校验或断言]
@@ -54,7 +54,7 @@ graph TD
 - **做什么:** [本任务交付的需求能力、用户可观察行为或验收闭环]
 - **规格依据:** REQ-002
 - **场景依据:** SCN-003
-- **设计依据:** API-02
+- **设计依据:** API-002
 - **代码证据:** EVD-003
 - **代码工作区:** [来自 plan.json.workspaceRef]
 - **验证边界:** [来自 plan.json.validationBoundary；写公开 seam 与对应的一条可执行校验或断言]
@@ -69,9 +69,9 @@ graph TD
 | Contract Item | Type | 关联 Scenario | 覆盖任务 | 验证方法 |
 |---------------|------|---------------|----------|----------|
 | REQ-001 | Behavior | SCN-001, SCN-002 | TASK-001 | [命令/测试] |
-| API-01 / x-auto-no-http-api | API | - | TASK-002 / 无需实现:[原因] | [验证方法] |
-| DATA-01 / x-auto-no-sql | Data | - | TASK-001 | [验证方法] |
-| D-01 | Technical Decision | - | TASK-001 | [验证方法] |
+| API-001 / x-auto-no-http-api | API | - | TASK-002 / 无需实现:[原因] | [验证方法] |
+| DATA-001 / x-auto-no-sql | Data | - | TASK-001 | [验证方法] |
+| D-001 | Technical Decision | - | TASK-001 | [验证方法] |
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.8.0803
+version: v1.9.0804
 ---
 
 ## 缺失产物处理
