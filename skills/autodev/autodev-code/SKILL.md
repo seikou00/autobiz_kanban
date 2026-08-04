@@ -21,7 +21,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}"
 ```
 
-准入只验证 Plan 声明的 workspace、validation cwd 与项目 manifest 是否匹配，不执行编译命令。批次质量模式和命令以 `batchValidation.mode` / `batchValidation.commands` 为唯一事实源。
+准入只验证 Plan 声明的 workspace、validation cwd 与项目 manifest 是否匹配，不执行编译命令。批次质量模式和命令以 `batchValidation.mode` / `batchValidation.commands` 为准。
 
 ## 写入 checkpoint
 
@@ -36,7 +36,7 @@ python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 
 ### Code 会话入口
 
-每次进入 Code 阶段或在新对话恢复 Code 时，第一条 runner 命令必须是：
+每次进入 Code 阶段或在新对话恢复 Code 时，最先执行：
 ```bash
 python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 ```
@@ -91,7 +91,7 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `batchExplorationScope`、`taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`；探索范围按上方 Batch 级探索闸门服从 `explorationDirective`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。脚本只要返回 `ok=false`，无论是引用、计划、Git 快照还是探索缓存错误，都必须停止编码、不得读取 HTML/调用 parser/修改业务代码；先按 `requiredAction` 修复并重新运行，直到返回 `ok=true`。其中 `explorationBlocked=true` 或 `implementationAllowed=false` 是机器阻断证据，不得被自然语言解释覆盖。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
+该脚本输出是当前 task 的上游上下文，必须读取其中的 `batchExplorationScope`、`taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`；探索范围按上方 Batch 级探索闸门服从 `explorationDirective`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。脚本只要返回 `ok=false`，无论是引用、计划、Git 快照还是探索缓存错误，都必须停止编码、不得读取 HTML/调用 parser/修改业务代码；先按 `requiredAction` 修复并重新运行，直到返回 `ok=true`。其中 `explorationBlocked=true` 或 `implementationAllowed=false` 是机器阻断证据，不得被自然语言解释覆盖。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
 
 必须按每个仓库的缓存状态执行，不能只看总体最严 policy 后忽略其他仓库：
 
@@ -255,7 +255,6 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
 ```bash
 python "{PLUGIN_ROOT}/hooks/stage_gate.py" validate --stage dev.code --feature "{FEATURE_ID}"
 python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_done
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 ```
 ## 写入边界
 

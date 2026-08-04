@@ -74,13 +74,11 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 ### autodev-plan 上下文感知
 
-探索开始时，优先确认当前 Feature：
+探索开始时，优先确认当前 Feature状态：
 
 ```bash
 python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
-
-后续准入、恢复模式和来源判断直接取用 `CHECKPOINT`。
 
 - 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。
 - 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
@@ -95,8 +93,8 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 | 新增或变化的 HTTP 行为       | `design.md` 的 API Decisions；无 API 写 `x-auto-no-http-api: true` |
 | 数据表/字段/索引/迁移需求    | `design.md` 的 Data Decisions；无数据变更写 `x-auto-no-sql: true` |
 | 技术方案、模块边界、集成点   | `design.md` 的 Technical Design                              |
-| 实现切分、涉及文件、验证方法 | `plan.json` 的任务 DAG、任务详情和覆盖矩阵；`PLAN.md` 同步为人类视图 |
-| 未确认业务语义或技术假设     | `design.md` 与 `plan.json` 的风险与待确认项，并回到用户确认；`PLAN.md` 同步为人类视图 |
+| 实现切分、涉及文件、验证方法 | `plan.json` 的任务 DAG、任务详情和覆盖矩阵；`PLAN.md` 以plan.json为准 |
+| 未确认业务语义或技术假设     | `design.md` 与 `plan.json` 的风险与待确认项，并回到用户确认；`PLAN.md` 以plan.json为准 |
 
 接口/数据决策讨论触发：
 
@@ -182,9 +180,6 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ### PLAN阶段
 先生成 `design.md`，再基于这些输入与 design 生成 `plan.json`，并同步生成 `PLAN.md` 。
 
-#### 工作目录
-若 `CHECKPOINT` 为空、未知，重新通过脚本获取当前checkpoint；后必须刷新 `CHECKPOINT`。
-
 #### 写入checkpoint
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）" --allow-create
@@ -214,7 +209,6 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - **Risks / Open Questions**：所有未确认业务语义、技术假设、兼容风险必须落在这里。
 
 完成条件：
-- [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 文件已写入磁盘
 - [ ] design.md 包含 Context、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
 - [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
 - [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
@@ -244,7 +238,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 展示后按以下两步确认，顺序不可颠倒：
 
-**第一步：待确认项逐条裁定**
+**待确认项逐条裁定**
 
 - 范围：API-xx / DATA-xx / D-xx 中 Status 为「待确认」的行，以及 R-xx 中 Type 为「待确认」或「读码差异」的行；没有待裁定条目时跳过本步，直接进入第二步。读码差异条目的选项闭集同样适用：裁定结果只能是「spec 基线过时，按代码现实修订（结果回写 spec/design 对应处）」「plan 读码有误，修正 Evidence」「行为契约需要变更，回 /autodev-specs」三者之一的具体化，不存在「按代码先做」的默认出口。
 - 消解定义：裁定即消解。一个条目被消解 = design.md 对应行 Status/Type 回写「已确认」，**且**裁定产生的具体内容（采纳的方案、用户提供的链接/字段）已写进对应行或章节。每个预设选项选中后必须能立即达成消解或明确暂停推进；两者之外的选项非法。
@@ -255,7 +249,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - 消解自查：全部裁定回写后、发起第二步之前，自查 design.md 各表单元格无「待确认」「读码差异」、回写内容无 TBD/待补充/待提供/占位 等词、无对缺失材料的引用（「根据实际文档」「以实际接口为准」「编码阶段补充」等）；任一命中回到第一步。plan_done 的 postcheck 会机械校验残留单元格，绕过自查也无法推进。
 - 顺序硬约束：所有待确认条目都拿到用户裁定之前，禁止发起第二步的整体确认门。
 
-**第二步：整体确认门**
+**整体确认门**
 
 - **发起阶段门**：按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `确认设计，进入 PLAN 生成 (Recommended)` / `需要调整设计` / `暂停，稍后继续`；这是阶段门，不设置 `autoResolutionMs`，必须等待明确答复。
 - **自由表达即退出结构化**：用户不点选项、直接给出修改意见时，当作普通文本吸收，更新 design.md 对应章节并重新展示变更部分，再择机重发确认门。
@@ -264,7 +258,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 - 只问「以上技术设计是否满足需求？」「是否可以继续？」这类未展示具体内容的笼统问题。
 - 以「内容已经写在 design.md 里」为由省略对话内展示。
-- 未拿到明确确认就开始生成 PLAN.md。
+- 未拿到明确确认就开始生成 PLAN.json。
 - 把待确认项在展示块中逐条列出后，未逐条以 `request_user_input` 提问就直接发起整体确认门；展示不等于裁定。
 - 自行判断某待确认项「编码阶段参考接口文档即可」「不影响主路径」而跳过提问；「延后处理」不能出现。
 - 选项 label/description 含「待确认」「先占位」「后续补充」「稍后提供」「编码阶段再」「编码阶段根据实际文档补充」「实现时参考文档」「字段以实际接口为准」等延后语义——凡选中后条目仍处于待确认状态的选项都是非法选项。延后判定按语义不按字面。
@@ -274,9 +268,9 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 #### 生成 plan.json + PLAN.md
 
-本阶段必须一次性生成完整的 plan.json + PLAN.md，并同时生成全部 `plans/Bxxx/plan.json`。不得只生成第一批并等待 Code 跑完后再规划下一批。`plan.json` 只保存 feature 状态、任务集封口状态、批次索引、批次状态、lane 级批次验证配置和可选的跨批次项目验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约、task 状态和投影后的批次验证状态。`PLAN.md` 是从 `plan.json` 投影的人类视图，并包含全部批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须一次性生成完整的 plan.json + PLAN.md，并同时生成全部 `plans/Bxxx/plan.json`。不得只生成第一批并等待 Code 跑完后再规划下一批。`plan.json` 只保存 feature 状态、任务集封口状态、批次索引、批次状态、lane 级批次验证配置和可选的跨批次项目验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约、task 状态和投影后的批次验证状态。`PLAN.md` 是从 `plan.json` 投影，并包含全部批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
-生成或修改 `plan.json` / `PLAN.md` 必须使用 `${pluginPath}/hooks/plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 投影生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
+生成或修改 `plan.json` / `PLAN.md` 必须使用 `${pluginPath}/hooks/plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
 生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${FEATURE_DIR}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${FEATURE_DIR}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
