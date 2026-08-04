@@ -404,14 +404,20 @@ class BoardConfigInvariantsTest(unittest.TestCase):
 
     def test_plan_skill_requires_plan_markdown_projection(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        # 钉机制不钉字面：同一条要求给若干可接受写法，命中任一即算满足。
+        # 措辞由人把关，测试只保证「PLAN.md 由 plan.json 投影产生」这条主线还在。
         required = [
-            "plan.json + PLAN.md",
-            "本阶段必须生成",
-            "PLAN.md` 是从 `plan.json` 投影的人类视图",
-            "`PLAN.md` 必须从 `plan.json` 投影",
-            "PLAN.md` 文件已写入磁盘",
+            ("要求同时产出两份", ("plan.json + PLAN.md",)),
+            ("PLAN.md 是必须产物", ("本阶段必须生成", "必须生成完整的 plan.json + PLAN.md")),
+            (
+                "PLAN.md 由 plan.json 投影而来",
+                ("`PLAN.md` 必须从 `plan.json` 投影", "`PLAN.md` 必须由 `plan_writer.py"),
+            ),
+            ("PLAN.md 要落盘", ("PLAN.md` 文件已写入磁盘",)),
         ]
-        missing = [phrase for phrase in required if phrase not in content]
+        missing = [
+            name for name, variants in required if not any(v in content for v in variants)
+        ]
         self.assertEqual(
             missing,
             [],

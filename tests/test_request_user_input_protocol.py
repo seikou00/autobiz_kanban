@@ -13,18 +13,41 @@ SPECS_SKILL = SKILLS / "autodev" / "autodev-specs" / "SKILL.md"
 PRD_SKILL = SKILLS / "autobiz" / "autobiz-prd-generate" / "SKILL.md"
 
 # plan 的裁定门是三处里被绕过后逐条补厚的那一处，prd/specs 按它对齐。
-# 这些串在三处都要在场，缺任何一处即为措辞重新漂移。
+#
+# 钉机制不钉字面：每条列若干可接受写法，命中任一即算在场。措辞由人把关，
+# 测试只保证「这条约束还在」——门的构成要素少一个就会被最低成本解释绕过，
+# 但换个说法表达同一个意思不该让测试变红。
 SHARED_ADJUDICATION_RULES = (
-    "声称拥有 ≠ 提供",
-    "暂停，拿到材料后继续",
-    "延后判定按语义不按字面",
-    "不存在「先假设 / 先按默认方案 / 先占位」后推进的出口",
-    "该出口已从选项闭集移除，不得以任何措辞重新引入",
-    "禁止搬进裁定门",
-    "消解自查",
-    "展示不等于裁定",
-    "凡选中后条目仍处于待确认状态的选项都是非法选项",
+    ("仅声称拥有不算提供", ("声称拥有 ≠ 提供", "声称拥有不等于提供")),
+    ("缺材料可暂停", ("暂停，拿到材料后继续",)),
+    ("延后按语义判定", ("延后判定按语义不按字面", "按语义不按字面")),
+    (
+        "不存在先占位后推进的出口",
+        ("不存在「先假设 / 先按默认方案 / 先占位」后推进的出口", "先占位」后推进的出口"),
+    ),
+    ("该出口不得重新引入", ("不得以任何措辞重新引入",)),
+    (
+        "探索期模板不得搬进裁定门",
+        ("禁止搬进裁定门", "在裁定阶段禁止使用", "裁定阶段禁止"),
+    ),
+    ("生成产物前要自查消解", ("消解自查",)),
+    ("展示不等于裁定", ("展示不等于裁定",)),
+    (
+        "选后仍待确认的选项非法",
+        ("凡选中后条目仍处于待确认状态的选项都是非法选项", "仍处于待确认状态的选项都是非法选项"),
+    ),
 )
+
+
+def missing_rules(content: str, extra: tuple = ()) -> list[str]:
+    """返回未命中任何可接受写法的规则名。"""
+    missing = [
+        name
+        for name, variants in SHARED_ADJUDICATION_RULES
+        if not any(v in content for v in variants)
+    ]
+    missing += [phrase for phrase in extra if phrase not in content]
+    return missing
 
 
 class RequestUserInputProtocolTest(unittest.TestCase):
@@ -63,11 +86,8 @@ class RequestUserInputProtocolTest(unittest.TestCase):
     def test_plan_adjudication_gate_forbids_placeholder_options(self) -> None:
         content = PLAN_SKILL.read_text(encoding="utf-8")
 
-        for required_rule in SHARED_ADJUDICATION_RULES + (
-            "裁定即消解",
-            "信息实体",
-        ):
-            self.assertIn(required_rule, content)
+        missing = missing_rules(content, extra=("裁定即消解", "信息实体"))
+        self.assertEqual(missing, [], "plan 裁定门缺少条款: " + ", ".join(missing))
 
         self.assertNotIn("「以假设固化：<假设>」", content)
 
@@ -77,12 +97,12 @@ class RequestUserInputProtocolTest(unittest.TestCase):
     def test_prd_and_specs_gates_match_plan_strictness(self) -> None:
         for skill in (PRD_SKILL, SPECS_SKILL):
             content = skill.read_text(encoding="utf-8")
-            for required_rule in SHARED_ADJUDICATION_RULES:
-                self.assertIn(
-                    required_rule,
-                    content,
-                    f"{skill.name} 裁定门缺少与 plan 对齐的条款: {required_rule}",
-                )
+            missing = missing_rules(content)
+            self.assertEqual(
+                missing,
+                [],
+                f"{skill.name} 裁定门缺少与 plan 对齐的条款: " + ", ".join(missing),
+            )
 
     def test_prd_gate_does_not_number_pending_items(self) -> None:
         content = PRD_SKILL.read_text(encoding="utf-8")

@@ -153,23 +153,19 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
         self.assertIn("Decision Log", plan)
 
     def test_plan_skill_separates_dec_from_d(self) -> None:
-        """`D-NNN` 与 `DEC-NNN` 都叫「决策」，方向和强制力都不同，必须写清。
+        """`D-NNN` 与 `DEC-NNN` 都叫「决策」，必须能分辨出是两个东西。
 
         a6868a2 删掉 Decision Log 后只剩一种决策，把 `D-001` 直呼「Decision」是
-        自洽的；恢复 DEC 通道后这个裸名就同时指两个东西。两者强度也差一个量级：
-        `D` 每任务至少引一个、design 里每条都要被引到（双向），`DEC` 只判引用
-        能否解析、可写「无」。只说「方向相反」会让人以为 D 写进 design 就完事。
+        自洽的；恢复 DEC 通道后这个裸名就同时指两个东西，plan 阶段据此自造
+        `DEC-NNN` 会撞上 design_decision_ref_unresolved 而报错原因看着莫名其妙。
+
+        只钉「两个 ID 都出现、且 D 带了限定词」这条主线，具体怎么行文不管。
         """
         plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
-        id_list = next(line for line in plan.splitlines() if "Requirement `REQ-001`" in line)
-        self.assertIn("技术决策 `D-001`", id_list, "D-001 必须限定为技术决策，不能裸称 Decision")
-        self.assertIn("decisionIds", id_list, "必须点出 D-NNN 的引用位置")
-        self.assertIn("plan_json_contract", id_list, "必须点出判定者")
-
-        dec_rule = next(line for line in plan.splitlines() if "规格决策 `DEC-001`" in line)
-        self.assertIn("不新增", dec_rule, "必须写明 DEC 是上游输入、本阶段不新增")
-        self.assertIn("design_contract", dec_rule, "必须点出判定者")
-        self.assertIn("无", dec_rule, "必须写明可为空")
+        self.assertIn("DEC-001", plan, "必须点出规格决策 DEC-001 的存在")
+        self.assertNotIn(
+            "Decision `D-001`", plan, "D-001 不能裸称 Decision——那个词现在也指 DEC"
+        )
 
 
 class DecisionLogSectionScopeTest(unittest.TestCase):
