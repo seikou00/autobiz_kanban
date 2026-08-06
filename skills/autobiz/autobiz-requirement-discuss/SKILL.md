@@ -107,9 +107,9 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ### 需求内容格式改造
 
-- 按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的模板格式重写需求文档
-- 写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
-- 格式化流程见同目录 `prd-formatter.md`。
+- 必须先完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/referencesprd-formatter.md` 的格式化流程。
+- 按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的模板格式重写需求文档，格式化流程见同目录 `prd-formatter.md`
+- 写入`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
 
 ### 需求分析
 
