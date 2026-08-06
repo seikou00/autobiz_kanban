@@ -17,12 +17,12 @@
 <!-- section: 前提与角色 | stages: dev.plan -->
 ## 前提与角色
 
-使用 task 工具，指定 `critic-autodev` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md`、`PLAN.md` 进行严格审查，从四个维度核查：
+使用 task 工具，指定 `critic-autodev` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md`、`PLAN.json` 进行严格审查，从四个维度核查：
 
 1. 技术选择是否合理；
 2. 规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对）；
 3. 测试是否合理和完备；
-4. 引用与事实是否相符（Code Evidence 各条与代码实际一致，Spec Traceability 引用的 REQ/SCN/D-xx 在上游真实存在）。
+4. 引用与事实是否相符（Code Evidence 各条与代码实际一致，Spec Traceability 引用的 REQ/SCN/D-xxx 在上游真实存在）。
 
 <!-- section: 前提与角色 | stages: dev.code -->
 ## 前提与角色
@@ -93,14 +93,14 @@
 <!-- section: 分类表 | stages: dev.plan -->
 ## 分类表
 
-| 分类 | 判定 | 动作 |
-|------|------|------|
-| 产物可修 | 技术方案、接口/数据形态、任务拆分、覆盖缺口、验证方法不足 | 技术结论改 design.md，执行结论改 PLAN.md，两边受影响处同步 |
-| 引用与事实不符 | Code Evidence 与代码不一致，或引用的 REQ/SCN/D-xx 不存在 | 更新 EVD-xx 与引用；与 spec/D-xx 冲突记 R-xx（Type=读码差异）走裁定门 |
-| 需用户裁定 | 有真实备选且改变实现路径，或与 design.md 中 `Status=已确认` 的 API/DATA/D 决策冲突 | 记 R-xx（Type=待确认），按「design.md 确认规则」第一步逐条裁定 |
-| 回流上游 | 行为契约本身缺失或矛盾 | 停止并建议回 `/autodev-specs`，不在本阶段补写行为契约 |
-| 仅列出 | 成立但不足以改产物 | 不改产物，在结论块中列出 |
-| 结论不成立 | 复核后与产物、代码实际不符 | 不改产物，在结论块中引 file:line 或产物原文说明 |
+| 分类 | 判定 | 动作                                                |
+|------|------|---------------------------------------------------|
+| 产物可修 | 技术方案、接口/数据形态、任务拆分、覆盖缺口、验证方法不足 | 技术结论改 design.md，执行结论改 PLAN.json，两边受影响处同步          |
+| 引用与事实不符 | Code Evidence 与代码不一致，或引用的 REQ/SCN/D-xxx 不存在 | 更新 EVD-xxx 与引用；与 spec/D-xxx 冲突记 R-xxx（Type=读码差异）走裁定门 |
+| 需用户裁定 | 有真实备选且改变实现路径，或与 design.md 中 `Status=已确认` 的 API/DATA/D 决策冲突 | 记 R-xxx（Type=待确认），按「design.md 确认规则」第一步逐条裁定         |
+| 回流上游 | 行为契约本身缺失或矛盾 | 停止并建议回 `/autodev-specs`，不在本阶段补写行为契约               |
+| 仅列出 | 成立但不足以改产物 | 不改产物，在结论块中列出                                      |
+| 结论不成立 | 复核后与产物、代码实际不符 | 不改产物，在结论块中引 file:line 或产物原文说明                     |
 
 - 只改被指出的条目；TASK/EVD/R/API/DATA/D 稳定 ID 不重排、不复用，已裁定行不因回检改写。
 - 不得靠删任务、缩小 Contract Coverage 或加「无需实现」豁免消除覆盖类结论。
