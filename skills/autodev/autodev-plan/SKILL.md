@@ -309,6 +309,8 @@ python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feat
 python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
 ```
 
+每个待创建的测试目标只能归属一个 TASK。两个 TASK 的验证命令指向同一个尚不存在的测试类时，第二个 TASK 在 Code 阶段无法满足「在本 run 内创建该测试」的要求，runner 会反复返回 `code_task_validation_test_creation_required` 且没有合法出口。因此每个 TASK 的测试选择器必须落在只属于它的测试类上，类名用该 TASK 的业务行为命名、与 `title` 语义对应，不要套用 `XxxServiceImplTest` / `XxxControllerTest` 这类按被测类命名的通用名——它们天然会被同模块的多个 TASK 撞上。若某个 TASK 的验证确实只能复用另一个 TASK 建出的测试类，它就不是 `code`：把该 group 的 `executionMode` 改为 `verified_existing`，由 writer 按 `reuse_existing` 处理。`preflight-task-draft` 与 `finalize-task-draft` 会机械校验这一条，同一 `(repo, cwd, 测试类)` 被两个以上 TASK 标记为待创建时返回 `duplicate_created_test_target`。
+
 不得直接编辑 Draft 根或 Batch JSON。需要查看进度时只运行 `show-task-draft`；它只返回 ready/pending Task ID 和 Batch 摘要。若分组表在 Draft 创建后改变，所有 Draft 命令返回 `task_group_changed_after_draft_created`；只能运行 `rebuild-task-draft --group-file <file>`，writer 仅保留 group projection 与该 TASK workspace contract 都未变化的 ready task 详情，只重置受影响 task，禁止逐字段同步旧 task。若旧 Draft 缺少 code workspace，修改单个 task detail 无法修复，必须运行 `rebuild-task-draft --group-file <file> --code-workspace <path>`；重复参数可登记多个仓库。
 
 全部 task ready 后运行一次 Draft 全局预检，再原子发布正式 Bundle：

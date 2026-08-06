@@ -111,6 +111,10 @@ TASK_VALIDATION_RUN_TYPE = "batch_task_validation"
 TASK_VALIDATION_RUNNING_COMMANDS = ["validate-batch-task"]
 TASK_VALIDATION_BATCH_CHECK_COMMANDS = ["batch-check"]
 TASK_VALIDATION_FAILED_COMMANDS = ["start-validation-repair", "start-batch-task-validation"]
+# Registered agent name for the host task tool's subagent_type. `requiredExecutor`
+# below names the role, not a registry entry, so the main agent had no legal value
+# to pass. Swap this single string to change which registered agent validates.
+BATCH_VALIDATION_SUBAGENT_TYPE = "verification-autodev"
 VALIDATION_DIAGNOSTIC_PATH_RE = re.compile(
     r"(?P<path>(?:[A-Za-z]:[\\/]|/)?[^\r\n]*?\.(?:java|kt|kts|groovy|scala|js|jsx|ts|tsx|vue|py))"
     r"(?=:\[?\d|:\s|$)",
@@ -3188,6 +3192,7 @@ def _task_validation_context(state: dict[str, Any]) -> dict[str, Any]:
         "commandAudience": "validation_subagent_only",
         "executorDirective": {
             "requiredExecutor": "batch_validation_subagent",
+            "subagentType": BATCH_VALIDATION_SUBAGENT_TYPE,
             "mainAgentAction": (
                 "start_validation_repair" if failed else "spawn_subagent_immediately"
             ),

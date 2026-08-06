@@ -20,6 +20,7 @@ FRONTEND_COMPILE_VALIDATION_KINDS = frozenset({"build", "compile", "typecheck"})
 TASK_VALIDATION_KINDS = BEHAVIOR_TASK_VALIDATION_KINDS | FRONTEND_COMPILE_VALIDATION_KINDS
 BATCH_VALIDATION_KINDS = frozenset({"build", "typecheck", "lint", "compile"})
 MAVEN_EXECUTABLES = frozenset({"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"})
+_MAVEN_PROJECT_LIST_FLAGS = ("-pl", "--projects")
 
 _NOOP_EXECUTABLES = {"echo", "false", "printf", "true"}
 _INLINE_SHELL_FLAGS = {
@@ -79,7 +80,72 @@ def command_policy_errors(command: Any) -> list[str]:
     if any(item.lower() in inline_flags for item in argv[1:]):
         errors.append("validation_command_inline_shell_forbidden")
     errors.extend(maven_test_policy_errors(command))
+    errors.extend(maven_project_selector_errors(command))
     return errors
+
+
+def _normalized_repo_relative_path(value: str) -> str:
+    """Normalize a Git-root-relative path so two spellings compare equal."""
+
+    candidate = value.replace("\\", "/").strip()
+    while candidate.startswith("./"):
+        candidate = candidate[2:]
+    candidate = candidate.rstrip("/")
+    return candidate or "."
+
+
+def _maven_project_list_values(argv: list[str]) -> list[str]:
+    """Return raw -pl/--projects values, covering both `-pl x` and `--projects=x`."""
+
+    values: list[str] = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        lowered = token.lower()
+        if lowered in _MAVEN_PROJECT_LIST_FLAGS:
+            if index + 1 < len(argv):
+                values.append(argv[index + 1])
+            index += 2
+            continue
+        for flag in _MAVEN_PROJECT_LIST_FLAGS:
+            if lowered.startswith(f"{flag}="):
+                values.append(token[len(flag) + 1:])
+                break
+        index += 1
+    return values
+
+
+def maven_project_selector_errors(command: Any) -> list[str]:
+    """Reject `-pl <path>` that re-names the directory the command already runs in.
+
+    ``-pl`` selects modules from the reactor of the POM in ``cwd``. When ``cwd``
+    is already the module directory, that reactor contains only the module
+    itself, so a path selector naming the same directory can never resolve and
+    Maven exits non-zero with ``Could not find the selected project in the
+    reactor``. Selecting a submodule from an aggregator root keeps working and
+    is not flagged, so this only rejects the provably unresolvable spelling.
+    """
+
+    if not isinstance(command, dict):
+        return []
+    argv = normalized_argv(command)
+    if not argv or command_executable(argv) not in MAVEN_EXECUTABLES:
+        return []
+    cwd = command.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return []
+    normalized_cwd = _normalized_repo_relative_path(cwd)
+    if normalized_cwd == ".":
+        return []
+    for raw_value in _maven_project_list_values(argv):
+        for item in raw_value.split(","):
+            candidate = item.strip()
+            # `!module` excludes instead of selects; `:artifactId` is not a path.
+            if not candidate or candidate.startswith("!") or ":" in candidate:
+                continue
+            if _normalized_repo_relative_path(candidate) == normalized_cwd:
+                return ["maven_project_selector_duplicates_cwd"]
+    return []
 
 
 def maven_test_selectors(command: Any) -> list[str]:
