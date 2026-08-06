@@ -39,6 +39,7 @@ from hooks.json_writer_common import (  # noqa: E402
     with_result_data,
     write_text,
     WriterError,
+    WriterEncodingError,
 )
 from hooks.evidence_kernel import FileLock  # noqa: E402
 from hooks.implementation_scope import load_scope  # noqa: E402
@@ -1382,11 +1383,27 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
     return task
 
 
+def _plan_writer_stdin_body() -> dict[str, Any]:
+    try:
+        return read_object_stdin()
+    except WriterEncodingError as exc:
+        raise PlanWriterInputError("invalid_body_stdin_encoding", str(exc)) from exc
+    except WriterError as exc:
+        message = str(exc)
+        if "stdin 为空" in message:
+            raise PlanWriterInputError("empty_body_stdin", message) from exc
+        if "stdin 不是合法 JSON" in message:
+            raise PlanWriterInputError("invalid_body_stdin_json", message) from exc
+        if "stdin JSON 顶层必须是 object" in message:
+            raise PlanWriterInputError("invalid_body_stdin_object", message) from exc
+        raise
+
+
 def _draft_detail_body(args: argparse.Namespace) -> dict[str, Any]:
     if args.body_file:
         return read_object_file(args.body_file)
     if args.body_stdin:
-        return read_object_stdin()
+        return _plan_writer_stdin_body()
     if args.body_json:
         value = parse_json_value(args.body_json)
         if not isinstance(value, dict):
@@ -1943,17 +1960,7 @@ def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str,
         if not isinstance(task, dict):
             raise ValueError("--task-json 顶层必须是 object")
     elif args.body_stdin:
-        try:
-            task = read_object_stdin()
-        except WriterError as exc:
-            message = str(exc)
-            if "stdin 为空" in message:
-                raise PlanWriterInputError("empty_body_stdin", message) from exc
-            if "stdin 不是合法 JSON" in message:
-                raise PlanWriterInputError("invalid_body_stdin_json", message) from exc
-            if "stdin JSON 顶层必须是 object" in message:
-                raise PlanWriterInputError("invalid_body_stdin_object", message) from exc
-            raise
+        task = _plan_writer_stdin_body()
     else:
         return None
 
@@ -5063,6 +5070,8 @@ def main(argv: list[str] | None = None) -> int:
             return args.func(args)
     except PlanWriterInputError as exc:
         return render_result(fail(exc.reason, exc.detail))
+    except WriterEncodingError as exc:
+        return render_result(fail("plan_writer_encoding_error", str(exc)))
     except Exception as exc:
         return render_result(fail("plan_writer_failed", str(exc)))
 
