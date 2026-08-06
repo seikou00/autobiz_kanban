@@ -8,12 +8,18 @@ This module is the single source of truth shared by:
 
 它统一定义三件事，避免两个脚本各写一份：
 1. 克隆缓存的磁盘布局：``<pluginPath>/sys/``。
-2. 清单 schema：``agents.manifest.json``——把 system_id 与其下的部署单元 id
-   (deployUnitId) 以及每个系统的 AGENTS.md 对应起来。
+2. 清单 schema——把 system_id 与其下的部署单元 id (deployUnitId) 以及每个系统的
+   AGENTS.md 对应起来；两个来源同用这一份 schema（见下）。
 3. 清单的解析/校验、deployUnitId -> systemId 的索引、以及 sync 脚本输出形状的整形。
 
-清单（克隆后位于 ``<pluginPath>/sys/agents.manifest.json``）。字段名兼容旧写法：
-``deployUnits``/``deployUnitId`` 为新名，旧的 ``serviceUnits``/``serviceUnitId`` 仍可解析::
+清单有两个来源，同 schema、按此优先级取（见 :func:`get_manifest_path`）：
+
+1. ``<pluginPath>/sys/knowledge.index.json`` —— ``hooks/knowledge_index.py`` 扫描知识库
+   frontmatter 生成，已迁移的知识库走这条；
+2. ``<pluginPath>/sys/agents.manifest.json`` —— 知识库仓自带的手写清单，未迁移时回落。
+
+字段名兼容旧写法：``deployUnits``/``deployUnitId`` 为新名，旧的
+``serviceUnits``/``serviceUnitId`` 仍可解析::
 
     {
       "schemaVersion": "autobizdevops.agents.manifest.v1",
@@ -48,6 +54,8 @@ from hooks.paths import get_sys_agents_md_path  # noqa: E402
 
 AGENTS_DIRNAME = "sys"
 MANIFEST_NAME = "agents.manifest.json"
+# 由 knowledge_index 扫描 frontmatter 生成的索引；与手写清单同 schema，优先于它。
+INDEX_NAME = "knowledge.index.json"
 AGENTS_MD_NAME = "AGENTS.md"
 MANIFEST_SCHEMA_VERSION = "v1"
 SYNC_SCHEMA_VERSION = "autobizdevops.agents.sync.v1"
@@ -93,7 +101,19 @@ def get_agents_root(plugin_root: Optional[Path] = None) -> Path:
 
 
 def get_manifest_path(plugin_root: Optional[Path] = None) -> Path:
-    return get_agents_root(plugin_root) / MANIFEST_NAME
+    """索引文件路径：优先扫描生成的 ``knowledge.index.json``，回落手写 ``agents.manifest.json``。
+
+    已迁移到 frontmatter 的知识库有前者、没有后者；未迁移的反之。两种知识库因此都能工作，
+    不需要 feature flag 或升级顺序约定。都不存在时返回生成物路径，由 load_manifest 报错。
+    """
+    root = get_agents_root(plugin_root)
+    generated = root / INDEX_NAME
+    if generated.is_file():
+        return generated
+    legacy = root / MANIFEST_NAME
+    if legacy.is_file():
+        return legacy
+    return generated
 
 
 def platform_key(platform: Optional[str] = None) -> str:
@@ -253,7 +273,10 @@ def parse_manifest(data: object) -> Manifest:
 def load_manifest(plugin_root: Optional[Path] = None) -> Manifest:
     path = get_manifest_path(plugin_root)
     if not path.is_file():
-        raise AgentsManifestError(f"未找到清单文件，请先同步 agents 仓库: {path}")
+        raise AgentsManifestError(
+            f"未找到索引文件，{get_agents_root(plugin_root)} 下既无 {INDEX_NAME} 也无 {MANIFEST_NAME}。"
+            f"修复：执行 hooks/sync_agents.py 同步知识库仓；若已同步，检查库内 md 是否带 frontmatter"
+        )
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:

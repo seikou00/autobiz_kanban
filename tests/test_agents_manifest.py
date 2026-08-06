@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from hooks.agents_repo import (  # noqa: E402
     AgentsManifestError,
     build_sync_payload,
+    get_manifest_path,
     index_unit_pairs,
     index_units,
     parse_manifest,
@@ -209,6 +210,59 @@ class BuildSyncPayloadTest(unittest.TestCase):
         (tmp / "sys").mkdir()
         with self.assertRaises(AgentsManifestError):
             build_sync_payload(plugin_root=tmp)
+
+
+class IndexPathPriorityTest(unittest.TestCase):
+    """knowledge.index.json（扫描生成）优先于 agents.manifest.json（手写），
+    两者只有一个时用那一个——迁移期两种知识库都能工作。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.sysd = self.root / "sys"
+        self.sysd.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, name, systems):
+        (self.sysd / name).write_text(
+            json.dumps({"schemaVersion": "v1", "systems": systems}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def test_generated_index_wins_over_legacy_manifest(self):
+        self._write("agents.manifest.json", [{"systemId": "OLD", "deployUnits": [
+            {"deployUnitId": "old_unit"}]}])
+        self._write("knowledge.index.json", [{"systemId": "NEW", "deployUnits": [
+            {"deployUnitId": "new_unit"}]}])
+        self.assertEqual(get_manifest_path(self.root).name, "knowledge.index.json")
+        self.assertEqual(
+            build_sync_payload(plugin_root=self.root)["supported_deploy_units"], ["new_unit"]
+        )
+
+    def test_falls_back_to_legacy_manifest(self):
+        self._write("agents.manifest.json", [{"systemId": "OLD", "deployUnits": [
+            {"deployUnitId": "old_unit"}]}])
+        self.assertEqual(get_manifest_path(self.root).name, "agents.manifest.json")
+        self.assertEqual(
+            build_sync_payload(plugin_root=self.root)["supported_deploy_units"], ["old_unit"]
+        )
+
+    def test_generated_index_alone_is_enough(self):
+        self._write("knowledge.index.json", [{"systemId": "NEW", "deployUnits": [
+            {"deployUnitId": "new_unit"}]}])
+        self.assertEqual(
+            build_sync_payload(plugin_root=self.root)["supported_deploy_units"], ["new_unit"]
+        )
+
+    def test_neither_present_raises_with_both_names_and_fix_hint(self):
+        with self.assertRaises(AgentsManifestError) as ctx:
+            build_sync_payload(plugin_root=self.root)
+        message = str(ctx.exception)
+        self.assertIn("knowledge.index.json", message)
+        self.assertIn("agents.manifest.json", message)
+        self.assertIn("修复", message)
 
 
 if __name__ == "__main__":

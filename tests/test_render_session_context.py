@@ -106,6 +106,99 @@ def _board_config(workflow):
     return path
 
 
+class GeneratedIndexInjectionTest(unittest.TestCase):
+    """AC3：知识库改用 frontmatter + 扫描生成索引后，注入产物形状与手写清单时一致。
+
+    这条链路端到端跑：写带 frontmatter 的 md → knowledge_index.build() → render()，
+    render_session_context.py 本身一行未改。
+    """
+
+    UNIT = "LF39.18_focusone"
+
+    def setUp(self):
+        from hooks import knowledge_index
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        sysd = self.root / "sys"
+
+        def _md(rel, **fields):
+            path = sysd / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            head = "\n".join("{}: {}".format(k, v) for k, v in fields.items())
+            path.write_text("---\n{}\n---\n\n# 正文\n".format(head), encoding="utf-8")
+
+        _md("LF3918/AGENTS.md", type="product knowledge", title="中台导航",
+            description="系统总览", sub_product="LF39.18")
+        _md("LF3918/03_Backend_Services/services/focusone/glossary.md",
+            type="service knowledge", title="领域术语表", description="业务术语与缩写",
+            sub_product="LF39.18", deploy_unit=self.UNIT)
+        _md("LF3918/03_Backend_Services/services/focusone/architecture.md",
+            type="service knowledge", title="架构说明", description="分层结构与模块职责",
+            sub_product="LF39.18", deploy_unit=self.UNIT)
+
+        self.build_result = knowledge_index.build(sysd)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _render(self, local_repo=None):
+        return render(
+            [{"deployUnitId": self.UNIT, "localRepoPath": local_repo or _local_repo(),
+              "description": "中台导航后端服务"}],
+            plugin_root=self.root,
+            platform="darwin",
+        )
+
+    def test_result_keys_unchanged(self):
+        res = self._render()
+        self.assertTrue(res["ok"])
+        self.assertEqual(
+            sorted(res), ["agentConfig", "agentmdLoadStatus", "message", "ok", "sessionContext"]
+        )
+
+    def test_load_status_shape_unchanged(self):
+        res = self._render()
+        status = [s for s in res["agentmdLoadStatus"] if s["deployUnitId"] == self.UNIT]
+        self.assertEqual(len(status), 1)
+        self.assertEqual(sorted(status[0]), ["deployUnitId", "loaded", "message", "path", "source"])
+        self.assertTrue(status[0]["loaded"])
+        self.assertEqual(status[0]["source"], "remote")
+        self.assertTrue(status[0]["path"].endswith(".entries/LF39.18/LF39.18_focusone.md"))
+
+    def test_unit_map_injected_with_absolute_paths(self):
+        """入口正文是生成的地图；{plugin_root} 占位符在注入前被替换成绝对路径。"""
+        context = self._render()["sessionContext"]
+        self.assertIn("## 文档地图", context)
+        self.assertIn(
+            str(self.root / "sys") + "/LF3918/03_Backend_Services/services/focusone/glossary.md",
+            context,
+        )
+        self.assertIn("业务术语与缩写", context)
+        self.assertNotIn("{plugin_root}", context)
+
+    def test_system_section_uses_generated_index_entry(self):
+        context = self._render()["sessionContext"]
+        self.assertIn("<SYSTEM", context)
+        self.assertIn("LF39.18（中台导航）", context)   # 展示名取自 AGENTS.md 的 frontmatter title
+
+    def test_scope_table_falls_back_to_ui_description(self):
+        """单元展示名在索引里是空串，① 表回落到 UI 传入的 description（OQ1 的降级）。"""
+        context = self._render()["sessionContext"]
+        self.assertIn("中台导航后端服务", context)
+
+    def test_unknown_unit_still_degrades_to_local(self):
+        local = _local_repo("# 本地兜底\n- 只有本地\n")
+        res = render(
+            [{"deployUnitId": "NOT_IN_INDEX", "localRepoPath": local, "description": "未登记"}],
+            plugin_root=self.root,
+            platform="darwin",
+        )
+        status = res["agentmdLoadStatus"][0]
+        self.assertEqual(status["source"], "local")
+        self.assertIn("本地兜底", res["sessionContext"])
+
+
 class ParseSelectedTest(unittest.TestCase):
     def test_empty_and_blank(self):
         self.assertEqual(_parse_selected(None), [])

@@ -188,6 +188,90 @@ class RunSuccessPathTest(unittest.TestCase):
         )
 
 
+class KnowledgeIndexWiringTest(unittest.TestCase):
+    """克隆后生成知识库索引这一步：warnings 透传、失败仍出合法 JSON。"""
+
+    CONFIG = '{"agentsRepo": {"url": "https://git/x.git", "ref": "main"}}'
+
+    def _run_with(self, build_side_effect):
+        with _temp_board_config(self.CONFIG), mock.patch.object(
+            sync_agents, "sync_repo", return_value={"commit": "abc", "transport": "https"}
+        ), mock.patch.object(
+            sync_agents.knowledge_index, "build", side_effect=build_side_effect
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            side_effect=lambda *, repo_info: {"ok": True, "repo": repo_info},
+        ):
+            return sync_agents.run(None, None)
+
+    def test_warnings_flow_into_payload(self):
+        result = self._run_with(
+            lambda dest: {"generated": True, "warnings": ["a.md: 缺必填字段 sub_product"]}
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["warnings"], ["a.md: 缺必填字段 sub_product"])
+
+    def test_payload_has_warnings_key_even_when_clean(self):
+        result = self._run_with(lambda dest: {"generated": True, "warnings": []})
+        self.assertEqual(result["warnings"], [])
+
+    def test_index_build_failure_returns_ok_false_with_repo_context(self):
+        def _boom(dest):
+            raise sync_agents.FrontmatterError("索引写入失败。修复：检查 sys/ 目录是否可写")
+
+        result = self._run_with(_boom)
+        self.assertFalse(result["ok"])
+        self.assertIn("知识库索引生成失败", result["message"])
+        self.assertIn("修复", result["message"])
+        self.assertEqual(result["repo"]["commit"], "abc")
+        self.assertIn("knowledge_path", result)
+
+    def test_index_build_oserror_returns_ok_false(self):
+        def _boom(dest):
+            raise OSError("Read-only file system")
+
+        result = self._run_with(_boom)
+        self.assertFalse(result["ok"])
+        self.assertIn("索引落盘失败", result["message"])
+        self.assertIn("可写", result["message"])
+
+    def test_index_failure_still_emits_json_and_exit_zero(self):
+        """AC6：UI 直调约定——逻辑失败也必须是合法 JSON + exit 0。"""
+        stdout = io.StringIO()
+        with _temp_board_config(self.CONFIG), mock.patch.object(
+            sync_agents, "sync_repo", return_value={"commit": "abc", "transport": "https"}
+        ), mock.patch.object(
+            sync_agents.knowledge_index,
+            "build",
+            side_effect=sync_agents.FrontmatterError("坏了。修复：看这里"),
+        ), contextlib.redirect_stdout(stdout):
+            code = sync_agents.main([])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertFalse(payload["ok"])
+
+    def test_manifest_unavailable_path_keeps_warnings(self):
+        """索引生成成功但清单仍不可用时，warnings 是诊断线索，不能丢。"""
+        with _temp_board_config(self.CONFIG), mock.patch.object(
+            sync_agents, "sync_repo", return_value={"commit": "abc", "transport": "https"}
+        ), mock.patch.object(
+            sync_agents.knowledge_index,
+            "build",
+            return_value={"generated": False, "warnings": ["全库无 frontmatter，回落 agents.manifest.json"]},
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            side_effect=sync_agents.AgentsManifestError("未找到清单文件"),
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("清单不可用", result["message"])
+        self.assertEqual(len(result["warnings"]), 1)
+
+
 def _git(args, cwd):
     return subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
@@ -415,6 +499,95 @@ class SyncRepoFallbackTest(unittest.TestCase):
         self.assertIn("https clone unavailable", message)
         self.assertIn("SSH 兜底失败", message)
         self.assertIn("ssh clone unavailable", message)
+
+
+def _make_frontmatter_source_repo() -> Path:
+    """带 frontmatter、不带 agents.manifest.json 的知识库仓（已迁移形态）。"""
+    src = Path(tempfile.mkdtemp()) / "kb-src"
+    src.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main", str(src)], capture_output=True, text=True, check=True)
+
+    def _md(rel, **fields):
+        path = src / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        head = "\n".join("{}: {}".format(k, v) for k, v in fields.items())
+        path.write_text("---\n{}\n---\n\n# 正文\n".format(head), encoding="utf-8")
+
+    _md("LF3918/AGENTS.md", type="product knowledge", title="中台导航",
+        description="系统总览", sub_product="LF39.18")
+    _md("LF3918/03_Backend_Services/services/focusone/glossary.md",
+        type="service knowledge", title="领域术语表", description="业务术语",
+        sub_product="LF39.18", deploy_unit="LF39.18_focusone")
+    _md("LF3918/04_Frontend_Apps/services/wgWebFlow/ui.md",
+        type="component reference", title="UI 体系", description="组件约定",
+        sub_product="LF39.18", deploy_unit="LF39.18_wgflowweb")
+    _md("BAD.md", type="product knowledge", title="缺字段")   # 触发 warning
+
+    _git(["add", "-A"], src)
+    _git(["commit", "-m", "init"], src)
+    return src
+
+
+@unittest.skipUnless(GIT, "git not available")
+class FrontmatterRepoEndToEndTest(unittest.TestCase):
+    """真实克隆一个带 frontmatter 的知识库，跑完整 run()：
+    frontmatter → 生成索引 → supported_deploy_units。"""
+
+    @contextlib.contextmanager
+    def _isolated(self, dest: Path):
+        """把克隆落点与索引读取点都挪到临时目录，绝不碰随包的 sys/。"""
+        from hooks import agents_repo
+
+        with mock.patch.object(sync_agents, "get_agents_root", return_value=dest), \
+                mock.patch.object(agents_repo, "get_agents_root", return_value=dest):
+            yield
+
+    def test_supported_units_derived_from_frontmatter(self):
+        src = _make_frontmatter_source_repo()
+        dest = Path(tempfile.mkdtemp()) / "sys"
+        with self._isolated(dest), _temp_board_config(
+            json.dumps({"agentsRepo": {"url": str(src), "ref": "main"}})
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertTrue(result["ok"], result.get("message"))
+        self.assertEqual(
+            result["supported_deploy_units"], ["LF39.18_focusone", "LF39.18_wgflowweb"]
+        )
+        system = result["systems"][0]
+        self.assertEqual(system["systemId"], "LF39.18")
+        self.assertEqual(system["systemName"], "中台导航")
+        self.assertTrue(system["agentsReady"])
+        self.assertFalse((dest / "agents.manifest.json").exists())
+        self.assertTrue((dest / "knowledge.index.json").is_file())
+
+    def test_bad_document_surfaces_as_warning_without_failing_sync(self):
+        src = _make_frontmatter_source_repo()
+        dest = Path(tempfile.mkdtemp()) / "sys"
+        with self._isolated(dest), _temp_board_config(
+            json.dumps({"agentsRepo": {"url": str(src), "ref": "main"}})
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertTrue(result["ok"])
+        bad = [w for w in result["warnings"] if w.startswith("BAD.md")]
+        self.assertEqual(len(bad), 1)
+        self.assertIn("description/sub_product", bad[0])
+        self.assertIn("修复", bad[0])
+
+    def test_legacy_repo_without_frontmatter_still_works(self):
+        """未迁移的知识库：不生成索引，回落手写清单，行为与改造前一致。"""
+        src = _make_source_repo()   # 有 agents.manifest.json、md 全裸
+        dest = Path(tempfile.mkdtemp()) / "sys"
+        with self._isolated(dest), _temp_board_config(
+            json.dumps({"agentsRepo": {"url": str(src), "ref": "main"}})
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertTrue(result["ok"], result.get("message"))
+        self.assertEqual(result["supported_deploy_units"], ["LF39.18_Outservice"])
+        self.assertFalse((dest / "knowledge.index.json").exists())
+        self.assertTrue(any("回落 agents.manifest.json" in w for w in result["warnings"]))
 
 
 @unittest.skipUnless(GIT, "git not available")
