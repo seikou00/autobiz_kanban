@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -13,10 +14,16 @@ from typing import Iterable
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+_HOOKS_DIR = Path(__file__).resolve().parent
+if str(_HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(_HOOKS_DIR))
 
 from board_core.artifact_paths import artifact_exists_exact, resolve_exact_relative_path  # noqa: E402
 from board_core.contracts import BoardConfigError, load_record_workflow_contracts, load_repo_workflow_contracts  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
+
+from repair_registry import lookup as lookup_repair  # noqa: E402
+from repair_registry import render as render_repair  # noqa: E402
 
 
 BLOCK_EXIT_CODE = 2
@@ -131,12 +138,40 @@ def fail_line(
     extra: str = "",
     *,
     repair: str = "",
+    target: str = "",
+    fields: dict | None = None,
 ) -> int:
-    print(f"POST_SKILL_FAIL skill={ctx.skill} reason={reason}{extra}")
-    if repair:
+    """打印一条机器可解析的预检失败。
+
+    结构化字段随行尾 ``payload={json}`` 一起输出，一条错误一行——同一个 reason
+    重复出现时，每条错误各自带着自己的 target 与 action，不依赖跨行配对。
+    未在 `repair_registry` 注册的 reason 不带 payload，行为与注册表引入前一致。
+    """
+    entry = lookup_repair(reason, extra)
+    payload = ""
+    action = repair
+    if entry is not None:
+        rendered_action = repair or render_repair(entry.action, target, fields)
+        action = rendered_action
+        payload = json.dumps(
+            {
+                "artifact": render_repair(entry.artifact, target, fields),
+                "target": target,
+                "problem": render_repair(entry.problem, target, fields),
+                "action": rendered_action,
+                "route": entry.route,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    line = f"POST_SKILL_FAIL skill={ctx.skill} reason={reason}{extra}"
+    if payload:
+        line = f"{line} payload={payload}"
+    print(line)
+    if action:
         print(
             f"POST_SKILL_REPAIR skill={ctx.skill} reason={reason} "
-            f"action={repair!r}"
+            f"action={action!r}"
         )
     return 1
 

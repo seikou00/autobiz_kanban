@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.8.08041
+version: v1.9.08051
 ---
 
 ## 缺失产物处理
@@ -473,6 +473,26 @@ Plan 阶段不再生成独立 smoke 计划。每个 Batch 的测试闭环必须�
 - [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
 - [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 plan.json 已同步记录，并更新相关任务或风险项。
 
+#### 产物契约预检（机器校验）
+
+这是脚本对产物做的**机器检查**，只判定：必备产物与章节是否齐全、格式与结构是否合法、稳定 ID 是否规范唯一、引用能否解析、机械可判的覆盖关系是否成立。
+
+它**不**判定需求语义是否完整、方案是否合理、测试策略是否充分、代码事实是否属实——那些由回检子代理负责，两者职责不重叠。
+
+design.md、plan.json、PLAN.md 全部生成完成后执行：
+
+```bash
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
+```
+
+处理流程：
+
+1. 等命令完整结束后再处理结果，不处理一条就重跑一次。
+2. 读取全部失败项。每一项都带 `artifact` / `target` / `problem` / `action` / `route`，按 `action` 修，不要自行推断修法。
+3. 按 `route` 分流：`fix_current` 在本阶段修；`return_specs` / `return_plan` 停止本阶段并回流；`ask_user` 回到用户确认，禁止自行填值。
+4. 按 `artifact` 归组，一次性改完全部可修项。
+5. 重跑完整预检；通过前不得进入回检，也不得推进 checkpoint。
+
 #### 回检与修复
 
 本节完整协议由脚本按阶段渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。
@@ -480,6 +500,8 @@ Plan 阶段不再生成独立 smoke 计划。每个 Batch 的测试闭环必须�
 ```bash
 python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
 ```
+
+回检导致产物变化时，重跑一次产物契约预检。
 
 ---
 

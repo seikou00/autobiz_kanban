@@ -33,7 +33,14 @@ for candidate in (ROOT, HOOKS_DIR, AUTODEV_HOOKS_DIR):
 from hooks.paths import get_plugin_output_workspace  # noqa: E402
 
 
-POSTCHECK_FAIL_RE = re.compile(r"^POST_SKILL_FAIL\s+skill=(?P<skill>\S+)\s+reason=(?P<reason>\S+)(?P<detail>.*)$")
+POSTCHECK_FAIL_RE = re.compile(
+    r"^POST_SKILL_FAIL\s+skill=(?P<skill>\S+)\s+reason=(?P<reason>\S+)"
+    r"(?P<detail>.*?)(?:\s+payload=(?P<payload>\{.*\}))?$"
+)
+
+# 结构化字段随 FAIL 行尾的 payload 一起到达，一条错误一行；同 reason 重复出现时
+# 每条错误各自带 target/action，不做跨行配对。旧行没有 payload，按原样降级。
+POSTCHECK_PAYLOAD_FIELDS = ("artifact", "target", "problem", "action", "route")
 
 
 class WriterError(RuntimeError):
@@ -228,13 +235,23 @@ def parse_postcheck_output(output: str, *, fallback_message: str = "") -> list[d
         match = POSTCHECK_FAIL_RE.match(line)
         if match:
             detail = match.group("detail").strip()
-            errors.append(
-                {
-                    "skill": match.group("skill"),
-                    "reason": match.group("reason"),
-                    "detail": detail,
-                }
-            )
+            error = {
+                "skill": match.group("skill"),
+                "reason": match.group("reason"),
+                "detail": detail,
+            }
+            raw_payload = match.group("payload")
+            if raw_payload:
+                try:
+                    payload = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict):
+                    for field in POSTCHECK_PAYLOAD_FIELDS:
+                        value = payload.get(field)
+                        if isinstance(value, str) and value:
+                            error[field] = value
+            errors.append(error)
         elif line.startswith("POST_SKILL_FAIL"):
             errors.append(_error("postcheck_failure", line))
     if not errors and fallback_message:

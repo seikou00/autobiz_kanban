@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.9.08041
+version: v1.10.08051
 ---
 
 ## 缺失产物处理
@@ -63,7 +63,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
-> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `集中校验并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
+> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `产物契约预检并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
 使用task工具，指定Explore-autodev角色进行探索。
 子代理按下面的要求返回结构化内容供主代理参考。
 探索时必须：
@@ -157,7 +157,7 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 规则：
 
 - 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
-- **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability；禁止单方面少生成。集中校验的 `capability_spec_correspondence` 双向判定这条，无需在回复中自行输出对照表。
+- **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability；禁止单方面少生成。产物契约预检的 `capability_spec_correspondence` 双向判定这条，无需在回复中自行输出对照表。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
 - Requirement 使用 `### Requirement [REQ-NNN]: <标题>`（NNN 三位递增；改标题不改 ID；删除后 ID 不复用；ID 在同一 feature 内全局唯一）。
 - Scenario 使用四级标题 `#### Scenario [SCN-NNN]: <标题>`，归属本文件中已存在的 REQ。
@@ -171,23 +171,32 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 - 操作段要与 proposal 的分组对上：`New Capabilities` 的 spec 在 `ADDED Requirements` 下写 Requirement，且 `MODIFIED`/`REMOVED` 段下不得有 Requirement（全新能力没有存量可改可删）；`Modified`/`Removed` 的 spec 必须在同名操作段下写 Requirement，另加 `ADDED` 是允许的。`capability_spec_correspondence` 判定这条。
 - 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
 
-## 集中校验
+## 产物契约预检（机器校验）
 
-proposal 与全部 specs 生成完成后执行一次完整校验：
+这是脚本对产物做的**机器检查**，只判定：必备产物与章节是否齐全、格式与结构是否合法、稳定 ID 是否规范唯一、引用能否解析、机械可判的覆盖关系是否成立。
+
+它**不**判定需求语义是否完整、方案是否合理、测试策略是否充分、代码事实是否属实——那些由回检子代理负责，两者职责不重叠。
+
+proposal 与全部 specs 生成完成后执行：
 
 ```bash
-python "${pluginPath}/skills/autodev/hooks/artifact_check.py" postcheck autodev-specs "${feature}" --repo-root "${pluginPath}" --workspace-root "${pluginWorkspace}/${projectDir}"
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature "${feature}"
 ```
 
-- 等命令完整结束后再处理结果。
-- 汇总本次输出中的全部失败项，按文件归组，一次性修改所有受影响产物。
-- 修改完成后重新执行同一完整校验；通过前不得推进 checkpoint。
-- 不以 `update_checkpoint.py` 代替产物预检，不按单条错误在校验与编辑之间往返。
+处理流程：
+
+1. 等命令完整结束后再处理结果，不处理一条就重跑一次。
+2. 读取全部失败项。每一项都带 `artifact` / `target` / `problem` / `action` / `route`，按 `action` 修，不要自行推断修法。
+3. 按 `route` 分流：`fix_current` 在本阶段修；`return_specs` / `return_plan` 停止本阶段并回流；`ask_user` 回到用户确认，禁止自行填值。
+4. 按 `artifact` 归组，一次性改完全部可修项。
+5. 重跑完整预检；通过前不得推进 checkpoint。
+
+不以 `update_checkpoint.py` 代替产物契约预检。
 
 ## 完成条件
 
 - 「输入与输出」列出的两个产物都已生成，`specs/` 下至少存在一个 `spec.md`。
-- 集中校验通过。能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
+- 产物契约预检通过。能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
 - specs 只描述行为契约，不包含实现任务。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
 
@@ -199,7 +208,9 @@ python "${pluginPath}/skills/autodev/hooks/artifact_check.py" postcheck autodev-
 python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
 ```
 
-集中校验与回检修复均通过后推进 checkpoint：
+回检导致产物变化时，重跑一次产物契约预检。
+
+产物契约预检与回检修复均通过后推进 checkpoint：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
