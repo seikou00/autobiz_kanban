@@ -233,7 +233,7 @@ class SyncRepoFallbackTest(unittest.TestCase):
         self.assertEqual(info, {"commit": "https-commit", "transport": "https"})
         self.assertEqual(run_git.call_count, 2)
         self.assertTrue(
-            all(self.SSH not in call.args[0] for call in run_git.call_args_list)
+            all(self.SSH not in args for (args,), _ in run_git.call_args_list)
         )
 
     def test_https_plain_clone_and_checkout_success_does_not_use_ssh(self):
@@ -250,7 +250,7 @@ class SyncRepoFallbackTest(unittest.TestCase):
         self.assertEqual(info, {"commit": "checkout-commit", "transport": "https"})
         self.assertEqual(run_git.call_count, 4)
         self.assertTrue(
-            all(self.SSH not in call.args[0] for call in run_git.call_args_list)
+            all(self.SSH not in args for (args,), _ in run_git.call_args_list)
         )
 
     def test_https_clone_failures_are_cleaned_before_ssh_success(self):
@@ -320,7 +320,7 @@ class SyncRepoFallbackTest(unittest.TestCase):
 
         self.assertEqual(info, {"commit": "ssh-commit", "transport": "ssh"})
         self.assertEqual(
-            [call.kwargs.get("timeout") for call in run_git.call_args_list],
+            [kwargs.get("timeout") for _, kwargs in run_git.call_args_list],
             [20, 20, None, None],
         )
 
@@ -339,18 +339,18 @@ class SyncRepoFallbackTest(unittest.TestCase):
 
         self.assertEqual(info, {"commit": "ssh-checkout-commit", "transport": "ssh"})
         clone_urls = [
-            call.args[0][-2]
-            for call in run_git.call_args_list
-            if call.args[0][0] == "clone"
+            args[-2]
+            for (args,), _ in run_git.call_args_list
+            if args[0] == "clone"
         ]
         self.assertEqual(clone_urls, [self.HTTPS, self.HTTPS, self.SSH, self.SSH])
         checkout_calls = [
-            call
-            for call in run_git.call_args_list
-            if call.args[0][0] == "checkout"
+            args
+            for (args,), _ in run_git.call_args_list
+            if args[0] == "checkout"
         ]
         self.assertEqual(len(checkout_calls), 1)
-        self.assertEqual(checkout_calls[0].args[0], ["checkout", "commit-ish"])
+        self.assertEqual(checkout_calls[0], ["checkout", "commit-ish"])
 
     def test_checkout_failure_does_not_trigger_ssh(self):
         dest = self._dest()
@@ -366,7 +366,7 @@ class SyncRepoFallbackTest(unittest.TestCase):
         self.assertIn("切换到 missing-ref 失败", str(ctx.exception))
         self.assertEqual(run_git.call_count, 3)
         self.assertTrue(
-            all(self.SSH not in call.args[0] for call in run_git.call_args_list)
+            all(self.SSH not in args for (args,), _ in run_git.call_args_list)
         )
 
     def test_missing_ssh_url_keeps_existing_failure_behavior(self):
@@ -395,7 +395,7 @@ class SyncRepoFallbackTest(unittest.TestCase):
 
         self.assertEqual(run_git.call_count, 2)
         self.assertTrue(
-            all(self.SSH not in call.args[0] for call in run_git.call_args_list)
+            all(self.SSH not in args for (args,), _ in run_git.call_args_list)
         )
 
     def test_both_transports_fail_with_combined_diagnostics(self):
