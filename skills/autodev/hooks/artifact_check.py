@@ -33,6 +33,7 @@ from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done, check_integrity, check_plan_evidence_refs  # noqa: E402
 from hooks.evidence_store import EvidenceStoreError, read_records, stream_path, validate_detail_fields  # noqa: E402
+from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
     load_and_validate_plan,
@@ -66,10 +67,16 @@ PLACEHOLDER_BRACKET = re.compile(
     r"\[(?!(?:REQ|SCN)-\d{3}\])(?![ xX]\])(?P<slot>[^\]\n]{1,40})\](?!\()"
 )
 PLACEHOLDER_WORD = re.compile(r"TBD|待补充|待提供|待定|占位", re.IGNORECASE)
-# specs 阶段决策：proposal `## Decision Log` 定义，design 规格追踪表引用
-DECISION_ID = re.compile(r"\bDEC-\d{3}\b")
-DECISION_HEADING = re.compile(r"^###\s+(DEC-\d{3})\s*[:：]", re.MULTILINE)
 PLACEHOLDER_TEXT = re.compile(r"\[[^\]\n]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
+# 规格决策 DEC-NNN：specs 阶段在 proposal `## Decision Log` 定义，design 追踪表引用。
+# 与技术决策 `D-NNN`（plan 阶段自产，见 hooks/plan_json.TECH_DECISION_ID_RE）不是一回事，
+# 两个正则互不误抓：`\bD-\d{3}\b` 要求 D 后紧跟 `-`，`DEC-001` 的 D 后是 E。
+SPEC_DECISION_ID = re.compile(r"\bDEC-\d{3}\b")
+SPEC_DECISION_HEADING = re.compile(r"^###\s+(DEC-\d{3})\s*[:：]", re.MULTILINE)
+DECISION_LOG_SECTION = re.compile(
+    r"^##\s+Decision Log\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
 # proposal 的 `## Capabilities` 段：到下一个同级标题为止
 CAPABILITIES_SECTION = re.compile(
     r"^##\s+Capabilities\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
@@ -176,7 +183,7 @@ def validate_no_template_guidance(
             ctx,
             "artifact_template_guidance_residue",
             f" file={artifact!r} line={lineno} kind={kind}",
-            repair="删除报错 file/line 的模板说明、外层 Markdown 围栏或引用块，只保留实际产物内容。",
+            target=f"{artifact}:{lineno}",
         )
     return failures
 
@@ -192,6 +199,28 @@ def spec_files(ctx: HookContext) -> list[Path]:
     )
 
 
+def _implementation_scope_contract_errors(ctx: HookContext) -> tuple[str, list[str]]:
+    """Load the optional scope contract without breaking legacy Features."""
+
+    manifest = scope_path(ctx.feature_dir)
+    if not manifest.is_file():
+        return "full_stack", []
+    return load_scope(ctx.feature_dir, required=True)
+
+
+def _report_implementation_scope_errors(ctx: HookContext) -> int:
+    _, errors = _implementation_scope_contract_errors(ctx)
+    failures = 0
+    for error in errors:
+        failures += fail_line(
+            ctx,
+            "invalid_implementation_scope",
+            f" detail={error}",
+            target=error,
+        )
+    return failures
+
+
 def validate_proposal_contract(ctx: HookContext) -> int:
     proposal = ctx.file("proposal.md")
     if not is_nonempty(proposal):
@@ -199,12 +228,16 @@ def validate_proposal_contract(ctx: HookContext) -> int:
 
     text = read_text(proposal)
     failures = validate_no_template_guidance(ctx, proposal, text)
+    failures += _report_implementation_scope_errors(ctx)
     required_sections = [
         "Why",
         "What Changes",
         "Capabilities",
         "Impact",
         "Out of Scope",
+        # design 的 `Decision` 列按 DEC-NNN 引用本节；节不存在时那些引用
+        # 无处解析，缺口要在 specs 阶段就报，不能拖到 plan 才发现。
+        "Decision Log",
         # 只校验节存在。`Status` 取值不查：「已确认」是模型能自己给自己写的
         # 状态词，给它加校验只会教出伪造，不会换来真实裁定。
         "Open Questions",
@@ -215,7 +248,7 @@ def validate_proposal_contract(ctx: HookContext) -> int:
                 ctx,
                 "invalid_proposal_missing_section",
                 f" section={section!r}",
-                repair=f"在 proposal.md 补齐「## {section}」节；Open Questions 无待确认项时正文写「无」。",
+                target=section,
             )
     return failures
 
@@ -317,10 +350,7 @@ def validate_capability_spec_correspondence(ctx: HookContext) -> int:
             ctx,
             "proposal_capability_missing_spec",
             f" capabilities={','.join(missing_specs)}",
-            repair=(
-                "为报错的每个 capability 生成 specs/<capability>/spec.md；"
-                "若该 capability 不该单独成 spec，回 proposal.md 将其移除或并入其他 capability。"
-            ),
+            target=",".join(missing_specs),
         )
     unlisted = sorted(present - declared)
     if unlisted:
@@ -328,10 +358,7 @@ def validate_capability_spec_correspondence(ctx: HookContext) -> int:
             ctx,
             "spec_missing_proposal_capability",
             f" capabilities={','.join(unlisted)}",
-            repair=(
-                "把报错的每个 capability 按 New / Modified / Removed 补进 proposal.md 的「## Capabilities」节；"
-                "若该 spec 不属于本轮范围，删除对应 specs/<capability>/ 目录。"
-            ),
+            target=",".join(unlisted),
         )
     failures += _capability_operation_failures(ctx, text, declared & present)
     return failures
@@ -368,10 +395,8 @@ def _capability_operation_failures(
                 ctx,
                 "capability_operation_missing",
                 f" capability={capability} group={group} expected={expected}",
-                repair=(
-                    f"在 specs/{capability}/spec.md 的「## {expected} Requirements」段下写出 Requirement；"
-                    f"若该能力实际不是 {group}，改 proposal.md 把它挪到正确的分组。"
-                ),
+                target=capability,
+                fields={"group": group, "expected": expected},
             )
         if group == "New":
             contradicting = sorted(actual - {"ADDED"})
@@ -380,12 +405,8 @@ def _capability_operation_failures(
                     ctx,
                     "capability_operation_contradicts_new",
                     f" capability={capability} operations={','.join(contradicting)}",
-                    repair=(
-                        f"specs/{capability}/spec.md 声明为 New，不该有存量需求可改可删："
-                        f"把 {'/'.join(contradicting)} 段下的 Requirement 移到「## ADDED Requirements」"
-                        f"（段标题可以保留，留空即可）；若该能力实际是在改存量，"
-                        "改 proposal.md 把它挪到 Modified / Removed 组。"
-                    ),
+                    target=capability,
+                    fields={"operations": "/".join(contradicting)},
                 )
     return failures
 
@@ -395,32 +416,28 @@ def validate_specs_contract(ctx: HookContext) -> int:
     if not specs:
         return fail_line(ctx, "missing_specs")
 
-    failures = 0
+    failures = _report_implementation_scope_errors(ctx)
     for spec in specs:
         text = read_text(spec)
         rel = spec.relative_to(ctx.feature_dir)
         failures += validate_no_template_guidance(ctx, spec, text)
         _, duplicate_reasons = _spec_definition_index(text)
         for reason in duplicate_reasons:
-            failures += fail_line(ctx, reason, f" file={rel}")
+            failures += fail_line(ctx, reason, f" file={rel}", target=str(rel))
         if not re.search(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", text, re.MULTILINE):
-            failures += fail_line(ctx, "invalid_spec_missing_operation_header", f" file={rel}")
+            failures += fail_line(ctx, "invalid_spec_missing_operation_header", f" file={rel}", target=str(rel))
         if not re.search(r"^###\s+Requirement\s+\[REQ-\d{3}\]:\s+.+", text, re.MULTILINE):
-            failures += fail_line(ctx, "invalid_spec_missing_requirement", f" file={rel}")
+            failures += fail_line(ctx, "invalid_spec_missing_requirement", f" file={rel}", target=str(rel))
         if not re.search(r"^####\s+Scenario\s+\[SCN-\d{3}\]:\s+.+", text, re.MULTILINE):
-            failures += fail_line(ctx, "invalid_spec_missing_scenario", f" file={rel}")
+            failures += fail_line(ctx, "invalid_spec_missing_scenario", f" file={rel}", target=str(rel))
         malformed = malformed_contract_headings(text)
         if malformed:
             failures += fail_line(
                 ctx,
                 "spec_contract_heading_malformed",
                 f" file={rel} headings={'; '.join(malformed)}",
-                repair=(
-                    "把报错的标题改成规范写法："
-                    "「### Requirement [REQ-NNN]: <标题>」/「#### Scenario [SCN-NNN]: <标题>」。"
-                    "NNN 是三位数字，方括号和层级都不能省——索引器只认这一种写法，"
-                    "其余写法会被静默跳过，该 Requirement 对下游覆盖检查等于不存在。"
-                ),
+                target=str(rel),
+                fields={"headings": "; ".join(malformed)},
             )
         barren = requirements_without_scenario(text)
         if barren:
@@ -428,10 +445,8 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 ctx,
                 "spec_requirement_without_scenario",
                 f" file={rel} requirements={','.join(barren)}",
-                repair=(
-                    "为报错的每个 Requirement 补至少一个「#### Scenario [SCN-NNN]: <标题>」；"
-                    "REMOVED Requirement 用 Scenario 描述旧入口被触发时的期望响应。"
-                ),
+                target=str(rel),
+                fields={"requirements": ",".join(barren)},
             )
         orphans = scenarios_without_requirement(text)
         if orphans:
@@ -439,10 +454,8 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 ctx,
                 "spec_scenario_without_requirement",
                 f" file={rel} scenarios={','.join(orphans)}",
-                repair=(
-                    "把报错的每个 Scenario 移到它所属的「### Requirement [REQ-NNN]:」标题之下；"
-                    "Scenario 出现在首个 Requirement 之前或操作段标题正下方时不归属任何 Requirement。"
-                ),
+                target=str(rel),
+                fields={"scenarios": ",".join(orphans)},
             )
         disordered = out_of_order_ids(text)
         if disordered:
@@ -450,10 +463,8 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 ctx,
                 "spec_id_out_of_order",
                 f" file={rel} ids={','.join(disordered)}",
-                repair=(
-                    "按文档顺序重排 REQ/SCN 编号，使其数值递增。"
-                    "允许跳号（删除后 ID 不复用会留下空档），但后出现的编号不得小于先出现的。"
-                ),
+                target=str(rel),
+                fields={"ids": ",".join(disordered)},
             )
         missing_fields = removed_requirements_missing_fields(text)
         if missing_fields:
@@ -461,10 +472,8 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 ctx,
                 "removed_requirement_missing_field",
                 f" file={rel} fields={','.join(missing_fields)}",
-                repair=(
-                    "为「## REMOVED Requirements」下报错的 Requirement 补齐"
-                    "「**Reason:** <移除原因>」与「**Migration:** <迁移方式>」，写实际内容而非占位符。"
-                ),
+                target=str(rel),
+                fields={"fields": ",".join(missing_fields)},
             )
         residue = placeholder_residue(text)
         if residue:
@@ -472,10 +481,8 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 ctx,
                 "spec_placeholder_residue",
                 f" file={rel} placeholders={'; '.join(sorted(set(residue))[:8])}",
-                repair=(
-                    "把报错的模板槽位替换成实际内容。"
-                    "`[REQ-NNN]` / `[SCN-NNN]` 是 ID 语法不算槽位，Markdown 链接也不算。"
-                ),
+                target=str(rel),
+                fields={"placeholders": "; ".join(sorted(set(residue))[:8])},
             )
     failures += _duplicate_ids_across_specs(ctx, specs)
     return failures
@@ -505,11 +512,8 @@ def _duplicate_ids_across_specs(ctx: HookContext, specs: list[Path]) -> int:
                 ctx,
                 "duplicate_spec_id_across_specs",
                 f" id={spec_id} files={','.join(sorted(files))}",
-                repair=(
-                    f"{spec_id} 在多个 spec 中重复定义。ID 在同一 feature 内必须全局唯一——"
-                    "覆盖检查按扁平 ID 集合判定，重号会让覆盖其中一个就算覆盖全部。"
-                    "给其中一处换一个未使用的编号，并同步所有引用它的地方。"
-                ),
+                target=spec_id,
+                fields={"files": ",".join(sorted(files))},
             )
     return failures
 
@@ -659,7 +663,7 @@ def validate_design_contract(ctx: HookContext) -> int:
     ]
     for section in required_sections:
         if section not in text:
-            failures += fail_line(ctx, "invalid_design_missing_section", f" section={section!r}")
+            failures += fail_line(ctx, "invalid_design_missing_section", f" section={section!r}", target=section)
 
     if not re.search(r"x-auto-no-http-api\W*:\W*(true|false)", text, re.IGNORECASE):
         failures += fail_line(ctx, "missing_design_api_marker")
@@ -667,7 +671,12 @@ def validate_design_contract(ctx: HookContext) -> int:
         failures += fail_line(ctx, "missing_design_data_marker")
     pending = PENDING_CELL.findall(text)
     if pending:
-        failures += fail_line(ctx, "design_has_pending_cells", f" count={len(pending)}")
+        failures += fail_line(
+            ctx,
+            "design_has_pending_cells",
+            f" count={len(pending)}",
+            target=f"{len(pending)} 处",
+        )
     failures += _unresolved_decision_refs(ctx, text)
     return failures
 
@@ -675,13 +684,17 @@ def validate_design_contract(ctx: HookContext) -> int:
 def _unresolved_decision_refs(ctx: HookContext, design_text: str) -> int:
     """Every ``DEC-NNN`` design cites must exist in the proposal's Decision Log.
 
+    The lookup is scoped to the section, not the whole file: a ``### DEC-001:``
+    heading dropped anywhere else in the proposal would otherwise resolve the
+    reference, which makes the check report something weaker than it claims.
+
     Reference resolution only. Whether a decision is well argued, and whether
     every Requirement needs one, are judgements a script cannot make -- and the
     2026-07-29 trace showed that demanding a self-issued status word here just
     teaches the model to forge one. Existence is a fact about files, so that is
     all this checks; ``无`` stays a legal cell value.
     """
-    cited = set(DECISION_ID.findall(design_text))
+    cited = set(SPEC_DECISION_ID.findall(design_text))
     if not cited:
         return 0
 
@@ -690,7 +703,8 @@ def _unresolved_decision_refs(ctx: HookContext, design_text: str) -> int:
         # `proposal_contract` owns a missing proposal; do not report it twice.
         return 0
 
-    defined = set(DECISION_HEADING.findall(read_text(proposal)))
+    section = DECISION_LOG_SECTION.search(read_text(proposal))
+    defined = set(SPEC_DECISION_HEADING.findall(section.group("body"))) if section else set()
     missing = sorted(cited - defined)
     if not missing:
         return 0
@@ -698,237 +712,7 @@ def _unresolved_decision_refs(ctx: HookContext, design_text: str) -> int:
         ctx,
         "design_decision_ref_unresolved",
         f" ids={','.join(missing)}",
-        repair=(
-            "design.md 规格追踪表引用的 DEC 编号在 proposal.md 的「## Decision Log」中不存在。"
-            "补上对应的「### DEC-NNN: <标题>」，或把该单元格改成实际存在的编号／「无」。"
-            "技术决策用 Design Coverage 列的 D-NNN，不要写进 Decision 列。"
-        ),
-    )
-
-
-def validate_skill_config_schema(
-    repo_root: Path,
-    skill: str,
-    *,
-    workspace_root: Path | None = None,
-    workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-) -> None:
-    config = load_artifact_config(
-        repo_root,
-        skill,
-        workspace_root=workspace_root,
-        workflow_profile=workflow_profile,
-        workflow_decisions=workflow_decisions,
-    )
-    for validator in config.validators:
-        if validator not in VALIDATORS:
-            raise HookCheckError("unknown_validator", f"{skill}:{validator}")
-
-
-def validate_config_schema(
-    repo_root: Path,
-    skill: str,
-    *,
-    workspace_root: Path | None = None,
-    workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-) -> None:
-    if skill != "all":
-        validate_skill_config_schema(
-            repo_root,
-            skill,
-            workspace_root=workspace_root,
-            workflow_profile=workflow_profile,
-            workflow_decisions=workflow_decisions,
-        )
-        return
-
-    try:
-        profiles = (
-            configured_profile_names(load_board_config(repo_root / "board_core" / "board_config.json"))
-            if workflow_profile == BASE_WORKFLOW_PROFILE
-            else (workflow_profile,)
-        )
-    except BoardConfigError as error:
-        raise HookCheckError("invalid_board_config", str(error)) from error
-
-    try:
-        for profile in profiles:
-            contracts = load_repo_workflow_contracts(
-                repo_root,
-                workspace=workspace_root,
-                profile=profile,
-                workflow_decisions=workflow_decisions,
-            )
-            for contract in contracts.skill_contracts.values():
-                for validator in contract.validators:
-                    if validator not in VALIDATORS:
-                        raise HookCheckError("unknown_validator", f"{contract.skill}:{validator}")
-    except BoardConfigError as error:
-        raise HookCheckError("invalid_board_config", str(error)) from error
-
-
-def run_precheck(
-    repo_root: Path,
-    workspace_root: Path,
-    skill: str,
-    slug: str,
-    *,
-    workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-    workflow_record: dict | None = None,
-) -> tuple[int, str]:
-    try:
-        config = load_artifact_config(
-            repo_root,
-            skill,
-            workspace_root=workspace_root,
-            workflow_profile=workflow_profile,
-            workflow_decisions=workflow_decisions,
-            workflow_record=workflow_record,
-        )
-        validate_required_files(workspace_root, slug, config.required_inputs)
-    except HookCheckError as error:
-        reason = f"{skill} precheck failed for {slug}: {error.reason}"
-        if error.detail:
-            reason = f"{reason} ({error.detail})"
-        return 1, reason
-    return 0, f"PRE_SKILL_PASS skill={skill}"
-
-
-def run_postcheck(
-    repo_root: Path,
-    workspace_root: Path,
-    skill: str,
-    slug: str,
-    *,
-    workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-    workflow_record: dict | None = None,
-) -> tuple[int, str]:
-    try:
-        config = load_artifact_config(
-            repo_root,
-            skill,
-            workspace_root=workspace_root,
-            workflow_profile=workflow_profile,
-            workflow_decisions=workflow_decisions,
-            workflow_record=workflow_record,
-        )
-        validate_required_files(workspace_root, slug, config.required_outputs)
-        for validator in config.validators:
-            if validator not in VALIDATORS:
-                raise HookCheckError("unknown_validator", f"{skill}:{validator}")
-    except HookCheckError as error:
-        reason = f"{skill} postcheck failed for {slug}: {error.reason}"
-        if error.detail:
-            reason = f"{reason} ({error.detail})"
-        return 1, reason
-
-    ctx = HookContext(
-        skill=skill,
-        slug=slug,
-        root=workspace_root,
-        required_inputs=config.required_inputs,
-        required_outputs=config.required_outputs,
-    )
-    failures = 0
-    for validator in config.validators:
-        failures += VALIDATORS[validator](ctx)
-    if failures:
-        return 1, f"POST_SKILL_FAIL skill={skill} failures={failures}"
-    return 0, f"POST_SKILL_PASS skill={skill}"
-
-
-def run_check(
-    kind: str,
-    repo_root: Path,
-    workspace_root: Path,
-    skill: str,
-    slug: str,
-    *,
-    workflow_profile: str = BASE_WORKFLOW_PROFILE,
-    workflow_decisions: dict[str, str] | None = None,
-) -> int:
-    if kind == "precheck":
-        code, message = run_precheck(
-            repo_root,
-            workspace_root,
-            skill,
-            slug,
-            workflow_profile=workflow_profile,
-            workflow_decisions=workflow_decisions,
-        )
-    elif kind == "postcheck":
-        code, message = run_postcheck(
-            repo_root,
-            workspace_root,
-            skill,
-            slug,
-            workflow_profile=workflow_profile,
-            workflow_decisions=workflow_decisions,
-        )
-    else:
-        print(f"UNKNOWN_CHECK kind={kind}", file=sys.stderr)
-        return 1
-    print(message)
-    return code
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Autodev artifact checks")
-    parser.add_argument("kind", choices=("precheck", "postcheck", "schema"))
-    parser.add_argument("skill")
-    parser.add_argument("slug", nargs="?")
-    parser.add_argument("--repo-root", default=str(repo_root_from_this_file()))
-    parser.add_argument("--workspace-root", default=str(Path.cwd().resolve()))
-    parser.add_argument("--workflow-profile", default=BASE_WORKFLOW_PROFILE)
-    parser.add_argument(
-        "--workflow-decision",
-        action="append",
-        default=[],
-        help="workflow decision in stage=enabled|skipped form; may be repeated",
-    )
-    args = parser.parse_args(argv)
-
-    repo_root = Path(args.repo_root).resolve()
-    workspace_root = Path(args.workspace_root).resolve()
-    workflow_decisions: dict[str, str] = {}
-    for raw_decision in args.workflow_decision:
-        if "=" not in raw_decision:
-            print(f"SCHEMA_FAIL skill={args.skill} reason=invalid_workflow_decision detail={raw_decision}")
-            return 1
-        stage_id, decision = raw_decision.split("=", 1)
-        workflow_decisions[stage_id.strip()] = decision.strip()
-
-    if args.kind == "schema":
-        try:
-            validate_config_schema(
-                repo_root,
-                args.skill,
-                workspace_root=workspace_root,
-                workflow_profile=args.workflow_profile,
-                workflow_decisions=workflow_decisions,
-            )
-        except HookCheckError as error:
-            detail = f" detail={error.detail}" if error.detail else ""
-            print(f"SCHEMA_FAIL skill={args.skill} reason={error.reason}{detail}")
-            return 1
-        print(f"SCHEMA_PASS skill={args.skill}")
-        return 0
-
-    if not args.slug:
-        print(f"{args.kind.upper()}_FAIL skill={args.skill} reason=missing_slug_argument")
-        return 1
-    return run_check(
-        args.kind,
-        repo_root,
-        workspace_root,
-        args.skill,
-        args.slug,
-        workflow_profile=args.workflow_profile,
-        workflow_decisions=workflow_decisions,
+        target=",".join(missing),
     )
 
 
@@ -950,7 +734,7 @@ def collect_spec_definition_index(ctx: HookContext) -> tuple[dict[str, set[str]]
         definitions, duplicate_reasons = _spec_definition_index(read_text(spec))
         rel = spec.relative_to(ctx.feature_dir)
         for reason in duplicate_reasons:
-            failures += fail_line(ctx, reason, f" file={rel}")
+            failures += fail_line(ctx, reason, f" file={rel}", target=str(rel))
         index["REQ"].update(definitions["REQ"])
         index["SCN"].update(definitions["SCN"])
     return index, failures
@@ -977,7 +761,7 @@ def collect_design_definition_index(ctx: HookContext) -> tuple[dict[str, set[str
     definitions, duplicate_reasons = _design_definition_index(read_text(design))
     failures = 0
     for reason in duplicate_reasons:
-        failures += fail_line(ctx, reason)
+        failures += fail_line(ctx, reason, target="design.md")
     return definitions, failures
 
 
@@ -1753,15 +1537,25 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
         req_refs = set(REQ_ID.findall(" ".join(spec_refs)))
         scn_refs = _scenario_refs_from_spec_refs(spec_refs)
         if not req_refs:
-            failures += fail_line(ctx, "missing_plan_json_requirement_ref", f" task={task_id}")
+            failures += fail_line(ctx, "missing_plan_json_requirement_ref", f" task={task_id}", target=task_id)
         if not scn_refs:
-            failures += fail_line(ctx, "missing_plan_json_scenario_ref", f" task={task_id}")
+            failures += fail_line(ctx, "missing_plan_json_scenario_ref", f" task={task_id}", target=task_id)
         for req_id in sorted(req_refs):
             if req_id not in spec_ids["REQ"]:
-                failures += fail_line(ctx, "unknown_plan_json_requirement_ref", f" task={task_id} id={req_id}")
+                failures += fail_line(
+                    ctx,
+                    "unknown_plan_json_requirement_ref",
+                    f" task={task_id} id={req_id}",
+                    target=f"{task_id}.specRefs {req_id}",
+                )
         for scn_id in sorted(scn_refs):
             if scn_id not in spec_ids["SCN"]:
-                failures += fail_line(ctx, "unknown_plan_json_scenario_ref", f" task={task_id} id={scn_id}")
+                failures += fail_line(
+                    ctx,
+                    "unknown_plan_json_scenario_ref",
+                    f" task={task_id} id={scn_id}",
+                    target=f"{task_id}.specRefs {scn_id}",
+                )
 
         design_refs = _string_list_value(task.get("designRefs")) or []
         design_ref_text = " ".join(design_refs)
@@ -1773,30 +1567,45 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
         covered_decision_refs.update(decision_refs)
 
         if not decision_refs:
-            failures += fail_line(ctx, "missing_plan_json_decision_ref", f" task={task_id}")
+            failures += fail_line(ctx, "missing_plan_json_decision_ref", f" task={task_id}", target=task_id)
         for api_id in sorted(api_refs):
             if api_id not in design_ids["API"]:
-                failures += fail_line(ctx, "unknown_plan_json_api_ref", f" task={task_id} id={api_id}")
+                failures += fail_line(
+                    ctx,
+                    "unknown_plan_json_api_ref",
+                    f" task={task_id} id={api_id}",
+                    target=f"{task_id}.designRefs {api_id}",
+                )
         for data_id in sorted(data_refs):
             if data_id not in design_ids["DATA"]:
-                failures += fail_line(ctx, "unknown_plan_json_data_ref", f" task={task_id} id={data_id}")
+                failures += fail_line(
+                    ctx,
+                    "unknown_plan_json_data_ref",
+                    f" task={task_id} id={data_id}",
+                    target=f"{task_id}.designRefs {data_id}",
+                )
         for decision_id in sorted(decision_refs):
             if decision_id not in design_ids["D"]:
-                failures += fail_line(ctx, "unknown_plan_json_decision_ref", f" task={task_id} id={decision_id}")
+                failures += fail_line(
+                    ctx,
+                    "unknown_plan_json_decision_ref",
+                    f" task={task_id} id={decision_id}",
+                    target=f"{task_id}.designRefs {decision_id}",
+                )
     if not no_http_api:
         if not design_ids["API"]:
-            failures += fail_line(ctx, "missing_design_api_id")
+            failures += fail_line(ctx, "missing_design_api_id", target="API Decisions")
         else:
             for api_id in sorted(design_ids["API"] - covered_api_refs):
-                failures += fail_line(ctx, "missing_plan_json_api_coverage", f" id={api_id}")
+                failures += fail_line(ctx, "missing_plan_json_api_coverage", f" id={api_id}", target=api_id)
     if not no_sql:
         if not design_ids["DATA"]:
-            failures += fail_line(ctx, "missing_design_data_id")
+            failures += fail_line(ctx, "missing_design_data_id", target="Data Decisions")
         else:
             for data_id in sorted(design_ids["DATA"] - covered_data_refs):
-                failures += fail_line(ctx, "missing_plan_json_data_coverage", f" id={data_id}")
+                failures += fail_line(ctx, "missing_plan_json_data_coverage", f" id={data_id}", target=data_id)
     for decision_id in sorted(design_ids["D"] - covered_decision_refs):
-        failures += fail_line(ctx, "missing_plan_json_decision_coverage", f" id={decision_id}")
+        failures += fail_line(ctx, "missing_plan_json_decision_coverage", f" id={decision_id}", target=decision_id)
     return failures
 
 
@@ -1841,10 +1650,10 @@ def validate_plan_task_granularity(ctx: HookContext) -> int:
     failures = 0
     if errors:
         for error in errors:
-            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))
         return failures
     if data is None:
-        return fail_line(ctx, "missing_plan_json")
+        return fail_line(ctx, "missing_plan_json", target="plan.json")
 
     raw_tasks = data.get("tasks")
     if not isinstance(raw_tasks, list):
@@ -1859,6 +1668,8 @@ def validate_plan_task_granularity(ctx: HookContext) -> int:
                 ctx,
                 error["reason"],
                 " " + error.get("detail", ""),
+                target=task_id,
+                fields={"detail": error.get("detail", "")},
             )
     return failures
 
@@ -1879,10 +1690,10 @@ def validate_plan_scenario_coverage(ctx: HookContext) -> int:
     failures = 0
     if errors:
         for error in errors:
-            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))
         return failures
     if data is None:
-        return fail_line(ctx, "missing_plan_json")
+        return fail_line(ctx, "missing_plan_json", target="plan.json")
 
     covered_refs: set[str] = set()
     raw_tasks = data.get("tasks")
@@ -1894,7 +1705,12 @@ def validate_plan_scenario_coverage(ctx: HookContext) -> int:
 
     missing_refs = expected_refs - covered_refs
     if missing_refs:
-        failures += fail_line(ctx, "missing_plan_scenario_coverage", f" ids={','.join(sorted(missing_refs))}")
+        failures += fail_line(
+            ctx,
+            "missing_plan_scenario_coverage",
+            f" ids={','.join(sorted(missing_refs))}",
+            target=",".join(sorted(missing_refs)),
+        )
     return failures
 
 
@@ -1908,10 +1724,10 @@ def validate_plan_ref_resolution(ctx: HookContext) -> int:
     failures = 0
     if errors:
         for error in errors:
-            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))
         return failures
     if data is None:
-        return fail_line(ctx, "missing_plan_json")
+        return fail_line(ctx, "missing_plan_json", target="plan.json")
 
     tasks = data.get("tasks")
     if not isinstance(tasks, list):
@@ -1924,22 +1740,33 @@ def validate_plan_ref_resolution(ctx: HookContext) -> int:
         for error in ref_errors:
             detail = error.get("detail", "")
             suffix = f" task={task_id} detail={detail}" if detail else f" task={task_id}"
-            failures += fail_line(ctx, error.get("reason", "invalid_artifact_ref"), suffix)
+            failures += fail_line(
+                ctx,
+                error.get("reason", "invalid_artifact_ref"),
+                suffix,
+                target=task_id,
+                fields={"detail": detail},
+            )
     return failures
 
 
 def validate_plan_json_initial_tasks(ctx: HookContext) -> int:
     if not ctx.requires_artifact("plan.json") and not is_nonempty(ctx.file("plan.json")):
         if is_nonempty(ctx.file("PLAN.md")):
-            return fail_line(ctx, "missing_plan_json", " detail=PLAN.md_present_but_not_machine_source")
+            return fail_line(
+                ctx,
+                "missing_plan_json",
+                " detail=PLAN.md_present_but_not_machine_source",
+                target="plan.json（当前只有 PLAN.md，它是投影视图不是事实源）",
+            )
         info(ctx, "plan_json_not_in_contract_degrade")
         return 0
     data, errors = load_and_validate_plan(ctx.file("plan.json"), require_initial_status=True)
     failures = 0
     for error in errors:
-        failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+        failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))
     if data is not None and not errors and data.get("taskSetStatus") != "finalized":
-        failures += fail_line(ctx, "plan_task_set_not_finalized")
+        failures += fail_line(ctx, "plan_task_set_not_finalized", target="plan.json.taskSetStatus")
     return failures
 
 
@@ -1947,7 +1774,12 @@ def validate_plan_json_contract(ctx: HookContext) -> int:
     plan_json = ctx.file("plan.json")
     if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
         if is_nonempty(ctx.file("PLAN.md")):
-            return fail_line(ctx, "missing_plan_json", " detail=PLAN.md_present_but_not_machine_source")
+            return fail_line(
+                ctx,
+                "missing_plan_json",
+                " detail=PLAN.md_present_but_not_machine_source",
+                target="plan.json（当前只有 PLAN.md，它是投影视图不是事实源）",
+            )
         info(ctx, "plan_json_not_in_contract_degrade")
         return 0
 
@@ -1955,10 +1787,22 @@ def validate_plan_json_contract(ctx: HookContext) -> int:
     failures = 0
     if errors:
         for error in errors:
-            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+            failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))
         return failures
     if data is None:
-        return fail_line(ctx, "missing_plan_json")
+        return fail_line(ctx, "missing_plan_json", target="plan.json")
+    implementation_scope, scope_errors = _implementation_scope_contract_errors(ctx)
+    for error in scope_errors:
+        failures += fail_line(ctx, "invalid_implementation_scope", f" detail={error}", target=error)
+    if scope_path(ctx.feature_dir).is_file() and not scope_errors:
+        plan_scope = data.get("implementationScope")
+        if plan_scope != implementation_scope:
+            failures += fail_line(
+                ctx,
+                "plan_implementation_scope_mismatch",
+                f" plan={plan_scope!r} feature={implementation_scope!r}",
+                target=f"plan={plan_scope!r} feature={implementation_scope!r}",
+            )
     failures += _validate_plan_json_traceability(ctx, data)
     return failures
 
@@ -1972,9 +1816,9 @@ def validate_plan_task_detail_schema(ctx: HookContext) -> int:
     data, errors = load_and_validate_plan(plan_json, require_task_details=True)
     failures = 0
     for error in errors:
-        failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+        failures += fail_line(ctx, "invalid_plan_json", f" detail={error}", target=str(error))
     if data is None:
-        return failures or fail_line(ctx, "missing_plan_json")
+        return failures or fail_line(ctx, "missing_plan_json", target="plan.json")
     return failures
 
 
@@ -2199,6 +2043,14 @@ def run_postcheck(
             if validator not in VALIDATORS:
                 raise HookCheckError("unknown_validator", f"{skill}:{validator}")
     except HookCheckError as error:
+        # 必备产物缺失是 specs/plan 最常见的失败，而它发生在 validator 跑起来之前。
+        # 不在这里补一条结构化失败行，调用方只能拿到一句没有修复动作的兜底文本。
+        fail_line(
+            HookContext(skill=skill, slug=slug, root=workspace_root),
+            error.reason,
+            f" detail={error.detail}" if error.detail else "",
+            target=error.detail,
+        )
         reason = f"{skill} postcheck failed for {slug}: {error.reason}"
         if error.detail:
             reason = f"{reason} ({error.detail})"

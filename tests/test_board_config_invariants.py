@@ -77,6 +77,53 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(offenders),
         )
 
+    def test_workflow_skills_index_shared_completion_guide(self) -> None:
+        index_line = (
+            "技能完成后，读取并遵循 "
+            "`${pluginPath}/skills/references/ui-continuation-guide.md`。"
+        )
+        legacy_phrases = (
+            "请回到特性面板新开新对话",
+            "提醒用户回到特性面板新开对话",
+            "如果用户仍在当前对话输入“继续”",
+            "若用户随后在当前对话输入“继续”",
+        )
+        skills = {
+            node.get("skill")
+            for _, node in _iter_nodes(_board_config())
+            if isinstance(node, dict)
+            and isinstance(node.get("skill"), str)
+            and node["skill"].startswith(("autobiz-", "autodev-", "autoops-"))
+        }
+        offenders: list[str] = []
+        for skill in sorted(skills):
+            group = skill.split("-", 1)[0]
+            relative_path = Path("skills") / group / skill / "SKILL.md"
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            if content.count(index_line) != 1:
+                offenders.append(f"{relative_path}: index_count={content.count(index_line)}")
+            for phrase in legacy_phrases:
+                if phrase in content:
+                    offenders.append(f"{relative_path}: legacy={phrase}")
+        self.assertEqual(
+            offenders,
+            [],
+            "workflow skills must keep one shared completion-guide index: "
+            + ", ".join(offenders),
+        )
+
+        guide = (ROOT / "skills/references/ui-continuation-guide.md").read_text(
+            encoding="utf-8"
+        )
+        for phrase in (
+            "## 完成时",
+            "## 完成后的续办意图",
+            "当前技能仍在执行",
+            "不得在当前对话中直接调用下一技能",
+            'resolve_next_skill.py" --json',
+        ):
+            self.assertIn(phrase, guide)
+
     def test_machine_stages_do_not_require_markdown_views_when_json_exists(self) -> None:
         self._assert_markdown_views_are_optional(
             {
@@ -357,14 +404,20 @@ class BoardConfigInvariantsTest(unittest.TestCase):
 
     def test_plan_skill_requires_plan_markdown_projection(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        # 钉机制不钉字面：同一条要求给若干可接受写法，命中任一即算满足。
+        # 措辞由人把关，测试只保证「PLAN.md 由 plan.json 投影产生」这条主线还在。
         required = [
-            "plan.json + PLAN.md",
-            "本阶段必须生成",
-            "PLAN.md` 是从 `plan.json` 投影的人类视图",
-            "`PLAN.md` 必须从 `plan.json` 投影",
-            "PLAN.md` 文件已写入磁盘",
+            ("要求同时产出两份", ("plan.json + PLAN.md",)),
+            ("PLAN.md 是必须产物", ("本阶段必须生成", "必须生成完整的 plan.json + PLAN.md")),
+            (
+                "PLAN.md 由 plan.json 投影而来",
+                ("`PLAN.md` 必须从 `plan.json` 投影", "`PLAN.md` 必须由 `plan_writer.py"),
+            ),
+            ("PLAN.md 要落盘", ("PLAN.md` 文件已写入磁盘",)),
         ]
-        missing = [phrase for phrase in required if phrase not in content]
+        missing = [
+            name for name, variants in required if not any(v in content for v in variants)
+        ]
         self.assertEqual(
             missing,
             [],

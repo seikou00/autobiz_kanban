@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.9.08041
+version: v1.10.08051
 ---
 
 ## 缺失产物处理
@@ -27,6 +27,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 - **怎么实现 / 怎么拆编码任务**：交给后续设计与计划阶段
 - **怎么改代码**：交给后续编码阶段
+
+## 实现范围
+
+生成 proposal/specs 前读取 `IMPLEMENTATION_SCOPE.json`。`backend_only` 只生成后端可实现、可验证的行为，禁止页面、交互和前端路由 Scenario；`frontend_only` 只生成前端行为，后端 API 只能作为外部依赖；`full_stack` 保持现有行为。范围缺失时按兼容规则视为 `full_stack`，但新 Feature 应在 Discuss 阶段先写入范围文件。
 
 ## 输入与输出
 
@@ -59,7 +63,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
-> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `集中校验并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
+> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `产物契约预检并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
 使用task工具，指定Explore-autodev角色进行探索。
 子代理按下面的要求返回结构化内容供主代理参考。
 探索时必须：
@@ -101,12 +105,21 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 - 消解定义：裁定即消解，但**裁定必须落盘才算数**。生成 proposal 时每条落为 `Open Questions` 一行，`Status=已确认`，裁定结论体现在对应的 Requirement/Scenario 上。
 - 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与讨论表条目 ID 对应（如 `SPEC-001` → `spec_001`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
 - 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前建议确认 (Recommended)」：采纳讨论表中的当前建议；②「采纳备选：<方案>」：选项自身携带具体方案；③「需要调整」：用户将给出修改意见，吸收后更新讨论表、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 specs 阶段、不推进。
-- 信息缺口不得使用「已准备好，稍后提供」或「后续补充并继续」；现在提供材料时由用户在「其他」中填写。
+- 信息缺口型条目（缺接口文档 url、字段定义、外部约定等）：`question` 中直接写「若现在能提供，请在『其他』中粘贴链接或具体内容」；预设选项只从「调整方案移除该依赖」「暂停，拿到材料后继续」中取，不得使用「已准备好，稍后提供」或「后续补充并继续」。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口——该出口已从选项闭集移除，不得以任何措辞重新引入。共享协议第 3 节的「后续补充并继续」模板在裁定阶段禁止使用。
+- 回写：拿到裁定后立即回写讨论表对应行——回写「已确认」的前提是信息实体落地：用户答复中给出的链接/字段/方案必须先写进对应行。**声称拥有 ≠ 提供**：用户仅声称「我有 / 稍后给」而未提供实体时，该条**未消解**：追问一次索取内容，仍未提供则按「调整方案移除该依赖 / 暂停」重发裁定。不得有延后选择，后续阶段不会检查待确认。
 - **禁止自行确认**：`已确认` 只能是用户裁定的结果。不得以「这是外部接口细节」「不影响行为契约的定义」「specs 阶段只关心 WHAT」等任何理由，自己把 Status 写成 `已确认`。判定某条不影响行为契约不是跳过裁定的理由，必须由用户裁定。
 - **自由表达即退出结构化**：用户不点选项、而是直接给出实质回复（补一条决策、改一个字段、提新问题），当作该条的裁定内容吸收并更新，**不得机械重复弹同一个结构化选择**；下一轮合适时机再重新发起该决策。
 - 每次发起问题后停止执行，等待用户回复；不得在同一轮继续生成产物。
+- 消解自查：全部裁定回写后、生成产物之前，自查讨论表无「待确认」单元格、回写内容无 TBD/待补充/待提供/占位 等词、无对缺失材料的引用（「根据实际文档」「以实际接口为准」「编码阶段补充」等）；任一命中回到逐条裁定。
+- 顺序硬约束：所有待确认条目都拿到用户裁定之前，禁止生成 proposal 与 specs。
 - 全部条目裁定后直接生成 proposal 与 specs，不再确认 capability 切分或规格范围。
-- `request_user_input` 不可用时按共享协议文本降级，并结束当前回复等待用户。
+
+反模式：
+
+- 禁止把待确认项在讨论表中逐条列出后，未逐条以 `request_user_input` 提问就直接生成产物；展示不等于裁定。
+- 自行判断某待确认项「编码阶段参考接口文档即可」「不影响行为契约」而跳过提问；「延后处理」不能出现。
+- 选项 label/description 含「待确认」「先占位」「后续补充」「稍后提供」「编码阶段再」「编码阶段根据实际文档补充」「实现时参考文档」「字段以实际接口为准」等延后语义——凡选中后条目仍处于待确认状态的选项都是非法选项。延后判定按语义不按字面。
+- 「已确认，我有 url/文档」这类仅声称拥有信息、不当场收集内容的选项，需要继续发起一次追问。
 
 ## 生成 proposal.md
 
@@ -134,7 +147,7 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 - **Capabilities**：按 New / Modified / Removed 分组列出本轮能力，名称使用 kebab-case。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
-- **Decision Log**：本阶段定下的关键取舍，每条一个 `### DEC-NNN`，写决定/为什么/否决/约束。`design.md` 的规格追踪表按 `DEC-NNN` 引用本节，是 specs 阶段决策传到 plan 的唯一通道。记录门槛三者取一，且必须是真实决策不是复述需求：① 结果偏离「直接读代码/需求会得到的显然做法」；② 有真实备选并择一；③ 改变外部可观察行为的边界或口径、读者不知理由会困惑。显然的、无备选的、需求直接决定的不记；无满足门槛的决策时本节正文只写「无」。
+- **Decision Log**：本阶段定下的关键取舍，每条一个 `### DEC-NNN`，写决定/为什么/否决/约束。`design.md` 的规格追踪表按 `DEC-NNN` 引用本节，是 specs 阶段决策传到 plan 的唯一通道——不记的取舍只留在对话里，下游拿到结论拿不到理由。记录门槛三者取一，且必须是真实决策不是复述需求：① 结果偏离「直接读代码/需求会得到的显然做法」；② 有真实备选并择一；③ 改变外部可观察行为的边界或口径、读者不知理由会困惑。显然的、无备选的、需求直接决定的不记；无满足门槛的决策时本节正文只写「无」。
 - **Open Questions**：discussion 表中的每条待确认项落一行，按上面「待确认问题裁定门」的消解定义填 `Status`；本轮无待确认项时本节正文只写「无」。
 
 ## 生成 specs/**/*.md
@@ -144,7 +157,7 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 规则：
 
 - 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
-- **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability；禁止单方面少生成。集中校验的 `capability_spec_correspondence` 双向判定这条，无需在回复中自行输出对照表。
+- **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability；禁止单方面少生成。产物契约预检的 `capability_spec_correspondence` 双向判定这条，无需在回复中自行输出对照表。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
 - Requirement 使用 `### Requirement [REQ-NNN]: <标题>`（NNN 三位；按文档顺序递增，允许跳号；改标题不改 ID；删除后 ID 不复用；ID 在同一 feature 内全局唯一，跨 spec 文件也不得重号）。
 - Scenario 使用四级标题 `#### Scenario [SCN-NNN]: <标题>`，必须写在所属 Requirement 标题之下；写在首个 Requirement 之前或操作段标题正下方即不归属任何 Requirement。
@@ -159,23 +172,32 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 - 操作段要与 proposal 的分组对上：`New Capabilities` 的 spec 在 `ADDED Requirements` 下写 Requirement，且 `MODIFIED`/`REMOVED` 段下不得有 Requirement（全新能力没有存量可改可删）；`Modified`/`Removed` 的 spec 必须在同名操作段下写 Requirement，另加 `ADDED` 是允许的。`capability_spec_correspondence` 判定这条。
 - 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
 
-## 集中校验
+## 产物契约预检（机器校验）
 
-proposal 与全部 specs 生成完成后执行一次完整校验：
+这是脚本对产物做的**机器检查**，只判定：必备产物与章节是否齐全、格式与结构是否合法、稳定 ID 是否规范唯一、引用能否解析、机械可判的覆盖关系是否成立。
+
+它**不**判定需求语义是否完整、方案是否合理、测试策略是否充分、代码事实是否属实——那些由回检子代理负责，两者职责不重叠。
+
+proposal 与全部 specs 生成完成后执行：
 
 ```bash
-python "${pluginPath}/skills/autodev/hooks/artifact_check.py" postcheck autodev-specs "${feature}" --repo-root "${pluginPath}" --workspace-root "${pluginWorkspace}/${projectDir}"
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature "${feature}"
 ```
 
-- 等命令完整结束后再处理结果。
-- 汇总本次输出中的全部失败项，按文件归组，一次性修改所有受影响产物。
-- 修改完成后重新执行同一完整校验；通过前不得推进 checkpoint。
-- 不以 `update_checkpoint.py` 代替产物预检，不按单条错误在校验与编辑之间往返。
+处理流程：
+
+1. 等命令完整结束后再处理结果，不处理一条就重跑一次。
+2. 读取全部失败项。每一项都带 `artifact` / `target` / `problem` / `action` / `route`，按 `action` 修，不要自行推断修法。
+3. 按 `route` 分流：`fix_current` 在本阶段修；`return_specs` / `return_plan` 停止本阶段并回流；`ask_user` 回到用户确认，禁止自行填值。
+4. 按 `artifact` 归组，一次性改完全部可修项。
+5. 重跑完整预检；通过前不得推进 checkpoint。
+
+不以 `update_checkpoint.py` 代替产物契约预检。
 
 ## 完成条件
 
 - 「输入与输出」列出的两个产物都已生成，`specs/` 下至少存在一个 `spec.md`。
-- 集中校验通过。能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
+- 产物契约预检通过。能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
 - specs 只描述行为契约，不包含实现任务。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
 
@@ -187,7 +209,9 @@ python "${pluginPath}/skills/autodev/hooks/artifact_check.py" postcheck autodev-
 python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
 ```
 
-集中校验与回检修复均通过后推进 checkpoint：
+回检导致产物变化时，重跑一次产物契约预检。
+
+产物契约预检与回检修复均通过后推进 checkpoint：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done

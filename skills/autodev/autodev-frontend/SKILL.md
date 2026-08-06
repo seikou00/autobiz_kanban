@@ -1,7 +1,7 @@
 ---
 name: autodev-frontend
 description: Dev 阶段 frontend_before_specs workflow profile 的 HTML 转前端实现节点。用于在行为规格生成前，基于 PRD、HTML、接口说明和现有前端工程完成前端实现；仅保留标准 HTML、绝对定位高保真 HTML 两种实现路线，以及用户确认后的 review 路线。
-version: v1.1.1604
+version: v1.1.08041
 ---
 
 # /autodev-frontend - HTML 转前端实现
@@ -22,17 +22,18 @@ version: v1.1.1604
 进入本技能前，当前 workflow profile 必须是 `frontend_before_specs`。如果由 `prd_done` 直接进入本技能，先使用统一脚本推进 checkpoint：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
 ```
 
 完成前端实现和必要验证后：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint frontend_done
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_done
 ```
 
-完成后汇报变更文件、验证命令和未覆盖风险，并提醒用户回到特性面板新开新对话。
-如果用户仍在当前对话输入“继续”“下一步”等续办意图，必须读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；当前技能尚未完成时不得使用该引导。
+完成后汇报变更文件、验证命令和未覆盖风险。
+
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
 
 ## 路由规则
 
@@ -56,14 +57,14 @@ python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint frontend_done
 
 | 来源 | 负责内容 |
 | --- | --- |
-| `{FEATURE_DIR}/PRD.md` | 字段、文案、交互、任务边界、页面业务语义，仅作 HTML 实现校对依据 |
+| `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` | 字段、文案、交互、任务边界、页面业务语义，仅作 HTML 实现校对依据 |
 | 接口说明文档 | 接口路径、请求方式、参数、响应字段、枚举/状态约束 |
 | HTML | 布局、结构、间距、视觉层级、组件槽位与视觉契约 |
 
 边界优先级：
 
 - 布局和视觉以 HTML 为准。
-- 业务文案和交互以 `{FEATURE_DIR}/PRD.md` 为准。
+- 业务文案和交互以 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 为准。
 - 数据字段与接口约束以接口说明文档为准。
 - 如果三者互相冲突，先保留 HTML 布局，再在汇报中明确冲突点；不要私自编造第四套口径。
 

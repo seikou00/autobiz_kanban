@@ -28,10 +28,11 @@ if str(HOOKS) not in sys.path:
     sys.path.insert(0, str(HOOKS))
 
 from artifact_check import (  # noqa: E402
-    DECISION_HEADING,
-    DECISION_ID,
+    SPEC_DECISION_HEADING,
+    SPEC_DECISION_ID,
     HookContext,
     _unresolved_decision_refs,
+    validate_proposal_contract,
 )
 from hooks.init_workspace import create_feature, init_workspace  # noqa: E402
 
@@ -117,13 +118,13 @@ class DecisionPatternTest(unittest.TestCase):
     def test_heading_pattern_accepts_both_colons(self) -> None:
         for line in ("### DEC-001: 标题", "### DEC-001： 标题"):
             with self.subTest(line=line):
-                self.assertEqual(DECISION_HEADING.findall(line), ["DEC-001"])
+                self.assertEqual(SPEC_DECISION_HEADING.findall(line), ["DEC-001"])
 
     def test_heading_pattern_requires_three_digits(self) -> None:
-        self.assertEqual(DECISION_HEADING.findall("### DEC-01: 两位"), [])
+        self.assertEqual(SPEC_DECISION_HEADING.findall("### DEC-01: 两位"), [])
 
     def test_id_pattern_does_not_match_technical_decision(self) -> None:
-        self.assertEqual(DECISION_ID.findall("| REQ-001 | D-001 | API-001 |"), [])
+        self.assertEqual(SPEC_DECISION_ID.findall("| REQ-001 | D-001 | API-001 |"), [])
 
 
 class TemplateAndSkillWiringTest(unittest.TestCase):
@@ -134,7 +135,7 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("## Decision Log", template)
-        self.assertEqual(DECISION_HEADING.findall(template), ["DEC-001"])
+        self.assertEqual(SPEC_DECISION_HEADING.findall(template), ["DEC-001"])
 
     def test_design_template_cites_dec_not_d(self) -> None:
         template = (ROOT / "skills/autodev/autodev-plan/templates/design.md").read_text(
@@ -150,6 +151,86 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
         self.assertIn("DEC-NNN", specs)
         self.assertIn("DEC-NNN", plan)
         self.assertIn("Decision Log", plan)
+
+    def test_plan_skill_separates_dec_from_d(self) -> None:
+        """`D-NNN` 与 `DEC-NNN` 都叫「决策」，必须能分辨出是两个东西。
+
+        a6868a2 删掉 Decision Log 后只剩一种决策，把 `D-001` 直呼「Decision」是
+        自洽的；恢复 DEC 通道后这个裸名就同时指两个东西，plan 阶段据此自造
+        `DEC-NNN` 会撞上 design_decision_ref_unresolved 而报错原因看着莫名其妙。
+
+        只钉「两个 ID 都出现、且 D 带了限定词」这条主线，具体怎么行文不管。
+        """
+        plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("DEC-001", plan, "必须点出规格决策 DEC-001 的存在")
+        self.assertNotIn(
+            "Decision `D-001`", plan, "D-001 不能裸称 Decision——那个词现在也指 DEC"
+        )
+
+
+class DecisionLogSectionScopeTest(unittest.TestCase):
+    """定义必须落在 `## Decision Log` 节内，写在 proposal 别处不算。
+
+    早先实现对整个 proposal 做 findall，等于「任意位置有同号三级标题即通过」，
+    比它自称的「Decision Log 内存在」弱。节外的 `### DEC-001:` 可能是引用、
+    是历史残留、也可能是别的章节恰好同号——都不构成决策定义。
+    """
+
+    def _resolve(self, proposal: str) -> int:
+        design = "| REQ-001 | SCN-001 | DEC-001 | API-001 / D-001 | EVD-001 |\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve() / "demo"
+            project.mkdir()
+            init_workspace(project)
+            create_feature(project, "alpha")
+            feature = project / ".autobizdevops" / "features" / "alpha"
+            (feature / "proposal.md").write_text(proposal, encoding="utf-8")
+            ctx = HookContext(skill="autodev-plan", slug="alpha", root=project)
+            with contextlib.redirect_stdout(io.StringIO()):
+                return _unresolved_decision_refs(ctx, design)
+
+    def test_definition_inside_the_section_resolves(self) -> None:
+        self.assertEqual(self._resolve(PROPOSAL), 0)
+
+    def test_definition_before_the_section_does_not_resolve(self) -> None:
+        proposal = "## Why\n\n### DEC-001: 混在别处\n\n## Decision Log\n\n无\n"
+        self.assertEqual(self._resolve(proposal), 1)
+
+    def test_definition_after_the_section_does_not_resolve(self) -> None:
+        proposal = "## Decision Log\n\n无\n\n## Open Questions\n\n### DEC-001: 节之后\n"
+        self.assertEqual(self._resolve(proposal), 1)
+
+
+class ProposalRequiresDecisionLogTest(unittest.TestCase):
+    """节缺失要在 specs 阶段就报，不能拖到 plan 才由引用解析发现。"""
+
+    def _run(self, proposal: str) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp).resolve() / "demo"
+            project.mkdir()
+            init_workspace(project)
+            create_feature(project, "alpha")
+            feature = project / ".autobizdevops" / "features" / "alpha"
+            (feature / "proposal.md").write_text(proposal, encoding="utf-8")
+            ctx = HookContext(skill="autodev-specs", slug="alpha", root=project)
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                return validate_proposal_contract(ctx), buffer.getvalue()
+
+    SECTIONS = ("Why", "What Changes", "Capabilities", "Impact", "Out of Scope", "Open Questions")
+
+    def test_missing_decision_log_is_reported(self) -> None:
+        proposal = "".join(f"## {name}\n\n无\n\n" for name in self.SECTIONS)
+        failures, output = self._run(proposal)
+        self.assertGreaterEqual(failures, 1)
+        self.assertIn("invalid_proposal_missing_section", output)
+        self.assertIn("Decision Log", output)
+
+    def test_all_sections_present_passes(self) -> None:
+        names = (*self.SECTIONS[:-1], "Decision Log", "Open Questions")
+        proposal = "".join(f"## {name}\n\n无\n\n" for name in names)
+        failures, output = self._run(proposal)
+        self.assertEqual(failures, 0, output)
 
 
 if __name__ == "__main__":

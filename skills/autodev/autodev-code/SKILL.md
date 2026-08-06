@@ -1,10 +1,12 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.7.0803
+version: v1.7.08041
 ---
 
 # /autodev-code — 代码执行
+
+进入 Code 前读取 Feature 的 `IMPLEMENTATION_SCOPE.json`。`backend_only` 只执行 backend task，`frontend_only` 只执行 frontend task；如果计划中存在相反 lane 的任务，停止并回到 `/autodev-plan` 修复，不得通过手工修改 `uiRequired` 绕过范围门禁。
 
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
@@ -18,17 +20,17 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "$
 
 
 ```bash
-python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}"
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-准入只验证 Plan 声明的 workspace、validation cwd 与项目 manifest 是否匹配，不执行编译命令。批次质量模式和命令以 `batchValidation.mode` / `batchValidation.commands` 为唯一事实源。
+准入只验证 Plan 声明的 workspace、validation cwd 与项目 manifest 是否匹配，不执行编译命令。批次质量模式和命令以 `batchValidation.mode` / `batchValidation.commands` 为准。
 
 ## 写入 checkpoint
 
 开始编码前推进到 `code_in_progress`：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_in_progress
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 ```
 
 ## 执行协议
@@ -36,7 +38,7 @@ python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 
 ### Code 会话入口
 
-每次进入 Code 阶段或在新对话恢复 Code 时，第一条 runner 命令必须是：
+每次进入 Code 阶段或在新对话恢复 Code 时，最先执行：
 ```bash
 python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 ```
@@ -91,7 +93,7 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-该脚本输出是当前 task 的上游上下文事实源，必须读取其中的 `batchExplorationScope`、`taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`；探索范围按上方 Batch 级探索闸门服从 `explorationDirective`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。脚本只要返回 `ok=false`，无论是引用、计划、Git 快照还是探索缓存错误，都必须停止编码、不得读取 HTML/调用 parser/修改业务代码；先按 `requiredAction` 修复并重新运行，直到返回 `ok=true`。其中 `explorationBlocked=true` 或 `implementationAllowed=false` 是机器阻断证据，不得被自然语言解释覆盖。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
+该脚本输出是当前 task 的上游上下文，必须读取其中的 `batchExplorationScope`、`taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`；探索范围按上方 Batch 级探索闸门服从 `explorationDirective`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。脚本只要返回 `ok=false`，无论是引用、计划、Git 快照还是探索缓存错误，都必须停止编码、不得读取 HTML/调用 parser/修改业务代码；先按 `requiredAction` 修复并重新运行，直到返回 `ok=true`。其中 `explorationBlocked=true` 或 `implementationAllowed=false` 是机器阻断证据，不得被自然语言解释覆盖。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
 
 必须按每个仓库的缓存状态执行，不能只看总体最严 policy 后忽略其他仓库：
 
@@ -253,9 +255,8 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
 项目级验证收敛后：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/stage_gate.py" validate --stage dev.code --feature "{FEATURE_ID}"
-python "{PLUGIN_ROOT}/hooks/update_checkpoint.py" --checkpoint code_done
-CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.code --feature "${feature}"
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 ```
 ## 写入边界
 
@@ -270,8 +271,5 @@ CHECKPOINT=$(python "{PLUGIN_ROOT}/read_state_json.py" --feature "{FEATURE_ID}")
 - 队列所有任务「完成」，且都有 `action=implementation` evidence。每个 TASK 的 required validation 要么全部通过并覆盖全部 AC，要么具有结构完整、Evidence 可回链的 `validationDisposition.status=deferred`——延期必须保留真实 FAIL/BLOCKED evidence、失败原因、repair 次数和 UTEST/E2E 交接阶段，不得伪造成 completion pass。未记录的失败仍阻断。task/batch/project 三级同此判定：PASS 校验 evidence 顺序，deferred 校验 issue、失败 evidence 与 run 终态闭环。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与每条 task/batch/project validation evidence 的 `ev_XXXX.log` 完整性和哈希校验通过；没有新生成的 `ev_XXXX.json` sidecar。
 - 每批 `taskValidation.status` 已进入 `passed` 或 `passed_with_deferred`，且额外批次质量门禁已通过或记录为 deferred；存在批次修复时按上方重验证流程产生 `attemptType=batch_revalidation` 的新完成 evidence。非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
-- 刷新后的 `CHECKPOINT` 为 `code_done`。
 
-**Skill 完成。**
-提醒用户：请回到特性面板新开新对话。
-如果用户仍在当前对话输入“继续”“下一步”等续办意图，必须读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；当前技能尚未完成时不得使用该引导。
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

@@ -29,11 +29,19 @@ FORMAL_SECTION_MAX_LEVEL = 3
 # 讨论记录类标题：标题与其下全部正文都不得进入正式稿
 DISCUSSION_SECTION_TITLES = ("历次讨论记录", "讨论记录")
 
+# PRD 阶段必须逐项裁定的讨论态标题。搬运时保留，裁定后由技能在 PRD.md 中消解。
+PENDING_SECTION_TITLES = ("待确认事项", "待确认项")
+
 # 正式稿禁用标题（本元组为禁用标题的单一事实源，由 biz_validate.py prd 强制）
-FORBIDDEN_PRD_SECTION_TITLES = ("审理提炼", "待确认事项", "待确认项", "外部依赖", "第三方依赖")
+FORBIDDEN_PRD_SECTION_TITLES = (
+    "审理提炼",
+    *PENDING_SECTION_TITLES,
+    "外部依赖",
+    "第三方依赖",
+)
 
 # 搬运时需要连标题带正文整段删除的章节
-DROP_SECTION_TITLES = DISCUSSION_SECTION_TITLES + FORBIDDEN_PRD_SECTION_TITLES
+DROP_SECTION_TITLES = DISCUSSION_SECTION_TITLES + ("审理提炼", "外部依赖", "第三方依赖")
 
 # 讨论稿说明句：命中的整行删除
 DISCUSS_NOTICE_PATTERNS = ("本文档为需求讨论中间稿",)
@@ -70,6 +78,20 @@ class DroppedSection:
 
 
 @dataclass(frozen=True)
+class PendingSection:
+    """搬运后保留在 PRD.md 中的待确认章节。行号为 PRD.md 1 基行号。"""
+
+    title: str
+    level: int
+    start_line: int
+    end_line: int
+
+    @property
+    def line_count(self) -> int:
+        return self.end_line - self.start_line + 1
+
+
+@dataclass(frozen=True)
 class TransplantResult:
     """搬运结果。
 
@@ -78,6 +100,7 @@ class TransplantResult:
     title_prepended 源文件没有可用 H1，正式标题为前置新增
     dropped_sections 被删章节（源文件行号）
     dropped_notices  被删讨论稿说明句 (源文件行号, 行内容)
+    pending_sections 保留的待确认章节（输出文件行号）
     pending_markers  残留的【待确认】(输出文件行号, 行内容)，脚本未改动
     """
 
@@ -86,6 +109,7 @@ class TransplantResult:
     title_prepended: bool
     dropped_sections: List[DroppedSection]
     dropped_notices: List[Tuple[int, str]]
+    pending_sections: List[PendingSection]
     pending_markers: List[Tuple[int, str]]
 
 
@@ -146,6 +170,27 @@ def _drop_ranges(total_lines: int, headings: Sequence[Heading]) -> List[DroppedS
     return dropped
 
 
+def _pending_ranges(total_lines: int, headings: Sequence[Heading]) -> List[PendingSection]:
+    """定位搬运后保留的待确认章节，外层区间覆盖的子标题不重复上报。"""
+    pending: List[PendingSection] = []
+    covered_until = 0
+    for pos, heading in enumerate(headings):
+        if heading.line_index < covered_until:
+            continue
+        if not heading_matches(heading.text, PENDING_SECTION_TITLES):
+            continue
+        end = total_lines
+        for later in headings[pos + 1:]:
+            if later.level <= heading.level:
+                end = later.line_index
+                break
+        pending.append(
+            PendingSection(heading.text, heading.level, heading.line_index + 1, end)
+        )
+        covered_until = end
+    return pending
+
+
 def plan_transplant(source_text: str) -> TransplantResult:
     """把讨论稿正文搬成正式稿正文。
 
@@ -201,6 +246,11 @@ def plan_transplant(source_text: str) -> TransplantResult:
         kept.pop()
     text = "\n".join(kept) + "\n"
 
+    output_lines = text.split("\n")
+    if output_lines and output_lines[-1] == "":
+        output_lines.pop()
+    pending_sections = _pending_ranges(len(output_lines), iter_headings(output_lines))
+
     pending_markers = [
         (idx + 1, line.strip())
         for idx, line in enumerate(text.split("\n"))
@@ -213,5 +263,6 @@ def plan_transplant(source_text: str) -> TransplantResult:
         title_prepended=title_prepended,
         dropped_sections=dropped_sections,
         dropped_notices=dropped_notices,
+        pending_sections=pending_sections,
         pending_markers=pending_markers,
     )

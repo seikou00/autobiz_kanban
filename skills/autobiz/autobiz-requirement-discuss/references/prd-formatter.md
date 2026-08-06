@@ -17,7 +17,7 @@ description: 格式化需求文档。根据用户上传的原需求文档，按�
 
 ### 步骤2：读取模板文档
 
-读取 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 模板文档，了解改写格式要求。
+读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 模板文档，了解改写格式要求。
 
 ### 步骤3：分析原文档结构
 
@@ -25,7 +25,7 @@ description: 格式化需求文档。根据用户上传的原需求文档，按�
 
 ### 步骤4：按模板重写文档
 
-按照 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 模板格式，将原需求文档内容填充到对应章节。
+按照 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 模板格式，将原需求文档内容填充到对应章节。
 
 #### 章节输出决策（权威规则）
 
@@ -123,7 +123,7 @@ description: 格式化需求文档。根据用户上传的原需求文档，按�
 
 ## 模板章节说明
 
-**注意：以下章节结构基于当前模板文件 `{pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的内容。模板可能动态更新，实际重写时应以模板文件的最新内容为准，不要在生成的新PRD中包含模板的注释说明。**
+**注意：以下章节结构基于当前模板文件 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的内容。模板可能动态更新，实际重写时应以模板文件的最新内容为准，不要在生成的新PRD中包含模板的注释说明。**
 
 当前模板包含以下章节结构：
 

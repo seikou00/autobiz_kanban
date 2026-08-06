@@ -64,7 +64,7 @@ description: 统一负责绝对定位高保真 HTML 路线的整页还原、结�
 | 输入源 | 读取策略 |
 | --- | --- |
 | 用户提供的 HTML | 必读 |
-| `{FEATURE_DIR}/PRD.md` | 存在时读取，用于校对业务文案、字段和交互边界 |
+| `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` | 存在时读取，用于校对业务文案、字段和交互边界 |
 | 当前目标文件 | 增量修改时读取 |
 | 项目 `architecture/` 文档 | 与结构、技术栈、API、组件相关时读取 |
 | 项目组件源码 | 只有需要证据时再读 |

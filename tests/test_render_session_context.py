@@ -171,10 +171,10 @@ class RenderShapeTest(unittest.TestCase):
         self.assertIn("不表示任何文件已被读取", prompt)
         self.assertIn("复述不算读取", prompt)
         self.assertIn("未用工具实际打开前，不得声称已读取", prompt)
-        self.assertIn(
-            "本轮通过工具实际打开了哪些文件路径，未打开的不得列入",
-            prompt,
-        )
+        # 产出义务：要求列出本轮实际打开的路径。措辞可调（范围限定等），
+        # 但「要报告打开了哪些、未打开的不得列入」这条主线不能没有。
+        self.assertIn("本轮通过工具实际打开了哪些", prompt)
+        self.assertIn("未打开的不得列入", prompt)
 
     def test_mandatory_reads_cannot_be_skipped_during_requirements_discussion(self):
         res = render(

@@ -41,6 +41,7 @@ from hooks.json_writer_common import (  # noqa: E402
     WriterError,
 )
 from hooks.evidence_kernel import FileLock  # noqa: E402
+from hooks.implementation_scope import load_scope  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_VALIDATION_KINDS,
     BATCH_STRATEGY,
@@ -642,8 +643,23 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
     errors = _task_group_structure_errors(data)
     if errors:
         return errors
+    implementation_scope, scope_errors = load_scope(feature_dir)
+    errors.extend({"reason": error} for error in scope_errors)
+    if scope_errors:
+        return errors
     for group in _task_groups(data):
         task_id = str(group.get("id", "task"))
+        ui_required = group.get("uiRequired") is True
+        if implementation_scope == "backend_only" and ui_required:
+            errors.append({
+                "reason": "implementation_scope_frontend_task_forbidden",
+                "detail": f"scope=backend_only;task={task_id}",
+            })
+        elif implementation_scope == "frontend_only" and not ui_required:
+            errors.append({
+                "reason": "implementation_scope_backend_task_forbidden",
+                "detail": f"scope=frontend_only;task={task_id}",
+            })
         errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
     if errors:
         return errors
@@ -2295,6 +2311,14 @@ def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
         return render_result(WriterResult(ok=False, path=group_file, errors=errors))
     workspace_contexts = _code_workspace_contexts(args.code_workspace)
     data = _initial(feature)
+    implementation_scope, scope_errors = load_scope(_path(workspace, feature).parent)
+    if scope_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=[{"reason": error} for error in scope_errors],
+        ))
+    data["implementationScope"] = implementation_scope
     data["tasks"] = [
         _draft_task_skeleton(
             group,
@@ -2512,6 +2536,14 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
             tasks.append(_draft_task_skeleton(group, workspace_roots))
             reset.append(task_id)
     data = _initial(feature)
+    implementation_scope, scope_errors = load_scope(_path(workspace, feature).parent)
+    if scope_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=[{"reason": error} for error in scope_errors],
+        ))
+    data["implementationScope"] = implementation_scope
     data["tasks"] = tasks
     data["taskSetStatus"] = "collecting"
     lock = {

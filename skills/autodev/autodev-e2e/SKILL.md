@@ -1,6 +1,7 @@
 ---
 name: autodev-e2e
 description: E2E 验证单个 Autodev feature 的真实用户主链路。用于 autodev-utest 完成后进入 E2E 阶段，或从 e2e_in_progress 恢复执行；生成 E2E_TEST_CASES.yaml、E2E_REPORT.md、e2e-run.log，并裁定 e2e_done 或 needs_fix。
+version: v1.1.08041
 ---
 
 # /autodev-e2e - 端到端测试
@@ -9,15 +10,11 @@ description: E2E 验证单个 Autodev feature 的真实用户主链路。用于 
 
 ## 运行契约
 
-```text
-FEATURE_DIR=${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
-```
-
 写入：
 
-- `${FEATURE_DIR}/E2E_TEST_CASES.yaml`
-- `${FEATURE_DIR}/E2E_REPORT.md`
-- `${FEATURE_DIR}/e2e-run.log`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_REPORT.md`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/e2e-run.log`
 - 当前 feature 直接相关的最小代码修复，仅限 `code_fixable`
 
 保持上游产物只读，保留核心用例与断言，并以真实命令、退出码和执行结果形成证据。由当前会话完成上下文建立、用例生成、执行、归因、修复和报告；后台进程只运行服务或测试命令。
@@ -149,4 +146,4 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 
 ## 完成交接
 
-技能完成后，提醒用户回到特性面板新开对话。若用户随后在当前对话输入“继续”或“下一步”，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`；技能未完成时继续执行上述步骤。
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
