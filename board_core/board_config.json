@@ -90,37 +90,6 @@
       "standard": {
         "label": "不需要，进入 autodev-specs",
         "description": "不先转换 HTML 设计稿，直接进入 autodev-specs。"
-      },
-      "frontend_before_specs": {
-        "label": "需要，进入 HTML 转前端",
-        "description": "先将 HTML 转换为项目内前端工程文件；在 autodev-frontend 内部按标准 HTML 或绝对定位高保真 HTML 分流，再进入后续阶段。",
-        "nodes": [
-          {
-            "id": "dev.frontend",
-            "phase": "Dev",
-            "label": "前端实现",
-            "skill": "autodev-frontend",
-            "insertBefore": "dev.specs",
-            "checkpointPrefix": "frontend",
-            "description": "基于 PRD 与 HTML 进行前端实现，并在 autodev-frontend 内部按标准 HTML 或绝对定位高保真 HTML 分流 \n 产物：项目内前端工程文件（无独立文档产物）",
-            "artifacts": {
-              "inputs": [
-                {
-                  "id": "prd",
-                  "label": "PRD文档",
-                  "artifactType": "file",
-                  "path": "PRD.md",
-                  "required": true,
-                  "extract": {
-                    "degrade": "无 PRD 时基于用户提供的 HTML 与描述实现，并记录验收基准缺失"
-                  }
-                }
-              ],
-              "outputs": []
-            },
-            "validators": []
-          }
-        ]
       }
     },
     "dynamicStages": [
