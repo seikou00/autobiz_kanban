@@ -35,13 +35,14 @@ from hooks.json_writer_common import (  # noqa: E402
     require_finalized_plan,
     resolve_feature,
     resolve_workspace,
+    shell_join,
     string_list,
     with_result_data,
     write_text,
     WriterError,
     WriterEncodingError,
 )
-from hooks.evidence_kernel import FileLock  # noqa: E402
+from hooks.evidence_kernel import FileLock, unlink_if_exists  # noqa: E402
 from hooks.implementation_scope import load_scope  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_VALIDATION_KINDS,
@@ -283,7 +284,7 @@ def _recover_plan_write_transaction_unlocked(workspace: Path, feature: str) -> W
     changed = atomic_write_json(_path(workspace, feature), root) or changed
     if isinstance(plan_markdown, str):
         changed = write_text(_md_path(workspace, feature), plan_markdown) or changed
-    transaction_path.unlink(missing_ok=True)
+    unlink_if_exists(transaction_path)
     return WriterResult(ok=True, path=_path(workspace, feature), changed=changed)
 
 
@@ -1164,7 +1165,7 @@ def _write(
     if plan_markdown is not None:
         changed = write_text(_md_path(workspace, feature), plan_markdown) or changed
     if transaction_path is not None:
-        transaction_path.unlink(missing_ok=True)
+        unlink_if_exists(transaction_path)
     return WriterResult(ok=True, path=path, changed=changed)
 
 
@@ -1199,12 +1200,12 @@ def _replay_draft_transaction(workspace: Path, feature: str) -> bool:
     if plans_dir.is_dir():
         for old_plan in plans_dir.glob("B*/plan.json"):
             if old_plan.parent.name not in referenced:
-                old_plan.unlink(missing_ok=True)
+                unlink_if_exists(old_plan)
                 try:
                     old_plan.parent.rmdir()
                 except OSError:
                     pass
-    transaction_path.unlink(missing_ok=True)
+    unlink_if_exists(transaction_path)
     return True
 
 
@@ -1884,7 +1885,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         plans_dir = _path(workspace, feature).parent / "plans"
         if plans_dir.is_dir():
             for old_plan in plans_dir.glob("B*/plan.json"):
-                old_plan.unlink(missing_ok=True)
+                unlink_if_exists(old_plan)
                 try:
                     old_plan.parent.rmdir()
                 except OSError:
@@ -1893,7 +1894,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 plans_dir.rmdir()
             except OSError:
                 pass
-        _handoff_path(workspace, feature).unlink(missing_ok=True)
+        unlink_if_exists(_handoff_path(workspace, feature))
     return render_result(with_result_data(_write(workspace, feature, _initial(feature), allow_empty=True), reset=bool(args.force)))
 
 
@@ -2712,7 +2713,7 @@ def _cmd_finalize_task_draft(args: argparse.Namespace) -> int:
             plans_dir = _path(workspace, feature).parent / "plans"
             for old_plan in plans_dir.glob("B*/plan.json") if plans_dir.is_dir() else []:
                 if old_plan.parent.name not in referenced:
-                    old_plan.unlink(missing_ok=True)
+                    unlink_if_exists(old_plan)
                     try:
                         old_plan.parent.rmdir()
                     except OSError:
@@ -2785,7 +2786,7 @@ def _cmd_materialize_task_set(args: argparse.Namespace) -> int:
         referenced = {item["id"] for item in summary["batches"]}
         for old_plan in plans_dir.glob("B*/plan.json"):
             if old_plan.parent.name not in referenced:
-                old_plan.unlink(missing_ok=True)
+                unlink_if_exists(old_plan)
                 try:
                     old_plan.parent.rmdir()
                 except OSError:
@@ -4578,7 +4579,7 @@ def activate_batch(workspace: Path, feature: str, batch_id: str) -> WriterResult
         data["nextBatchId"] = ordered[index + 1] if index + 1 < len(ordered) else None
         result = _write(workspace, feature, data)
         if result.ok:
-            _handoff_path(workspace, feature).unlink(missing_ok=True)
+            unlink_if_exists(_handoff_path(workspace, feature))
         return with_result_data(result, activeBatchId=batch_id, nextBatchId=data.get("nextBatchId"))
 
 
@@ -4692,7 +4693,7 @@ def _render_plan_md(data: dict[str, Any]) -> str:
             for command in commands:
                 if isinstance(command, dict):
                     argv = command.get("argv")
-                    rendered = shlex.join(argv) if isinstance(argv, list) and all(isinstance(item, str) for item in argv) else command.get("command", "")
+                    rendered = shell_join(argv) if isinstance(argv, list) and all(isinstance(item, str) for item in argv) else command.get("command", "")
                     command_id = command.get("id")
                     lines.append(f"  - {command_id}: {rendered}" if command_id else f"  - {rendered}")
         else:

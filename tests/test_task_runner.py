@@ -1223,17 +1223,15 @@ class TaskRunnerTest(unittest.TestCase):
                 return real_popen(*args, **kwargs)
 
             progress = io.StringIO()
-            with (
-                patch.object(
-                    task_runner_module.subprocess,
-                    "Popen",
-                    side_effect=tracked_popen,
-                ),
-                patch.object(task_runner_module.sys, "stderr", progress),
+            with patch.object(
+                task_runner_module.subprocess,
+                "Popen",
+                side_effect=tracked_popen,
             ):
-                exit_code, output = task_runner_module._run_validation(
-                    command, {repo.name: repo}
-                )
+                with patch.object(task_runner_module.sys, "stderr", progress):
+                    exit_code, output = task_runner_module._run_validation(
+                        command, {repo.name: repo}
+                    )
 
             self.assertEqual(exit_code, 0)
             self.assertIn("validation output captured", output)
@@ -4794,20 +4792,22 @@ class TaskRunnerTest(unittest.TestCase):
                 self.assertTrue(lock_held)
                 return {}
 
-            with (
-                patch.object(task_runner_module, "_task_run_lock", side_effect=observed_lock),
-                patch.object(
+            with patch.object(
+                task_runner_module,
+                "_task_run_lock",
+                side_effect=observed_lock,
+            ):
+                with patch.object(
                     task_runner_module,
                     "load_plan_bundle",
                     side_effect=guarded_load,
-                ),
-                patch.object(
-                    task_runner_module,
-                    "_activate_batch_unlocked",
-                    side_effect=guarded_activate,
-                ),
-            ):
-                result = task_runner_module.code_session(workspace, "alpha")
+                ):
+                    with patch.object(
+                        task_runner_module,
+                        "_activate_batch_unlocked",
+                        side_effect=guarded_activate,
+                    ):
+                        result = task_runner_module.code_session(workspace, "alpha")
 
             self.assertEqual(result["action"], "execute_active_batch")
             self.assertEqual(result["activeBatchId"], "B002")

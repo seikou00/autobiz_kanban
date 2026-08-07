@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence, read_records, stream_path  # noqa: E402
-from hooks.evidence_kernel import FileLock  # noqa: E402
+from hooks.evidence_kernel import FileLock, unlink_if_exists  # noqa: E402
 from hooks.code_exploration import CodeExplorationError, inspect_exploration_cache  # noqa: E402
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
@@ -1959,12 +1959,12 @@ def _run_validation_process(
         output = _decode_validation_output(log_path.read_bytes())
     finally:
         try:
-            log_path.unlink(missing_ok=True)
+            unlink_if_exists(log_path)
         except OSError:
             pass
         if wrapper_path is not None:
             try:
-                wrapper_path.unlink(missing_ok=True)
+                unlink_if_exists(wrapper_path)
             except OSError:
                 pass
 

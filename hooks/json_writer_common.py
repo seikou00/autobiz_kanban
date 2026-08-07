@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -89,6 +90,10 @@ def with_result_data(result: WriterResult, **data: Any) -> WriterResult:
     merged = dict(result.data or {})
     merged.update(data)
     return WriterResult(ok=result.ok, path=result.path, changed=result.changed, errors=result.errors, data=merged)
+
+
+def shell_join(argv: list[str]) -> str:
+    return " ".join(shlex.quote(item) for item in argv)
 
 
 def fail_if_artifact_exists(path: Path, *, force: bool) -> WriterResult | None:

@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_integrity_gate import check_code_done, check_integrity  # noqa: E402
-from hooks.evidence_kernel import FileLock  # noqa: E402
+from hooks.evidence_kernel import FileLock, unlink_if_exists  # noqa: E402
 from hooks.evidence_store import EvidenceStoreError, read_records, stream_path  # noqa: E402
 from hooks.json_writer_common import atomic_write_json  # noqa: E402
 from hooks.plan_json import batch_plan_path, load_plan, load_plan_bundle, normalize_status  # noqa: E402
@@ -147,7 +147,7 @@ def reset_invalid_tasks(feature_dir: Path, invalid_tasks: set[str]) -> bool:
                 root["activeBatchId"] = None
                 root["nextBatchId"] = None
             root["latestProjectCheckEvidenceId"] = None
-            (feature_dir / "BATCH_HANDOFF.json").unlink(missing_ok=True)
+            unlink_if_exists(feature_dir / "BATCH_HANDOFF.json")
             atomic_write_json(plan_path, root)
         return changed
 

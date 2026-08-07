@@ -25,6 +25,7 @@ try:
         output_duplicates_record,
         prepare_log,
         pending_path,
+        unlink_if_exists,
         write_log,
         write_json_artifact,
         write_pending,
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover - direct script execution path
         output_duplicates_record,
         prepare_log,
         pending_path,
+        unlink_if_exists,
         write_log,
         write_json_artifact,
         write_pending,
@@ -495,7 +497,7 @@ def _recover_pending_appends(target_feature_dir: Path) -> None:
         }
         streamed = by_id.get(evidence_id)
         if streamed is None:
-            log_path(target_feature_dir, evidence_id).unlink(missing_ok=True)
+            unlink_if_exists(log_path(target_feature_dir, evidence_id))
             path.unlink()
             continue
         if streamed != pending:
@@ -690,7 +692,7 @@ def append_evidence(
             feature_id=str(payload.get("featureId") or target_feature_dir.name),
             verify_existing=False,
         )
-        pending_path(target_feature_dir, str(evidence_id)).unlink(missing_ok=True)
+        unlink_if_exists(pending_path(target_feature_dir, str(evidence_id)))
         return payload
 
 

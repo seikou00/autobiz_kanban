@@ -43,6 +43,13 @@ def pending_path(target_feature_dir: Path, evidence_id: str) -> Path:
     return target_feature_dir / "evidence" / ".pending" / f"{evidence_id}.json"
 
 
+def unlink_if_exists(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("wb", dir=path.parent, delete=False) as handle:

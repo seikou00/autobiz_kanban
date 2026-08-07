@@ -32,7 +32,7 @@ from hooks.plan_json import (  # noqa: E402
     validate_task_collection,
     write_plan_json,
 )
-from hooks.evidence_kernel import check_record_artifacts, write_pending  # noqa: E402
+from hooks.evidence_kernel import check_record_artifacts, unlink_if_exists, write_pending  # noqa: E402
 from hooks.evidence_kernel import write_sidecar  # noqa: E402
 
 
@@ -246,6 +246,18 @@ def append_current_evidence(
         },
         output_tail="ok\n",
     )
+
+
+class EvidenceKernelTest(unittest.TestCase):
+    def test_unlink_if_exists_removes_file_and_tolerates_missing_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "cleanup.json"
+            path.write_text("cleanup\n", encoding="utf-8")
+
+            unlink_if_exists(path)
+            self.assertFalse(path.exists())
+
+            unlink_if_exists(path)
 
 
 class PlanJsonTest(unittest.TestCase):

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +25,7 @@ from hooks.json_writer_common import (  # noqa: E402
     render_result,
     resolve_feature,
     resolve_workspace,
+    shell_join,
     with_result_data,
 )
 from hooks.result_writer_common import (  # noqa: E402
@@ -96,7 +96,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
             if commands and isinstance(commands[0], dict):
                 argv = commands[0].get("argv")
                 command = (
-                    shlex.join(argv)
+                    shell_join(argv)
                     if isinstance(argv, list) and all(isinstance(item, str) for item in argv)
                     else str(commands[0].get("command", ""))
                 )

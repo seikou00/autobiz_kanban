@@ -18,7 +18,7 @@ AUTODEV_HOOKS = ROOT / "skills" / "autodev" / "hooks"
 if str(AUTODEV_HOOKS) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS))
 
-from hooks.json_writer_common import parse_postcheck_output  # noqa: E402
+from hooks.json_writer_common import parse_postcheck_output, shell_join  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
     BATCH_VALIDATION_KINDS,
@@ -414,6 +414,9 @@ def _named_code_workspace(
 
 
 class JsonWriterTests(unittest.TestCase):
+    def test_shell_join_quotes_arguments_on_python_37(self) -> None:
+        self.assertEqual(shell_join(["python", "hello world", "plain"]), "python 'hello world' plain")
+
     def test_plan_writer_binds_each_task_to_one_of_multiple_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
