@@ -313,9 +313,10 @@ def progress_fingerprint(target_feature_dir: Path) -> str:
     这比逐文件哈希便宜得多，而任何写入（含 EVIDENCE.jsonl 追加）都会改变它。
     排除 .auto-mode/ 自身，避免记账写入把自己算成"有进展"。
 
-    该指纹不能单独作为空转依据：业务代码通常写在 session workspace，而不在
-    FEATURE_DIR。实际空转判断由 observed_progress_fingerprint() 合并来源 workspace
-    的可观测 Git 变更；无法观测时宁可不触发空转熔断，交给 maxTotalSteps 兜底。
+    业务代码通常写在 session workspace 而不在 FEATURE_DIR，所以该指纹单独用会偏保守
+    （漏掉只改业务代码的进展）。observed_progress_fingerprint() 在平台传了
+    sessionWorkspacePath 时合并其 Git 变更；平台当前不传，此时降级为只用本指纹——理由
+    与代价见该函数 docstring。
     """
     if not target_feature_dir.is_dir():
         return ""
@@ -402,15 +403,35 @@ def observed_progress_fingerprint(
     target_feature_dir: Path,
     session_workspace_path: str | None,
 ) -> str | None:
-    """合并 Feature 产物和业务 workspace；缺一不可时禁用空转熔断。"""
-    if not session_workspace_path:
-        return None
-    workspace_fingerprint = workspace_progress_fingerprint(session_workspace_path)
-    if workspace_fingerprint is None:
+    """合并 Feature 产物和业务 workspace 指纹；完全观测不到时返回 None。
+
+    平台当前分支（feature/board_automode）的 AgentTurnEndEvent 不含
+    sessionWorkspacePath——曾经加过（CmbCoworkAgent a7cb8eaa "pass workspace to
+    managed auto-mode hook"），但那个 commit 只在实验分支上，没有合进来。若要求业务
+    workspace 可观测才启用熔断，stalledSteps 会永远停在 0，空转保护实际失效，只剩
+    maxTotalSteps 兜底（120 轮）。因此拿不到 workspace 时降级为只用 FEATURE_DIR 指纹。
+
+    代价：一轮只改业务代码、没碰 FEATURE_DIR 任何产物（含 EVIDENCE.jsonl）时会被算成
+    「无进展」。连续 maxStalledSteps 轮如此才熔断，且熔断只是填草稿等人按发送，不丢状态。
+
+    FEATURE_DIR 也无内容时仍返回 None：此时 progress_fingerprint() 返回空串，若直接用
+    它做指纹，"" == "" 会把「观测不到」误判成「确认没进展」，反而凭空触发熔断。
+    """
+    feature_fingerprint = progress_fingerprint(target_feature_dir)
+    workspace_fingerprint = (
+        workspace_progress_fingerprint(session_workspace_path) if session_workspace_path else None
+    )
+    if workspace_fingerprint is None and not feature_fingerprint:
         return None
     digest = hashlib.sha256()
-    digest.update(f"feature:{progress_fingerprint(target_feature_dir)}\n".encode("utf-8"))
-    digest.update(f"workspace:{workspace_fingerprint}\n".encode("utf-8"))
+    digest.update(f"feature:{feature_fingerprint}\n".encode("utf-8"))
+    # 平台重新开始传 workspace 时标记位会变化，指纹随之改变，只会多算一次「有进展」
+    # （重置 stalledSteps），不会漏判空转。
+    digest.update(
+        f"workspace:{workspace_fingerprint}\n".encode("utf-8")
+        if workspace_fingerprint is not None
+        else b"workspace:(unobservable)\n"
+    )
     return digest.hexdigest()
 
 
@@ -472,6 +493,22 @@ def end_reason_text(event: dict[str, Any]) -> str:
     if isinstance(message, str) and message.strip():
         return f"{code_text}: {message.strip()}"
     return code_text
+
+
+def end_reason_code(event: dict[str, Any]) -> str:
+    """endReason.code；缺失或非法时回落 unknown（与平台的 code 联合类型对齐）。"""
+    reason = event.get("endReason")
+    if not isinstance(reason, dict):
+        return "unknown"
+    code = reason.get("code")
+    return code if isinstance(code, str) and code else "unknown"
+
+
+# 平台有意终止本回合，而非暂时性故障：
+#   hook_halt    —— 被 PreToolUse 钩子拦下（插件自己的写门禁、密钥扫描就注册在 hooks.json）
+#   failure_fuse —— 平台侧重复失败熔断
+# 两者重试只会反复撞同一堵墙，白烧 maxErrorRetries 配额，因此直接暂停交给人。
+DELIBERATE_HALT_CODES = frozenset({"hook_halt", "failure_fuse"})
 
 
 # --------------------------------------------------------------------------- #
@@ -664,6 +701,60 @@ def decide(
             "complete:awaiting_human_in_other_thread",
         )
 
+    # 1) 归档：整链结束。
+    if checkpoint == "archived":
+        return finish(
+            result(True, "Feature 已归档，托管推进链结束。", [{"actionType": "complete"}]),
+            "complete:archived",
+        )
+
+    # 2) 系统有意停止：不是暂时性故障，重试只会反复撞同一堵墙。
+    #
+    # 平台 endReason.code 现为 normal | provider_error | hook_halt | failure_fuse | unknown
+    # （CmbCoworkAgent src/shared/harness-board-types.ts AgentTurnEndEvent）。其中：
+    #   · hook_halt    —— 被 PreToolUse 门禁拦停（本插件自己的写门禁、密钥扫描就在其中），
+    #                     同样的动作重发必然再次被拦；
+    #   · failure_fuse —— 平台侧重复失败熔断，已判定该链路不可自动继续。
+    # 这两类必须交给人看门禁/熔断说了什么，不能消耗 maxErrorRetries 空转重试。
+    # provider_error / unknown 仍属可重试故障，继续走下面的重试分支。
+    #
+    # 不放在 `outcome == "error"` 里：平台把 outcome 和 endReason 设计成两个独立字段，
+    # 未找到约束二者组合的代码，因此不假设有意停止一定伴随 outcome=error。
+    #
+    # 必须在计数递增（totalSteps/stalledSteps/errorStreak）之前判断：
+    #   - hook_halt 本质是门禁判定该次写入不合法，本轮根本没有实际推进，递增 totalSteps
+    #     会虚增步数；
+    #   - 若指纹未变、已有 stalledSteps=2，一个 hook_halt 会让 stalledSteps 先到 3 触发
+    #     空转熔断，掩盖真实原因（门禁拦截），用户看不到门禁消息；
+    #   - outcome=error 时仍会递增 errorStreak，与"不消耗重试配额"的设计不符。
+    if end_reason_code(event) in DELIBERATE_HALT_CODES:
+        reason = end_reason_text(event)
+        body = (
+            f"上一轮被系统有意停止（{reason}），这类终止重试无效，已暂停自动推进。"
+            f"{checkpoint_note(route)}"
+            "请查看被拦截的原因（门禁提示或熔断日志），处理后手动发送本条消息继续，"
+            "之后会重新开始计数。"
+        )
+        return finish(
+            result(True, f"系统有意停止，暂停自动推进：{reason}", [pause(auto_message(body), skill)]),
+            f"pause:deliberate_halt:{end_reason_code(event)}",
+        )
+
+    # 3) 总步数硬闸（在递增前判断，避免第 121 次才拦住）。
+    if state["totalSteps"] >= int(config["maxTotalSteps"]):
+        body = (
+            f"托管模式已累计自动推进 {state['totalSteps']} 次，达到上限"
+            f"（maxTotalSteps={config['maxTotalSteps']}），已停止自动推进以免失控。"
+            f"{checkpoint_note(route)}确认无误后手动发送本条消息即可继续，"
+            "并重新获得一个完整的自动推进额度。"
+        )
+        return finish(
+            result(True, "达到托管总步数上限，暂停自动推进。", [pause(auto_message(body), skill)]),
+            "pause:max_total_steps",
+        )
+
+    # ========== 状态计数递增：从此往下的分支才消耗各类配额 ==========
+
     state["totalSteps"] = int(state.get("totalSteps", 0)) + 1
 
     # 停滞检测只接受可观测的业务 workspace + FEATURE_DIR 组合指纹。inputTokens 是整轮
@@ -689,40 +780,26 @@ def decide(
         state["errorStreak"] = 0
         state["errorCheckpoint"] = ""
 
-    # 1) 归档：整链结束。
-    if checkpoint == "archived":
-        return finish(
-            result(True, "Feature 已归档，托管推进链结束。", [{"actionType": "complete"}]),
-            "complete:archived",
-        )
-
-    # 2) 总步数硬闸。
-    if state["totalSteps"] > int(config["maxTotalSteps"]):
-        body = (
-            f"托管模式已累计自动推进 {state['totalSteps'] - 1} 次，达到上限"
-            f"（maxTotalSteps={config['maxTotalSteps']}），已停止自动推进以免失控。"
-            f"{checkpoint_note(route)}确认无误后手动发送本条消息即可继续，"
-            "并重新获得一个完整的自动推进额度。"
-        )
-        return finish(
-            result(True, "达到托管总步数上限，暂停自动推进。", [pause(auto_message(body), skill)]),
-            "pause:max_total_steps",
-        )
-
-    # 3) 空转熔断：连续多轮 checkpoint、Feature 产物和业务工作区 Git 状态都没变化。
+    # 4) 空转熔断：连续多轮 checkpoint 与可观测产物都没变化。
+    #
+    # 观测范围取决于平台是否传 sessionWorkspacePath（当前分支不传，只看 FEATURE_DIR），
+    # 所以文案不能声称检查过业务工作区——这条 body 会填进用户输入框，说错了会让刚写完
+    # 业务代码的人以为自己的改动没被识别。
     if state["stalledSteps"] >= int(config["maxStalledSteps"]):
         body = (
-            f"托管模式连续 {state['stalledSteps']} 轮没有观察到 checkpoint、Feature 产物或业务工作区变更，"
+            f"托管模式连续 {state['stalledSteps']} 轮没有观察到 checkpoint 或 Feature 产物变更，"
             f"疑似空转（例如 Agent 以纯文本提问结束回合），已停止自动推进。"
             f"{checkpoint_note(route)}"
-            "请补充所需信息后手动发送本条消息继续，之后会重新开始计数。"
+            "若这几轮只改了业务代码、没有更新任何 Feature 产物，属于误判，直接发送本条消息即可继续；"
+            "否则请补充所需信息后再发送。之后都会重新开始计数。"
         )
         return finish(
             result(True, "检测到托管空转，暂停自动推进。", [pause(auto_message(body), skill)]),
             "pause:stalled",
         )
 
-    # 4) 异常中断续跑（用户主动停止不会走到这里——平台侧只弹 toast，不调本命令）。
+    # 5) 异常中断续跑（用户主动停止不会走到这里——平台侧只弹 toast，不调本命令）。
+    # 走到这里说明不是有意停止（hook_halt/failure_fuse 已在分支 2 拦住），属于可重试故障。
     if outcome == "error":
         reason = end_reason_text(event)
         max_retries = int(config["maxErrorRetries"])
@@ -766,11 +843,11 @@ def decide(
             "continue:error_retry",
         )
 
-    # 5) needs_fix 回流：按 FIX_REQUEST.json 的 suggestedCheckpoint 新开会话修复。
+    # 6) needs_fix 回流：按 FIX_REQUEST.json 的 suggestedCheckpoint 新开会话修复。
     if checkpoint == "needs_fix":
         return finish(*_decide_needs_fix(route, state, config, skill, message))
 
-    # 6) 需要人决策的岔路口（动态阶段 / profile 选择）。
+    # 7) 需要人决策的岔路口（动态阶段 / profile 选择）。
     if route.get("requiresWorkflowChoice"):
         return finish(*_decide_workflow_choice(route, skill))
     if route.get("requiresProfileChoice"):
@@ -783,7 +860,7 @@ def decide(
             "pause:profile_choice",
         )
 
-    # 7) 正常推进。
+    # 8) 正常推进。
     if not skill:
         body = (
             "插件无法解析下一步技能，已停止自动推进。"

@@ -228,10 +228,12 @@ class DecideErrorRetryTest(unittest.TestCase):
         self.assertEqual(_action_types(payload), ["create_new_session"])
 
     def test_error_streak_exceeds_limit_pauses(self) -> None:
-        # 已重试 2 次 (maxErrorRetries=2)，第 3 次应暂停
+        # 已重试 2 次 (maxErrorRetries=2)，第 3 次应暂停。
+        # code 必须是可重试类型：hook_halt / failure_fuse 会先被「有意停止」分支拦下，
+        # 走不到重试计数这一层。
         run_state = dict(EMPTY_RUN_STATE, history=[], errorStreak=2, errorCheckpoint="code_in_progress")
         payload, _ = _decide(
-            event=_event("error", "hook_halt"),
+            event=_event("error", "provider_error"),
             run_state=run_state,
         )
         self.assertEqual(_action_types(payload), ["continue_current_session"])
@@ -250,6 +252,121 @@ class DecideErrorRetryTest(unittest.TestCase):
         self.assertEqual(state["errorStreak"], 1)  # 从 1 开始，不继承跨 checkpoint 的 streak
         self.assertEqual(_action_types(payload), ["continue_current_session"])
         self.assertTrue(_first_action(payload)["nextAction"]["autoSend"])
+
+
+# ---------------------------------------------------------------------------
+# decide — 系统有意停止（平台 endReason.code 新增 hook_halt / failure_fuse）
+# ---------------------------------------------------------------------------
+
+
+class DecideDeliberateHaltTest(unittest.TestCase):
+    """hook_halt / failure_fuse 是有意终止，重试无效，必须首轮就暂停。"""
+
+    def test_hook_halt_pauses_on_first_occurrence(self) -> None:
+        payload, _ = _decide(event=_event("error", "hook_halt"))
+        self.assertTrue(payload["ok"])
+        # 不复用重试额度：第一次就暂停，而不是 continue+autoSend 重试。
+        self.assertEqual(_action_types(payload), ["continue_current_session"])
+        self.assertFalse(_first_action(payload)["nextAction"]["autoSend"])
+        self.assertIn("hook_halt", payload["messages"])
+
+    def test_failure_fuse_pauses_on_first_occurrence(self) -> None:
+        payload, _ = _decide(event=_event("error", "failure_fuse"))
+        self.assertEqual(_action_types(payload), ["continue_current_session"])
+        self.assertFalse(_first_action(payload)["nextAction"]["autoSend"])
+        self.assertIn("failure_fuse", payload["messages"])
+
+    def test_halt_pauses_even_when_outcome_is_success(self) -> None:
+        """平台把 outcome 与 endReason 设计成独立字段，不能只在 error 分支里判 code。"""
+        payload, _ = _decide(event=_event("success", "hook_halt"))
+        self.assertEqual(_action_types(payload), ["continue_current_session"])
+        self.assertFalse(_first_action(payload)["nextAction"]["autoSend"])
+
+    def test_halt_pause_marks_awaiting_human(self) -> None:
+        payload, state = _decide(event=_event("error", "failure_fuse", thread_id="thr-halt"))
+        self.assertEqual(state["awaitingHumanThreadId"], "thr-halt")
+
+    def test_halt_records_code_in_history_decision(self) -> None:
+        _, state = _decide(event=_event("error", "hook_halt"))
+        self.assertEqual(state["history"][-1]["decision"], "pause:deliberate_halt:hook_halt")
+
+    def test_retryable_codes_still_retry(self) -> None:
+        """回归：provider_error / unknown 不能被新分支误伤。"""
+        for code in ("provider_error", "unknown"):
+            with self.subTest(code=code):
+                payload, _ = _decide(event=_event("error", code))
+                self.assertEqual(_action_types(payload), ["continue_current_session"])
+                self.assertTrue(_first_action(payload)["nextAction"]["autoSend"])
+
+    def test_normal_success_unaffected(self) -> None:
+        payload, _ = _decide(event=_event("success", "normal"))
+        self.assertTrue(_first_action(payload)["nextAction"]["autoSend"])
+
+    def test_archived_wins_over_halt(self) -> None:
+        """归档是终态，不该被有意停止分支改写成暂停。"""
+        payload, _ = _decide(
+            event=_event("error", "hook_halt"),
+            route=_route("archived", "done", node_id="archived"),
+        )
+        self.assertEqual(_action_types(payload), ["complete"])
+
+    def test_halt_does_not_increment_total_steps(self) -> None:
+        """hook_halt 本质是门禁判定写入不合法，本轮没有实际推进，不应虚增步数。"""
+        _, state = _decide(event=_event("error", "hook_halt"), run_state=dict(EMPTY_RUN_STATE, totalSteps=5))
+        self.assertEqual(state["totalSteps"], 5)
+
+    def test_halt_does_not_increment_error_streak(self) -> None:
+        """有意停止不消耗重试配额，不应递增 errorStreak。"""
+        _, state = _decide(event=_event("error", "hook_halt"), run_state=dict(EMPTY_RUN_STATE, errorStreak=1))
+        self.assertEqual(state["errorStreak"], 1)
+
+    def test_halt_does_not_increment_stalled_steps(self) -> None:
+        """有意停止不应递增停滞计数，即使指纹未变。"""
+        _, state = _decide(
+            event=_event("error", "hook_halt"),
+            run_state=dict(
+                EMPTY_RUN_STATE,
+                stalledSteps=1,
+                lastCheckpoint="code_in_progress",
+                lastFingerprint="abc123",
+            ),
+            fingerprint="abc123",
+        )
+        self.assertEqual(state["stalledSteps"], 1)
+
+    def test_halt_wins_over_stalled_detection(self) -> None:
+        """P2 回归：stalledSteps=2 + hook_halt + 指纹未变，不能被空转熔断掩盖门禁原因。"""
+        payload, state = _decide(
+            event=_event("error", "hook_halt"),
+            run_state=dict(
+                EMPTY_RUN_STATE,
+                stalledSteps=2,
+                lastCheckpoint="code_in_progress",
+                lastFingerprint="abc123",
+            ),
+            fingerprint="abc123",
+        )
+        self.assertEqual(_action_types(payload), ["continue_current_session"])
+        self.assertFalse(_first_action(payload)["nextAction"]["autoSend"])
+        self.assertIn("hook_halt", payload["messages"])
+        # 确认不是空转提示
+        self.assertNotIn("空转", payload["messages"])
+        self.assertNotIn("stalled", state["history"][-1]["decision"])
+        # 确认 stalledSteps 没有递增到 3
+        self.assertEqual(state["stalledSteps"], 2)
+
+    def test_halt_wins_over_max_total_steps(self) -> None:
+        """有意停止应在 totalSteps 递增前拦住，不会因为刚好到上限而被掩盖。"""
+        payload, state = _decide(
+            event=_event("error", "failure_fuse"),
+            run_state=dict(EMPTY_RUN_STATE, totalSteps=10),
+            config=dict(DEFAULT_AUTO_MODE_CONFIG, maxTotalSteps=10),
+        )
+        self.assertEqual(_action_types(payload), ["continue_current_session"])
+        self.assertFalse(_first_action(payload)["nextAction"]["autoSend"])
+        self.assertIn("failure_fuse", payload["messages"])
+        self.assertNotIn("maxTotalSteps", payload["messages"])
+        self.assertEqual(state["totalSteps"], 10)
 
 
 # ---------------------------------------------------------------------------
@@ -614,9 +731,50 @@ class ProgressFingerprintTest(unittest.TestCase):
             self.assertIsNotNone(before)
             self.assertNotEqual(before, after)
 
-    def test_observed_fingerprint_is_none_without_workspace(self) -> None:
+    def test_observed_fingerprint_is_none_when_nothing_observable(self) -> None:
+        """FEATURE_DIR 空 + 无 workspace：必须是 None，不能是空串。
+
+        空串会让 "" == "" 把「观测不到」当成「确认没进展」，凭空触发空转熔断。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(observed_progress_fingerprint(Path(tmp), None))
+
+    def test_observed_fingerprint_degrades_to_feature_dir_without_workspace(self) -> None:
+        """平台当前分支不传 sessionWorkspacePath，此时降级为只用 FEATURE_DIR 指纹。
+
+        若这里返回 None，stalledSteps 将永远停在 0，空转熔断实际失效。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            feature = Path(tmp)
+            (feature / "PRD.md").write_text("content", encoding="utf-8")
+            fingerprint = observed_progress_fingerprint(feature, None)
+            self.assertIsNotNone(fingerprint)
+            # 同样内容必须稳定，否则每轮都被算成「有进展」，熔断照样失效。
+            self.assertEqual(fingerprint, observed_progress_fingerprint(feature, None))
+
+    def test_observed_fingerprint_without_workspace_tracks_feature_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature = Path(tmp)
+            (feature / "PRD.md").write_text("content", encoding="utf-8")
+            before = observed_progress_fingerprint(feature, None)
+            (feature / "DESIGN.md").write_text("more", encoding="utf-8")
+            self.assertNotEqual(before, observed_progress_fingerprint(feature, None))
+
+    def test_observed_fingerprint_degrades_when_workspace_not_a_git_repo(self) -> None:
+        """给了 workspace 但 Git 观测不到时，也应降级而不是禁用熔断。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            feature = root / "feature"
+            workspace = root / "workspace"
+            feature.mkdir()
+            workspace.mkdir()
+            (feature / "PRD.md").write_text("content", encoding="utf-8")
+            with mock.patch(
+                "hooks.auto_next_step.workspace_progress_fingerprint", return_value=None
+            ):
+                degraded = observed_progress_fingerprint(feature, str(workspace))
+            self.assertIsNotNone(degraded)
+            self.assertEqual(degraded, observed_progress_fingerprint(feature, None))
 
 
 class RunStateTransactionTest(unittest.TestCase):
