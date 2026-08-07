@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 from board_core.contracts import (
     BoardConfigError,
@@ -18,12 +18,13 @@ from board_core.workflow_compiler import (
     BASE_WORKFLOW_PROFILE,
     BASE_WORKFLOW_TEMPLATE,
     WorkflowCompileError,
-    configured_workflow_templates,
     normalize_workflow_decisions,
     normalize_workflow_profile,
     normalize_workflow_skipped_nodes,
     normalize_workflow_template,
+    workflow_template_uses_nodes,
 )
+from board_core.workflow import find_current_node
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,13 +35,13 @@ STATE_JSON_RELATIVE_PATH = Path(".autobizdevops") / "state.json"
 STATE_COLUMNS = ("Feature", "负责人", "checkpoint", "阶段", "迭代", "最后更新")
 EMPTY_CELL = "—"
 
+BOARD_CONFIG = load_board_config(BOARD_CONFIG_PATH)
 WORKFLOW_CONTRACTS = load_workflow_contracts(BOARD_CONFIG_PATH)
 KNOWN_CHECKPOINTS = WORKFLOW_CONTRACTS.known_checkpoints
 DEFAULT_STAGE_BY_CHECKPOINT = WORKFLOW_CONTRACTS.stage_labels
-WORKFLOW_TEMPLATES = configured_workflow_templates(load_board_config(BOARD_CONFIG_PATH))
 
-StateRecord = dict[str, Any]
-StateRecords = dict[str, StateRecord]
+StateRecord = Dict[str, Any]
+StateRecords = Dict[str, StateRecord]
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,9 @@ class StateLoadResult:
     errors: list[str]
     exists: bool
     source: str
+    raw_records: dict[str, Any] = field(default_factory=dict)
+    record_errors: dict[str, list[str]] = field(default_factory=dict)
+    fatal_errors: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,8 @@ class StateSyncResult:
     changed: bool
     state_path: Path
     state_json_path: Path
+    raw_records: dict[str, Any] = field(default_factory=dict)
+    record_errors: dict[str, list[str]] = field(default_factory=dict)
 
 
 def get_state_path(workspace: Path) -> Path:
@@ -167,7 +173,18 @@ def _normalize_record(
         "workflowDecisions": workflow_decisions,
         "workflowTemplate": workflow_template,
     }
-    if WORKFLOW_TEMPLATES.get(workflow_template, {}).get("kind") == "custom":
+    if checkpoint == "needs_fix":
+        needs_fix_from = _clean(raw_record.get("needsFixFromCheckpoint"))
+        if needs_fix_from:
+            source_idx, _ = find_current_node(list(contracts.nodes), needs_fix_from)
+            if source_idx < 0:
+                errors.append(
+                    f"{context}: Feature '{feature}' 的 needsFixFromCheckpoint "
+                    f"无法映射到节点: {needs_fix_from}"
+                )
+                return None
+            record["needsFixFromCheckpoint"] = needs_fix_from
+    if workflow_template_uses_nodes(BOARD_CONFIG, workflow_template):
         record["workflowNodes"] = [str(item).strip() for item in raw_record.get("workflowNodes", [])]
         # Legacy workflowExternalized is intentionally not carried over: inputs
         # whose producer is absent are dropped by the compiler instead.
@@ -186,13 +203,31 @@ def normalize_state_records(
     context: str = "state records",
     workspace: Path | None = None,
 ) -> tuple[StateRecords, list[str]]:
+    normalized, record_errors = normalize_state_records_detailed(
+        records,
+        context=context,
+        workspace=workspace,
+    )
+    errors = [error for feature in sorted(record_errors) for error in record_errors[feature]]
+    return normalized, errors
+
+
+def normalize_state_records_detailed(
+    records: dict[str, Any],
+    *,
+    context: str = "state records",
+    workspace: Path | None = None,
+) -> tuple[StateRecords, dict[str, list[str]]]:
     normalized: StateRecords = {}
-    errors: list[str] = []
+    record_errors: dict[str, list[str]] = {}
     for feature in sorted(records):
+        errors: list[str] = []
         record = _normalize_record(feature, records[feature], errors, context=context, workspace=workspace)
         if record is not None:
             normalized[feature] = record
-    return normalized, errors
+        if errors:
+            record_errors[feature] = errors
+    return normalized, record_errors
 
 
 def parse_state_md_records(content: str) -> tuple[StateRecords, list[str]]:
@@ -237,31 +272,77 @@ def parse_state_md_records(content: str) -> tuple[StateRecords, list[str]]:
 
 
 def parse_state_json_records(content: str, *, workspace: Path | None = None) -> tuple[StateRecords, list[str]]:
+    result = parse_state_json_records_result(content, workspace=workspace)
+    return result.records, result.errors
+
+
+def parse_state_json_records_result(content: str, *, workspace: Path | None = None) -> StateLoadResult:
     errors: list[str] = []
     try:
         payload = json.loads(content)
     except json.JSONDecodeError as exc:
-        return {}, [f"state.json 不是合法 JSON: {exc}"]
+        message = f"state.json 不是合法 JSON: {exc}"
+        return StateLoadResult(
+            records={},
+            errors=[message],
+            exists=True,
+            source="state.json",
+            fatal_errors=[message],
+        )
 
     if not isinstance(payload, dict):
-        return {}, ["state.json 顶层必须是对象"]
+        message = "state.json 顶层必须是对象"
+        return StateLoadResult(
+            records={},
+            errors=[message],
+            exists=True,
+            source="state.json",
+            fatal_errors=[message],
+        )
 
     if "features" in payload:
         features = payload.get("features")
         if not isinstance(features, dict):
-            return {}, ["state.json.features 必须是对象"]
-        records, record_errors = normalize_state_records(
+            message = "state.json.features 必须是对象"
+            return StateLoadResult(
+                records={},
+                errors=[message],
+                exists=True,
+                source="state.json",
+                fatal_errors=[message],
+            )
+        records, record_errors = normalize_state_records_detailed(
             features,
             context="state.json.features",
             workspace=workspace,
         )
-        errors.extend(record_errors)
-        return records, errors
+        errors.extend(error for feature in sorted(record_errors) for error in record_errors[feature])
+        return StateLoadResult(
+            records=records,
+            errors=errors,
+            exists=True,
+            source="state.json",
+            raw_records=dict(features),
+            record_errors=record_errors,
+            fatal_errors=[],
+        )
 
     # Legacy migration format: {"feature": "checkpoint"}.
-    records, record_errors = normalize_state_records(payload, context="state.json legacy map", workspace=workspace)
-    errors.extend(record_errors)
-    return records, errors
+    records, record_errors = normalize_state_records_detailed(
+        payload,
+        context="state.json legacy map",
+        workspace=workspace,
+    )
+    errors.extend(error for feature in sorted(record_errors) for error in record_errors[feature])
+    return StateLoadResult(
+        records=records,
+        errors=errors,
+        exists=True,
+        source="state.json",
+        raw_records=dict(payload),
+        record_errors=record_errors,
+        fatal_errors=[],
+    )
 
 
 def load_state_json_records_result(workspace: Path) -> StateLoadResult:
@@ -272,8 +353,7 @@ def load_state_json_records_result(workspace: Path) -> StateLoadResult:
     if not state_json.is_file():
         return StateLoadResult(records={}, errors=[], exists=False, source="state.json")
 
-    records, errors = parse_state_json_records(state_json.read_text(encoding="utf-8"), workspace=workspace)
-    return StateLoadResult(records=records, errors=errors, exists=True, source="state.json")
+    return parse_state_json_records_result(state_json.read_text(encoding="utf-8"), workspace=workspace)
 
 
 def load_state_json_records(workspace: Path) -> tuple[StateRecords, list[str], bool]:
@@ -292,7 +372,13 @@ def _load_state_records_result(workspace: Path) -> StateLoadResult:
 
     if state_md.is_file():
         records, errors = parse_state_md_records(state_md.read_text(encoding="utf-8"))
-        return StateLoadResult(records=records, errors=errors, exists=True, source="STATE.md")
+        return StateLoadResult(
+            records=records,
+            errors=errors,
+            exists=True,
+            source="STATE.md",
+            fatal_errors=list(errors),
+        )
 
     return StateLoadResult(records={}, errors=[], exists=False, source="")
 
@@ -316,6 +402,30 @@ def state_json_content_from_records(records: StateRecords, *, workspace: Path | 
             feature: normalized[feature]
             for feature in sorted(normalized)
         },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def state_json_content_from_records_preserving_raw(
+    records: StateRecords,
+    *,
+    raw_records: dict[str, Any] | None = None,
+    workspace: Path | None = None,
+) -> str:
+    normalized, errors = normalize_state_records(records, workspace=workspace)
+    if errors:
+        raise ValueError("\n".join(errors))
+
+    merged: dict[str, Any] = {}
+    for feature in sorted(set(raw_records or {}) | set(normalized)):
+        if feature in normalized:
+            merged[feature] = normalized[feature]
+        else:
+            merged[feature] = (raw_records or {})[feature]
+
+    payload = {
+        "schemaVersion": STATE_SCHEMA_VERSION,
+        "features": merged,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
@@ -386,6 +496,26 @@ def write_state_records(workspace: Path, records: StateRecords) -> None:
     _atomic_write_text(state_md, render_state_md(records, workspace=workspace))
 
 
+def write_state_records_preserving_raw(
+    workspace: Path,
+    records: StateRecords,
+    *,
+    raw_records: dict[str, Any] | None = None,
+) -> None:
+    workspace = workspace.resolve()
+    state_json = get_state_json_path(workspace)
+    state_md = get_state_path(workspace)
+    _atomic_write_text(
+        state_json,
+        state_json_content_from_records_preserving_raw(
+            records,
+            raw_records=raw_records,
+            workspace=workspace,
+        ),
+    )
+    _atomic_write_text(state_md, render_state_md(records, workspace=workspace))
+
+
 def check_or_fix_state_sync(workspace: Path, *, fix: bool = True) -> StateSyncResult:
     workspace = workspace.resolve()
     state_json = get_state_json_path(workspace)
@@ -400,19 +530,27 @@ def check_or_fix_state_sync(workspace: Path, *, fix: bool = True) -> StateSyncRe
             changed=False,
             state_path=state_md,
             state_json_path=state_json,
+            raw_records={},
+            record_errors={},
         )
-    if result.errors:
+    if result.fatal_errors:
         return StateSyncResult(
             ok=False,
             records=result.records,
-            errors=result.errors,
+            errors=result.fatal_errors,
             state_exists=True,
             changed=False,
             state_path=state_md,
             state_json_path=state_json,
+            raw_records=result.raw_records,
+            record_errors=result.record_errors,
         )
 
-    expected_json = state_json_content_from_records(result.records, workspace=workspace)
+    expected_json = state_json_content_from_records_preserving_raw(
+        result.records,
+        raw_records=result.raw_records,
+        workspace=workspace,
+    )
     expected_md = render_state_md(result.records, workspace=workspace)
     errors: list[str] = []
     changed = False
@@ -439,4 +577,6 @@ def check_or_fix_state_sync(workspace: Path, *, fix: bool = True) -> StateSyncRe
         changed=changed,
         state_path=state_md,
         state_json_path=state_json,
+        raw_records=result.raw_records,
+        record_errors=result.record_errors,
     )

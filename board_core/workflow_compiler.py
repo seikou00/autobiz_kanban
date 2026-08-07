@@ -11,6 +11,8 @@ from typing import Iterable
 BASE_WORKFLOW_PROFILE = "standard"
 LEGACY_BASE_WORKFLOW_PROFILE = "base"
 BASE_WORKFLOW_TEMPLATE = "standard"
+LEGACY_CUSTOM_WORKFLOW_TEMPLATE = "custom"
+LEGACY_CUSTOM_REQUIRED_NODES = ("dev.code", "ops.archive")
 ALLOWED_TEMPLATE_KINDS = frozenset({"profile", "nodeSubset", "custom"})
 # 对外展示的模板类型名（内部 kind 保留编译语义，profile 对外呈现为 classical）。
 TEMPLATE_TYPE_BY_KIND = {"profile": "classical"}
@@ -147,6 +149,32 @@ def normalize_workflow_template(template: str | None) -> str:
     return cleaned or BASE_WORKFLOW_TEMPLATE
 
 
+def _legacy_custom_template_spec(template: str) -> dict | None:
+    if template != LEGACY_CUSTOM_WORKFLOW_TEMPLATE:
+        return None
+    return {
+        "id": LEGACY_CUSTOM_WORKFLOW_TEMPLATE,
+        "kind": "custom",
+        "label": "自定义（旧版）",
+        "description": "兼容旧 state.json 中已创建的 custom 流程；不再作为新建模板展示。",
+        "nodes": [],
+        "requiredNodes": list(LEGACY_CUSTOM_REQUIRED_NODES),
+    }
+
+
+def workflow_template_uses_nodes(base_config: dict, template: str | None) -> bool:
+    """Whether this template stores a per-record workflowNodes list.
+
+    The configured template registry intentionally does not expose the retired
+    custom template, but existing state records with workflowTemplate=custom
+    still need to retain their workflowNodes field.
+    """
+    template = normalize_workflow_template(template)
+    if _legacy_custom_template_spec(template) is not None:
+        return True
+    return configured_workflow_templates(base_config).get(template, {}).get("kind") == "custom"
+
+
 def configured_workflow_templates(base_config: dict) -> dict[str, dict]:
     """Validated workflow.templates registry; standard is always present."""
     workflow = base_config.get("workflow")
@@ -259,6 +287,8 @@ def resolve_template_subset(
     registry = configured_workflow_templates(base_config)
     spec = registry.get(template)
     if spec is None:
+        spec = _legacy_custom_template_spec(template)
+    if spec is None:
         known = ", ".join(sorted(registry))
         raise WorkflowCompileError(f"unknown workflow template: {template}; known: {known}")
 
@@ -280,6 +310,72 @@ def resolve_template_subset(
     if not merged_nodes:
         raise WorkflowCompileError(f"workflow template {template} requires workflowNodes to be a non-empty list")
     return merged_nodes
+
+
+def normalize_workflow_skipped_nodes(value: object | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise WorkflowCompileError("workflowSkippedNodes must be a list of non-empty node ids")
+    return tuple(dict.fromkeys(item.strip() for item in value))
+
+
+def configured_skip_policy(base_config: dict) -> dict:
+    """Validated workflow.skipPolicy.
+
+    Policy is enforced only by the skip operation (validate_skip_request), not
+    by the compiler: tightening the policy later must not make existing state
+    records unloadable.
+    """
+    workflow = base_config.get("workflow")
+    raw = workflow.get("skipPolicy", {}) if isinstance(workflow, dict) else {}
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise WorkflowCompileError("workflow.skipPolicy must be an object")
+    locked = raw.get("lockedNodes", [])
+    if locked is None:
+        locked = []
+    if not isinstance(locked, list) or any(
+        not isinstance(item, str) or not item.strip() for item in locked
+    ):
+        raise WorkflowCompileError("workflow.skipPolicy.lockedNodes must be a list of non-empty node ids")
+    return {"lockedNodes": tuple(dict.fromkeys(item.strip() for item in locked))}
+
+
+def _active_nodes(nodes: list[dict]) -> list[dict]:
+    return [node for node in nodes if not node.get("skipped")]
+
+
+def _mark_skipped_nodes(
+    nodes: list[dict],
+    skipped_ids: tuple[str, ...],
+    *,
+    context: str = "workflowSkippedNodes",
+) -> list[dict]:
+    """Mark skipped nodes in place and return the active sublist.
+
+    Skipped nodes stay in the node array (the board renders them as 已跳过) but
+    are excluded from every contract derivation by the callers.
+    """
+    if not skipped_ids:
+        return nodes
+    known = {str(node.get("id", "")) for node in nodes if isinstance(node, dict)}
+    unknown = sorted(set(skipped_ids) - known)
+    if unknown:
+        raise WorkflowCompileError(f"{context} references unknown nodes: {', '.join(unknown)}")
+    skipped_set = set(skipped_ids)
+    active: list[dict] = []
+    for node in nodes:
+        if str(node.get("id", "")) in skipped_set:
+            node["skipped"] = True
+        else:
+            active.append(node)
+    if not active:
+        raise WorkflowCompileError(f"{context} cannot skip every workflow node")
+    return active
 
 
 def normalize_workflow_skipped_nodes(value: object | None) -> tuple[str, ...]:
@@ -823,8 +919,10 @@ def _derive_checkpoint_transitions(nodes: list[dict], base_checkpoint_config: di
         known_starts = {item for item in (_start_checkpoint(node) for node in nodes) if item}
         dynamic_starts = {
             start
-            for node in nodes
-            if node.get("_dynamic") and (start := _start_checkpoint(node)) and start != "archived"
+            for start in (
+                _start_checkpoint(node) if node.get("_dynamic") else None for node in nodes
+            )
+            if start and start != "archived"
         }
         transitions["needs_fix"] = sorted((set(old_needs_fix_targets) & known_starts) | dynamic_starts)
     if "archived" in {checkpoint for node in nodes for checkpoint in node.get("checkpoints", [])}:

@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from board_core.artifact_paths import artifact_exists_exact, resolve_exact_relative_path  # noqa: E402
 from board_core.contracts import BoardConfigError, load_record_workflow_contracts, load_repo_workflow_contracts  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE  # noqa: E402
 
@@ -56,17 +57,12 @@ class HookContext:
 
 
 def is_nonempty(path: Path) -> bool:
-    return path.is_file() and path.stat().st_size > 0
+    resolved = resolve_exact_relative_path(path.parent, path.name)
+    return resolved is not None and resolved.is_file() and resolved.stat().st_size > 0
 
 
 def artifact_exists(feature_dir: Path, name: str) -> bool:
-    if any(char in name for char in "*?["):
-        return any(path.is_file() and path.stat().st_size > 0 for path in feature_dir.glob(name))
-
-    path = feature_dir / name
-    if path.is_dir():
-        return any(child.is_file() and child.stat().st_size > 0 for child in path.rglob("*"))
-    return is_nonempty(path)
+    return artifact_exists_exact(feature_dir, name)
 
 
 def read_text(path: Path) -> str:
@@ -129,8 +125,19 @@ def load_artifact_config(
     )
 
 
-def fail_line(ctx: HookContext, reason: str, extra: str = "") -> int:
+def fail_line(
+    ctx: HookContext,
+    reason: str,
+    extra: str = "",
+    *,
+    repair: str = "",
+) -> int:
     print(f"POST_SKILL_FAIL skill={ctx.skill} reason={reason}{extra}")
+    if repair:
+        print(
+            f"POST_SKILL_REPAIR skill={ctx.skill} reason={reason} "
+            f"action={repair!r}"
+        )
     return 1
 
 
@@ -142,25 +149,35 @@ def info(ctx: HookContext, reason: str, extra: str = "") -> None:
     print(f"POST_SKILL_INFO skill={ctx.skill} reason={reason}{extra}")
 
 
+TASK_HEADING = re.compile(r"^###\s+(TASK-\d{3}):", re.MULTILINE)
+
+
 def task_count(plan: Path) -> int:
     if not is_nonempty(plan):
         return 0
-    return len(
-        re.findall(
-            r"^###\s+(?:Task\s+\[T\d{3}\]\s*:\s+.+|\d+[.)]\s+.+)$",
-            read_text(plan),
-            re.MULTILINE,
-        )
-    )
+    # 新格式 `### TASK-001: 名称`；兼容旧格式 `### 1. 名称`
+    return len(re.findall(r"^### (?:TASK-\d{3}:|[0-9]+\.)", read_text(plan), re.MULTILINE))
+
+
+def plan_task_blocks(plan_text: str) -> dict[str, str]:
+    """按 `### TASK-NNN:` 标题切出任务详情块；legacy 数字标题 PLAN 返回空 dict。"""
+    blocks: dict[str, str] = {}
+    matches = list(TASK_HEADING.finditer(plan_text))
+    for index, match in enumerate(matches):
+        start = match.end()
+        if index + 1 < len(matches):
+            end = matches[index + 1].start()
+        else:
+            next_section = re.search(r"^##\s", plan_text[start:], re.MULTILINE)
+            end = start + next_section.start() if next_section else len(plan_text)
+        blocks[match.group(1)] = plan_text[start:end]
+    return blocks
 
 
 def task_statuses(plan: Path) -> list[str]:
     if not is_nonempty(plan):
         return []
-    statuses: list[str] = []
-    for line in read_text(plan).splitlines():
-        normalized = re.sub(r"\*+", "", line).strip()
-        match = re.match(r"^[-*]\s*(?:状态|Status)\s*[:：]\s*(.+)$", normalized, re.IGNORECASE)
-        if match:
-            statuses.append(match.group(1).strip())
-    return statuses
+    return [
+        match.group(1).strip()
+        for match in re.finditer(r"^[ \t]*[-*][ \t]*\*\*状态:\*\*[ \t]*(.+)$", read_text(plan), re.MULTILINE)
+    ]

@@ -15,11 +15,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.contracts import (  # noqa: E402
+    ArtifactSpec,
     BoardConfigError,
     SkillContract,
     load_record_workflow_contracts,
     load_repo_workflow_contracts,
 )
+from board_core.artifact_paths import artifact_exists_exact  # noqa: E402
 from board_core.state import find_feature_dir  # noqa: E402
 from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import (  # noqa: E402
@@ -27,6 +29,7 @@ from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_TEMPLATE,
     WorkflowCompileError,
     configured_profile_names,
+    load_record_effective_board_config,
     normalize_workflow_decisions,
     read_json,
 )
@@ -69,22 +72,15 @@ def render_contract(contract: SkillContract) -> str:
     return "\n".join(lines) + "\n"
 
 
-_GLOB_CHARS = frozenset("*?[")
-
-
 def _artifact_present(feature_dir: Path, path: str) -> bool:
     """Whether an input artifact already exists (non-empty) under the feature dir.
 
     Glob-aware and mirrors the precheck gate's notion of "generated"
     (skills/autodev/hooks/common.py::artifact_exists): a file counts only when it
-    exists with size > 0, so empty placeholders are treated as missing.
+    exists with the exact contract filename and size > 0, so empty placeholders
+    and case-only filename mismatches are treated as missing.
     """
-    if any(char in path for char in _GLOB_CHARS):
-        return any(
-            match.is_file() and match.stat().st_size > 0 for match in feature_dir.glob(path)
-        )
-    target = feature_dir / path
-    return target.is_file() and target.stat().st_size > 0
+    return artifact_exists_exact(feature_dir, path)
 
 
 def _missing_handling_line(artifact: ArtifactSpec) -> str:
@@ -107,6 +103,7 @@ def render_contract_plain(
     contract: SkillContract,
     workflow_context: dict | None = None,
     feature_dir: Path | None = None,
+    extra_missing_inputs: tuple[ArtifactSpec, ...] = (),
 ) -> str:
     """Emit only how missing inputs are handled — nothing else.
 
@@ -120,12 +117,22 @@ def render_contract_plain(
     already means "these are the ones to handle". The frame the checklist used to
     carry — title, checkpoint, workflow context, boundary, outputs and
     validators — is intentionally dropped; ``workflow_context`` is accepted for
-    call-site compatibility but no longer rendered.
+    call-site compatibility but no longer rendered. ``extra_missing_inputs`` is
+    used for nodeSubset/custom entry inputs that were dropped from the hard
+    contract but should still expose their degrade guidance in this plain view.
     """
     baseline = feature_dir is None
+    candidates: list[ArtifactSpec] = []
+    seen_paths: set[str] = set()
+    for artifact in (*contract.inputs, *extra_missing_inputs):
+        if artifact.path in seen_paths:
+            continue
+        seen_paths.add(artifact.path)
+        candidates.append(artifact)
+
     pending = [
         artifact
-        for artifact in contract.inputs
+        for artifact in candidates
         if baseline or not _artifact_present(feature_dir, artifact.path)
     ]
     if not pending:
@@ -216,19 +223,60 @@ def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
     return find_feature_dir(workspace, feature) or get_feature_active_dir(workspace, feature)
 
 
+def _dropped_input_artifacts(
+    repo_root: Path,
+    *,
+    skill: str,
+    workspace: Path,
+    node_id: str,
+    record: dict,
+) -> tuple[ArtifactSpec, ...]:
+    effective = load_record_effective_board_config(
+        repo_root / "board_core" / "board_config.json",
+        repo_root=repo_root,
+        workspace=workspace,
+        record=record,
+    )
+    dropped = effective.get("workflowDroppedInputs", {})
+    if not isinstance(dropped, dict):
+        return ()
+    dropped_paths = dropped.get(node_id, [])
+    if not isinstance(dropped_paths, list) or not dropped_paths:
+        return ()
+
+    try:
+        base_contract = load_repo_workflow_contracts(
+            repo_root,
+            workspace=workspace,
+            profile=BASE_WORKFLOW_PROFILE,
+            workflow_decisions={},
+        ).contract_for_skill(skill)
+    except BoardConfigError:
+        return ()
+
+    by_path = {artifact.path: artifact for artifact in base_contract.inputs}
+    return tuple(
+        by_path[path]
+        for path in dropped_paths
+        if isinstance(path, str) and path in by_path
+    )
+
+
 def _find_feature_contract(
     repo_root: Path,
     *,
     skill: str,
     feature: str,
     workspace: Path,
-) -> tuple[SkillContract, dict]:
+) -> tuple[SkillContract, dict, tuple[ArtifactSpec, ...]]:
     result = load_state_json_records_result(workspace)
     if not result.exists:
         raise BoardConfigError(f"state.json 未找到: {workspace}")
-    if result.errors:
-        raise BoardConfigError("; ".join(result.errors))
+    if result.fatal_errors:
+        raise BoardConfigError("; ".join(result.fatal_errors))
     record = result.records.get(feature)
+    if record is None and result.record_errors.get(feature):
+        raise BoardConfigError("; ".join(result.record_errors[feature]))
     if record is None:
         raise BoardConfigError(f"feature '{feature}' 未在 state.json 中找到")
     contracts = load_record_workflow_contracts(repo_root, record, workspace=workspace)
@@ -242,7 +290,15 @@ def _find_feature_contract(
         workflow_context["workflowNodes"] = record.get("workflowNodes")
     if record.get("workflowSkippedNodes"):
         workflow_context["workflowSkippedNodes"] = record.get("workflowSkippedNodes")
-    return contracts.contract_for_skill(skill), workflow_context
+    contract = contracts.contract_for_skill(skill)
+    extra_missing_inputs = _dropped_input_artifacts(
+        repo_root,
+        skill=skill,
+        workspace=workspace,
+        node_id=contract.node_id,
+        record=record,
+    )
+    return contract, workflow_context, extra_missing_inputs
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -274,13 +330,14 @@ def main(argv: list[str] | None = None) -> int:
 
     workflow_context: dict = {}
     feature_dir: Path | None = None
+    extra_missing_inputs: tuple[ArtifactSpec, ...] = ()
     try:
         repo_root = Path(args.repo_root).resolve()
         if args.feature is not None:
             if args.workflow_profile != BASE_WORKFLOW_PROFILE or args.workflow_decision:
                 raise BoardConfigError("--feature 与 --workflow-profile/--workflow-decision 不能同时使用")
             workspace = _resolve_feature_workspace(args.workspace)
-            contract, workflow_context = _find_feature_contract(
+            contract, workflow_context, extra_missing_inputs = _find_feature_contract(
                 repo_root,
                 skill=args.skill,
                 feature=args.feature,
@@ -321,7 +378,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.plain:
-        print(render_contract_plain(contract, workflow_context, feature_dir), end="")
+        print(
+            render_contract_plain(
+                contract,
+                workflow_context,
+                feature_dir,
+                extra_missing_inputs=extra_missing_inputs,
+            ),
+            end="",
+        )
         return 0
 
     print(render_contract(contract), end="")

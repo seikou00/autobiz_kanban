@@ -5,24 +5,20 @@
 1. `proposal.md`
 2. `specs/**/*.md`
 3. `design.md`
-4. `UNIT_TEST_RESULT.json`
-5. `plan.json`
-6. `evidence/EVIDENCE.jsonl`
-7. `test-output.log`（仅排查时补充）
-8. 直接相关的代码与配置
+4. `UNIT_TEST_REPORT.md` / `test-output.log`
+5. `PLAN.md`
+6. 直接相关的代码与配置
 
 各输入用途：
 
 - `proposal.md`：提取能力边界、影响面、非目标
 - `specs/**/*.md`：提取 Requirement / Scenario 行为契约，作为 pass/fail 的主要行为依据
 - `design.md`：提取接口决策、数据决策、成功与失败路径
-- `UNIT_TEST_RESULT.json`：提取当前单测 verdict、scenarioCoverage、target 结果和回归优先级
-- `plan.json`：提供任务顺序、taskId、specRefs、designRefs 和已有验证提示
-- `evidence/EVIDENCE.jsonl`：提供已执行验证的 evidenceId 与 spec/design 回链
-- `test-output.log`：只在排查失败或跳过原因时补充阅读
+- `UNIT_TEST_REPORT.md` / `test-output.log`：提取当前单测覆盖、失败历史、轻量单测命令线索和回归优先级
+- `PLAN.md`：只提供任务顺序和已有验证提示
 - 代码与配置：补充路由、入口 URL、测试数据、稳定断言点
 
-`plan.json`、evidence 和代码上下文可以影响优先级与可执行性，但永远不是 pass/fail 依据。行为是否通过以 `specs/**/*.md` 为准，测试结论以 `E2E_RESULT.json` 为机器事实源。
+`PLAN.md` 和代码上下文可以影响优先级与可执行性，但永远不是 pass/fail 依据。行为是否通过以 `specs/**/*.md` 为准。
 
 ## 硬规则
 
@@ -32,7 +28,6 @@
 - 必须为 `specs/**/*.md` 中每个用户可见 Requirement / Scenario 生成最少一条用例
 - proposal 中每个本轮能力边界必须能追溯到至少一个 specs 场景，或明确标记不适合 E2E
 - `specs/**/*.md` 中每个属于用户主链路的 Requirement / Scenario 至少要被一条用例覆盖；API Decision 或 Data Decision 作为执行和断言上下文
-- `specs_contract` 里的 Requirement / Scenario 统一使用稳定 ID，例如 `specs/<capability>/spec.md#REQ-001` 和 `#SCN-001`
 - 每个用例必须标注 `execution_mode: browser | api | mixed | database_assisted`
 - 每个用例必须标注 `ui_required: true | false`
 - 当 Requirement / Scenario 涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由或用户可见流程时，必须设置 `ui_required: true`
@@ -83,8 +78,8 @@ source:
     - data_decision: DATA-001
   specs_contract:
     - spec: specs/comments/spec.md
-      requirement: Requirement [REQ-001]: comment creation
-      scenario: Scenario [SCN-001]: create comment successfully
+      requirement: Requirement: comment creation
+      scenario: Scenario: create comment successfully
   regression_risks:
     - 评论创建与列表刷新链路
 
@@ -143,7 +138,7 @@ cleanup:
 
 - `feature`：必填
 - `proposal_capability`：建议填写
-- `specs_contract`：建议填写，指向 specs 文件、Requirement 和 Scenario；优先写稳定 ID
+- `specs_contract`：建议填写，指向 specs 文件、Requirement 和 Scenario
 - `design_contract`：涉及 HTTP/API 或数据变更时建议填写 API/Data Decision
 - `regression_risks`：当该用例来自当前回归风险时建议填写
 
@@ -212,8 +207,8 @@ source:
     - comments
   specs_contract:
     - spec: specs/comments/spec.md
-      requirement: Requirement [REQ-001]: comment creation
-      scenario: Scenario [SCN-001]: create comment successfully
+      requirement: Requirement: comment creation
+      scenario: Scenario: create comment successfully
   design_contract:
     - api_decision: API-001
 preconditions:

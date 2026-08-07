@@ -117,3 +117,11 @@ __pycache__/
 
 # Local planning drafts
 /docs/plan-implementation-scope-switch.md
+
+# =========================
+# 使用的ai插件
+# =========================
+.trellis
+.agents
+.codex
+AGENTS.md

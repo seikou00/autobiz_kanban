@@ -24,6 +24,7 @@ if str(HOOKS_DIR) not in sys.path:
 
 from board_core.artifacts import scan_artifacts  # type: ignore[import-untyped]
 from board_core.contracts import artifact_dicts  # type: ignore[import-untyped]
+from board_core.state_store import check_or_fix_state_sync, state_rows_from_records  # type: ignore[import-untyped]
 from board_core.workflow_compiler import (  # type: ignore[import-untyped]
     BASE_WORKFLOW_PROFILE,
     BASE_WORKFLOW_TEMPLATE,
@@ -36,15 +37,13 @@ from board_core.workflow_compiler import (  # type: ignore[import-untyped]
 )
 from board_core.state import (  # type: ignore[import-untyped]
     find_feature_dir,
-    load_state_md,
-    load_state_records,
 )
 from board_core.workflow import (  # type: ignore[import-untyped]
     derive_current_node_status,
     derive_current_node_status_label,
     build_workflow_shell,
     derive_node_status,
-    find_current_node,
+    find_effective_current_node,
     node_status_label,
 )
 
@@ -150,10 +149,19 @@ def _hook_log_refs(workspace: Path, feature: str, feature_dir: Path | None = Non
     ]
 
 
+def build_run_context(workspace: Path, feature: str, config: dict) -> tuple[dict, dict]:
+    """Build the Feature Status payload plus the effective config it was built from.
 
-def run_mode(workspace: Path, feature: str, config: dict) -> int:
-    """Handle --mode run."""
-    state_records, state_record_errors, _state_record_exists = load_state_records(workspace)
+    ``config`` is the baseline board config.  A record that selects a profile,
+    template, dynamic stage or node skip compiles its own effective workflow
+    here.  Callers that look nodes up by ``skill`` / ``states`` /
+    ``runtimePolicy`` — session context resolving its runtime policy, for one —
+    must use the returned config: nodes inserted by profiles and dynamic stages
+    are not reachable through the baseline one.
+    """
+    sync_result = check_or_fix_state_sync(workspace, fix=True)
+    state_records = sync_result.records
+    state_record_errors: list[str] = []
     record = state_records.get(feature, {})
     workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
     workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
@@ -170,9 +178,19 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     suffix_states = config["checkpointSuffixState"]
 
     # Read state.json; STATE.md is repaired as a generated view when needed.
-    state_rows, state_errors, state_exists = load_state_md(workspace)
+    state_rows = state_rows_from_records(state_records)
+    state_errors = [
+        *sync_result.errors,
+        *sync_result.record_errors.get(feature, []),
+    ]
+    state_exists = sync_result.state_exists
     checkpoint = state_rows.get(feature)
-    feature_dir = find_feature_dir(workspace, feature)
+    archive_iteration = record.get("iteration") if checkpoint == "archived" else None
+    feature_dir = find_feature_dir(
+        workspace,
+        feature,
+        archive_iteration=archive_iteration,
+    )
     has_feature_dir = feature_dir is not None
 
     # Determine initial degraded state message
@@ -195,7 +213,13 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     # If there's no checkpoint, degrade gracefully: best-effort scan
     current_idx, current_node_id = -1, None
     if checkpoint:
-        current_idx, current_node_id = find_current_node(nodes_config, checkpoint)
+        current_idx, current_node_id = find_effective_current_node(
+            nodes_config,
+            checkpoint,
+            record.get("needsFixFromCheckpoint"),
+            stage=record.get("stage"),
+            stage_labels=config["workflow"]["checkpoints"]["stageLabels"],
+        )
 
     if current_idx < 0 and checkpoint:
         summary_parts.append(f"未知 checkpoint '{checkpoint}'，adapter 无法映射到流程节点")
@@ -209,6 +233,11 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
             workspace,
             artifact_dicts(node, "outputs"),
         )
+        if checkpoint == "archived":
+            archived_label = suffix_states["archived"]["label"]
+            for artifact in artifacts:
+                if artifact.get("artifactStatus") == "generated":
+                    artifact["artifactStatusLabel"] = archived_label
         run_nodes.append({
             "id": node["id"],
             "nodeStatus": node_status,
@@ -243,7 +272,19 @@ def run_mode(workspace: Path, feature: str, config: dict) -> int:
     if workflow_skipped:
         output["run"]["workflowSkippedNodes"] = list(workflow_skipped)
 
-    json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
+    return output, config
+
+
+def build_run_payload(workspace: Path, feature: str, config: dict) -> dict:
+    """Build the Feature Status payload used by both CLI and session context."""
+    payload, _effective_config = build_run_context(workspace, feature, config)
+    return payload
+
+
+def run_mode(workspace: Path, feature: str, config: dict) -> int:
+    """Handle --mode run."""
+    payload = build_run_payload(workspace, feature, config)
+    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
     print()
     return 0
 
@@ -266,12 +307,31 @@ def _collect_project_runs(
     nodes_config = config["workflow"]["nodes"]
     suffix_states = config["checkpointSuffixState"]
 
-    state_records, _state_errors, _state_exists = load_state_records(project_workspace)
-    feature_names = sorted(state_records.keys())
+    sync_result = check_or_fix_state_sync(project_workspace, fix=True)
+    state_records = sync_result.records
+    # Keep malformed records visible in the project overview.  State
+    # normalization intentionally omits them from ``records`` so callers that
+    # need a valid checkpoint can fail safely, but hiding the feature entirely
+    # makes the board unable to surface a state.json repair problem.
+    feature_names = sorted(set(state_records) | set(sync_result.raw_records))
 
     runs: list[dict] = []
     for feature in feature_names:
-        record = state_records.get(feature, {})
+        record = state_records.get(feature)
+        if record is None:
+            # An invalid checkpoint (or another invalid record field) cannot
+            # be routed reliably.  Preserve the feature in project status and
+            # use the neutral default workflow with an unknown current state.
+            runs.append({
+                "featureName": feature,
+                "featureId": feature,
+                "currentNodeId": "unknown",
+                "currentNodeStatus": "unknown",
+                "currentNodeStatusLabel": "未知",
+                "nodeIds": [node["id"] for node in config["workflow"]["nodes"]],
+            })
+            continue
+
         workflow_template = normalize_workflow_template(record.get("workflowTemplate"))
         workflow_skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
         workflow_id, _workflow_profile, _workflow_decisions = workflow_marker(
@@ -289,7 +349,13 @@ def _collect_project_runs(
         checkpoint = record.get("checkpoint", "")
         current_idx, current_node_id = (-1, None)
         if checkpoint:
-            current_idx, current_node_id = find_current_node(nodes_config, checkpoint)
+            current_idx, current_node_id = find_effective_current_node(
+                nodes_config,
+                checkpoint,
+                record.get("needsFixFromCheckpoint"),
+                stage=record.get("stage"),
+                stage_labels=run_config["workflow"]["checkpoints"]["stageLabels"],
+            )
 
         current_node_status = derive_current_node_status(checkpoint, suffix_states, current_idx)
         current_node = nodes_config[current_idx] if 0 <= current_idx < len(nodes_config) else None

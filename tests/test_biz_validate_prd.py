@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import json
 import subprocess
 import sys
 import tempfile
@@ -99,30 +98,6 @@ VALID_PRD = FORMAL_PREFIX + """## 用户故事
 """
 
 
-def write_confirmed_non_ui_context(feature_dir: Path) -> None:
-    (feature_dir / "UI_CONTEXT.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "featureId": "alpha",
-                "uiRequired": False,
-                "decisionStatus": "confirmed",
-                "decisionSource": "default_false",
-                "confirmedAtCheckpoint": "prd_done",
-                "notApplicableReason": "纯后端能力",
-                "pages": [],
-                "interactions": [],
-                "visualSources": [],
-                "capabilities": [],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 class BizValidatePrdTests(unittest.TestCase):
     def make_workspace(self, prd_content: str, discuss_content: str = DISCUSS_WITH_HISTORY) -> Path:
         tempdir = tempfile.TemporaryDirectory()
@@ -132,7 +107,6 @@ class BizValidatePrdTests(unittest.TestCase):
         feature_dir.mkdir(parents=True)
         (feature_dir / "PRD_DISCUSS.md").write_text(discuss_content, encoding="utf-8")
         (feature_dir / "PRD.md").write_text(prd_content, encoding="utf-8")
-        write_confirmed_non_ui_context(feature_dir)
         write_state_records(workspace, {"alpha": sample_record("prd_done")})
         return workspace
 
@@ -259,6 +233,16 @@ class BizValidatePrdTests(unittest.TestCase):
 
                 self.assertFalse(result["ok"])
                 self.assertIn("禁用标题", "\n".join(result["errors"]))
+
+    def test_rejects_pending_marker_after_prd_resolution_gate(self) -> None:
+        workspace = self.make_workspace(
+            VALID_PRD.replace("审批人需要快速识别异常付款。", "审批人【待确认】需要快速识别异常付款。")
+        )
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("逐项获取用户裁定", "\n".join(result["errors"]))
 
     def test_rejects_missing_new_required_section(self) -> None:
         workspace = self.make_workspace(VALID_PRD.replace("## 关键约束", "## 约束"))

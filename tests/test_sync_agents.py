@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -20,6 +21,12 @@ from hooks import sync_agents  # noqa: E402
 from hooks.agents_repo import build_sync_payload  # noqa: E402
 
 GIT = shutil.which("git")
+
+
+def _git_result(returncode=0, *, stdout="", stderr=""):
+    return subprocess.CompletedProcess(
+        args=["git"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
 
 
 @contextlib.contextmanager
@@ -38,19 +45,73 @@ def _temp_board_config(text: str):
 
 class ResolveRepoTest(unittest.TestCase):
     def test_cli_override_wins_without_reading_config(self):
-        url, ref = sync_agents._resolve_repo("https://example.com/a.git", "dev")
-        self.assertEqual((url, ref), ("https://example.com/a.git", "dev"))
+        with mock.patch.object(
+            sync_agents,
+            "load_board_config",
+            side_effect=AssertionError("config should not be read"),
+        ):
+            url, ref, ssh_url = sync_agents._resolve_repo(
+                "https://example.com/a.git", "dev"
+            )
+        self.assertEqual((url, ref, ssh_url), ("https://example.com/a.git", "dev", ""))
 
     def test_falls_back_to_empty_board_config(self):
         with _temp_board_config('{"agentsRepo": {"url": "", "ref": "main"}}'):
-            url, ref = sync_agents._resolve_repo(None, None)
+            url, ref, ssh_url = sync_agents._resolve_repo(None, None)
         self.assertEqual(url, "")
         self.assertEqual(ref, "main")
+        self.assertEqual(ssh_url, "")
 
     def test_falls_back_to_configured_url(self):
-        with _temp_board_config('{"agentsRepo": {"url": "https://git/x.git", "ref": "dev"}}'):
-            url, ref = sync_agents._resolve_repo(None, None)
-        self.assertEqual((url, ref), ("https://git/x.git", "dev"))
+        config = (
+            '{"agentsRepo": {"url": "https://git/x.git", '
+            '"sshUrl": "git@git:x.git", "ref": "dev"}}'
+        )
+        with _temp_board_config(config):
+            url, ref, ssh_url = sync_agents._resolve_repo(None, None)
+        self.assertEqual((url, ref, ssh_url), ("https://git/x.git", "dev", "git@git:x.git"))
+
+    def test_explicit_repo_url_does_not_inherit_configured_ssh_url(self):
+        config = (
+            '{"agentsRepo": {"url": "https://git/config.git", '
+            '"sshUrl": "git@git:config.git", "ref": "dev"}}'
+        )
+        with _temp_board_config(config):
+            url, ref, ssh_url = sync_agents._resolve_repo(
+                "https://git/override.git", None
+            )
+        self.assertEqual(url, "https://git/override.git")
+        self.assertEqual(ref, "dev")
+        self.assertEqual(ssh_url, "")
+
+    def test_explicit_empty_repo_url_still_disables_configured_ssh_url(self):
+        config = (
+            '{"agentsRepo": {"url": "https://git/config.git", '
+            '"sshUrl": "git@git:config.git", "ref": "dev"}}'
+        )
+        with _temp_board_config(config):
+            url, ref, ssh_url = sync_agents._resolve_repo("", None)
+        self.assertEqual((url, ref, ssh_url), ("https://git/config.git", "dev", ""))
+
+    def test_explicit_ssh_url_overrides_config_and_is_trimmed(self):
+        config = (
+            '{"agentsRepo": {"url": "https://git/config.git", '
+            '"sshUrl": "git@git:config.git", "ref": "dev"}}'
+        )
+        with _temp_board_config(config):
+            url, ref, ssh_url = sync_agents._resolve_repo(
+                None, None, "  git@git:override.git  "
+            )
+        self.assertEqual((url, ref, ssh_url), ("https://git/config.git", "dev", "git@git:override.git"))
+
+    def test_explicit_empty_ssh_url_disables_configured_fallback(self):
+        config = (
+            '{"agentsRepo": {"url": "https://git/config.git", '
+            '"sshUrl": "git@git:config.git", "ref": "dev"}}'
+        )
+        with _temp_board_config(config):
+            url, ref, ssh_url = sync_agents._resolve_repo(None, None, "")
+        self.assertEqual((url, ref, ssh_url), ("https://git/config.git", "dev", ""))
 
 
 class RunFailurePathTest(unittest.TestCase):
@@ -59,6 +120,72 @@ class RunFailurePathTest(unittest.TestCase):
             result = sync_agents.run(None, None)
         self.assertFalse(result["ok"])
         self.assertIn("未配置 agents 仓库地址", result["message"])
+
+    def test_https_and_ssh_failure_still_outputs_json_and_exit_zero(self):
+        dest = Path(tempfile.mkdtemp()) / "sys"
+        failures = [
+            _git_result(1, stderr="https branch unavailable"),
+            _git_result(1, stderr="https clone unavailable"),
+            _git_result(1, stderr="ssh branch unavailable"),
+            _git_result(1, stderr="ssh clone unavailable"),
+        ]
+        stdout = io.StringIO()
+        with mock.patch.object(sync_agents, "get_agents_root", return_value=dest), mock.patch.object(
+            sync_agents, "_run_git", side_effect=failures
+        ), contextlib.redirect_stdout(stdout):
+            code = sync_agents.main(
+                [
+                    "--repo-url",
+                    "https://git/x.git",
+                    "--ssh-url",
+                    "git@git:x.git",
+                    "--ref",
+                    "main",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertFalse(payload["ok"])
+        self.assertIn("HTTPS 克隆失败", payload["message"])
+        self.assertIn("https clone unavailable", payload["message"])
+        self.assertIn("SSH 兜底失败", payload["message"])
+        self.assertIn("ssh clone unavailable", payload["message"])
+
+
+class RunSuccessPathTest(unittest.TestCase):
+    def test_payload_records_canonical_urls_and_actual_transport(self):
+        config = (
+            '{"agentsRepo": {"url": "https://git/x.git", '
+            '"sshUrl": "git@git:x.git", "ref": "dev"}}'
+        )
+        with _temp_board_config(config), mock.patch.object(
+            sync_agents,
+            "sync_repo",
+            return_value={"commit": "abc123", "transport": "ssh"},
+        ) as sync_repo_mock, mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            side_effect=lambda *, repo_info: {"ok": True, "repo": repo_info},
+        ):
+            result = sync_agents.run(None, None)
+
+        sync_repo_mock.assert_called_once_with(
+            "https://git/x.git",
+            "dev",
+            mock.ANY,
+            "git@git:x.git",
+        )
+        self.assertEqual(
+            result["repo"],
+            {
+                "url": "https://git/x.git",
+                "sshUrl": "git@git:x.git",
+                "ref": "dev",
+                "commit": "abc123",
+                "transport": "ssh",
+            },
+        )
 
 
 def _git(args, cwd):
@@ -87,6 +214,209 @@ def _make_source_repo() -> Path:
     return src
 
 
+class SyncRepoFallbackTest(unittest.TestCase):
+    HTTPS = "https://git.example.com/agents.git"
+    SSH = "git@git.example.com:agents.git"
+
+    def _dest(self):
+        return Path(tempfile.mkdtemp()) / "sys"
+
+    def test_https_branch_clone_success_does_not_use_ssh(self):
+        dest = self._dest()
+        results = [
+            _git_result(),
+            _git_result(stdout="https-commit\n"),
+        ]
+        with mock.patch.object(sync_agents, "_run_git", side_effect=results) as run_git:
+            info = sync_agents.sync_repo(self.HTTPS, "main", dest, self.SSH)
+
+        self.assertEqual(info, {"commit": "https-commit", "transport": "https"})
+        self.assertEqual(run_git.call_count, 2)
+        self.assertTrue(
+            all(self.SSH not in call.args[0] for call in run_git.call_args_list)
+        )
+
+    def test_https_plain_clone_and_checkout_success_does_not_use_ssh(self):
+        dest = self._dest()
+        results = [
+            _git_result(1, stderr="branch form failed"),
+            _git_result(),
+            _git_result(),
+            _git_result(stdout="checkout-commit\n"),
+        ]
+        with mock.patch.object(sync_agents, "_run_git", side_effect=results) as run_git:
+            info = sync_agents.sync_repo(self.HTTPS, "commit-ish", dest, self.SSH)
+
+        self.assertEqual(info, {"commit": "checkout-commit", "transport": "https"})
+        self.assertEqual(run_git.call_count, 4)
+        self.assertTrue(
+            all(self.SSH not in call.args[0] for call in run_git.call_args_list)
+        )
+
+    def test_https_clone_failures_are_cleaned_before_ssh_success(self):
+        dest = self._dest()
+        marker = dest / "partial"
+        calls = []
+
+        def fake_run_git(args, *, cwd=None, timeout=None):
+            calls.append((args, cwd, timeout))
+            if len(calls) == 1:
+                dest.mkdir(parents=True)
+                marker.write_text("https branch partial", encoding="utf-8")
+                return _git_result(1, stderr="https branch unavailable")
+            if len(calls) == 2:
+                self.assertFalse(marker.exists())
+                dest.mkdir(parents=True)
+                marker.write_text("https plain partial", encoding="utf-8")
+                return _git_result(1, stderr="https clone unavailable")
+            if len(calls) == 3:
+                self.assertFalse(marker.exists())
+                return _git_result()
+            if len(calls) == 4:
+                return _git_result(stdout="ssh-commit\n")
+            raise AssertionError(f"unexpected git call: {args}")
+
+        with mock.patch.object(sync_agents, "_run_git", side_effect=fake_run_git):
+            info = sync_agents.sync_repo(self.HTTPS, "main", dest, self.SSH)
+
+        self.assertEqual(info, {"commit": "ssh-commit", "transport": "ssh"})
+        clone_urls = [args[-2] for args, _, _ in calls if args[0] == "clone"]
+        self.assertEqual(clone_urls, [self.HTTPS, self.HTTPS, self.SSH])
+
+    def test_https_clone_timeout_stops_https_and_uses_ssh(self):
+        dest = self._dest()
+        marker = dest / "partial"
+
+        def fake_run_git(args, *, cwd=None, timeout=None):
+            if args[0] == "clone" and self.HTTPS in args:
+                self.assertEqual(timeout, sync_agents.HTTPS_CLONE_TIMEOUT_SECONDS)
+                dest.mkdir(parents=True, exist_ok=True)
+                marker.write_text("https partial", encoding="utf-8")
+                raise subprocess.TimeoutExpired(["git", *args], timeout)
+            if args[0] == "clone" and self.SSH in args:
+                self.assertIsNone(timeout)
+                self.assertFalse(marker.exists())
+                return _git_result()
+            if args[0] == "rev-parse":
+                return _git_result(stdout="ssh-commit\n")
+            raise AssertionError(f"unexpected git call: {args}")
+
+        with mock.patch.object(sync_agents, "_run_git", side_effect=fake_run_git) as run_git:
+            info = sync_agents.sync_repo(self.HTTPS, "main", dest, self.SSH)
+
+        self.assertEqual(info, {"commit": "ssh-commit", "transport": "ssh"})
+        self.assertEqual(run_git.call_count, 3)
+
+    def test_https_plain_clone_also_has_timeout(self):
+        dest = self._dest()
+        results = [
+            _git_result(1, stderr="branch form failed"),
+            subprocess.TimeoutExpired(["git", "clone"], sync_agents.HTTPS_CLONE_TIMEOUT_SECONDS),
+            _git_result(),
+            _git_result(stdout="ssh-commit\n"),
+        ]
+        with mock.patch.object(sync_agents, "_run_git", side_effect=results) as run_git:
+            info = sync_agents.sync_repo(self.HTTPS, "main", dest, self.SSH)
+
+        self.assertEqual(info, {"commit": "ssh-commit", "transport": "ssh"})
+        self.assertEqual(
+            [call.kwargs.get("timeout") for call in run_git.call_args_list],
+            [20, 20, None, None],
+        )
+
+    def test_ssh_uses_same_plain_clone_and_checkout_strategy(self):
+        dest = self._dest()
+        results = [
+            _git_result(1, stderr="https branch unavailable"),
+            _git_result(1, stderr="https clone unavailable"),
+            _git_result(1, stderr="ssh branch form failed"),
+            _git_result(),
+            _git_result(),
+            _git_result(stdout="ssh-checkout-commit\n"),
+        ]
+        with mock.patch.object(sync_agents, "_run_git", side_effect=results) as run_git:
+            info = sync_agents.sync_repo(self.HTTPS, "commit-ish", dest, self.SSH)
+
+        self.assertEqual(info, {"commit": "ssh-checkout-commit", "transport": "ssh"})
+        clone_urls = [
+            call.args[0][-2]
+            for call in run_git.call_args_list
+            if call.args[0][0] == "clone"
+        ]
+        self.assertEqual(clone_urls, [self.HTTPS, self.HTTPS, self.SSH, self.SSH])
+        checkout_calls = [
+            call
+            for call in run_git.call_args_list
+            if call.args[0][0] == "checkout"
+        ]
+        self.assertEqual(len(checkout_calls), 1)
+        self.assertEqual(checkout_calls[0].args[0], ["checkout", "commit-ish"])
+
+    def test_checkout_failure_does_not_trigger_ssh(self):
+        dest = self._dest()
+        results = [
+            _git_result(1, stderr="branch form failed"),
+            _git_result(),
+            _git_result(1, stderr="unknown ref"),
+        ]
+        with mock.patch.object(sync_agents, "_run_git", side_effect=results) as run_git:
+            with self.assertRaises(RuntimeError) as ctx:
+                sync_agents.sync_repo(self.HTTPS, "missing-ref", dest, self.SSH)
+
+        self.assertIn("切换到 missing-ref 失败", str(ctx.exception))
+        self.assertEqual(run_git.call_count, 3)
+        self.assertTrue(
+            all(self.SSH not in call.args[0] for call in run_git.call_args_list)
+        )
+
+    def test_missing_ssh_url_keeps_existing_failure_behavior(self):
+        dest = self._dest()
+        results = [
+            _git_result(1, stderr="branch unavailable"),
+            _git_result(1, stderr="https unavailable"),
+        ]
+        with mock.patch.object(sync_agents, "_run_git", side_effect=results) as run_git:
+            with self.assertRaises(RuntimeError) as ctx:
+                sync_agents.sync_repo(self.HTTPS, "main", dest)
+
+        self.assertIn("https unavailable", str(ctx.exception))
+        self.assertNotIn("SSH 兜底失败", str(ctx.exception))
+        self.assertEqual(run_git.call_count, 2)
+
+    def test_non_https_primary_never_uses_ssh_fallback(self):
+        dest = self._dest()
+        results = [
+            _git_result(1, stderr="branch unavailable"),
+            _git_result(1, stderr="local clone unavailable"),
+        ]
+        with mock.patch.object(sync_agents, "_run_git", side_effect=results) as run_git:
+            with self.assertRaises(RuntimeError):
+                sync_agents.sync_repo("/local/repo", "main", dest, self.SSH)
+
+        self.assertEqual(run_git.call_count, 2)
+        self.assertTrue(
+            all(self.SSH not in call.args[0] for call in run_git.call_args_list)
+        )
+
+    def test_both_transports_fail_with_combined_diagnostics(self):
+        dest = self._dest()
+        results = [
+            _git_result(1, stderr="https branch unavailable"),
+            _git_result(1, stderr="https clone unavailable"),
+            _git_result(1, stderr="ssh branch unavailable"),
+            _git_result(1, stderr="ssh clone unavailable"),
+        ]
+        with mock.patch.object(sync_agents, "_run_git", side_effect=results):
+            with self.assertRaises(RuntimeError) as ctx:
+                sync_agents.sync_repo(self.HTTPS, "main", dest, self.SSH)
+
+        message = str(ctx.exception)
+        self.assertIn("HTTPS 克隆失败", message)
+        self.assertIn("https clone unavailable", message)
+        self.assertIn("SSH 兜底失败", message)
+        self.assertIn("ssh clone unavailable", message)
+
+
 @unittest.skipUnless(GIT, "git not available")
 class SyncRepoEndToEndTest(unittest.TestCase):
     def test_clone_then_update(self):
@@ -97,6 +427,7 @@ class SyncRepoEndToEndTest(unittest.TestCase):
         # 首次：克隆
         info = sync_agents.sync_repo(str(src), "main", dest)
         self.assertTrue(info["commit"])
+        self.assertEqual(info["transport"], "other")
         self.assertTrue((dest / "agents.manifest.json").is_file())
         self.assertTrue((dest / "LF39" / "AGENTS.md").is_file())
 
@@ -162,6 +493,7 @@ class WriteBoardConfigTest(unittest.TestCase):
         '  "apiVersion": 1,\n'
         '  "agentsRepo": {\n'
         '    "url": "",\n'
+        '    "sshUrl": "git@git.example.com:agents.git",\n'
         '    "ref": "main"\n'
         "  },\n"
         '  "supported_deploy_units": ["OLD1", "OLD2"],\n'
@@ -182,6 +514,10 @@ class WriteBoardConfigTest(unittest.TestCase):
         self.assertIn('  "apiVersion": 1,\n', out)
         self.assertIn('  "inspectCommands": { "darwin": { "x": "y" } }\n', out)
         self.assertIn('"supported_deploy_units": ["A", "B", "C"],', out)
+        self.assertEqual(
+            json.loads(out)["agentsRepo"]["sshUrl"],
+            "git@git.example.com:agents.git",
+        )
         # 仅定点替换、不重排：总行数不变
         self.assertEqual(len(out.splitlines()), len(self.SAMPLE.splitlines()))
 
@@ -190,6 +526,7 @@ class WriteBoardConfigTest(unittest.TestCase):
             "{\n"
             '  "agentsRepo": {\n'
             '    "url": "",\n'
+            '    "sshUrl": "git@git.example.com:agents.git",\n'
             '    "ref": "main"\n'
             "  },\n"
             '  "inspectCommands": {}\n'
@@ -199,6 +536,7 @@ class WriteBoardConfigTest(unittest.TestCase):
         sync_agents.merge_supported_units_into_board_config(["A"], cfg)
         data = json.loads(cfg.read_text(encoding="utf-8"))
         self.assertEqual(data["supported_deploy_units"], ["A"])
+        self.assertEqual(data["agentsRepo"]["sshUrl"], "git@git.example.com:agents.git")
         self.assertEqual(data["inspectCommands"], {})
 
     def test_empty_list_writes_empty_array(self):

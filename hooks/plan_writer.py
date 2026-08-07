@@ -39,8 +39,10 @@ from hooks.json_writer_common import (  # noqa: E402
     with_result_data,
     write_text,
     WriterError,
+    WriterEncodingError,
 )
 from hooks.evidence_kernel import FileLock  # noqa: E402
+from hooks.implementation_scope import load_scope  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_VALIDATION_KINDS,
     BATCH_STRATEGY,
@@ -58,6 +60,7 @@ from hooks.plan_json import (  # noqa: E402
     deferred_task_validation_enabled,
     load_plan_bundle,
     normalize_status,
+    normalize_repository_relative_path,
     task_execution_lane,
     task_execution_mode,
     task_contract_sha256,
@@ -642,8 +645,23 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
     errors = _task_group_structure_errors(data)
     if errors:
         return errors
+    implementation_scope, scope_errors = load_scope(feature_dir)
+    errors.extend({"reason": error} for error in scope_errors)
+    if scope_errors:
+        return errors
     for group in _task_groups(data):
         task_id = str(group.get("id", "task"))
+        ui_required = group.get("uiRequired") is True
+        if implementation_scope == "backend_only" and ui_required:
+            errors.append({
+                "reason": "implementation_scope_frontend_task_forbidden",
+                "detail": f"scope=backend_only;task={task_id}",
+            })
+        elif implementation_scope == "frontend_only" and not ui_required:
+            errors.append({
+                "reason": "implementation_scope_backend_task_forbidden",
+                "detail": f"scope=frontend_only;task={task_id}",
+            })
         errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
     if errors:
         return errors
@@ -1365,11 +1383,27 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
     return task
 
 
+def _plan_writer_stdin_body() -> dict[str, Any]:
+    try:
+        return read_object_stdin()
+    except WriterEncodingError as exc:
+        raise PlanWriterInputError("invalid_body_stdin_encoding", str(exc)) from exc
+    except WriterError as exc:
+        message = str(exc)
+        if "stdin 为空" in message:
+            raise PlanWriterInputError("empty_body_stdin", message) from exc
+        if "stdin 不是合法 JSON" in message:
+            raise PlanWriterInputError("invalid_body_stdin_json", message) from exc
+        if "stdin JSON 顶层必须是 object" in message:
+            raise PlanWriterInputError("invalid_body_stdin_object", message) from exc
+        raise
+
+
 def _draft_detail_body(args: argparse.Namespace) -> dict[str, Any]:
     if args.body_file:
         return read_object_file(args.body_file)
     if args.body_stdin:
-        return read_object_stdin()
+        return _plan_writer_stdin_body()
     if args.body_json:
         value = parse_json_value(args.body_json)
         if not isinstance(value, dict):
@@ -1618,8 +1652,10 @@ def _annotate_validation_test_plan(
         plan = maven_test_plan(command, command_dir)
         if plan is not None:
             plan["cwd"] = cwd
-            if command.get("repo"):
-                plan["repo"] = command.get("repo")
+            # Persist the effective workspace key for every target.  Omitting
+            # the default key made the same target appear under both an empty
+            # repo and ``default`` in later structural checks.
+            plan["repo"] = str(key)
             plans.append(plan)
     candidate = copy.deepcopy(task)
     candidate["validationTestPlan"] = plans
@@ -1924,17 +1960,7 @@ def _task_from_body(args: argparse.Namespace, data: dict[str, Any]) -> dict[str,
         if not isinstance(task, dict):
             raise ValueError("--task-json 顶层必须是 object")
     elif args.body_stdin:
-        try:
-            task = read_object_stdin()
-        except WriterError as exc:
-            message = str(exc)
-            if "stdin 为空" in message:
-                raise PlanWriterInputError("empty_body_stdin", message) from exc
-            if "stdin 不是合法 JSON" in message:
-                raise PlanWriterInputError("invalid_body_stdin_json", message) from exc
-            if "stdin JSON 顶层必须是 object" in message:
-                raise PlanWriterInputError("invalid_body_stdin_object", message) from exc
-            raise
+        task = _plan_writer_stdin_body()
     else:
         return None
 
@@ -2218,6 +2244,108 @@ def _code_workspace_preflight_errors(
     return errors
 
 
+def _created_maven_test_source_identity(selector: str) -> tuple[str, str | None] | None:
+    """Return the source stem and optional package-qualified class selector.
+
+    A simple Maven selector such as ``AlphaTest`` does not identify a package,
+    so it could refer to any ``*.AlphaTest`` source below the same module.  A
+    package-qualified selector does.  Keeping both parts lets the caller reject
+    ambiguous simple selectors without rejecting two known, distinct packages.
+    """
+
+    class_selector = selector.split("#", 1)[0].strip().split("$", 1)[0]
+    if not class_selector:
+        return None
+    source_stem = class_selector.rsplit(".", 1)[-1].strip()
+    if not source_stem:
+        return None
+    return source_stem, class_selector if "." in class_selector else None
+
+
+def _duplicate_created_test_target_errors(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Reject two TASKs planning to create the same test source file.
+
+    ``validationTestPlan`` is derived by :func:`_annotate_validation_test_plan`
+    from the filesystem: a selector whose source file is absent gets
+    ``mode=create_in_code``. Two TASKs holding the same ``create_in_code``
+    target means both are told to author the same file, which the Code runner
+    cannot satisfy -- the second one finds the file already present but outside
+    its own start snapshot and returns
+    ``code_task_validation_test_creation_required`` forever.
+
+    Maven accepts both simple and fully-qualified test selectors.  A pending
+    simple selector has no package path, so it is treated as conflicting with a
+    fully-qualified selector with the same source stem in the same module.  Two
+    different fully-qualified package paths remain distinct source files.
+    """
+
+    owners: dict[tuple[str, str, str], list[tuple[str, str | None]]] = {}
+    for task in _tasks(data):
+        task_id = str(task.get("id"))
+        plans = task.get("validationTestPlan")
+        if not isinstance(plans, list):
+            continue
+        seen: set[tuple[str, str, str, str | None]] = set()
+        for plan in plans:
+            if not isinstance(plan, dict):
+                continue
+            repo = str(plan.get("repo") or "default")
+            raw_cwd = plan.get("cwd")
+            cwd = normalize_repository_relative_path(raw_cwd)
+            if cwd is None:
+                cwd = str(raw_cwd or "")
+            for target in plan.get("targets", []):
+                if not isinstance(target, dict):
+                    continue
+                if target.get("mode") != "create_in_code":
+                    continue
+                selector = target.get("selector")
+                if not isinstance(selector, str) or not selector:
+                    continue
+                identity = _created_maven_test_source_identity(selector)
+                if identity is None:
+                    continue
+                source_stem, qualified_selector = identity
+                key = (repo, cwd, source_stem)
+                owner = (task_id, qualified_selector)
+                if (*key, qualified_selector) in seen:
+                    continue
+                seen.add((*key, qualified_selector))
+                owners.setdefault(key, []).append(owner)
+
+    errors: list[dict[str, str]] = []
+    for (repo, cwd, source_stem), task_owners in sorted(owners.items()):
+        colliding_task_id_set: set[str] = set()
+        for index, (task_id, qualified_selector) in enumerate(task_owners):
+            for other_task_id, other_qualified_selector in task_owners[index + 1:]:
+                if task_id == other_task_id:
+                    continue
+                # Two known packages name different files.  A simple selector
+                # is package-ambiguous and must not be used to create a second
+                # file next to any package-qualified selector of the same name.
+                if (
+                    qualified_selector is not None
+                    and other_qualified_selector is not None
+                    and qualified_selector != other_qualified_selector
+                ):
+                    continue
+                colliding_task_id_set.update((task_id, other_task_id))
+        colliding_task_ids = list(dict.fromkeys(
+            task_id for task_id, _ in task_owners if task_id in colliding_task_id_set
+        ))
+        if len(colliding_task_ids) < 2:
+            continue
+        location = f"{repo}:{cwd}"
+        errors.append({
+            "reason": "duplicate_created_test_target",
+            "detail": (
+                f"target={source_stem};taskIds={','.join(colliding_task_ids)};at={location};"
+                "each_task_needs_its_own_test_class_or_set_execution_mode_verified_existing"
+            ),
+        })
+    return errors
+
+
 def _task_set_preflight_errors(
     feature_dir: Path,
     data: dict[str, Any],
@@ -2234,6 +2362,9 @@ def _task_set_preflight_errors(
     if errors:
         return errors
     errors = _code_workspace_preflight_errors(data, code_workspaces)
+    if errors:
+        return errors
+    errors = _duplicate_created_test_target_errors(data)
     if errors:
         return errors
     root, batches = _project_batches(data)
@@ -2295,6 +2426,14 @@ def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
         return render_result(WriterResult(ok=False, path=group_file, errors=errors))
     workspace_contexts = _code_workspace_contexts(args.code_workspace)
     data = _initial(feature)
+    implementation_scope, scope_errors = load_scope(_path(workspace, feature).parent)
+    if scope_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=[{"reason": error} for error in scope_errors],
+        ))
+    data["implementationScope"] = implementation_scope
     data["tasks"] = [
         _draft_task_skeleton(
             group,
@@ -2512,6 +2651,14 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
             tasks.append(_draft_task_skeleton(group, workspace_roots))
             reset.append(task_id)
     data = _initial(feature)
+    implementation_scope, scope_errors = load_scope(_path(workspace, feature).parent)
+    if scope_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=[{"reason": error} for error in scope_errors],
+        ))
+    data["implementationScope"] = implementation_scope
     data["tasks"] = tasks
     data["taskSetStatus"] = "collecting"
     lock = {
@@ -4923,6 +5070,8 @@ def main(argv: list[str] | None = None) -> int:
             return args.func(args)
     except PlanWriterInputError as exc:
         return render_result(fail(exc.reason, exc.detail))
+    except WriterEncodingError as exc:
+        return render_result(fail("plan_writer_encoding_error", str(exc)))
     except Exception as exc:
         return render_result(fail("plan_writer_failed", str(exc)))
 

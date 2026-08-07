@@ -1,21 +1,20 @@
 ---
 name: autobiz-prd-generate
 description: Biz 阶段 PRD 生成技能。
-version: v1.2.1701
+version: v1.2.08041
 ---
 
-# /autobiz-prd-generate — Biz 阶段 PRD 生成技能
+# /autobiz-prd-generate — Biz 阶段 PRD 生成
 
-## 概述
+## 实现范围
 
-本技能用于生成可交付的正式 `PRD.md`。
+生成 PRD 前读取 Feature 的 `IMPLEMENTATION_SCOPE.json`：
 
-## 核心能力
+```bash
+python "${pluginPath}/hooks/implementation_scope.py" validate --feature "${feature}"
+```
 
-- 提炼上游素材：按其 `读取方式` 读取已收敛的需求摘要、确认结论、问题处理状态、假设与风险
-- 正式稿整理：正式稿标题固定为 `# 需求正式稿`，剔除讨论稿说明句、讨论记录、待确认事项和外部依赖章节
-- 正式段落追加：直接包含 `用户故事`、`验收口径`、`验收标准`、`关键约束`
-- PRD 质量检查：确保追加段落可供下游 Dev 阶段消费，且正式 PRD 不包含讨论记录正文、包装标题、待确认事项或外部依赖章节
+`backend_only` 的 PRD 只保留 API、数据、权限、状态和后端异常；`frontend_only` 只保留页面、交互、前端校验和展示状态；`full_stack` 保持完整范围。PRD 必须包含 `## 当前实现范围`，被剥离内容保留在 `SCOPE_SPLIT.md`。
 
 ## 工作流程
 
@@ -24,8 +23,10 @@ version: v1.2.1701
 调用脚本读取当前 Feature 状态：
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
+
+每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 
 ## 缺失产物处理
 
@@ -36,77 +37,98 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-prd-generate --fe
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-### 生成正式 `PRD.md`
+### 搬运正文
 
-#### 目标
+```bash
+python "${pluginPath}/skills/autobiz/hooks/prd_transplant.py" --feature "${feature}"
+```
 
-- 基于上游已确认内容（按各 input 的 `method`/`degrade`）提炼正式需求，未确认的内容不得写入；不要求 `PRD.md` 正文与上游素材逐字一致
-- 正式稿必须以 `# 需求正式稿` 开头，直接剔除独立出现的 `本文档为需求讨论中间稿，用于记录需求讨论过程和结论`
-- 正式稿只保留已确认的正式需求，剔除讨论记录正文与讨论态章节、不输出包装标题
-- 正式稿必须直接包含用户故事、验收口径、验收标准和关键约束
+其余正文逐字保留
+
+脚本输出必须原样转述给用户，不得只说"已生成"：
+
+- 「已删除章节」逐条列出（章节名 + 行数）
+- 「待确认章节」逐条列出（章节名 + 行号）
+- 「`【待确认】`告警」逐条列出（行号 + 内容）
+
+脚本报错时按分支处理：
+
+- `PRD.md 已存在` → 先与用户确认是否要重刷正文；确认后加 `--force` 重跑。此时模型已追加的四段会被冲掉，需要重新追加
+- `PRD_DISCUSS.md 不存在` → 走降级：先与用户完成需求澄清，再基于用户**已确认**的内容手写 `PRD.md` 正文。这是唯一允许手写正文的分支
+
+### 待确认问题裁定门
+
+- 范围：`PRD.md` 的 `待确认事项` / `待确认项` 章节中每个实质条目，以及每一处 `【待确认】`；同一决策去重后逐条裁定。章节正文仅为「无」时直接移除该空章节。
+- 展示：裁定前展示 `待确认内容 / 所在上下文 / 当前建议 / 备选 / 影响`。
+- 消解定义：裁定即消解，但**裁定必须落盘才算数**。一个条目被消解 = 裁定产生的具体内容（采纳的方案、用户提供的链接/字段）已写进 `PRD.md` 对应需求正文，**且**原待确认条目/标记已移除。
+- 协议：先读取 `${pluginPath}/skills/references/ask-user-question.md`，再用 `request_user_input` 逐项提问，每轮最多 3 项；`id` 用条目内容的简短 snake_case 概括。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
+- 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前建议确认 (Recommended)」：采纳展示中的当前建议；②「采纳备选：<方案>」：选项自身携带具体方案；③「需要调整」：用户将给出修改意见，吸收后更新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 PRD 阶段、不推进。
+- 信息缺口型条目（缺外部约定、上游材料等）：**判断这一时充分查看系统提示词中<AGENTS_INSTRUCTIONS>这个块里面的信息，不得不看就判断是外部约定和上游材料**`question` 中直接写「若现在能提供，请在『其他』中粘贴链接或具体内容」；预设选项只从「调整需求移除该依赖」「暂停，拿到材料后继续」中取。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口，不得以任何措辞重新引入。共享协议第 3 节的「后续补充并继续」模板，这个阶段禁止搬进裁定门。
+- 回写：裁定后立即把具体结论写入 `PRD.md` 对应需求正文；无对应位置时写入「当前已确认结论」。用户裁定为本期不做时，在对应需求标注「本期不做」或「二期」。**声称拥有 ≠ 提供**：用户仅声称「我有 / 稍后给」而未提供实体时，该条**未消解**：追问一次索取内容，仍未提供则按「调整需求移除该依赖 / 暂停」重发裁定。结论落盘后才能移除原待确认条目/标记。
+- 写入边界：裁定结果写入 `PRD.md`，不回改 `PRD_DISCUSS.md`。
+- **禁止自行消解**：消解只能是用户裁定的结果。不得以「这是实现细节」「不影响主流程」「PRD 阶段只关心 WHAT」等任何理由自行认定某条已消解。
+- **自由表达即退出结构化**：用户不点选项、而是直接给出实质回复（补一条结论、改一处措辞、提新问题），当作该条的裁定内容吸收并更新，**不得机械重复弹同一个结构化选择**。
+- 消解自查：`PRD.md` 无待确认章节、无 `【待确认】`、无 TBD/待补充/待提供/后续确认等延后占位，也无对缺失材料的引用（「以实际接口为准」「开发阶段补充」等），再进入下一节。
+- 顺序硬约束：全部条目裁定并回写前，禁止追加正式段落、更新 `prd_done` 或运行完成校验。
+
+反模式：
+
+- 禁止直接删除待确认条目或整个章节，未将裁定结论写入 `PRD.md`。
+- 把待确认项逐条展示后，未逐条以 `request_user_input` 提问就继续推进；展示不等于裁定。
+- 自行认定待确认项不影响主流程而跳过提问；「延后处理」不能出现。
+- 选项 label/description 含「待确认」「先占位」「后续补充」「稍后提供」「实现时确认」「开发阶段再定」「以实际接口为准」等延后语义——凡选中后条目仍处于待确认状态的选项都是非法选项。延后判定按语义不按字面。
+- 「已确认，我有 url/文档」这类仅声称拥有信息、不当场收集内容的选项，需要继续发起一次追问。
+
+### 追加正式段落
+
+用 Edit 在 `PRD.md` **末尾追加**四段，禁止用 Write 工具整文件覆盖。
 
 #### `PRD.md` 结构要求
 
-最终 `PRD.md` 必须采用正式稿结构：
-
-1. **正式标题与需求正文**
-   - 第一行必须是 `# 需求正式稿`
-   - 可以基于上游素材或用户确认的需求结论整理需求摘要、确认结论、问题处理状态、假设与风险
-   - 不需要与 `PRD_DISCUSS.md` 截断前内容做正文一致性对比
-2. **正式需求段落**
-   - 必须直接包含 `用户故事`、`验收口径`、`验收标准`、`关键约束`
-   - 第一段正式需求段落建议直接从 `## 用户故事` 开始，不要额外包一层标题
+1. **标题与需求正文**
+   - 第一行是 `# 需求正式稿`
+   - 其后是搬运自 `PRD_DISCUSS.md` 并完成待确认闭环的需求正文
+2. **需求段落**
+   - 必须包含 `用户故事`、`验收口径`、`验收标准`、`关键约束`
+   - 从 `## 用户故事` 开始，接在正文末尾，四段之间不插入其他章节
 
 #### 要求
 
-- 若讨论稿包含 `历次讨论记录` 或 `讨论记录`，该标题及其后的讨论记录正文不得进入 `PRD.md`
-- `PRD.md` 不得包含 `审理提炼`、`待确认事项`、`待确认项`、`外部依赖`、`第三方依赖` 标题（本条为禁用标题的单一事实源，由 `biz_validate.py prd` 强制）
-- 正式需求段落不得把讨论稿内容改写成旧 PRD 模板
+- 四段内容必须能从闭环后的正文直接追溯，未确认的内容不得写入
+- 若讨论稿包含 `讨论补充资料`，必须将该章节完整写入 `PRD.md`；不得将其视为讨论记录而删除
 - 用户故事应描述角色、目标和业务价值，避免写成内部实现任务
 - 验收口径应拆分用户视角、工程视角和回归视角
 - 验收标准必须可验证，覆盖关键输入、处理、输出、边界和异常路径
-- 关键约束应覆盖需求中已明确或可从正式需求正文直接追溯的权限、数据、状态、时间和组织约束
-- 若信息不足以生成正式段落，必须停止补齐信息后再生成：按上游 `method`/`degrade` 回到需求澄清或直接与用户确认；不要把未确认内容写进正式 PRD
+- 关键约束应覆盖需求中已明确或可从正文直接追溯的权限、数据、状态、时间和组织约束
+- 若信息不足以生成四段，必须停止补齐信息后再生成：回到需求澄清或直接与用户确认；不要把未确认内容写进 `PRD.md`
+
+#### 硬禁令与反模式
+
+- 禁止跳过 `prd_transplant.py` 直接写 `PRD.md`
+- 禁止在裁定回写之外改写、摘要、重排、重新编号搬运下来的正文
+- 禁止把四段插进正文中间，或给四段包一层新标题
+- 反模式：把讨论稿"总结"成更精炼的新正文
+- 反模式：把讨论稿内容套进旧 PRD 模板重新组织章节
+- 反模式：觉得功能清单表格太长而合并、省略、改成条目列表
 
 #### 输出文件
 
-- 正式稿：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
-- UI 范围机器事实源：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
 
-### UI 范围处理
 
-- 写入或更新 `UI_CONTEXT.json` 前，必须先读取 `{pluginPath}/skills/autobiz/references/ui-context.md`，按其中模板和枚举生成，不要等校验失败后再读取 Python validator 反推格式。
-- `UI_CONTEXT.json` 是 UI 范围机器事实源；先读它，再写 `PRD.md`，不要从 PRD 正文重新推导 `uiRequired`。
-- `PRD.md` 只描述 UI 行为范围、页面目标、关键交互、加载态、空态、错误态和成功态，不描述前端实现方案、组件库选择或代码结构。
-- 生成 PRD 后必须同步更新 `UI_CONTEXT.json`：将已确认的 UI 决策推进到 `decisionStatus=confirmed`。
-- `uiRequired=true` 时，确保 `pages[]`、`interactions[]` 或 `visualSources[]` 至少能表达 UI 范围；页面数、页面列表、页面目标和核心交互必须能从这些结构化字段读出。
-- 高保真 HTML、标准 HTML、设计稿、Figma/MasterGo 或原型链接只保留在 `visualSources[]`，作为 code 阶段实现输入；已提供的 HTML 必须使用 Feature 内归档的 `frontend-html/VIS-xxx/...` 路径和稳定 `VIS-xxx`，不要把 HTML、设计稿、原型链接直接混入 `PRD.md` 正文作为需求实现。
-- 若讨论阶段确认存在高保真但尚未拿到文件或链接，保留 `visualSources[]` 的占位引用和 `required=true`，并在 `PRD.md` 中只写“高保真输入待提供”的风险或依赖；进入锁定/Code 前必须完成归档。没有高保真要求的 UI Capability 保持空 `visualSourceRefs`，不得因此阻断其他 UI Task。
-- PRD 阶段不要编造 `capabilities[].specRefs`；PRD 阶段通常只维护 `pages[]`、`interactions[]`、`visualSources[]`。
-- `uiRequired=false` 时，保留或补齐 `notApplicableReason`。
-- 如果 `PRD_DISCUSS.md` 的自然语言与 `UI_CONTEXT.json` 冲突，以 `UI_CONTEXT.json` 为准；需要改变 UI 范围时先回到用户确认，再更新 `UI_CONTEXT.json`，不要让 Markdown 与 JSON 双源漂移。
-
-### 最终检查与交接
+###  最终检查与交接
 
 完成 PRD 生成后，检查以下事项：
 
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已存在，且以 `# 需求正式稿` 开头
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 不包含讨论稿说明句 `本文档为需求讨论中间稿，用于记录需求讨论过程和结论`
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已追加 `用户故事`、`验收口径`、`验收标准`、`关键约束`
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json` 已存在，格式符合 `ui-context.md`，且 `decisionStatus` 至少为 `confirmed`
-
-向用户明确说明：
-
-- 正式 PRD 位于 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已存在，且以 `# 需求正式稿` 开头,且有 `用户故事`、`验收口径`、`验收标准`、`关键约束`内容
+- `PRD.md` 中已无待确认章节与 `【待确认】` 残留
 
 ### 更新状态
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ## 输出清单
@@ -117,10 +139,11 @@ Skill 完成后，必须运行脚本校验：
 python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 
-通过脚本检查即视为**Skill 完成。**
+通过脚本检查即视为 Skill 完成。
+
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
 
 ## 技能使用约束
 
-1. 本技能专注生成正式 PRD，不替代需求澄清过程
-2. 不能把用户未确认的内容"补全成看起来合理的实现"
-3. 不要输出伪代码、数据库实现方案或服务内部类设计来替代 PRD
+- 不能把用户未确认的内容"补全成看起来合理的实现"
+- 不要输出伪代码、数据库实现方案或服务内部类设计来替代 PRD

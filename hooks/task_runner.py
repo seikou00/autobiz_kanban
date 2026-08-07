@@ -111,6 +111,10 @@ TASK_VALIDATION_RUN_TYPE = "batch_task_validation"
 TASK_VALIDATION_RUNNING_COMMANDS = ["validate-batch-task"]
 TASK_VALIDATION_BATCH_CHECK_COMMANDS = ["batch-check"]
 TASK_VALIDATION_FAILED_COMMANDS = ["start-validation-repair", "start-batch-task-validation"]
+# Registered agent name for the host task tool's subagent_type. `requiredExecutor`
+# below names the role, not a registry entry, so the main agent had no legal value
+# to pass. Swap this single string to change which registered agent validates.
+BATCH_VALIDATION_SUBAGENT_TYPE = "verification-autodev"
 VALIDATION_DIAGNOSTIC_PATH_RE = re.compile(
     r"(?P<path>(?:[A-Za-z]:[\\/]|/)?[^\r\n]*?\.(?:java|kt|kts|groovy|scala|js|jsx|ts|tsx|vue|py))"
     r"(?=:\[?\d|:\s|$)",
@@ -827,7 +831,8 @@ def _start_task_unlocked(
             raise TaskRunnerError(f"task_implementation_already_ready:{task_id}")
     if task.get("blockers"):
         raise TaskRunnerError(f"task_has_blockers:{task_id}")
-    if unfinished := _unfinished_dependencies(plan, task):
+    unfinished = _unfinished_dependencies(plan, task)
+    if unfinished:
         raise TaskRunnerError("unfinished_task_dependencies:" + ",".join(unfinished))
     if normalize_status(task.get("status")) == "done":
         raise TaskRunnerError(f"task_already_done:{task_id}")
@@ -1414,11 +1419,8 @@ def _fresh_maven_failure_results(
     if not selectors:
         return []
     roots = _fresh_maven_report_roots(command_dir, before_reports)
-    return [
-        result
-        for selector in selectors
-        if (result := _maven_selector_report_result(roots, selector))["failures"]
-    ]
+    results = [_maven_selector_report_result(roots, selector) for selector in selectors]
+    return [result for result in results if result["failures"]]
 
 
 def _runtime_environment_failure_category(output: str) -> str | None:
@@ -3190,6 +3192,7 @@ def _task_validation_context(state: dict[str, Any]) -> dict[str, Any]:
         "commandAudience": "validation_subagent_only",
         "executorDirective": {
             "requiredExecutor": "batch_validation_subagent",
+            "subagentType": BATCH_VALIDATION_SUBAGENT_TYPE,
             "mainAgentAction": (
                 "start_validation_repair" if failed else "spawn_subagent_immediately"
             ),
@@ -5856,7 +5859,8 @@ def _run_project_checks_unlocked(
         bundle = load_plan_bundle(feature_dir)
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
-    if unfinished := bundle_unfinished_tasks(bundle):
+    unfinished = bundle_unfinished_tasks(bundle)
+    if unfinished:
         raise TaskRunnerError("project_check_requires_all_tasks_done:" + ",".join(unfinished))
     if bundle.root.get("activeBatchId") is not None or bundle.root.get("nextBatchId") is not None:
         raise TaskRunnerError("project_check_requires_all_batches_done")

@@ -13,7 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-if str(ROOT := Path(__file__).resolve().parents[1]) not in sys.path:
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence  # noqa: E402
@@ -562,6 +563,7 @@ class TaskRunnerTest(unittest.TestCase):
                     "commandAudience": "validation_subagent_only",
                     "executorDirective": {
                         "requiredExecutor": "batch_validation_subagent",
+                        "subagentType": "verification-autodev",
                         "mainAgentAction": "spawn_subagent_immediately",
                         "mainAgentAllowedRunnerCommands": [],
                         "mainAgentPreflightAllowed": False,

@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -37,9 +37,9 @@ from board_core.state_store import (  # noqa: E402
     StateRecords,
     check_or_fix_state_sync,
     render_state_md,
-    state_json_content_from_records,
+    state_json_content_from_records_preserving_raw,
     state_rows_from_records,
-    write_state_records,
+    write_state_records_preserving_raw,
 )
 from board_core.workflow import (  # noqa: E402
     landing_checkpoint_after_skip,
@@ -55,7 +55,6 @@ from board_core.workflow_compiler import (  # noqa: E402
     normalize_workflow_profile,
     normalize_workflow_skipped_nodes,
 )
-from plan_json import load_and_validate_plan  # noqa: E402
 
 
 STATE_RELATIVE_PATH = Path(".autobizdevops") / "STATE.md"
@@ -64,7 +63,6 @@ CHECKPOINT_LOG_EVENTS = (
     ("state-done", "STATE checkpoint 转移校验", "transition_errors"),
     ("autodev-lifecycle", "Autodev 产物校验", "lifecycle_errors"),
 )
-FIX_REQUEST_RELATIVE_PATH = Path(".autobizdevops") / "features"
 
 
 @dataclass(frozen=True)
@@ -81,6 +79,7 @@ class CheckpointUpdate:
     new_checkpoint: str | None
     workflow_profile: str = BASE_WORKFLOW_PROFILE
     workflow_decisions: dict[str, str] | None = None
+    raw_records: dict[str, object] = field(default_factory=dict)
 
     @property
     def errors(self) -> tuple[str, ...]:
@@ -107,9 +106,9 @@ def replace_feature_record(
     new_records: StateRecords = {slug: dict(record) for slug, record in records.items()}
     if feature in new_records:
         record = dict(new_records[feature])
+        old_checkpoint = record.get("checkpoint", "")
         old_profile = normalize_workflow_profile(record.get("workflowProfile", BASE_WORKFLOW_PROFILE))
         if old_profile != workflow_profile:
-            old_checkpoint = record.get("checkpoint", "")
             if old_checkpoint != "prd_done":
                 return records, [
                     f"Feature '{feature}' 已绑定 workflowProfile={old_profile}，不能在 {old_checkpoint} 改为 {workflow_profile}"
@@ -119,6 +118,10 @@ def replace_feature_record(
         record["checkpoint"] = checkpoint
         record["stage"] = resolved_stage
         record["workflowDecisions"] = dict(workflow_decisions)
+        if checkpoint == "needs_fix" and old_checkpoint != "needs_fix":
+            record["needsFixFromCheckpoint"] = old_checkpoint
+        elif checkpoint != "needs_fix":
+            record.pop("needsFixFromCheckpoint", None)
         if owner is not None:
             record["owner"] = owner
         if iteration is not None:
@@ -191,33 +194,6 @@ def validate_workflow_decision_updates(
     return tuple(errors)
 
 
-def validate_fix_request_for_needs_fix(
-    workspace: Path,
-    feature: str,
-    checkpoint: str,
-    *,
-    allowed_next: frozenset[str] | set[str] | tuple[str, ...] | list[str] = (),
-) -> tuple[str, ...]:
-    if checkpoint != "needs_fix":
-        return ()
-    path = workspace / FIX_REQUEST_RELATIVE_PATH / feature / "FIX_REQUEST.json"
-    if not path.is_file() or path.stat().st_size <= 0:
-        return (f"进入 needs_fix 必须先生成 FIX_REQUEST.json: {path}",)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        return (f"FIX_REQUEST.json 非法: {exc}",)
-    if not isinstance(data, dict):
-        return ("FIX_REQUEST.json root 必须是 object",)
-    suggested = data.get("suggestedCheckpoint")
-    if not isinstance(suggested, str) or not suggested.strip():
-        return ("FIX_REQUEST.json 缺少 suggestedCheckpoint",)
-    allowed = set(allowed_next)
-    if allowed and suggested not in allowed:
-        return (f"FIX_REQUEST.json suggestedCheckpoint 不在允许回流中: {suggested}",)
-    return ()
-
-
 def prepare_checkpoint_update(
     *,
     workspace: Path,
@@ -230,6 +206,7 @@ def prepare_checkpoint_update(
     updated_at: str | None = None,
     workflow_profile: str | None = None,
     workflow_decision_updates: dict[str, str] | None = None,
+    needs_fix_from_checkpoint: str | None = None,
 ) -> CheckpointUpdate:
     workspace = workspace.resolve()
     state_path = workspace / STATE_RELATIVE_PATH
@@ -280,6 +257,23 @@ def prepare_checkpoint_update(
             new_checkpoint=None,
             workflow_profile=workflow_profile or BASE_WORKFLOW_PROFILE,
             workflow_decisions=workflow_decision_updates or {},
+            raw_records=sync_result.raw_records,
+        )
+    if sync_result.record_errors.get(feature):
+        return CheckpointUpdate(
+            ok=False,
+            state_path=state_path,
+            state_json_path=state_json_path,
+            content="",
+            state_json_content="",
+            transition_errors=tuple(sync_result.record_errors[feature]),
+            lifecycle_errors=(),
+            records=sync_result.records,
+            old_checkpoint=None,
+            new_checkpoint=None,
+            workflow_profile=workflow_profile or BASE_WORKFLOW_PROFILE,
+            workflow_decisions=workflow_decision_updates or {},
+            raw_records=sync_result.raw_records,
         )
 
     old_records = sync_result.records
@@ -382,6 +376,22 @@ def prepare_checkpoint_update(
         stage_labels=contracts.stage_labels,
         initial_checkpoints=contracts.initial_checkpoints,
     )
+    if needs_fix_from_checkpoint is not None and not update_errors:
+        source_checkpoint = needs_fix_from_checkpoint.strip()
+        old_checkpoint = old_map.get(feature)
+        if checkpoint != "needs_fix":
+            update_errors.append("--needs-fix-from-checkpoint 只能与 --checkpoint needs_fix 一起使用")
+        elif not source_checkpoint:
+            update_errors.append("--needs-fix-from-checkpoint 不能为空")
+        elif old_checkpoint != "needs_fix" and source_checkpoint != old_checkpoint:
+            update_errors.append(
+                "--needs-fix-from-checkpoint 必须等于进入 needs_fix 前的当前 checkpoint: "
+                f"{old_checkpoint or 'empty'}"
+            )
+        else:
+            record_with_source = dict(new_records[feature])
+            record_with_source["needsFixFromCheckpoint"] = source_checkpoint
+            new_records[feature] = record_with_source
     new_map = state_rows_from_records(new_records)
 
     content = ""
@@ -390,18 +400,16 @@ def prepare_checkpoint_update(
     if not update_errors:
         try:
             content = render_state_md(new_records, workspace=workspace)
-            state_json_content = state_json_content_from_records(new_records, workspace=workspace)
+            state_json_content = state_json_content_from_records_preserving_raw(
+                new_records,
+                raw_records=sync_result.raw_records,
+                workspace=workspace,
+            )
         except ValueError as exc:
             render_errors.extend(str(exc).splitlines())
 
     transition_errors = [
         *update_errors,
-        *validate_fix_request_for_needs_fix(
-            workspace,
-            feature,
-            checkpoint,
-            allowed_next=contracts.allowed_next.get("needs_fix", frozenset()),
-        ),
         *render_errors,
         *validate_transitions(
             old_map,
@@ -438,6 +446,7 @@ def prepare_checkpoint_update(
         new_checkpoint=new_map.get(feature),
         workflow_profile=resolved_profile,
         workflow_decisions=resolved_decisions,
+        raw_records=sync_result.raw_records,
     )
 
 
@@ -459,6 +468,8 @@ def prepare_skip_update(
     state_path = workspace / STATE_RELATIVE_PATH
     state_json_path = workspace / STATE_JSON_RELATIVE_PATH
 
+    raw_records: dict[str, object] = {}
+
     def failed(
         *transition_errors: str,
         old_checkpoint: str | None = None,
@@ -479,6 +490,7 @@ def prepare_skip_update(
             new_checkpoint=new_checkpoint,
             workflow_profile=profile,
             workflow_decisions=decisions or {},
+            raw_records=raw_records,
         )
 
     if not feature.strip():
@@ -491,10 +503,13 @@ def prepare_skip_update(
         return failed("--skip-node 不能为空")
 
     sync_result = check_or_fix_state_sync(workspace, fix=True)
+    raw_records = sync_result.raw_records
     if not sync_result.state_exists:
         return failed(f"state.json 不存在且无法从 STATE.md 迁移: {state_json_path}")
     if sync_result.errors:
         return failed(*sync_result.errors)
+    if sync_result.record_errors.get(feature):
+        return failed(*sync_result.record_errors[feature])
 
     old_records = sync_result.records
     old_record = old_records.get(feature)
@@ -564,7 +579,11 @@ def prepare_skip_update(
     render_errors: list[str] = []
     try:
         content = render_state_md(new_records, workspace=workspace)
-        state_json_content = state_json_content_from_records(new_records, workspace=workspace)
+        state_json_content = state_json_content_from_records_preserving_raw(
+            new_records,
+            raw_records=sync_result.raw_records,
+            workspace=workspace,
+        )
     except ValueError as exc:
         render_errors.extend(str(exc).splitlines())
 
@@ -598,6 +617,7 @@ def prepare_skip_update(
         new_checkpoint=new_checkpoint,
         workflow_profile=profile,
         workflow_decisions=decisions,
+        raw_records=sync_result.raw_records,
     )
 
 
@@ -680,24 +700,6 @@ def write_hook_logs(result: CheckpointUpdate, *, workspace: Path, feature: str) 
         )
 
 
-def validate_plan_json_for_checkpoint(
-    *,
-    workspace: Path,
-    feature: str,
-    checkpoint: str,
-) -> tuple[bool, str]:
-    if checkpoint != "plan_done":
-        return True, ""
-    feature_dir = workspace / ".autobizdevops" / "features" / feature
-    plan_json = feature_dir / "plan.json"
-    if plan_json.is_file() and plan_json.stat().st_size > 0:
-        _, validate_errors = load_and_validate_plan(plan_json, require_initial_status=True)
-        if validate_errors:
-            return False, "plan_done 校验 plan.json 失败: " + "; ".join(validate_errors)
-        return True, ""
-    return False, f"plan_done 校验 plan.json 失败: 缺少 {plan_json}"
-
-
 def write_result_json(
     result: CheckpointUpdate,
     *,
@@ -748,6 +750,10 @@ def main(argv: list[str] | None = None) -> int:
         help="skip a workflow node mid-flight (node id, e.g. dev.utest); may be repeated",
     )
     parser.add_argument("--stage", help="stage column override")
+    parser.add_argument(
+        "--needs-fix-from-checkpoint",
+        help="backfill the source checkpoint for a feature already at needs_fix",
+    )
     parser.add_argument("--owner", help="owner column override")
     parser.add_argument("--iteration", help="iteration column override")
     parser.add_argument("--workflow-profile", help="workflow profile for a new feature row")
@@ -766,11 +772,26 @@ def main(argv: list[str] | None = None) -> int:
         print("checkpoint 更新失败: 必须且只能提供 --checkpoint 或 --skip-node 之一", file=sys.stderr)
         return 1
     if args.skip_node and any(
-        [args.stage, args.owner, args.iteration, args.workflow_profile, args.workflow_decision, args.allow_create]
+        [
+            args.stage,
+            args.owner,
+            args.iteration,
+            args.workflow_profile,
+            args.workflow_decision,
+            args.allow_create,
+            args.needs_fix_from_checkpoint,
+        ]
     ):
         print(
             "checkpoint 更新失败: --skip-node 不能与 --stage/--owner/--iteration/"
-            "--workflow-profile/--workflow-decision/--allow-create 同时使用",
+            "--workflow-profile/--workflow-decision/--allow-create/"
+            "--needs-fix-from-checkpoint 同时使用",
+            file=sys.stderr,
+        )
+        return 1
+    if args.needs_fix_from_checkpoint is not None and args.checkpoint != "needs_fix":
+        print(
+            "checkpoint 更新失败: --needs-fix-from-checkpoint 只能与 --checkpoint needs_fix 一起使用",
             file=sys.stderr,
         )
         return 1
@@ -816,6 +837,7 @@ def main(argv: list[str] | None = None) -> int:
                 allow_create=args.allow_create,
                 workflow_profile=args.workflow_profile,
                 workflow_decision_updates=workflow_decision_updates,
+                needs_fix_from_checkpoint=args.needs_fix_from_checkpoint,
             )
 
     requested_checkpoint = args.checkpoint or result.new_checkpoint or ""
@@ -856,16 +878,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_logs()
         return 1
     if not args.dry_run:
-        synced, sync_error = validate_plan_json_for_checkpoint(
-            workspace=workspace,
-            feature=feature,
-            checkpoint=result.new_checkpoint or requested_checkpoint,
-        )
-        if not synced:
-            print(sync_error, file=sys.stderr)
-            return 1
-    if not args.dry_run:
-        write_state_records(workspace, result.records)
+        write_state_records_preserving_raw(workspace, result.records, raw_records=result.raw_records)
         _write_logs()
     return 0
 

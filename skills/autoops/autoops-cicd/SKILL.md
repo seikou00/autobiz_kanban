@@ -1,7 +1,7 @@
 ---
 name: autoops-cicd
-description: CI/CD 阶段技能。支持承接 Dev 验收产物，优先读取 VERIFY_DECISION.json 作为流水线准入机器事实源，或在已有代码仓库中直接进入流水线准备与阻断问题记录。
-version: v1.1.1604
+description: CI/CD 阶段技能。
+version: v1.1.08041
 author: zhangQiuFeng
 ---
 
@@ -13,10 +13,10 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 # /autoops-cicd — CI/CD 清单与流水线阻断处理
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
 ### 正常模式
 
-- 上游入口：`checkpoint = verify_done`
-- 这是 Dev 验收通过后进入 CI/CD 的唯一合法交接点
 - 使用场景：完整走完 Biz / Dev 链路后，继续生成 CI/CD 清单与 PR 描述
 
 
@@ -29,15 +29,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 - 全局状态：`.autobizdevops/state.json`
 
 如用户额外提供 `PRD.md` 或 `design.md`，可在 `CICD_CHECKLIST.md` 中记录其来源；未提供时允许继续，但必须明确写明“需求/设计文档缺失或未提供”。
-
-## 输入事实源
-
-读取（如有）：
-
-- `VERIFY_DECISION.json` 是 CI/CD 准入机器事实源；用 `verdict`、`nextCheckpoint`、`failedScenarioRefs`、`manualVerificationRefs`、`missingScenarioRefs` 和 `evidenceIds` 判断是否可进入流水线。
-- `VERIFY_REPORT.md` 只作为验收的人类叙述参考，用于补充交付说明和遗留风险文字，不从 Markdown 文本重新推导 verdict。
-- 若 `VERIFY_DECISION.json` 缺失，停止并回到 verify 阶段补齐结构化验收决策；不得用 `VERIFY_REPORT.md` 推导准入 verdict。
-- 若 `VERIFY_DECISION.json.verdict != "pass"` 或 `nextCheckpoint != "verify_done"`，不得启动流水线；把失败、人工验证或缺失场景写入阻断项，等待回流或人工确认。
 
 ## 使用场景
 
@@ -53,32 +44,28 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 ## 执行步骤
 
-### 标准化工作目录与 State 快照
+### 获取feature状态
 
-1. 确定 `{slug}`，进入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/`
-2. 调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-3. 后续准入、恢复和完成判断直接取用 `CHECKPOINT`。若脚本提示 Feature 不存在，仅用户直供 CI/CD 场景可继续通过 `--allow-create` 创建；创建后必须刷新 `CHECKPOINT`。
-4. 若尚未执行 workspace 初始化，先执行 `python hooks/init_workspace.py .`
-5. 读取仓库构建配置、流水线配置、执行清单列出的验收产物和用户输入，优先按 `VERIFY_DECISION.json` 整理 CI/CD 准入上下文。
-6. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 验收）`：
+3. 每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
+4. 读取仓库构建配置、流水线配置、已有流程产物和用户输入，整理 CI/CD 所需上下文
+5. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress --stage "CI/CD（来源: Dev 验收）" --allow-create
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### 生成交付文档
 
 1. 生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/CICD_CHECKLIST.md`
 2. 生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PR_BODY.md`
-3. 在 `CICD_CHECKLIST.md` 记录 `VERIFY_DECISION.json` 的 verdict、nextCheckpoint、场景失败/人工验证/缺失集合与 evidenceIds；`VERIFY_REPORT.md` 只补充说明文字。
-4. 若已知 PRD 或 API 来源，在 `CICD_CHECKLIST.md` 或 `PR_BODY.md` 中标注引用路径
-5. 若需求文档缺失，必须在 `CICD_CHECKLIST.md` 中记录：
+3. 若已知 PRD 或 API 来源，在 `CICD_CHECKLIST.md` 或 `PR_BODY.md` 中标注引用路径
+4. 若需求文档缺失，必须在 `CICD_CHECKLIST.md` 中记录：
 
 ```markdown
 - **需求文档状态:** 缺失/未提供
@@ -92,7 +79,7 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 3. 轮询命令保持现有约定：
 
 ```bash
-python hooks/poll_pipeline_status.py --pipelineCode <pipeline_code> --pipelineNum <pipeline_build_num>
+python "${pluginPath}/skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py" --pipelineCode <pipeline_code> --pipelineNum <pipeline_build_num>
 ```
 
 4. 该脚本为耗时操作，可后台运行
@@ -124,7 +111,7 @@ python hooks/poll_pipeline_status.py --pipelineCode <pipeline_code> --pipelineNu
 ### 用户确认后完成阶段
 
 1. 本技能不得执行 git 写命令
-2. 请用户确认 CI/CD 是否完成时，若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `已完成、推进到 cicd_done (Recommended)` / `尚未完成、保持当前状态`；若不支持，必须显式追问：`CI/CD 是否已完成？请回复”已完成”或”未完成”。`
+2. 请用户确认 CI/CD 是否完成时，按共享 `ask-user-question.md` 协议发起选择，选项至少包含 `已完成、推进到 cicd_done (Recommended)` / `尚未完成、保持当前状态`；若当前模式不支持 `request_user_input`，必须显式追问：`CI/CD 是否已完成？请回复“已完成”或“未完成”。`
 3. 只有在用户明确回复”已完成”（已执行 / done / ok 等）后，才允许用统一脚本把 checkpoint 推进到 `cicd_done`
 4. 未拿到明确肯定答复前，必须保持 `cicd_in_progress`，不得推进 `cicd_done`
 
@@ -132,12 +119,11 @@ macOS/Linux:
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 ### 是否再次执行
 
-1. 需要再次触发流水线或重新整理清单时，若当前运行模式支持 `request_user_input`，必须优先用它发起选择，选项至少包含 `重新触发流水线 / 重整清单` / `不再重跑 (Recommended)`；若不支持，必须显式追问：`是否需要再次执行流水线或重新整理清单？请回复"重跑"或"不重跑"。`
+1. 需要再次触发流水线或重新整理清单时，按共享 `ask-user-question.md` 协议发起选择，推荐项必须放第一位，选项至少包含 `不再重跑 (Recommended)` / `重新触发流水线或重整清单`；若当前模式不支持 `request_user_input`，必须显式追问：`是否需要再次执行流水线或重新整理清单？请回复“重跑”或“不重跑”。`
 2. 未拿到用户明确同意前，不得擅自重跑。
 
-**Skill 完成。**
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

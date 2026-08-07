@@ -1,6 +1,7 @@
 ---
 name: ZA21-encrypt
 description: 调用内部密码加密服务，将明文密码转换为 BEE_ENC_COMMON_ 加密格式。支持单条或批量密码加密。
+version: v1.0.0804
 ---
 
 # ZA21密码加密工具
@@ -54,16 +55,16 @@ description: 调用内部密码加密服务，将明文密码转换为 BEE_ENC_C
 
 ```bash
 # 从管道传入
-python3 scripts/password-encrypt.py '{"rawPasswd": ["1111"]}'
+python "${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py" '{"rawPasswd": ["1111"]}'
 
 # 或 echo 传入
-echo '{"rawPasswd": ["1111"]}' | python3 scripts/password-encrypt.py
+echo '{"rawPasswd": ["1111"]}' | python "${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py"
 ```
 
 ### 方式 2: Shell 脚本
 
 ```bash
-echo '{"rawPasswd": ["1111"]}' | ./scripts/password-encrypt.sh
+echo '{"rawPasswd": ["1111"]}' | bash "${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.sh"
 ```
 
 ### 方式 3: 直接调用 (OpenClaw 内部)
@@ -144,8 +145,8 @@ AI 会自动转换为工具调用并返回加密结果。
 
 | 脚本        | 路径                            | 说明            |
 | --------- | ----------------------------- | ------------- |
-| Python 版本 | `scripts/password-encrypt.py` | 推荐，功能完整       |
-| Shell 版本  | `scripts/password-encrypt.sh` | 备用，依赖 curl/jq |
+| Python 版本 | `${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py` | 推荐，功能完整       |
+| Shell 版本  | `${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.sh` | 备用，依赖 curl/jq |
 
 ---
 

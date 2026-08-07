@@ -7,7 +7,7 @@ from .autobizdevops/state.json first. STATE.md is a generated view.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 from hooks.paths import (
     get_features_active_dir,
@@ -19,8 +19,8 @@ from board_core.state_store import (
 )
 
 
-StateResult = tuple[dict[str, str], list[str], bool]  # rows, errors, file_exists
-StateRecordsResult = tuple[dict[str, dict[str, Any]], list[str], bool]
+StateResult = Tuple[Dict[str, str], List[str], bool]  # rows, errors, file_exists
+StateRecordsResult = Tuple[Dict[str, Dict[str, Any]], List[str], bool]
 
 
 def load_state_md(workspace: Path) -> StateResult:
@@ -60,13 +60,21 @@ def list_active_feature_names(workspace: Path) -> list[str]:
     return sorted(entry.name for entry in active.iterdir() if entry.is_dir())
 
 
-def find_feature_dir(workspace: Path, feature: str) -> Path | None:
-    """Return the feature directory path (active first, fall back to archive)."""
+def find_feature_dir(
+    workspace: Path,
+    feature: str,
+    archive_iteration: object | None = None,
+) -> Path | None:
+    """Return the active directory or the selected archived iteration."""
     active = get_features_active_dir(workspace) / feature
     if active.is_dir():
         return active
     archive_base = get_features_archive_dir(workspace)
     if archive_base.is_dir():
+        iteration = str(archive_iteration or "").strip()
+        if iteration not in {"", "-", "—"}:
+            selected_archive = archive_base / f"{feature}-iter{iteration}"
+            return selected_archive if selected_archive.is_dir() else None
         exact_archive = archive_base / feature
         if exact_archive.is_dir():
             return exact_archive

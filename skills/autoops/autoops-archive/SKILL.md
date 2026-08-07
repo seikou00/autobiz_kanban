@@ -1,7 +1,7 @@
 ---
 name: autoops-archive
 description: Ops 归档阶段技能。
-version: v1.2.1701
+version: v1.2.0804
 author: zhangQiuFeng
 ---
 
@@ -19,13 +19,14 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-archive --feature
 ## 恢复入口
 若 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 已不存在、`.autobizdevops/archive/{slug}-iter*` 已存在且 `state.json` 为 `archived`，直接提示已归档并退出
 
-调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
+调用脚本读取当前 Feature 快照：
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-后续准入和恢复直接取用 `CHECKPOINT`。
+每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
+
 ## 路径约定
 
 | 项目 | 路径 |
@@ -63,7 +64,6 @@ CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint archived --iteration "{N}"
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
 只允许更新当前 `{slug}` 对应的 Feature 行，不得删除该行，不得改写其他 Feature 状态。
@@ -112,3 +112,5 @@ Skill 完成前必须满足：
 - [ ] `.autobizdevops/archive/{slug}-iter{N}/` 已存在
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/` 已不存在
 - [ ] 已向用户输出归档路径与保留的过程产物清单
+
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

@@ -167,8 +167,8 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
     records = read_records(stream_path(target_feature_dir))
     known_evidence_ids = {
         evidence_id
-        for record in records
-        if isinstance((evidence_id := record.get("evidenceId")), str)
+        for evidence_id in (record.get("evidenceId") for record in records)
+        if isinstance(evidence_id, str)
     }
     known_tasks = task_ids(plan)
     for record in records:
@@ -245,18 +245,23 @@ def check_code_done(target_feature_dir: Path) -> list[str]:
     if plan_errors:
         errors.extend(f"plan_json:{error}" for error in plan_errors)
         diagnostic_plan, _ = load_and_validate_plan(plan_path)
-        if diagnostic_plan is not None and (blocked := blocked_tasks(diagnostic_plan)):
-            errors.append("unresolved_blocker:" + ",".join(blocked))
+        if diagnostic_plan is not None:
+            blocked = blocked_tasks(diagnostic_plan)
+            if blocked:
+                errors.append("unresolved_blocker:" + ",".join(blocked))
         return errors
     if plan is None:
         errors.append("missing_plan_json")
         return errors
 
-    if unfinished := unfinished_tasks(plan):
+    unfinished = unfinished_tasks(plan)
+    if unfinished:
         errors.append("plan_json_unfinished_tasks:" + ",".join(unfinished))
-    if failed := failed_tasks(plan):
+    failed = failed_tasks(plan)
+    if failed:
         errors.append("plan_json_failed_tasks:" + ",".join(failed))
-    if blocked := blocked_tasks(plan):
+    blocked = blocked_tasks(plan)
+    if blocked:
         errors.append("unresolved_blocker:" + ",".join(blocked))
 
     try:
@@ -969,8 +974,9 @@ def _check_project_completion(
 
 
 def _evidence_number(evidence_id: str) -> int:
+    trimmed = evidence_id[len("ev_"):] if evidence_id.startswith("ev_") else evidence_id
     try:
-        return int(evidence_id.removeprefix("ev_"))
+        return int(trimmed)
     except ValueError:
         return -1
 

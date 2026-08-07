@@ -85,6 +85,41 @@ def find_current_node(
     return -1, None
 
 
+def find_effective_current_node(
+    nodes: list[dict],
+    checkpoint: str,
+    needs_fix_from_checkpoint: str | None = None,
+    *,
+    stage: str | None = None,
+    stage_labels: dict[str, str] | None = None,
+) -> tuple[int, str | None]:
+    """Resolve the display/routing node for a checkpoint.
+
+    ``needs_fix`` is a workflow-level checkpoint rather than a node-owned
+    checkpoint.  Its source checkpoint preserves the node position while the
+    real checkpoint still determines that node's blocked status.
+    """
+    if checkpoint != "needs_fix":
+        return find_current_node(nodes, checkpoint)
+
+    if needs_fix_from_checkpoint:
+        return find_current_node(nodes, needs_fix_from_checkpoint)
+
+    if not stage or not isinstance(stage_labels, dict):
+        return -1, None
+
+    matches: dict[str, int] = {}
+    for idx, node in enumerate(nodes):
+        for node_checkpoint in node.get("checkpoints", []):
+            if stage_labels.get(node_checkpoint) == stage:
+                matches[node["id"]] = idx
+                break
+    if len(matches) != 1:
+        return -1, None
+    node_id, idx = next(iter(matches.items()))
+    return idx, node_id
+
+
 def node_start_checkpoint(node: dict) -> str | None:
     """Return the checkpoint that enters the node (its *_in_progress or archived)."""
     checkpoints = node.get("checkpoints", [])
@@ -116,6 +151,8 @@ def validate_skip_request(
     skip_list = [str(item).strip() for item in skip_ids if str(item).strip()]
     if not skip_list:
         return ["未提供要跳过的节点"]
+    if current_checkpoint == "needs_fix":
+        return ["当前处于 needs_fix 阻断状态，不能跳过节点；请先按修复建议回流到对应节点"]
 
     errors: list[str] = []
     index_by_id = {str(node.get("id", "")): idx for idx, node in enumerate(nodes)}
@@ -223,7 +260,7 @@ def derive_node_status(
     if current_checkpoint == "archived":
         return "archived" if node["id"] == "ops.archive" else "done"
 
-    if current_checkpoint == "needs_fix":
+    if current_idx < 0:
         return "unknown"
 
     if node_idx < current_idx:

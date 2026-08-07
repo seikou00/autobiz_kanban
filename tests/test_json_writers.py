@@ -100,7 +100,11 @@ def _write_design(feature_dir: Path) -> None:
             [
                 "# 技术设计: cap",
                 "## 1. Context / 输入上下文",
-                "## 2. Spec Traceability / 规格追踪",
+                "## 2. Code Evidence / 代码探索证据",
+                "| ID | 事实 | 位置 |",
+                "|----|------|------|",
+                "| EVD-01 | no-op | src/cap.py |",
+                "## 3. Spec Traceability / 规格追踪",
                 "| Spec | Requirement / Scenario | Design Coverage |",
                 "|------|------------------------|-----------------|",
                 "| specs/cap/spec.md | Requirement [REQ-001] / Scenario [SCN-001] | API-001 / DATA-001 / D-001 |",
@@ -126,31 +130,6 @@ def _write_design(feature_dir: Path) -> None:
                 "| R-001 | 风险 | none | low | none |",
             ]
         ),
-        encoding="utf-8",
-    )
-
-
-def _write_non_ui(feature_dir: Path) -> None:
-    (feature_dir / "UI_CONTEXT.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "featureId": "alpha",
-                "uiRequired": False,
-                "decisionStatus": "locked",
-                "decisionSource": "default_false",
-                "confirmedAtCheckpoint": "prd_done",
-                "lockedAtCheckpoint": "specs_done",
-                "notApplicableReason": "纯后端",
-                "pages": [],
-                "interactions": [],
-                "visualSources": [],
-                "capabilities": [],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
         encoding="utf-8",
     )
 
@@ -2132,7 +2111,6 @@ class JsonWriterTests(unittest.TestCase):
             _write_proposal(feature_dir)
             _write_specs(feature_dir)
             _write_design(feature_dir)
-            _write_non_ui(feature_dir)
             _write_plan(feature_dir, include_second=False)
 
             result = validate_stage(workspace=workspace, feature="alpha", stage="dev.plan")
@@ -2151,7 +2129,6 @@ class JsonWriterTests(unittest.TestCase):
             _write_proposal(feature_dir)
             _write_specs(feature_dir, second=True)
             _write_design(feature_dir)
-            _write_non_ui(feature_dir)
             _write_plan(feature_dir, include_second=False)
 
             structure = _run("plan_writer.py", "validate", "--workspace", str(workspace), "--feature", "alpha", "--structure")
@@ -2352,12 +2329,20 @@ class JsonWriterTests(unittest.TestCase):
             workspace, feature_dir = _workspace(Path(tmp))
             payload = {
                 "id": "T001",
-                "title": "stdin task",
-                "goal": "deliver stdin task",
+                "title": "中文路径 stdin task",
+                "goal": "deliver a UTF-8 Chinese path through stdin",
                 "status": "done",
                 "deps": [],
                 "uiRequired": False,
-                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "workspaceRef": "default",
+                "scope": {
+                    "modules": ["中文模块"],
+                    "entrypoints": [],
+                    "pages": [],
+                    "dataObjects": [],
+                    "workspaceRoots": {"default": "."},
+                    "paths": ["src/main/java/中文目录/服务.java"],
+                },
                 "implementationPoints": ["update behavior", "cover boundary"],
                 "acceptanceCriteria": ["behavior is observable"],
                 "validationBoundary": "public behavior seam validated by the task command",
@@ -2391,6 +2376,68 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(tasks[0]["id"], "T001")
             self.assertEqual(tasks[0]["status"], "todo")
             self.assertEqual(tasks[0]["evidenceIds"], [])
+            self.assertEqual(tasks[0]["scope"]["modules"], ["中文模块"])
+            self.assertEqual(tasks[0]["scope"]["paths"], ["src/main/java/中文目录/服务.java"])
+
+    def test_plan_writer_rejects_non_utf8_stdin_with_remediation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            payload = {
+                "id": "T001",
+                "title": "中文路径 stdin task",
+                "goal": "deliver a UTF-8 Chinese path through stdin",
+                "deps": [],
+                "uiRequired": False,
+                "workspaceRef": "default",
+                "scope": {
+                    "modules": ["中文模块"],
+                    "entrypoints": [],
+                    "pages": [],
+                    "dataObjects": [],
+                    "workspaceRoots": {"default": "."},
+                    "paths": ["src/main/java/中文目录/服务.java"],
+                },
+                "implementationPoints": ["write a path", "read a path"],
+                "acceptanceCriteria": ["path is preserved"],
+                "validationBoundary": "UTF-8 body input is validated before any plan write",
+                "nonGoals": ["do not change behavior"],
+                "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                "designRefs": ["design.md#D-001"],
+                "apiIds": [],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [{"command": TEST_TASK_COMMAND}],
+                "expectedFiles": [],
+                "evidenceIds": [],
+                "blockers": [],
+            }
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "plan_writer.py"),
+                    "add-task",
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                    "--body-stdin",
+                ],
+                cwd=ROOT,
+                input=json.dumps(payload, ensure_ascii=False).encode("gb18030"),
+                capture_output=True,
+                check=False,
+            )
+
+            output = body.stdout.decode("utf-8")
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertNotEqual(body.returncode, 0, output + body.stderr.decode("utf-8"))
+            self.assertIn("invalid_body_stdin_encoding", output)
+            self.assertIn("不是有效 UTF-8", output)
+            self.assertIn("Unicode surrogate", output)
+            self.assertIn("--body-file", output)
+            self.assertEqual(json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))["batches"], [])
 
     def test_plan_writer_body_stdin_rejects_conflicting_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2879,167 +2926,12 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("task_not_found", result.stdout)
 
-    def test_ui_context_writer_false_clears_ui_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _ = _workspace(Path(tmp))
-            init = _run("ui_context_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha", "--ui-required")
-            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
-            locked = _run("ui_context_writer.py", "validate", "--workspace", str(workspace), "--feature", "alpha", "--locked")
-            self.assertNotEqual(locked.returncode, 0)
-            self.assertIn("ui_context_not_locked", locked.stdout)
-            _run(
-                "ui_context_writer.py",
-                "add-page",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--name",
-                "Page",
-                "--goal",
-                "Goal",
-            )
-
-            result = _run(
-                "ui_context_writer.py",
-                "set-ui-required",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "false",
-                "--reason",
-                "纯后端",
-            )
-
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            data = json.loads((workspace / ".autobizdevops" / "features" / "alpha" / "UI_CONTEXT.json").read_text())
-            self.assertFalse(data["uiRequired"])
-            self.assertEqual(data["pages"], [])
-            self.assertEqual(data["interactions"], [])
-            self.assertEqual(data["visualSources"], [])
-            self.assertEqual(data["capabilities"], [])
-
-    def test_ui_context_writer_archives_html_bundle_and_binds_capability(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir = _workspace(root)
-            source_root = root / "provided-ui"
-            (source_root / "assets").mkdir(parents=True)
-            source_file = source_root / "index.html"
-            source_file.write_text('<link rel="stylesheet" href="assets/page.css"><main>UI</main>', encoding="utf-8")
-            (source_root / "assets" / "page.css").write_text("main { color: red; }", encoding="utf-8")
-
-            commands = [
-                ("init", "--ui-required"),
-                ("add-page", "--name", "Page", "--goal", "Goal"),
-                (
-                    "add-visual-source",
-                    "--type",
-                    "high_fidelity_html",
-                    "--source-file",
-                    str(source_file),
-                    "--source-root",
-                    str(source_root),
-                    "--route",
-                    "absolute-html",
-                    "--required",
-                    "true",
-                ),
-                (
-                    "add-capability",
-                    "--capability-id",
-                    "alpha-ui",
-                    "--page-ref",
-                    "PAGE-001",
-                    "--visual-source-ref",
-                    "VIS-001",
-                    "--spec-ref",
-                    "specs/cap/spec.md#REQ-001",
-                    "--spec-ref",
-                    "specs/cap/spec.md#SCN-001",
-                    "--ui-required",
-                    "true",
-                ),
-                ("confirm", "--decision-source", "user_confirmed"),
-                ("lock",),
-            ]
-            for command in commands:
-                result = _run(
-                    "ui_context_writer.py",
-                    *command,
-                    "--workspace",
-                    str(workspace),
-                    "--feature",
-                    "alpha",
-                )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-            data = json.loads((feature_dir / "UI_CONTEXT.json").read_text(encoding="utf-8"))
-            source = data["visualSources"][0]
-            self.assertEqual(source["path"], "frontend-html/VIS-001/index.html")
-            self.assertEqual(len(source["contentSha256"]), 64)
-            self.assertEqual(len(source["bundleSha256"]), 64)
-            self.assertEqual(data["capabilities"][0]["visualSourceRefs"], ["VIS-001"])
-            self.assertTrue((feature_dir / source["path"]).is_file())
-            self.assertTrue((feature_dir / "frontend-html" / "VIS-001" / "assets" / "page.css").is_file())
-
-    def test_ui_context_writer_materializes_existing_visual_source_placeholder(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir = _workspace(root)
-            source_file = root / "provided.html"
-            source_file.write_text("<main>provided</main>", encoding="utf-8")
-            commands = [
-                ("init", "--ui-required"),
-                (
-                    "add-visual-source",
-                    "--source-id",
-                    "VIS-001",
-                    "--type",
-                    "high_fidelity_html",
-                    "--path",
-                    "frontend-html/<待提供>.html",
-                    "--route",
-                    "absolute-html",
-                    "--required",
-                    "true",
-                ),
-                (
-                    "update-visual-source",
-                    "--source-id",
-                    "VIS-001",
-                    "--type",
-                    "high_fidelity_html",
-                    "--source-file",
-                    str(source_file),
-                    "--route",
-                    "absolute-html",
-                    "--required",
-                    "true",
-                ),
-            ]
-            for command in commands:
-                result = _run(
-                    "ui_context_writer.py",
-                    *command,
-                    "--workspace",
-                    str(workspace),
-                    "--feature",
-                    "alpha",
-                )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-            data = json.loads((feature_dir / "UI_CONTEXT.json").read_text(encoding="utf-8"))
-            self.assertEqual(data["visualSources"][0]["path"], "frontend-html/VIS-001/provided.html")
-            self.assertTrue((feature_dir / data["visualSources"][0]["path"]).is_file())
 
     def test_result_writers_create_expected_ids_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
             _write_plan(feature_dir, include_second=False)
-            _write_non_ui(feature_dir)
 
             unit = _run("unit_test_result_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha", "--from-plan")
             e2e = _run(
@@ -3094,14 +2986,13 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(e2e_data["cases"][0]["caseId"], "E2E-alpha-001")
             self.assertEqual(review_data["findings"][0]["message"], "ok")
             self.assertEqual(verify_data["nextCheckpoint"], "needs_fix")
-            self.assertEqual(verify_data["uiSummary"]["uiRequired"], False)
+            self.assertNotIn("uiSummary", verify_data)
 
     def test_result_writers_reject_missing_trace_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
             _write_plan(feature_dir, include_second=False)
-            _write_non_ui(feature_dir)
 
             unit = _run(
                 "unit_test_result_writer.py",
