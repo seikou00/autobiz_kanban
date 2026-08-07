@@ -2329,12 +2329,20 @@ class JsonWriterTests(unittest.TestCase):
             workspace, feature_dir = _workspace(Path(tmp))
             payload = {
                 "id": "T001",
-                "title": "stdin task",
-                "goal": "deliver stdin task",
+                "title": "中文路径 stdin task",
+                "goal": "deliver a UTF-8 Chinese path through stdin",
                 "status": "done",
                 "deps": [],
                 "uiRequired": False,
-                "scope": {"modules": ["src"], "entrypoints": [], "pages": [], "dataObjects": []},
+                "workspaceRef": "default",
+                "scope": {
+                    "modules": ["中文模块"],
+                    "entrypoints": [],
+                    "pages": [],
+                    "dataObjects": [],
+                    "workspaceRoots": {"default": "."},
+                    "paths": ["src/main/java/中文目录/服务.java"],
+                },
                 "implementationPoints": ["update behavior", "cover boundary"],
                 "acceptanceCriteria": ["behavior is observable"],
                 "validationBoundary": "public behavior seam validated by the task command",
@@ -2368,6 +2376,68 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(tasks[0]["id"], "T001")
             self.assertEqual(tasks[0]["status"], "todo")
             self.assertEqual(tasks[0]["evidenceIds"], [])
+            self.assertEqual(tasks[0]["scope"]["modules"], ["中文模块"])
+            self.assertEqual(tasks[0]["scope"]["paths"], ["src/main/java/中文目录/服务.java"])
+
+    def test_plan_writer_rejects_non_utf8_stdin_with_remediation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            payload = {
+                "id": "T001",
+                "title": "中文路径 stdin task",
+                "goal": "deliver a UTF-8 Chinese path through stdin",
+                "deps": [],
+                "uiRequired": False,
+                "workspaceRef": "default",
+                "scope": {
+                    "modules": ["中文模块"],
+                    "entrypoints": [],
+                    "pages": [],
+                    "dataObjects": [],
+                    "workspaceRoots": {"default": "."},
+                    "paths": ["src/main/java/中文目录/服务.java"],
+                },
+                "implementationPoints": ["write a path", "read a path"],
+                "acceptanceCriteria": ["path is preserved"],
+                "validationBoundary": "UTF-8 body input is validated before any plan write",
+                "nonGoals": ["do not change behavior"],
+                "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
+                "designRefs": ["design.md#D-001"],
+                "apiIds": [],
+                "dataIds": [],
+                "decisionIds": ["D-001"],
+                "validationCommands": [{"command": TEST_TASK_COMMAND}],
+                "expectedFiles": [],
+                "evidenceIds": [],
+                "blockers": [],
+            }
+
+            init = _run("plan_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha")
+            body = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "hooks" / "plan_writer.py"),
+                    "add-task",
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                    "--body-stdin",
+                ],
+                cwd=ROOT,
+                input=json.dumps(payload, ensure_ascii=False).encode("gb18030"),
+                capture_output=True,
+                check=False,
+            )
+
+            output = body.stdout.decode("utf-8")
+            self.assertEqual(init.returncode, 0, init.stdout + init.stderr)
+            self.assertNotEqual(body.returncode, 0, output + body.stderr.decode("utf-8"))
+            self.assertIn("invalid_body_stdin_encoding", output)
+            self.assertIn("不是有效 UTF-8", output)
+            self.assertIn("Unicode surrogate", output)
+            self.assertIn("--body-file", output)
+            self.assertEqual(json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))["batches"], [])
 
     def test_plan_writer_body_stdin_rejects_conflicting_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -563,6 +563,7 @@ class TaskRunnerTest(unittest.TestCase):
                     "commandAudience": "validation_subagent_only",
                     "executorDirective": {
                         "requiredExecutor": "batch_validation_subagent",
+                        "subagentType": "verification-autodev",
                         "mainAgentAction": "spawn_subagent_immediately",
                         "mainAgentAllowedRunnerCommands": [],
                         "mainAgentPreflightAllowed": False,

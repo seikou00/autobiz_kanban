@@ -389,8 +389,8 @@
             }
           },
           "subagentConfig": {
-            "disabledBuiltinSubagents": ["Explore","code-reviewer","code-simplifier"],
-            "customSubagentFiles": ["agents/explore.md","agents/code-reviewer.md","agents/code-simplifier.md"]
+            "disabledBuiltinSubagents": ["Explore","code-reviewer","code-simplifier","verification"],
+            "customSubagentFiles": ["agents/explore.md","agents/code-reviewer.md","agents/code-simplifier.md","agents/verification.md"]
           }
         },
         "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码；PLAN.md 任务状态与完成记录就地回写（无独立文档产物；执行协议以 autodev-code skill 正文为准）",

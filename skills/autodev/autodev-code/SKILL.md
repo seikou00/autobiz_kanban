@@ -46,8 +46,8 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 若根计划处于 `awaiting_next_conversation`，它会校验并消费 `BATCH_HANDOFF.json`，自动激活 `nextBatchId`，无需用户提供 batch ID。必须严格按返回的 `action` 分支：
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
-- `run_batch_task_validation`：当前批次所有 TASK 实现均已收口为 `implemented`；创建 deferred validation run，并启动一个批次级只验证子代理，由它串行运行该批全部 TASK 与 batch 校验命令。
-- `spawn_batch_validation_subagent`：立即用一次“子任务执行”创建批次级只验证子代理，并把 `validationContext` 原样传入；`validationSubagentMode=start/resume/recover_closure/batch_check` 只说明子代理从哪个阶段接续。完整协议见下方「独立子代理执行批次全部校验」，不要在此就地展开。
+- `run_batch_task_validation`：当前批次所有 TASK 实现均已收口为 `implemented`；创建 deferred validation run，并启动一个批次级只验证子代理（角色取 `executorDirective.subagentType`），由它串行运行该批全部 TASK 与 batch 校验命令。
+- `spawn_batch_validation_subagent`：立即用一次“子任务执行”创建批次级只验证子代理，角色取 `executorDirective.subagentType`，并把 `validationContext` 原样传入；`validationSubagentMode=start/resume/recover_closure/batch_check` 只说明子代理从哪个阶段接续。完整协议见下方「独立子代理执行批次全部校验」，不要在此就地展开。
 - `fix_or_retry_task_validation`：源码未变化时可创建新的 task-validation run 从 `failedValidationTaskId` 重试；需要修改源码时，必须先对 runner 返回的 `repairOwnerTaskIds` 之一执行 `start-validation-repair`，不得默认把验证游标当成修复责任 TASK。若源码已在 repair 启动前被修改，显式执行 `start-validation-repair --adopt-workspace-changes`；runner 只采用请求代码工作区内的变化，并把父 validation run、采用文件与 repair 次数写入新 run 和后续 implementation Evidence。每个责任 TASK 最多做 2 次 validation repair；第 2 次修复后仍失败时 runner 自动记录延期问题并继续队列。
 - `run_batch_check`：仅用于未启用 deferred policy 的旧计划；当前批次 TASK 已全部完成，执行下方「批次验证与重验证」。
 - `recover_task_covered_batch`：仅用于未启用 deferred policy 的旧计划；最后一个 TASK evidence 已写入但批次收口尚未绑定时，inspect 并 recover 原 TASK run。
@@ -153,7 +153,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 python "${pluginPath}/hooks/task_runner.py" start-batch-task-validation --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-保存输出的完整 `validationContext`，其中必须包含 `runType/featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256/allowedCommands/commandAudience/executorDirective/subagentProtocol/executionGroups`。runner 返回 `action/requiredAction=spawn_batch_validation_subagent` 后，主 agent 的下一次工具调用必须是一次“子任务执行”；禁止在两者之间调用 `code_task_context.py`、`inspect`、`validate-batch-task`、`batch-check` 或任何底层构建命令。主 agent 只启动一个全新的批次验证子代理，并把该对象原样放入启动 prompt；必须把 `executorDirective/subagentProtocol` 作为机器协议执行，不得用旧模板覆盖或省略其中的执行角色、异步轮询、单子代理和终态规则，不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能执行 `allowedCommands` 中列出的 runner 命令——该列表按 phase 严格收窄（`task_validation` 只能 `validate-batch-task`，`batch_check` 只能 `batch-check`，失败态 `failed_handoff` 为空），并按 `currentTaskId` 调用：
+保存输出的完整 `validationContext`，其中必须包含 `runType/featureId/batchId/runId/taskOrder/currentTaskId/requestedCodeWorkspaces/batchSnapshotSha256/allowedCommands/commandAudience/executorDirective/subagentProtocol/executionGroups`。runner 返回 `action/requiredAction=spawn_batch_validation_subagent` 后，主 agent 的下一次工具调用必须是一次“子任务执行”；禁止在两者之间调用 `code_task_context.py`、`inspect`、`validate-batch-task`、`batch-check` 或任何底层构建命令。主 agent 只启动一个全新的批次验证子代理，角色取 `executorDirective.subagentType`（runner 给出的已注册 agent 名，直接作为宿主子任务工具的 `subagent_type`，不得改写或自行挑选），并把该对象原样放入启动 prompt；必须把 `executorDirective/subagentProtocol` 作为机器协议执行，不得用旧模板覆盖或省略其中的执行角色、异步轮询、单子代理和终态规则，不得只传自然语言摘要、遗漏 batch 上下文或自行改写 `code_workspace`。子代理禁止修改源码、测试、配置、Plan 和 Evidence，只能执行 `allowedCommands` 中列出的 runner 命令——该列表按 phase 严格收窄（`task_validation` 只能 `validate-batch-task`，`batch_check` 只能 `batch-check`，失败态 `failed_handoff` 为空），并按 `currentTaskId` 调用：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" validate-batch-task --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<CURRENT_TASK_ID>" --run-id "<VALIDATION_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
@@ -221,7 +221,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-check --feature "${feature}" -
 - runner 在首条命令前把 `activeRunId` 投影到 plan；命令 evidence 全部写完后先保存 `status=evidence_written`，再幂等绑定 plan。进程在 evidence append、TASK 重验证请求或最终批次绑定后中断时，重新调用 `code-session` 取得原 `activeRunId`，再以同一 `--run-id` 执行 `batch-check`；runner 会采用已写入 stream 的 evidence，不重复执行已完成命令。
 - required 命令决定批次成败及 `latestPassEvidenceIds`；optional 成功或 optional 失败 evidence 都只追加到批次历史和 run attempt，不得让 optional 失败阻断 code-done，也不得把 optional 记录伪装为 required latest pass。
 - 修复路径超出当前批次请求 workspace 时返回 `batch_fix_outside_workspace`，必须修复工作区后用同一 batch run 重试；同 workspace 内的任何修复都会改变批次最终快照，因此无论修改了哪个文件，都清空整批当前 completion 指针并按稳定顺序重验全部 TASK，不再按 `scope.paths` 归因。
-- 修复后的 batch-check 返回 `requiredAction=run_batch_task_validation` 时，保留原 batch run ID，整批 TASK 当前 validation completion 指针失效；创建新的 deferred task-validation run，启动一个新的批次级验证子代理串行重验全部 TASK。全部通过后仍由该子代理使用原 batch run ID 再跑最终 batch-check。`pendingRevalidation` 只保存触发和被替代 Evidence 关联，不再启动另一套 `start/complete` 重验。
+- 修复后的 batch-check 返回 `requiredAction=run_batch_task_validation` 时，保留原 batch run ID，整批 TASK 当前 validation completion 指针失效；创建新的 deferred task-validation run，启动一个新的批次级验证子代理（角色取 `executorDirective.subagentType`）串行重验全部 TASK。全部通过后仍由该子代理使用原 batch run ID 再跑最终 batch-check。`pendingRevalidation` 只保存触发和被替代 Evidence 关联，不再启动另一套 `start/complete` 重验。
 - batch-check 直接通过且没有批次修复，或重验证后的最终 batch-check 通过时，runner 才把批次置为完成。非末批会返回 `stop_and_open_new_conversation` 与 `batchHandoff`；末批则进入可选项目检查或完成门禁。
 
 若 `batch-check` 返回 `requiredAction=stop_and_open_new_conversation`、`stopAfterBatch=true` 和 `batchHandoff`，当前批次已经结束。必须原样输出 `userMessage` 提醒用户打开新对话，然后立即结束当前回复；不得继续读取或实现下一批，不得运行 project-check/checkpoint 命令，也不得在同一对话再次调用 `code-session`。新对话重新进入 Code 后由会话入口自动检查并激活下一批。`BATCH_HANDOFF.json` 始终保存在 feature 产物目录，入口激活时消费并删除。

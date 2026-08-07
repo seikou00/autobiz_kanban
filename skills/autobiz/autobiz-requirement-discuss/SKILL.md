@@ -29,21 +29,9 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_in_progress
 ```
+### 缓存检测与清理
 
-
-## 工作流程
-
-> **流程管控**：执行开始时用 `write_todos` 建立 todo 列表，每完成一步立即标记完成。以下环节不得跳过，可按实际情况增补条目：
->
-> 1. 建立需求上下文：读取原始材料并保存到 prd_original
-> 2. 改造需求文档并写入 PRD_DISCUSS.md
-> 3. 需求分析
-> 4. 问题清单展示与用户确认
-> 5. 对话式引导与 PRD_DISCUSS.md 调整
-> 6. 迭代回检直到收敛
-> 7. 更新状态与校验
-
-
+用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 已存在时，先删除该文件再走完整流程。
 
 ### 实现范围选择
 
@@ -64,9 +52,6 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
 
 同时在 `PRD_DISCUSS.md` 写入 `## 当前实现范围`。被剥离的交付内容记录到 Feature 目录的 `SCOPE_SPLIT.md`，不得作为本轮实现范围继续传播。
 
-### 缓存检测与清理
-
-用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 已存在时，先删除该文件再走完整流程。
 
 ## 缺失产物处理
 
@@ -107,9 +92,11 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ### 需求内容格式改造
 
-- 按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的模板格式重写需求文档
-- 写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
-- 格式化流程见同目录 `prd-formatter.md`。
+- 必须先完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd-formatter.md` 。
+- 按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的模板格式重写需求文档。
+- **关键** ：根据 `prd-formatter.md`进行格式化。
+- 写入`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。
+- **关键** ：以原需求文档为基准，核对生成的 `PRD_DISCUSS.md` 是否遗漏功能说明；逐项检查功能清单、功能详情、字段/表格行、规则、链接、文案、状态、外部协作规则和验收项。发现遗漏、弱化或错位时，先更新 `PRD_DISCUSS.md`，再重新核对。
 
 ### 需求分析
 

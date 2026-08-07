@@ -32,6 +32,7 @@ SPECS_SKILL = ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md"
 PLAN_SKILL = ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md"
 SIMPLIFIER_AGENT = ROOT / "agents" / "code-simplifier.md"
 EXPLORE_AGENT = ROOT / "agents" / "explore.md"
+VERIFICATION_AGENT = ROOT / "agents" / "verification.md"
 BOARD_CONFIG = ROOT / "board_core" / "board_config.json"
 PROTOCOL = ROOT / "skills" / "references" / "review-protocol.md"
 
@@ -252,6 +253,19 @@ class ExploreRoleIsResolvableTest(unittest.TestCase):
 
         self.assertIn("agents/explore.md", subagents["customSubagentFiles"])
         self.assertIn("Explore", subagents["disabledBuiltinSubagents"])
+
+
+class BatchValidationRoleIsResolvableTest(unittest.TestCase):
+    """Code 阶段批次验证角色必须可被宿主解析。"""
+
+    def test_agent_name_matches_runner_directive(self) -> None:
+        self.assertIn("name: verification-autodev", _read(VERIFICATION_AGENT))
+
+    def test_dev_code_injects_verification_agent(self) -> None:
+        subagents = _dev_code_subagents()
+
+        self.assertIn("agents/verification.md", subagents["customSubagentFiles"])
+        self.assertIn("verification", subagents["disabledBuiltinSubagents"])
 
 
 if __name__ == "__main__":
