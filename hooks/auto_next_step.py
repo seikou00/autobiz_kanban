@@ -58,7 +58,7 @@ from hooks.json_writer_common import atomic_write_json  # noqa: E402
 from hooks.paths import get_plugin_output_workspace  # noqa: E402
 from hooks.route_checkpoint import resolve_route  # noqa: E402
 from hooks.update_checkpoint import prepare_checkpoint_update, write_hook_logs  # noqa: E402
-from board_core.state_store import write_state_records  # noqa: E402
+from board_core.state_store import load_state_json_records_result, write_state_records  # noqa: E402
 from board_core.workflow_compiler import read_json  # noqa: E402
 
 
@@ -624,6 +624,8 @@ def resume_note(route: dict[str, Any]) -> str:
 
 def decide(
     *,
+    workspace: Path,
+    feature: str,
     event: dict[str, Any],
     route: dict[str, Any],
     run_state: dict[str, Any],
@@ -642,6 +644,14 @@ def decide(
     ratio = context_ratio(event)
     threshold = float(config["contextUsageThreshold"])
     skill, message = route_next_action(route)
+
+    # 读取 Feature state.json 以获取 batchContinuation
+    feature_state = {}
+    try:
+        records = load_state_json_records_result(workspace).records
+        feature_state = records.get(feature, {})
+    except Exception:
+        pass  # state.json 读取失败不应阻塞托管链
 
     state = dict(run_state)
     state["processedEventIds"] = list(run_state.get("processedEventIds", []))
@@ -889,6 +899,33 @@ def decide(
             "new_session:auto_plan_to_code",
         )
 
+    # batch 内任务切换检测：同一 batch 未完成，但上一任务已完成，需要续跑下一任务。
+    # 必须在 node_status == "done" 之前判断，因为 batch 完成后 checkpoint 仍是 code_in_progress。
+    batch_continuation = feature_state.get("batchContinuation")
+    if isinstance(batch_continuation, dict) and batch_continuation.get("continueCurrentBatch"):
+        batch_id = batch_continuation.get("activeBatchId", "")
+        next_task_id = batch_continuation.get("nextTaskId", "")
+        # batch 内切换任务，判断是否需要新开会话（上下文占用）。
+        if ratio is not None and ratio >= threshold:
+            return finish(
+                result(
+                    True,
+                    f"batch {batch_id} 任务完成，上下文占用 {ratio:.0%} 已超阈值，新开会话续跑下一任务 {next_task_id}。",
+                    [new_session(skill, auto_message(message, note=resume_note(route)))],
+                ),
+                "new_session:batch_continuation_context_threshold",
+            )
+        # 上下文未满，同会话继续。
+        ratio_text = f"{ratio:.0%}" if ratio is not None else "未知"
+        return finish(
+            result(
+                True,
+                f"batch {batch_id} 任务完成（上下文占用 {ratio_text}），同会话继续下一任务 {next_task_id}。",
+                [continue_session(skill, auto_message(message))],
+            ),
+            "continue:batch_continuation",
+        )
+
     node_status = str(route.get("currentNodeStatus") or "")
     if node_status == "done":
         # 需求 1：节点完成 -> 新开会话跑下一节点（route.nextAction 已指向下一节点技能）。
@@ -1125,6 +1162,8 @@ def _run(argv: list[str]) -> int:
 
         try:
             payload, new_state = decide(
+                workspace=workspace,
+                feature=args.feature,
                 event=event,
                 route=route_payload,
                 run_state=run_state,

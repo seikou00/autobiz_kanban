@@ -173,6 +173,10 @@ def _normalize_record(
         # whose producer is absent are dropped by the compiler instead.
     if workflow_skipped:
         record["workflowSkippedNodes"] = list(workflow_skipped)
+    # 保留 batchContinuation（托管模式 batch 内任务切换状态）
+    batch_continuation = raw_record.get("batchContinuation")
+    if isinstance(batch_continuation, dict):
+        record["batchContinuation"] = batch_continuation
     return record
 
 

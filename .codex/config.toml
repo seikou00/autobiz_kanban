@@ -1,0 +1,5 @@
+[mcp_servers.harness-feedback]
+url = "http://harnessfeedback.paas.cmbchina.cn/mcp"
+
+[mcp_servers.mcp-arch]
+url = "https://archguardservice.paas.cmbchina.cn/mcp"
