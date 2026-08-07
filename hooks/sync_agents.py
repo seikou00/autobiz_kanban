@@ -15,12 +15,8 @@ board_config.json 注册::
     }
 
 行为：每次都删掉旧 ``<pluginPath>/sys/``（已 .gitignore）再重新克隆，始终拿到远端
-最新内容；HTTPS 的两种 clone 方式都失败时，以 ``sshUrl`` 兜底重试相同 ref。
-
-克隆后调 ``knowledge_index.build()``：遍历仓库里带 frontmatter 的 ``.md``，生成
-``knowledge.index.json`` 与 ``.entries/`` 下的各级入口文档，再把索引整形为 stdout JSON。
-尚未迁移到 frontmatter 的旧知识库扫不到条目、不生成索引，由 ``agents_repo`` 回落到
-仓库自带的手写 ``agents.manifest.json``——两种知识库都能用，无需 feature flag。
+最新内容；HTTPS 的两种 clone 方式都失败时，以 ``sshUrl`` 兜底重试相同 ref。仓库内含
+``agents.manifest.json`` 与 ``<systemId>/AGENTS.md``。随后把清单整形为 stdout JSON。
 
 输出（stdout，宿主据此把 supported_deploy_units 合并进 board.json）::
 
@@ -29,9 +25,7 @@ board_config.json 注册::
       "knowledge_path": "<pluginPath>/sys",  # 克隆落盘路径，与 repo 同级；写进 board.json 的
                                              # inspectCommands.<platform>.knowledge_path
       "supported_deploy_units": [...],
-      "systems": [ {"systemId","systemName","agentsReady","agentsPath","deployUnits":[...]} ],
-      "warnings": [...] }                    # 沉淀质量问题（缺 frontmatter/缺字段/type 非法/
-                                             # 单元跨 sub_product 重复），供 UI 暴露给沉淀方
+      "systems": [ {"systemId","systemName","agentsReady","agentsPath","deployUnits":[...]} ] }
 
 ``--write-board-config``（已写进注册的 pull_knowledge 命令，UI 每次拉取即触发）：同步成功后
 把 ``supported_deploy_units`` 定点写回 board_config.json 顶层同名字段，并把克隆落盘路径写回
@@ -60,7 +54,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks import knowledge_index  # noqa: E402
 from hooks.agents_repo import (  # noqa: E402
     SYNC_SCHEMA_VERSION,
     AgentsManifestError,
@@ -68,7 +61,6 @@ from hooks.agents_repo import (  # noqa: E402
     get_agents_root,
     platform_key,
 )
-from hooks.knowledge_index import FrontmatterError  # noqa: E402
 from board_core.contracts import BoardConfigError, load_board_config  # noqa: E402
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
@@ -272,32 +264,13 @@ def run(
         "ref": resolved_ref,
         **repo_info,
     }
-
-    # 扫描 frontmatter 生成索引与各级入口；未迁移的旧知识库扫不到条目、不写索引，
-    # 由 agents_repo 回落手写的 agents.manifest.json。
-    try:
-        index_result = knowledge_index.build(dest)
-    except FrontmatterError as exc:
-        result = _fail(f"仓库已拉取但知识库索引生成失败: {exc}")
-        result["repo"] = repo_info
-        result["knowledge_path"] = str(dest)
-        return result
-    except OSError as exc:
-        result = _fail(f"仓库已拉取但知识库索引落盘失败: {exc}，请检查 sys/ 目录是否可写")
-        result["repo"] = repo_info
-        result["knowledge_path"] = str(dest)
-        return result
-    index_warnings = list(index_result.get("warnings", []))
-
     try:
         payload = build_sync_payload(repo_info=repo_info)
     except AgentsManifestError as exc:
         result = _fail(f"仓库已拉取但清单不可用: {exc}")
         result["repo"] = repo_info
         result["knowledge_path"] = str(dest)  # 已克隆，给出落盘路径（与 repo 同级）
-        result["warnings"] = index_warnings
         return result
-    payload["warnings"] = index_warnings
     return payload
 
 
