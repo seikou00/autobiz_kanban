@@ -386,6 +386,82 @@ def _ui_context_payload(workspace: Path, feature: str) -> dict[str, Any] | None:
         raise
 
 
+def _collect_frontend_batches(fd: Path, visual_sources_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collect all frontend batches with their visual source route declarations."""
+    _, _, load_plan = _import_ui_context_helpers()
+    if load_plan is None:
+        return []
+
+    plans_dir = fd / ".tmp" / "plan_writer" / "draft" / "plans"
+    if not plans_dir.is_dir():
+        return []
+
+    batches = []
+    for batch_dir in sorted(plans_dir.iterdir()):
+        if not batch_dir.is_dir():
+            continue
+        batch_plan_path = batch_dir / "plan.json"
+        if not batch_plan_path.is_file():
+            continue
+
+        try:
+            batch = load_plan(batch_plan_path)
+        except Exception:
+            continue
+
+        if batch.get("executionLane") != "frontend":
+            continue
+
+        batch_id = batch.get("batchId")
+        tasks = batch.get("tasks", [])
+        if not isinstance(tasks, list):
+            continue
+
+        task_ids = []
+        visual_source_refs = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = task.get("id")
+            if task_id:
+                task_ids.append(str(task_id))
+            ui_refs = task.get("uiRefs")
+            if isinstance(ui_refs, dict):
+                refs = ui_refs.get("visualSourceRefs", [])
+                if isinstance(refs, list):
+                    visual_source_refs.extend(str(r) for r in refs if isinstance(r, str))
+
+        visual_source_refs = sorted(set(visual_source_refs))
+
+        declared_routes = {}
+        for vis_id in visual_source_refs:
+            if vis_id in visual_sources_by_id:
+                vis_source = visual_sources_by_id[vis_id]
+                vis_route = vis_source.get("route")
+                if isinstance(vis_route, str) and vis_route in VALID_ROUTES:
+                    declared_routes[vis_id] = vis_route
+
+        consolidated_route = None
+        unique_routes = set(declared_routes.values())
+        if len(unique_routes) == 1:
+            consolidated_route = next(iter(unique_routes))
+        elif ROUTE_ABSOLUTE in unique_routes:
+            consolidated_route = ROUTE_ABSOLUTE
+        elif ROUTE_STANDARD in unique_routes:
+            consolidated_route = ROUTE_STANDARD
+
+        batches.append({
+            "batchId": batch_id,
+            "executionLane": "frontend",
+            "taskIds": task_ids,
+            "visualSourceRefs": visual_source_refs,
+            "declaredRoutes": declared_routes,
+            "consolidatedRoute": consolidated_route,
+        })
+
+    return batches
+
+
 def route_payload_from_ui_context(
     workspace: Path,
     feature: str,
@@ -462,6 +538,8 @@ def route_payload_from_ui_context(
                 "declared HTML visual source is missing; falling back to spec-driven-ui",
             ]
 
+    frontend_batches = _collect_frontend_batches(fd, visual_sources_by_id)
+
     payload: dict[str, Any] = {
         "version": 1,
         "feature": feature,
@@ -499,6 +577,8 @@ def route_payload_from_ui_context(
             if isinstance(task.get("taskId"), str)
         },
     }
+    if frontend_batches:
+        payload["batches"] = frontend_batches
     if route_missing_declared or (missing_html_sources and not html_sources):
         payload["htmlSourceMissing"] = True
         payload["missingHtmlSourcePaths"] = missing_html_sources
