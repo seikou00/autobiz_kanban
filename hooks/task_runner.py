@@ -105,6 +105,9 @@ DEFAULT_TIMEOUT_SECONDS = 300
 VALIDATION_OUTPUT_POLL_SECONDS = 0.2
 VALIDATION_PROGRESS_INTERVAL_SECONDS = 30.0
 COMPILE_DIAGNOSTIC_DRAIN_SECONDS = 2.0
+FAILURE_DIAGNOSTIC_DRAIN_SECONDS = 10.0  # 动态诊断收集窗口上限
+LOG_STABLE_THRESHOLD_SECONDS = 2.0  # 日志停止增长判定阈值
+TEST_REPORT_SCAN_INTERVAL_SECONDS = 1.0  # 测试报告扫描间隔
 PROCESS_TERMINATION_GRACE_SECONDS = 3.0
 VALIDATION_DIAGNOSTIC_BUFFER_BYTES = 64 * 1024
 WINDOWS_BATCH_EXECUTABLE_SUFFIXES = frozenset({".bat", ".cmd"})
@@ -129,7 +132,7 @@ class TaskRunnerError(ValueError):
         self.details = details
 
 
-@dataclass(frozen=True)
+@dataclass
 class ValidationProcessResult:
     exit_code: int | None
     output: str
@@ -137,6 +140,10 @@ class ValidationProcessResult:
     compile_category: str | None
     duration_seconds: float
     process_tree_terminated: bool
+    test_report_failure: dict[str, Any] | None = None  # 新增：测试报告失败详情
+    early_failure_category: str | None = None  # 提前检测到的失败类别
+    early_failure_source: str | None = None  # 检测源（surefire_report/failsafe_report等）
+    early_failure_detected_at: float = 0.0  # 检测到失败的时间点（秒）
 
 
 @dataclass(frozen=True)
@@ -1795,6 +1802,139 @@ def _terminate_validation_process_tree(
     return process.poll() is not None and not process_group_exists()
 
 
+def _maven_report_snapshot(command_cwd: Path) -> dict[str, float]:
+    """
+    记录当前 Maven 测试报告的基线（文件路径 -> mtime）
+    用于后续判断哪些是本次运行新生成的报告
+    """
+    baseline: dict[str, float] = {}
+    for pattern in ["**/surefire-reports/TEST-*.xml", "**/failsafe-reports/TEST-*.xml"]:
+        for report_path in command_cwd.glob(pattern):
+            try:
+                mtime = report_path.stat().st_mtime
+                baseline[str(report_path)] = mtime
+            except OSError:
+                continue
+    return baseline
+
+
+def _scan_maven_test_reports(
+    command_cwd: Path,
+    baseline_reports: dict[str, float],
+    started_at: float,
+) -> dict[str, Any] | None:
+    """
+    扫描 Surefire/Failsafe 测试报告，查找失败
+
+    只处理相对基准时间新增或修改的 XML
+    解析失败时跳过（下一轮重试），不误判
+    """
+    test_failures: list[dict[str, Any]] = []
+    affected_selectors: set[str] = set()
+    detection_source = "surefire_report"
+
+    for pattern in ["**/surefire-reports/TEST-*.xml", "**/failsafe-reports/TEST-*.xml"]:
+        for report_path in command_cwd.glob(pattern):
+            # 只看本次新增或修改的
+            try:
+                mtime = report_path.stat().st_mtime
+            except OSError:
+                continue
+
+            report_key = str(report_path)
+            if report_key in baseline_reports and mtime <= baseline_reports[report_key]:
+                continue
+
+            try:
+                tree = ET.parse(report_path)
+            except ET.ParseError:
+                # XML 正在写入，下一轮重试
+                continue
+            except OSError:
+                continue
+
+            root = tree.getroot()
+            test_class = root.get("name", "UnknownClass")
+
+            if "failsafe" in str(report_path):
+                detection_source = "failsafe_report"
+
+            # 查找 <failure> 和 <error>
+            for testcase in root.findall(".//testcase"):
+                test_method = testcase.get("name", "")
+
+                failure = testcase.find("failure")
+                error = testcase.find("error")
+                failure_node = failure if failure is not None else error
+
+                if failure_node is not None:
+                    test_failures.append({
+                        "testClass": test_class,
+                        "testMethod": test_method,
+                        "exceptionType": failure_node.get("type", ""),
+                        "message": (failure_node.get("message", "") or "")[:1000],
+                        "stackTrace": (failure_node.text or "").strip()[:2000]
+                    })
+                    affected_selectors.add(f"{test_class}#{test_method}")
+
+    if test_failures:
+        return {
+            "category": "behavior_test_failure",
+            "detectionSource": detection_source,
+            "detectedAtSeconds": time.monotonic() - started_at,
+            "summary": f"测试失败: {test_failures[0]['testClass']}.{test_failures[0]['testMethod']}",
+            "testFailures": test_failures,
+            "affectedSelectors": sorted(affected_selectors),
+            "firstFailure": test_failures[0],
+        }
+
+    return None
+
+
+def _drain_diagnostics_after_test_failure(
+    process: subprocess.Popen[bytes],
+    command_log: Any,
+    rolling_output: bytearray,
+    started_at: float,
+    hard_deadline: float,
+    captured_bytes: int,
+    command: dict[str, Any],
+    repositories: RepositoryMap,
+) -> None:
+    """
+    发现测试失败后继续收集诊断，直到满足任一条件：
+    1. 进程自然退出
+    2. 日志停止增长超过 2 秒
+    3. 超过 FAILURE_DIAGNOSTIC_DRAIN_SECONDS（10 秒）
+    4. 到达硬超时
+    """
+    drain_deadline = min(
+        time.monotonic() + FAILURE_DIAGNOSTIC_DRAIN_SECONDS,
+        hard_deadline
+    )
+    last_size = captured_bytes
+    last_change = time.monotonic()
+
+    while time.monotonic() < drain_deadline:
+        # 检查进程是否自然退出
+        if process.poll() is not None:
+            return
+
+        # 读取新日志
+        chunk = command_log.read(8192)
+        if chunk:
+            last_size += len(chunk)
+            last_change = time.monotonic()
+            rolling_output.extend(chunk)
+            if len(rolling_output) > VALIDATION_DIAGNOSTIC_BUFFER_BYTES:
+                del rolling_output[:-VALIDATION_DIAGNOSTIC_BUFFER_BYTES]
+        elif time.monotonic() - last_change > LOG_STABLE_THRESHOLD_SECONDS:
+            # 日志停止增长超过 2 秒
+            return
+
+        time.sleep(VALIDATION_OUTPUT_POLL_SECONDS)
+
+
 def _validation_command_argv(launch_spec: ValidationLaunchSpec) -> list[str]:
     return [
         launch_spec.resolved_executable,
@@ -1861,6 +2001,11 @@ def _run_validation_process(
     rolling_output = bytearray()
     captured_bytes = 0
     next_progress_at = started_at + VALIDATION_PROGRESS_INTERVAL_SECONDS
+
+    # 新增：测试报告基线和扫描
+    baseline_reports = _maven_report_snapshot(command_cwd)
+    test_report_failure: dict[str, Any] | None = None
+    next_report_scan = started_at + TEST_REPORT_SCAN_INTERVAL_SECONDS
 
     try:
         if launch_spec.launch_mode == "windows_batch":
@@ -1937,6 +2082,34 @@ def _run_validation_process(
                     if compile_category is not None:
                         termination_reason = "compile_diagnostic"
                     break
+
+                # 新增：每 1 秒扫描测试报告
+                if now >= next_report_scan:
+                    report_failure = _scan_maven_test_reports(
+                        command_cwd, baseline_reports, started_at
+                    )
+                    if report_failure is not None:
+                        test_report_failure = report_failure
+                        termination_reason = "test_report_failure"
+                        _emit_validation_progress(
+                            "validation_failure_detected",
+                            commandId=str(command.get("id", "")),
+                            elapsedSeconds=round(now - started_at, 3),
+                            category=report_failure["category"],
+                            source=report_failure["detectionSource"],
+                            testClass=report_failure.get("firstFailure", {}).get("testClass", ""),
+                            testMethod=report_failure.get("firstFailure", {}).get("testMethod", ""),
+                        )
+                        # 进入诊断收集窗口
+                        _drain_diagnostics_after_test_failure(
+                            process, command_log, rolling_output, started_at,
+                            hard_deadline, captured_bytes, command, repositories
+                        )
+                        process_tree_terminated = _terminate_validation_process_tree(process)
+                        read_available_output()
+                        break
+                    next_report_scan = now + TEST_REPORT_SCAN_INTERVAL_SECONDS
+
                 if compile_category is not None and (
                     (compile_deadline is not None and now >= compile_deadline)
                     or now >= hard_deadline
@@ -1998,6 +2171,10 @@ def _run_validation_process(
         compile_category=compile_category,
         duration_seconds=time.monotonic() - started_at,
         process_tree_terminated=process_tree_terminated,
+        test_report_failure=test_report_failure,
+        early_failure_category=test_report_failure["category"] if test_report_failure else None,
+        early_failure_source=test_report_failure["detectionSource"] if test_report_failure else None,
+        early_failure_detected_at=test_report_failure["detectedAtSeconds"] if test_report_failure else 0.0,
     )
 
 
@@ -2050,6 +2227,28 @@ def _run_validation(
             return 1, (
                 f"{output}\nvalidation_process_stopped_after_compile_failure:"
                 f"{process_result.compile_category}:"
+                f"durationSeconds={process_result.duration_seconds:.3f}:"
+                f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
+            )
+        if process_result.termination_reason == "test_report_failure":
+            # 提前失败检测：在超时前从测试报告中检测到失败
+            failure_details = ""
+            if process_result.test_report_failure:
+                first_failure = process_result.test_report_failure.get("firstFailure", {})
+                if first_failure:
+                    failure_details = (
+                        f"\nTest failure detected: {first_failure.get('testClass', '')}.{first_failure.get('testMethod', '')}\n"
+                        f"  Type: {first_failure.get('exceptionType', '')}\n"
+                        f"  Message: {first_failure.get('message', '')}\n"
+                    )
+                    stack_trace = first_failure.get('stackTrace', '')
+                    if stack_trace:
+                        failure_details += f"  Stack trace:\n{stack_trace}\n"
+            return 1, (
+                f"{output}{failure_details}\nvalidation_process_stopped_after_test_report_failure:"
+                f"category={process_result.early_failure_category or 'behavior_test_failure'}:"
+                f"detectionSource={process_result.early_failure_source or 'test_report'}:"
+                f"detectedAtSeconds={process_result.early_failure_detected_at:.3f}:"
                 f"durationSeconds={process_result.duration_seconds:.3f}:"
                 f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
             )

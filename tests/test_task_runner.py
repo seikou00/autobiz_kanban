@@ -1407,15 +1407,21 @@ class TaskRunnerTest(unittest.TestCase):
                 "maven_test_selectors",
                 return_value=["AppTest"],
             ):
+                started_at = time.monotonic()
                 exit_code, output = task_runner_module._run_validation(
                     command,
                     {repo.name: repo},
                 )
+            # 提前失败检测应该返回退出码 1（验证失败）
             self.assertEqual(exit_code, 1)
-            self.assertIn(
-                "validation_maven_test_failures_detected_after_timeout",
-                output,
-            )
+            # 应该在远小于 5 秒（脚本 sleep 时间）内完成
+            elapsed = time.monotonic() - started_at
+            self.assertLess(elapsed, 3.0)
+            # 应该包含提前失败检测的标记
+            self.assertIn("validation_process_stopped_after_test_report_failure", output)
+            self.assertIn("behavior_test_failure", output)
+            self.assertIn("surefire_report", output)
+            # 输出中应包含实际的测试失败详情
             self.assertIn("expected true", output)
 
     def test_runtime_environment_failure_requires_strong_environment_marker(self) -> None:
