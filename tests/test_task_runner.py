@@ -880,6 +880,31 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertNotEqual(exit_code, 0)
             self.assertIn("validation_maven_test_target_missing", output)
 
+    def test_maven_runner_rejects_project_selector_from_leaf_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = (Path(tmp) / "repo").resolve()
+            module = repo / "后台服务" / "零售客户经营" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            (module / "pom.xml").write_text("<project/>", encoding="utf-8")
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    "mvn", "test", "-Dtest=AgrCtrlSearchBasicTest",
+                    "-pl", "backend/service/LF39.05_bccompliancemng",
+                ],
+                "cwd": "后台服务/零售客户经营/LF39.05_bccompliancemng",
+            }
+
+            with self.assertRaisesRegex(
+                task_runner_module.TaskRunnerError,
+                "maven_project_selector_requires_aggregator_cwd",
+            ):
+                task_runner_module._assert_validation_command_environment(
+                    command,
+                    {repo.name: repo},
+                    retry_same_run=True,
+                )
+
     def test_grouped_maven_execution_splits_distinct_test_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp).resolve()

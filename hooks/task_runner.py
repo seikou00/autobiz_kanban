@@ -87,6 +87,7 @@ from hooks.task_run_integrity import (  # noqa: E402
 )
 from hooks.validation_policy import (  # noqa: E402
     command_policy_errors,
+    maven_project_selector_workspace_errors,
     maven_test_plan,
     maven_test_selectors,
     package_script_name,
@@ -1556,6 +1557,12 @@ def _assert_validation_command_environment(
         )
     _, repo = _command_repository(command, repositories)
     command_cwd = (repo / str(command.get("cwd"))).resolve()
+    if command_cwd.is_dir():
+        selector_errors = maven_project_selector_workspace_errors(command, command_cwd)
+        if selector_errors:
+            raise TaskRunnerError(
+                f"validation_command_policy_violation:{command.get('id', '')}:{selector_errors[0]}"
+            )
     script_name = package_script_name(command)
     if script_name is not None:
         package_path = command_cwd / "package.json"

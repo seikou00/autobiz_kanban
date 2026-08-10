@@ -377,6 +377,27 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-plan skill must define the deterministic task writer protocol: " + ", ".join(missing),
         )
 
+    def test_plan_skill_requires_targeted_draft_repair_loop(self) -> None:
+        content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "validation.issues",
+            "validation.invalidTaskIds",
+            "repairTarget=task_detail",
+            "repairTarget=task_group",
+            "repair-draft-task",
+            "repair-draft-tasks",
+            "批量修复在任一 patch 不合法时整体不落盘",
+            "不得因为 task detail",
+            "删除 `.tmp/plan_writer`",
+            "不得删除 Draft 或全量重填 task",
+        ]
+        missing = [phrase for phrase in required if phrase not in content]
+        self.assertEqual(
+            missing,
+            [],
+            "autodev-plan skill must keep targeted Draft repair semantics: " + ", ".join(missing),
+        )
+
     def test_plan_skill_keeps_ui_task_generation_guidance(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         required = [

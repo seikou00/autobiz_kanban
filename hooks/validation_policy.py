@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -148,6 +149,62 @@ def maven_project_selector_errors(command: Any) -> list[str]:
     return []
 
 
+def maven_project_selector_workspace_errors(command: Any, command_dir: Path) -> list[str]:
+    """Validate Maven project selectors against the reactor POM in ``command_dir``.
+
+    A task command normally runs from its leaf module and needs no ``-pl``.
+    Path selectors are only meaningful when that directory is a Maven
+    aggregator. Keeping this filesystem-aware check separate lets the generic
+    command policy remain usable before a workspace has been resolved.
+    """
+
+    if not isinstance(command, dict):
+        return []
+    argv = normalized_argv(command)
+    if not argv or command_executable(argv) not in MAVEN_EXECUTABLES:
+        return []
+
+    selectors = [
+        item.strip()
+        for value in _maven_project_list_values(argv)
+        for item in value.split(",")
+        if item.strip() and not item.strip().startswith("!")
+    ]
+    if not selectors:
+        return []
+
+    command_dir = command_dir.resolve()
+    pom_path = command_dir / "pom.xml"
+    if not pom_path.is_file():
+        return []
+    try:
+        root = ET.parse(pom_path).getroot()
+    except (ET.ParseError, OSError):
+        return []
+    has_modules = any(
+        element.tag.rsplit("}", 1)[-1] == "module" and bool((element.text or "").strip())
+        for element in root.iter()
+    )
+    if not has_modules:
+        return ["maven_project_selector_requires_aggregator_cwd"]
+
+    for selector in selectors:
+        # Coordinates such as :artifactId cannot be verified as file paths.
+        if ":" in selector:
+            continue
+        normalized = selector.replace("\\", "/")
+        if "/" not in normalized and not normalized.startswith("."):
+            continue
+        selected_dir = (command_dir / normalized).resolve()
+        try:
+            selected_dir.relative_to(command_dir)
+        except ValueError:
+            return ["maven_project_selector_outside_cwd"]
+        if not (selected_dir / "pom.xml").is_file():
+            return ["maven_project_selector_path_missing"]
+    return []
+
+
 def maven_test_selectors(command: Any) -> list[str]:
     """Return concrete Maven test selectors from -Dtest/-Dit.test properties."""
 
@@ -255,6 +312,103 @@ def maven_test_target_sources(command_dir: Path, selector: str) -> list[Path]:
                     continue
             candidates.append(path)
     return sorted(set(candidates))
+
+
+def _maven_reactor_search_roots(command: Any, command_dir: Path) -> list[Path] | None:
+    """Resolve `-pl`/`--projects` path selectors to concrete module directories.
+
+    Returns ``None`` when the command has no resolvable path selector, meaning
+    the caller should fall back to searching the whole ``command_dir`` (the
+    unscoped default). Coordinate selectors (``:artifactId``) cannot be mapped
+    to a directory from the filesystem alone, so they also fall back to an
+    unrestricted search rather than risk silently excluding the real target.
+    """
+
+    argv = normalized_argv(command)
+    if not argv:
+        return None
+    selectors = [
+        item.strip()
+        for value in _maven_project_list_values(argv)
+        for item in value.split(",")
+        if item.strip() and not item.strip().startswith("!")
+    ]
+    if not selectors:
+        return None
+    if any(":" in selector for selector in selectors):
+        return None
+
+    resolved_base = command_dir.resolve()
+    roots: list[Path] = []
+    for selector in selectors:
+        candidate = (command_dir / selector.replace("\\", "/")).resolve()
+        try:
+            candidate.relative_to(resolved_base)
+        except ValueError:
+            continue
+        if candidate.is_dir():
+            roots.append(candidate)
+    return roots or None
+
+
+def _maven_test_source_package(source: Path, root: Path) -> str | None:
+    """Extract the dotted package path for a test source below ``root``."""
+
+    try:
+        relative = source.relative_to(root)
+    except ValueError:
+        return None
+    parts = list(relative.parts)
+    for lang_dir in ("java", "kotlin", "groovy", "scala"):
+        if lang_dir in parts:
+            lang_index = parts.index(lang_dir)
+            return ".".join(parts[lang_index + 1:-1])
+    return None
+
+
+def check_maven_test_target_ambiguity(command: Any, command_dir: Path) -> list[str]:
+    """Check if a Maven test selector is ambiguous (matches multiple packages).
+
+    Honors `-pl`/`--projects` scoping: a selector that matches the same class
+    name in two different modules is only ambiguous if Maven would actually
+    search both of them. When the command restricts the reactor to a single
+    resolvable module, sources outside that module are not considered.
+
+    Returns list of error codes if ambiguous selectors are found.
+    """
+    selectors = maven_test_selectors(command)
+    if not selectors:
+        return []
+
+    search_roots = _maven_reactor_search_roots(command, command_dir) or [command_dir]
+
+    errors: list[str] = []
+    for selector in selectors:
+        # Skip fully qualified selectors (contains package path)
+        class_selector = selector.split("#", 1)[0].strip()
+        if "." in class_selector:
+            # Fully qualified, not ambiguous
+            continue
+
+        # Find all matching source files within the scoped reactor roots.
+        sources: set[Path] = set()
+        for root in search_roots:
+            sources.update(maven_test_target_sources(root, selector))
+        if len(sources) > 1:
+            # Extract package paths to check if they're actually different
+            packages = set()
+            for source in sources:
+                for root in search_roots:
+                    package = _maven_test_source_package(source, root)
+                    if package is not None:
+                        packages.add(package)
+                        break
+
+            if len(packages) > 1:
+                errors.append("maven_test_selector_ambiguous")
+                break
+
+    return errors
 
 
 def maven_test_plan(command: Any, command_dir: Path) -> dict[str, Any] | None:

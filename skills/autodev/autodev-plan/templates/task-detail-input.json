@@ -19,9 +19,9 @@
   "nonGoals": [
     "[explicit adjacent behavior or scope that this task will not change]"
   ],
-  "designRefs": ["design.md#D-001"],
+  "designRefs": [],
   "dataIds": [],
-  "decisionIds": ["D-001"],
+  "decisionIds": [],
   "validationCommands": [
     {
       "argv": ["[executable]", "[task test arguments]"],

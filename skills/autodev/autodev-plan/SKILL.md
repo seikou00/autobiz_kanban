@@ -55,7 +55,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 - 找到最可能的集成点和受影响文件
 - 识别现有命名、错误体、分页、鉴权、租户、审计、日志等风格
 - 隐性知识你需要理解现有系统完成探索，并将隐性知识与我讨论
-- 任务、需求和设计决策都必须使用稳定 ID：Task `T001`、Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。`D-NNN` 由本阶段写进 design 技术决策表，并且每个任务的 `decisionIds` 至少引用一个；design 里的每条 `D-NNN` 也都必须被某个任务引到，双向由 `plan_json_contract` 判定。
+- 任务、需求和设计决策都必须使用稳定 ID：Task `T001`、Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。`D-NNN` 由本阶段写进 design 技术决策表；任务只引用与自身实现真正相关的决策，没有适用技术决策时 `decisionIds` 写空数组，禁止按 Task 编号生成 `D-NNN`。design 里的每条 `D-NNN` 仍必须被至少一个真正相关的任务引用，全局覆盖由 `plan_json_contract` 判定。
 - 规格决策 `DEC-001` ：由 specs 阶段在 proposal 的 `## Decision Log` 节定义，本阶段只在 design 追踪表的 `Decision` 列引用、不新增，该 Requirement 无此类决策时写「无」。`design_contract` 只判引用能否在该节内解析，不要求每个 Requirement 都有。两者都叫「决策」，区别是 `D` 本阶段产出且引用强制，`DEC` 上游输入且可为空。
 
 **比较选项**
@@ -257,6 +257,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - **发起阶段门**：按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `确认设计，进入 PLAN 生成 (Recommended)` / `需要调整设计` / `暂停，稍后继续`；这是阶段门，不设置 `autoResolutionMs`，必须等待明确答复。
 - **自由表达即退出结构化**：用户不点选项、直接给出修改意见时，当作普通文本吸收，更新 design.md 对应章节并重新展示变更部分，再择机重发确认门。
 
+整体确认通过后，`design.md` 成为 Plan 的只读事实源。Plan 只能从其中选择已确认的 `API-NNN` / `DATA-NNN` / `D-NNN`，不得根据候选 Task 反向新增、续编或改写 design ID。任务分组或详情出现未知 ID 时，只能修 `task-groups.json` 或 Draft task；若规格本身确实要求修改 Design，必须退出当前 Plan 生成，重新展示 Design 变更并再次通过整体确认门，不能把 Plan 校验错误当作 Design 修订依据。已 finalized 且未开始执行的 Draft 如确实完成了独立 Design 修订，必须显式使用 `reopen-finalized-draft --design-revision-confirmed --reason <reason>` 更新 Design 锁；普通 reopen 不得接受 Design 漂移。
+
 反模式（禁止）：
 
 - 只问「以上技术设计是否满足需求？」「是否可以继续？」这类未展示具体内容的笼统问题。
@@ -295,7 +297,7 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${f
 
 分组预检失败时只能修改候选分组，不得准备 Draft。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先在候选分组表证明共享验证闭环，确认这些 SCN 共享同一用户动作、公开 seam 和自动化验证边界，否则按业务闭环继续拆分。
 
-分组预检成功后立即创建并锁定 Draft Batch；`prepare-task-draft` 会保存 `groupingDigest`，投影全部 group-owned 字段和自动 Batch，不需要也不接受 task 目录。下例以当前项目根为代码仓库；涉及多个仓库时，为每个实际绝对路径重复传入 `--code-workspace`：
+分组预检成功后立即创建并锁定 Draft Batch；`prepare-task-draft` 会保存 `groupingDigest`，投影全部 group-owned 字段和自动 Batch，不需要也不接受 task 目录。首次准备还会在 Feature 目录写入持久的 `.design-contract.lock.json`，记录已确认 Design 的 SHA；它不在 `.tmp/plan_writer` 下，删除临时 Draft 不能重新铸造 Design 锁。若确实完成了 Design 重新确认，必须显式传 `--design-revision-confirmed --reason <reason>` 刷新该锁。下例以当前项目根为代码仓库；涉及多个仓库时，为每个实际绝对路径重复传入 `--code-workspace`：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feature}" --group-file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json" --code-workspace "<FRONTEND_MODULE>"
@@ -303,7 +305,7 @@ python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feat
 
 每个候选分组应显式选择 `executionMode=code|verified_existing|external_dependency`，缺省仅兼容为 `code`。`verified_existing` 表示本 Feature 内已有实现，只允许复用现存可执行验证目标；`external_dependency` 表示行为与验证均由 Feature 外的系统或仓库负责，必须同时写 `externalDependency.system/owner/trackingRefs`，不得配置本地验证命令或待创建测试。外部依赖不是本地 no-code 实现，也不得借创建占位测试把它伪装成已验证。
 
-按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样：
+按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样；批量修复在任一 patch 不合法时整体不落盘：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
@@ -320,7 +322,7 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${fe
 python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
-全局预检只负责跨 task Scenario 覆盖、DAG、backend/frontend 顺序、Batch 投影和设计覆盖；单 task 内容错误必须已在 `set-draft-task-detail` 当场阻断。finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
+`preflight-task-groups` 会先把每个 `apiIds` 与当前已确认 design 对照，不存在的 ID 当场返回 `repairTarget=task_group` 和 `designMutationAllowed=false`。`set-draft-task-detail` 对 `dataIds` / `decisionIds` / `designRefs` 执行同样的存在性门禁；Draft 创建时锁定 design 摘要，之后 design 内容变化会返回 `confirmed_design_changed_after_draft_created`，当前 Plan 不得继续。`preflight-task-draft` 会重新校验单 task 引用、workspace/manifest、验证命令、测试目标冲突，以及跨 task Scenario 覆盖、DAG、backend/frontend 顺序、Batch 投影和 Design 双向覆盖。失败时必须读取返回值中的 `validation.issues`、`validation.invalidTaskIds`；每条 issue 都包含 `taskIds`、`field`、`currentValue`、`repairTarget` 等定位信息。未知或漏覆盖的 Design ID 只能按 `repairTarget=task_detail` 或 `repairTarget=task_group` 修 Plan，禁止修改 design 迎合 Task。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复，不能借删除缓存绕过设计确认。finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
 
 除 `executionMode=external_dependency` 外，每个 task detail 必须包含非空 `validationCommands`。合法 kind、命令禁令与待创建测试的取值以 `add-task-contract` 输出为唯一事实源：`validationKindsByLane` 给出 backend/frontend 各自允许的 kind，`validationCommandPolicy` 给出禁用可执行文件、内联 shell、placeholder 与 Maven 选择器要求，`validationTestPlanPolicy.byExecutionMode` 给出各 executionMode 可用的 `reuse_existing` / `create_in_code`。要点：backend TASK 禁止配置 compile/build/typecheck/lint，lint 只能作为 Batch 补充门禁；frontend TASK 的编译型 kind 必须与真实命令动作一致；Maven `test` 必须带具体类选择器 `-Dtest=XxxTest` 或 `-Dit.test=XxxIT`。`verified_existing` 缺少可复用目标时返回 Plan 重做契约。不得通过 validator 失败来探索 schema。
 
@@ -344,7 +346,7 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 - 顶层 `batchValidationProfiles` 按 lane 选择 `mode=task_covered|commands`。backend lane 固定 `commands`：TASK 跑定向行为测试，Batch 再跑 required compile/build 收口；Maven 工程的典型组合是 TASK `mvn test -Dtest=...`、Batch `mvn compile`。frontend 仍有 TASK 未覆盖的工程风险时也用 `commands`，至少配置一条有增量价值的 required 命令。
 - 顶层 `projectValidationCommands` 只承载可选的跨 lane、跨批次或全项目集成检查，按 `argv + cwd + repo` 归一化后不得与任何 batch profile 命令重复，也不能替代 TASK 的 AC 覆盖。没有这种检查时保持空数组，Code 可直接进入完成门禁。
 - Plan 阶段所有任务初始状态为 `todo`，evidence 相关字段为空或 null，这些运行字段只由 task runner 更新。Plan 初始激活 `B001`；非末批完成后根状态会成为 `awaiting_next_conversation`，Code 必须停止当前对话，新对话通过 `task_runner.py code-session` 检查并自动激活下一批。
-- 每个任务必须追溯到真实 specs 与 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的决策。模板中的 API/Data/Decision ID 都是占位示例，必须替换成真实 ID。任务不涉及接口或数据变更时，不要为了过校验强行编造 `API-*` / `DATA-*`：`plan.json.apiIds` / `dataIds` 写空数组 `[]`，`PLAN.md` 的 `api_id` / `data_id` 写 `无` 或 `-`。如果 `design.md` 中存在 API/Data 决策，则这些决策必须被至少一个真正相关的任务覆盖；只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
+- 每个任务必须追溯到真实 specs 与已确认 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的 ID。四个字段在结构上可以存在但取空数组；任务不涉及对应设计项时必须写 `[]`，禁止为了过校验强行编造或按 Task 编号续写 `API-*` / `DATA-*` / `D-*`。模板中的 API/Data/Decision ID 都是占位示例，生成前必须替换为 Design 中真实 ID；不要为了过校验强行编造，未涉及时使用空数组 `[]`。如果 `design.md` 中存在 API/Data/D 决策，则这些设计项必须被至少一个真正相关的任务覆盖；覆盖缺失时把已有 ID 绑定到正确任务，禁止向 design 新增 ID 迎合 Plan。只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
 - `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
 - `validationCommands` 是 task 级强门禁，必须窄、快、可直接执行并由退出码/断言判读；不能确定真实文件时不要凭空填写 `expectedFiles`。`executionMode=external_dependency` 不运行本地 TASK 验证，由 runner 记录 blocked/deferred Evidence。
 
@@ -439,8 +441,8 @@ UI 任务规则：
 - 如果预检返回 `missing_plan_scenario_coverage`，必须回 Scenario 覆盖矩阵定位遗漏并重新分组。不得把缺失 Scenario 添加到标题相近、已有 API 或同一页面的 task，除非重新证明它们共享同一公开 seam 和验证闭环。
 - 每个 `set-draft-task-detail` 成功后该 task 才进入 ready；失败不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
 - 分组 digest 变化时运行 `rebuild-task-draft`；writer 保留分组投影未变化的 ready task，重置其余 task。不得修改 group 后继续向旧 Draft 写详情。
-- 全部 task ready 后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。
-- 对 finalized 计划不原地解封、不直接编辑 JSON；需要重做时清理正式产物并显式重建 Draft。
+- 全部 task ready 后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。若预检失败，先按 `validation.issues` 定位并修复 Draft，再重新预检，不删除 Draft。
+- 对 finalized 计划不原地解封、不直接编辑 JSON（不得绕过 Draft lock 修改正式 Bundle）。先运行 `diagnose-plan-repair`：未开始执行且 Draft 完整时，运行 `reopen-finalized-draft --reason <reason>` 进入可修复状态；修复后使用 `finalize-task-draft --force` 重新物化并重算 `taskSetDigest`、`taskContractSha256ByTask`。若已开始执行，禁止覆盖正式计划并转入计划修订；只有 Draft 缺失或不可校验时才清理并全量重建。
 - `validate --structure` 会复核已生成 bundle 的结构、完整性摘要和 Task 粒度，但不替代完整 Scenario 覆盖预检或 `dev.plan` 阶段门禁。
 
 finalize 成功后，必须为每个实际使用的 lane 选择一种批次收口模式。`task_covered` 只用于 frontend：当 frontend 的每个 TASK 都有 required 且动作匹配的 compile/build/typecheck 命令，并且没有额外未覆盖的工程风险时使用：

@@ -48,10 +48,10 @@
     "splitRationale": "SCN-001, SCN-002, SCN-003, SCN-004, SCN-005, SCN-006 share one validation loop and cannot be validated independently.",
     "requiredValidation": "one required behavior_test, integration_test, or e2e_test covers every acceptance criterion"
   },
-  "designRefs": ["design.md#D-001"],
+  "designRefs": [],
   "apiIds": [],
   "dataIds": [],
-  "decisionIds": ["D-001"],
+  "decisionIds": [],
   "validationCommands": [
     {
       "id": "VAL-T001-01",

@@ -15,6 +15,7 @@ Structural check only: no language assumption, no repository layout assumption.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -26,10 +27,12 @@ if str(ROOT) not in sys.path:
 from hooks.validation_policy import (  # noqa: E402
     command_policy_errors,
     maven_project_selector_errors,
+    maven_project_selector_workspace_errors,
 )
 
 
 REASON = "maven_project_selector_duplicates_cwd"
+WORKSPACE_REASON = "maven_project_selector_requires_aggregator_cwd"
 MODULE = "alpha/beta/service-gamma"
 
 
@@ -137,6 +140,40 @@ class TestMavenProjectSelectorGuard(unittest.TestCase):
             _command(["mvn", "test", "-Dtest=AlphaTest"], cwd=MODULE),
             "正确形态：cwd 已在模块内，不需要 -pl",
         )
+
+    def test_leaf_module_rejects_project_selector(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = Path(tmp) / "后台服务" / "零售客户经营" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            (module / "pom.xml").write_text("<project/>", encoding="utf-8")
+
+            errors = maven_project_selector_workspace_errors(
+                _command([
+                    "mvn", "test", "-Dtest=AgrCtrlSearchBasicTest",
+                    "-pl", "backend/service/LF39.05_bccompliancemng",
+                ]),
+                module,
+            )
+
+            self.assertEqual(errors, [WORKSPACE_REASON])
+
+    def test_aggregator_allows_existing_path_selector(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            aggregator = Path(tmp)
+            module = aggregator / "backend" / "service"
+            module.mkdir(parents=True)
+            (aggregator / "pom.xml").write_text(
+                "<project><modules><module>backend/service</module></modules></project>",
+                encoding="utf-8",
+            )
+            (module / "pom.xml").write_text("<project/>", encoding="utf-8")
+
+            errors = maven_project_selector_workspace_errors(
+                _command(["mvn", "compile", "-pl", "backend/service"]),
+                aggregator,
+            )
+
+            self.assertEqual(errors, [])
 
     def test_non_maven_executable_is_ignored(self):
         self.assertAllowed(
