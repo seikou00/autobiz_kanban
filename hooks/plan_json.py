@@ -535,7 +535,14 @@ def _validate_tasks_container(
             _validate_string_list(errors, raw_task, task_id, "mergedScenarioRefs", required=False)
         _validate_string_list(errors, raw_task, task_id, "apiIds", required=False, item_re=API_ID_RE)
         _validate_string_list(errors, raw_task, task_id, "dataIds", required=False, item_re=DATA_ID_RE)
-        _validate_string_list(errors, raw_task, task_id, "decisionIds", item_re=TECH_DECISION_ID_RE)
+        _validate_string_list(
+            errors,
+            raw_task,
+            task_id,
+            "decisionIds",
+            required=False,
+            item_re=TECH_DECISION_ID_RE,
+        )
         evidence_ids = _validate_string_list(
             errors,
             raw_task,

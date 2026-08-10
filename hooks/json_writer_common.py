@@ -57,7 +57,7 @@ class WriterResult:
     ok: bool
     path: Path | None = None
     changed: bool = False
-    errors: list[dict[str, str]] | None = None
+    errors: list[dict[str, Any]] | None = None
     data: dict[str, Any] | None = None
 
 

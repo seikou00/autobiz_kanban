@@ -880,6 +880,31 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertNotEqual(exit_code, 0)
             self.assertIn("validation_maven_test_target_missing", output)
 
+    def test_maven_runner_rejects_project_selector_from_leaf_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = (Path(tmp) / "repo").resolve()
+            module = repo / "后台服务" / "零售客户经营" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            (module / "pom.xml").write_text("<project/>", encoding="utf-8")
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    "mvn", "test", "-Dtest=AgrCtrlSearchBasicTest",
+                    "-pl", "backend/service/LF39.05_bccompliancemng",
+                ],
+                "cwd": "后台服务/零售客户经营/LF39.05_bccompliancemng",
+            }
+
+            with self.assertRaisesRegex(
+                task_runner_module.TaskRunnerError,
+                "maven_project_selector_requires_aggregator_cwd",
+            ):
+                task_runner_module._assert_validation_command_environment(
+                    command,
+                    {repo.name: repo},
+                    retry_same_run=True,
+                )
+
     def test_grouped_maven_execution_splits_distinct_test_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp).resolve()
@@ -1380,15 +1405,21 @@ class TaskRunnerTest(unittest.TestCase):
                 "maven_test_selectors",
                 return_value=["AppTest"],
             ):
+                started_at = time.monotonic()
                 exit_code, output = task_runner_module._run_validation(
                     command,
                     {repo.name: repo},
                 )
+            # 提前失败检测应该返回退出码 1（验证失败）
             self.assertEqual(exit_code, 1)
-            self.assertIn(
-                "validation_maven_test_failures_detected_after_timeout",
-                output,
-            )
+            # 应该在远小于 5 秒（脚本 sleep 时间）内完成
+            elapsed = time.monotonic() - started_at
+            self.assertLess(elapsed, 3.0)
+            # 应该包含提前失败检测的标记
+            self.assertIn("validation_process_stopped_after_test_report_failure", output)
+            self.assertIn("behavior_test_failure", output)
+            self.assertIn("surefire_report", output)
+            # 输出中应包含实际的测试失败详情
             self.assertIn("expected true", output)
 
     def test_runtime_environment_failure_requires_strong_environment_marker(self) -> None:

@@ -77,8 +77,16 @@ DYNAMIC_REASONS = {
     "invalid_plan_task_matrix_validation",
     # hooks/code_task_context.py resolve_task_refs
     "invalid_artifact_ref",
+    "invalid_artifact_ref_format",
+    "invalid_artifact_ref_type",
+    "ambiguous_ref_anchor",
     "missing_ref_file",
     "missing_ref_anchor",
+    "invalid_design_contract",
+    "design_api_marker_conflicts_with_definitions",
+    "design_data_marker_conflicts_with_definitions",
+    "plan_api_ref_forbidden_by_design_marker",
+    "plan_data_ref_forbidden_by_design_marker",
 }
 
 # run_postcheck 在 validator 跑起来之前就可能失败，这些也必须带修复动作。
