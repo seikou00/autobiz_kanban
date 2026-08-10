@@ -1248,6 +1248,11 @@ def _maven_test_target_errors(command: dict[str, Any], command_dir: Path) -> lis
 
 
 def _maven_report_snapshot(command_dir: Path) -> dict[str, int]:
+    """
+    记录当前 Maven 测试报告的基线（文件路径 -> mtime_ns）
+    用于后续判断哪些是本次运行新生成的报告
+    使用 st_mtime_ns 纳秒精度以避免短时间内重写时的漏检
+    """
     reports: dict[str, int] = {}
     if not command_dir.is_dir():
         return reports
@@ -1802,22 +1807,6 @@ def _terminate_validation_process_tree(
     return process.poll() is not None and not process_group_exists()
 
 
-def _maven_report_snapshot(command_cwd: Path) -> dict[str, float]:
-    """
-    记录当前 Maven 测试报告的基线（文件路径 -> mtime）
-    用于后续判断哪些是本次运行新生成的报告
-    """
-    baseline: dict[str, float] = {}
-    for pattern in ["**/surefire-reports/TEST-*.xml", "**/failsafe-reports/TEST-*.xml"]:
-        for report_path in command_cwd.glob(pattern):
-            try:
-                mtime = report_path.stat().st_mtime
-                baseline[str(report_path)] = mtime
-            except OSError:
-                continue
-    return baseline
-
-
 def _scan_maven_test_reports(
     command_cwd: Path,
     baseline_reports: dict[str, float],
@@ -2074,6 +2063,9 @@ def _run_validation_process(
                         if detected == "test_compile_failure" or compile_category is None:
                             compile_category = detected
 
+            # 新增：环境错误检测
+            environment_failure_category: str | None = None
+
             while True:
                 read_available_output()
                 now = time.monotonic()
@@ -2081,6 +2073,22 @@ def _run_validation_process(
                     read_available_output()
                     if compile_category is not None:
                         termination_reason = "compile_diagnostic"
+                    break
+
+                # 新增：检测环境错误（每次轮询都检查）
+                decoded_output = _decode_validation_output(bytes(rolling_output))
+                env_failure = _runtime_environment_failure_category(decoded_output)
+                if env_failure is not None:
+                    environment_failure_category = env_failure
+                    termination_reason = "environment_failure"
+                    _emit_validation_progress(
+                        "validation_environment_failure",
+                        commandId=str(command.get("id", "")),
+                        elapsedSeconds=round(now - started_at, 3),
+                        category=env_failure,
+                    )
+                    process_tree_terminated = _terminate_validation_process_tree(process)
+                    read_available_output()
                     break
 
                 # 新增：每 1 秒扫描测试报告
@@ -2234,16 +2242,22 @@ def _run_validation(
             # 提前失败检测：在超时前从测试报告中检测到失败
             failure_details = ""
             if process_result.test_report_failure:
-                first_failure = process_result.test_report_failure.get("firstFailure", {})
-                if first_failure:
-                    failure_details = (
-                        f"\nTest failure detected: {first_failure.get('testClass', '')}.{first_failure.get('testMethod', '')}\n"
-                        f"  Type: {first_failure.get('exceptionType', '')}\n"
-                        f"  Message: {first_failure.get('message', '')}\n"
-                    )
-                    stack_trace = first_failure.get('stackTrace', '')
-                    if stack_trace:
-                        failure_details += f"  Stack trace:\n{stack_trace}\n"
+                test_failures = process_result.test_report_failure.get("testFailures", [])
+                if test_failures:
+                    failure_details = f"\nDetected {len(test_failures)} test failure(s):\n"
+                    for idx, failure in enumerate(test_failures, 1):
+                        failure_details += (
+                            f"\n[{idx}] {failure.get('testClass', '')}.{failure.get('testMethod', '')}\n"
+                            f"    Type: {failure.get('exceptionType', '')}\n"
+                            f"    Message: {failure.get('message', '')}\n"
+                        )
+                        stack_trace = failure.get('stackTrace', '')
+                        if stack_trace:
+                            # 限制堆栈跟踪的长度以避免输出过长
+                            stack_lines = stack_trace.split('\n')
+                            if len(stack_lines) > 20:
+                                stack_trace = '\n'.join(stack_lines[:20]) + '\n    ... (truncated)'
+                            failure_details += f"    Stack trace:\n{stack_trace}\n"
             return 1, (
                 f"{output}{failure_details}\nvalidation_process_stopped_after_test_report_failure:"
                 f"category={process_result.early_failure_category or 'behavior_test_failure'}:"
@@ -3807,8 +3821,15 @@ def _run_deferred_validation_group(
                 for outcome in selector_results
                 if outcome.get("status") == "not_executed"
             ]
-            if missing:
+            # not_executed 的测试不应被视为失败
+            # 它们需要被重新验证或标记为未完成
+            if test_failures:
                 logical_exit_code = 1
+            elif physical_exit_code == 0 or any_reported_test_failed:
+                logical_exit_code = 0
+            # 如果有 missing 但没有实际测试失败，保持物理退出码
+            # 这样 not_executed 的任务会被标记为需要重试，而不是失败
+            if missing:
                 logical_output = (
                     f"{output}\n"
                     + "\n".join(
@@ -3816,7 +3837,9 @@ def _run_deferred_validation_group(
                         for selector in missing
                     )
                 )
-            elif test_failures:
+        elif strategy == "maven_test_aggregate" and not roots:
+            # 没有报告生成的情况
+            if test_failures:
                 logical_exit_code = 1
             elif physical_exit_code == 0 or any_reported_test_failed:
                 logical_exit_code = 0
