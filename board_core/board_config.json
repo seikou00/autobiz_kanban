@@ -514,8 +514,8 @@
             }
           },
           "subagentConfig": {
-            "disabledBuiltinSubagents": ["verification"],
-            "customSubagentFiles": ["agents/verification.md"]
+            "disabledBuiltinSubagents": ["test-engineer"],
+            "customSubagentFiles": ["agents/test-engineer.md"]
           }
         },
         "description": "单元测试生成、验证与最小修复 \n 产物：UNIT_TEST_REPORT.md（单元测试报告：用例结果、覆盖与风险）、test-output.log（单测运行原始输出日志）",

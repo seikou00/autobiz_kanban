@@ -82,6 +82,81 @@ def _write(workspace: Path, feature: str, data: dict[str, Any]) -> WriterResult:
     return WriterResult(ok=True, path=_path(workspace, feature), changed=changed)
 
 
+def _append_unique(existing, values):
+    result = list(existing) if isinstance(existing, list) else []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result
+
+
+def record_execution(
+    workspace,
+    feature,
+    *,
+    target_id=None,
+    task_id,
+    spec_refs,
+    evidence_id,
+    result,
+    command,
+):
+    """Create/update one UT target while preserving prior evidence history."""
+    if result not in RESULTS:
+        raise ValueError(
+            "result 无效: {}。修复：使用 {}。".format(result, ", ".join(sorted(RESULTS)))
+        )
+    for label, value in (
+        ("task_id", task_id),
+        ("evidence_id", evidence_id),
+        ("command", command),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("{} 不能为空。修复：传入本次测试执行的真实值。".format(label))
+    if not isinstance(spec_refs, list) or not spec_refs or not all(
+        isinstance(value, str) and value.strip() for value in spec_refs
+    ):
+        raise ValueError("spec_refs 必须是非空字符串数组。修复：传入 assignment 的 spec refs。")
+
+    data = _load(workspace, feature)
+    if target_id is None:
+        target_id = next_numbered_id(
+            {
+                target.get("targetId")
+                for target in _targets(data)
+                if isinstance(target, dict) and isinstance(target.get("targetId"), str)
+            },
+            "UT",
+        )
+    elif not isinstance(target_id, str) or not target_id.strip():
+        raise ValueError("target_id 不能为空。修复：省略该参数自动分配，或传入稳定 UT ID。")
+    target = None
+    for candidate in _targets(data):
+        if isinstance(candidate, dict) and candidate.get("targetId") == target_id:
+            target = candidate
+            break
+    if target is None:
+        target = {
+            "targetId": target_id,
+            "taskId": task_id,
+            "specRefs": [],
+            "evidenceIds": [],
+            "result": result,
+            "command": command,
+        }
+        _targets(data).append(target)
+
+    target["taskId"] = task_id
+    target["specRefs"] = _append_unique(target.get("specRefs"), spec_refs)
+    target["evidenceIds"] = _append_unique(target.get("evidenceIds"), [evidence_id])
+    target["result"] = result
+    target["command"] = command
+    return with_result_data(_write(workspace, feature, data), target=target)
+
+
+record_test_execution = record_execution
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     existing = fail_if_artifact_exists(_path(workspace, feature), force=args.force)
@@ -148,6 +223,22 @@ def _cmd_update_target(args: argparse.Namespace) -> int:
     if args.evidence_id is not None:
         target["evidenceIds"] = args.evidence_id
     return render_result(_write(workspace, feature, data))
+
+
+def _cmd_record_execution(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    return render_result(
+        record_execution(
+            workspace,
+            feature,
+            target_id=args.target_id,
+            task_id=args.task_id,
+            spec_refs=args.spec_ref,
+            evidence_id=args.evidence_id,
+            result=args.result,
+            command=args.command,
+        )
+    )
 
 
 def _cmd_set_verdict(args: argparse.Namespace) -> int:
@@ -248,6 +339,16 @@ def main(argv: list[str] | None = None) -> int:
     update.add_argument("--result", choices=sorted(RESULTS))
     update.add_argument("--command")
     update.set_defaults(func=_cmd_update_target)
+
+    execution = sub.add_parser("record-execution")
+    _common(execution)
+    execution.add_argument("--target-id")
+    execution.add_argument("--task-id", required=True)
+    execution.add_argument("--spec-ref", action="append", required=True)
+    execution.add_argument("--evidence-id", required=True)
+    execution.add_argument("--result", required=True, choices=sorted(RESULTS))
+    execution.add_argument("--command", required=True)
+    execution.set_defaults(func=_cmd_record_execution)
 
     verdict = sub.add_parser("set-verdict")
     _common(verdict)

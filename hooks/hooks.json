@@ -8,6 +8,12 @@
           "command": "python3 hooks/augment_explore_task_prompt.py",
           "timeout": 30,
           "persistAfterInterrupt": true
+        },
+        {
+          "type": "command",
+          "command": "python3 hooks/augment_test_engineer_task_prompt.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
         }
       ]
     },
