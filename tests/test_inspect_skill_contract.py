@@ -63,6 +63,27 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertIn("无 PRD 时基于用户描述直接澄清行为契约", output)
         self.assertNotIn("UI_CONTEXT.json", output)
 
+    def test_plain_lean_archive_reports_nothing_to_handle(self) -> None:
+        # ops.archive's only input is produced by ops.cicd, which lean drops from
+        # the chain: it can never exist here, so it is not a missing artifact.
+        feature = "lean-archive"
+        self._create_feature(feature, workflow_template="lean")
+
+        self.assertEqual(self._plain("autoops-archive", feature), "")
+
+    def test_plain_lean_code_omits_inputs_of_dropped_upstream_nodes(self) -> None:
+        feature = "lean-code"
+        self._create_feature(feature, workflow_template="lean")
+
+        output = self._plain("autodev-code", feature)
+
+        # Still produced upstream inside lean (dev.specs), just not written yet.
+        self.assertIn("proposal.md", output)
+        # Produced by nodes lean drops (biz.prd / dev.plan / dev.detail_design).
+        self.assertNotIn("PRD.md", output)
+        self.assertNotIn("design.md", output)
+        self.assertNotIn("plan.json", output)
+
     def test_plain_includes_discuss_input_after_skipping_discuss_node(self) -> None:
         feature = "skip-discuss"
         self._create_feature(feature)

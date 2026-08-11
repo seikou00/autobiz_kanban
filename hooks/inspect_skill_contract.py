@@ -118,8 +118,9 @@ def render_contract_plain(
     carry — title, checkpoint, workflow context, boundary, outputs and
     validators — is intentionally dropped; ``workflow_context`` is accepted for
     call-site compatibility but no longer rendered. ``extra_missing_inputs`` is
-    used for nodeSubset/custom entry inputs that were dropped from the hard
-    contract but should still expose their degrade guidance in this plain view.
+    used for the chain entry node's inputs that were dropped from the hard
+    contract — their producer sits outside this workflow, so the user may still
+    supply them by hand and the degrade guidance stays relevant.
     """
     baseline = feature_dir is None
     candidates: list[ArtifactSpec] = []
@@ -223,6 +224,18 @@ def _resolve_feature_dir(workspace: Path, feature: str) -> Path:
     return find_feature_dir(workspace, feature) or get_feature_active_dir(workspace, feature)
 
 
+def _entry_node_id(effective: dict) -> str:
+    """Id of the chain's first active node (skipped nodes stay in the array)."""
+    workflow = effective.get("workflow")
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list):
+        return ""
+    for node in nodes:
+        if isinstance(node, dict) and not node.get("skipped"):
+            return str(node.get("id", ""))
+    return ""
+
+
 def _dropped_input_artifacts(
     repo_root: Path,
     *,
@@ -231,12 +244,22 @@ def _dropped_input_artifacts(
     node_id: str,
     record: dict,
 ) -> tuple[ArtifactSpec, ...]:
+    """Inputs dropped from the hard contract that the plain view still shows.
+
+    Only the chain entry node qualifies: its dropped inputs have no producer
+    inside this workflow at all, so the user may hand them in and the degrade
+    guidance still applies. Drops on any later node mean the producing node is
+    not in the chain — the artifact cannot exist here, is not part of this
+    contract, and must not be reported as a missing artifact to handle.
+    """
     effective = load_record_effective_board_config(
         repo_root / "board_core" / "board_config.json",
         repo_root=repo_root,
         workspace=workspace,
         record=record,
     )
+    if node_id != _entry_node_id(effective):
+        return ()
     dropped = effective.get("workflowDroppedInputs", {})
     if not isinstance(dropped, dict):
         return ()
