@@ -58,8 +58,8 @@ COMPLETION_POLICIES = {
 }
 TASK_EXECUTION_MODES = {"code", "verified_existing", "external_dependency"}
 BATCH_VALIDATION_MODES = {"commands", "task_covered"}
-TASK_VALIDATION_POLICY_MODES = {"deferred_batch"}
-TASK_VALIDATION_ORCHESTRATIONS = {"single_batch_subagent"}
+TASK_VALIDATION_POLICY_MODES = {"deferred_batch", "defer_to_test_stages"}
+TASK_VALIDATION_ORCHESTRATIONS = {"single_batch_subagent", "inline"}
 TASK_VALIDATION_FAIL_STRATEGIES = {"fail_fast", "repair_then_defer"}
 TASK_VALIDATION_AGENT_SCOPES = {"task_and_batch_validation_commands"}
 TASK_VALIDATION_STATUSES = {
@@ -102,6 +102,8 @@ BATCH_VALIDATION_STATUSES = {
     "passed",
     "deferred",
 }
+BATCH_COMPILE_STATUSES = {"pending", "repairing", "failed", "passed"}
+BATCH_COMPILE_MAX_REPAIR_ATTEMPTS = 3
 VALIDATION_DEFERRAL_REASONS = {
     "environment_failure",
     "repair_attempts_exhausted",
@@ -211,6 +213,12 @@ def task_execution_mode(task: dict[str, Any]) -> str:
 def deferred_task_validation_enabled(data: dict[str, Any]) -> bool:
     policy = data.get("taskValidationPolicy")
     return isinstance(policy, dict) and policy.get("mode") == "deferred_batch"
+
+
+def defer_to_test_stages_enabled(data: dict[str, Any]) -> bool:
+    """Check if the new defer_to_test_stages policy is enabled."""
+    policy = data.get("taskValidationPolicy")
+    return isinstance(policy, dict) and policy.get("mode") == "defer_to_test_stages"
 
 
 def code_validation_max_repair_attempts(data: dict[str, Any]) -> int:
@@ -369,6 +377,27 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
                 if validation_mode == "task_covered"
                 else {}
             ),
+            # P1-7: 新策略包含 batchCompile 在 digest 中
+            **(
+                {
+                    "batchCompileStatus": batch.get("batchCompile", {}).get("status"),
+                    "batchCompileCommandId": batch.get("batchCompile", {}).get("commandId"),
+                    "batchCompileRepairAttempts": batch.get("batchCompile", {}).get("repairAttempts"),
+                    "batchCompileMaxRepairAttempts": batch.get("batchCompile", {}).get("maxRepairAttempts"),
+                    "batchCompileRepairTaskId": batch.get("batchCompile", {}).get("repairTaskId"),
+                    "batchCompileWorkspaceSnapshotSha256": batch.get("batchCompile", {}).get(
+                        "workspaceSnapshotSha256"
+                    ),
+                    "batchCompileImplementationEvidenceByTask": batch.get("batchCompile", {}).get(
+                        "implementationEvidenceByTask"
+                    ),
+                    "batchCompileImplementationRevisionByTask": batch.get("batchCompile", {}).get(
+                        "implementationRevisionByTask"
+                    ),
+                }
+                if isinstance(batch, dict) and "batchCompile" in batch
+                else {}
+            ),
             "tasks": [
                 {"id": task.get("id"), "contractSha256": task_contract_sha256(task)}
                 for task in batch_tasks
@@ -477,6 +506,7 @@ def _validate_tasks_container(
     require_all_done: bool = False,
     require_task_details: bool = False,
     known_task_ids: set[str] | None = None,
+    defer_to_test_stages: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
@@ -617,12 +647,16 @@ def _validate_tasks_container(
         ):
             errors.append(f"{task_id}.latestPassEvidenceId_invalid")
         if require_all_done:
+            # 新策略：defer_to_test_stages 下任务 done 不强制要求 completion evidence
+            # 而是依赖 batchCompile.status == passed 作为完成证据
             validation_deferred = isinstance(disposition, dict)
-            if not completion_evidence_ids and not validation_deferred:
+            defer_to_test = defer_to_test_stages
+
+            if not completion_evidence_ids and not validation_deferred and not defer_to_test:
                 errors.append(f"{task_id}.completionEvidenceIds_missing")
             if validation_deferred and latest_pass is not None:
                 errors.append(f"{task_id}.latestPassEvidenceId_forbidden_when_deferred")
-            elif not validation_deferred and (not isinstance(latest_pass, str) or not latest_pass):
+            elif not validation_deferred and not defer_to_test and (not isinstance(latest_pass, str) or not latest_pass):
                 errors.append(f"{task_id}.latestPassEvidenceId_missing")
             elif isinstance(latest_pass, str) and latest_pass not in completion_evidence_ids:
                 errors.append(f"{task_id}.latestPassEvidenceId_not_completion_evidence:{latest_pass}")
@@ -695,7 +729,12 @@ def _validate_tasks_container(
             if raw_validation_test_plan not in (None, []):
                 errors.append(f"{task_id}.external_dependency_validationTestPlan_forbidden")
         else:
-            _validate_validation_test_plan(errors, raw_task, task_id)
+            _validate_validation_test_plan(
+                errors,
+                raw_task,
+                task_id,
+                defer_to_test_stages=defer_to_test_stages,
+            )
         validation_test_plan = raw_validation_test_plan
         validation_test_plan = validation_test_plan if isinstance(validation_test_plan, list) else []
         create_targets = [
@@ -834,6 +873,7 @@ def validate_batch_plan_data(
     require_initial_status: bool = False,
     require_all_done: bool = False,
     require_backend_compile: bool = True,
+    defer_to_test_stages: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
@@ -876,6 +916,13 @@ def validate_batch_plan_data(
         data,
         str(batch_id),
         require_backend_compile=require_backend_compile,
+    )
+    _validate_batch_compile(
+        errors,
+        data,
+        str(batch_id),
+        enabled=defer_to_test_stages,
+        require_all_done=require_all_done,
     )
     if "taskValidation" in data:
         _validate_task_validation(errors, data, str(batch_id))
@@ -948,6 +995,7 @@ def validate_batch_plan_data(
             require_all_done=require_all_done,
             require_task_details=True,
             known_task_ids=known_task_ids,
+            defer_to_test_stages=defer_to_test_stages,
         )
     )
     return errors
@@ -959,6 +1007,7 @@ def validate_task_collection(
     *,
     require_initial_status: bool = False,
     require_all_done: bool = False,
+    defer_to_test_stages: bool = False,
 ) -> list[str]:
     """Validate task contracts before they are projected into batch files."""
 
@@ -973,6 +1022,7 @@ def validate_task_collection(
         require_all_done=require_all_done,
         require_task_details=True,
         known_task_ids=known,
+        defer_to_test_stages=defer_to_test_stages,
     )
 
 
@@ -1104,19 +1154,28 @@ def _validate_validation_test_plan(
     errors: list[str],
     task: dict[str, Any],
     task_id: str,
+    *,
+    defer_to_test_stages: bool = False,
 ) -> None:
     raw_plan = task.get("validationTestPlan")
     if raw_plan is None:
         return
     context = f"{task_id}.validationTestPlan"
+
     if not isinstance(raw_plan, list):
         errors.append(f"{context}_must_be_array")
         return
+
+    # 新策略：defer_to_test_stages 使用新格式（commandId, assetType, executionStage）
+    # 旧策略：deferred_batch 使用旧格式（framework=maven, targets）
+    is_new_strategy = defer_to_test_stages
+
     command_ids = {
         str(command.get("id"))
         for command in task.get("validationCommands", [])
         if isinstance(command, dict) and isinstance(command.get("id"), str)
     }
+
     for index, item in enumerate(raw_plan):
         item_context = f"{context}[{index}]"
         if not isinstance(item, dict):
@@ -1125,27 +1184,65 @@ def _validate_validation_test_plan(
         command_id = item.get("commandId")
         if command_id not in command_ids:
             errors.append(f"{item_context}.commandId_invalid")
-        if item.get("framework") != "maven":
-            errors.append(f"{item_context}.framework_invalid")
-        targets = item.get("targets")
-        if not isinstance(targets, list) or not targets:
-            errors.append(f"{item_context}.targets_missing")
-            continue
-        for target_index, target in enumerate(targets):
-            target_context = f"{item_context}.targets[{target_index}]"
-            if not isinstance(target, dict):
-                errors.append(f"{target_context}_must_be_object")
-                continue
-            if not isinstance(target.get("selector"), str) or not target.get("selector", "").strip():
-                errors.append(f"{target_context}.selector_missing")
-            if target.get("mode") not in {"reuse_existing", "create_in_code"}:
-                errors.append(f"{target_context}.mode_invalid")
-            source_files = target.get("sourceFiles")
-            if not isinstance(source_files, list) or not all(
-                isinstance(value, str) and value.strip() and not Path(value).is_absolute()
-                for value in source_files
+
+        if is_new_strategy:
+            # 新策略：校验 assetType, executionStage, covers, testIntent
+            if item.get("assetType") not in {"unit_test", "integration_test", "e2e_test"}:
+                errors.append(f"{item_context}.assetType_invalid")
+            if item.get("executionStage") not in {"with_code", "post_batch"}:
+                errors.append(f"{item_context}.executionStage_invalid")
+            covers = item.get("covers")
+            acceptance_ids = {
+                str(criterion.get("id"))
+                for criterion in task.get("acceptanceCriteria", [])
+                if isinstance(criterion, dict) and isinstance(criterion.get("id"), str)
+            }
+            if (
+                not isinstance(covers, list)
+                or not covers
+                or any(not isinstance(value, str) or not value.strip() for value in covers)
             ):
-                errors.append(f"{target_context}.sourceFiles_invalid")
+                errors.append(f"{item_context}.covers_missing")
+            else:
+                for criterion_id in covers:
+                    if criterion_id not in acceptance_ids:
+                        errors.append(f"{item_context}.covers_unknown:{criterion_id}")
+            test_intent = item.get("testIntent")
+            if not isinstance(test_intent, dict):
+                errors.append(f"{item_context}.testIntent_missing")
+            elif not isinstance(test_intent.get("behavior"), str) or not test_intent.get("behavior", "").strip():
+                errors.append(f"{item_context}.testIntent.behavior_missing")
+            else:
+                intent_criteria = test_intent.get("acceptanceCriteria")
+                if not isinstance(intent_criteria, list) or {
+                    str(criterion.get("id"))
+                    for criterion in intent_criteria
+                    if isinstance(criterion, dict) and isinstance(criterion.get("id"), str)
+                } != acceptance_ids:
+                    errors.append(f"{item_context}.testIntent.acceptanceCriteria_mismatch")
+        else:
+            # 旧策略：校验 framework=maven, targets
+            if item.get("framework") != "maven":
+                errors.append(f"{item_context}.framework_invalid")
+            targets = item.get("targets")
+            if not isinstance(targets, list) or not targets:
+                errors.append(f"{item_context}.targets_missing")
+                continue
+            for target_index, target in enumerate(targets):
+                target_context = f"{item_context}.targets[{target_index}]"
+                if not isinstance(target, dict):
+                    errors.append(f"{target_context}_must_be_object")
+                    continue
+                if not isinstance(target.get("selector"), str) or not target.get("selector", "").strip():
+                    errors.append(f"{target_context}.selector_missing")
+                if target.get("mode") not in {"reuse_existing", "create_in_code"}:
+                    errors.append(f"{target_context}.mode_invalid")
+                source_files = target.get("sourceFiles")
+                if not isinstance(source_files, list) or not all(
+                    isinstance(value, str) and value.strip() and not Path(value).is_absolute()
+                    for value in source_files
+                ):
+                    errors.append(f"{target_context}.sourceFiles_invalid")
 
 
 def _validate_batch_command(
@@ -1362,6 +1459,131 @@ def _validate_batch_validation(
         errors.append(f"{batch_id}.batchValidation.deferred_issue_missing")
 
 
+def _validate_batch_compile(
+    errors: list[str],
+    data: dict[str, Any],
+    batch_id: str,
+    *,
+    enabled: bool,
+    require_all_done: bool,
+) -> None:
+    compile_state = data.get("batchCompile")
+    if not enabled:
+        if compile_state is not None:
+            errors.append(f"{batch_id}.batchCompile_unexpected")
+        return
+    batch_validation = data.get("batchValidation")
+    commands = batch_validation.get("commands", []) if isinstance(batch_validation, dict) else []
+    compile_commands = [
+        command
+        for command in commands
+        if isinstance(command, dict)
+        and command.get("kind") == "compile"
+        and command.get("required") is True
+    ]
+    if not compile_commands:
+        errors.append(f"{batch_id}.batchCompile.required_compile_command_missing")
+    if compile_state is None:
+        if require_all_done:
+            errors.append(f"{batch_id}.batchCompile_missing")
+        return
+    if not isinstance(compile_state, dict):
+        errors.append(f"{batch_id}.batchCompile_must_be_object")
+        return
+
+    status = compile_state.get("status")
+    if status not in BATCH_COMPILE_STATUSES:
+        errors.append(f"{batch_id}.batchCompile.status_invalid")
+    attempts = compile_state.get("repairAttempts", 0)
+    maximum = compile_state.get("maxRepairAttempts", BATCH_COMPILE_MAX_REPAIR_ATTEMPTS)
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+        errors.append(f"{batch_id}.batchCompile.repairAttempts_invalid")
+    if maximum != BATCH_COMPILE_MAX_REPAIR_ATTEMPTS:
+        errors.append(f"{batch_id}.batchCompile.maxRepairAttempts_must_be_3")
+    if isinstance(attempts, int) and not isinstance(attempts, bool) and attempts > BATCH_COMPILE_MAX_REPAIR_ATTEMPTS:
+        errors.append(f"{batch_id}.batchCompile.repairAttempts_exceeded")
+
+    command_id = compile_state.get("commandId")
+    if status in {"failed", "passed", "repairing"} and (
+        not isinstance(command_id, str) or not command_id.strip()
+    ):
+        errors.append(f"{batch_id}.batchCompile.commandId_missing")
+    elif command_id is not None and (not isinstance(command_id, str) or not command_id.strip()):
+        errors.append(f"{batch_id}.batchCompile.commandId_invalid")
+    elif isinstance(command_id, str) and not any(
+        command.get("id") == command_id for command in compile_commands
+    ):
+        errors.append(f"{batch_id}.batchCompile.commandId_not_required_compile")
+
+    for field in ("output", "failureCategory"):
+        value = compile_state.get(field)
+        if value is not None and not isinstance(value, str):
+            errors.append(f"{batch_id}.batchCompile.{field}_invalid")
+    diagnostic_paths = compile_state.get("diagnosticPaths", [])
+    if not isinstance(diagnostic_paths, list) or any(
+        not isinstance(item, str) or not item.strip() for item in diagnostic_paths
+    ):
+        errors.append(f"{batch_id}.batchCompile.diagnosticPaths_invalid")
+    owner_ids = compile_state.get("repairOwnerTaskIds", [])
+    known_task_ids = {
+        str(task.get("id"))
+        for task in tasks(data)
+        if isinstance(task.get("id"), str)
+    }
+    if not isinstance(owner_ids, list) or any(
+        not isinstance(item, str) or item not in known_task_ids for item in owner_ids
+    ):
+        errors.append(f"{batch_id}.batchCompile.repairOwnerTaskIds_invalid")
+    elif status in {"failed", "repairing"} and not owner_ids:
+        errors.append(f"{batch_id}.batchCompile.repairOwnerTaskIds_missing")
+
+    repair_task_id = compile_state.get("repairTaskId")
+    if status == "repairing":
+        if not isinstance(repair_task_id, str) or repair_task_id not in owner_ids:
+            errors.append(f"{batch_id}.batchCompile.repairTaskId_invalid")
+    elif repair_task_id is not None:
+        errors.append(f"{batch_id}.batchCompile.repairTaskId_forbidden")
+
+    requested_workspaces = compile_state.get("requestedCodeWorkspaces", [])
+    if not isinstance(requested_workspaces, list) or any(
+        not isinstance(item, str) or not item.strip() for item in requested_workspaces
+    ):
+        errors.append(f"{batch_id}.batchCompile.requestedCodeWorkspaces_invalid")
+    snapshot_sha256 = compile_state.get("workspaceSnapshotSha256")
+    if status in {"failed", "passed", "repairing"} and (
+        not isinstance(snapshot_sha256, str) or not TASK_SET_DIGEST_RE.fullmatch(snapshot_sha256)
+    ):
+        errors.append(f"{batch_id}.batchCompile.workspaceSnapshotSha256_invalid")
+    elif snapshot_sha256 is not None and (
+        not isinstance(snapshot_sha256, str) or not TASK_SET_DIGEST_RE.fullmatch(snapshot_sha256)
+    ):
+        errors.append(f"{batch_id}.batchCompile.workspaceSnapshotSha256_invalid")
+    evidence_by_task = compile_state.get("implementationEvidenceByTask", {})
+    revision_by_task = compile_state.get("implementationRevisionByTask", {})
+    if not isinstance(evidence_by_task, dict) or any(
+        task_id not in known_task_ids
+        or not isinstance(evidence_id, str)
+        or not EVIDENCE_ID_RE.fullmatch(evidence_id)
+        for task_id, evidence_id in evidence_by_task.items()
+    ):
+        errors.append(f"{batch_id}.batchCompile.implementationEvidenceByTask_invalid")
+    if not isinstance(revision_by_task, dict) or any(
+        task_id not in known_task_ids
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
+        for task_id, revision in revision_by_task.items()
+    ):
+        errors.append(f"{batch_id}.batchCompile.implementationRevisionByTask_invalid")
+    if status == "passed":
+        if not isinstance(evidence_by_task, dict) or set(evidence_by_task) != known_task_ids:
+            errors.append(f"{batch_id}.batchCompile.implementationEvidenceByTask_incomplete")
+        if not isinstance(revision_by_task, dict) or set(revision_by_task) != known_task_ids:
+            errors.append(f"{batch_id}.batchCompile.implementationRevisionByTask_incomplete")
+    if require_all_done and status != "passed":
+        errors.append(f"{batch_id}.batchCompile.status_not_passed")
+
+
 def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) -> None:
     policy = data.get("taskValidationPolicy")
     if policy is None:
@@ -1371,21 +1593,44 @@ def _validate_task_validation_policy(errors: list[str], data: dict[str, Any]) ->
         return
     if policy.get("mode") not in TASK_VALIDATION_POLICY_MODES:
         errors.append("taskValidationPolicy.mode_invalid")
-    if policy.get("orchestration") not in TASK_VALIDATION_ORCHESTRATIONS:
-        errors.append("taskValidationPolicy.orchestration_invalid")
-    if policy.get("failStrategy") not in TASK_VALIDATION_FAIL_STRATEGIES:
-        errors.append("taskValidationPolicy.failStrategy_invalid")
-    if policy.get("maxConcurrency") != 1:
-        errors.append("taskValidationPolicy.maxConcurrency_must_be_1")
-    if policy.get("agentScope") not in TASK_VALIDATION_AGENT_SCOPES:
-        errors.append("taskValidationPolicy.agentScope_invalid")
-    max_repairs = policy.get("maxRepairAttempts", DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS)
-    if not isinstance(max_repairs, int) or isinstance(max_repairs, bool) or max_repairs < 0:
-        errors.append("taskValidationPolicy.maxRepairAttempts_invalid")
-    for field in ("environmentFailureDisposition", "exhaustedRepairDisposition"):
-        value = policy.get(field, "defer")
-        if value != "defer":
-            errors.append(f"taskValidationPolicy.{field}_invalid")
+
+    # New policy: defer_to_test_stages requires inline orchestration
+    policy_mode = policy.get("mode")
+    if policy_mode == "defer_to_test_stages":
+        if policy.get("orchestration") != "inline":
+            errors.append("taskValidationPolicy.orchestration_must_be_inline_for_defer_to_test_stages")
+
+        # Validate codeGate
+        code_gate = policy.get("codeGate")
+        if code_gate != "batch_compile_only":
+            errors.append("taskValidationPolicy.codeGate_invalid_for_defer_to_test_stages")
+
+        # Validate maxTestStageRepairAttempts
+        max_test_repairs = policy.get("maxTestStageRepairAttempts")
+        if max_test_repairs is not None:
+            if not isinstance(max_test_repairs, int) or isinstance(max_test_repairs, bool) or max_test_repairs < 0:
+                errors.append("taskValidationPolicy.maxTestStageRepairAttempts_invalid")
+
+        # Validate testAssetIntegrity should not exist
+        if "testAssetIntegrity" in policy:
+            errors.append("taskValidationPolicy.testAssetIntegrity_not_allowed_for_defer_to_test_stages")
+    else:
+        # Old policy: deferred_batch validation
+        if policy.get("orchestration") not in TASK_VALIDATION_ORCHESTRATIONS:
+            errors.append("taskValidationPolicy.orchestration_invalid")
+        if policy.get("failStrategy") not in TASK_VALIDATION_FAIL_STRATEGIES:
+            errors.append("taskValidationPolicy.failStrategy_invalid")
+        if policy.get("maxConcurrency") != 1:
+            errors.append("taskValidationPolicy.maxConcurrency_must_be_1")
+        if policy.get("agentScope") not in TASK_VALIDATION_AGENT_SCOPES:
+            errors.append("taskValidationPolicy.agentScope_invalid")
+        max_repairs = policy.get("maxRepairAttempts", DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS)
+        if not isinstance(max_repairs, int) or isinstance(max_repairs, bool) or max_repairs < 0:
+            errors.append("taskValidationPolicy.maxRepairAttempts_invalid")
+        for field in ("environmentFailureDisposition", "exhaustedRepairDisposition"):
+            value = policy.get(field, "defer")
+            if value != "defer":
+                errors.append(f"taskValidationPolicy.{field}_invalid")
 
 
 def _validate_validation_deferral(
@@ -1962,6 +2207,7 @@ def _bundle_consistency_errors(
                 require_initial_status=require_initial_status,
                 require_all_done=require_all_done,
                 require_backend_compile=require_backend_compile,
+                defer_to_test_stages=defer_to_test_stages_enabled(root),
             )
         )
         actual_ids = [str(item.get("id")) for item in tasks(data)]

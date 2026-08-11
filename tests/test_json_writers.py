@@ -1603,6 +1603,67 @@ class JsonWriterTests(unittest.TestCase):
             self.assertIn("T001.visualSourceRefs_must_be_string_array", result.stdout)
             self.assertIn("T001.frontendRoute_missing", result.stdout)
 
+    def test_plan_writer_grouping_returns_all_invalid_tasks_and_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+
+            def oversized_task(task_id: str, start: int) -> dict:
+                task = _plan_task_body()
+                task["id"] = task_id
+                task["title"] = f"{task_id} oversized"
+                task["specRefs"] = [
+                    "specs/cap/spec.md#REQ-001",
+                    *[
+                        f"specs/cap/spec.md#SCN-{index:03d}"
+                        for index in range(start, start + 6)
+                    ],
+                ]
+                task["mergedScenarioRefs"] = []
+                task.pop("splitRationale", None)
+                return task
+
+            group_file = _write_task_groups(
+                root / "task-groups.json",
+                [oversized_task("T001", 1), oversized_task("T002", 7)],
+            )
+            result = _run(
+                "plan_writer.py",
+                "preflight-task-groups",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--group-file",
+                str(group_file),
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["validation"]["invalidTaskIds"], ["T001", "T002"])
+            issues = payload["validation"]["issues"]
+            self.assertEqual(
+                {(issue["taskIds"][0], issue["reason"]) for issue in issues},
+                {
+                    ("T001", "missing_plan_task_merged_scenario_refs"),
+                    ("T001", "missing_plan_task_split_rationale"),
+                    ("T002", "missing_plan_task_merged_scenario_refs"),
+                    ("T002", "missing_plan_task_split_rationale"),
+                },
+            )
+            merged_issue = next(
+                issue
+                for issue in issues
+                if issue["taskIds"] == ["T001"]
+                and issue["reason"] == "missing_plan_task_merged_scenario_refs"
+            )
+            self.assertEqual(len(merged_issue["diagnostics"]["expectedRefs"]), 6)
+            self.assertEqual(
+                merged_issue["diagnostics"]["violations"][0]["code"],
+                "merged_scenario_refs_missing",
+            )
+
     def test_plan_writer_freezes_all_ui_refs_after_grouping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))

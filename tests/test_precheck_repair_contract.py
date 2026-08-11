@@ -256,6 +256,26 @@ class StructuredOutputTest(unittest.TestCase):
         self.assertEqual(errors[0]["reason"], "brand_new_unregistered_reason")
         self.assertNotIn("action", errors[0])
 
+    def test_registered_failure_preserves_structured_diagnostics(self) -> None:
+        diagnostics = {
+            "taskId": "T013",
+            "field": "splitRationale",
+            "violations": [{"code": "split_rationale_missing_related_ids"}],
+        }
+        _, output = run_capture(
+            lambda: fail_line(
+                HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp")),
+                "invalid_plan_task_split_rationale",
+                " task=T013 detail=scenarios=8",
+                target="T013",
+                fields={"detail": "task=T013 detail=scenarios=8"},
+                diagnostics=diagnostics,
+            )
+        )
+
+        error = parse_postcheck_output(output)[0]
+        self.assertEqual(error["diagnostics"], diagnostics)
+
     def test_pending_design_cells_route_to_the_user(self) -> None:
         ctx = HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp"))
         _, output = run_capture(lambda: fail_line(ctx, "design_has_pending_cells", " count=2", target="2 处"))
@@ -526,6 +546,7 @@ class RepresentativePlanFailuresTest(unittest.TestCase):
                     " " + error.get("detail", ""),
                     target="T001",
                     fields={"detail": error.get("detail", "")},
+                    diagnostics=error,
                 )
             return failures
 
@@ -534,6 +555,7 @@ class RepresentativePlanFailuresTest(unittest.TestCase):
             for field in ("artifact", "target", "problem", "action", "route"):
                 self.assertTrue(error.get(field), f"{error['reason']} 缺 {field}")
             self.assertEqual(error["target"], "T001")
+            self.assertTrue(error.get("diagnostics", {}).get("violations"))
 
 
 class SkillWordingTest(unittest.TestCase):

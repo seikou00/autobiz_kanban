@@ -96,6 +96,53 @@ class PlanGranularityTests(unittest.TestCase):
             ],
         )
         self.assertIn("missingRefs=specs/capability/spec.md#SCN-009", errors[0]["detail"])
+        self.assertEqual(
+            errors[0]["missingRefs"],
+            ["specs/capability/spec.md#SCN-009"],
+        )
+        self.assertEqual(errors[0]["field"], "mergedScenarioRefs")
+
+    def test_split_rationale_reports_every_specific_violation(self) -> None:
+        task = _task_with_scenarios(8)
+        task["apiIds"] = ["API-001", "API-002"]
+        task["mergedScenarioRefs"] = task["specRefs"][1:]
+        task["splitRationale"] = "同一模块"
+
+        errors = validate_plan_task_grouping_item(task, task_id="T001")
+        rationale_error = next(
+            item for item in errors if item["reason"] == "invalid_plan_task_split_rationale"
+        )
+        violation_codes = {item["code"] for item in rationale_error["violations"]}
+
+        self.assertEqual(rationale_error["taskId"], "T001")
+        self.assertEqual(rationale_error["field"], "splitRationale")
+        self.assertEqual(
+            rationale_error["thresholds"],
+            [{
+                "dimension": "scenarios",
+                "field": "specRefs",
+                "observed": 8,
+                "softLimit": 5,
+                "hardLimit": 12,
+            }],
+        )
+        self.assertEqual(
+            violation_codes,
+            {
+                "split_rationale_too_short",
+                "split_rationale_contains_banned_term",
+                "split_rationale_missing_validation_boundary",
+                "split_rationale_missing_related_ids",
+            },
+        )
+        missing_ids = next(
+            item
+            for item in rationale_error["violations"]
+            if item["code"] == "split_rationale_missing_related_ids"
+        )
+        self.assertEqual(missing_ids["requiredCount"], 3)
+        self.assertEqual(missing_ids["actualCount"], 0)
+        self.assertEqual(len(missing_ids["eligibleIds"]), 8)
 
     def test_matrix_exception_rejects_incomplete_merged_scenario_refs(self) -> None:
         task = _task_with_scenarios(9)
@@ -116,6 +163,26 @@ class PlanGranularityTests(unittest.TestCase):
         )
 
         self.assertIn("invalid_plan_task_matrix_validation", _reasons(task))
+
+    def test_matrix_validation_reports_exact_cover_mismatch(self) -> None:
+        task = _task_with_scenarios(8)
+        task["mergedScenarioRefs"] = task["specRefs"][1:]
+        task["validationCommands"][0]["covers"] = task["validationCommands"][0]["covers"][:-1]
+
+        errors = validate_plan_task_granularity_item(task, task_id="T001")
+        matrix_error = next(
+            item for item in errors if item["reason"] == "invalid_plan_task_matrix_validation"
+        )
+        covers_error = next(
+            item
+            for item in matrix_error["violations"]
+            if item["code"] == "matrix_validation_covers_mismatch"
+        )
+
+        self.assertEqual(matrix_error["taskId"], "T001")
+        self.assertEqual(matrix_error["field"], "validationCommands")
+        self.assertEqual(covers_error["missingCovers"], ["AC-T001-08"])
+        self.assertEqual(covers_error["extraCovers"], [])
 
     def test_matrix_exception_rejects_more_than_twelve_scenarios(self) -> None:
         task = _task_with_scenarios(13)

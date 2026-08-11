@@ -32,6 +32,7 @@ from evidence_kernel import check_record_artifacts  # noqa: E402
 from plan_json import (  # noqa: E402
     blocked_tasks,
     deferred_task_validation_enabled,
+    defer_to_test_stages_enabled,
     failed_tasks,
     load_and_validate_plan,
     plan_json_path,
@@ -286,6 +287,8 @@ def _check_completion(
         if isinstance(record.get("evidenceId"), str)
     }
     deferred = deferred_task_validation_enabled(plan)
+    defer_to_test = defer_to_test_stages_enabled(plan)
+    implementation_evidence_required = deferred or defer_to_test
     projected_issue_ids = {
         str(issue.get("issueId"))
         for issue in plan.get("deferredValidationIssues", [])
@@ -328,7 +331,7 @@ def _check_completion(
         passed_command_ids: set[str] = set()
         covered_criteria: set[str] = set()
         completion_records: list[dict[str, Any]] = []
-        if deferred:
+        if implementation_evidence_required:
             implementation_ids = task.get("implementationEvidenceIds")
             implementation_ids = implementation_ids if isinstance(implementation_ids, list) else []
             latest_implementation = task.get("latestImplementationEvidenceId")
@@ -336,6 +339,8 @@ def _check_completion(
                 errors.append(f"{task_id}.implementation_evidence_missing")
             if latest_implementation not in implementation_ids:
                 errors.append(f"{task_id}.latest_implementation_evidence_invalid")
+            elif implementation_ids and latest_implementation != implementation_ids[-1]:
+                errors.append(f"{task_id}.latest_implementation_evidence_not_latest")
             for evidence_id in implementation_ids:
                 implementation_record = by_id.get(str(evidence_id))
                 if (
@@ -429,7 +434,7 @@ def _check_completion(
                         completion_records,
                     )
                 )
-            else:
+            elif not defer_to_test:
                 errors.extend(_check_task_run_state(feature_dir, task, completion_records))
 
         completed_revalidation = task.get("completedRevalidation")
@@ -494,13 +499,15 @@ def _check_completion(
         elif revalidation_records:
             errors.append(f"{task_id}.completed_revalidation_pointer_missing")
 
-        if not validation_deferred:
-            for command_id in sorted(required_command_ids - passed_command_ids):
-                errors.append(f"{task_id}.missing_required_validation_pass:{command_id}")
-            acceptance_ids = _task_acceptance_ids(task)
-            missing_criteria = sorted(acceptance_ids - covered_criteria)
-            if missing_criteria:
-                errors.append(f"{task_id}.missing_acceptance_coverage:" + ",".join(missing_criteria))
+        # 新策略：不检查验证命令和验收标准，这些留给 UTest/E2E 阶段
+        if not defer_to_test_stages_enabled(plan):
+            if not validation_deferred:
+                for command_id in sorted(required_command_ids - passed_command_ids):
+                    errors.append(f"{task_id}.missing_required_validation_pass:{command_id}")
+                acceptance_ids = _task_acceptance_ids(task)
+                missing_criteria = sorted(acceptance_ids - covered_criteria)
+                if missing_criteria:
+                    errors.append(f"{task_id}.missing_acceptance_coverage:" + ",".join(missing_criteria))
     for batch in (plan.get("_bundleBatches") or {}).values():
         if not isinstance(batch, dict):
             continue
@@ -654,6 +661,65 @@ def _check_batch_completion(
                 ]
                 if task_validation.get("deferredTaskIds", []) != expected_deferred:
                     errors.append(f"{batch_id}.task_validation_deferred_projection_mismatch")
+
+        # 新策略：检查 batchCompile 而不是 batchValidation
+        if defer_to_test_stages_enabled(plan):
+            compile_result = batch.get("batchCompile")
+            if not isinstance(compile_result, dict):
+                errors.append(f"{batch_id}.batch_compile_contract_missing")
+                continue
+            compile_status = compile_result.get("status")
+            # P1-6: Code done gate 只接受 passed，failed 必须阻断完成
+            if compile_status != "passed":
+                if compile_status == "failed":
+                    errors.append(f"{batch_id}.batch_compile_failed")
+                else:
+                    errors.append(f"{batch_id}.batch_compile_not_passed:{compile_status}")
+                continue
+
+            # P1-5: 编译通过时严格校验 commandId
+            command_id = compile_result.get("commandId")
+            if not isinstance(command_id, str) or not command_id.strip():
+                errors.append(f"{batch_id}.batch_compile_commandId_missing_or_empty")
+                continue
+
+            # P1-5: 验证 commandId 对应计划中的 compile command
+            batch_validation = batch.get("batchValidation")
+            batch_commands = (
+                batch_validation.get("commands", [])
+                if isinstance(batch_validation, dict)
+                else []
+            )
+            compile_command = None
+            for cmd in batch_commands:
+                if (
+                    isinstance(cmd, dict)
+                    and cmd.get("kind") == "compile"
+                    and cmd.get("required") is True
+                    and cmd.get("id") == command_id
+                ):
+                    compile_command = cmd
+                    break
+            if compile_command is None:
+                errors.append(f"{batch_id}.batch_compile_commandId_not_found_in_plan:{command_id}")
+                continue
+            expected_implementation_evidence = {
+                str(task.get("id")): task.get("latestImplementationEvidenceId")
+                for task in batch.get("tasks", [])
+                if isinstance(task, dict) and isinstance(task.get("id"), str)
+            }
+            if compile_result.get("implementationEvidenceByTask") != expected_implementation_evidence:
+                errors.append(f"{batch_id}.batch_compile_implementation_evidence_mismatch")
+            expected_implementation_revisions = {
+                str(task.get("id")): task.get("implementationRevision")
+                for task in batch.get("tasks", [])
+                if isinstance(task, dict) and isinstance(task.get("id"), str)
+            }
+            if compile_result.get("implementationRevisionByTask") != expected_implementation_revisions:
+                errors.append(f"{batch_id}.batch_compile_implementation_revision_mismatch")
+            continue
+
+        # 旧策略：检查 batchValidation
         validation = batch.get("batchValidation")
         if not isinstance(validation, dict):
             errors.append(f"{batch_id}.batch_validation_contract_missing")

@@ -1655,6 +1655,7 @@ def validate_plan_task_granularity(ctx: HookContext) -> int:
                 " " + error.get("detail", ""),
                 target=task_id,
                 fields={"detail": error.get("detail", "")},
+                diagnostics=error,
             )
     return failures
 

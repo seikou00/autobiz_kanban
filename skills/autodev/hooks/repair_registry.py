@@ -453,8 +453,9 @@ _PLAN: Dict[str, Repair] = {
         artifact="plan.json",
         problem="{target} 的 splitRationale 不满足要求：{detail}",
         action=(
-            "补足两点：逐个点名被合并的相关编号，并说明验证边界（具体验证手段/命令），"
-            "不要写「便于实现」「逻辑相关」这类空话，再重建 Draft。" + PLAN_NO_HAND_EDIT
+            "先读取返回 JSON 的 diagnostics.violations，逐项修复其中列出的字段、编号和验证边界；"
+            "不得根据 Scenario 编号猜测拆分归属。若不满足真实共享验证闭环，应回覆盖矩阵按业务闭环拆分，"
+            "再重建 Draft。" + PLAN_NO_HAND_EDIT
         ),
     ),
     "invalid_plan_task_matrix_validation": Repair(
