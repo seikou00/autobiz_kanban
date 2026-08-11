@@ -12,6 +12,10 @@ GLOB_ARTIFACT_CONTRACTS = {
         "path": "cache/code-exploration/**/*.json",
         "suffix": ".json",
     },
+    "e2e_diagnostics": {
+        "path": "e2e-diagnostics/**/*",
+        "suffix": None,
+    },
 }
 ARTIFACT_STATUS_LABELS = {
     "generated": "已生成",
@@ -57,7 +61,7 @@ def _scan_glob_artifact(feature_dir: Path, workspace: Path, artifact: dict) -> d
         for match in feature_dir.glob(path)
         if (
             match.is_file()
-            and match.suffix == suffix
+            and (suffix is None or match.suffix == suffix)
             and resolve_exact_relative_path(feature_dir, match.relative_to(feature_dir)) is not None
         )
     )

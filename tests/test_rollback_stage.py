@@ -52,6 +52,7 @@ class RollbackStageTest(unittest.TestCase):
         }
         delete = {
             "E2E_TEST_CASES.yaml": "cases",
+            "E2E_QUALITY_SCAN.json": "quality",
             "E2E_REPORT.md": "e2e",
             "e2e-run.log": "e2e log",
             "VERIFY_REPORT.md": "verify",
@@ -60,6 +61,11 @@ class RollbackStageTest(unittest.TestCase):
         }
         for name, content in {**keep, **delete}.items():
             (self.feature_dir / name).write_text(content, encoding="utf-8")
+        diagnostics = self.feature_dir / "e2e-diagnostics" / "round-1"
+        diagnostics.mkdir(parents=True)
+        (diagnostics / "report.json").write_text("{}\n", encoding="utf-8")
+        diagnostics_lock = self.feature_dir / "e2e-diagnostics" / "e2e-run.lock"
+        diagnostics_lock.write_text("0", encoding="utf-8")
 
         plan = prepare_stage_rollback(
             workspace=self.project,
@@ -77,6 +83,8 @@ class RollbackStageTest(unittest.TestCase):
             self.assertTrue((self.feature_dir / name).exists(), name)
         for name in delete:
             self.assertFalse((self.feature_dir / name).exists(), name)
+        self.assertFalse((diagnostics / "report.json").exists())
+        self.assertFalse(diagnostics_lock.exists())
         records, errors, _ = load_state_json_records(self.project)
         self.assertEqual(errors, [])
         self.assertEqual(records[self.feature]["checkpoint"], "unit_test_done")

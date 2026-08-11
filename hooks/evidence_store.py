@@ -741,6 +741,18 @@ def _cmd_append(args: argparse.Namespace) -> int:
     }:
         print("code_validation_requires_task_runner", file=sys.stderr)
         return 1
+    if record.get("skill") == "autodev-e2e" and record.get("action") in {
+        "validation",
+        "batch_validation",
+        "project_check",
+    }:
+        print(
+            "e2e_validation_requires_e2e_runner。修复：使用 "
+            "`${pluginPath}/hooks/run_e2e_command.py run ... -- playwright test ...` "
+            "产生真实退出码、Playwright JSON report 与 Evidence。",
+            file=sys.stderr,
+        )
+        return 1
     tail = Path(args.output_tail).read_text(encoding="utf-8", errors="ignore") if args.output_tail else None
     try:
         appended = append_evidence(target, record, output_tail=tail)

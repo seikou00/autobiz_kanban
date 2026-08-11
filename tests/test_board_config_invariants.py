@@ -171,6 +171,20 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
 
+    def test_e2e_stage_declares_trust_gate_and_diagnostics_outputs(self) -> None:
+        nodes = [node for _, node in _iter_nodes(_board_config()) if node.get("id") == "dev.e2e"]
+        self.assertEqual(1, len(nodes))
+        outputs = nodes[0]["artifacts"]["outputs"]
+        by_path = {artifact["path"]: artifact for artifact in outputs}
+        self.assertIn("E2E_QUALITY_SCAN.json", by_path)
+        self.assertFalse(by_path["E2E_QUALITY_SCAN.json"]["required"])
+        self.assertIn("e2e-diagnostics/**/*", by_path)
+        self.assertFalse(by_path["e2e-diagnostics/**/*"]["required"])
+        self.assertEqual(
+            ["e2e_result_json", "e2e_cases_contract", "fix_request_json", "evidence_integrity"],
+            nodes[0]["validators"],
+        )
+
 
     def test_standard_workflow_does_not_depend_on_advisory_smoke_artifacts(self) -> None:
         offenders: list[str] = []

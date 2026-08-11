@@ -357,6 +357,11 @@ CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
         "lifecycle": "evidence",
         "description": "结构化 E2E 测试结果。",
     },
+    "E2E_QUALITY_SCAN.json": {
+        "category": "e2e_quality_scan",
+        "lifecycle": "evidence",
+        "description": "E2E 假绿质量门禁与输入哈希。",
+    },
     "e2e-run.log": {
         "category": "log",
         "lifecycle": "log",
@@ -415,6 +420,12 @@ def catalog_metadata_for_path(relative_path: str) -> dict[str, Any]:
             "category": "source_reference",
             "lifecycle": "reference",
             "description": "原始需求文档或参考材料快照。",
+        }
+    if relative_path.startswith("e2e-diagnostics/"):
+        return {
+            "category": "e2e_diagnostic",
+            "lifecycle": "evidence",
+            "description": "E2E trace、截图、网络、控制台或机器报告诊断。",
         }
     return dict(
         CATALOG_EXACT_METADATA.get(

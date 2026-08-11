@@ -587,7 +587,7 @@
           }
         },
         "order": 80,
-        "description": "端到端测试 \n 产物：E2E_TEST_CASES.yaml（E2E 测试用例：步骤与断言定义）、E2E_REPORT.md（E2E 测试报告：执行结论与失败项）、e2e-run.log（E2E 运行原始日志）",
+        "description": "端到端测试 \n 产物：E2E_TEST_CASES.yaml（唯一用例计划）、E2E_QUALITY_SCAN.json（质量门禁）、E2E_RESULT.json（机器结论）、e2e-run.log（JSONL 运行事实）、evidence/EVIDENCE.jsonl（可信执行证据）、e2e-diagnostics/**/*（诊断产物），可选 E2E_REPORT.md 与失败回流 FIX_REQUEST.json",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
@@ -646,6 +646,8 @@
             { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": false },
             { "id": "e2e_result_json", "label": "结构化 E2E 结果", "artifactType": "json", "path": "E2E_RESULT.json", "required": true },
             { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false },
+            { "id": "e2e_quality_scan", "label": "E2E 质量门禁", "artifactType": "json", "path": "E2E_QUALITY_SCAN.json", "required": false },
+            { "id": "e2e_diagnostics", "label": "E2E 诊断产物", "artifactType": "file", "path": "e2e-diagnostics/**/*", "required": false },
             { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]

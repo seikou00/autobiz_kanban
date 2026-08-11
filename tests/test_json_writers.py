@@ -2948,14 +2948,14 @@ class JsonWriterTests(unittest.TestCase):
                 "T001",
                 "--spec-ref",
                 "specs/cap/spec.md#SCN-001",
-                "--evidence-id",
-                "ev_0001",
+                "--priority",
+                "P0",
+                "--ui-required",
+                "true",
                 "--execution-mode",
-                "manual",
-                "--verdict",
-                "PASS",
+                "browser",
                 "--step-json",
-                '{"action":"open","expected":"ok"}',
+                '{"action":"open","expected":"ok","verification":{"type":"ui","details":"visible"}}',
             )
             review = _run(
                 "review_findings_writer.py",
@@ -3019,9 +3019,7 @@ class JsonWriterTests(unittest.TestCase):
                 "--task-id",
                 "T001",
                 "--execution-mode",
-                "manual",
-                "--verdict",
-                "PASS",
+                "browser",
             )
             review = _run(
                 "review_findings_writer.py",
@@ -3041,7 +3039,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(unit.returncode, 0)
             self.assertIn("missing_unit_target_trace_args", unit.stdout)
             self.assertNotEqual(e2e.returncode, 0)
-            self.assertIn("missing_e2e_case_args", e2e.stdout)
+            self.assertIn("required", e2e.stderr)
             self.assertNotEqual(review.returncode, 0)
             self.assertIn("missing_review_finding_args", review.stdout)
 

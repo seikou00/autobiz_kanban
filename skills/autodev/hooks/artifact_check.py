@@ -33,6 +33,15 @@ from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import BASE_WORKFLOW_PROFILE, configured_profile_names  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done, check_integrity, check_plan_evidence_refs  # noqa: E402
 from hooks.evidence_store import EvidenceStoreError, read_records, stream_path, validate_detail_fields  # noqa: E402
+from hooks.e2e_trust_common import (  # noqa: E402
+    DIAGNOSTICS_DIR,
+    is_fresh,
+    normalize_relative_path,
+    validate_execution_evidence_chain,
+    validate_execution_hash_chain,
+    validate_execution_log_chain,
+    validate_scan_current,
+)
 from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
@@ -995,11 +1004,15 @@ def _e2e_scenario_covering_evidence(ctx: HookContext) -> dict[str, set[str]]:
     for record in records:
         evidence_id = record.get("evidenceId")
         spec_refs = record.get("specRefs")
-        node_id = record.get("nodeId")
         skill = record.get("skill")
         if not isinstance(evidence_id, str) or not isinstance(spec_refs, list):
             continue
-        if node_id != "dev.e2e" and skill != "autodev-e2e":
+        if skill != "autodev-e2e" or record.get("action") != "validation":
+            continue
+        validation = record.get("validation")
+        if not isinstance(validation, dict):
+            continue
+        if str(validation.get("result", "")).lower() != "pass" or validation.get("exitCode") != 0:
             continue
         scenario_refs = _scenario_refs_from_spec_refs([ref for ref in spec_refs if isinstance(ref, str)])
         for scenario_ref in scenario_refs:
@@ -1258,6 +1271,129 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
     return failures
 
 
+def _e2e_log_records(ctx: HookContext, *, pass_claimed: bool) -> tuple[list[dict], int]:
+    path = ctx.file("e2e-run.log")
+    if not is_nonempty(path):
+        return [], fail_line(ctx, "missing_e2e_run_log")
+    records: list[dict] = []
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if not raw.strip():
+            continue
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            if not records and line_no == 1 and not raw.lstrip().startswith(("{", "[")):
+                if pass_claimed:
+                    return [], fail_line(ctx, "legacy_e2e_log_cannot_support_pass")
+                info(ctx, "legacy_e2e_log_read_only_degrade")
+                return [], 0
+            return [], fail_line(ctx, "invalid_e2e_run_log_json", f" line={line_no}")
+        if not isinstance(value, dict):
+            return [], fail_line(ctx, "invalid_e2e_run_log_record", f" line={line_no}")
+        records.append(value)
+    failures = 0
+    run_ids: set[str] = set()
+    for record in records:
+        if record.get("kind") == "note":
+            if any(
+                not isinstance(record.get(field), str) or not record.get(field)
+                for field in ("ts", "phase", "text")
+            ):
+                failures += fail_line(ctx, "invalid_e2e_note_record")
+            continue
+        if record.get("kind") != "verdict_run":
+            failures += fail_line(ctx, "invalid_e2e_run_log_kind")
+            continue
+        run_id = record.get("runId")
+        if not isinstance(run_id, str) or not run_id:
+            failures += fail_line(ctx, "missing_e2e_log_run_id")
+        elif run_id in run_ids:
+            failures += fail_line(ctx, "duplicate_e2e_log_run_id", f" runId={run_id}")
+        else:
+            run_ids.add(run_id)
+    return records, failures
+
+
+def _e2e_evidence_index(ctx: HookContext) -> tuple[dict[str, dict], dict[str, str], int]:
+    try:
+        records = read_records(stream_path(ctx.feature_dir))
+    except EvidenceStoreError as exc:
+        return {}, {}, fail_line(ctx, "invalid_evidence_stream", f" detail={exc}")
+    result: dict[str, dict] = {}
+    run_ids: dict[str, str] = {}
+    failures = 0
+    for record in records:
+        evidence_id = record.get("evidenceId")
+        if isinstance(evidence_id, str):
+            result[evidence_id] = record
+        e2e_run = record.get("e2eRun")
+        run_id = e2e_run.get("runId") if isinstance(e2e_run, dict) else None
+        if isinstance(run_id, str):
+            if run_id in run_ids:
+                failures += fail_line(
+                    ctx,
+                    "duplicate_e2e_evidence_run_id",
+                    f" runId={run_id} evidenceIds={run_ids[run_id]},{evidence_id}",
+                )
+            else:
+                run_ids[run_id] = str(evidence_id)
+    return result, run_ids, failures
+
+
+def _valid_e2e_steps(ctx: HookContext, case: dict, *, context: str) -> int:
+    failures = 0
+    steps = case.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return fail_line(ctx, "invalid_e2e_steps", f" item={context}")
+    for index, step in enumerate(steps):
+        step_context = f"{context}.steps[{index}]"
+        if not isinstance(step, dict):
+            failures += fail_line(ctx, "invalid_e2e_step", f" item={step_context}")
+            continue
+        for field in ("action", "expected"):
+            failures += _check_string_field(ctx, step, field, context=step_context)
+        verification = step.get("verification")
+        if not isinstance(verification, dict):
+            failures += fail_line(ctx, "missing_e2e_step_verification", f" item={step_context}")
+            continue
+        if str(verification.get("type", "")).lower() not in {"ui", "api", "database"}:
+            failures += fail_line(ctx, "invalid_e2e_verification_type", f" item={step_context}")
+        failures += _check_string_field(ctx, verification, "details", context=step_context)
+    if case.get("uiRequired") is True and case.get("priority") in {"P0", "P1"}:
+        final = steps[-1] if isinstance(steps[-1], dict) else {}
+        verification = final.get("verification") if isinstance(final.get("verification"), dict) else {}
+        if str(verification.get("type", "")).lower() != "ui":
+            failures += fail_line(ctx, "ui_p0_p1_requires_final_ui_assertion", f" item={context}")
+    return failures
+
+
+def _diagnostic_paths_valid(ctx: HookContext, execution: dict, *, context: str) -> int:
+    failures = 0
+    paths = execution.get("diagnosticPaths")
+    if not isinstance(paths, dict):
+        return fail_line(ctx, "missing_e2e_diagnostic_paths", f" item={context}")
+    for field in ("trace", "screenshot", "console", "network", "report"):
+        if field not in paths:
+            failures += fail_line(ctx, "missing_e2e_diagnostic_path_field", f" item={context} field={field}")
+            continue
+        value = paths.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value:
+            failures += fail_line(ctx, "invalid_e2e_diagnostic_path", f" item={context} field={field}")
+            continue
+        try:
+            relative, resolved = normalize_relative_path(ctx.feature_dir, value, field)
+        except ValueError:
+            failures += fail_line(ctx, "e2e_diagnostic_path_outside_feature", f" item={context} field={field}")
+            continue
+        if not relative.startswith(DIAGNOSTICS_DIR + "/"):
+            failures += fail_line(ctx, "e2e_diagnostic_path_outside_directory", f" item={context} field={field}")
+        elif not resolved.is_file():
+            failures += fail_line(ctx, "e2e_diagnostic_path_missing", f" item={context} field={field}")
+    return failures
+
+
 def validate_e2e_result_json(ctx: HookContext) -> int:
     data, failures = load_json_artifact(
         ctx,
@@ -1268,14 +1404,52 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
         return failures
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_e2e_result_version")
-    verdict = data.get("verdict")
-    if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED"}:
+    root_verdict = data.get("verdict")
+    if not isinstance(root_verdict, str) or root_verdict.upper() not in {"PASS", "FAIL", "BLOCKED"}:
         failures += fail_line(ctx, "invalid_e2e_result_summary_verdict")
-    elif ctx.requires_artifact("E2E_RESULT.json") and verdict.upper() not in TERMINAL_PASS:
+    elif ctx.requires_artifact("E2E_RESULT.json") and root_verdict.upper() not in TERMINAL_PASS:
         failures += fail_line(ctx, "non_terminal_e2e_result_verdict")
+    if root_verdict == "PASS" and data.get("verdictSource") != "finalize":
+        failures += fail_line(ctx, "e2e_pass_requires_finalize_source")
+
+    current = data.get("currentRound")
+    if not isinstance(current, dict):
+        failures += fail_line(ctx, "missing_e2e_current_round")
+        current = {}
+    elif (
+        not isinstance(current.get("index"), int)
+        or current.get("index", 0) < 1
+        or current.get("kind") not in {"initial", "repair"}
+        or not isinstance(current.get("startedAt"), str)
+    ):
+        failures += fail_line(ctx, "invalid_e2e_current_round")
+    repair_rounds = data.get("repairRounds")
+    if not isinstance(repair_rounds, int) or not 0 <= repair_rounds <= 3:
+        failures += fail_line(ctx, "invalid_e2e_repair_rounds")
+
+    pass_claimed = root_verdict == "PASS"
     cases = data.get("cases")
     if not isinstance(cases, list) or not cases:
         return failures + fail_line(ctx, "invalid_e2e_result_cases")
+    pass_claimed = pass_claimed or any(
+        isinstance(case, dict) and case.get("verdict") == "PASS" for case in cases
+    )
+    log_records, log_failures = _e2e_log_records(ctx, pass_claimed=pass_claimed)
+    failures += log_failures
+    verdict_logs = {
+        record.get("runId"): record
+        for record in log_records
+        if record.get("kind") == "verdict_run" and isinstance(record.get("runId"), str)
+    }
+    evidence_by_id, evidence_run_ids, evidence_failures = _e2e_evidence_index(ctx)
+    failures += evidence_failures
+    quality_gate = data.get("qualityGate") if isinstance(data.get("qualityGate"), dict) else None
+    if pass_claimed:
+        _, quality_errors = validate_scan_current(ctx.feature_dir, quality_gate)
+        for error in quality_errors:
+            failures += fail_line(ctx, "invalid_e2e_quality_gate", f" detail={error}")
+
+    all_execution_run_ids: set[str] = set()
     for index, case in enumerate(cases):
         context = f"cases[{index}]"
         if not isinstance(case, dict):
@@ -1285,23 +1459,155 @@ def validate_e2e_result_json(ctx: HookContext) -> int:
         case_id = case.get("caseId")
         if isinstance(case_id, str) and not E2E_ID.fullmatch(case_id):
             failures += fail_line(ctx, "invalid_e2e_result_case_id", f" item={context}")
-        _, _, trace_failures = _check_trace_refs(ctx, case, context=context, require_task=True, require_evidence=True)
+        _, _, trace_failures = _check_trace_refs(
+            ctx,
+            case,
+            context=context,
+            require_task=True,
+            require_evidence=case.get("verdict") == "PASS",
+        )
         failures += trace_failures
-        failures += _check_string_field(ctx, case, "executionMode", context=context)
-        steps = case.get("steps")
-        if not isinstance(steps, list):
-            failures += fail_line(ctx, "invalid_json_array_field", f" item={context} field=steps")
-        verdict = case.get("verdict")
-        if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
+        if case.get("executionMode") not in {"browser", "api", "mixed", "database_assisted"}:
+            failures += fail_line(ctx, "invalid_e2e_execution_mode", f" item={context}")
+        if case.get("priority") not in {"P0", "P1", "P2"}:
+            failures += fail_line(ctx, "invalid_e2e_priority", f" item={context}")
+        if not isinstance(case.get("uiRequired"), bool):
+            failures += fail_line(ctx, "invalid_e2e_ui_required", f" item={context}")
+        failures += _valid_e2e_steps(ctx, case, context=context)
+        case_verdict = case.get("verdict")
+        if case_verdict not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
             failures += fail_line(ctx, "invalid_e2e_result_verdict", f" item={context}")
-        elif isinstance(data.get("verdict"), str) and data["verdict"].upper() in TERMINAL_PASS and verdict.upper() in {"FAIL", "BLOCKED"}:
+        if case_verdict == "PASS" and case.get("verdictSource") != "finalize":
+            failures += fail_line(ctx, "e2e_case_pass_requires_finalize_source", f" item={context}")
+        if root_verdict == "PASS" and case_verdict not in {"PASS", "SKIP"}:
             failures += fail_line(ctx, "e2e_result_summary_mismatch", f" item={context}")
+        if case_verdict == "SKIP" and not isinstance(case.get("reason"), str):
+            failures += fail_line(ctx, "e2e_skip_requires_reason", f" item={context}")
+
+        executions = case.get("executions")
+        if not isinstance(executions, list):
+            executions = []
+            if case_verdict == "PASS":
+                failures += fail_line(ctx, "e2e_pass_without_executions", f" item={context}")
+        current_pass = False
+        for execution_index, execution in enumerate(executions):
+            execution_context = f"{context}.executions[{execution_index}]"
+            if not isinstance(execution, dict):
+                failures += fail_line(ctx, "invalid_e2e_execution", f" item={execution_context}")
+                continue
+            run_id = execution.get("runId")
+            if not isinstance(run_id, str) or not run_id:
+                failures += fail_line(ctx, "missing_e2e_execution_run_id", f" item={execution_context}")
+                continue
+            if run_id in all_execution_run_ids:
+                failures += fail_line(ctx, "duplicate_e2e_execution_run_id", f" runId={run_id}")
+            all_execution_run_ids.add(run_id)
+            failures += _diagnostic_paths_valid(ctx, execution, context=execution_context)
+            process_code = execution.get("processExitCode")
+            gate_code = execution.get("gateExitCode")
+            result = execution.get("result")
+            if not isinstance(process_code, int) or not isinstance(gate_code, int):
+                failures += fail_line(ctx, "invalid_e2e_exit_code", f" item={execution_context}")
+            elif gate_code == 0 and process_code != 0:
+                failures += fail_line(ctx, "e2e_gate_cannot_relax_process", f" item={execution_context}")
+            if result not in {"PASS", "FAIL", "FLAKY", "BLOCKED"}:
+                failures += fail_line(ctx, "invalid_e2e_execution_result", f" item={execution_context}")
+            if execution.get("executionPhase") != "verdict" or execution.get("executionAdapter") != "playwright_test":
+                failures += fail_line(ctx, "invalid_e2e_execution_adapter", f" item={execution_context}")
+            evidence_id = execution.get("evidenceId")
+            evidence = evidence_by_id.get(evidence_id) if isinstance(evidence_id, str) else None
+            if evidence is None:
+                failures += fail_line(ctx, "missing_e2e_execution_evidence", f" item={execution_context}")
+                continue
+            if evidence.get("skill") != "autodev-e2e" or evidence.get("action") != "validation":
+                failures += fail_line(ctx, "invalid_e2e_execution_evidence_source", f" item={execution_context}")
+            for error in validate_execution_evidence_chain(
+                execution,
+                evidence,
+                case.get("caseId"),
+                case.get("taskId"),
+                case.get("specRefs"),
+            ):
+                failures += fail_line(
+                    ctx,
+                    "invalid_e2e_evidence_chain",
+                    f" item={execution_context} detail={error}",
+                )
+            log = verdict_logs.get(run_id)
+            if log is None:
+                failures += fail_line(ctx, "missing_e2e_verdict_log", f" item={execution_context}")
+            else:
+                for error in validate_execution_log_chain(
+                    execution,
+                    evidence_id,
+                    log,
+                    case.get("caseId"),
+                    case.get("taskId"),
+                    case.get("specRefs"),
+                ):
+                    failures += fail_line(
+                        ctx,
+                        "e2e_log_execution_mismatch",
+                        f" item={execution_context} detail={error}",
+                    )
+            if (
+                result == "PASS"
+                and gate_code == 0
+                and execution.get("roundIndex") == current.get("index")
+                and is_fresh(evidence.get("createdAt"), current.get("startedAt"))
+            ):
+                current_pass = True
+                for error in validate_execution_hash_chain(
+                    ctx.feature_dir, quality_gate, execution, evidence
+                ):
+                    failures += fail_line(
+                        ctx,
+                        "invalid_e2e_hash_chain",
+                        f" item={execution_context} detail={error}",
+                    )
+        if case_verdict == "PASS" and not current_pass:
+            failures += fail_line(ctx, "e2e_pass_without_fresh_execution", f" item={context}")
+
+    log_run_ids = {
+        record.get("runId")
+        for record in log_records
+        if record.get("kind") == "verdict_run" and isinstance(record.get("runId"), str)
+    }
+    if all_execution_run_ids != log_run_ids:
+        failures += fail_line(ctx, "e2e_execution_log_run_set_mismatch")
+    if all_execution_run_ids != set(evidence_run_ids):
+        failures += fail_line(ctx, "e2e_execution_evidence_run_set_mismatch")
+
+    coverage = data.get("scenarioCoverage")
+    if isinstance(coverage, list):
+        for row_index, row in enumerate(coverage):
+            if not isinstance(row, dict) or str(row.get("verdict", "")).lower() != "pass":
+                continue
+            for evidence_id in row.get("evidenceIds", []) if isinstance(row.get("evidenceIds"), list) else []:
+                evidence = evidence_by_id.get(evidence_id)
+                if (
+                    evidence is None
+                    or evidence.get("skill") != "autodev-e2e"
+                    or evidence.get("action") != "validation"
+                ):
+                    failures += fail_line(
+                        ctx,
+                        "invalid_e2e_coverage_evidence_source",
+                        f" item=scenarioCoverage[{row_index}] evidenceId={evidence_id}",
+                    )
+                elif not is_fresh(evidence.get("createdAt"), current.get("startedAt")):
+                    failures += fail_line(
+                        ctx,
+                        "stale_e2e_coverage_evidence",
+                        f" item=scenarioCoverage[{row_index}] evidenceId={evidence_id}",
+                    )
     failures += _validate_scenario_coverage(
         ctx,
         data,
         field="scenarioCoverage",
         required=True,
         require_pass_evidence=True,
+        covering_evidence=_e2e_scenario_covering_evidence(ctx),
     )
     return failures
 
@@ -1902,6 +2208,34 @@ def validate_e2e_cases_contract(ctx: HookContext) -> int:
         failures += fail_line(ctx, "missing_e2e_execution_mode")
     if "ui_required:" not in cases_text:
         failures += fail_line(ctx, "missing_e2e_ui_required")
+    yaml_case_ids = set(E2E_ID.findall(cases_text))
+    result_path = ctx.file("E2E_RESULT.json")
+    if is_nonempty(result_path):
+        try:
+            result_data = json.loads(result_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result_data = None
+        result_cases = result_data.get("cases") if isinstance(result_data, dict) else None
+        if isinstance(result_cases, list):
+            result_case_ids = {
+                case.get("caseId")
+                for case in result_cases
+                if isinstance(case, dict) and isinstance(case.get("caseId"), str)
+            }
+            missing_in_result = yaml_case_ids - result_case_ids
+            missing_in_yaml = result_case_ids - yaml_case_ids
+            if missing_in_result:
+                failures += fail_line(
+                    ctx,
+                    "e2e_case_ids_missing_in_result",
+                    f" ids={','.join(sorted(missing_in_result))}",
+                )
+            if missing_in_yaml:
+                failures += fail_line(
+                    ctx,
+                    "e2e_case_ids_missing_in_yaml",
+                    f" ids={','.join(sorted(missing_in_yaml))}",
+                )
     return failures
 
 
