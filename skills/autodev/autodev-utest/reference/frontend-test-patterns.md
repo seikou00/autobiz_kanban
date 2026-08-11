@@ -1,6 +1,6 @@
 # Frontend test patterns
 
-Source attribution: Vue patterns are adapted from the vuejs-ai skills repository (https://github.com/vuejs-ai/skills) and the Vue official testing guide (https://vuejs.org/guide/scaling-up/testing.html); user-facing query patterns are adapted from Testing Library documentation (https://testing-library.com/). The bundled vuejs-ai MIT license is `LICENSE.vuejs-ai-MIT.txt`.
+Source attribution: Vue patterns are adapted from the vuejs-ai skills repository (https://github.com/vuejs-ai/skills) and the Vue official testing guide (https://vuejs.org/guide/scaling-up/testing.html); user-facing query patterns are adapted from Testing Library documentation (https://testing-library.com/). 
 
 编辑说明：运行渲染器选择 framework/domain；不要把本说明复制进 agent prompt。
 

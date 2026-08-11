@@ -1,9 +1,5 @@
 # Spring Boot 2/3 单测参考源文件
 
-来源：Spring AI Community Contributors 的 `spring-testing-skills`（Apache-2.0）。
-Copyright 2026 Spring AI Community Contributors.
-本文件已按 Spring Boot 2/3 重映射，并移除 ORM 专有内容与真实 WebSocket 连接内容。完整许可证见同目录 `LICENSE.spring-testing-skills-Apache-2.0.txt`。
-
 编辑约定：用 `<!-- section: 名称 | domain: <域> -->` 标记可渲染小节；合法域为 `fundamentals`、`mvc`、`security`、`websocket`、`persistence`，`*` 表示所有域。单域渲染不超过 400 行，全部 `domain: *` 小节合计不超过 60 行。
 
 源文件导航：
