@@ -569,12 +569,13 @@ class CacheClassificationTest(unittest.TestCase):
 
 
 class CodeExplorationWriterTest(unittest.TestCase):
-    def _run_writer(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def _run_writer(self, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "hooks/code_exploration_writer.py", *args],
             cwd=Path(__file__).resolve().parents[1],
             capture_output=True,
             text=True,
+            input=input_text,
             check=False,
         )
 
@@ -633,6 +634,109 @@ class CodeExplorationWriterTest(unittest.TestCase):
         self.assertEqual(payload["recordExample"]["findings"]["moduleMap"][0]["ownerLane"], "backend")
         self.assertEqual(payload["patchExample"]["findingUpdates"], {})
         self.assertEqual(payload["patchExample"]["reviewedPaths"], ["src/service.py"])
+        self.assertEqual(payload["recordBodySchema"]["required"], ["findings"])
+        self.assertEqual(
+            payload["recordBodySchema"]["properties"]["findings"]["required"],
+            ["moduleMap", "conventions", "integrationPoints", "testEntrypoints", "validationPatterns"],
+        )
+        self.assertIn("--body-stdin", payload["bodyInput"]["preferred"])
+
+    def test_cli_argument_errors_are_machine_readable(self) -> None:
+        result = self._run_writer("record", "--body-stdin", input_text="{}")
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"], "code_exploration_cli_arguments_invalid")
+        self.assertEqual(payload["requiredAction"], "repair_cli_arguments")
+        self.assertIn("--task-id", payload["issues"][0]["detail"])
+        self.assertIn("contract", payload["contractCommand"])
+
+    def test_contract_can_return_focused_record_schema(self) -> None:
+        result = self._run_writer("contract", "--section", "record")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["section"], "record")
+        self.assertIn("recordBodySchema", payload)
+        self.assertIn("recordExample", payload)
+        self.assertNotIn("policies", payload)
+        self.assertNotIn("patchBodySchema", payload)
+
+    def test_record_reports_all_body_violations_with_json_paths(self) -> None:
+        from tests.test_task_runner import _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
+            body = json.dumps(
+                {
+                    "findings": {
+                        "moduleMap": [{"path": "../escape", "role": ""}],
+                        "conventions": "wrong",
+                        "integrationPoints": [],
+                        "testEntrypoints": [{"cwd": ".", "scope": "tests"}],
+                        "validationPatterns": [{"kind": "compile", "cwd": ".", "scope": "compile"}],
+                    },
+                    "exploredPaths": ["../outside", 7],
+                    "sharedPaths": "wrong",
+                }
+            )
+            result = self._run_writer(
+                "record", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+                "--expected-cache-sha256", "missing", "--body-stdin", input_text=body,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["error"], "code_exploration_record_body_invalid")
+            paths = {issue["path"] for issue in payload["issues"]}
+            self.assertTrue(
+                {
+                    "findings.moduleMap[0].path",
+                    "findings.moduleMap[0].role",
+                    "findings.conventions",
+                    "findings.testEntrypoints[0].argv",
+                    "findings.validationPatterns[0].argv",
+                    "exploredPaths[0]",
+                    "exploredPaths[1]",
+                    "sharedPaths",
+                }.issubset(paths)
+            )
+            self.assertEqual(payload["requiredAction"], "repair_record_body")
+            self.assertIn("recordExample", payload)
+
+    def test_record_accepts_stdin_and_rejects_body_file_inside_repository(self) -> None:
+        from tests.test_task_runner import _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
+            body = json.dumps(
+                {
+                    "findings": {
+                        "moduleMap": [], "conventions": [], "integrationPoints": [],
+                        "testEntrypoints": [], "validationPatterns": [],
+                    },
+                    "exploredPaths": [], "sharedPaths": [],
+                }
+            )
+            stdin_result = self._run_writer(
+                "record", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+                "--expected-cache-sha256", "missing", "--body-stdin", input_text=body,
+            )
+            self.assertEqual(stdin_result.returncode, 0, stdin_result.stdout + stdin_result.stderr)
+
+            inside = repo / "exploration-record.json"
+            inside.write_text(body, encoding="utf-8")
+            rejected = self._run_writer(
+                "record", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+                "--expected-cache-sha256", "missing", "--body-file", str(inside),
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            payload = json.loads(rejected.stdout)
+            self.assertEqual(payload["error"], "code_exploration_body_file_inside_repository")
+            self.assertEqual(payload["requiredAction"], "use_body_stdin_or_external_temp_file")
 
     def test_record_missing_cache_then_inspect_fresh_and_reject_wrong_cas(self) -> None:
         from tests.test_task_runner import _workspace
@@ -1116,6 +1220,9 @@ class CodeTaskContextCacheTest(unittest.TestCase):
             repo = Path(tmp) / "repo"
             repo.mkdir()
             _git(repo, "init", "-b", "main")
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".cmbdevclaw/large_tool_results/\n", encoding="utf-8"
+            )
             (repo / "src.txt").write_text("source\n", encoding="utf-8")
 
             result = build_context(
@@ -1167,16 +1274,42 @@ class CodeTaskContextCacheTest(unittest.TestCase):
                     "requiresPatch": False,
                 },
             )
-            self.assertEqual(
-                result.data["explorationDirective"],
-                {
-                    "phase": "batch_bootstrap",
-                    "scopeSource": "batchExplorationScope",
-                    "fullExplorationAllowed": True,
-                    "requiresRecord": True,
-                    "requiresPatch": False,
-                },
+            directive = result.data["explorationDirective"]
+            self.assertEqual(directive["phase"], "batch_bootstrap")
+            self.assertEqual(directive["scopeSource"], "batchExplorationScope")
+            self.assertTrue(directive["fullExplorationAllowed"])
+            self.assertTrue(directive["requiresRecord"])
+            self.assertFalse(directive["requiresPatch"])
+            self.assertEqual(directive["requiredAction"], "record_code_exploration_before_start")
+            self.assertEqual(len(directive["nextCommands"]), 1)
+            self.assertEqual(directive["nextCommands"][0]["action"], "record_code_exploration")
+            self.assertTrue(result.data["explorationBlocked"])
+            self.assertFalse(result.data["implementationAllowed"])
+            self.assertFalse(result.data["startAllowed"])
+
+    def test_context_blocks_before_exploration_when_runtime_path_is_unignored(self) -> None:
+        from hooks.code_task_context import build_context
+        from tests.test_task_runner import _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
+            (repo / ".git" / "info" / "exclude").unlink()
+            result = build_context(
+                workspace=workspace,
+                feature="alpha",
+                task_id="T001",
+                code_workspaces=[repo],
             )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["requiredAction"], "configure_git_ignore_and_retry_context")
+            self.assertTrue(result.data["explorationBlocked"])
+            self.assertFalse(result.data["startAllowed"])
+            self.assertEqual(
+                result.data["runtimeIgnoreIssues"][0]["path"],
+                ".cmbdevclaw/large_tool_results/",
+            )
+            self.assertIn("--code-workspace", result.data["retryContextArgv"])
 
     def test_backend_context_never_projects_frontend_shared_findings(self) -> None:
         from hooks.code_task_context import build_context
@@ -1234,16 +1367,17 @@ class CodeTaskContextCacheTest(unittest.TestCase):
             self.assertEqual(cache["findings"]["moduleMap"][0]["role"], "backend contract")
             self.assertNotIn("frontend contract", json.dumps(cache, ensure_ascii=False))
             self.assertTrue(frontend_path.is_file())
-            self.assertEqual(
-                result.data["explorationDirective"],
-                {
-                    "phase": "task_guard",
-                    "scopeSource": "taskContract.scope",
-                    "fullExplorationAllowed": False,
-                    "requiresRecord": False,
-                    "requiresPatch": False,
-                },
-            )
+            directive = result.data["explorationDirective"]
+            self.assertEqual(directive["phase"], "task_guard")
+            self.assertEqual(directive["scopeSource"], "taskContract.scope")
+            self.assertFalse(directive["fullExplorationAllowed"])
+            self.assertFalse(directive["requiresRecord"])
+            self.assertFalse(directive["requiresPatch"])
+            self.assertEqual(directive["requiredAction"], "start_task")
+            self.assertEqual(directive["nextCommands"], [])
+            self.assertIn("start", directive["startArgv"])
+            self.assertIn("--code-workspace", directive["startArgv"])
+            self.assertTrue(result.data["startAllowed"])
 
 
 if __name__ == "__main__":

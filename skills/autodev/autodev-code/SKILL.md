@@ -72,9 +72,33 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 
 ###  执行单个任务
 
+**固定命令顺序：`code_task_context` → runtime ignore 检查 → `contract` → 有界探索 → `record/patch` → 再次 `code_task_context` 确认全部仓库为 `fresh` → `start`。禁止为了保存 Git 快照先调用 `start`；首次探索记录本身会绑定当前 Git snapshot，`start` 在探索未就绪时必然阻断且不会创建 run。**
+
 1. 任务状态置「进行中」，保留原内容（启用 `write_todos`，将该任务条目置为进行中）。启动前必须确保每个业务仓库都通过 `.gitignore` 或 `.git/info/exclude` 忽略 `.cmbdevclaw/large_tool_results/`；runner 只校验该契约，不会代写业务仓库。未命中 ignore 时先配置窄规则，再执行 start。
 
-在修改业务代码前必须启动任务运行并保存 Git 快照：
+2. 读唯一 `plan.json` 中的结构化执行契约。**必须先运行任务上下文解析脚本，且这一步发生在上面的 `start` 命令之前：**
+
+```bash
+python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
+```
+
+该脚本输出是当前 task 的上游上下文，必须读取其中的 `batchExplorationScope`、`taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`。`explorationDirective.nextCommands` 是机器生成的下一步命令，必须原样执行，不得自行猜参数；`explorationDirective.requiredAction` 不是建议而是当前闸门动作。探索范围按上方 Batch 级探索闸门服从 `explorationDirective`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。脚本只要返回 `ok=false`，无论是引用、计划、Git 快照还是探索缓存错误，都必须停止编码、不得读取 HTML/调用 parser/修改业务代码；先按 `requiredAction` 修复并重新运行，直到返回 `ok=true`。其中 `explorationBlocked=true` 或 `implementationAllowed=false` 是机器阻断证据，不得被自然语言解释覆盖。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
+
+必须按每个仓库的缓存状态执行，不能只看总体最严 policy 后忽略其他仓库：
+
+若 `explorationPolicy.status=unavailable`，说明没有传入业务仓库，必须停止并补传 `--code-workspace`，不得绕过缓存协议继续编码。
+
+- `missing` / `stale`（`full_bounded_explore`、`requiresRecord=true`）：读取 `staleReasons` / `criticalHits`，完成一次有界探索；先执行 `explorationDirective.contractArgv` 读取完整 schema/example，并确认业务仓内存在的 `.autobizdevops/`、`.cmbdevclaw/` 等运行期目录已被 Git ignore，再对每个仓库原样执行对应 `explorationDirective.nextCommands[].argv`，通过 `--body-stdin` 写入完整 findings。只有无法使用 stdin 时才允许 `--body-file`，且文件必须位于业务 Git 仓库之外，禁止把临时探索 JSON 纳入仓库 snapshot。writer 返回 `issues[]` 时必须一次修复列出的全部 JSON path，不得只修第一项后继续猜。重新运行 `code_task_context.py`，对应仓库必须成为 `fresh` 后才能 start 或改业务代码。`headCommit` 单独变化但 Git 可见文件快照未变，或当前文件快照与可信 TASK/Batch Evidence 的最终快照一致时允许复用；HEAD 变化且缺少可信最终快照时仍按 `stale` 处理。
+- `fresh`（`task_scope_only`）：直接使用缓存 findings，只定点读取当前 Task scope / entrypoint 涉及文件；不得重复探测项目框架、模块布局和测试运行器。
+- `fresh_with_trusted_changes`（`task_scope_only`）：implementation evidence 已解释本次仓库变化，且缓存与当前 Task 属于同一 active batch；只定点读取当前 Task scope / entrypoint，不执行 `record` 或 `patch`。这是批次内的 `deferredCacheUpdate`，变化会在批次边界统一吸收。
+- `reusable_with_changes`（`targeted_reread`、`requiresPatch=true`）：只读取 `changedPaths + 1-hop 依赖 + 当前 Task scope`，再对每个仓库原样执行对应 `explorationDirective.nextCommands[].argv`，优先通过 `--body-stdin` 提交 patch；即使事实未变化，也必须传完整 `reviewedPaths` 和空 `findingUpdates`。`findingUpdates` 对每个字段采用整类替换语义，不得只传该列表的一部分；writer 会在合并后重新校验完整 findings。重新运行 context，成为 `fresh` 后才能 start 或改业务代码。
+- 同一 active batch 内，普通且已被 implementation Evidence 解释的源文件变化不要求每个 Task 都 patch；进入下一批次时在 Batch 级探索闸门统一 patch。即使仍在同一批次，命中 `shared/integration` 路径也必须立即 targeted reread/patch；构建配置、迁移/schema、HEAD 变化且缺少可信最终快照，或无法由 Evidence 解释的路径仍进入 `stale`，重新做有界 `record`。`transientValidationFiles` 不参与探索差异，但同一路径后续成为正式变更时必须重新纳入。
+
+`fresh/reusable_with_changes 时禁止无边界全仓探索`：不得重新运行无范围全仓 `rg`、递归目录 listing 或框架发现。缓存只能通过 `code_exploration_writer.py` 修改，禁止直接编辑 `cache/code-exploration/**/*.json`。共享路径只更新当前 executionLane；另一 lane 在后续 inspect 时独立判定。runner 能返回 machine policy，但宿主未提供工具调用遥测，无法独立证明 Agent 执行过多少次搜索，这是协议层约束。
+
+必须读取当前 task 的 `workspaceRef`、`goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `workspaceRef` / `goal` / `scope` / `validationBoundary` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
+3. 改代码前按 `explorationPolicy` 进行首次有界探索或缓存定点复核；先识别或复用项目分层、命名、错误处理、校验、日志、测试风格，并读取测试插件/provider 版本（例如 Maven Surefire 与 JUnit 4/5 兼容性）、Spring 测试启动入口和现有可运行测试，形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。不得在测试失败后才猜测框架版本；计划为 `integration_test` 时不得为了通过验证降级成只 mock service 的 controller 单元测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
+4. context 返回 `startAllowed=true` 后，在修改业务代码前启动任务运行并保存 Git 快照：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"
@@ -87,41 +111,20 @@ python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-
 每个 TASK 必须且只能绑定一个 `workspaceRef`；只向 runner 传该 TASK 的 workspace，禁止对 TASK start/finish/validate 重复传入其他仓库，前端 TASK 不得传后端仓库、后端 TASK 也不得传前端仓库。若一个需求闭环需要修改多个业务仓库，Plan 必须拆成多个 TASK 并用 deps 串联；跨仓库集成检查只能放在 `projectValidationCommands`。Plan 中具名 workspace 的 validation command 必须用 `repo` 指明 Git 根目录名；changed/supporting 路径使用 `repoId:relative/path`。无论涉及多少仓库，`evidence/` 与 `.task-runs/` 只能写入 feature 产物目录，禁止写入任一业务仓库。
 
 Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后端不会进入同一 Batch，同一 lane 的不同仓库也不会进入同一 Batch。启动批次验证、逐 TASK 验证和 `batch-check` 时只传该 Batch 的唯一 workspace。
-2. 读唯一 `plan.json` 中的结构化执行契约。必须先运行任务上下文解析脚本：
 
-```bash
-python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
-```
-
-该脚本输出是当前 task 的上游上下文，必须读取其中的 `batchExplorationScope`、`taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`；探索范围按上方 Batch 级探索闸门服从 `explorationDirective`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位源码、测试和执行验证命令。脚本只要返回 `ok=false`，无论是引用、计划、Git 快照还是探索缓存错误，都必须停止编码、不得读取 HTML/调用 parser/修改业务代码；先按 `requiredAction` 修复并重新运行，直到返回 `ok=true`。其中 `explorationBlocked=true` 或 `implementationAllowed=false` 是机器阻断证据，不得被自然语言解释覆盖。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
-
-必须按每个仓库的缓存状态执行，不能只看总体最严 policy 后忽略其他仓库：
-
-若 `explorationPolicy.status=unavailable`，说明没有传入业务仓库，必须停止并补传 `--code-workspace`，不得绕过缓存协议继续编码。
-
-- `missing` / `stale`（`full_bounded_explore`、`requiresRecord=true`）：读取 `staleReasons` / `criticalHits`，完成一次有界探索；先读取 `code_exploration_writer.py contract`，并确认业务仓内存在的 `.autobizdevops/`、`.cmbdevclaw/` 等运行期目录已被 Git ignore，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `record --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 写入完整 findings。重新运行 `code_task_context.py`，对应仓库必须成为 `fresh` 后才能改业务代码。`headCommit` 单独变化但 Git 可见文件快照未变，或当前文件快照与可信 TASK/Batch Evidence 的最终快照一致时允许复用；HEAD 变化且缺少可信最终快照时仍按 `stale` 处理。
-- `fresh`（`task_scope_only`）：直接使用缓存 findings，只定点读取当前 Task scope / entrypoint 涉及文件；不得重复探测项目框架、模块布局和测试运行器。
-- `fresh_with_trusted_changes`（`task_scope_only`）：implementation evidence 已解释本次仓库变化，且缓存与当前 Task 属于同一 active batch；只定点读取当前 Task scope / entrypoint，不执行 `record` 或 `patch`。这是批次内的 `deferredCacheUpdate`，变化会在批次边界统一吸收。
-- `reusable_with_changes`（`targeted_reread`、`requiresPatch=true`）：只读取 `changedPaths + 1-hop 依赖 + 当前 Task scope`，再对每个 `explorationCaches[]` 仓库分别调用一次仅含该仓库 `--code-workspace` 的 `patch --expected-cache-sha256 <cacheSha256> --body-file <JSON>` 确认；即使事实未变化，也必须传完整 `reviewedPaths` 和空 `findingUpdates`。`findingUpdates` 对每个字段采用整类替换语义，不得只传该列表的一部分；writer 会在合并后重新校验完整 findings。重新运行 context，成为 `fresh` 后才能改业务代码。
-- 同一 active batch 内，普通且已被 implementation Evidence 解释的源文件变化不要求每个 Task 都 patch；进入下一批次时在 Batch 级探索闸门统一 patch。即使仍在同一批次，命中 `shared/integration` 路径也必须立即 targeted reread/patch；构建配置、迁移/schema、HEAD 变化且缺少可信最终快照，或无法由 Evidence 解释的路径仍进入 `stale`，重新做有界 `record`。`transientValidationFiles` 不参与探索差异，但同一路径后续成为正式变更时必须重新纳入。
-
-`fresh/reusable_with_changes 时禁止无边界全仓探索`：不得重新运行无范围全仓 `rg`、递归目录 listing 或框架发现。缓存只能通过 `code_exploration_writer.py` 修改，禁止直接编辑 `cache/code-exploration/**/*.json`。共享路径只更新当前 executionLane；另一 lane 在后续 inspect 时独立判定。runner 能返回 machine policy，但宿主未提供工具调用遥测，无法独立证明 Agent 执行过多少次搜索，这是协议层约束。
-
-必须读取当前 task 的 `workspaceRef`、`goal`、`scope`、`validationBoundary`、`implementationPoints`、`acceptanceCriteria`、`nonGoals`、`splitRationale`（若存在）、`specRefs`、`designRefs`、`validationCommands`；不得只根据 `title` / `specRefs` 脑补实现范围。缺少 `workspaceRef` / `goal` / `scope` / `validationBoundary` / `implementationPoints` / `acceptanceCriteria` / `nonGoals` 时停止编码，回到 `/autodev-plan` 补齐，不得边做边猜。先依各输入的读取方式确认行为契约与约束，再在其之上按现有代码模式做最小实现决策（读取方式优先于此默认）。`splitRationale` 只用于理解合并背景，不得作为扩大 scope 的理由。
-3. 改代码前按 `explorationPolicy` 进行首次有界探索或缓存定点复核；先识别或复用项目分层、命名、错误处理、校验、日志、测试风格，并读取测试插件/provider 版本（例如 Maven Surefire 与 JUnit 4/5 兼容性）、Spring 测试启动入口和现有可运行测试，形成简短修改映射（依据、拟改文件、复用模式、验证命令）再动手。不得在测试失败后才猜测框架版本；计划为 `integration_test` 时不得为了通过验证降级成只 mock service 的 controller 单元测试。真实入口/集成点仍无法定位则停止记录阻断，不要凭空造路径或猜测性抽象。
-4. 实现并自检：
+5. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的业务范围；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/test/resources/迁移/配置会由 runner 自动归集。不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
    - 任务需要写 / 改测试时，遵循 `${pluginPath}/skills/references/test-quality.md`：站在 seam 上验证、期望值来自独立事实源（勿同义反复）、mock 只在系统边界。
    - 先读取 `start` 返回的 `validationTestTargets` 及 Task 的 `validationTestPlan`。标为 `reuse_existing` 的目标必须复用已有测试类，不得创建同名或重复测试；只有 `executionMode=code` 且目标标为 `create_in_code` 时才新增最小测试类。内部 code Task 缺少该测试时，runner 返回 `code_task_validation_test_creation_required / continue_current_implementation_and_create_validation_tests`，主 agent 必须留在当前实现 run 创建测试后再收口，不得把它延期或改写成 no-code。`verified_existing` 遇到 `create_in_code` 必须返回 Plan 改为可复用验证；`external_dependency` 不得创建源码、测试或本地验证命令。Runner 在执行 Maven 验证前要求 code 模式的目标测试源文件已存在，并要求新鲜的 Surefire/Failsafe 报告证明至少一个对应测试实际执行。
    - Code 阶段新建、位于请求 workspace 下的 `src/test`、`test`、`tests` 测试根的测试文件一律归入 `transientValidationFiles`，不进入正式 `changedFiles`，即使被暂存也不改变该分类；文件保留到批次 TASK 验证结束。start 前已有的测试文件若被修改，仍是正式代码变更。不得用 `skipTests`、`maven.test.skip` 或允许零匹配测试通过的参数规避验证。
    - TASK 实现期间不得手工执行 `validationCommands`，也不得执行 compile/build/typecheck/lint 或当前 `batchValidation.commands`。所有 TASK 命令统一在批次实现结束后由独立验证子代理通过 runner 执行。
-5. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
-6. **实现差异协议**：实现中遇到以下任一情况，停下用 `request_user_input` 单次确认，展示「design/spec 说 X，代码/实现是 Y」，拿到裁定前不得继续，也不得先调用 `finish-implementation` 收口：
+6. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
+7. **实现差异协议**：实现中遇到以下任一情况，停下用 `request_user_input` 单次确认，展示「design/spec 说 X，代码/实现是 Y」，拿到裁定前不得继续，也不得先调用 `finish-implementation` 收口：
    - **`EVD` / design 依据与代码现实不符** → 裁定后回写 `artifactFeatureDir` 下 `design.md` 的对应行（注明「code 阶段修订」）再继续；不得改写业务代码仓库 cwd 下的同名文件。
    - **必须偏离 `API` / `DATA` / `D` 已定形态**（定的做不了或明显更差）→ 同上，偏离经裁定回写 `design.md` 后才可按新形态实现；「实现细节自由度」不覆盖已定的接口/数据/技术决策形态。
    - **实现将违反 `REQ` / `SCN` 行为契约** → 停止编码，不得实现一个违反行为契约的版本；按下方阻断口径记录原因与建议回流阶段（specs/plan），回流 `/autodev-plan` 修订契约后重新进入。TASK 状态由 runner 负责流转，不得手工置「失败」。
-7. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不运行 `validationCommands`，不写 `completionEvidenceIds`，也不把 TASK 置为 done。deferred 计划调用旧 `complete` 会被明确拒绝：
+8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不运行 `validationCommands`，不写 `completionEvidenceIds`，也不把 TASK 置为 done。deferred 计划调用旧 `complete` 会被明确拒绝：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"

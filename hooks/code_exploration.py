@@ -173,10 +173,32 @@ def _safe_relative_path(value: Any) -> bool:
     )
 
 
-def validate_findings(findings: Any) -> list[str]:
+def _finding_validation_entries(findings: Any) -> list[tuple[str, dict[str, str]]]:
     if not isinstance(findings, dict):
-        return ["findings_missing"]
-    errors: list[str] = []
+        return [
+            (
+                "findings_missing",
+                {
+                    "path": "findings",
+                    "code": "required_object",
+                    "expected": "object",
+                },
+            )
+        ]
+    entries: list[tuple[str, dict[str, str]]] = []
+
+    def add(legacy_code: str, path: str, code: str, expected: str) -> None:
+        entries.append(
+            (
+                legacy_code,
+                {
+                    "path": path,
+                    "code": code,
+                    "expected": expected,
+                },
+            )
+        )
+
     required_strings = {
         "moduleMap": ("path", "role"),
         "conventions": ("category", "fact"),
@@ -187,41 +209,92 @@ def validate_findings(findings: Any) -> list[str]:
     for field in FINDING_FIELDS:
         values = findings.get(field)
         if not isinstance(values, list):
-            errors.append(f"findings_{field}_invalid")
+            add(f"findings_{field}_invalid", f"findings.{field}", "required_array", "array")
             continue
         for index, item in enumerate(values):
-            context = f"findings_{field}[{index}]"
+            legacy_context = f"findings_{field}[{index}]"
+            context = f"findings.{field}[{index}]"
             if not isinstance(item, dict):
-                errors.append(f"{context}_must_be_object")
+                add(f"{legacy_context}_must_be_object", context, "object_required", "object")
                 continue
             for name in required_strings[field]:
                 if not isinstance(item.get(name), str) or not item[name].strip():
-                    errors.append(f"{context}_{name}_missing")
+                    add(
+                        f"{legacy_context}_{name}_missing",
+                        f"{context}.{name}",
+                        "required_non_empty_string",
+                        "non_empty_string",
+                    )
             for name in ("path", "cwd"):
                 if name in item and not _safe_relative_path(item.get(name)):
-                    errors.append(f"{context}_{name}_unsafe")
+                    add(
+                        f"{legacy_context}_{name}_unsafe",
+                        f"{context}.{name}",
+                        "unsafe_relative_path",
+                        "safe_repository_relative_path",
+                    )
             for name in ("dependsOn", "evidencePaths", "sharedWithLanes"):
                 if name in item and (
                     not isinstance(item[name], list)
                     or not all(isinstance(value, str) and value.strip() for value in item[name])
                 ):
-                    errors.append(f"{context}_{name}_invalid")
+                    add(
+                        f"{legacy_context}_{name}_invalid",
+                        f"{context}.{name}",
+                        "invalid_string_array",
+                        "string_array",
+                    )
             for name in ("evidencePaths", "dependsOn"):
                 if isinstance(item.get(name), list) and any(not _safe_relative_path(value) for value in item[name]):
-                    errors.append(f"{context}_{name}_unsafe")
+                    add(
+                        f"{legacy_context}_{name}_unsafe",
+                        f"{context}.{name}",
+                        "unsafe_relative_path_array",
+                        "safe_repository_relative_path_array",
+                    )
             if isinstance(item.get("sharedWithLanes"), list) and any(
                 value not in EXECUTION_LANES for value in item["sharedWithLanes"]
             ):
-                errors.append(f"{context}_sharedWithLanes_invalid")
+                add(
+                    f"{legacy_context}_sharedWithLanes_invalid",
+                    f"{context}.sharedWithLanes",
+                    "invalid_execution_lane_array",
+                    "array_of_backend_or_frontend",
+                )
             if "ownerLane" in item and item.get("ownerLane") not in EXECUTION_LANES:
-                errors.append(f"{context}_ownerLane_invalid")
+                add(
+                    f"{legacy_context}_ownerLane_invalid",
+                    f"{context}.ownerLane",
+                    "invalid_execution_lane",
+                    "backend_or_frontend",
+                )
             if field in {"testEntrypoints", "validationPatterns"}:
                 argv = item.get("argv")
                 if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv):
-                    errors.append(f"{context}_argv_invalid")
+                    add(
+                        f"{legacy_context}_argv_invalid",
+                        f"{context}.argv",
+                        "required_non_empty_argv",
+                        "non_empty_string_array",
+                    )
                 if "command" in item:
-                    errors.append(f"{context}_command_string_forbidden")
-    return errors
+                    add(
+                        f"{legacy_context}_command_string_forbidden",
+                        f"{context}.command",
+                        "command_string_forbidden",
+                        "argv_only",
+                    )
+    return entries
+
+
+def finding_validation_issues(findings: Any) -> list[dict[str, str]]:
+    """Return every detectable findings violation with a precise JSON path."""
+    return [issue for _legacy_code, issue in _finding_validation_entries(findings)]
+
+
+def validate_findings(findings: Any) -> list[str]:
+    """Retain legacy cache error codes while sharing structured validation rules."""
+    return [legacy_code for legacy_code, _issue in _finding_validation_entries(findings)]
 
 
 def validate_cache(
