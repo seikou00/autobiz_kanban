@@ -33,12 +33,14 @@ from hooks.evidence_kernel import FileLock, unlink_if_exists  # noqa: E402
 from hooks.code_exploration import CodeExplorationError, inspect_exploration_cache  # noqa: E402
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
+    BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
     DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS,
     EXECUTION_LANES,
     PlanBundle,
     batch_validation_terminal,
     code_validation_fail_strategy,
     code_validation_max_repair_attempts,
+    defer_to_test_stages_enabled,
     deferred_task_validation_enabled,
     bundle_unfinished_tasks,
     find_task,
@@ -54,7 +56,9 @@ from hooks.plan_json import (  # noqa: E402
 from hooks.plan_writer import (  # noqa: E402
     PlanWriterInputError,
     activate_batch as activate_plan_batch,
+    begin_batch_compile_repair,
     invalidate_deferred_task_validation_for_repair,
+    mark_batch_tasks_done_after_compile,
     record_batch_validation_attempt,
     record_batch_validation_deferral,
     record_deferred_task_validation_attempt,
@@ -69,6 +73,7 @@ from hooks.plan_writer import (  # noqa: E402
     set_task_execution_status,
     start_batch_validation_run,
     start_deferred_task_validation,
+    update_batch_compile_status,
 )
 from hooks.repository_snapshot import (  # noqa: E402
     RepositoryMap,
@@ -87,6 +92,7 @@ from hooks.task_run_integrity import (  # noqa: E402
 )
 from hooks.validation_policy import (  # noqa: E402
     command_policy_errors,
+    maven_project_selector_workspace_errors,
     maven_test_plan,
     maven_test_selectors,
     package_script_name,
@@ -104,6 +110,9 @@ DEFAULT_TIMEOUT_SECONDS = 300
 VALIDATION_OUTPUT_POLL_SECONDS = 0.2
 VALIDATION_PROGRESS_INTERVAL_SECONDS = 30.0
 COMPILE_DIAGNOSTIC_DRAIN_SECONDS = 2.0
+FAILURE_DIAGNOSTIC_DRAIN_SECONDS = 10.0  # 动态诊断收集窗口上限
+LOG_STABLE_THRESHOLD_SECONDS = 2.0  # 日志停止增长判定阈值
+TEST_REPORT_SCAN_INTERVAL_SECONDS = 1.0  # 测试报告扫描间隔
 PROCESS_TERMINATION_GRACE_SECONDS = 3.0
 VALIDATION_DIAGNOSTIC_BUFFER_BYTES = 64 * 1024
 WINDOWS_BATCH_EXECUTABLE_SUFFIXES = frozenset({".bat", ".cmd"})
@@ -128,7 +137,7 @@ class TaskRunnerError(ValueError):
         self.details = details
 
 
-@dataclass(frozen=True)
+@dataclass
 class ValidationProcessResult:
     exit_code: int | None
     output: str
@@ -136,6 +145,10 @@ class ValidationProcessResult:
     compile_category: str | None
     duration_seconds: float
     process_tree_terminated: bool
+    test_report_failure: dict[str, Any] | None = None  # 新增：测试报告失败详情
+    early_failure_category: str | None = None  # 提前检测到的失败类别
+    early_failure_source: str | None = None  # 检测源（surefire_report/failsafe_report等）
+    early_failure_detected_at: float = 0.0  # 检测到失败的时间点（秒）
 
 
 @dataclass(frozen=True)
@@ -259,7 +272,7 @@ def _unfinished_dependencies(plan: PlanBundle, task: dict[str, Any]) -> list[str
     }
     task_id = str(task.get("id", ""))
     task_batch = plan.task_batches.get(task_id)
-    deferred = deferred_task_validation_enabled(plan.root)
+    deferred = deferred_task_validation_enabled(plan.root) or defer_to_test_stages_enabled(plan.root)
     unfinished: list[str] = []
     for dep in task.get("deps", []):
         if not isinstance(dep, str):
@@ -811,6 +824,31 @@ def _start_task_unlocked(
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(feature_dir, task_id)
+    if defer_to_test_stages_enabled(plan.root):
+        batch = plan.batches.get(batch_id)
+        batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
+        compile_status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
+        is_compile_repair = (
+            isinstance(repair_context, dict)
+            and repair_context.get("batchCompileRepair") is True
+        )
+        if compile_status == "failed" and not is_compile_repair:
+            raise TaskRunnerError(
+                f"batch_compile_repair_requires_explicit_start:{task_id}",
+                requiredAction="start_batch_compile_repair",
+                repairOwnerTaskIds=batch_compile.get("repairOwnerTaskIds", []),
+            )
+        if compile_status == "repairing" and not is_compile_repair:
+            raise TaskRunnerError(
+                f"batch_compile_repair_already_running:{batch_id}",
+                requiredAction="continue_batch_compile_repair",
+                repairTaskId=batch_compile.get("repairTaskId"),
+            )
+        if normalize_status(task.get("status")) == "implemented" and not is_compile_repair:
+            raise TaskRunnerError(
+                f"task_implementation_already_ready:{task_id}",
+                requiredAction="run_batch_compile",
+            )
     if deferred_task_validation_enabled(plan.root):
         batch = plan.batches.get(batch_id)
         task_validation = batch.get("taskValidation") if isinstance(batch, dict) else None
@@ -1240,6 +1278,11 @@ def _maven_test_target_errors(command: dict[str, Any], command_dir: Path) -> lis
 
 
 def _maven_report_snapshot(command_dir: Path) -> dict[str, int]:
+    """
+    记录当前 Maven 测试报告的基线（文件路径 -> mtime_ns）
+    用于后续判断哪些是本次运行新生成的报告
+    使用 st_mtime_ns 纳秒精度以避免短时间内重写时的漏检
+    """
     reports: dict[str, int] = {}
     if not command_dir.is_dir():
         return reports
@@ -1556,6 +1599,12 @@ def _assert_validation_command_environment(
         )
     _, repo = _command_repository(command, repositories)
     command_cwd = (repo / str(command.get("cwd"))).resolve()
+    if command_cwd.is_dir():
+        selector_errors = maven_project_selector_workspace_errors(command, command_cwd)
+        if selector_errors:
+            raise TaskRunnerError(
+                f"validation_command_policy_violation:{command.get('id', '')}:{selector_errors[0]}"
+            )
     script_name = package_script_name(command)
     if script_name is not None:
         package_path = command_cwd / "package.json"
@@ -1788,6 +1837,123 @@ def _terminate_validation_process_tree(
     return process.poll() is not None and not process_group_exists()
 
 
+def _scan_maven_test_reports(
+    command_cwd: Path,
+    baseline_reports: dict[str, float],
+    started_at: float,
+) -> dict[str, Any] | None:
+    """
+    扫描 Surefire/Failsafe 测试报告，查找失败
+
+    只处理相对基准时间新增或修改的 XML
+    解析失败时跳过（下一轮重试），不误判
+    """
+    test_failures: list[dict[str, Any]] = []
+    affected_selectors: set[str] = set()
+    detection_source = "surefire_report"
+
+    for pattern in ["**/surefire-reports/TEST-*.xml", "**/failsafe-reports/TEST-*.xml"]:
+        for report_path in command_cwd.glob(pattern):
+            # 只看本次新增或修改的
+            try:
+                mtime = report_path.stat().st_mtime
+            except OSError:
+                continue
+
+            report_key = str(report_path)
+            if report_key in baseline_reports and mtime <= baseline_reports[report_key]:
+                continue
+
+            try:
+                tree = ET.parse(report_path)
+            except ET.ParseError:
+                # XML 正在写入，下一轮重试
+                continue
+            except OSError:
+                continue
+
+            root = tree.getroot()
+            test_class = root.get("name", "UnknownClass")
+
+            if "failsafe" in str(report_path):
+                detection_source = "failsafe_report"
+
+            # 查找 <failure> 和 <error>
+            for testcase in root.findall(".//testcase"):
+                test_method = testcase.get("name", "")
+
+                failure = testcase.find("failure")
+                error = testcase.find("error")
+                failure_node = failure if failure is not None else error
+
+                if failure_node is not None:
+                    test_failures.append({
+                        "testClass": test_class,
+                        "testMethod": test_method,
+                        "exceptionType": failure_node.get("type", ""),
+                        "message": (failure_node.get("message", "") or "")[:1000],
+                        "stackTrace": (failure_node.text or "").strip()[:2000]
+                    })
+                    affected_selectors.add(f"{test_class}#{test_method}")
+
+    if test_failures:
+        return {
+            "category": "behavior_test_failure",
+            "detectionSource": detection_source,
+            "detectedAtSeconds": time.monotonic() - started_at,
+            "summary": f"测试失败: {test_failures[0]['testClass']}.{test_failures[0]['testMethod']}",
+            "testFailures": test_failures,
+            "affectedSelectors": sorted(affected_selectors),
+            "firstFailure": test_failures[0],
+        }
+
+    return None
+
+
+def _drain_diagnostics_after_test_failure(
+    process: subprocess.Popen[bytes],
+    command_log: Any,
+    rolling_output: bytearray,
+    started_at: float,
+    hard_deadline: float,
+    captured_bytes: int,
+    command: dict[str, Any],
+    repositories: RepositoryMap,
+) -> None:
+    """
+    发现测试失败后继续收集诊断，直到满足任一条件：
+    1. 进程自然退出
+    2. 日志停止增长超过 2 秒
+    3. 超过 FAILURE_DIAGNOSTIC_DRAIN_SECONDS（10 秒）
+    4. 到达硬超时
+    """
+    drain_deadline = min(
+        time.monotonic() + FAILURE_DIAGNOSTIC_DRAIN_SECONDS,
+        hard_deadline
+    )
+    last_size = captured_bytes
+    last_change = time.monotonic()
+
+    while time.monotonic() < drain_deadline:
+        # 检查进程是否自然退出
+        if process.poll() is not None:
+            return
+
+        # 读取新日志
+        chunk = command_log.read(8192)
+        if chunk:
+            last_size += len(chunk)
+            last_change = time.monotonic()
+            rolling_output.extend(chunk)
+            if len(rolling_output) > VALIDATION_DIAGNOSTIC_BUFFER_BYTES:
+                del rolling_output[:-VALIDATION_DIAGNOSTIC_BUFFER_BYTES]
+        elif time.monotonic() - last_change > LOG_STABLE_THRESHOLD_SECONDS:
+            # 日志停止增长超过 2 秒
+            return
+
+        time.sleep(VALIDATION_OUTPUT_POLL_SECONDS)
+
+
 def _validation_command_argv(launch_spec: ValidationLaunchSpec) -> list[str]:
     return [
         launch_spec.resolved_executable,
@@ -1854,6 +2020,11 @@ def _run_validation_process(
     rolling_output = bytearray()
     captured_bytes = 0
     next_progress_at = started_at + VALIDATION_PROGRESS_INTERVAL_SECONDS
+
+    # 新增：测试报告基线和扫描
+    baseline_reports = _maven_report_snapshot(command_cwd)
+    test_report_failure: dict[str, Any] | None = None
+    next_report_scan = started_at + TEST_REPORT_SCAN_INTERVAL_SECONDS
 
     try:
         if launch_spec.launch_mode == "windows_batch":
@@ -1922,6 +2093,9 @@ def _run_validation_process(
                         if detected == "test_compile_failure" or compile_category is None:
                             compile_category = detected
 
+            # 新增：环境错误检测
+            environment_failure_category: str | None = None
+
             while True:
                 read_available_output()
                 now = time.monotonic()
@@ -1930,6 +2104,50 @@ def _run_validation_process(
                     if compile_category is not None:
                         termination_reason = "compile_diagnostic"
                     break
+
+                # 新增：检测环境错误（每次轮询都检查）
+                decoded_output = _decode_validation_output(bytes(rolling_output))
+                env_failure = _runtime_environment_failure_category(decoded_output)
+                if env_failure is not None:
+                    environment_failure_category = env_failure
+                    termination_reason = "environment_failure"
+                    _emit_validation_progress(
+                        "validation_environment_failure",
+                        commandId=str(command.get("id", "")),
+                        elapsedSeconds=round(now - started_at, 3),
+                        category=env_failure,
+                    )
+                    process_tree_terminated = _terminate_validation_process_tree(process)
+                    read_available_output()
+                    break
+
+                # 新增：每 1 秒扫描测试报告
+                if now >= next_report_scan:
+                    report_failure = _scan_maven_test_reports(
+                        command_cwd, baseline_reports, started_at
+                    )
+                    if report_failure is not None:
+                        test_report_failure = report_failure
+                        termination_reason = "test_report_failure"
+                        _emit_validation_progress(
+                            "validation_failure_detected",
+                            commandId=str(command.get("id", "")),
+                            elapsedSeconds=round(now - started_at, 3),
+                            category=report_failure["category"],
+                            source=report_failure["detectionSource"],
+                            testClass=report_failure.get("firstFailure", {}).get("testClass", ""),
+                            testMethod=report_failure.get("firstFailure", {}).get("testMethod", ""),
+                        )
+                        # 进入诊断收集窗口
+                        _drain_diagnostics_after_test_failure(
+                            process, command_log, rolling_output, started_at,
+                            hard_deadline, captured_bytes, command, repositories
+                        )
+                        process_tree_terminated = _terminate_validation_process_tree(process)
+                        read_available_output()
+                        break
+                    next_report_scan = now + TEST_REPORT_SCAN_INTERVAL_SECONDS
+
                 if compile_category is not None and (
                     (compile_deadline is not None and now >= compile_deadline)
                     or now >= hard_deadline
@@ -1991,6 +2209,10 @@ def _run_validation_process(
         compile_category=compile_category,
         duration_seconds=time.monotonic() - started_at,
         process_tree_terminated=process_tree_terminated,
+        test_report_failure=test_report_failure,
+        early_failure_category=test_report_failure["category"] if test_report_failure else None,
+        early_failure_source=test_report_failure["detectionSource"] if test_report_failure else None,
+        early_failure_detected_at=test_report_failure["detectedAtSeconds"] if test_report_failure else 0.0,
     )
 
 
@@ -2043,6 +2265,34 @@ def _run_validation(
             return 1, (
                 f"{output}\nvalidation_process_stopped_after_compile_failure:"
                 f"{process_result.compile_category}:"
+                f"durationSeconds={process_result.duration_seconds:.3f}:"
+                f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
+            )
+        if process_result.termination_reason == "test_report_failure":
+            # 提前失败检测：在超时前从测试报告中检测到失败
+            failure_details = ""
+            if process_result.test_report_failure:
+                test_failures = process_result.test_report_failure.get("testFailures", [])
+                if test_failures:
+                    failure_details = f"\nDetected {len(test_failures)} test failure(s):\n"
+                    for idx, failure in enumerate(test_failures, 1):
+                        failure_details += (
+                            f"\n[{idx}] {failure.get('testClass', '')}.{failure.get('testMethod', '')}\n"
+                            f"    Type: {failure.get('exceptionType', '')}\n"
+                            f"    Message: {failure.get('message', '')}\n"
+                        )
+                        stack_trace = failure.get('stackTrace', '')
+                        if stack_trace:
+                            # 限制堆栈跟踪的长度以避免输出过长
+                            stack_lines = stack_trace.split('\n')
+                            if len(stack_lines) > 20:
+                                stack_trace = '\n'.join(stack_lines[:20]) + '\n    ... (truncated)'
+                            failure_details += f"    Stack trace:\n{stack_trace}\n"
+            return 1, (
+                f"{output}{failure_details}\nvalidation_process_stopped_after_test_report_failure:"
+                f"category={process_result.early_failure_category or 'behavior_test_failure'}:"
+                f"detectionSource={process_result.early_failure_source or 'test_report'}:"
+                f"detectedAtSeconds={process_result.early_failure_detected_at:.3f}:"
                 f"durationSeconds={process_result.duration_seconds:.3f}:"
                 f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
             )
@@ -2345,7 +2595,7 @@ def _finish_implementation_unlocked(
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
     execution_mode = task_execution_mode(task)
-    if not deferred_task_validation_enabled(plan.root):
+    if not deferred_task_validation_enabled(plan.root) and not defer_to_test_stages_enabled(plan.root):
         raise TaskRunnerError(
             f"finish_implementation_requires_deferred_plan:{task_id}",
             requiredAction="use_complete_for_legacy_plan",
@@ -2423,6 +2673,18 @@ def _finish_implementation_unlocked(
     )
     repair_context = state.get("repairContext")
     repair_context = repair_context if isinstance(repair_context, dict) else None
+    if (
+        isinstance(repair_context, dict)
+        and repair_context.get("batchCompileRepair") is True
+        and not file_changes
+    ):
+        raise TaskRunnerError(
+            "batch_compile_repair_requires_code_changes",
+            requiredAction="continue_model_repair",
+            batchId=batch_id,
+            taskId=task_id,
+            repairAttempt=repair_context.get("batchCompileRepairAttempt"),
+        )
     adopted_file_changes = (
         repair_context.get("adoptedFileChanges", [])
         if isinstance(repair_context, dict)
@@ -2614,7 +2876,7 @@ def _complete_task_unlocked(
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
     execution_mode = task_execution_mode(task)
-    if deferred_task_validation_enabled(plan.root):
+    if deferred_task_validation_enabled(plan.root) or defer_to_test_stages_enabled(plan.root):
         raise TaskRunnerError(
             f"complete_disabled_for_deferred_validation:{task_id}",
             requiredAction="use_finish_implementation",
@@ -2818,61 +3080,68 @@ def _complete_task_unlocked(
         isinstance(item, dict) and item.get("result") != "pass" and item.get("required") is True
         for item in completed_commands.values()
     )
-    for command in task.get("validationCommands", []):
-        if not isinstance(command, dict):
-            continue
-        command_id = command.get("id")
-        if isinstance(command_id, str) and command_id in completed_commands:
-            continue
-        command_repository_id, _ = _command_repository(command, repositories)
-        exit_code, output = _run_validation(
-            command,
-            repositories,
-            run_id=run_id,
-            batch_id=batch_id,
-            task_id=task_id,
-        )
-        if not _repository_snapshots_match(final_repositories, _repository_state(repositories)):
-            raise TaskRunnerError(f"validation_modified_workspace:{command_id}")
-        record = _record_for_command(
-            feature=feature,
-            task=task,
-            run_id=run_id,
-            command=command,
-            exit_code=exit_code,
-            completion_mode=completion_mode,
-            file_changes=cumulative_file_changes,
-            transient_validation_files=transient_validation_files,
-            supporting_files=normalized_supporting,
-            no_change_why=no_code_change_why,
-            repository_id=command_repository_id if multiple_repositories or command.get("repo") else None,
-            revalidation=state.get("revalidation") if isinstance(state.get("revalidation"), dict) else None,
-        )
-        try:
-            evidence = append_evidence(feature_dir, record, output_tail=output)
-        except EvidenceStoreError as exc:
-            raise TaskRunnerError(f"evidence_append_failed:{exc}") from exc
-        evidence_id = str(evidence["evidenceId"])
-        evidence_ids.append(evidence_id)
-        if exit_code == 0 and command.get("required") is True:
-            pass_evidence_ids.append(evidence_id)
-        if exit_code != 0 and command.get("required") is True:
-            required_failed = True
-        if isinstance(command_id, str):
-            completed_commands[command_id] = {
-                "evidenceId": evidence_id,
-                "result": "pass" if exit_code == 0 else "fail",
-                "required": command.get("required"),
-            }
-            state.update(
-                {
-                    "status": "validation_running",
-                    "completedCommandEvidence": completed_commands,
-                    "evidenceIds": evidence_ids,
-                    "completionEvidenceIds": pass_evidence_ids,
-                }
+
+    # 新策略：defer_to_test_stages 下不执行 validationCommands
+    if defer_to_test_stages_enabled(plan.root):
+        # 跳过验证命令执行，直接标记为 implemented
+        pass
+    else:
+        # 旧策略：执行 validationCommands
+        for command in task.get("validationCommands", []):
+            if not isinstance(command, dict):
+                continue
+            command_id = command.get("id")
+            if isinstance(command_id, str) and command_id in completed_commands:
+                continue
+            command_repository_id, _ = _command_repository(command, repositories)
+            exit_code, output = _run_validation(
+                command,
+                repositories,
+                run_id=run_id,
+                batch_id=batch_id,
+                task_id=task_id,
             )
-            _save_run(path, state)
+            if not _repository_snapshots_match(final_repositories, _repository_state(repositories)):
+                raise TaskRunnerError(f"validation_modified_workspace:{command_id}")
+            record = _record_for_command(
+                feature=feature,
+                task=task,
+                run_id=run_id,
+                command=command,
+                exit_code=exit_code,
+                completion_mode=completion_mode,
+                file_changes=cumulative_file_changes,
+                transient_validation_files=transient_validation_files,
+                supporting_files=normalized_supporting,
+                no_change_why=no_code_change_why,
+                repository_id=command_repository_id if multiple_repositories or command.get("repo") else None,
+                revalidation=state.get("revalidation") if isinstance(state.get("revalidation"), dict) else None,
+            )
+            try:
+                evidence = append_evidence(feature_dir, record, output_tail=output)
+            except EvidenceStoreError as exc:
+                raise TaskRunnerError(f"evidence_append_failed:{exc}") from exc
+            evidence_id = str(evidence["evidenceId"])
+            evidence_ids.append(evidence_id)
+            if exit_code == 0 and command.get("required") is True:
+                pass_evidence_ids.append(evidence_id)
+            if exit_code != 0 and command.get("required") is True:
+                required_failed = True
+            if isinstance(command_id, str):
+                completed_commands[command_id] = {
+                    "evidenceId": evidence_id,
+                    "result": "pass" if exit_code == 0 else "fail",
+                    "required": command.get("required"),
+                }
+                state.update(
+                    {
+                        "status": "validation_running",
+                        "completedCommandEvidence": completed_commands,
+                        "evidenceIds": evidence_ids,
+                        "completionEvidenceIds": pass_evidence_ids,
+                    }
+                )
+                _save_run(path, state)
 
     success = not required_failed
     state.update(
@@ -3601,8 +3870,15 @@ def _run_deferred_validation_group(
                 for outcome in selector_results
                 if outcome.get("status") == "not_executed"
             ]
-            if missing:
+            # not_executed 的测试不应被视为失败
+            # 它们需要被重新验证或标记为未完成
+            if test_failures:
                 logical_exit_code = 1
+            elif physical_exit_code == 0 or any_reported_test_failed:
+                logical_exit_code = 0
+            # 如果有 missing 但没有实际测试失败，保持物理退出码
+            # 这样 not_executed 的任务会被标记为需要重试，而不是失败
+            if missing:
                 logical_output = (
                     f"{output}\n"
                     + "\n".join(
@@ -3610,7 +3886,9 @@ def _run_deferred_validation_group(
                         for selector in missing
                     )
                 )
-            elif test_failures:
+        elif strategy == "maven_test_aggregate" and not roots:
+            # 没有报告生成的情况
+            if test_failures:
                 logical_exit_code = 1
             elif physical_exit_code == 0 or any_reported_test_failed:
                 logical_exit_code = 0
@@ -6297,6 +6575,122 @@ def start_validation_repair(
         )
 
 
+def start_batch_compile_repair(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    task_id: str,
+    code_workspace: Path | list[Path],
+) -> dict[str, Any]:
+    """Start a model-owned task run that repairs a failed batch compile."""
+
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        bundle, actual_batch_id, task = _load_plan_and_task(feature_dir, task_id)
+        if actual_batch_id != batch_id:
+            raise TaskRunnerError(
+                f"batch_compile_repair_task_batch_mismatch:{task_id}",
+                expectedBatchId=batch_id,
+                actualBatchId=actual_batch_id,
+            )
+        if not defer_to_test_stages_enabled(bundle.root):
+            raise TaskRunnerError(f"defer_to_test_stages_not_enabled:{batch_id}")
+        batch = bundle.batches.get(batch_id)
+        batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
+        if not isinstance(batch_compile, dict) or batch_compile.get("status") != "failed":
+            raise TaskRunnerError(f"batch_compile_repair_requires_failed:{batch_id}")
+        owner_ids = batch_compile.get("repairOwnerTaskIds")
+        owner_ids = (
+            [str(item) for item in owner_ids if isinstance(item, str)]
+            if isinstance(owner_ids, list)
+            else []
+        )
+        if task_id not in owner_ids:
+            raise TaskRunnerError(
+                f"batch_compile_repair_owner_mismatch:{task_id}",
+                repairOwnerTaskIds=owner_ids,
+            )
+        attempts = int(batch_compile.get("repairAttempts", 0))
+        if attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS:
+            raise TaskRunnerError(
+                f"batch_compile_repair_attempts_exhausted:{batch_id}",
+                requiredAction="escalate_batch_compile_repair_exhausted",
+                nextActor="main_agent",
+                repairAttempts=attempts,
+                maxRepairAttempts=BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+            )
+        if normalize_status(task.get("status")) != "implemented":
+            raise TaskRunnerError(f"batch_compile_repair_task_not_implemented:{task_id}")
+
+        requested_workspaces = (
+            [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+        )
+        if len(requested_workspaces) != 1:
+            raise TaskRunnerError(
+                "batch_compile_repair_requires_single_workspace",
+                requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
+            )
+        expected_workspaces = batch_compile.get("requestedCodeWorkspaces")
+        actual_workspaces = [str(path.resolve()) for path in requested_workspaces]
+        if expected_workspaces != actual_workspaces:
+            raise TaskRunnerError(
+                "batch_compile_repair_workspace_mismatch",
+                expectedRequestedCodeWorkspaces=expected_workspaces,
+                requestedCodeWorkspaces=actual_workspaces,
+            )
+        repositories = _resolve_repositories(requested_workspaces)
+        current_snapshot = _repository_state_sha256(_repository_state(repositories))
+        expected_snapshot = batch_compile.get("workspaceSnapshotSha256")
+        if current_snapshot != expected_snapshot:
+            raise TaskRunnerError(
+                "workspace_changed_before_batch_compile_repair",
+                requiredAction="restore_failed_compile_snapshot",
+                expectedWorkspaceSnapshotSha256=expected_snapshot,
+                currentWorkspaceSnapshotSha256=current_snapshot,
+            )
+
+        repair_attempt = attempts + 1
+        repair_context = {
+            "batchCompileRepair": True,
+            "batchCompileRepairAttempt": repair_attempt,
+            "parentBatchCompileCommandId": batch_compile.get("commandId"),
+            "parentBatchCompileWorkspaceSnapshotSha256": expected_snapshot,
+            "failureCategory": batch_compile.get("failureCategory"),
+            "diagnosticPaths": list(batch_compile.get("diagnosticPaths", [])),
+        }
+        state = _start_task_unlocked(
+            workspace,
+            feature,
+            task_id,
+            code_workspace,
+            repair_context=repair_context,
+        )
+        result = begin_batch_compile_repair(workspace, feature, batch_id, task_id)
+        if not result.ok:
+            set_task_execution_status(
+                workspace,
+                feature,
+                task_id,
+                "implemented",
+                expected_task_contract_sha256=task_contract_sha256(task),
+            )
+            state["status"] = "aborted"
+            state["abortReason"] = "batch_compile_repair_plan_binding_failed"
+            _save_run(_run_path(feature_dir, task_id, str(state.get("runId"))), state)
+            raise TaskRunnerError(
+                "batch_compile_repair_plan_binding_failed",
+                planWriterErrors=result.errors or [],
+            )
+        state["batchCompileRepair"] = {
+            "batchId": batch_id,
+            "taskId": task_id,
+            "attempt": repair_attempt,
+            "maxAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+            "requiredAction": "model_fix_then_finish_implementation",
+        }
+        return state
+
+
 def abort_task(
     workspace: Path,
     feature: str,
@@ -6342,6 +6736,211 @@ def run_project_checks(
         return _run_project_checks_unlocked(workspace, feature, code_workspace)
 
 
+def _run_batch_compile(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    code_workspace: Path | list[Path],
+) -> dict[str, Any]:
+    """
+    在批次完成后执行编译验证（仅编译，不运行测试）。
+
+    返回: {
+        "compileStatus": "passed" | "failed",
+        "commandId": str,
+        "output": str (失败时),
+        "failureCategory": str (失败时)
+    }
+    """
+    feature_dir = _feature_dir(workspace, feature)
+    plan_bundle = load_plan_bundle(feature_dir)
+    if not defer_to_test_stages_enabled(plan_bundle.root):
+        raise TaskRunnerError(f"defer_to_test_stages_not_enabled:{batch_id}")
+    batch = plan_bundle.batches.get(batch_id)
+    if not isinstance(batch, dict):
+        raise TaskRunnerError(f"batch_not_found:{batch_id}")
+
+    batch_compile = batch.get("batchCompile")
+    if not isinstance(batch_compile, dict):
+        raise TaskRunnerError(f"batch_compile_not_initialized:{batch_id}")
+    compile_status = batch_compile.get("status")
+    if compile_status == "passed":
+        return {
+            "compileStatus": "passed",
+            "commandId": batch_compile.get("commandId", ""),
+        }
+    if compile_status == "failed":
+        attempts = int(batch_compile.get("repairAttempts", 0))
+        exhausted = attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
+        raise TaskRunnerError(
+            f"batch_compile_repair_required:{batch_id}",
+            requiredAction=(
+                "escalate_batch_compile_repair_exhausted"
+                if exhausted
+                else "start_batch_compile_repair"
+            ),
+            nextActor="main_agent" if exhausted else "model",
+            repairAttempts=attempts,
+            maxRepairAttempts=BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+            repairOwnerTaskIds=batch_compile.get("repairOwnerTaskIds", []),
+            diagnosticPaths=batch_compile.get("diagnosticPaths", []),
+        )
+    if compile_status == "repairing":
+        raise TaskRunnerError(
+            f"batch_compile_repair_in_progress:{batch_id}",
+            requiredAction="finish_implementation",
+            nextActor="model",
+            repairTaskId=batch_compile.get("repairTaskId"),
+            repairAttempts=batch_compile.get("repairAttempts", 0),
+        )
+    if compile_status != "pending":
+        raise TaskRunnerError(f"batch_compile_status_invalid:{batch_id}:{compile_status}")
+
+    # P0: 前置条件 - 检查所有任务是否已经实现
+    batch_tasks = batch.get("tasks", [])
+    all_tasks_implemented = all(
+        normalize_status(task.get("status")) in {"implemented", "done"}
+        for task in batch_tasks
+        if isinstance(task, dict)
+    )
+    if not all_tasks_implemented:
+        incomplete_tasks = [
+            str(task.get("id"))
+            for task in batch_tasks
+            if isinstance(task, dict) and normalize_status(task.get("status")) not in {"implemented", "done"}
+        ]
+        raise TaskRunnerError(
+            f"batch_compile_precondition_failed:{batch_id}",
+            incompleteTasks=incomplete_tasks,
+        )
+    invalid_implementation_bindings = [
+        str(task.get("id"))
+        for task in batch_tasks
+        if isinstance(task, dict)
+        and (
+            not isinstance(task.get("latestImplementationEvidenceId"), str)
+            or task.get("latestImplementationEvidenceId")
+            not in (
+                task.get("implementationEvidenceIds")
+                if isinstance(task.get("implementationEvidenceIds"), list)
+                else []
+            )
+            or not isinstance(task.get("implementationRevision"), int)
+            or isinstance(task.get("implementationRevision"), bool)
+            or int(task.get("implementationRevision", 0)) < 1
+        )
+    ]
+    if invalid_implementation_bindings:
+        raise TaskRunnerError(
+            f"batch_compile_implementation_evidence_missing:{batch_id}",
+            taskIds=invalid_implementation_bindings,
+        )
+
+    requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    if len(requested_workspaces) != 1:
+        raise TaskRunnerError(
+            "batch_compile_requires_single_workspace",
+            batchId=batch_id,
+            requestedCodeWorkspaces=[str(p.resolve()) for p in requested_workspaces],
+        )
+
+    repositories = _resolve_repositories(requested_workspaces)
+    if not repositories:
+        raise TaskRunnerError("no_repositories_resolved")
+    # 查找编译命令
+    batch_validation = batch.get("batchValidation")
+    if not isinstance(batch_validation, dict):
+        raise TaskRunnerError(f"batch_validation_config_missing:{batch_id}")
+
+    commands = batch_validation.get("commands", [])
+    compile_command = next(
+        (
+            cmd
+            for cmd in commands
+            if isinstance(cmd, dict)
+            and cmd.get("kind") == "compile"
+            and cmd.get("required") is True
+        ),
+        None,
+    )
+
+    if not compile_command:
+        raise TaskRunnerError(
+            f"batch_compile_command_not_found:{batch_id}",
+            availableCommands=[cmd.get("kind") for cmd in commands if isinstance(cmd, dict)],
+        )
+
+    command_id = str(compile_command.get("id", ""))
+    try:
+        exit_code, output = _run_validation(
+            compile_command,
+            repositories,
+            batch_id=batch_id,
+            task_id="__batch_compile__",
+        )
+        requested_paths = [str(path.resolve()) for path in requested_workspaces]
+        workspace_snapshot_sha256 = _repository_state_sha256(
+            _repository_state(repositories)
+        )
+        implementation_evidence_by_task = {
+            str(task.get("id")): str(task.get("latestImplementationEvidenceId"))
+            for task in batch_tasks
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        }
+        implementation_revision_by_task = {
+            str(task.get("id")): int(task.get("implementationRevision", 0))
+            for task in batch_tasks
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        }
+        if exit_code == 0:
+            return {
+                "compileStatus": "passed",
+                "commandId": command_id,
+                "requestedCodeWorkspaces": requested_paths,
+                "workspaceSnapshotSha256": workspace_snapshot_sha256,
+                "implementationEvidenceByTask": implementation_evidence_by_task,
+                "implementationRevisionByTask": implementation_revision_by_task,
+            }
+        diagnostic_paths = _validation_diagnostic_paths(output, compile_command, repositories)
+        fallback_task_id = next(
+            (
+                str(task.get("id"))
+                for task in reversed(batch_tasks)
+                if isinstance(task, dict) and isinstance(task.get("id"), str)
+            ),
+            "",
+        )
+        repair_owner_ids = _validation_repair_owner_task_ids(
+            feature_dir,
+            batch,
+            fallback_task_id,
+            diagnostic_paths,
+        )
+        return {
+            "compileStatus": "failed",
+            "commandId": command_id,
+            "output": output,
+            "failureCategory": (
+                _definitive_compile_failure_category(output, compile_command, repositories)
+                or "compile_error"
+            ),
+            "diagnosticPaths": diagnostic_paths,
+            "repairOwnerTaskIds": repair_owner_ids,
+            "requestedCodeWorkspaces": requested_paths,
+            "workspaceSnapshotSha256": workspace_snapshot_sha256,
+            "implementationEvidenceByTask": implementation_evidence_by_task,
+            "implementationRevisionByTask": implementation_revision_by_task,
+        }
+    except TaskRunnerError:
+        raise
+    except Exception as exc:
+        raise TaskRunnerError(
+            f"batch_compile_execution_failed:{exc}",
+            batchId=batch_id,
+            commandId=command_id,
+        ) from exc
+
+
 def _activate_batch_unlocked(workspace: Path, feature: str, batch_id: str) -> dict[str, Any]:
     result = activate_plan_batch(workspace, feature, batch_id)
     if not result.ok:
@@ -6357,6 +6956,105 @@ def activate_batch(workspace: Path, feature: str, batch_id: str) -> dict[str, An
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
         return _activate_batch_unlocked(workspace, feature, batch_id)
+
+
+def run_batch_compile(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    code_workspace: Path | list[Path],
+) -> dict[str, Any]:
+    """
+    公共 API：在批次完成后执行编译验证。
+
+    返回: {
+        "compileStatus": "passed" | "failed",
+        "commandId": str,
+        "output": str (失败时),
+        "failureCategory": str (失败时)
+    }
+    """
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        compile_result = _run_batch_compile(workspace, feature, batch_id, code_workspace)
+        # 将编译结果持久化到 Plan
+        return _integrate_batch_compile_result(workspace, feature, batch_id, compile_result)
+
+
+def _integrate_batch_compile_result(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    compile_result: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    集成批次编译结果到 PLAN.json。
+
+    返回更新后的状态和下一步动作。
+    """
+    try:
+        result = update_batch_compile_status(workspace, feature, batch_id, compile_result)
+    except PlanWriterInputError as exc:
+        raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
+
+    if not result.ok:
+        raise TaskRunnerError(
+            result.error_code,
+            detail=result.detail,
+            path=str(result.path) if result.path else None,
+        )
+
+    compile_status = compile_result.get("compileStatus")
+    if compile_status == "passed":
+        # 编译通过后，将批次中的所有 implemented 任务标记为 done
+        try:
+            mark_result = mark_batch_tasks_done_after_compile(workspace, feature, batch_id)
+            if not mark_result.ok:
+                raise TaskRunnerError(
+                    mark_result.error_code,
+                    detail=mark_result.detail,
+                )
+        except PlanWriterInputError as exc:
+            raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
+
+        continuation = _code_session_unlocked(workspace, feature)
+        return {
+            "compileStatus": "passed",
+            "requiredAction": continuation.get("action", "batch_compile_passed"),
+            "batchId": batch_id,
+            "continuation": continuation,
+        }
+    else:
+        refreshed = load_plan_bundle(_feature_dir(workspace, feature))
+        refreshed_batch = refreshed.batches.get(batch_id)
+        batch_compile = (
+            refreshed_batch.get("batchCompile") if isinstance(refreshed_batch, dict) else None
+        )
+        batch_compile = batch_compile if isinstance(batch_compile, dict) else {}
+        attempts = int(batch_compile.get("repairAttempts", 0))
+        exhausted = attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
+        return {
+            "compileStatus": "failed",
+            "requiredAction": (
+                "escalate_batch_compile_repair_exhausted"
+                if exhausted
+                else "start_batch_compile_repair"
+            ),
+            "nextActor": "main_agent" if exhausted else "model",
+            "modelRepairRequired": not exhausted,
+            "batchId": batch_id,
+            "commandId": compile_result.get("commandId"),
+            "output": compile_result.get("output", ""),
+            "failureCategory": compile_result.get("failureCategory", ""),
+            "diagnosticPaths": compile_result.get("diagnosticPaths", []),
+            "repairOwnerTaskIds": compile_result.get("repairOwnerTaskIds", []),
+            "repairAttempts": attempts,
+            "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+            "remainingRepairAttempts": max(
+                BATCH_COMPILE_MAX_REPAIR_ATTEMPTS - attempts,
+                0,
+            ),
+        }
 
 
 def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
@@ -6489,6 +7187,139 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
             isinstance(task, dict) and normalize_status(task.get("status")) == "done"
             for task in batch_tasks
         )
+
+        # 新增：如果启用了 defer_to_test_stages，则检查批次编译状态
+        # 注意：即使任务还是 implemented 状态，只要编译通过就可以触发编译
+        if defer_to_test_stages_enabled(bundle.root):
+            batch_compile = batch_plan.get("batchCompile") if isinstance(batch_plan, dict) else None
+            batch_compile_status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
+
+            # 所有任务 implemented 或 done，且编译状态是 pending
+            all_tasks_ready = bool(batch_tasks) and all(
+                isinstance(task, dict) and normalize_status(task.get("status")) in {"implemented", "done"}
+                for task in batch_tasks
+            )
+
+            if all_tasks_ready and batch_compile_status == "pending":
+                return {
+                    "action": "run_batch_compile",
+                    "activeBatchId": active_batch_id,
+                    "executionLane": execution_lane,
+                    "activatedFromHandoff": activated_from_handoff,
+                    "userMessage": f"批次 {active_batch_id} 的所有任务已实现，开始执行批次编译验证。",
+                }
+            elif batch_compile_status == "failed":
+                attempts = int(batch_compile.get("repairAttempts", 0))
+                exhausted = attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
+                return {
+                    "action": (
+                        "batch_compile_repair_exhausted"
+                        if exhausted
+                        else "start_batch_compile_repair"
+                    ),
+                    "requiredAction": (
+                        "escalate_batch_compile_repair_exhausted"
+                        if exhausted
+                        else "start_batch_compile_repair"
+                    ),
+                    "nextActor": "main_agent" if exhausted else "model",
+                    "modelRepairRequired": not exhausted,
+                    "activeBatchId": active_batch_id,
+                    "executionLane": execution_lane,
+                    "compileOutput": batch_compile.get("output", ""),
+                    "failureCategory": batch_compile.get("failureCategory", ""),
+                    "commandId": batch_compile.get("commandId", ""),
+                    "diagnosticPaths": batch_compile.get("diagnosticPaths", []),
+                    "repairOwnerTaskIds": batch_compile.get("repairOwnerTaskIds", []),
+                    "repairAttempts": attempts,
+                    "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+                    "remainingRepairAttempts": max(
+                        BATCH_COMPILE_MAX_REPAIR_ATTEMPTS - attempts,
+                        0,
+                    ),
+                    "allowedRunnerCommands": (
+                        [] if exhausted else ["start-batch-compile-repair"]
+                    ),
+                    "activatedFromHandoff": activated_from_handoff,
+                    "userMessage": (
+                        f"批次 {active_batch_id} 的编译修复已达到 3 次上限，流程已阻断。"
+                        if exhausted
+                        else (
+                            f"批次 {active_batch_id} 编译失败；必须由模型启动受控修复任务，"
+                            "修复完成并记录新的 implementation evidence 后才能重新编译。"
+                        )
+                    ),
+                }
+            elif batch_compile_status == "repairing":
+                return {
+                    "action": "continue_batch_compile_repair",
+                    "requiredAction": "model_fix_then_finish_implementation",
+                    "nextActor": "model",
+                    "activeBatchId": active_batch_id,
+                    "executionLane": execution_lane,
+                    "repairTaskId": batch_compile.get("repairTaskId"),
+                    "repairAttempts": batch_compile.get("repairAttempts", 0),
+                    "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+                    "diagnosticPaths": batch_compile.get("diagnosticPaths", []),
+                    "allowedRunnerCommands": ["finish-implementation"],
+                    "activatedFromHandoff": activated_from_handoff,
+                    "userMessage": (
+                        f"模型正在修复批次 {active_batch_id} 的编译问题；"
+                        "完成代码修改后记录 implementation evidence。"
+                    ),
+                }
+            elif batch_compile_status == "passed":
+                # 编译通过，批次完成，检查是否有下一批次
+                next_batch_id = bundle.root.get("nextBatchId")
+                if isinstance(next_batch_id, str):
+                    # 有下一批次，自动激活
+                    _activate_batch_unlocked(workspace, feature, next_batch_id)
+                    try:
+                        bundle = load_plan_bundle(feature_dir)
+                    except ValueError as exc:
+                        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+                    return {
+                        "action": "batch_completed_next_activated",
+                        "completedBatchId": active_batch_id,
+                        "activeBatchId": next_batch_id,
+                        "executionLane": execution_lane,
+                        "activatedFromHandoff": activated_from_handoff,
+                        "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。已自动激活下一批次 {next_batch_id}。",
+                    }
+                else:
+                    # 没有下一批次，检查是否需要项目级验证
+                    project_commands = bundle.root.get("projectValidationCommands")
+                    if isinstance(project_commands, list) and project_commands:
+                        latest_project_check = bundle.root.get("latestProjectCheckEvidenceId")
+                        if not isinstance(latest_project_check, str):
+                            return {
+                                "action": "run_project_check",
+                                "completedBatchId": active_batch_id,
+                                "activatedFromHandoff": activated_from_handoff,
+                                "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。所有批次已完成，需要执行项目级验证。",
+                            }
+                    return {
+                        "action": "feature_completed",
+                        "completedBatchId": active_batch_id,
+                        "activatedFromHandoff": activated_from_handoff,
+                        "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。所有批次已完成，功能开发结束。",
+                    }
+            elif batch_compile_status is not None:
+                raise TaskRunnerError(
+                    f"batch_compile_status_invalid:{active_batch_id}:{batch_compile_status}"
+                )
+            elif all_tasks_ready:
+                raise TaskRunnerError(f"batch_compile_contract_missing:{active_batch_id}")
+            else:
+                return {
+                    "action": "execute_active_batch",
+                    "activeBatchId": active_batch_id,
+                    "executionLane": execution_lane,
+                    "taskIds": list(entry.get("taskIds", [])),
+                    "activatedFromHandoff": activated_from_handoff,
+                    "userMessage": f"继续实现批次 {active_batch_id}。",
+                }
+
         batch_validation = batch_plan.get("batchValidation") if isinstance(batch_plan, dict) else None
         if (
             all_tasks_done
@@ -6944,6 +7775,21 @@ def _cmd_start_validation_repair(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
+def _cmd_start_batch_compile_repair(args: argparse.Namespace) -> int:
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        state = start_batch_compile_repair(
+            workspace,
+            feature,
+            args.batch_id,
+            args.task_id,
+            code_workspace,
+        )
+        return _emit(True, **state)
+    except (TaskRunnerError, ValueError) as exc:
+        return _emit_error(exc)
+
+
 def _cmd_recover(args: argparse.Namespace) -> int:
     return _cmd_complete(args)
 
@@ -7045,6 +7891,27 @@ def _cmd_activate_batch(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
+def _cmd_batch_compile(args: argparse.Namespace) -> int:
+    """处理 batch-compile 子命令"""
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        result = run_batch_compile(
+            workspace,
+            feature,
+            args.batch_id,
+            code_workspace,
+        )
+        # P1-6: 根据编译状态返回正确的退出码
+        compile_status = result.get("compileStatus")
+        success = compile_status == "passed"
+        return _emit(
+            success,
+            **result,
+        )
+    except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
+        return _emit_error(exc)
+
+
 def _cmd_code_session(args: argparse.Namespace) -> int:
     try:
         workspace = resolve_workspace(args.workspace)
@@ -7090,6 +7957,11 @@ def main(argv: list[str] | None = None) -> int:
         help="adopt in-workspace changes made after the failed validation snapshot",
     )
     validation_repair.set_defaults(func=_cmd_start_validation_repair)
+
+    batch_compile_repair = subparsers.add_parser("start-batch-compile-repair")
+    common(batch_compile_repair)
+    batch_compile_repair.add_argument("--batch-id", required=True)
+    batch_compile_repair.set_defaults(func=_cmd_start_batch_compile_repair)
 
     recover = subparsers.add_parser("recover")
     common(recover, needs_run=True)
@@ -7152,6 +8024,13 @@ def main(argv: list[str] | None = None) -> int:
     session.add_argument("--workspace")
     session.add_argument("--feature")
     session.set_defaults(func=_cmd_code_session)
+
+    batch_compile = subparsers.add_parser("batch-compile")
+    batch_compile.add_argument("--workspace")
+    batch_compile.add_argument("--feature")
+    batch_compile.add_argument("--batch-id", required=True)
+    batch_compile.add_argument("--code-workspace", required=True, action="append")
+    batch_compile.set_defaults(func=_cmd_batch_compile)
 
     args = parser.parse_args(argv)
     return args.func(args)

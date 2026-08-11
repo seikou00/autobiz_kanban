@@ -376,6 +376,39 @@ class PlanJsonTest(unittest.TestCase):
             errors,
         )
 
+    def test_defer_to_test_stages_validation_test_plan_schema_is_strict(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["validationTestPlan"] = [
+            {
+                "commandId": "VAL-T001-01",
+                "assetType": "unit_test",
+                "executionStage": "with_code",
+                "covers": ["AC-T001-01"],
+                "testIntent": {
+                    "behavior": "the behavior is observable",
+                    "acceptanceCriteria": task["acceptanceCriteria"],
+                },
+            }
+        ]
+
+        self.assertEqual(
+            validate_test_tasks(plan, defer_to_test_stages=True),
+            [],
+        )
+
+        task["validationTestPlan"][0]["covers"] = ["T001"]
+        task["validationTestPlan"][0]["testIntent"]["acceptanceCriteria"] = []
+        errors = validate_test_tasks(plan, defer_to_test_stages=True)
+        self.assertIn(
+            "T001.validationTestPlan[0].covers_unknown:T001",
+            errors,
+        )
+        self.assertIn(
+            "T001.validationTestPlan[0].testIntent.acceptanceCriteria_mismatch",
+            errors,
+        )
+
     def test_plan_requires_workspace_roots_for_nonempty_scope_paths(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
         plan["tasks"][0]["scope"]["paths"] = ["src/main/java/example"]

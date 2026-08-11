@@ -445,7 +445,210 @@ def _configure_deferred_task_validation(feature_dir: Path) -> None:
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = False) -> None:
+    batch = _read_batch(feature_dir)
+    for task in batch["tasks"]:
+        task.update({
+            "implementationEvidenceIds": [],
+            "latestImplementationEvidenceId": None,
+            "validationEvidenceIds": [],
+            "implementationRevision": 0,
+        })
+    compile_script = (
+        "import sys; print('repair.txt:1: cannot find symbol', file=sys.stderr); "
+        + ("raise SystemExit(1)" if always_fail else "raise SystemExit(0 if __import__('pathlib').Path('compile-fixed.txt').exists() else 1)")
+    )
+    batch["batchValidation"]["commands"][0]["argv"] = [sys.executable, "-c", compile_script]
+    _write_batch(feature_dir, batch)
+
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["taskValidationPolicy"] = {
+        "mode": "defer_to_test_stages",
+        "orchestration": "inline",
+        "codeGate": "batch_compile_only",
+        "maxTestStageRepairAttempts": 3,
+    }
+    root["projectValidationCommands"] = []
+    root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = [
+        sys.executable,
+        "-c",
+        compile_script,
+    ]
+    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 class TaskRunnerTest(unittest.TestCase):
+    def test_batch_compile_failure_requires_model_repair_and_new_implementation_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            first_evidence = json.loads(finished.stdout)["implementationEvidenceId"]
+
+            failed = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            failed_payload = json.loads(failed.stdout)
+            self.assertEqual(failed_payload["requiredAction"], "start_batch_compile_repair")
+            self.assertEqual(failed_payload["nextActor"], "model")
+            self.assertEqual(failed_payload["repairAttempts"], 0)
+            self.assertEqual(failed_payload["maxRepairAttempts"], 3)
+            self.assertEqual(failed_payload["repairOwnerTaskIds"], ["T001"])
+
+            direct_retry = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(direct_retry.returncode, 0)
+            self.assertEqual(
+                json.loads(direct_retry.stdout)["error"],
+                "batch_compile_repair_required:B001",
+            )
+            ordinary_start = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(ordinary_start.returncode, 0)
+            self.assertEqual(
+                json.loads(ordinary_start.stdout)["requiredAction"],
+                "start_batch_compile_repair",
+            )
+
+            manual_change = code / "manual-before-repair.txt"
+            manual_change.write_text("not controlled by a model repair run\n", encoding="utf-8")
+            changed_workspace_repair = _run(
+                "start-batch-compile-repair", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
+                "--code-workspace", str(code),
+            )
+            self.assertNotEqual(changed_workspace_repair.returncode, 0)
+            self.assertEqual(
+                json.loads(changed_workspace_repair.stdout)["error"],
+                "workspace_changed_before_batch_compile_repair",
+            )
+            manual_change.unlink()
+
+            repair = _run(
+                "start-batch-compile-repair", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
+                "--code-workspace", str(code),
+            )
+            self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
+            repair_payload = json.loads(repair.stdout)
+            self.assertEqual(repair_payload["repairContext"]["batchCompileRepairAttempt"], 1)
+            (code / "compile-fixed.txt").write_text("fixed by model\n", encoding="utf-8")
+            repaired = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", repair_payload["runId"],
+            )
+            self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+            second_evidence = json.loads(repaired.stdout)["implementationEvidenceId"]
+            self.assertNotEqual(second_evidence, first_evidence)
+            pending_batch = _read_batch(feature_dir)
+            self.assertEqual(pending_batch["batchCompile"]["status"], "pending")
+            self.assertEqual(pending_batch["batchCompile"]["repairAttempts"], 1)
+
+            passed = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+            completed_batch = _read_batch(feature_dir)
+            self.assertEqual(completed_batch["batchCompile"]["status"], "passed")
+            self.assertEqual(completed_batch["tasks"][0]["status"], "done")
+            self.assertEqual(
+                completed_batch["tasks"][0]["implementationEvidenceIds"],
+                [first_evidence, second_evidence],
+            )
+            self.assertEqual(check_code_done(feature_dir), [])
+
+            completed_batch["batchCompile"]["implementationEvidenceByTask"]["T001"] = first_evidence
+            _write_batch(feature_dir, completed_batch)
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["taskSetDigest"] = task_set_digest(root, {"B001": completed_batch})
+            root_path.write_text(
+                json.dumps(root, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "B001.batch_compile_implementation_evidence_mismatch",
+                check_code_done(feature_dir),
+            )
+
+    def test_batch_compile_model_repair_is_blocked_after_three_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir, always_fail=True)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            for attempt in range(1, 4):
+                failed = _run(
+                    "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                    "--batch-id", "B001", "--code-workspace", str(code),
+                )
+                self.assertNotEqual(failed.returncode, 0)
+                repair = _run(
+                    "start-batch-compile-repair", "--workspace", str(workspace),
+                    "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
+                    "--code-workspace", str(code),
+                )
+                self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
+                repair_payload = json.loads(repair.stdout)
+                self.assertEqual(
+                    repair_payload["repairContext"]["batchCompileRepairAttempt"],
+                    attempt,
+                )
+                (code / "repair.txt").write_text(f"model repair {attempt}\n", encoding="utf-8")
+                repaired = _run(
+                    "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                    "--task-id", "T001", "--code-workspace", str(code),
+                    "--run-id", repair_payload["runId"],
+                )
+                self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+
+            final_failure = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(final_failure.returncode, 0)
+            final_payload = json.loads(final_failure.stdout)
+            self.assertEqual(
+                final_payload["requiredAction"],
+                "escalate_batch_compile_repair_exhausted",
+            )
+            self.assertEqual(final_payload["repairAttempts"], 3)
+            self.assertFalse(final_payload["modelRepairRequired"])
+
+            fourth_repair = _run(
+                "start-batch-compile-repair", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
+                "--code-workspace", str(code),
+            )
+            self.assertNotEqual(fourth_repair.returncode, 0)
+            self.assertEqual(
+                json.loads(fourth_repair.stdout)["error"],
+                "batch_compile_repair_attempts_exhausted:B001",
+            )
+
     def test_first_task_start_requires_fresh_code_exploration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp), exploration_ready=False)
@@ -879,6 +1082,31 @@ class TaskRunnerTest(unittest.TestCase):
             )
             self.assertNotEqual(exit_code, 0)
             self.assertIn("validation_maven_test_target_missing", output)
+
+    def test_maven_runner_rejects_project_selector_from_leaf_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = (Path(tmp) / "repo").resolve()
+            module = repo / "后台服务" / "零售客户经营" / "LF39.05_bccompliancemng"
+            module.mkdir(parents=True)
+            (module / "pom.xml").write_text("<project/>", encoding="utf-8")
+            command = {
+                "id": "VAL-T001-01",
+                "argv": [
+                    "mvn", "test", "-Dtest=AgrCtrlSearchBasicTest",
+                    "-pl", "backend/service/LF39.05_bccompliancemng",
+                ],
+                "cwd": "后台服务/零售客户经营/LF39.05_bccompliancemng",
+            }
+
+            with self.assertRaisesRegex(
+                task_runner_module.TaskRunnerError,
+                "maven_project_selector_requires_aggregator_cwd",
+            ):
+                task_runner_module._assert_validation_command_environment(
+                    command,
+                    {repo.name: repo},
+                    retry_same_run=True,
+                )
 
     def test_grouped_maven_execution_splits_distinct_test_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1380,15 +1608,21 @@ class TaskRunnerTest(unittest.TestCase):
                 "maven_test_selectors",
                 return_value=["AppTest"],
             ):
+                started_at = time.monotonic()
                 exit_code, output = task_runner_module._run_validation(
                     command,
                     {repo.name: repo},
                 )
+            # 提前失败检测应该返回退出码 1（验证失败）
             self.assertEqual(exit_code, 1)
-            self.assertIn(
-                "validation_maven_test_failures_detected_after_timeout",
-                output,
-            )
+            # 应该在远小于 5 秒（脚本 sleep 时间）内完成
+            elapsed = time.monotonic() - started_at
+            self.assertLess(elapsed, 3.0)
+            # 应该包含提前失败检测的标记
+            self.assertIn("validation_process_stopped_after_test_report_failure", output)
+            self.assertIn("behavior_test_failure", output)
+            self.assertIn("surefire_report", output)
+            # 输出中应包含实际的测试失败详情
             self.assertIn("expected true", output)
 
     def test_runtime_environment_failure_requires_strong_environment_marker(self) -> None:

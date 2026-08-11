@@ -77,8 +77,16 @@ DYNAMIC_REASONS = {
     "invalid_plan_task_matrix_validation",
     # hooks/code_task_context.py resolve_task_refs
     "invalid_artifact_ref",
+    "invalid_artifact_ref_format",
+    "invalid_artifact_ref_type",
+    "ambiguous_ref_anchor",
     "missing_ref_file",
     "missing_ref_anchor",
+    "invalid_design_contract",
+    "design_api_marker_conflicts_with_definitions",
+    "design_data_marker_conflicts_with_definitions",
+    "plan_api_ref_forbidden_by_design_marker",
+    "plan_data_ref_forbidden_by_design_marker",
 }
 
 # run_postcheck 在 validator 跑起来之前就可能失败，这些也必须带修复动作。
@@ -247,6 +255,26 @@ class StructuredOutputTest(unittest.TestCase):
         errors = parse_postcheck_output(output)
         self.assertEqual(errors[0]["reason"], "brand_new_unregistered_reason")
         self.assertNotIn("action", errors[0])
+
+    def test_registered_failure_preserves_structured_diagnostics(self) -> None:
+        diagnostics = {
+            "taskId": "T013",
+            "field": "splitRationale",
+            "violations": [{"code": "split_rationale_missing_related_ids"}],
+        }
+        _, output = run_capture(
+            lambda: fail_line(
+                HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp")),
+                "invalid_plan_task_split_rationale",
+                " task=T013 detail=scenarios=8",
+                target="T013",
+                fields={"detail": "task=T013 detail=scenarios=8"},
+                diagnostics=diagnostics,
+            )
+        )
+
+        error = parse_postcheck_output(output)[0]
+        self.assertEqual(error["diagnostics"], diagnostics)
 
     def test_pending_design_cells_route_to_the_user(self) -> None:
         ctx = HookContext(skill="autodev-plan", slug="alpha", root=Path("/tmp"))
@@ -518,6 +546,7 @@ class RepresentativePlanFailuresTest(unittest.TestCase):
                     " " + error.get("detail", ""),
                     target="T001",
                     fields={"detail": error.get("detail", "")},
+                    diagnostics=error,
                 )
             return failures
 
@@ -526,6 +555,7 @@ class RepresentativePlanFailuresTest(unittest.TestCase):
             for field in ("artifact", "target", "problem", "action", "route"):
                 self.assertTrue(error.get(field), f"{error['reason']} 缺 {field}")
             self.assertEqual(error["target"], "T001")
+            self.assertTrue(error.get("diagnostics", {}).get("violations"))
 
 
 class SkillWordingTest(unittest.TestCase):

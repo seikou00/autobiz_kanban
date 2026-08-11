@@ -56,6 +56,7 @@ def _workspace(root: Path) -> tuple[Path, Path]:
         json.dumps({"schemaVersion": "autobizdevops.state.v3", "features": {"alpha": _state_record()}}, indent=2),
         encoding="utf-8",
     )
+    _write_design(feature_dir)
     return workspace, feature_dir
 
 
@@ -110,12 +111,12 @@ def _write_design(feature_dir: Path) -> None:
                 "| specs/cap/spec.md | Requirement [REQ-001] / Scenario [SCN-001] | API-001 / DATA-001 / D-001 |",
                 "| specs/cap/spec.md | Requirement [REQ-001] / Scenario [SCN-002] | API-001 / DATA-001 / D-001 |",
                 "## 3. API Decisions / 接口决策",
-                "- x-auto-no-http-api: true",
+                "- x-auto-no-http-api: false",
                 "| ID | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |",
                 "|----|--------|--------------|---------|----------|--------|-------------------|--------|",
                 "| API-001 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
                 "## 4. Data Decisions / 数据决策",
-                "- x-auto-no-sql: true",
+                "- x-auto-no-sql: false",
                 "| ID | Table/Model | Change | Fields | Index/Migration | Rollback | Status |",
                 "|----|-------------|--------|--------|-----------------|----------|--------|",
                 "| DATA-001 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
@@ -275,9 +276,9 @@ def _plan_task_body() -> dict:
         "validationBoundary": "public behavior seam validated by the task command",
         "nonGoals": ["do not change unrelated behavior"],
         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
-        "designRefs": ["design.md#D-001"],
-        "apiIds": [],
-        "dataIds": [],
+        "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+        "apiIds": ["API-001"],
+        "dataIds": ["DATA-001"],
         "decisionIds": ["D-001"],
         "validationCommands": [
             {
@@ -422,6 +423,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)  # Add design.md for artifact ref validation
             _, backend_module = _named_code_workspace(
                 root,
                 "backend-repo",
@@ -556,6 +558,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)  # Add design.md for artifact ref validation
             backend_repo, _ = _named_code_workspace(root, "backend-repo")
             frontend_repo, _ = _named_code_workspace(root, "frontend-repo")
             _, replacement_frontend = _named_code_workspace(
@@ -631,6 +634,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
+            _write_design(feature_dir)  # Add design.md for artifact ref validation
             task = _plan_task_body()
             group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
 
@@ -682,6 +686,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir)
+            _write_design(feature_dir)  # Add design.md for artifact ref validation
             task = _plan_task_body()
             task.update(
                 {
@@ -740,6 +745,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             _, module = _code_module(root)
             task = _plan_task_body()
             task["executionMode"] = "verified_existing"
@@ -798,6 +804,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
             backend_a, _ = _named_code_workspace(root, "backend-a", manifest="pom.xml")
             backend_b, _ = _named_code_workspace(root, "backend-b", manifest="pom.xml")
             first = _plan_task_body()
@@ -901,6 +908,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             task = _plan_task_body()
             group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
             self.assertEqual(_run(
@@ -988,6 +996,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             task = _plan_task_body()
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
@@ -1041,6 +1050,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
             first = _plan_task_body()
             second = _plan_task_body()
             second.update({"id": "T002", "title": "second", "deps": ["T001"]})
@@ -1211,6 +1221,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             _, module = _code_module(root)
             task = _plan_task_body()
             task["uiRequired"] = True
@@ -1264,6 +1275,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
             task = _plan_task_body()
@@ -1289,6 +1301,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
             first = _plan_task_body()
@@ -1351,6 +1364,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
             backend = _plan_task_body()
@@ -1407,6 +1421,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             _, module = _code_module(root)
             task_dir = root / "tasks"
             task_dir.mkdir()
@@ -1453,6 +1468,38 @@ class JsonWriterTests(unittest.TestCase):
                 root_plan["batchValidationProfiles"]["backend"]["commands"][0]["cwd"],
                 "backend/service",
             )
+
+    def test_plan_writer_rejects_project_selector_from_leaf_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, module = _code_module(root)
+            task_dir = root / "tasks"
+            task_dir.mkdir()
+            task = _plan_task_body()
+            task["scope"].update({
+                "workspaceRoots": {"default": "backend/service"},
+                "paths": ["src/main/java/example"],
+            })
+            task["validationCommands"][0].update({
+                "argv": [
+                    "mvn", "test", "-Dtest=ProtocolCtrlApplyTest",
+                    "-pl", "backend/service/LF39.05_bccompliancemng",
+                ],
+                "cwd": "backend/service",
+            })
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+
+            result = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+                "--code-workspace", str(module),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("maven_project_selector_requires_aggregator_cwd", result.stdout)
 
     def test_plan_writer_rejects_missing_validation_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1555,6 +1602,67 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("T001.visualSourceRefs_must_be_string_array", result.stdout)
             self.assertIn("T001.frontendRoute_missing", result.stdout)
+
+    def test_plan_writer_grouping_returns_all_invalid_tasks_and_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+
+            def oversized_task(task_id: str, start: int) -> dict:
+                task = _plan_task_body()
+                task["id"] = task_id
+                task["title"] = f"{task_id} oversized"
+                task["specRefs"] = [
+                    "specs/cap/spec.md#REQ-001",
+                    *[
+                        f"specs/cap/spec.md#SCN-{index:03d}"
+                        for index in range(start, start + 6)
+                    ],
+                ]
+                task["mergedScenarioRefs"] = []
+                task.pop("splitRationale", None)
+                return task
+
+            group_file = _write_task_groups(
+                root / "task-groups.json",
+                [oversized_task("T001", 1), oversized_task("T002", 7)],
+            )
+            result = _run(
+                "plan_writer.py",
+                "preflight-task-groups",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--group-file",
+                str(group_file),
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["validation"]["invalidTaskIds"], ["T001", "T002"])
+            issues = payload["validation"]["issues"]
+            self.assertEqual(
+                {(issue["taskIds"][0], issue["reason"]) for issue in issues},
+                {
+                    ("T001", "missing_plan_task_merged_scenario_refs"),
+                    ("T001", "missing_plan_task_split_rationale"),
+                    ("T002", "missing_plan_task_merged_scenario_refs"),
+                    ("T002", "missing_plan_task_split_rationale"),
+                },
+            )
+            merged_issue = next(
+                issue
+                for issue in issues
+                if issue["taskIds"] == ["T001"]
+                and issue["reason"] == "missing_plan_task_merged_scenario_refs"
+            )
+            self.assertEqual(len(merged_issue["diagnostics"]["expectedRefs"]), 6)
+            self.assertEqual(
+                merged_issue["diagnostics"]["violations"][0]["code"],
+                "merged_scenario_refs_missing",
+            )
 
     def test_plan_writer_freezes_all_ui_refs_after_grouping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1928,6 +2036,7 @@ class JsonWriterTests(unittest.TestCase):
         self.assertTrue(contract["collectingRepairs"]["preserveUnchangedTaskDetails"])
         self.assertFalse(contract["draftWorkflow"]["standaloneTaskFiles"])
         self.assertEqual(contract["draftWorkflow"]["groupLock"], "groupingDigest")
+        self.assertEqual(contract["draftWorkflow"]["persistentDesignLock"], ".design-contract.lock.json")
         self.assertEqual(
             contract["draftWorkflow"]["scopeWorkspaceRootsSource"],
             "prepare-task-draft --code-workspace",
@@ -2125,6 +2234,32 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual([error["reason"] for error in result.errors or []], [])
             self.assertEqual(output.getvalue().strip(), "")
             self.assertFalse((feature_dir / "SMOKE_TEST_PLAN.json").exists())
+
+    def test_postcheck_rejects_unknown_design_ref_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_proposal(feature_dir)
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            _write_plan(feature_dir)
+
+            batch_path = feature_dir / "plans" / "B001" / "plan.json"
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+            batch["tasks"][0]["designRefs"] = [
+                "design.md#API-777",
+                "design.md#DATA-001",
+                "design.md#D-001",
+            ]
+            batch_path.write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            root["taskSetDigest"] = task_set_digest(root, {"B001": batch})
+            (feature_dir / "plan.json").write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code, _ = run_postcheck(ROOT, workspace, "autodev-plan", "alpha", workflow_record=_state_record())
+            self.assertNotEqual(code, 0)
+            self.assertIn("missing_ref_anchor", output.getvalue())
 
     def test_plan_structure_passes_while_stage_gate_fails_on_missing_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -57,7 +57,7 @@ class WriterResult:
     ok: bool
     path: Path | None = None
     changed: bool = False
-    errors: list[dict[str, str]] | None = None
+    errors: list[dict[str, Any]] | None = None
     data: dict[str, Any] | None = None
 
 
@@ -301,8 +301,8 @@ def _ensure_utf8_encodable(content: str, *, source: str) -> None:
         raise _encoding_error(source, "内容包含无法编码为 UTF-8 的 Unicode surrogate") from exc
 
 
-def parse_postcheck_output(output: str, *, fallback_message: str = "") -> list[dict[str, str]]:
-    errors: list[dict[str, str]] = []
+def parse_postcheck_output(output: str, *, fallback_message: str = "") -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
         if not line:
@@ -326,6 +326,9 @@ def parse_postcheck_output(output: str, *, fallback_message: str = "") -> list[d
                         value = payload.get(field)
                         if isinstance(value, str) and value:
                             error[field] = value
+                    diagnostics = payload.get("diagnostics")
+                    if isinstance(diagnostics, dict):
+                        error["diagnostics"] = diagnostics
             errors.append(error)
         elif line.startswith("POST_SKILL_FAIL"):
             errors.append(_error("postcheck_failure", line))

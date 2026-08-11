@@ -140,6 +140,7 @@ def fail_line(
     repair: str = "",
     target: str = "",
     fields: dict | None = None,
+    diagnostics: dict | None = None,
 ) -> int:
     """打印一条机器可解析的预检失败。
 
@@ -153,14 +154,17 @@ def fail_line(
     if entry is not None:
         rendered_action = repair or render_repair(entry.action, target, fields)
         action = rendered_action
+        payload_data = {
+            "artifact": render_repair(entry.artifact, target, fields),
+            "target": target,
+            "problem": render_repair(entry.problem, target, fields),
+            "action": rendered_action,
+            "route": entry.route,
+        }
+        if diagnostics:
+            payload_data["diagnostics"] = diagnostics
         payload = json.dumps(
-            {
-                "artifact": render_repair(entry.artifact, target, fields),
-                "target": target,
-                "problem": render_repair(entry.problem, target, fields),
-                "action": rendered_action,
-                "route": entry.route,
-            },
+            payload_data,
             ensure_ascii=False,
             separators=(",", ":"),
         )

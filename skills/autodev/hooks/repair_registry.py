@@ -245,6 +245,11 @@ _DESIGN: Dict[str, Repair] = {
         problem="design.md 不存在或为空",
         action="生成 design.md，必备章节为 Context / 输入上下文、Code Evidence、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions。",
     ),
+    "invalid_design_contract": Repair(
+        artifact="design.md",
+        problem="design.md 无法作为设计契约读取：{detail}",
+        action="修复 design.md 的编码或读取错误，确保文件为有效 UTF-8 文本，再重新生成 Plan。",
+    ),
     "invalid_design_missing_section": Repair(
         artifact="design.md",
         problem="design.md 缺少必备章节「{target}」",
@@ -259,6 +264,16 @@ _DESIGN: Dict[str, Repair] = {
         artifact="design.md",
         problem="design.md 缺少 x-auto-no-sql 标记",
         action="在 Data Decisions 节写入 `x-auto-no-sql: true|false`：本轮不涉及数据结构变更写 true，涉及写 false 并列出 DATA-NNN 定义。",
+    ),
+    "design_api_marker_conflicts_with_definitions": Repair(
+        artifact="design.md",
+        problem="x-auto-no-http-api=true 与已有 API 定义冲突：{detail}",
+        action="若本轮存在 HTTP API，将 x-auto-no-http-api 改为 false；否则删除不属于本轮的 API-NNN 定义。",
+    ),
+    "design_data_marker_conflicts_with_definitions": Repair(
+        artifact="design.md",
+        problem="x-auto-no-sql=true 与已有 DATA 定义冲突：{detail}",
+        action="若本轮存在数据结构变更，将 x-auto-no-sql 改为 false；否则删除不属于本轮的 DATA-NNN 定义。",
     ),
     "design_has_pending_cells": Repair(
         artifact="design.md",
@@ -376,6 +391,16 @@ _PLAN: Dict[str, Repair] = {
         problem="{target} 引用的 D（技术决策）编号在 design.md 中未定义",
         action="编号写错就用 hooks/plan_writer.py 改正；design.md 确实还没定义就先在 Technical Design 节补出该 D-NNN，再重建任务引用。",
     ),
+    "plan_api_ref_forbidden_by_design_marker": Repair(
+        artifact="plan.json",
+        problem="{target} 引用了 API，但 design.md 声明 x-auto-no-http-api=true：{detail}",
+        action="Design 是事实源：从任务分组或任务详情中移除该 API 引用，再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "plan_data_ref_forbidden_by_design_marker": Repair(
+        artifact="plan.json",
+        problem="{target} 引用了 DATA，但 design.md 声明 x-auto-no-sql=true：{detail}",
+        action="Design 是事实源：从任务详情中移除该 DATA 引用，再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
     "missing_plan_json_api_coverage": Repair(
         artifact="plan.json",
         problem="design.md 定义的 API {target} 没有被任何实现任务覆盖",
@@ -428,8 +453,9 @@ _PLAN: Dict[str, Repair] = {
         artifact="plan.json",
         problem="{target} 的 splitRationale 不满足要求：{detail}",
         action=(
-            "补足两点：逐个点名被合并的相关编号，并说明验证边界（具体验证手段/命令），"
-            "不要写「便于实现」「逻辑相关」这类空话，再重建 Draft。" + PLAN_NO_HAND_EDIT
+            "先读取返回 JSON 的 diagnostics.violations，逐项修复其中列出的字段、编号和验证边界；"
+            "不得根据 Scenario 编号猜测拆分归属。若不满足真实共享验证闭环，应回覆盖矩阵按业务闭环拆分，"
+            "再重建 Draft。" + PLAN_NO_HAND_EDIT
         ),
     ),
     "invalid_plan_task_matrix_validation": Repair(
@@ -441,6 +467,21 @@ _PLAN: Dict[str, Repair] = {
         artifact="plan.json",
         problem="{target} 的引用格式不合法：{detail}",
         action="引用写成 `<文件路径>#<锚点>` 形式（如 specs/<capability>/spec.md#REQ-001、design.md#API-001），再重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "invalid_artifact_ref_format": Repair(
+        artifact="plan.json",
+        problem="{target} 的引用格式不合法：{detail}",
+        action="引用写成 `<文件路径>#<锚点>` 形式（如 specs/<capability>/spec.md#REQ-001、design.md#API-001），再重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "invalid_artifact_ref_type": Repair(
+        artifact="plan.json",
+        problem="{target} 的引用类型与字段不匹配：{detail}",
+        action="specRefs 只放 REQ/SCN，designRefs 只放 API/DATA/D；修正任务引用后再重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "ambiguous_ref_anchor": Repair(
+        artifact="plan.json",
+        problem="{target} 的短引用无法唯一定位：{detail}",
+        action="把短引用改成带相对文件路径的完整形式 `<文件路径>#<锚点>`，再重建 Draft。" + PLAN_NO_HAND_EDIT,
     ),
     "missing_ref_file": Repair(
         artifact="plan.json",

@@ -43,6 +43,12 @@ from hooks.e2e_trust_common import (  # noqa: E402
     validate_scan_current,
 )
 from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
+from hooks.artifact_ref_validator import (  # noqa: E402
+    design_marker_value,
+    load_design_contract,
+    validate_plan_design_coverage,
+    validate_task_artifact_refs,
+)
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
     load_and_validate_plan,
@@ -674,10 +680,17 @@ def validate_design_contract(ctx: HookContext) -> int:
         if section not in text:
             failures += fail_line(ctx, "invalid_design_missing_section", f" section={section!r}", target=section)
 
-    if not re.search(r"x-auto-no-http-api\W*:\W*(true|false)", text, re.IGNORECASE):
+    no_http_api = design_marker_value(text, "x-auto-no-http-api")
+    no_sql = design_marker_value(text, "x-auto-no-sql")
+    if no_http_api is None:
         failures += fail_line(ctx, "missing_design_api_marker")
-    if not re.search(r"x-auto-no-sql\W*:\W*(true|false)", text, re.IGNORECASE):
+    if no_sql is None:
         failures += fail_line(ctx, "missing_design_data_marker")
+    design_ids, _ = collect_design_definition_index(ctx)
+    if no_http_api is True and design_ids["API"]:
+        failures += fail_line(ctx, "design_api_marker_conflicts_with_definitions")
+    if no_sql is True and design_ids["DATA"]:
+        failures += fail_line(ctx, "design_data_marker_conflicts_with_definitions")
     pending = PENDING_CELL.findall(text)
     if pending:
         failures += fail_line(
@@ -1801,38 +1814,46 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     return failures
 
 
-def _boolean_marker_value(text: str, marker: str) -> bool | None:
-    match = re.search(rf"{re.escape(marker)}\W*:\W*(true|false)\b", text, re.IGNORECASE)
-    if not match:
-        return None
-    return match.group(1).lower() == "true"
+def _artifact_issue_target(issue: dict, fallback: str) -> str:
+    task_ids = issue.get("taskIds")
+    task_id = ""
+    if isinstance(task_ids, list):
+        task_id = ",".join(str(item) for item in task_ids if item)
+
+    field = issue.get("field")
+    location = ".".join(
+        item for item in (task_id, str(field) if field else "") if item
+    )
+    current_value = issue.get("currentValue")
+    if current_value not in (None, ""):
+        return f"{location} {current_value}".strip()
+    return location or fallback
 
 
-def _design_escape_hatches(ctx: HookContext) -> tuple[bool, bool]:
-    design = ctx.file("design.md")
-    if not is_nonempty(design):
-        return False, False
-    text = read_text(design)
-    return (
-        _boolean_marker_value(text, "x-auto-no-http-api") is True,
-        _boolean_marker_value(text, "x-auto-no-sql") is True,
+def _emit_artifact_issue(ctx: HookContext, issue: dict, fallback: str) -> int:
+    reason = str(issue.get("reason") or "invalid_artifact_ref")
+    detail = str(issue.get("detail") or "")
+    return fail_line(
+        ctx,
+        reason,
+        f" {detail}" if detail else "",
+        target=_artifact_issue_target(issue, fallback),
+        fields={"detail": detail},
     )
 
 
 def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
     failures = 0
     spec_ids, spec_failures = collect_spec_definition_index(ctx)
-    design_ids, design_failures = collect_design_definition_index(ctx)
-    no_http_api, no_sql = _design_escape_hatches(ctx)
-    failures += spec_failures + design_failures
+    design_contract, design_issues = load_design_contract(ctx.feature_dir)
+    failures += spec_failures
+    for issue in design_issues:
+        failures += _emit_artifact_issue(ctx, issue, "design.md")
 
     raw_tasks = data.get("tasks")
     if not isinstance(raw_tasks, list):
         return failures
 
-    covered_api_refs: set[str] = set()
-    covered_data_refs: set[str] = set()
-    covered_decision_refs: set[str] = set()
     for index, task in enumerate(raw_tasks):
         context = f"tasks[{index}]"
         if not isinstance(task, dict):
@@ -1863,55 +1884,19 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
                     target=f"{task_id}.specRefs {scn_id}",
                 )
 
-        design_refs = _string_list_value(task.get("designRefs")) or []
-        design_ref_text = " ".join(design_refs)
-        api_refs = set(_string_list_value(task.get("apiIds")) or []) | set(re.findall(r"\bAPI-\d{3}\b", design_ref_text))
-        data_refs = set(_string_list_value(task.get("dataIds")) or []) | set(re.findall(r"\bDATA-\d{3}\b", design_ref_text))
-        decision_refs = set(_string_list_value(task.get("decisionIds")) or []) | set(re.findall(r"\bD-\d{3}\b", design_ref_text))
-        covered_api_refs.update(api_refs)
-        covered_data_refs.update(data_refs)
-        covered_decision_refs.update(decision_refs)
-
-        if not decision_refs:
-            failures += fail_line(ctx, "missing_plan_json_decision_ref", f" task={task_id}", target=task_id)
-        for api_id in sorted(api_refs):
-            if api_id not in design_ids["API"]:
-                failures += fail_line(
-                    ctx,
-                    "unknown_plan_json_api_ref",
-                    f" task={task_id} id={api_id}",
-                    target=f"{task_id}.designRefs {api_id}",
-                )
-        for data_id in sorted(data_refs):
-            if data_id not in design_ids["DATA"]:
-                failures += fail_line(
-                    ctx,
-                    "unknown_plan_json_data_ref",
-                    f" task={task_id} id={data_id}",
-                    target=f"{task_id}.designRefs {data_id}",
-                )
-        for decision_id in sorted(decision_refs):
-            if decision_id not in design_ids["D"]:
-                failures += fail_line(
-                    ctx,
-                    "unknown_plan_json_decision_ref",
-                    f" task={task_id} id={decision_id}",
-                    target=f"{task_id}.designRefs {decision_id}",
-                )
-    if not no_http_api:
-        if not design_ids["API"]:
-            failures += fail_line(ctx, "missing_design_api_id", target="API Decisions")
-        else:
-            for api_id in sorted(design_ids["API"] - covered_api_refs):
-                failures += fail_line(ctx, "missing_plan_json_api_coverage", f" id={api_id}", target=api_id)
-    if not no_sql:
-        if not design_ids["DATA"]:
-            failures += fail_line(ctx, "missing_design_data_id", target="Data Decisions")
-        else:
-            for data_id in sorted(design_ids["DATA"] - covered_data_refs):
-                failures += fail_line(ctx, "missing_plan_json_data_coverage", f" id={data_id}", target=data_id)
-    for decision_id in sorted(design_ids["D"] - covered_decision_refs):
-        failures += fail_line(ctx, "missing_plan_json_decision_coverage", f" id={decision_id}", target=decision_id)
+        for issue in validate_task_artifact_refs(
+            ctx.feature_dir,
+            task,
+            design_contract=design_contract,
+        ):
+            failures += _emit_artifact_issue(ctx, issue, task_id)
+    for issue in validate_plan_design_coverage(design_contract, raw_tasks):
+        reason = str(issue.get("reason") or "")
+        fallback = {
+            "missing_design_api_id": "API Decisions",
+            "missing_design_data_id": "Data Decisions",
+        }.get(reason, "plan.json")
+        failures += _emit_artifact_issue(ctx, issue, fallback)
     return failures
 
 
@@ -1976,6 +1961,7 @@ def validate_plan_task_granularity(ctx: HookContext) -> int:
                 " " + error.get("detail", ""),
                 target=task_id,
                 fields={"detail": error.get("detail", "")},
+                diagnostics=error,
             )
     return failures
 
