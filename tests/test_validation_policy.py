@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import unittest
-import tempfile
-from pathlib import Path
 
 from hooks.validation_policy import (
     command_policy_errors,
+    compile_only_command_errors,
+    compile_only_package_script_errors,
+    compile_only_package_scripts_errors,
     frontend_compile_command_matches_kind,
     package_script_name,
     package_script_policy_errors,
-    maven_test_plan,
     maven_test_policy_errors,
     maven_test_target_sources,
     task_validation_kinds_for_lane,
@@ -18,6 +18,90 @@ from hooks.validation_groups import plan_validation_groups
 
 
 class ValidationPolicyTest(unittest.TestCase):
+    def test_compile_only_policy_supports_frontend_build_and_typecheck(self) -> None:
+        self.assertEqual(
+            compile_only_command_errors({"argv": ["npm", "run", "build"]}),
+            [],
+        )
+        self.assertEqual(
+            compile_only_command_errors({"argv": ["pnpm", "typecheck"]}),
+            [],
+        )
+        self.assertEqual(
+            compile_only_command_errors({"argv": ["npx", "tsc", "--noEmit"]}),
+            [],
+        )
+        self.assertEqual(
+            compile_only_command_errors({"argv": ["yarn", "build"]}),
+            [],
+        )
+        self.assertEqual(
+            compile_only_command_errors({"argv": ["bun", "run", "typecheck"]}),
+            [],
+        )
+
+    def test_compile_only_policy_rejects_frontend_and_maven_tests(self) -> None:
+        self.assertIn(
+            "compile_command_executes_tests",
+            compile_only_command_errors({"argv": ["npm", "test"]}),
+        )
+        self.assertIn(
+            "compile_command_executes_tests",
+            compile_only_command_errors({"argv": ["npx", "vitest", "run"]}),
+        )
+        self.assertIn(
+            "compile_command_executes_tests",
+            compile_only_command_errors({"argv": ["yarn", "test"]}),
+        )
+        self.assertIn(
+            "compile_command_executes_tests",
+            compile_only_command_errors({"argv": ["bun", "test"]}),
+        )
+        self.assertIn(
+            "compile_command_not_compile_only",
+            compile_only_command_errors({"argv": ["mvn", "verify"]}),
+        )
+        self.assertEqual(
+            compile_only_command_errors({"argv": ["mvn", "clean", "compile"]}),
+            [],
+        )
+        self.assertEqual(
+            compile_only_command_errors({"argv": ["mvn", "-pl", "web", "-am", "compile"]}),
+            [],
+        )
+        self.assertIn(
+            "compile_command_not_compile_only",
+            compile_only_command_errors({"argv": ["mvn", "validate", "generate-sources"]}),
+        )
+        self.assertIn(
+            "compile_command_not_compile_only",
+            compile_only_command_errors({"argv": ["gradle", "build"]}),
+        )
+
+    def test_frontend_batch_uses_compile_kind_with_build_or_typecheck_argv(self) -> None:
+        for argv in (
+            ["npm", "run", "build"],
+            ["pnpm", "typecheck"],
+            ["npx", "tsc", "--noEmit"],
+        ):
+            with self.subTest(argv=argv):
+                command = {"argv": argv, "kind": "compile", "required": True}
+                self.assertEqual(compile_only_command_errors(command), [])
+
+    def test_compile_only_policy_rejects_test_chained_from_frontend_build_script(self) -> None:
+        self.assertIn(
+            "compile_package_script_executes_tests",
+            compile_only_package_script_errors("vite build && vitest run"),
+        )
+        self.assertEqual(compile_only_package_script_errors("vite build"), [])
+        self.assertIn(
+            "compile_package_script_executes_tests",
+            compile_only_package_scripts_errors(
+                {"prebuild": "vitest run", "build": "vite build"},
+                "build",
+            ),
+        )
+
     def test_rejects_direct_noop_placeholder_and_inline_shell(self) -> None:
         self.assertEqual(
             command_policy_errors({"argv": ["echo", "ok"]}),
@@ -58,27 +142,6 @@ class ValidationPolicyTest(unittest.TestCase):
         self.assertEqual(package_script_policy_errors(None), ["validation_package_script_missing"])
         self.assertEqual(package_script_policy_errors("echo build ok"), ["validation_command_noop"])
         self.assertEqual(package_script_policy_errors("vite build"), [])
-
-    def test_maven_test_plan_distinguishes_existing_and_to_be_created_targets(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "src" / "test" / "java" / "example" / "ExistingTest.java"
-            source.parent.mkdir(parents=True)
-            source.write_text("class ExistingTest {}\n", encoding="utf-8")
-            existing = {
-                "id": "VAL-T001-01",
-                "argv": ["mvn", "test", "-Dtest=example.ExistingTest,NewTest"],
-            }
-            plan = maven_test_plan(existing, root)
-            self.assertIsNotNone(plan)
-            self.assertEqual(
-                [target["mode"] for target in plan["targets"]],
-                ["reuse_existing", "create_in_code"],
-            )
-            self.assertEqual(
-                maven_test_target_sources(root, "example.ExistingTest"),
-                [source],
-            )
 
     def test_maven_target_policy_rejects_skip_and_non_concrete_selectors(self) -> None:
         command = {

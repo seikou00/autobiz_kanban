@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.plan_json import task_contract_sha256, task_set_digest
+from hooks.plan_json import task_contract_sha256
 
 
 def _state_record(checkpoint: str = "plan_in_progress") -> dict:
@@ -380,9 +380,8 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("missing_ref_anchor", result.stdout)
 
-    def test_set_draft_task_detail_rejects_cross_task_test_class_conflict(self) -> None:
-        """T002 planning to create the same test class as already-ready T001 must be
-        rejected at set-draft-task-detail time, not deferred to preflight-task-draft."""
+    def test_set_draft_task_detail_allows_shared_test_selector_as_intent(self) -> None:
+        """Test-stage ownership is deferred, so Plan may preserve shared selectors as intent."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
@@ -437,18 +436,17 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 "--feature", "alpha", "--task-id", "T002", "--body-file", str(second_detail_path),
             )
 
-            self.assertNotEqual(second_result.returncode, 0, second_result.stdout + second_result.stderr)
-            self.assertIn("duplicate_created_test_target", second_result.stdout)
+            self.assertEqual(second_result.returncode, 0, second_result.stdout + second_result.stderr)
 
-            # The rejected T002 detail must not have been persisted. Both tasks
-            # share the "backend" lane, so they land in the same batch (B001);
-            # T002 is the second task in that batch.
             draft_batch_path = (
                 feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
             )
             draft_tasks = json.loads(draft_batch_path.read_text(encoding="utf-8"))["tasks"]
-            second_draft_task = next(task for task in draft_tasks if task["id"] == "T002")
-            self.assertEqual(second_draft_task["goal"], "")
+            for draft_task in draft_tasks:
+                self.assertEqual(draft_task["validationCommands"][0]["argv"][-1], "-Dtest=DuplicateTest")
+                self.assertEqual(len(draft_task["validationTestPlan"]), 1)
+                self.assertNotIn("targets", draft_task["validationTestPlan"][0])
+                self.assertIn("testIntent", draft_task["validationTestPlan"][0])
 
     def test_set_draft_task_detail_accepts_valid_refs_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -639,85 +637,6 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertEqual(issue["taskIds"], ["T001"])
             self.assertEqual(issue["repairTarget"], "task_group")
 
-    def test_preflight_reports_duplicate_test_owners_and_repair_changes_one_target(self) -> None:
-        """An internally consistent legacy Draft may predate early collision checks."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir = _workspace(root)
-            _write_specs(feature_dir, second=True)
-            _write_design(feature_dir)
-            module = root / "code" / "backend" / "service"
-            module.mkdir(parents=True)
-            (module / "pom.xml").write_text("<project/>\n", encoding="utf-8")
-            subprocess.run(["git", "init", "-b", "main"], cwd=root / "code", check=True, capture_output=True)
-            first = _plan_task_body("T001")
-            second = _plan_task_body("T002", scenario="SCN-002")
-            second["deps"] = ["T001"]
-            for task, selector in ((first, "AlphaTest"), (second, "BetaTest")):
-                task["validationCommands"] = [{
-                    "id": f"VAL-{task['id']}-01",
-                    "argv": ["mvn", "test", f"-Dtest={selector}"],
-                    "cwd": "backend/service",
-                    "kind": "behavior_test",
-                    "required": True,
-                    "covers": [f"AC-{task['id']}-01"],
-                }]
-            group_file = _write_task_groups(root / "task-groups.json", [first, second])
-            prepared = _run(
-                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
-                "--feature", "alpha", "--group-file", str(group_file),
-                "--code-workspace", str(module),
-            )
-            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
-            for task in (first, second):
-                detail_path = root / f"{task['id']}.json"
-                detail_path.write_text(json.dumps(_draft_detail_body(task)), encoding="utf-8")
-                result = _run(
-                    "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
-                    "--feature", "alpha", "--task-id", task["id"], "--body-file", str(detail_path),
-                )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-            draft_root_path = feature_dir / ".tmp" / "plan_writer" / "draft" / "plan.json"
-            batch_path = feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
-            draft_root = json.loads(draft_root_path.read_text(encoding="utf-8"))
-            batch = json.loads(batch_path.read_text(encoding="utf-8"))
-            second_task = next(item for item in batch["tasks"] if item["id"] == "T002")
-            second_task["validationCommands"][0]["argv"] = ["mvn", "test", "-Dtest=AlphaTest"]
-            second_task["validationTestPlan"][0]["targets"][0]["selector"] = "AlphaTest"
-            draft_root["taskSetDigest"] = task_set_digest(draft_root, {"B001": batch})
-            batch_path.write_text(json.dumps(batch), encoding="utf-8")
-            draft_root_path.write_text(json.dumps(draft_root), encoding="utf-8")
-
-            preflight = _run(
-                "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
-                "--feature", "alpha",
-            )
-            self.assertNotEqual(preflight.returncode, 0)
-            issue = next(
-                item
-                for item in json.loads(preflight.stdout)["validation"]["issues"]
-                if item["reason"] == "duplicate_created_test_target"
-            )
-            self.assertEqual(issue["taskIds"], ["T001", "T002"])
-            self.assertEqual(issue["field"], "validationCommands")
-
-            repaired = _run(
-                "plan_writer.py", "repair-draft-task", "--workspace", str(workspace),
-                "--feature", "alpha", "--task-id", "T002", "--body-json",
-                json.dumps({
-                    "validationCommands": [{
-                        "argv": ["mvn", "test", "-Dtest=BetaTest"],
-                        "cwd": "backend/service",
-                        "kind": "behavior_test",
-                        "required": True,
-                        "covers": [1],
-                    }],
-                }),
-            )
-            self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
-            self.assertTrue(json.loads(repaired.stdout)["repairComplete"])
-
     def test_finalized_plan_repair_recomputes_root_and_task_contract_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -821,8 +740,8 @@ class PrevalidationIntegrationTests(unittest.TestCase):
 
             batch_path = feature_dir / "plans" / "B001" / "plan.json"
             formal_batch = json.loads(batch_path.read_text(encoding="utf-8"))
-            formal_batch["taskValidation"]["status"] = "running"
-            formal_batch["taskValidation"]["activeRunId"] = "run-001"
+            formal_batch["status"] = "in_progress"
+            formal_batch["tasks"][0]["status"] = "in_progress"
             batch_path.write_text(json.dumps(formal_batch), encoding="utf-8")
 
             repaired = _run(
@@ -831,7 +750,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 json.dumps({"goal": "must not be persisted"}),
             )
             self.assertNotEqual(repaired.returncode, 0)
-            self.assertIn("task_validation_workspace_frozen", repaired.stdout)
+            self.assertIn("plan_execution_workspace_frozen", repaired.stdout)
             self.assertIn("repairTarget", repaired.stdout)
 
             draft_batch_path = (

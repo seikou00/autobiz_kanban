@@ -19,9 +19,44 @@ BEHAVIOR_TASK_VALIDATION_KINDS = frozenset({
 })
 FRONTEND_COMPILE_VALIDATION_KINDS = frozenset({"build", "compile", "typecheck"})
 TASK_VALIDATION_KINDS = BEHAVIOR_TASK_VALIDATION_KINDS | FRONTEND_COMPILE_VALIDATION_KINDS
-BATCH_VALIDATION_KINDS = frozenset({"build", "typecheck", "lint", "compile"})
+# Batch plans deliberately expose one schema kind. Frontend build/typecheck
+# semantics are carried by argv and checked by compile_only_command_errors.
+BATCH_VALIDATION_KINDS = frozenset({"compile"})
 MAVEN_EXECUTABLES = frozenset({"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"})
 _MAVEN_PROJECT_LIST_FLAGS = ("-pl", "--projects")
+_MAVEN_OPTIONS_WITH_VALUE = frozenset({
+    "-f",
+    "--file",
+    "-gs",
+    "--global-settings",
+    "-pl",
+    "--projects",
+    "-s",
+    "--settings",
+    "-t",
+    "--toolchains",
+})
+_MAVEN_COMPILE_ONLY_GOALS = frozenset({
+    "clean",
+    "validate",
+    "initialize",
+    "generate-sources",
+    "process-sources",
+    "generate-resources",
+    "process-resources",
+    "compile",
+})
+_TEST_EXECUTABLES = frozenset({
+    "ava",
+    "jest",
+    "mocha",
+    "pytest",
+    "tox",
+    "unittest",
+    "vitest",
+})
+_FRONTEND_COMPILE_SCRIPT_MARKERS = ("build", "compile", "typecheck", "type-check")
+_TEST_SCRIPT_MARKERS = ("cypress", "e2e", "integration", "jest", "mocha", "playwright", "spec", "test", "vitest")
 
 _NOOP_EXECUTABLES = {"echo", "false", "printf", "true"}
 _INLINE_SHELL_FLAGS = {
@@ -83,6 +118,75 @@ def command_policy_errors(command: Any) -> list[str]:
     errors.extend(maven_test_policy_errors(command))
     errors.extend(maven_project_selector_errors(command))
     return errors
+
+
+def compile_only_command_errors(command: Any) -> list[str]:
+    """Enforce Code-stage compile commands across JVM and frontend toolchains.
+
+    Batch command ``kind`` is always ``compile``. Frontend build/typecheck is
+    represented by argv (for example ``npm run build`` or ``npx tsc --noEmit``).
+    Maven must reach the ``compile`` goal; validate/generate-sources alone do not
+    prove that production sources compile. Test-running goals and scripts fail.
+    """
+
+    argv = normalized_argv(command)
+    if not argv:
+        return []
+    executable = command_executable(argv)
+    lowered_args = [item.lower() for item in argv[1:]]
+    if executable in _TEST_EXECUTABLES:
+        return ["compile_command_executes_tests"]
+    if executable in MAVEN_EXECUTABLES:
+        goals: set[str] = set()
+        skip_next = False
+        for item in lowered_args:
+            if skip_next:
+                skip_next = False
+                continue
+            if item in _MAVEN_OPTIONS_WITH_VALUE:
+                skip_next = True
+                continue
+            if item.startswith("-"):
+                continue
+            goals.add(item.rsplit(":", 1)[-1])
+        if not goals or "compile" not in goals or not goals.issubset(_MAVEN_COMPILE_ONLY_GOALS):
+            return ["compile_command_not_compile_only"]
+        if any(item.startswith("-dtest=") or item.startswith("-dit.test=") for item in lowered_args):
+            return ["compile_command_executes_tests"]
+        return []
+    if executable in {
+        "npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"
+    }:
+        script = package_script_name(command)
+        if isinstance(script, str) and any(
+            marker in script.lower() for marker in _TEST_SCRIPT_MARKERS
+        ):
+            return ["compile_command_executes_tests"]
+        if not isinstance(script, str) or not any(
+            marker in script.lower() for marker in _FRONTEND_COMPILE_SCRIPT_MARKERS
+        ):
+            return ["compile_command_not_compile_only"]
+        return []
+    if executable in {"npx", "npx.cmd"}:
+        tool = lowered_args[0] if lowered_args else ""
+        if tool in _TEST_EXECUTABLES or any(marker in tool for marker in _TEST_SCRIPT_MARKERS):
+            return ["compile_command_executes_tests"]
+        if tool not in {"tsc", "vue-tsc", "vite", "webpack", "next", "ng"}:
+            return ["compile_command_not_compile_only"]
+        if tool in {"vite", "webpack", "next", "ng"} and "build" not in lowered_args[1:]:
+            return ["compile_command_not_compile_only"]
+        return []
+    if executable in {"gradle", "gradle.bat", "gradlew", "gradlew.bat"} and any(
+        "test" in item for item in lowered_args if not item.startswith("-")
+    ):
+        return ["compile_command_executes_tests"]
+    if executable in {"gradle", "gradle.bat", "gradlew", "gradlew.bat"}:
+        tasks = [item for item in lowered_args if not item.startswith("-")]
+        if not tasks or any(item in {"build", "check"} for item in tasks) or not all(
+            "compile" in item or item in {"assemble", "classes"} for item in tasks
+        ):
+            return ["compile_command_not_compile_only"]
+    return []
 
 
 def _normalized_repo_relative_path(value: str) -> str:
@@ -411,25 +515,6 @@ def check_maven_test_target_ambiguity(command: Any, command_dir: Path) -> list[s
     return errors
 
 
-def maven_test_plan(command: Any, command_dir: Path) -> dict[str, Any] | None:
-    selectors = maven_test_selectors(command)
-    if not selectors:
-        return None
-    targets = []
-    for selector in selectors:
-        files = maven_test_target_sources(command_dir, selector)
-        targets.append({
-            "selector": selector,
-            "mode": "reuse_existing" if files else "create_in_code",
-            "sourceFiles": [path.relative_to(command_dir).as_posix() for path in files],
-        })
-    return {
-        "commandId": command.get("id"),
-        "framework": "maven",
-        "targets": targets,
-    }
-
-
 def task_validation_kinds_for_lane(lane: str) -> frozenset[str]:
     if lane == "frontend":
         return TASK_VALIDATION_KINDS
@@ -446,12 +531,14 @@ def package_script_name(command: Any) -> str | None:
         return None
     executable = command_executable(argv)
     args = argv[1:]
-    if executable not in {"npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"} or not args:
+    if executable not in {
+        "npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"
+    } or not args:
         return None
     lowered = [item.lower() for item in args]
     if lowered[0] == "run" and len(args) > 1 and not args[1].startswith("-"):
         return args[1]
-    if executable in {"pnpm", "pnpm.cmd", "yarn", "yarn.cmd"} and not args[0].startswith("-"):
+    if executable in {"pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"} and not args[0].startswith("-"):
         return args[0]
     if executable in {"npm", "npm.cmd"} and lowered[0] in {"start", "stop", "test"}:
         return args[0]
@@ -468,6 +555,32 @@ def package_script_policy_errors(script: Any) -> list[str]:
     if _NOOP_SCRIPT_RE.fullmatch(script):
         errors.append("validation_command_noop")
     return errors
+
+
+def compile_only_package_script_errors(script: Any) -> list[str]:
+    errors = package_script_policy_errors(script)
+    if errors or not isinstance(script, str):
+        return errors
+    lowered = script.lower()
+    if any(re.search(rf"(^|[\s;&|]){re.escape(marker)}(?:[\s:&|]|$)", lowered) for marker in _TEST_SCRIPT_MARKERS):
+        return ["compile_package_script_executes_tests"]
+    return []
+
+
+def compile_only_package_scripts_errors(scripts: Any, script_name: str) -> list[str]:
+    if not isinstance(scripts, dict):
+        return ["validation_package_script_missing"]
+    main_script = scripts.get(script_name)
+    errors = compile_only_package_script_errors(main_script)
+    if errors:
+        return errors
+    for lifecycle_name in (f"pre{script_name}", f"post{script_name}"):
+        if lifecycle_name not in scripts:
+            continue
+        lifecycle_errors = compile_only_package_script_errors(scripts.get(lifecycle_name))
+        if lifecycle_errors:
+            return lifecycle_errors
+    return []
 
 
 def frontend_compile_command_matches_kind(command: Any) -> bool:

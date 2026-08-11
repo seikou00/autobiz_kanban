@@ -163,18 +163,17 @@ class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
 
 
 class CodeReviewIsReadOnlyTest(unittest.TestCase):
-    """code 阶段回检在 runner 三条改码通道关闭之后，只能上报不能改码。"""
+    """Code 回检在实现和批次编译修复收口后只能上报，不能改码。"""
 
     def test_code_review_declares_closed_repair_channels(self) -> None:
         output = render("dev.code")
 
-        # 三个报错名让「通道已关」成为可验证事实，而不是可被解释掉的说法。
-        for error_name in (
-            "task_already_done",
-            "validation_repair_requires_failed_validation",
-            "batch_not_active",
+        for contract in (
+            "已完成 TASK 不得重启",
+            "最多 3 次的模型修复流程",
+            "旧逐 TASK 验证和项目检查入口均不可用",
         ):
-            self.assertIn(error_name, output)
+            self.assertIn(contract, output)
 
     def test_code_review_forbids_source_changes(self) -> None:
         output = render("dev.code")

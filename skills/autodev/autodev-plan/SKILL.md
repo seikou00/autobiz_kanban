@@ -279,7 +279,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
-候选分组必须先做可验证性判断：backend group 若只产出 Entity/PO/DO/DTO/Mapper、配置或脚手架等结构，且唯一校验是 `compile/build` 或文件存在检查，则不得独立成 TASK；在不跨 workspace/lane 且不突破粒度上限时，合并到最早消费它的下游行为 group，并重排 ID/deps。只有能在不依赖后续 TASK 的情况下，通过真实的 behavior/integration/static 契约测试验证的数据迁移、ORM、序列化或 Schema 契约，才可保留为独立 backend TASK。frontend group 可按 frontend validation profile 使用 compile/build/typecheck 验证页面工程能成功编译，但不得把该命令伪装成 behavior test。此判断必须在 `preflight-task-groups` 和创建 Draft 前完成，不得在 task detail 阶段用空 `validationCommands`、伪 `static_check` 或占位命令兜底。
+候选分组必须先做可验证性判断：backend group 若只产出 Entity/PO/DO/DTO/Mapper、配置或脚手架等结构，且唯一校验是 `compile/build` 或文件存在检查，则不得独立成 TASK；在不跨 workspace/lane 且不突破粒度上限时，合并到最早消费它的下游行为 group，并重排 ID/deps。只有能在不依赖后续 TASK 的情况下，通过真实的 behavior/integration/static 契约测试验证的数据迁移、ORM、序列化或 Schema 契约，才可保留为独立 backend TASK。frontend group 可按 frontend validation profile 使用 compile/build/typecheck 验证页面工程能成功编译，但不得把该命令伪装成 behavior test。此判断必须在 `preflight-task-groups` 和创建 Draft 前完成，不得在 task detail 阶段用空 `validationCommands`、伪 `static_check` 或占位命令兜底。Plan 仍必须生成测试相关的 `validationTestPlan` 和 `testIntent`，但这些内容不表示 Code 阶段创建或执行测试。
 
 每次 Plan 会话准备 Draft 前只执行一次以下只读命令，并以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流；后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
@@ -311,7 +311,7 @@ python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feat
 python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
 ```
 
-每个待创建的测试目标只能归属一个 TASK。两个 TASK 的验证命令指向同一个尚不存在的测试类时，第二个 TASK 在 Code 阶段无法满足「在本 run 内创建该测试」的要求，runner 会反复返回 `code_task_validation_test_creation_required` 且没有合法出口。因此每个 TASK 的测试选择器必须落在只属于它的测试类上，类名用该 TASK 的业务行为命名、与 `title` 语义对应，不要套用 `XxxServiceImplTest` / `XxxControllerTest` 这类按被测类命名的通用名——它们天然会被同模块的多个 TASK 撞上。若某个 TASK 的验证确实只能复用另一个 TASK 建出的测试类，它就不是 `code`：把该 group 的 `executionMode` 改为 `verified_existing`，由 writer 按 `reuse_existing` 处理。`preflight-task-draft` 与 `finalize-task-draft` 会机械校验这一条，同一 `(repo, cwd, 测试类)` 被两个以上 TASK 标记为待创建时返回 `duplicate_created_test_target`。
+Plan 阶段生成测试意图和验证命令契约，但不生成测试源码目标。测试目标不在 Code 阶段分配或创建；TASK 的 `testIntent` 供后续 UTest/E2E 阶段决定测试文件归属、复用策略和执行顺序。不得填写或推导 `create_in_code`，也不得依据测试文件是否存在来调整任务拆分。
 
 不得直接编辑 Draft 根或 Batch JSON。需要查看进度时只运行 `show-task-draft`；它只返回 ready/pending Task ID 和 Batch 摘要。若分组表在 Draft 创建后改变，所有 Draft 命令返回 `task_group_changed_after_draft_created`；只能运行 `rebuild-task-draft --group-file <file>`，writer 仅保留 group projection 与该 TASK workspace contract 都未变化的 ready task 详情，只重置受影响 task，禁止逐字段同步旧 task。若旧 Draft 缺少 code workspace，修改单个 task detail 无法修复，必须运行 `rebuild-task-draft --group-file <file> --code-workspace <path>`；重复参数可登记多个仓库。
 
@@ -324,7 +324,7 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 
 `preflight-task-groups` 会先把每个 `apiIds` 与当前已确认 design 对照，不存在的 ID 当场返回 `repairTarget=task_group` 和 `designMutationAllowed=false`。`set-draft-task-detail` 对 `dataIds` / `decisionIds` / `designRefs` 执行同样的存在性门禁；Draft 创建时锁定 design 摘要，之后 design 内容变化会返回 `confirmed_design_changed_after_draft_created`，当前 Plan 不得继续。`preflight-task-draft` 会重新校验单 task 引用、workspace/manifest、验证命令、测试目标冲突，以及跨 task Scenario 覆盖、DAG、backend/frontend 顺序、Batch 投影和 Design 双向覆盖。失败时必须读取返回值中的 `validation.issues`、`validation.invalidTaskIds`；每条 issue 都包含 `taskIds`、`field`、`currentValue`、`repairTarget` 等定位信息。未知或漏覆盖的 Design ID 只能按 `repairTarget=task_detail` 或 `repairTarget=task_group` 修 Plan，禁止修改 design 迎合 Task。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复，不能借删除缓存绕过设计确认。finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
 
-除 `executionMode=external_dependency` 外，每个 task detail 必须包含非空 `validationCommands`。合法 kind、命令禁令与待创建测试的取值以 `add-task-contract` 输出为唯一事实源：`validationKindsByLane` 给出 backend/frontend 各自允许的 kind，`validationCommandPolicy` 给出禁用可执行文件、内联 shell、placeholder 与 Maven 选择器要求，`validationTestPlanPolicy.byExecutionMode` 给出各 executionMode 可用的 `reuse_existing` / `create_in_code`。要点：backend TASK 禁止配置 compile/build/typecheck/lint，lint 只能作为 Batch 补充门禁；frontend TASK 的编译型 kind 必须与真实命令动作一致；Maven `test` 必须带具体类选择器 `-Dtest=XxxTest` 或 `-Dit.test=XxxIT`。`verified_existing` 缺少可复用目标时返回 Plan 重做契约。不得通过 validator 失败来探索 schema。
+除 `executionMode=external_dependency` 外，每个 task detail 必须包含非空 `validationCommands`，writer 会据此生成 `validationTestPlan`/`testIntent`。合法 kind、命令禁令与意图字段以 `add-task-contract` 输出为唯一事实源；不得生成 `create_in_code`、测试文件目标或 Code 阶段测试执行计划。不得通过 validator 失败来探索 schema。
 
 所有 JSON 必须合法，不允许 Markdown、注释、尾逗号或解释性文本。任务依赖只能指向本批更早任务或更早批次任务，禁止前向依赖、backend 依赖 frontend 和跨批环。不得直接整份写入 root/batch 正式 JSON，也不得生成 `plan_v1.json`、`plan_v2.json` 等平行版本；发现根 `plan.json` 含 `tasks`、缺少 `taskSetStatus` / `executionLane` / `batchValidationProfiles`、任一批次缺少 `batchValidation`，或使用旧 batch strategy 时不迁移、不兼容。validator 会返回 `batch_validation_contract_requires_rebuild`，必须清理并重跑完整 Plan。
 
@@ -341,14 +341,14 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 - 字段清单、必填项与取值枚举以 `add-task-contract` 为准：`fields` / `conditionalFields` 给字段契约，`workspaceContract` 给 workspace 与 scope 派生规则，`batchAssignment` 给分批与 lane 推导，`taskSetFinalization` 给发布顺序。下面几条是它无法表达的语义判断和易错点。
 - 只使用当前结构，不写 `version` / `taskDetailVersion` 字段。发现带版本字段或根含 tasks 的 plan 时，不迁移、不兼容，清理后重新执行 Plan。
 - `goal` 写用户可观察结果，不是实现动作；`scope.modules/entrypoints/dataObjects` 写执行范围，`scope.pages` 由 writer 从分组 UI refs 投影。`validationBoundary` 必须描述公开 seam 与可执行校验边界，`nonGoals` 至少一条具体、非空的相邻行为排除，二者都不接受模板占位。
-- `scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生，再按 `workspaceRef` 选择唯一仓库；`scope.paths` 只写相对该 workspace 的提示性路径，**不是实现文件白名单**——runner 会从 start 快照自动统计该 workspace 内全部有效 Git 变更，DTO、domain、test、resources、迁移或配置遗漏在 `scope.paths` 中不会导致 TASK abort，跨 workspace 的变更仍然拒绝。具名 repo 使用 `repoId:relative/path`，禁止再次包含 workspace 前缀。
+- `scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生，再按 `workspaceRef` 选择唯一仓库；`scope.paths` 只写相对该 workspace 的提示性路径，**不是实现文件白名单**——runner 会从 start 快照自动统计该 workspace 内全部有效生产代码与生产配置变更，DTO、domain、resources、迁移或配置遗漏在 `scope.paths` 中不会导致 TASK abort；测试文件和跨 workspace 变更仍然拒绝。具名 repo 使用 `repoId:relative/path`，禁止再次包含 workspace 前缀。
 - `validationCommands[].cwd` 保持 Git 根相对路径，必须等于或位于该 TASK 的 workspace root 下；省略时 writer 自动补 repo 与 workspace root。多仓库计划中每个 TASK validation command 的 `repo` 必须等于该 TASK 唯一 `workspaceRef`；project command 按实际执行仓库填写。所有 evidence 文件仍属于 feature 产物目录。
-- 顶层 `batchValidationProfiles` 按 lane 选择 `mode=task_covered|commands`。backend lane 固定 `commands`：TASK 跑定向行为测试，Batch 再跑 required compile/build 收口；Maven 工程的典型组合是 TASK `mvn test -Dtest=...`、Batch `mvn compile`。frontend 仍有 TASK 未覆盖的工程风险时也用 `commands`，至少配置一条有增量价值的 required 命令。
+- 顶层 `batchValidationProfiles` 统一使用 `mode=commands`，每个实际使用的 lane 必须配置一条 `kind=compile` 的 required 命令；backend 可使用 `mvn compile`，frontend 可使用 `npm run build`、`pnpm typecheck` 或等价的不执行测试的编译命令。TASK 的 `validationCommands` 不在 Code 阶段运行。
 - 顶层 `projectValidationCommands` 只承载可选的跨 lane、跨批次或全项目集成检查，按 `argv + cwd + repo` 归一化后不得与任何 batch profile 命令重复，也不能替代 TASK 的 AC 覆盖。没有这种检查时保持空数组，Code 可直接进入完成门禁。
 - Plan 阶段所有任务初始状态为 `todo`，evidence 相关字段为空或 null，这些运行字段只由 task runner 更新。Plan 初始激活 `B001`；非末批完成后根状态会成为 `awaiting_next_conversation`，Code 必须停止当前对话，新对话通过 `task_runner.py code-session` 检查并自动激活下一批。
 - 每个任务必须追溯到真实 specs 与已确认 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的 ID。四个字段在结构上可以存在但取空数组；任务不涉及对应设计项时必须写 `[]`，禁止为了过校验强行编造或按 Task 编号续写 `API-*` / `DATA-*` / `D-*`。模板中的 API/Data/Decision ID 都是占位示例，生成前必须替换为 Design 中真实 ID；不要为了过校验强行编造，未涉及时使用空数组 `[]`。如果 `design.md` 中存在 API/Data/D 决策，则这些设计项必须被至少一个真正相关的任务覆盖；覆盖缺失时把已有 ID 绑定到正确任务，禁止向 design 新增 ID 迎合 Plan。只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
 - `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
-- `validationCommands` 是 task 级强门禁，必须窄、快、可直接执行并由退出码/断言判读；不能确定真实文件时不要凭空填写 `expectedFiles`。`executionMode=external_dependency` 不运行本地 TASK 验证，由 runner 记录 blocked/deferred Evidence。
+- `validationCommands` 是 task 级测试意图契约，必须窄、快、可追溯；不能确定真实文件时不要凭空填写 `expectedFiles`。Code 阶段不运行 TASK 验证；`executionMode=external_dependency` 仍由后续阶段处理。
 
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
@@ -421,13 +421,13 @@ UI 任务规则：
    - 每个任务必须包含「涉及范围」「执行要点」「验证命令」「预期结果」：
      - 「涉及范围」写模块、入口、服务、模型、配置、测试等方向；能确定真实路径时写路径，不能确定时写现有代码中要定位的范围，不要凭空发明文件。
      - 「执行要点」写入 `implementationPoints`，每条是一个可执行动作或关键约束，覆盖实现切入点、关键改动、复用现有能力、边界/失败路径和测试补充；条数上限见上一节的两档计数预检，超限时合并同一实现动作或拆 Task，不得机械删除覆盖点。
-   - 「验证命令」必须是执行者（大模型）能直接在命令行运行、并自行判读结果的命令，窄、快、可单独运行。backend 用精确自动化测试或接口级 `curl`/HTTP 断言脚本，frontend 用真实的 compile/build/typecheck 作为最低门禁；具体 kind 与命令禁令见「生成 plan.json」中指向的 `add-task-contract` 契约。若 backend 当前确实缺少自动验证手段，则在本任务里声明具体测试类并由 Code 补最小测试/脚本；若 frontend 采用 package script，脚本必须真实存在且不能是 no-op。
+     - 「验证命令」必须是后续 UTest/E2E 执行者能直接运行并自行判读结果的命令，窄、快、可单独运行。backend 用精确自动化测试或接口级 `curl`/HTTP 断言脚本，frontend 用真实的 compile/build/typecheck 作为最低门禁；具体 kind 与命令禁令见「生成 plan.json」中指向的 `add-task-contract` 契约。若 backend 当前缺少自动验证手段，则在 `testIntent` 中声明应补的真实测试边界，由后续 UTest 阶段创建测试；Code 不补测试。frontend package script 必须真实存在且不能是 no-op。
      - 「预期结果」写可观察结果，不要只写“通过”。
    - 执行要点要写到可直接开工的可执行程度：钉住真实文件/符号/入口、真实命令与预期结果；但不要拆成 2-5 分钟步骤、完整代码块、逐文件微任务或频繁 commit，PLAN 仍保持需求闭环任务粒度。
    - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
 
 7. 生成 DAG 与覆盖检查
-   - Batch 按 `B001 -> B002` 的计划顺序串行执行；同一 Batch 的 TASK 由单一队列逐个收口和校验。依赖仍只表达真实业务前置关系，不要为了 Batch 串行额外伪造跨 Batch 依赖；Batch 内没有真实依赖的 TASK 也不启动并行 run。
+   - Batch 按 `B001 -> B002` 的计划顺序串行执行；同一 Batch 的 TASK 由单一队列逐个完成生产实现，全部成为 `implemented` 后统一编译一次。依赖仍只表达真实业务前置关系，不要为了 Batch 串行额外伪造跨 Batch 依赖；Batch 内没有真实依赖的 TASK 也不启动并行 run。
    - 任务数不是首要目标：8-15 个清晰 vertical slice 优于 5 个巨型 capability task。超过 15 个任务时才检查是否把代码步骤误拆成任务；禁止为了压低任务数合并独立场景。
    - specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 
@@ -446,22 +446,16 @@ UI 任务规则：
 - 对 finalized 计划不原地解封、不直接编辑 JSON（不得绕过 Draft lock 修改正式 Bundle）。先运行 `diagnose-plan-repair`：未开始执行且 Draft 完整时，运行 `reopen-finalized-draft --reason <reason>` 进入可修复状态；修复后使用 `finalize-task-draft --force` 重新物化并重算 `taskSetDigest`、`taskContractSha256ByTask`。若已开始执行，禁止覆盖正式计划并转入计划修订；只有 Draft 缺失或不可校验时才清理并全量重建。
 - `validate --structure` 会复核已生成 bundle 的结构、完整性摘要和 Task 粒度，但不替代完整 Scenario 覆盖预检或 `dev.plan` 阶段门禁。
 
-finalize 成功后，必须为每个实际使用的 lane 选择一种批次收口模式。`task_covered` 只用于 frontend：当 frontend 的每个 TASK 都有 required 且动作匹配的 compile/build/typecheck 命令，并且没有额外未覆盖的工程风险时使用：
-
-```bash
-python "${pluginPath}/hooks/plan_writer.py" set-batch-validation-mode --feature "${feature}" --lane frontend --mode task_covered
-```
-
-否则只添加能够覆盖 TASK 盲区的 required 批次命令；添加命令会把该 lane 切换为 `commands`：
+finalize 成功后，必须为每个实际使用的 lane 添加一条 required 编译命令，批次统一使用 `mode=commands`：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --feature "${feature}" --lane backend --command "<BACKEND_COMPILE_OR_BUILD>" --kind compile --code-workspace "<BACKEND_MODULE>"
-python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --feature "${feature}" --lane frontend --command "<FRONTEND_BUILD_OR_TYPECHECK>" --kind build --code-workspace "<FRONTEND_MODULE>"
+python "${pluginPath}/hooks/plan_writer.py" add-batch-validation-command --feature "${feature}" --lane frontend --command "<FRONTEND_COMPILE_OR_BUILD>" --kind compile --code-workspace "<FRONTEND_MODULE>"
 ```
 
-backend 请求 `task_covered` 会直接失败，且不能用 TASK 的 `mvn test` 省略 Batch 编译。同一 lane 只使用一个 workspace 时 writer 可自动选择；使用多个仓库时必须为每个 workspace 分别添加 required 命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。确有跨 lane/跨批次集成检查时，再用 `add-project-validation-command --kind integration_test|e2e_test|static_check` 添加可选最终检查。
+同一 lane 只使用一个 workspace 时 writer 可自动选择；使用多个仓库时必须为每个 workspace 分别添加 required 命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。跨 lane/跨批次集成检查属于后续 UTest/E2E 阶段，不作为 Code 完成门禁。
 
-Plan 阶段不再生成独立 smoke 计划。每个 Batch 的测试闭环必须直接落在 TASK `validationCommands`、`task_covered` 或 `batchValidation.commands` 中并由 runner 实际执行；只有测试文件但没有可执行命令和 AC 覆盖关系，不视为有效验证。
+Plan 阶段不再生成独立 smoke 计划。每个 Batch 的 Code 收口只落在 `batchValidation.commands` 的 required `kind=compile` 命令中；frontend 命令的 argv 可以是 build/typecheck，但不得执行或串联测试。TASK `validationCommands` 继续投影为 `testIntent`，由后续 UTest/E2E 阶段执行。
 
 完成任务、Batch 和可选项目验证配置后，运行 `python "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`。阶段门禁见文末「整体完成条件」；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代它。
 

@@ -526,21 +526,19 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-plan skill must keep the pre-write task splitting algorithm: " + ", ".join(missing),
         )
 
-    def test_code_skill_requires_batch_session_entry_and_handoff_stop(self) -> None:
+    def test_code_skill_requires_compile_only_batch_session_actions(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
             "task_runner.py\" code-session",
             "每次进入 Code 阶段或在新对话恢复 Code 时",
             "execute_active_batch",
-            "run_project_check",
+            "run_batch_compile",
+            "start_batch_compile_repair",
+            "continue_batch_compile_repair",
             "code_done_ready",
             "stop_and_open_new_conversation",
-            "原样输出 `userMessage`",
-            "立即结束当前回复",
             "不得在同一对话再次调用 `code-session`",
-            "requiresNewConversation",
             "协议层约束",
-            "宿主未提供 conversation ID",
             "explorationCaches",
             "full_bounded_explore",
             "task_scope_only",
@@ -557,7 +555,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertEqual(
             missing,
             [],
-            "autodev-code must enforce Code session entry and batch handoff stop: " + ", ".join(missing),
+            "autodev-code must enforce compile-only Code session actions: " + ", ".join(missing),
         )
 
     def test_code_skill_requires_same_batch_continuation(self) -> None:
@@ -596,15 +594,13 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-code must protect task snapshot baselines: " + ", ".join(missing),
         )
 
-    def test_code_skill_defines_transient_validation_files(self) -> None:
+    def test_code_skill_forbids_test_file_changes(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "transientValidationFiles",
-            "Code 阶段新建",
-            "`src/test`、`test`、`tests`",
-            "不进入正式 `changedFiles`",
-            "即使被暂存也不改变该分类",
-            "start 前已有的测试文件若被修改",
+            "不得创建或修改测试文件",
+            "code_stage_test_changes_forbidden",
+            "测试文件变更会被拒绝",
+            "后续 UTest/E2E 阶段",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -628,7 +624,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "批次边界",
             "shared/integration",
             "deferredCacheUpdate",
-            "transientValidationFiles",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -644,14 +639,16 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "`scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生",
             "`scope.paths` 只写相对该 workspace 的提示性路径",
             "`validationCommands[].cwd` 保持 Git 根相对路径",
-            "domain、test、resources",
+            "DTO、domain、resources、迁移或配置",
+            "测试文件和跨 workspace 变更仍然拒绝",
             "`repoId:relative/path`",
         ]
         code_required = [
             "必须与 task `scope.workspaceRoots` 声明的位置完全一致",
             "`scopePathBase=requested_code_workspace`",
             "`task_run_requested_workspace_mismatch`",
-            "DTO/domain/test/resources/迁移/配置等同 workspace 文件无需补 scope 或重建 digest",
+            "DTO/domain/resources/迁移/配置",
+            "测试文件变更会被拒绝",
         ]
         missing = [phrase for phrase in plan_required if phrase not in plan]
         missing.extend(phrase for phrase in code_required if phrase not in code)

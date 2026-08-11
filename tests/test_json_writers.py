@@ -21,11 +21,11 @@ if str(AUTODEV_HOOKS) not in sys.path:
 from hooks.json_writer_common import parse_postcheck_output, shell_join  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
-    BATCH_VALIDATION_KINDS,
     MAX_BATCH_TASKS,
     TASK_VALIDATION_KINDS,
     task_set_digest,
 )
+from hooks.plan_writer import _annotate_validation_test_plan  # noqa: E402
 from hooks.stage_gate import validate_stage  # noqa: E402
 from skills.autodev.hooks.artifact_check import run_postcheck  # noqa: E402
 
@@ -171,6 +171,12 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                 "taskSetStatus": "finalized",
                 "activeBatchId": "B001",
                 "nextBatchId": None,
+                "taskValidationPolicy": {
+                    "mode": "defer_to_test_stages",
+                    "orchestration": "inline",
+                    "codeGate": "batch_compile_only",
+                    "maxTestStageRepairAttempts": 3,
+                },
                 "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
                 "batches": [{
                     "id": "B001", "path": "plans/B001/plan.json", "title": "cap",
@@ -491,24 +497,14 @@ class JsonWriterTests(unittest.TestCase):
                 )
             )
             backend_task = next(task for task in draft["tasks"] if task["id"] == "T001")
-            self.assertEqual(
-                backend_task["validationTestPlan"],
-                [
-                    {
-                        "commandId": "VAL-T001-01",
-                        "framework": "maven",
-                        "targets": [
-                            {
-                                "selector": "TargetTest",
-                                "mode": "create_in_code",
-                                "sourceFiles": [],
-                            }
-                        ],
-                        "cwd": "backend/service",
-                        "repo": "backend-repo",
-                    }
-                ],
-            )
+            self.assertEqual(len(backend_task["validationTestPlan"]), 1)
+            test_intent = backend_task["validationTestPlan"][0]
+            self.assertEqual(test_intent["commandId"], "VAL-T001-01")
+            self.assertEqual(test_intent["assetType"], "unit_test")
+            self.assertEqual(test_intent["executionStage"], "with_code")
+            self.assertNotIn("targets", test_intent)
+            self.assertNotIn("create_in_code", json.dumps(test_intent))
+            self.assertTrue(test_intent["testIntent"]["behavior"])
 
             frontend_detail = _draft_detail_body(frontend)
             frontend_detail["validationCommands"][0].update({"argv": ["npm", "test"]})
@@ -740,37 +736,12 @@ class JsonWriterTests(unittest.TestCase):
             self.assertIn("执行模式: external_dependency", plan_md)
             self.assertIn("system=LF39.05_bczhaohuapi", plan_md)
 
-    def test_plan_writer_rejects_create_in_code_for_verified_existing_task(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir = _workspace(root)
-            _write_specs(feature_dir)
-            _write_design(feature_dir)
-            _, module = _code_module(root)
-            task = _plan_task_body()
-            task["executionMode"] = "verified_existing"
-            group_file = _write_task_groups(root / "task-groups.json", [task])
-            prepared = _run(
-                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
-                "--feature", "alpha", "--group-file", str(group_file),
-                "--code-workspace", str(module),
-            )
-            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
-
-            detail = _draft_detail_body(task)
-            detail["validationCommands"][0]["argv"] = ["mvn", "test", "-Dtest=MissingTest"]
-            detail_path = root / "T001-detail.json"
-            detail_path.write_text(json.dumps(detail), encoding="utf-8")
-            detailed = _run(
-                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
-                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
-            )
-            self.assertNotEqual(detailed.returncode, 0)
-            self.assertIn("T001.verified_existing_create_in_code_forbidden", detailed.stdout)
-            draft_text = (
-                feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
-            ).read_text(encoding="utf-8")
-            self.assertNotIn("MissingTest", draft_text)
+    def test_plan_writer_default_never_emits_create_in_code_for_verified_existing_task(self) -> None:
+        task = _plan_task_body()
+        annotated = _annotate_validation_test_plan(task, [])
+        self.assertEqual(annotated["validationTestPlan"][0]["commandId"], "VAL-T001-01")
+        self.assertNotIn("targets", annotated["validationTestPlan"][0])
+        self.assertNotIn("create_in_code", json.dumps(annotated["validationTestPlan"]))
 
     def test_plan_writer_prepare_draft_projects_backend_and_frontend_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1834,17 +1805,14 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["taskValidationPolicy"],
             {
-                "mode": "deferred_batch",
-                "orchestration": "single_batch_subagent",
-                "failStrategy": "repair_then_defer",
-                "maxConcurrency": 1,
-                "agentScope": "task_and_batch_validation_commands",
-                "maxRepairAttempts": 2,
-                "environmentFailureDisposition": "defer",
-                "exhaustedRepairDisposition": "defer",
-                "taskCommandTiming": "after_all_batch_tasks_implemented",
-                "batchCommandTiming": "after_all_task_commands_pass",
+                "mode": "defer_to_test_stages",
+                "orchestration": "inline",
+                "codeGate": "batch_compile_only",
+                "maxTestStageRepairAttempts": 3,
+                "taskCommandTiming": "test_stages_only",
+                "codeCommandTiming": "after_all_batch_tasks_implemented",
                 "validationTarget": "batch_final_snapshot",
+                "codeStageTestExecution": "forbidden",
             },
         )
         self.assertNotIn("status", contract["taskInputExample"])
@@ -1905,29 +1873,18 @@ class JsonWriterTests(unittest.TestCase):
         self.assertTrue(contract["validationCommandPolicy"]["packageScriptMustExist"])
         self.assertTrue(contract["validationCommandPolicy"]["mavenTargetMustBeConcreteClass"])
         self.assertEqual(
-            contract["validationTestPlanPolicy"]["modes"],
-            ["reuse_existing", "create_in_code"],
-        )
-        self.assertFalse(
-            contract["validationTestPlanPolicy"]["createdTestRecordedAsChangedFile"]
+            contract["validationTestPlanPolicy"]["targetModes"],
+            [],
         )
         self.assertEqual(
-            contract["validationTestPlanPolicy"]["byExecutionMode"],
-            {
-                "code": ["reuse_existing", "create_in_code"],
-                "verified_existing": ["reuse_existing"],
-                "external_dependency": [],
-            },
+            contract["validationTestPlanPolicy"]["representation"],
+            "test_intent_only",
         )
         self.assertEqual(
-            contract["validationTestPlanPolicy"]["missingTargetActionByExecutionMode"],
-            {
-                "code": "continue_current_implementation_and_create_validation_tests",
-                "verified_existing": "return_to_plan_and_reuse_existing_validation",
-                "external_dependency": "record_external_dependency_without_local_test",
-            },
+            contract["validationTestPlanPolicy"]["createInCodeAllowed"],
+            False,
         )
-        self.assertEqual(contract["batchValidationKinds"], sorted(BATCH_VALIDATION_KINDS))
+        self.assertEqual(contract["batchValidationKinds"], ["compile"])
         self.assertEqual(
             contract["projectValidationCommand"]["allowedKinds"],
             ["e2e_test", "integration_test", "static_check"],
@@ -1947,11 +1904,12 @@ class JsonWriterTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            contract["batchValidationMode"]["command"],
-            "set-batch-validation-mode --lane <backend|frontend> --mode <task_covered|commands>",
+            contract["batchValidationMode"],
+            {
+                "mode": "commands",
+                "requiredGate": "one required compile command per used lane and workspace",
+            },
         )
-        self.assertIn("frontend lane only", contract["batchValidationMode"]["taskCoveredRequirements"])
-        self.assertIn("commands mode", contract["batchValidationMode"]["backendRequirement"])
         self.assertEqual(contract["workspaceContract"]["field"], "scope.workspaceRoots")
         self.assertEqual(contract["workspaceContract"]["taskBindingField"], "workspaceRef")
         self.assertEqual(contract["workspaceContract"]["maxWorkspaceRefsPerTask"], 1)
@@ -1966,10 +1924,10 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["validationEnvironmentPolicy"],
             {
-                "preflightBeforeRun": False,
-                "missingExecutableResult": "blocked_evidence_and_defer",
-                "runtimeEnvironmentResult": "blocked_evidence_and_defer",
-                "requiredActions": ["record_deferred_and_continue"],
+                "preflightBeforeRun": True,
+                "missingExecutableResult": "block_batch_compile",
+                "runtimeEnvironmentResult": "block_batch_compile",
+                "requiredActions": ["fix_compile_environment_and_retry_batch_compile"],
                 "planOrDigestRebuildRequired": False,
             },
         )
@@ -2025,7 +1983,6 @@ class JsonWriterTests(unittest.TestCase):
                 "command": "finalize-task-draft",
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
-                    "set-batch-validation-mode",
                     "add-batch-validation-command",
                     "add-project-validation-command",
                     "render-md",
