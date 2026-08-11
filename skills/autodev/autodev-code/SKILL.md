@@ -54,6 +54,7 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_compile`：执行一次 `batch-compile`，不得先执行任何 TASK 测试命令。
 - `start_batch_compile_repair` / `continue_batch_compile_repair`：按 runner 返回的 `repairOwnerTaskIds` 由模型修复生产代码，最多 3 次，不得要求用户手工修改。
+- `stop_and_open_new_conversation`：当前批次已完成；向用户显示 runner 返回的 `userMessage` 并立即结束当前对话，不得继续读取、探索或启动下一批次。
 - `code_done_ready`：所有批次均已通过生产代码编译门禁，继续 Code 完成门禁。
 
 入口返回失败、活动批次缺失或 handoff 不一致时必须停止，不得猜测 batch ID、直接编辑计划或绕过入口启动 Task。`code-session` 只允许在 Code 会话入口调用；收到批次完成的 `stop_and_open_new_conversation` 后，不得在同一对话再次调用 `code-session`。
@@ -157,14 +158,16 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 
 `batch-compile` 是 Code 阶段唯一构建命令，只编译生产代码，不运行 TASK 测试，也不创建测试资产。长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
 
-- 返回 `compileStatus=passed` 后，runner 将本批 `implemented` TASK 标记为 `done` 并返回下一步；按 `continuation` 继续，不再进入旧验证流程。
-- 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型先执行下列命令，再根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码：
+- 返回 `compileStatus=passed` 后，runner 将本批 `implemented` TASK 标记为 `done` 并返回下一步。非末批返回 `requiredAction=stop_and_open_new_conversation`、`stopAfterBatch=true` 和 `BATCH_HANDOFF.json`，当前对话必须立即停止；末批才按 `continuation` 进入 `code_done_ready`。不再进入旧验证流程。
+- 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码。推荐先执行下列命令建立 repair run，再修改代码：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" start-batch-compile-repair --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<REPAIR_OWNER_TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-修复完成后用返回的 runId 执行 `finish-implementation`，再重新执行同一批次的 `batch-compile`。不得让用户手工修改，也不得在 repair 中创建/修改测试或执行测试命令。每批最多 3 次编译 repair；达到上限后按 `escalate_batch_compile_repair_exhausted` 阻断，不得开启第 4 次或绕过状态。
+如果模型已先完成生产代码修复，再执行 `start-batch-compile-repair`，不得回滚修复：runner 会以失败编译快照为基线收编真实文件差异，并在返回中设置 `adoptedPreStartChanges=true`。随后即使不再修改文件，也必须用返回的 runId 执行 `finish-implementation`，生成新的 implementation evidence，再重新执行同一批次的 `batch-compile`。收编仍受 workspace 边界和测试文件禁改规则约束。
+
+不得让用户手工修改，不得自行执行 `mvn compile`、前端 build/typecheck 或其他旁路编译，也不得在 repair 中创建/修改测试或执行测试命令。每批最多 3 次编译 repair；达到上限后按 `escalate_batch_compile_repair_exhausted` 阻断，不得开启第 4 次或绕过状态。
 
 ### 回检与交接
 

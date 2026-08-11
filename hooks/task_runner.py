@@ -1808,9 +1808,20 @@ def _finish_implementation_unlocked(
         raise TaskRunnerError(f"task_run_not_implementation_finishable:{state.get('status')}")
 
     file_changes, final_repositories = _repository_changes(state, repositories)
+    repair_context = state.get("repairContext")
+    repair_context = repair_context if isinstance(repair_context, dict) else None
+    adopted_file_changes = (
+        repair_context.get("adoptedFileChanges", [])
+        if isinstance(repair_context, dict)
+        else []
+    )
+    adopted_file_changes = (
+        adopted_file_changes if isinstance(adopted_file_changes, list) else []
+    )
+    repair_file_changes = _merge_file_changes(adopted_file_changes, file_changes)
     test_asset_changes = sorted({
         path
-        for change in file_changes
+        for change in repair_file_changes
         for path in (change.get("path"), change.get("fromPath"))
         if isinstance(path, str)
         and _is_transient_validation_path(path.split(":", 1)[-1])
@@ -1827,12 +1838,10 @@ def _finish_implementation_unlocked(
         task_id,
         run_id,
     )
-    repair_context = state.get("repairContext")
-    repair_context = repair_context if isinstance(repair_context, dict) else None
     if (
         isinstance(repair_context, dict)
         and repair_context.get("batchCompileRepair") is True
-        and not file_changes
+        and not repair_file_changes
     ):
         raise TaskRunnerError(
             "batch_compile_repair_requires_code_changes",
@@ -1841,14 +1850,9 @@ def _finish_implementation_unlocked(
             taskId=task_id,
             repairAttempt=repair_context.get("batchCompileRepairAttempt"),
         )
-    adopted_file_changes = (
-        repair_context.get("adoptedFileChanges", [])
-        if isinstance(repair_context, dict)
-        else []
-    )
     cumulative_file_changes = _merge_file_changes(
         historical_file_changes,
-        adopted_file_changes if isinstance(adopted_file_changes, list) else None,
+        adopted_file_changes,
         file_changes,
     )
     adopted_transient_files = (
@@ -2017,6 +2021,140 @@ def _repository_state_sha256(repository_state: list[dict[str, Any]]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(content).hexdigest()
+
+
+def _batch_compile_snapshot_path(feature_dir: Path, batch_id: str) -> Path:
+    return feature_dir / ".task-runs" / ".batch-compile" / f"{batch_id}.json"
+
+
+def _persist_batch_compile_workspace_state(
+    feature_dir: Path,
+    feature: str,
+    batch_id: str,
+    compile_result: dict[str, Any],
+) -> None:
+    """Keep the failed compile baseline needed to adopt a model's early repair."""
+
+    repository_state = compile_result.get("workspaceState")
+    snapshot_sha256 = compile_result.get("workspaceSnapshotSha256")
+    if (
+        compile_result.get("compileStatus") != "failed"
+        or not isinstance(repository_state, list)
+        or not repository_state
+        or not isinstance(snapshot_sha256, str)
+        or _repository_state_sha256(repository_state) != snapshot_sha256
+    ):
+        return
+    atomic_write_json(
+        _batch_compile_snapshot_path(feature_dir, batch_id),
+        {
+            "version": 1,
+            "featureId": feature,
+            "batchId": batch_id,
+            "commandId": compile_result.get("commandId"),
+            "compileStatus": "failed",
+            "workspaceSnapshotSha256": snapshot_sha256,
+            "repositories": repository_state,
+            "capturedAt": _utc_now(),
+        },
+    )
+
+
+def _repository_state_matches(
+    repository_state: Any,
+    expected_snapshot_sha256: str,
+) -> bool:
+    return (
+        isinstance(repository_state, list)
+        and bool(repository_state)
+        and _repository_state_sha256(repository_state) == expected_snapshot_sha256
+    )
+
+
+def _failed_compile_repository_state(
+    feature_dir: Path,
+    feature: str,
+    batch_id: str,
+    command_id: Any,
+    expected_snapshot_sha256: str,
+) -> list[dict[str, Any]] | None:
+    """Load an exact failed-compile baseline, including pre-upgrade run fallback."""
+
+    snapshot_path = _batch_compile_snapshot_path(feature_dir, batch_id)
+    try:
+        record = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = None
+    if (
+        isinstance(record, dict)
+        and record.get("version") == 1
+        and record.get("featureId") == feature
+        and record.get("batchId") == batch_id
+        and record.get("commandId") == command_id
+        and record.get("compileStatus") == "failed"
+        and record.get("workspaceSnapshotSha256") == expected_snapshot_sha256
+        and _repository_state_matches(record.get("repositories"), expected_snapshot_sha256)
+    ):
+        return [item for item in record["repositories"] if isinstance(item, dict)]
+
+    # Older runner versions did not persist a dedicated compile snapshot. A
+    # completed task run normally has the same final repository state because
+    # compile outputs are ignored. Reuse it only when its digest is exact.
+    for run_path in sorted((feature_dir / ".task-runs").glob("T*/*.json"), reverse=True):
+        try:
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(run, dict)
+            or run.get("featureId") != feature
+            or run.get("batchId") != batch_id
+            or strict_task_run_integrity_error(run) is not None
+        ):
+            continue
+        for field in ("finalRepositories", "abortRepositories", "repositories"):
+            repository_state = run.get(field)
+            if _repository_state_matches(repository_state, expected_snapshot_sha256):
+                return [item for item in repository_state if isinstance(item, dict)]
+    return None
+
+
+def _repository_state_file_changes(
+    before_state: list[dict[str, Any]],
+    after_state: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    before_by_id = {
+        str(item.get("id")): item
+        for item in before_state
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    after_by_id = {
+        str(item.get("id")): item
+        for item in after_state
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if not before_by_id or set(before_by_id) != set(after_by_id):
+        raise TaskRunnerError("batch_compile_repair_repository_state_mismatch")
+    multiple = len(before_by_id) > 1
+    changes: list[dict[str, str]] = []
+    for repository_id in sorted(before_by_id):
+        before = before_by_id[repository_id]
+        after = after_by_id[repository_id]
+        if before.get("path") != after.get("path"):
+            raise TaskRunnerError("batch_compile_repair_repository_state_mismatch")
+        before_snapshot = before.get("snapshot")
+        after_snapshot = after.get("snapshot")
+        if not isinstance(before_snapshot, dict) or not isinstance(after_snapshot, dict):
+            raise TaskRunnerError("batch_compile_repair_repository_snapshot_missing")
+        repository_changes = _snapshot_changes(before_snapshot, after_snapshot)
+        if multiple:
+            for change in repository_changes:
+                change["path"] = f"{repository_id}:{change['path']}"
+                if "fromPath" in change:
+                    change["fromPath"] = f"{repository_id}:{change['fromPath']}"
+                change["repository"] = repository_id
+        changes.extend(repository_changes)
+    return changes
 
 
 
@@ -2526,15 +2664,63 @@ def start_batch_compile_repair(
                 requestedCodeWorkspaces=actual_workspaces,
             )
         repositories = _resolve_repositories(requested_workspaces)
-        current_snapshot = _repository_state_sha256(_repository_state(repositories))
+        current_repository_state = _repository_state(repositories)
+        current_snapshot = _repository_state_sha256(current_repository_state)
         expected_snapshot = batch_compile.get("workspaceSnapshotSha256")
+        if not isinstance(expected_snapshot, str):
+            raise TaskRunnerError("batch_compile_repair_workspace_snapshot_missing")
+
+        adopted_file_changes: list[dict[str, str]] = []
         if current_snapshot != expected_snapshot:
-            raise TaskRunnerError(
-                "workspace_changed_before_batch_compile_repair",
-                requiredAction="restore_failed_compile_snapshot",
-                expectedWorkspaceSnapshotSha256=expected_snapshot,
-                currentWorkspaceSnapshotSha256=current_snapshot,
+            failed_repository_state = _failed_compile_repository_state(
+                feature_dir,
+                feature,
+                batch_id,
+                batch_compile.get("commandId"),
+                expected_snapshot,
             )
+            if failed_repository_state is None:
+                raise TaskRunnerError(
+                    "workspace_changed_before_batch_compile_repair",
+                    requiredAction="restore_failed_compile_snapshot",
+                    expectedWorkspaceSnapshotSha256=expected_snapshot,
+                    currentWorkspaceSnapshotSha256=current_snapshot,
+                    snapshotRecoveryAvailable=False,
+                )
+            adopted_file_changes = _repository_state_file_changes(
+                failed_repository_state,
+                current_repository_state,
+            )
+            if not adopted_file_changes:
+                raise TaskRunnerError(
+                    "workspace_changed_before_batch_compile_repair",
+                    requiredAction="restore_failed_compile_snapshot",
+                    expectedWorkspaceSnapshotSha256=expected_snapshot,
+                    currentWorkspaceSnapshotSha256=current_snapshot,
+                    snapshotRecoveryAvailable=True,
+                )
+            changed_files = _changed_files(adopted_file_changes)
+            test_asset_changes = sorted({
+                path
+                for change in adopted_file_changes
+                for path in (change.get("path"), change.get("fromPath"))
+                if isinstance(path, str)
+                and _is_transient_validation_path(path.split(":", 1)[-1])
+            })
+            if test_asset_changes:
+                raise TaskRunnerError(
+                    "code_stage_test_changes_forbidden",
+                    requiredAction="restore_test_changes_and_retry_start_batch_compile_repair",
+                    testFiles=test_asset_changes,
+                )
+            scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
+            if not _paths_within_workspace_contexts(changed_files, scope_workspaces):
+                raise TaskRunnerError(
+                    "out_of_scope_changes_detected:" + ",".join(changed_files),
+                    requiredAction="restore_out_of_scope_changes_and_retry_start_batch_compile_repair",
+                    changedFiles=changed_files,
+                    requestedCodeWorkspaces=actual_workspaces,
+                )
 
         repair_attempt = attempts + 1
         repair_context = {
@@ -2545,6 +2731,14 @@ def start_batch_compile_repair(
             "failureCategory": batch_compile.get("failureCategory"),
             "diagnosticPaths": list(batch_compile.get("diagnosticPaths", [])),
         }
+        if adopted_file_changes:
+            repair_context.update(
+                {
+                    "adoptedFileChanges": adopted_file_changes,
+                    "adoptedWorkspaceSnapshotSha256": current_snapshot,
+                    "adoptedPreStartChanges": True,
+                }
+            )
         state = _start_task_unlocked(
             workspace,
             feature,
@@ -2573,7 +2767,13 @@ def start_batch_compile_repair(
             "taskId": task_id,
             "attempt": repair_attempt,
             "maxAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
-            "requiredAction": "model_fix_then_finish_implementation",
+            "adoptedPreStartChanges": bool(adopted_file_changes),
+            "adoptedChangedFiles": _changed_files(adopted_file_changes),
+            "requiredAction": (
+                "finish_implementation_then_retry_batch_compile"
+                if adopted_file_changes
+                else "model_fix_then_finish_implementation"
+            ),
         }
         return state
 
@@ -2765,9 +2965,8 @@ def _run_batch_compile(
             task_id="__batch_compile__",
         )
         requested_paths = [str(path.resolve()) for path in requested_workspaces]
-        workspace_snapshot_sha256 = _repository_state_sha256(
-            _repository_state(repositories)
-        )
+        workspace_state = _repository_state(repositories)
+        workspace_snapshot_sha256 = _repository_state_sha256(workspace_state)
         implementation_evidence_by_task = {
             str(task.get("id")): str(task.get("latestImplementationEvidenceId"))
             for task in batch_tasks
@@ -2784,6 +2983,7 @@ def _run_batch_compile(
                 "commandId": command_id,
                 "requestedCodeWorkspaces": requested_paths,
                 "workspaceSnapshotSha256": workspace_snapshot_sha256,
+                "workspaceState": workspace_state,
                 "implementationEvidenceByTask": implementation_evidence_by_task,
                 "implementationRevisionByTask": implementation_revision_by_task,
             }
@@ -2814,6 +3014,7 @@ def _run_batch_compile(
             "repairOwnerTaskIds": repair_owner_ids,
             "requestedCodeWorkspaces": requested_paths,
             "workspaceSnapshotSha256": workspace_snapshot_sha256,
+            "workspaceState": workspace_state,
             "implementationEvidenceByTask": implementation_evidence_by_task,
             "implementationRevisionByTask": implementation_revision_by_task,
         }
@@ -2878,6 +3079,12 @@ def _integrate_batch_compile_result(
 
     返回更新后的状态和下一步动作。
     """
+    _persist_batch_compile_workspace_state(
+        _feature_dir(workspace, feature),
+        feature,
+        batch_id,
+        compile_result,
+    )
     try:
         result = update_batch_compile_status(workspace, feature, batch_id, compile_result)
     except PlanWriterInputError as exc:
@@ -2897,11 +3104,38 @@ def _integrate_batch_compile_result(
             mark_result = mark_batch_tasks_done_after_compile(workspace, feature, batch_id)
             if not mark_result.ok:
                 raise TaskRunnerError(
-                    mark_result.error_code,
-                    detail=mark_result.detail,
+                    "mark_batch_tasks_done_after_compile_failed",
+                    planWriterErrors=mark_result.errors or [],
                 )
         except PlanWriterInputError as exc:
             raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
+
+        batch_handoff = (
+            mark_result.data.get("batchHandoff")
+            if isinstance(mark_result.data, dict)
+            else None
+        )
+        if isinstance(batch_handoff, dict):
+            continuation = {
+                "action": batch_handoff.get(
+                    "requiredAction",
+                    "stop_and_open_new_conversation",
+                ),
+                "completedBatchId": batch_handoff.get("completedBatchId", batch_id),
+                "nextBatchId": batch_handoff.get("nextBatchId"),
+                "requiresNewConversation": True,
+                "userMessage": batch_handoff.get("userMessage"),
+            }
+            return {
+                "compileStatus": "passed",
+                "requiredAction": continuation["action"],
+                "batchId": batch_id,
+                "batchHandoff": batch_handoff,
+                "stopAfterBatch": True,
+                "requiresNewConversation": True,
+                "userMessage": batch_handoff.get("userMessage"),
+                "continuation": continuation,
+            }
 
         continuation = _code_session_unlocked(workspace, feature)
         return {

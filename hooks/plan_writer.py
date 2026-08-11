@@ -4575,6 +4575,61 @@ def begin_batch_compile_repair(
         return _write(workspace, feature, data)
 
 
+def _build_compile_batch_handoff(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    batch_tasks: list[dict[str, Any]],
+    batch_compile: dict[str, Any],
+    next_entry: dict[str, Any],
+) -> dict[str, Any]:
+    next_batch_id = str(next_entry.get("id"))
+    user_message = (
+        f"当前批次 {batch_id} 已通过生产代码编译门禁。"
+        f"请打开新的对话继续执行 {next_batch_id}。"
+    )
+    return {
+        "version": 1,
+        "featureId": feature,
+        "completedBatchId": batch_id,
+        "nextBatchId": next_batch_id,
+        "completedTaskIds": [str(task.get("id")) for task in batch_tasks],
+        "implementationEvidenceIds": [
+            evidence_id
+            for task in batch_tasks
+            for evidence_id in task.get("implementationEvidenceIds", [])
+            if isinstance(evidence_id, str)
+        ],
+        "batchCompile": {
+            field: copy.deepcopy(batch_compile.get(field))
+            for field in (
+                "status",
+                "commandId",
+                "workspaceSnapshotSha256",
+                "implementationEvidenceByTask",
+                "implementationRevisionByTask",
+            )
+        },
+        "nextBatch": {
+            "title": str(next_entry.get("title", "")),
+            "taskIds": list(next_entry.get("taskIds", [])),
+            "specRoots": list(next_entry.get("specRoots", [])),
+            "deps": list(next_entry.get("deps", [])),
+            "executionLane": next_entry.get("executionLane"),
+        },
+        "status": "awaiting_next_conversation",
+        "requiredAction": "stop_and_open_new_conversation",
+        "requiresNewConversation": True,
+        "userMessage": user_message,
+        "createdAt": _utc_now(),
+        "activationCommand": (
+            f"python hooks/task_runner.py code-session --workspace {workspace} "
+            f"--feature {feature}"
+        ),
+        "instruction": user_message,
+    }
+
+
 def mark_batch_tasks_done_after_compile(
     workspace: Path,
     feature: str,
@@ -4630,7 +4685,38 @@ def mark_batch_tasks_done_after_compile(
                 # done gate 将直接检查 batchCompile.status == passed
                 updated_count += 1
 
-        return _write(workspace, feature, data)
+        entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
+        ordered_ids = [str(entry.get("id")) for entry in entries]
+        try:
+            batch_index = ordered_ids.index(batch_id)
+        except ValueError:
+            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
+        next_entry = entries[batch_index + 1] if batch_index + 1 < len(entries) else None
+        handoff: dict[str, Any] | None = None
+        if isinstance(next_entry, dict):
+            next_batch_id = str(next_entry.get("id"))
+            data["status"] = "awaiting_next_conversation"
+            data["activeBatchId"] = None
+            data["nextBatchId"] = next_batch_id
+            handoff = _build_compile_batch_handoff(
+                workspace,
+                feature,
+                batch_id,
+                [task for task in tasks if task.get("id") in task_ids],
+                batch_compile,
+                next_entry,
+            )
+
+        result = _write(workspace, feature, data)
+        if not result.ok:
+            return result
+        if handoff is None:
+            unlink_if_exists(_handoff_path(workspace, feature))
+            return result
+        handoff_changed = atomic_write_json(_handoff_path(workspace, feature), handoff)
+        if handoff_changed and not result.changed:
+            result = WriterResult(ok=True, path=result.path, changed=True)
+        return with_result_data(result, batchHandoff=handoff)
 
 
 

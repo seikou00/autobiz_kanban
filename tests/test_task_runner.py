@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import io
 import json
 import os
@@ -390,7 +391,133 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _add_second_compile_only_batch(feature_dir: Path) -> None:
+    first = _read_batch(feature_dir)
+    second_task = copy.deepcopy(first["tasks"][0])
+    second_task.update(
+        {
+            "id": "T002",
+            "title": "deliver next behavior",
+            "status": "todo",
+            "deps": ["T001"],
+            "specRefs": ["specs/next/spec.md#REQ-002", "specs/next/spec.md#SCN-002"],
+            "acceptanceCriteria": [
+                {
+                    "id": "AC-T002-01",
+                    "text": "next behavior is observable",
+                    "scenarioRefs": ["specs/next/spec.md#SCN-002"],
+                }
+            ],
+            "evidenceIds": [],
+            "implementationEvidenceIds": [],
+            "latestImplementationEvidenceId": None,
+            "validationEvidenceIds": [],
+            "completionEvidenceIds": [],
+            "latestPassEvidenceId": None,
+            "implementationRevision": 0,
+        }
+    )
+    second_task["validationCommands"][0].update(
+        {
+            "id": "VAL-T002-01",
+            "covers": ["AC-T002-01"],
+        }
+    )
+    second = copy.deepcopy(first)
+    second.update(
+        {
+            "batchId": "B002",
+            "title": "next",
+            "status": "todo",
+            "taskCount": 1,
+            "completedTaskCount": 0,
+            "completionEvidenceIds": [],
+            "taskIds": ["T002"],
+            "startedAt": None,
+            "completedAt": None,
+            "tasks": [second_task],
+        }
+    )
+    second.pop("batchCompile", None)
+    second["batchValidation"]["status"] = "pending"
+    second["batchValidation"]["commands"][0]["id"] = "BATCH-B002-VAL-001"
+    second["batchValidation"]["evidenceIds"] = []
+    second["batchValidation"]["latestPassEvidenceIds"] = []
+    second["batchValidation"]["activeRunId"] = None
+    second_path = feature_dir / "plans" / "B002" / "plan.json"
+    second_path.parent.mkdir(parents=True)
+    second_path.write_text(
+        json.dumps(second, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["nextBatchId"] = "B002"
+    root["batches"].append(
+        {
+            "id": "B002",
+            "path": "plans/B002/plan.json",
+            "title": "next",
+            "specRoots": ["specs/next/spec.md"],
+            "executionLane": "backend",
+            "deps": ["B001"],
+            "taskIds": ["T002"],
+            "status": "todo",
+        }
+    )
+    root["taskSetDigest"] = task_set_digest(root, {"B001": first, "B002": second})
+    root_path.write_text(
+        json.dumps(root, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 class TaskRunnerTest(unittest.TestCase):
+    def test_batch_compile_pass_stops_for_new_conversation_before_next_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            _add_second_compile_only_batch(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            (code / "compile-fixed.txt").write_text("compile ready\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            compiled = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            payload = json.loads(compiled.stdout)
+            self.assertEqual(payload["requiredAction"], "stop_and_open_new_conversation")
+            self.assertTrue(payload["stopAfterBatch"])
+            self.assertTrue(payload["requiresNewConversation"])
+            self.assertEqual(payload["batchHandoff"]["completedBatchId"], "B001")
+            self.assertEqual(payload["batchHandoff"]["nextBatchId"], "B002")
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(root["status"], "awaiting_next_conversation")
+            self.assertIsNone(root["activeBatchId"])
+            self.assertEqual(root["nextBatchId"], "B002")
+            handoff_path = feature_dir / "BATCH_HANDOFF.json"
+            self.assertTrue(handoff_path.is_file())
+
+            resumed = _run(
+                "code-session", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            resumed_payload = json.loads(resumed.stdout)
+            self.assertEqual(resumed_payload["action"], "execute_active_batch")
+            self.assertEqual(resumed_payload["activeBatchId"], "B002")
+            self.assertTrue(resumed_payload["activatedFromHandoff"])
+            self.assertFalse(handoff_path.exists())
+
     def test_batch_compile_failure_requires_model_repair_and_new_implementation_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -436,20 +563,11 @@ class TaskRunnerTest(unittest.TestCase):
                 "start_batch_compile_repair",
             )
 
-            manual_change = code / "manual-before-repair.txt"
-            manual_change.write_text("not controlled by a model repair run\n", encoding="utf-8")
-            changed_workspace_repair = _run(
-                "start-batch-compile-repair", "--workspace", str(workspace),
-                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
-                "--code-workspace", str(code),
-            )
-            self.assertNotEqual(changed_workspace_repair.returncode, 0)
-            self.assertEqual(
-                json.loads(changed_workspace_repair.stdout)["error"],
-                "workspace_changed_before_batch_compile_repair",
-            )
-            manual_change.unlink()
-
+            # A model may act on the compile diagnostics before it starts the
+            # formal repair run. The runner adopts that exact snapshot diff so
+            # it remains evidence-bound instead of demanding a rollback.
+            (code / "implemented.txt").write_text("implemented and repaired\n", encoding="utf-8")
+            (code / "compile-fixed.txt").write_text("fixed by model\n", encoding="utf-8")
             repair = _run(
                 "start-batch-compile-repair", "--workspace", str(workspace),
                 "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
@@ -458,7 +576,11 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
             repair_payload = json.loads(repair.stdout)
             self.assertEqual(repair_payload["repairContext"]["batchCompileRepairAttempt"], 1)
-            (code / "compile-fixed.txt").write_text("fixed by model\n", encoding="utf-8")
+            self.assertTrue(repair_payload["repairContext"]["adoptedPreStartChanges"])
+            self.assertEqual(
+                repair_payload["batchCompileRepair"]["adoptedChangedFiles"],
+                ["compile-fixed.txt", "implemented.txt"],
+            )
             repaired = _run(
                 "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
                 "--task-id", "T001", "--code-workspace", str(code),
@@ -497,6 +619,76 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertIn(
                 "B001.batch_compile_implementation_evidence_mismatch",
                 check_code_done(feature_dir),
+            )
+
+    def test_batch_compile_repair_does_not_adopt_test_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            failed = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(failed.returncode, 0)
+
+            test_file = code / "tests" / "generated_test.py"
+            test_file.parent.mkdir(parents=True)
+            test_file.write_text("assert True\n", encoding="utf-8")
+            repair = _run(
+                "start-batch-compile-repair", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
+                "--code-workspace", str(code),
+            )
+
+            self.assertNotEqual(repair.returncode, 0)
+            payload = json.loads(repair.stdout)
+            self.assertEqual(payload["error"], "code_stage_test_changes_forbidden")
+            self.assertEqual(payload["testFiles"], ["tests/generated_test.py"])
+            self.assertEqual(_read_batch(feature_dir)["batchCompile"]["repairAttempts"], 0)
+
+    def test_batch_compile_repair_adopts_changes_from_legacy_failed_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            failed = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            snapshot_path = (
+                feature_dir / ".task-runs" / ".batch-compile" / "B001.json"
+            )
+            snapshot_path.unlink()
+
+            (code / "compile-fixed.txt").write_text("fixed before runner upgrade\n", encoding="utf-8")
+            repair = _run(
+                "start-batch-compile-repair", "--workspace", str(workspace),
+                "--feature", "alpha", "--batch-id", "B001", "--task-id", "T001",
+                "--code-workspace", str(code),
+            )
+
+            self.assertEqual(repair.returncode, 0, repair.stdout + repair.stderr)
+            payload = json.loads(repair.stdout)
+            self.assertTrue(payload["repairContext"]["adoptedPreStartChanges"])
+            self.assertEqual(
+                payload["batchCompileRepair"]["adoptedChangedFiles"],
+                ["compile-fixed.txt"],
             )
 
     def test_batch_compile_model_repair_is_blocked_after_three_attempts(self) -> None:
