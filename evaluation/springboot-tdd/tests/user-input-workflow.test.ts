@@ -8,7 +8,8 @@ import {
   assertWorkflowAction,
   assertWorkflowHandoff,
   assertWorkflowProgress,
-  decodeRunDetail
+  decodeRunDetail,
+  isWorkflowStageComplete
 } from "../src/workflow.ts"
 
 test("answers every CMBDevClaw question with its recommended choice", () => {
@@ -73,6 +74,13 @@ test("accepts the Harness completed-node handoff to the next Skill", () => {
   assert.throws(() => assertWorkflowHandoff(projection, "dev.plan", "autodev-plan"), /交接节点不匹配/)
   assert.throws(() => assertWorkflowHandoff(projection, "dev.specs", "autodev-code"), /交接 nextAction 不匹配/)
   assert.throws(() => assertWorkflowHandoff(detail("in_progress", "autodev-plan"), "dev.specs", "autodev-plan"), /交接节点不匹配/)
+})
+
+test("distinguishes an unfinished stage from a completed handoff", () => {
+  assert.equal(isWorkflowStageComplete(detail("in_progress", "autodev-specs"), "dev.specs", "autodev-plan"), false)
+  assert.equal(isWorkflowStageComplete(detail("done", "autodev-plan"), "dev.specs", "autodev-plan"), true)
+  assert.equal(isWorkflowStageComplete(detail("done", "autodev-code"), "dev.specs", "autodev-plan"), false)
+  assert.equal(isWorkflowStageComplete(detail("done", "autodev-plan"), "dev.specs"), true)
 })
 
 test("requires observable Harness progress", () => {

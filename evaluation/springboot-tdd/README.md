@@ -57,6 +57,8 @@ npm run eval -- run
 
 Harness stage handoff keeps `currentNodeId` on the node that just reached `done` and exposes the next stage through that completed state's `nextAction`. The full-chain driver validates both fields before invoking the next fixed Skill.
 
+If an agent turn ends before the current Skill writes its completion checkpoint, the driver continues the same Skill in the same thread up to two times within the original stage and total time budgets. Each continuation remains explicitly attributed to the fixed plugin Skill; the driver still rejects a stage that does not reach the exact completed-node handoff.
+
 Resume only completed/recorded batch state with:
 
 ```bash

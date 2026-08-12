@@ -130,6 +130,15 @@ export function assertWorkflowHandoff(
   return detail.nextAction
 }
 
+export function isWorkflowStageComplete(
+  detail: RunDetailProjection,
+  nodeId: string,
+  expectedNextSkill?: string
+): boolean {
+  if (detail.currentNodeId !== nodeId || detail.nodeStatuses[nodeId] !== "done") return false
+  return expectedNextSkill === undefined || detail.nextAction?.slashSkill === expectedNextSkill
+}
+
 export function assertWorkflowProgress(before: RunDetailProjection, after: RunDetailProjection): void {
   const changed = before.currentNodeId !== after.currentNodeId
     || before.currentNodeStatus !== after.currentNodeStatus
