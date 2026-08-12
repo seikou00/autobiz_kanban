@@ -33,6 +33,13 @@ export interface InvokeResult {
   error?: string
 }
 
+export interface WorkflowCompletionTarget {
+  projectId: string
+  slug: string
+  nodeId: string
+  nextSkill?: string
+}
+
 export async function installPlugin(
   session: CmbDevClawSession,
   config: BenchmarkConfig,
@@ -270,7 +277,8 @@ export async function invokeThread(
   threadId: string,
   message: string,
   workspacePath: string,
-  timeoutMs: number
+  timeoutMs: number,
+  completionTarget?: WorkflowCompletionTarget
 ): Promise<InvokeResult> {
   return await session.page.evaluate(async (input: {
     threadId: string
@@ -278,6 +286,7 @@ export async function invokeThread(
     modelId: string
     workspacePath: string
     timeoutMs: number
+    completionTarget?: WorkflowCompletionTarget
   }) => {
     const api = (window as any).api
     return await new Promise<InvokeResult>((resolve) => {
@@ -287,6 +296,9 @@ export async function invokeThread(
       let settled = false
       let streamCleanup = (): void => undefined
       let approvalCleanup = (): void => undefined
+      let completionTimer: number | undefined
+      let completionStopping = false
+      let completionChecking = false
       const userInputCleanup = api.userInput.onRequest(input.threadId, async (request: any) => {
         if (seenRequests.has(request.requestId)) return
         seenRequests.add(request.requestId)
@@ -306,6 +318,7 @@ export async function invokeThread(
         if (settled) return
         settled = true
         window.clearTimeout(timer)
+        if (completionTimer !== undefined) window.clearInterval(completionTimer)
         streamCleanup()
         approvalCleanup()
         userInputCleanup()
@@ -360,8 +373,38 @@ export async function invokeThread(
         if (event.type === "done") finish(false)
         if (event.type === "error") finish(false, String(event.message ?? event.error ?? "agent error"))
       }, input.modelId)
+      if (input.completionTarget) {
+        const target = input.completionTarget
+        const stopAtCompletedHandoff = async (): Promise<void> => {
+          if (settled || completionStopping || completionChecking) return
+          completionChecking = true
+          try {
+            const detail = await api.harnessBoard.getRunDetail(target.projectId, target.slug)
+            const runNode = detail?.run?.nodes?.find((node: any) => node?.id === target.nodeId)
+            if (detail?.run?.currentNodeId !== target.nodeId || runNode?.nodeStatus !== "done") return
+            if (target.nextSkill) {
+              const workflowNode = detail?.workflow?.nodes?.find((node: any) => node?.id === target.nodeId)
+              const states = [
+                ...(Array.isArray(workflowNode?.states) ? workflowNode.states : []),
+                ...(Array.isArray(detail?.workflow?.states) ? detail.workflow.states : [])
+              ]
+              const state = states.find((item: any) => item?.nodeStatus === "done")
+              if (state?.nextAction?.slashSkill !== target.nextSkill) return
+            }
+            completionStopping = true
+            await api.agent.cancel(input.threadId, { cancelWorkers: true }).catch(() => undefined)
+            finish(false)
+          } catch {
+            // The normal post-turn Harness assertion remains authoritative.
+          } finally {
+            completionChecking = false
+          }
+        }
+        completionTimer = window.setInterval(() => void stopAtCompletedHandoff(), 250)
+        void stopAtCompletedHandoff()
+      }
     })
-  }, { threadId, message, modelId: config.model.id, workspacePath, timeoutMs })
+  }, { threadId, message, modelId: config.model.id, workspacePath, timeoutMs, completionTarget })
 }
 
 export async function getRunDetail(session: CmbDevClawSession, binding: HarnessBinding): Promise<unknown> {

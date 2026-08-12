@@ -193,3 +193,66 @@ test("auto-confirms git commits only inside the isolated evaluation workspace", 
     ;(globalThis as any).window = originalWindow
   }
 })
+
+test("stops an agent turn at the exact completed Harness handoff", async () => {
+  const originalWindow = (globalThis as any).window
+  let cancelled = 0
+  try {
+    const api = {
+      userInput: { onRequest: () => () => undefined },
+      sandbox: { onApprovalRequest: () => () => undefined },
+      harnessBoard: {
+        getRunDetail: async () => ({
+          run: {
+            currentNodeId: "dev.code",
+            nodes: [{ id: "dev.code", nodeStatus: "done" }]
+          },
+          workflow: {
+            nodes: [{
+              id: "dev.code",
+              states: [{ nodeStatus: "done", nextAction: { slashSkill: "autodev-review" } }]
+            }],
+            states: []
+          }
+        })
+      },
+      agent: {
+        invoke: () => () => undefined,
+        cancel: async () => { cancelled += 1 }
+      }
+    }
+    ;(globalThis as any).window = {
+      api,
+      setTimeout: globalThis.setTimeout.bind(globalThis),
+      clearTimeout: globalThis.clearTimeout.bind(globalThis),
+      setInterval: (callback: () => void) => {
+        queueMicrotask(callback)
+        return 1
+      },
+      clearInterval: () => undefined
+    }
+    const session = {
+      page: { evaluate: async (callback: any, input: any) => await callback(input) }
+    } as any
+    const result = await invokeThread(
+      session,
+      { model: { id: "custom:test" } } as any,
+      "thread-1",
+      "run",
+      "/tmp/eval-repo",
+      1_000,
+      {
+        projectId: "project-1",
+        slug: "pet-weight-tracking",
+        nodeId: "dev.code",
+        nextSkill: "autodev-review"
+      }
+    )
+
+    assert.equal(result.timedOut, false)
+    assert.equal(result.error, undefined)
+    assert.equal(cancelled, 1)
+  } finally {
+    ;(globalThis as any).window = originalWindow
+  }
+})

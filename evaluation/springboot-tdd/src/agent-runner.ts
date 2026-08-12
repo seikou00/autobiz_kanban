@@ -130,7 +130,13 @@ export async function runAgent(
           threadId,
           turnMessage,
           dirs.repo,
-          Math.max(1, Math.floor(Math.min(stageRemainingMs, totalRemainingMs)))
+          Math.max(1, Math.floor(Math.min(stageRemainingMs, totalRemainingMs))),
+          {
+            projectId: binding.projectId,
+            slug: binding.slug,
+            nodeId,
+            ...(nextSkill ? { nextSkill } : {})
+          }
         )
         userInput.push(...invoke.userInput)
         after = decodeRunDetail(await getRunDetail(session, binding))
