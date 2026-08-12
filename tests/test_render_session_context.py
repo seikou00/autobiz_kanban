@@ -148,7 +148,14 @@ class RenderShapeTest(unittest.TestCase):
             res["agentConfig"],
             {
                 "agentMode": "solo",
-                "toolConfig": {"task": {"enabled": True}},
+                "toolConfig": {
+                    "task": {"enabled": True},
+                    "requestUserInput": {
+                        "allowAutoResolution": True,
+                        "defaultTimeoutMs": 240_000,
+                        "autoResolutionType": "select_first",
+                    },
+                },
                 "subagentConfig": {
                     "disabledBuiltinSubagents": [],
                     "customSubagentFiles": [],
@@ -161,6 +168,19 @@ class RenderShapeTest(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["sessionContext"], "")
         self.assertEqual(res["agentmdLoadStatus"], [])
+
+    def test_request_user_input_uses_platform_max_timeout_and_first_option(self):
+        config = render([], plugin_root=_plugin_root())["agentConfig"]["toolConfig"][
+            "requestUserInput"
+        ]
+        self.assertEqual(
+            config,
+            {
+                "allowAutoResolution": True,
+                "defaultTimeoutMs": 240_000,
+                "autoResolutionType": "select_first",
+            },
+        )
 
     def test_inlined_context_does_not_count_as_actual_file_read(self):
         res = render(
@@ -372,7 +392,14 @@ class RuntimePolicyTest(unittest.TestCase):
     def test_missing_arguments_or_feature_falls_back_to_defaults(self):
         expected = {
             "agentMode": "solo",
-            "toolConfig": {"task": {"enabled": True}},
+            "toolConfig": {
+                "task": {"enabled": True},
+                "requestUserInput": {
+                    "allowAutoResolution": True,
+                    "defaultTimeoutMs": 240_000,
+                    "autoResolutionType": "select_first",
+                },
+            },
             "subagentConfig": {
                 "disabledBuiltinSubagents": [],
                 "customSubagentFiles": [],
@@ -387,7 +414,14 @@ class RuntimePolicyTest(unittest.TestCase):
     def test_process_environment_is_not_used_for_node_resolution(self):
         expected = {
             "agentMode": "solo",
-            "toolConfig": {"task": {"enabled": True}},
+            "toolConfig": {
+                "task": {"enabled": True},
+                "requestUserInput": {
+                    "allowAutoResolution": True,
+                    "defaultTimeoutMs": 240_000,
+                    "autoResolutionType": "select_first",
+                },
+            },
             "subagentConfig": {
                 "disabledBuiltinSubagents": [],
                 "customSubagentFiles": [],
@@ -515,7 +549,14 @@ class RuntimePolicyTest(unittest.TestCase):
             specs["agentConfig"],
             {
                 "agentMode": "solo",
-                "toolConfig": {"task": {"enabled": False}},
+                "toolConfig": {
+                    "task": {"enabled": False},
+                    "requestUserInput": {
+                        "allowAutoResolution": True,
+                        "defaultTimeoutMs": 240_000,
+                        "autoResolutionType": "select_first",
+                    },
+                },
                 "subagentConfig": {
                     "disabledBuiltinSubagents": [],
                     "customSubagentFiles": [],

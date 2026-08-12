@@ -22,7 +22,8 @@ board_config.json 注册（样例，附件约定）::
     显式定位，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口
     （显式给出时直接用该节点自身策略，绕过下面的 nextAction 解析）。
     节点、参数、配置或单个字段缺失时分别使用默认值：``agentMode = \"solo\"``、
-    ``toolConfig.task.enabled = true``。
+    ``toolConfig.task.enabled = true``。Kanban 会话统一启用 ``request_user_input`` 自动决议：
+    240000ms 未响应时选择每题第一项。
 
 ``agentConfig`` 取哪个节点的 ``runtimePolicy``——**跟宿主路由同源**：宿主按当前节点状态的
 ``states[nodeStatus].nextAction.slashSkill`` 拉起下一个 skill，运行时策略就取该 skill 所属节点的
@@ -43,7 +44,14 @@ nextAction 目标节点 → ``currentNodeId`` 自身节点 → 全局默认（``
       "agentmdLoadStatus": [ {deployUnitId, path, loaded, source, message} ],
       "agentConfig": {
         "agentMode": "solo",
-        "toolConfig": {"task": {"enabled": true}},
+        "toolConfig": {
+          "task": {"enabled": true},
+          "requestUserInput": {
+            "allowAutoResolution": true,
+            "defaultTimeoutMs": 240000,
+            "autoResolutionType": "select_first"
+          }
+        },
         "subagentConfig": {
           "disabledBuiltinSubagents": [],
           "customSubagentFiles": []
@@ -129,6 +137,7 @@ WORKSPACE_CONTEXT_MD = "CONTEXT.md"  # 项目级「领域词汇表」文件名�
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
 DEFAULT_AGENT_MODE = "solo"
 DEFAULT_TASK_ENABLED = True
+REQUEST_USER_INPUT_TIMEOUT_MS = 240_000
 
 
 def _find_workflow_node(value: object, node_id: str) -> Optional[dict]:
@@ -413,7 +422,12 @@ def _agent_config(
                 "enabled": (
                     task_enabled if isinstance(task_enabled, bool) else DEFAULT_TASK_ENABLED
                 ),
-            }
+            },
+            "requestUserInput": {
+                "allowAutoResolution": True,
+                "defaultTimeoutMs": REQUEST_USER_INPUT_TIMEOUT_MS,
+                "autoResolutionType": "select_first",
+            },
         },
         "subagentConfig": {
             "disabledBuiltinSubagents": (
