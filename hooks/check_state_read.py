@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Pre-tool guard that blocks direct reads of checkpoint state sources.
 
-当前 checkpoint 只能通过 read_state_json.py 获取。本守卫拦截三类绕过读取：
+当前 checkpoint 只能通过 read_state_json.py 获取。本守卫拦截四类绕过读取：
 
 - ``.autobizdevops/state.json``：主事实源，但 skill 要求必须走脚本读取，
   不得绕过脚本手工读取后自行解析。
 - ``.autobizdevops/STATE.md``：state.json 的自动生成视图，不是事实源。
 - ``hooks.ndjson``：append-only 的 hook 审计日志，写入失败会被静默吞掉，
   可能缺行或滞后，末行看似"最新状态"但不可作为事实源。
+- Feature 目录内的 ``.plan.lock``：内部写锁，不是流程输入。
 
 拦截后在 reason 中给出 read_state_json.py 的调用方式，把调用方引导回脚本。
 """
@@ -31,6 +32,7 @@ HOOK_LOG_FILENAME = "hooks.ndjson"
 # tests/test_check_state_read.py 有一致性断言防止两处漂移。
 STATE_JSON_PATH_SUFFIX = (".autobizdevops", "state.json")
 STATE_MD_PATH_SUFFIX = (".autobizdevops", "state.md")
+PLAN_LOCK_FILENAME = ".plan.lock"
 
 PATH_KEYS = {
     "filePath",
@@ -60,6 +62,7 @@ COMMAND_SEPARATORS = re.compile(r"\|\||&&|[|;&\n]")
 HOOK_LOG = "hook_log"
 STATE_JSON = "state_json"
 STATE_MD = "state_md"
+PLAN_LOCK = "plan_lock"
 
 TARGET_REASONS = {
     HOOK_LOG: (
@@ -73,6 +76,10 @@ TARGET_REASONS = {
     STATE_MD: (
         "STATE.md 是 state.json 的自动生成视图，"
         "不得据其判断当前 checkpoint。"
+    ),
+    PLAN_LOCK: (
+        ".plan.lock 是 Feature 内部写锁，不是流程输入，"
+        "不得读取或据其判断执行进度。"
     ),
 }
 
@@ -118,6 +125,9 @@ def blocked_read_target(value: str) -> str | None:
         return STATE_JSON
     if has_path_suffix(normalized, STATE_MD_PATH_SUFFIX):
         return STATE_MD
+    parts = [part.lower() for part in normalized.split("/") if part and part != "."]
+    if basename(normalized) == PLAN_LOCK_FILENAME and ".autobizdevops" in parts:
+        return PLAN_LOCK
     return None
 
 
@@ -151,16 +161,19 @@ def command_read_target(command: str) -> str | None:
 
 
 def payload_read_target(payload: dict) -> str | None:
-    tool_input = payload.get("tool_input", {})
+    tool_input = payload.get("tool_input") or payload.get("input") or {}
     for path in extract_candidate_paths(tool_input):
         target = blocked_read_target(path)
         if target is not None:
             return target
 
     if isinstance(tool_input, dict):
-        command = tool_input.get("command")
-        if isinstance(command, str) and command.strip():
-            return command_read_target(command)
+        for key in ("command", "cmd", "script"):
+            command = tool_input.get(key)
+            if isinstance(command, str) and command.strip():
+                target = command_read_target(command)
+                if target is not None:
+                    return target
     return None
 
 

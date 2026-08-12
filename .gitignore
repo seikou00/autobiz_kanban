@@ -121,3 +121,4 @@ __pycache__/
 .agents
 .codex
 AGENTS.md
+outputs/

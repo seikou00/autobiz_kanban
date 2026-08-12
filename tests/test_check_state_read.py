@@ -6,6 +6,7 @@ from pathlib import Path
 
 from hooks.check_state_read import (
     HOOK_LOG,
+    PLAN_LOCK,
     STATE_JSON,
     STATE_JSON_PATH_SUFFIX,
     STATE_MD,
@@ -48,6 +49,15 @@ class BlockedReadTargetTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(blocked_read_target(path), STATE_MD)
 
+    def test_blocks_feature_plan_lock(self) -> None:
+        for path in (
+            ".autobizdevops/features/demo/.plan.lock",
+            "/abs/ws/proj/.autobizdevops/features/demo/.plan.lock",
+            r"proj\.autobizdevops\features\demo\.plan.lock",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(blocked_read_target(path), PLAN_LOCK)
+
     def test_ignores_unrelated_files(self) -> None:
         # state.json 按路径后缀匹配，项目里其它同名文件不受影响。
         for path in (
@@ -57,6 +67,8 @@ class BlockedReadTargetTest(unittest.TestCase):
             "docs/STATE.md",
             "hooks/hooks.json",
             "hooks.ndjson.bak",
+            ".plan.lock",
+            "src/.plan.lock",
             ".autobizdevops/features/demo/PRD.md",
         ):
             with self.subTest(path=path):
@@ -71,6 +83,7 @@ class CommandReadTargetTest(unittest.TestCase):
             "cat .autobizdevops/state.json": STATE_JSON,
             'jq ".features" .autobizdevops/state.json': STATE_JSON,
             "head -20 .autobizdevops/STATE.md": STATE_MD,
+            "cat .autobizdevops/features/demo/.plan.lock": PLAN_LOCK,
             "ls -la && cat .autobizdevops/state.json": STATE_JSON,
         }
         for command, expected in cases.items():
@@ -119,6 +132,16 @@ class PayloadReadTargetTest(unittest.TestCase):
         }
         self.assertEqual(payload_read_target(payload), STATE_JSON)
 
+    def test_blocks_input_envelope_and_command_aliases(self) -> None:
+        cases = (
+            {"input": {"file_path": ".autobizdevops/state.json"}},
+            {"input": {"cmd": "cat .autobizdevops/STATE.md"}},
+            {"input": {"script": "cat .autobizdevops/features/demo/.plan.lock"}},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                self.assertIsNotNone(payload_read_target(payload))
+
     def test_allows_unrelated_read(self) -> None:
         payload = {
             "tool_name": "read_file",
@@ -134,7 +157,7 @@ class PayloadReadTargetTest(unittest.TestCase):
 
 class BlockReasonTest(unittest.TestCase):
     def test_every_target_points_back_to_script(self) -> None:
-        for target in (HOOK_LOG, STATE_JSON, STATE_MD):
+        for target in (HOOK_LOG, STATE_JSON, STATE_MD, PLAN_LOCK):
             with self.subTest(target=target):
                 reason = block_reason(target)
                 self.assertIn("read_state_json.py", reason)

@@ -1,7 +1,7 @@
 ---
 name: autoops-cicd
 description: CI/CD 阶段技能。
-version: v1.1.08041
+version: v1.1.0811
 author: zhangQiuFeng
 ---
 
@@ -26,7 +26,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 - CI/CD 清单：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/CICD_CHECKLIST.md`
 - PR 描述草稿：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PR_BODY.md`
-- 全局状态：`.autobizdevops/state.json`
 
 如用户额外提供 `PRD.md` 或 `design.md`，可在 `CICD_CHECKLIST.md` 中记录其来源；未提供时允许继续，但必须明确写明“需求/设计文档缺失或未提供”。
 
