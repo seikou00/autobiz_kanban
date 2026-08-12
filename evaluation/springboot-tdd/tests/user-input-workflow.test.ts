@@ -4,7 +4,12 @@ import test from "node:test"
 import { appendSkillInvocation, formatSkillInvocation } from "../src/cmbdevclaw-driver.ts"
 import { EvalError } from "../src/errors.ts"
 import { answerUserInput } from "../src/user-input.ts"
-import { assertWorkflowAction, assertWorkflowProgress, decodeRunDetail } from "../src/workflow.ts"
+import {
+  assertWorkflowAction,
+  assertWorkflowHandoff,
+  assertWorkflowProgress,
+  decodeRunDetail
+} from "../src/workflow.ts"
 
 test("answers every CMBDevClaw question with its recommended choice", () => {
   const decision = answerUserInput({
@@ -59,6 +64,15 @@ test("decodes Harness state and checks the exact Skill next action", () => {
   assert.equal(projection.projectId, "project-1")
   assert.equal(assertWorkflowAction(projection, "dev.specs", "autodev-specs").userMessage, "continue")
   assert.throws(() => assertWorkflowAction(projection, "dev.specs", "autodev-code"), EvalError)
+})
+
+test("accepts the Harness completed-node handoff to the next Skill", () => {
+  const projection = detail("done", "autodev-plan")
+
+  assert.equal(assertWorkflowHandoff(projection, "dev.specs", "autodev-plan").userMessage, "continue")
+  assert.throws(() => assertWorkflowHandoff(projection, "dev.plan", "autodev-plan"), /交接节点不匹配/)
+  assert.throws(() => assertWorkflowHandoff(projection, "dev.specs", "autodev-code"), /交接 nextAction 不匹配/)
+  assert.throws(() => assertWorkflowHandoff(detail("in_progress", "autodev-plan"), "dev.specs", "autodev-plan"), /交接节点不匹配/)
 })
 
 test("requires observable Harness progress", () => {

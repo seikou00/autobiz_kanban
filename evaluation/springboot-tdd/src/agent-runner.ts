@@ -14,7 +14,12 @@ import {
 } from "./cmbdevclaw-driver.ts"
 import { launchCmbDevClaw } from "./cmbdevclaw-app.ts"
 import { EvalError } from "./errors.ts"
-import { assertWorkflowAction, assertWorkflowProgress, decodeRunDetail } from "./workflow.ts"
+import {
+  assertWorkflowAction,
+  assertWorkflowHandoff,
+  assertWorkflowProgress,
+  decodeRunDetail
+} from "./workflow.ts"
 import type { BenchmarkConfig, PluginSnapshotManifest, RunPlan, WorkflowStageRecord } from "./types.ts"
 import type { RunDirectories } from "./workspace.ts"
 
@@ -82,7 +87,10 @@ export async function runAgent(
       }
       const skill = config.workflow.skills[nodeId]!
       const before = decodeRunDetail(await getRunDetail(session, binding))
-      const action = assertWorkflowAction(before, nodeId, skill)
+      const previousNode = config.workflow.nodes[index - 1]
+      const action = previousNode
+        ? assertWorkflowHandoff(before, previousNode, skill)
+        : assertWorkflowAction(before, nodeId, skill)
       const selectedSkill = await selectPluginSkill(session, plugin, skill)
       const threadId = await createThread(session, config, dirs.repo, `${plan.id} ${nodeId}`, binding)
       threadIds.push(threadId)
@@ -120,7 +128,7 @@ export async function runAgent(
       assertWorkflowProgress(before, after)
       const nextNode = config.workflow.nodes[index + 1]
       if (nextNode) {
-        assertWorkflowAction(after, nextNode, config.workflow.skills[nextNode]!)
+        assertWorkflowHandoff(after, nodeId, config.workflow.skills[nextNode]!)
       } else if (after.nodeStatuses[nodeId] !== "done") {
         throw new EvalError("agent", `终点 ${nodeId} 未完成：${after.nodeStatuses[nodeId] ?? "unknown"}`, `达到 ${config.workflow.terminalCheckpoint} 后再结束。`)
       }

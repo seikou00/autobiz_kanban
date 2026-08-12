@@ -108,6 +108,28 @@ export function assertWorkflowAction(
   return detail.nextAction
 }
 
+export function assertWorkflowHandoff(
+  detail: RunDetailProjection,
+  completedNodeId: string,
+  expectedSkill: string
+): WorkflowNextAction {
+  if (detail.currentNodeId !== completedNodeId || detail.nodeStatuses[completedNodeId] !== "done") {
+    throw new EvalError(
+      "agent",
+      `Harness 交接节点不匹配：期望 ${completedNodeId}/done，实际 ${detail.currentNodeId}/${detail.currentNodeStatus}`,
+      "刷新 Feature 状态并检查上一节点 checkpoint。"
+    )
+  }
+  if (detail.nextAction?.slashSkill !== expectedSkill) {
+    throw new EvalError(
+      "agent",
+      `Harness 交接 nextAction 不匹配：期望 /${expectedSkill}，实际 /${detail.nextAction?.slashSkill ?? "(none)"}`,
+      `检查 ${completedNodeId} 完成态的 board nextAction。`
+    )
+  }
+  return detail.nextAction
+}
+
 export function assertWorkflowProgress(before: RunDetailProjection, after: RunDetailProjection): void {
   const changed = before.currentNodeId !== after.currentNodeId
     || before.currentNodeStatus !== after.currentNodeStatus

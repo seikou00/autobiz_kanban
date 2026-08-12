@@ -55,6 +55,8 @@ npm run eval -- run
 
 `app-smoke` starts an isolated CMBDevClaw instance, proves the target plugin is initially absent, installs the packaged ZIP through the application API, checks Harness Board compatibility, creates the fixed Feature, and validates its first Skill action. The current plugin no longer exposes its legacy `custom` template for new Features, so the driver uses the public `standard` template and the public Harness `skipNode` operation to exclude Biz, E2E, and Ops nodes; the resulting active chain is exactly the six Dev nodes above. It configures the model record but does not invoke the agent or make a model request.
 
+Harness stage handoff keeps `currentNodeId` on the node that just reached `done` and exposes the next stage through that completed state's `nextAction`. The full-chain driver validates both fields before invoking the next fixed Skill.
+
 Resume only completed/recorded batch state with:
 
 ```bash
