@@ -19,6 +19,7 @@ import {
 import type {
   BenchmarkConfig,
   PluginSnapshotManifest,
+  AgentTrace,
   RunPlan,
   RunResult,
   TraceSummary,
@@ -34,6 +35,59 @@ import {
 
 export interface BatchOptions {
   resume: boolean
+}
+
+export function migrateRunManifest(
+  value: unknown,
+  config: BenchmarkConfig,
+  fingerprint: string,
+  reevaluatedAt = new Date().toISOString()
+): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new EvalError("setup", "run manifest 不是对象", "修复 run 的 manifest.json 后重评。")
+  }
+  const manifest = value as Record<string, unknown>
+  const existingFingerprint = typeof manifest.originalFingerprint === "string"
+    ? manifest.originalFingerprint
+    : typeof manifest.fingerprint === "string"
+      ? manifest.fingerprint
+      : undefined
+  return {
+    ...manifest,
+    schemaVersion: 2,
+    fingerprint,
+    ...(existingFingerprint ? { originalFingerprint: existingFingerprint } : {}),
+    app: {
+      commit: config.app.commit,
+      packageVersion: config.app.version,
+      traceVersion: config.app.traceVersion
+    },
+    reevaluatedAt
+  }
+}
+
+function validateRunTraces(
+  config: BenchmarkConfig,
+  plan: RunPlan,
+  agentOutput: AgentRunOutput,
+  nativeTraces: AgentTrace[]
+): void {
+  if (nativeTraces.length === 0) {
+    throw new EvalError("agent", "没有找到本 run 的 CMBDevClaw trace", "确认 trace root 隔离和 flush 完成。")
+  }
+  if (plan.condition === "full-chain") {
+    if (!agentOutput.plugin) throw new EvalError("plugin_load", "full-chain 缺少 plugin metadata", "检查安装结果。")
+    validateFullChainTraces(
+      nativeTraces,
+      agentOutput.stages,
+      agentOutput.plugin.id,
+      agentOutput.plugin.version,
+      config.app.traceVersion,
+      config.model.id
+    )
+    return
+  }
+  validateControlTraces(nativeTraces, config.plugin.expectedName, config.app.traceVersion, config.model.id)
 }
 
 async function loadOrCreateSnapshot(
@@ -109,7 +163,11 @@ export async function executeBatch(
         benchmarkId: config.benchmarkId,
         run: plan,
         fingerprint,
-        app: { commit: config.app.commit, version: config.app.version },
+        app: {
+          commit: config.app.commit,
+          packageVersion: config.app.version,
+          traceVersion: config.app.traceVersion
+        },
         plugin: {
           fingerprint: snapshot.fingerprint,
           name: snapshot.pluginName,
@@ -131,18 +189,7 @@ export async function executeBatch(
       await writeJson(resolve(dirs.root, "agent-output.json"), agentOutput)
       await capturePatch(dirs)
       const nativeTraces = readTraces(dirs.traces).filter((trace) => agentOutput.threadIds.includes(trace.threadId))
-      if (nativeTraces.length === 0) throw new EvalError("agent", "没有找到本 run 的 CMBDevClaw trace", "确认 trace root 隔离和 flush 完成。")
-      if (plan.condition === "full-chain") {
-        if (!agentOutput.plugin) throw new EvalError("plugin_load", "full-chain 缺少 plugin metadata", "检查安装结果。")
-        validateFullChainTraces(
-          nativeTraces,
-          agentOutput.stages,
-          agentOutput.plugin.id,
-          agentOutput.plugin.version,
-          config.app.version,
-          config.model.id
-        )
-      } else validateControlTraces(nativeTraces, config.plugin.expectedName, config.app.version, config.model.id)
+      validateRunTraces(config, plan, agentOutput, nativeTraces)
       traces = summarizeTraces(nativeTraces)
       await writeJson(resolve(dirs.root, "trace-summary.json"), traces)
       const verifier = await runVerifier(config, dirs.repo)
@@ -187,10 +234,15 @@ export async function reevaluateRun(
 ): Promise<RunResult> {
   const dirs = runDirectories(plan)
   const agentOutput = JSON.parse(await readFile(resolve(dirs.root, "agent-output.json"), "utf8")) as AgentRunOutput
-  const traces = summarizeTraces(readTraces(dirs.traces).filter((trace) => agentOutput.threadIds.includes(trace.threadId)))
+  const nativeTraces = readTraces(dirs.traces).filter((trace) => agentOutput.threadIds.includes(trace.threadId))
+  validateRunTraces(config, plan, agentOutput, nativeTraces)
+  const traces = summarizeTraces(nativeTraces)
   const verifier = await runVerifier(config, dirs.repo)
   await writeJson(resolve(dirs.verifier, "result.json"), verifier)
   const result = evaluateRun(config, plan, fingerprint, traces, agentOutput.stages, verifier, agentOutput.plugin?.version)
+  const manifestPath = resolve(dirs.root, "manifest.json")
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as unknown
+  await writeJson(manifestPath, migrateRunManifest(manifest, config, fingerprint))
   await writeJson(resolve(dirs.root, "result.json"), result)
   return result
 }

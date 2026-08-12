@@ -28,7 +28,7 @@ function nativeTrace(overrides: Record<string, unknown> = {}) {
     durationMs: 60_000,
     userMessage: "run",
     modelId: "model-1",
-    appVersion: "1.4.9",
+    appVersion: "39.8.10",
     steps: [{ toolCalls: [{ name: "read_file" }, { name: "edit_file" }] }],
     modelCalls: [{ tokenUsage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 } }],
     totalToolCalls: 2,
@@ -65,12 +65,22 @@ test("summarizes native traces and validates full-chain attribution", () => {
   const summary = summarizeTraces([trace])
   assert.equal(summary.totalTokens, 120)
   assert.equal(summary.toolCalls, 2)
-  assert.doesNotThrow(() => validateFullChainTraces([trace], [stage], "plugin-1", "1.0.83", "1.4.9", "model-1"))
+  assert.doesNotThrow(() => validateFullChainTraces([trace], [stage], "plugin-1", "1.0.83", "39.8.10", "model-1"))
 })
 
 test("control trace validation rejects target plugin attribution", () => {
   const trace = nativeTrace({ skillSource: ["plugin:target-plugin/skills/autodev-specs"] })
-  assert.throws(() => validateControlTraces([trace], "target-plugin", "1.4.9", "model-1"), /control trace/)
+  assert.throws(() => validateControlTraces([trace], "target-plugin", "39.8.10", "model-1"), /control trace/)
+})
+
+test("control trace validation uses Electron trace version, not CMBDevClaw package version", () => {
+  const trace = nativeTrace({ skillSource: [], usedSkills: [] })
+
+  assert.doesNotThrow(() => validateControlTraces([trace], "target-plugin", "39.8.10", "model-1"))
+  assert.throws(
+    () => validateControlTraces([trace], "target-plugin", "1.4.9", "model-1"),
+    /appVersion 错误：39\.8\.10/
+  )
 })
 
 test("full-chain trace validation rejects missing native routing evidence", () => {
@@ -87,7 +97,7 @@ test("full-chain trace validation rejects missing native routing evidence", () =
     userInput: []
   }
   assert.throws(
-    () => validateFullChainTraces([trace], [stage], "plugin-1", "1.0.83", "1.4.9", "model-1"),
+    () => validateFullChainTraces([trace], [stage], "plugin-1", "1.0.83", "39.8.10", "model-1"),
     /routingTrace/
   )
 })

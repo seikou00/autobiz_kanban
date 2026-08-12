@@ -61,6 +61,19 @@ export async function runPreflight(
     detail: version,
     ...(version === config.app.version ? {} : { fix: "使用配置固定的 CMBDevClaw version。" })
   })
+  const electronPackagePath = resolve(config.app.projectPath, "node_modules", "electron", "package.json")
+  const electronVersion = existsSync(electronPackagePath)
+    ? String((JSON.parse(readFileSync(electronPackagePath, "utf8")) as { version?: unknown }).version ?? "")
+    : "missing"
+  checks.push({
+    id: "cmbdevclaw.traceVersion",
+    ok: electronVersion === config.app.traceVersion,
+    required: true,
+    detail: electronVersion,
+    ...(electronVersion === config.app.traceVersion
+      ? {}
+      : { fix: "安装固定 CMBDevClaw Electron 依赖，或更新 traceVersion 与评测基线。" })
+  })
   for (const [id, path, fix] of [
     ["cmbdevclaw.main", config.app.mainEntry, "在 CMBDevClaw 仓库运行 npm run build。"],
     ["cmbdevclaw.electron", config.app.electronBin, "在 CMBDevClaw 仓库安装固定依赖。"],

@@ -6,7 +6,7 @@ import type { ConditionId, RunResult } from "../src/types.ts"
 
 function result(condition: ConditionId, repeat: number, resolved: boolean, tokens: number): RunResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId: `${condition}-${repeat}`,
     benchmarkId: "benchmark-1",
     taskId: "springboot-tdd",
@@ -36,7 +36,8 @@ function result(condition: ConditionId, repeat: number, resolved: boolean, token
     },
     traceIds: [`trace-${condition}-${repeat}`],
     stageCount: condition === "full-chain" ? 6 : 1,
-    appVersion: "1.4.9"
+    appVersion: "39.8.10",
+    appPackageVersion: "1.4.9"
   }
 }
 
@@ -60,6 +61,13 @@ test("rejects comparison across different fingerprints", () => {
   const full = { ...result("full-chain", 1, true, 200), fingerprint: "other" }
 
   assert.throws(() => compareResults([control, full]), /fingerprint\/benchmarkId 不一致/)
+})
+
+test("rejects legacy run results before comparison", () => {
+  const control = { ...result("control", 1, false, 100), schemaVersion: 1 as never }
+  const full = result("full-chain", 1, true, 200)
+
+  assert.throws(() => compareResults([control, full]), /旧版 run schema/)
 })
 
 test("rejects an incomplete or unbalanced final repeat matrix", () => {

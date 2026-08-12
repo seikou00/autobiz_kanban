@@ -15,6 +15,7 @@
     "projectPath": "${CMBDEVCLAW_PROJECT:-../../../../CmbCoworkAgent}",
     "commit": "0ab3bb562befbd41181b2f4c6436e321fb08bd60",
     "version": "1.4.9",
+    "traceVersion": "39.8.10",
     "mainEntry": "out/main/index.js",
     "electronBin": "node_modules/.bin/electron"
   },

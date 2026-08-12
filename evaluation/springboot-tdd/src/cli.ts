@@ -100,7 +100,7 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({
       benchmarkId: config.benchmarkId,
       task: config.task.id,
-      app: `${config.app.version}@${config.app.commit}`,
+      app: `package=${config.app.version}, trace=${config.app.traceVersion}@${config.app.commit}`,
       plugin: `${config.plugin.expectedName}@${config.plugin.expectedVersion}`,
       model: config.model.id,
       runs: plans

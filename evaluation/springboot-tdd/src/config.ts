@@ -91,6 +91,7 @@ function parseApp(value: unknown, baseDir: string, env: NodeJS.ProcessEnv): AppC
     projectPath,
     commit,
     version: asString(record.version, "app.version"),
+    traceVersion: asString(record.traceVersion, "app.traceVersion"),
     mainEntry: resolve(projectPath, asString(record.mainEntry, "app.mainEntry")),
     electronBin: resolve(projectPath, asString(record.electronBin, "app.electronBin"))
   }
@@ -105,6 +106,16 @@ function parseApp(value: unknown, baseDir: string, env: NodeJS.ProcessEnv): AppC
       "setup",
       `CMBDevClaw version 不匹配：配置 ${app.version}，实际 ${String(packageRecord.version)}`,
       "切换到固定应用版本或更新配置与评测基线。"
+    )
+  }
+  const electronPackagePath = resolve(projectPath, "node_modules", "electron", "package.json")
+  requirePath(electronPackagePath, "CMBDevClaw Electron package.json")
+  const electronPackage = asRecord(JSON.parse(readFileSync(electronPackagePath, "utf8")), "CMBDevClaw Electron package.json")
+  if (electronPackage.version !== app.traceVersion) {
+    throw new EvalError(
+      "setup",
+      `CMBDevClaw trace runtime version 不匹配：配置 ${app.traceVersion}，实际 ${String(electronPackage.version)}`,
+      "安装固定 CMBDevClaw 依赖，或更新 traceVersion 与评测基线。"
     )
   }
   return app

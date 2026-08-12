@@ -26,6 +26,7 @@ export interface AppConfig {
   projectPath: string
   commit: string
   version: string
+  traceVersion: string
   mainEntry: string
   electronBin: string
 }
@@ -247,7 +248,7 @@ export interface VerifierResult {
 }
 
 export interface RunResult {
-  schemaVersion: 1
+  schemaVersion: 2
   runId: string
   benchmarkId: string
   taskId: string
@@ -269,5 +270,6 @@ export interface RunResult {
   traceIds: string[]
   stageCount: number
   appVersion: string
+  appPackageVersion: string
   pluginVersion?: string
 }

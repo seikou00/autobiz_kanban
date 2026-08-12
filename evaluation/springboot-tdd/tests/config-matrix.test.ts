@@ -16,7 +16,7 @@ const configPath = resolve(import.meta.dirname, "..", "config", "benchmark_confi
 interface RawConfigFixture {
   reportRoot: string
   task: { promptPath: string; sourcePath: string; provenancePath: string; repoCommit: string }
-  app: { projectPath: string; commit: string }
+  app: { projectPath: string; commit: string; traceVersion: string }
   plugin: { root: string }
   verifier: { hiddenTestPath: string; goldPatchPath: string; image: string }
   conditions: Array<{ id: string; pluginEnabled: boolean }>
@@ -50,6 +50,7 @@ test("loads the pinned benchmark config and builds the balanced matrix", () => {
   const matrix = buildRunMatrix(config)
 
   assert.equal(config.app.version, "1.4.9")
+  assert.equal(config.app.traceVersion, "39.8.10")
   assert.equal(config.plugin.expectedVersion, "1.0.83")
   assert.equal(config.model.temperature, 0.01)
   assert.equal(matrix.length, 6)
@@ -108,7 +109,12 @@ test("fingerprint includes the resolved model runtime identity", () => {
   const secondEnv = { ...firstEnv, [config.model.modelEnv]: "model-b" }
 
   assert.equal(resolveModelRuntimeIdentity(config, firstEnv).model, "model-a")
-  assert.notEqual(batchFingerprint(config, snapshot, firstEnv), batchFingerprint(config, snapshot, secondEnv))
+  const firstFingerprint = batchFingerprint(config, snapshot, firstEnv)
+  assert.notEqual(firstFingerprint, batchFingerprint(config, snapshot, secondEnv))
+  assert.notEqual(firstFingerprint, batchFingerprint({
+    ...config,
+    app: { ...config.app, traceVersion: "40.0.0" }
+  }, snapshot, firstEnv))
   assert.throws(() => resolveModelRuntimeIdentity(config, {}), /模型运行身份不完整/)
 })
 
@@ -116,6 +122,7 @@ test("config validation rejects mutable or ambiguous benchmark inputs", () => {
   const mutations: Array<(raw: RawConfigFixture) => void> = [
     (raw) => { raw.task.repoCommit = "" },
     (raw) => { raw.app.commit = "abc" },
+    (raw) => { raw.app.traceVersion = "1.4.9" },
     (raw) => { raw.verifier.image = "zhangyiiiiii/swe-skills-bench-jvm:latest" },
     (raw) => { raw.task.promptPath = "/definitely/missing/springboot-tdd-task.md" },
     (raw) => { raw.conditions = [{ id: "control", pluginEnabled: false }, { id: "unknown", pluginEnabled: true }] },

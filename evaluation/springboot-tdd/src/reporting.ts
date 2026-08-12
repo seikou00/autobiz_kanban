@@ -94,6 +94,9 @@ function assertBalancedMatrix(results: RunResult[], expectedRepeats?: number): v
 
 export function compareResults(results: RunResult[], expectedRepeats?: number): ComparisonReport {
   if (results.length === 0) throw new EvalError("setup", "没有可比较 result", "先执行 run/evaluate。")
+  if (results.some((result) => result.schemaVersion !== 2)) {
+    throw new EvalError("setup", "结果包含旧版 run schema", "先用 evaluate 重评旧 run，再执行 compare。")
+  }
   const fingerprints = new Set(results.map((result) => result.fingerprint))
   const benchmarkIds = new Set(results.map((result) => result.benchmarkId))
   if (fingerprints.size !== 1 || benchmarkIds.size !== 1) {

@@ -41,7 +41,7 @@ export function evaluateRun(
   pluginVersion?: string
 ): RunResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId: plan.id,
     benchmarkId: config.benchmarkId,
     taskId: plan.taskId,
@@ -56,7 +56,8 @@ export function evaluateRun(
     usage: traces,
     traceIds: traces.traceIds,
     stageCount: stages.length,
-    appVersion: config.app.version,
+    appVersion: config.app.traceVersion,
+    appPackageVersion: config.app.version,
     ...(pluginVersion ? { pluginVersion } : {})
   }
 }
@@ -71,7 +72,7 @@ export function failedRun(
   stages: WorkflowStageRecord[] = []
 ): RunResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId: plan.id,
     benchmarkId: config.benchmarkId,
     taskId: plan.taskId,
@@ -87,6 +88,7 @@ export function failedRun(
     usage: traces,
     traceIds: traces.traceIds,
     stageCount: stages.length,
-    appVersion: config.app.version
+    appVersion: config.app.traceVersion,
+    appPackageVersion: config.app.version
   }
 }

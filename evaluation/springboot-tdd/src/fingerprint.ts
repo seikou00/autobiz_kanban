@@ -44,7 +44,11 @@ export function batchFingerprint(
       sourceSha256: sha256(readFileSync(config.task.sourcePath)),
       provenanceSha256: sha256(readFileSync(config.task.provenancePath))
     },
-    app: { commit: config.app.commit, version: config.app.version },
+    app: {
+      commit: config.app.commit,
+      packageVersion: config.app.version,
+      traceVersion: config.app.traceVersion
+    },
     plugin: { fingerprint: snapshot.fingerprint, version: snapshot.pluginVersion },
     model: {
       id: config.model.id,
