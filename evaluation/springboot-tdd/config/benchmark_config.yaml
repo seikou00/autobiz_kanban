@@ -45,6 +45,7 @@
       "dev.code",
       "dev.review",
       "dev.utest",
+      "dev.e2e",
       "dev.verify"
     ],
     "skills": {
@@ -53,6 +54,7 @@
       "dev.code": "autodev-code",
       "dev.review": "autodev-reviewer",
       "dev.utest": "autodev-utest",
+      "dev.e2e": "autodev-e2e",
       "dev.verify": "autodev-verify"
     }
   },

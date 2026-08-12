@@ -24,6 +24,7 @@ const EXPECTED_WORKFLOW_NODES = [
   "dev.code",
   "dev.review",
   "dev.utest",
+  "dev.e2e",
   "dev.verify"
 ]
 
@@ -176,7 +177,7 @@ function parseWorkflow(value: unknown): WorkflowConfig {
   if (JSON.stringify(nodes) !== JSON.stringify(EXPECTED_WORKFLOW_NODES)) {
     throw new EvalError(
       "setup",
-      `workflow.nodes 必须是固定六节点链：${EXPECTED_WORKFLOW_NODES.join(" -> ")}`,
+      `workflow.nodes 必须是固定七节点链：${EXPECTED_WORKFLOW_NODES.join(" -> ")}`,
       "恢复 benchmark 固定 Harness 活动链。"
     )
   }

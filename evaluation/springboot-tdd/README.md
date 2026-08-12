@@ -3,7 +3,7 @@
 This package evaluates the plugin through CMBDevClaw, the application platform that installs and runs the packaged plugin. It compares one fixed task under two conditions:
 
 - `control`: CMBDevClaw runs the task without the target plugin.
-- `full-chain`: CMBDevClaw installs the exact plugin ZIP and advances the Harness Board chain `dev.specs -> dev.plan -> dev.code -> dev.review -> dev.utest -> dev.verify`.
+- `full-chain`: CMBDevClaw installs the exact plugin ZIP and advances the Harness Board chain `dev.specs -> dev.plan -> dev.code -> dev.review -> dev.utest -> dev.e2e -> dev.verify`.
 
 Both conditions use the same CMBDevClaw build, model configuration, PetClinic commit, task prompt, verifier image, hidden tests, and three-repeat matrix. CMBDevClaw native traces provide Skill, plugin, Harness, timing, tool-call, and token attribution. Docker verification runs only after the agent has finished.
 
@@ -53,7 +53,7 @@ npm run eval -- snapshot
 npm run eval -- run
 ```
 
-`app-smoke` starts an isolated CMBDevClaw instance, proves the target plugin is initially absent, installs the packaged ZIP through the application API, checks Harness Board compatibility, creates the fixed Feature, and validates its first Skill action. The current plugin no longer exposes its legacy `custom` template for new Features, so the driver uses the public `standard` template and the public Harness `skipNode` operation to exclude Biz, E2E, and Ops nodes; the resulting active chain is exactly the six Dev nodes above. It configures the model record but does not invoke the agent or make a model request.
+`app-smoke` starts an isolated CMBDevClaw instance, proves the target plugin is initially absent, installs the packaged ZIP through the application API, checks Harness Board compatibility, creates the fixed Feature, and validates its first Skill action. The current plugin no longer exposes its legacy `custom` template for new Features, so the driver uses the public `standard` template and the public Harness `skipNode` operation to exclude Biz and Ops nodes; the resulting active chain is exactly the seven Dev nodes above. It configures the model record but does not invoke the agent or make a model request.
 
 Harness stage handoff keeps `currentNodeId` on the node that just reached `done` and exposes the next stage through that completed state's `nextAction`. The full-chain driver validates both fields before invoking the next fixed Skill.
 

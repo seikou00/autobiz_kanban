@@ -35,7 +35,7 @@ function result(condition: ConditionId, repeat: number, resolved: boolean, token
       skillSource: []
     },
     traceIds: [`trace-${condition}-${repeat}`],
-    stageCount: condition === "full-chain" ? 6 : 1,
+    stageCount: condition === "full-chain" ? 7 : 1,
     appVersion: "39.8.10",
     appPackageVersion: "1.4.9"
   }

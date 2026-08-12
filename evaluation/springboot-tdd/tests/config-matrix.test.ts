@@ -61,6 +61,15 @@ test("loads the pinned benchmark config and builds the balanced matrix", () => {
   assert.equal(config.model.temperature, 0.01)
   assert.equal(config.verifier.mavenExecutable, "/opt/maven/bin/mvn")
   assert.equal(config.verifier.imagePullTimeoutMs, 1_800_000)
+  assert.deepEqual(config.workflow.nodes, [
+    "dev.specs",
+    "dev.plan",
+    "dev.code",
+    "dev.review",
+    "dev.utest",
+    "dev.e2e",
+    "dev.verify"
+  ])
   assert.equal(matrix.length, 6)
   assert.deepEqual(matrix.map((item) => item.id), [
     "springboot-tdd__control__r01",
