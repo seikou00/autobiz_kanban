@@ -117,6 +117,7 @@ test("uses fixed image Maven and one persistent cache for all verifier stages", 
     assert.equal(mavenCalls.length, 3)
     assert.ok(mavenCalls.every((argv) => argv.includes(config.verifier.mavenExecutable)))
     assert.ok(mavenCalls.every((argv) => argv.includes(cacheMount)))
+    assert.ok(mavenCalls.every((argv) => argv.includes("-U")))
     assert.ok(mavenCalls.every((argv) => !argv.includes("./mvnw")))
   } finally {
     rmSync(root, { recursive: true, force: true })

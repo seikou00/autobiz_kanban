@@ -75,6 +75,7 @@ async function runMaven(
     config.verifier.mavenExecutable,
     "-q",
     "-B",
+    "-U",
     ...mavenArgs
   ], { cwd: repoPath, timeoutMs: config.verifier.timeoutMs })
 }
