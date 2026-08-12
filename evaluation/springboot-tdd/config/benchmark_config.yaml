@@ -59,6 +59,7 @@
   "verifier": {
     "image": "zhangyiiiiii/swe-skills-bench-jvm@sha256:3b5219f2740fc8fd3b24409856181ae025fab0e256c43680ba7567d94a12a819",
     "platform": "linux/amd64",
+    "mavenExecutable": "/opt/maven/bin/mvn",
     "hiddenTestPath": "../verifier/springboot-tdd/WeightRecordApiBenchmarkTest.java",
     "goldPatchPath": "../verifier/springboot-tdd/gold.patch",
     "testClass": "WeightRecordApiBenchmarkTest",

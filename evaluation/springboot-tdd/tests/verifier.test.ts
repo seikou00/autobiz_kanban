@@ -1,11 +1,18 @@
 import assert from "node:assert/strict"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import test from "node:test"
 
 import { loadConfig } from "../src/config.ts"
 import { EvalError } from "../src/errors.ts"
 import type { ProcessResult } from "../src/types.ts"
-import { assertVerifierProcessHealthy, prepareVerifierImage } from "../src/verifier.ts"
+import {
+  assertVerifierProcessHealthy,
+  prepareVerifierImage,
+  runVerifier,
+  verifierMavenCachePath
+} from "../src/verifier.ts"
 
 const configPath = resolve(import.meta.dirname, "..", "config", "benchmark_config.yaml")
 
@@ -71,7 +78,47 @@ test("classifies image-pull and Maven timeouts as infrastructure failures", asyn
   )
   assert.doesNotThrow(() => assertVerifierProcessHealthy("build", processResult({ exitCode: 1 })))
   assert.throws(
+    () => assertVerifierProcessHealthy("build", processResult({
+      exitCode: 1,
+      stderr: "wget: Failed to fetch https://repo.maven.apache.org/maven2/apache-maven.tar.gz"
+    })),
+    (error: unknown) => error instanceof EvalError && error.failureClass === "infrastructure" && /Maven 依赖/.test(error.message)
+  )
+  assert.throws(
     () => assertVerifierProcessHealthy("build", processResult({ exitCode: 125, stderr: "daemon unavailable" })),
     (error: unknown) => error instanceof EvalError && error.failureClass === "infrastructure"
   )
+})
+
+test("uses fixed image Maven and one persistent cache for all verifier stages", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "springboot-tdd-verifier-"))
+  const repoPath = resolve(root, "repo")
+  const config = { ...loadConfig(configPath), reportRoot: resolve(root, "reports") }
+  const calls: string[][] = []
+  mkdirSync(repoPath, { recursive: true })
+  try {
+    await runVerifier(config, repoPath, async (argv) => {
+      calls.push(argv)
+      if (argv[1] === "image") return processResult({ argv, cwd: repoPath })
+      if (argv.some((item) => item === `-Dtest=${config.verifier.testClass}`)) {
+        const reportDir = resolve(repoPath, "target", "surefire-reports")
+        mkdirSync(reportDir, { recursive: true })
+        writeFileSync(
+          resolve(reportDir, "TEST-org.springframework.samples.petclinic.owner.WeightRecordApiBenchmarkTest.xml"),
+          '<testsuite><testcase name="feature_recordsValidWeight" time="0.1"/></testsuite>',
+          "utf8"
+        )
+      }
+      return processResult({ argv, cwd: repoPath })
+    })
+
+    const mavenCalls = calls.filter((argv) => argv.includes(config.verifier.mavenExecutable))
+    const cacheMount = `${verifierMavenCachePath(config)}:/home/dev/.m2`
+    assert.equal(mavenCalls.length, 3)
+    assert.ok(mavenCalls.every((argv) => argv.includes(config.verifier.mavenExecutable)))
+    assert.ok(mavenCalls.every((argv) => argv.includes(cacheMount)))
+    assert.ok(mavenCalls.every((argv) => !argv.includes("./mvnw")))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

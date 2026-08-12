@@ -18,7 +18,13 @@ interface RawConfigFixture {
   task: { promptPath: string; sourcePath: string; provenancePath: string; repoCommit: string }
   app: { projectPath: string; commit: string; traceVersion: string }
   plugin: { root: string }
-  verifier: { hiddenTestPath: string; goldPatchPath: string; image: string; imagePullTimeoutMs: number }
+  verifier: {
+    hiddenTestPath: string
+    goldPatchPath: string
+    image: string
+    mavenExecutable: string
+    imagePullTimeoutMs: number
+  }
   conditions: Array<{ id: string; pluginEnabled: boolean }>
   workflow: { nodes: string[]; terminalCheckpoint: string }
 }
@@ -53,6 +59,7 @@ test("loads the pinned benchmark config and builds the balanced matrix", () => {
   assert.equal(config.app.traceVersion, "39.8.10")
   assert.equal(config.plugin.expectedVersion, "1.0.83")
   assert.equal(config.model.temperature, 0.01)
+  assert.equal(config.verifier.mavenExecutable, "/opt/maven/bin/mvn")
   assert.equal(config.verifier.imagePullTimeoutMs, 1_800_000)
   assert.equal(matrix.length, 6)
   assert.deepEqual(matrix.map((item) => item.id), [
@@ -125,6 +132,7 @@ test("config validation rejects mutable or ambiguous benchmark inputs", () => {
     (raw) => { raw.app.commit = "abc" },
     (raw) => { raw.app.traceVersion = "1.4.9" },
     (raw) => { raw.verifier.image = "zhangyiiiiii/swe-skills-bench-jvm:latest" },
+    (raw) => { raw.verifier.mavenExecutable = "mvn" },
     (raw) => { raw.task.promptPath = "/definitely/missing/springboot-tdd-task.md" },
     (raw) => { raw.conditions = [{ id: "control", pluginEnabled: false }, { id: "unknown", pluginEnabled: true }] },
     (raw) => { raw.conditions = [{ id: "control", pluginEnabled: false }, { id: "control", pluginEnabled: false }] },

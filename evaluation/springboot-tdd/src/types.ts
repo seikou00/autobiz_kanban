@@ -60,6 +60,7 @@ export interface WorkflowConfig {
 export interface VerifierConfig {
   image: string
   platform: string
+  mavenExecutable: string
   hiddenTestPath: string
   goldPatchPath: string
   testClass: string

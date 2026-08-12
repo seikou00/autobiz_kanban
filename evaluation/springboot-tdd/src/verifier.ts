@@ -10,6 +10,18 @@ import type { BenchmarkConfig, ProcessResult, TestCaseResult, VerifierResult } f
 type ProcessRunner = typeof runProcess
 
 const DOCKER_INFRASTRUCTURE_EXIT_CODES = new Set([125, 126, 127, 137, 143])
+const NETWORK_FAILURE_PATTERNS = [
+  /wget: Failed to fetch/i,
+  /UnknownHostException/i,
+  /ConnectException/i,
+  /SocketTimeoutException/i,
+  /Connection (?:reset|refused|timed out)/i,
+  /Network is unreachable/i,
+  /Temporary failure in name resolution/i,
+  /Name or service not known/i,
+  /PKIX path building failed/i,
+  /status code: (?:429|502|503|504)\b/i
+]
 
 const FEATURE_TESTS = [
   "feature_recordsValidWeight",
@@ -45,6 +57,8 @@ async function runMaven(
   mavenArgs: string[],
   processRunner: ProcessRunner
 ): Promise<ProcessResult> {
+  const cachePath = verifierMavenCachePath(config)
+  await mkdir(cachePath, { recursive: true })
   return await processRunner([
     "docker",
     "run",
@@ -53,10 +67,12 @@ async function runMaven(
     config.verifier.platform,
     "-v",
     `${repoPath}:/workspace/spring-petclinic`,
+    "-v",
+    `${cachePath}:/home/dev/.m2`,
     "-w",
     "/workspace/spring-petclinic",
     config.verifier.image,
-    "./mvnw",
+    config.verifier.mavenExecutable,
     "-q",
     "-B",
     ...mavenArgs
@@ -65,6 +81,16 @@ async function runMaven(
 
 function processDetail(result: ProcessResult): string {
   return (result.stderr.trim() || result.stdout.trim() || `exit=${String(result.exitCode)}`).slice(-2_000)
+}
+
+function hasNetworkFailure(result: ProcessResult): boolean {
+  const output = `${result.stderr}\n${result.stdout}`
+  return NETWORK_FAILURE_PATTERNS.some((pattern) => pattern.test(output))
+}
+
+export function verifierMavenCachePath(config: BenchmarkConfig): string {
+  const digest = config.verifier.image.split("@sha256:")[1]?.slice(0, 16) ?? "unknown"
+  return resolve(config.reportRoot, "_cache", `maven-${digest}`)
 }
 
 export function assertVerifierProcessHealthy(stage: string, result: ProcessResult): void {
@@ -81,6 +107,14 @@ export function assertVerifierProcessHealthy(stage: string, result: ProcessResul
       "infrastructure",
       `验证器 ${stage} 的 Docker 进程异常终止：${processDetail(result)}`,
       "检查 Docker Desktop、容器资源和固定验证镜像后重试。",
+      result
+    )
+  }
+  if (result.exitCode !== 0 && hasNetworkFailure(result)) {
+    throw new EvalError(
+      "infrastructure",
+      `验证器 ${stage} 无法下载 Maven 依赖：${processDetail(result)}`,
+      "恢复 Maven 仓库网络后仅重评该 run；已下载依赖会保留在评测缓存中。",
       result
     )
   }
@@ -142,46 +176,59 @@ export async function runVerifier(
     repoPath,
     "target/surefire-reports/TEST-org.springframework.samples.petclinic.owner.WeightRecordApiBenchmarkTest.xml"
   )
-  await unlink(hiddenDestination).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT") throw error
-  })
-  const build = await runMaven(config, repoPath, ["-DskipTests", "compile"], processRunner)
-  assertVerifierProcessHealthy("build", build)
-  const regression = build.exitCode === 0
-    ? await runMaven(config, repoPath, ["test"], processRunner)
-    : notRun(repoPath, "build failed; regression not run")
-  if (build.exitCode === 0) assertVerifierProcessHealthy("regression", regression)
-  await mkdir(dirname(hiddenDestination), { recursive: true })
-  await copyFile(config.verifier.hiddenTestPath, hiddenDestination)
-  const previousXml = existsSync(xmlPath) ? readFileSync(xmlPath, "utf8") : undefined
-  const hidden = build.exitCode === 0
-    ? await runMaven(config, repoPath, [`-Dtest=${config.verifier.testClass}`, "test"], processRunner)
-    : notRun(repoPath, "build failed; hidden test not run")
-  if (build.exitCode === 0) assertVerifierProcessHealthy("hidden tests", hidden)
-  let tests: TestCaseResult[] = []
-  if (existsSync(xmlPath)) {
-    const xml = readFileSync(xmlPath, "utf8")
-    if (xml === previousXml) {
-      throw new EvalError("verifier", `hidden JUnit XML 未被本次运行更新：${xmlPath}`, "检查 Maven 是否在测试执行前失败。")
+  const hiddenClassPath = resolve(
+    repoPath,
+    "target/test-classes/org/springframework/samples/petclinic/owner/WeightRecordApiBenchmarkTest.class"
+  )
+  const hiddenTextPath = resolve(
+    repoPath,
+    "target/surefire-reports/org.springframework.samples.petclinic.owner.WeightRecordApiBenchmarkTest.txt"
+  )
+  const removeArtifact = async (path: string): Promise<void> => {
+    await unlink(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error
+    })
+  }
+  await Promise.all([hiddenDestination, hiddenClassPath, xmlPath, hiddenTextPath].map(removeArtifact))
+  try {
+    const build = await runMaven(config, repoPath, ["-DskipTests", "compile"], processRunner)
+    assertVerifierProcessHealthy("build", build)
+    const regression = build.exitCode === 0
+      ? await runMaven(config, repoPath, ["test"], processRunner)
+      : notRun(repoPath, "build failed; regression not run")
+    if (build.exitCode === 0) assertVerifierProcessHealthy("regression", regression)
+    await mkdir(dirname(hiddenDestination), { recursive: true })
+    await copyFile(config.verifier.hiddenTestPath, hiddenDestination)
+    const hidden = build.exitCode === 0
+      ? await runMaven(config, repoPath, [`-Dtest=${config.verifier.testClass}`, "test"], processRunner)
+      : notRun(repoPath, "build failed; hidden test not run")
+    if (build.exitCode === 0) assertVerifierProcessHealthy("hidden tests", hidden)
+    let tests: TestCaseResult[] = []
+    if (existsSync(xmlPath)) tests = parseJUnitXml(readFileSync(xmlPath, "utf8"))
+    else if (build.exitCode === 0 && hidden.exitCode === 0) {
+      throw new EvalError(
+        "verifier",
+        `hidden JUnit XML 缺失：${xmlPath}`,
+        "检查固定测试类名和 Maven/Surefire 测试发现配置。",
+        hidden
+      )
     }
-    tests = parseJUnitXml(xml)
-  }
-  else if (build.exitCode === 0) {
-    throw new EvalError("verifier", `hidden JUnit XML 缺失：${xmlPath}`, "检查 Maven/Surefire 输出，不能仅依赖进程退出码。")
-  }
-  const scores = {
-    build: build.exitCode === 0 && !build.timedOut ? 1 : 0,
-    regression: regression.exitCode === 0 && !regression.timedOut ? 1 : 0,
-    feature: scoreExpected(tests, FEATURE_TESTS),
-    integration: scoreExpected(tests, INTEGRATION_TESTS)
-  }
-  return {
-    build,
-    regression,
-    hidden,
-    tests,
-    scores,
-    resolved: Object.values(scores).every((score) => score === 1) && hidden.exitCode === 0
+    const scores = {
+      build: build.exitCode === 0 && !build.timedOut ? 1 : 0,
+      regression: regression.exitCode === 0 && !regression.timedOut ? 1 : 0,
+      feature: scoreExpected(tests, FEATURE_TESTS),
+      integration: scoreExpected(tests, INTEGRATION_TESTS)
+    }
+    return {
+      build,
+      regression,
+      hidden,
+      tests,
+      scores,
+      resolved: Object.values(scores).every((score) => score === 1) && hidden.exitCode === 0
+    }
+  } finally {
+    await Promise.all([hiddenDestination, hiddenClassPath].map(removeArtifact))
   }
 }
 

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { runAgent, type AgentRunOutput } from "./agent-runner.ts"
@@ -114,6 +114,24 @@ async function capturePatch(dirs: RunDirectories): Promise<void> {
   await writeFile(resolve(dirs.root, "patch.diff"), diff.stdout, "utf8")
 }
 
+async function resetVerifierDiagnostics(dirs: RunDirectories): Promise<void> {
+  for (const name of ["result.json", "error.json"]) {
+    await unlink(resolve(dirs.verifier, name)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error
+    })
+  }
+}
+
+async function captureVerifierError(dirs: RunDirectories, error: unknown): Promise<void> {
+  if (!(error instanceof EvalError) || !["verifier", "infrastructure"].includes(error.failureClass)) return
+  await writeJson(resolve(dirs.verifier, "error.json"), {
+    schemaVersion: 1,
+    failureClass: error.failureClass,
+    error: error.message,
+    cause: error.causeValue
+  })
+}
+
 function existingTraceSummary(dirs: RunDirectories, threadIds: string[]): TraceSummary | undefined {
   try {
     const traces = readTraces(dirs.traces).filter((trace) => threadIds.includes(trace.threadId))
@@ -206,6 +224,7 @@ export async function executeBatch(
       await writeJson(resultPath, result)
       results.push(result)
     } catch (error) {
+      await captureVerifierError(dirs, error).catch(() => undefined)
       await capturePatch(dirs).catch(() => undefined)
       await writeJson(resolve(dirs.root, "agent-output.json"), agentOutput).catch(() => undefined)
       traces ??= existingTraceSummary(dirs, agentOutput.threadIds)
@@ -238,11 +257,13 @@ export async function reevaluateRun(
   validateRunTraces(config, plan, agentOutput, nativeTraces)
   const traces = summarizeTraces(nativeTraces)
   let result: RunResult
+  await resetVerifierDiagnostics(dirs)
   try {
     const verifier = await runVerifier(config, dirs.repo)
     await writeJson(resolve(dirs.verifier, "result.json"), verifier)
     result = evaluateRun(config, plan, fingerprint, traces, agentOutput.stages, verifier, agentOutput.plugin?.version)
   } catch (error) {
+    await captureVerifierError(dirs, error).catch(() => undefined)
     const failureClass = error instanceof EvalError ? error.failureClass : "infrastructure"
     result = failedRun(
       config,

@@ -61,7 +61,9 @@ export function batchFingerprint(
     verifier: {
       image: config.verifier.image,
       platform: config.verifier.platform,
+      mavenExecutable: config.verifier.mavenExecutable,
       testClass: config.verifier.testClass,
+      imagePullTimeoutMs: config.verifier.imagePullTimeoutMs,
       timeoutMs: config.verifier.timeoutMs,
       hiddenTestSha256: sha256(readFileSync(config.verifier.hiddenTestPath)),
       goldPatchSha256: sha256(readFileSync(config.verifier.goldPatchPath))

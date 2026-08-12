@@ -202,11 +202,15 @@ function parseVerifier(value: unknown, baseDir: string, env: NodeJS.ProcessEnv):
   const verifier = {
     image,
     platform: asString(record.platform, "verifier.platform"),
+    mavenExecutable: asString(record.mavenExecutable, "verifier.mavenExecutable"),
     hiddenTestPath: resolveConfigPath(baseDir, record.hiddenTestPath, "verifier.hiddenTestPath", env),
     goldPatchPath: resolveConfigPath(baseDir, record.goldPatchPath, "verifier.goldPatchPath", env),
     testClass: asString(record.testClass, "verifier.testClass"),
     imagePullTimeoutMs: asInteger(record.imagePullTimeoutMs, "verifier.imagePullTimeoutMs", 1_000),
     timeoutMs: asInteger(record.timeoutMs, "verifier.timeoutMs", 1_000)
+  }
+  if (!verifier.mavenExecutable.startsWith("/")) {
+    throw new EvalError("setup", "verifier.mavenExecutable 必须是容器内绝对路径", "使用固定镜像中的 Maven 绝对路径。")
   }
   requirePath(verifier.hiddenTestPath, "verifier.hiddenTestPath")
   requirePath(verifier.goldPatchPath, "verifier.goldPatchPath")
