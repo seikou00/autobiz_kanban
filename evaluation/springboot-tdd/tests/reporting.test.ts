@@ -70,6 +70,17 @@ test("rejects legacy run results before comparison", () => {
   assert.throws(() => compareResults([control, full]), /旧版 run schema/)
 })
 
+test("rejects infrastructure failures instead of averaging them as task zeros", () => {
+  const control = {
+    ...result("control", 1, false, 100),
+    failureClass: "infrastructure" as const,
+    error: "verifier build timed out"
+  }
+  const full = result("full-chain", 1, true, 200)
+
+  assert.throws(() => compareResults([control, full]), /不可计分失败.*infrastructure/)
+})
+
 test("rejects an incomplete or unbalanced final repeat matrix", () => {
   const balancedTwo = [
     result("control", 1, false, 100),

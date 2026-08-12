@@ -205,6 +205,7 @@ function parseVerifier(value: unknown, baseDir: string, env: NodeJS.ProcessEnv):
     hiddenTestPath: resolveConfigPath(baseDir, record.hiddenTestPath, "verifier.hiddenTestPath", env),
     goldPatchPath: resolveConfigPath(baseDir, record.goldPatchPath, "verifier.goldPatchPath", env),
     testClass: asString(record.testClass, "verifier.testClass"),
+    imagePullTimeoutMs: asInteger(record.imagePullTimeoutMs, "verifier.imagePullTimeoutMs", 1_000),
     timeoutMs: asInteger(record.timeoutMs, "verifier.timeoutMs", 1_000)
   }
   requirePath(verifier.hiddenTestPath, "verifier.hiddenTestPath")

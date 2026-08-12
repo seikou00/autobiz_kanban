@@ -97,6 +97,14 @@ export function compareResults(results: RunResult[], expectedRepeats?: number): 
   if (results.some((result) => result.schemaVersion !== 2)) {
     throw new EvalError("setup", "结果包含旧版 run schema", "先用 evaluate 重评旧 run，再执行 compare。")
   }
+  const invalidFailures = results.filter((result) => result.failureClass && result.failureClass !== "task")
+  if (invalidFailures.length > 0) {
+    throw new EvalError(
+      "setup",
+      `结果包含不可计分失败：${invalidFailures.map((result) => `${result.runId}=${String(result.failureClass)}`).join(", ")}`,
+      "修复运行环境并仅重评这些 run，再执行 compare。"
+    )
+  }
   const fingerprints = new Set(results.map((result) => result.fingerprint))
   const benchmarkIds = new Set(results.map((result) => result.benchmarkId))
   if (fingerprints.size !== 1 || benchmarkIds.size !== 1) {

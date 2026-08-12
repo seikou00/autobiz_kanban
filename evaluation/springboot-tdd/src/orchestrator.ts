@@ -237,9 +237,23 @@ export async function reevaluateRun(
   const nativeTraces = readTraces(dirs.traces).filter((trace) => agentOutput.threadIds.includes(trace.threadId))
   validateRunTraces(config, plan, agentOutput, nativeTraces)
   const traces = summarizeTraces(nativeTraces)
-  const verifier = await runVerifier(config, dirs.repo)
-  await writeJson(resolve(dirs.verifier, "result.json"), verifier)
-  const result = evaluateRun(config, plan, fingerprint, traces, agentOutput.stages, verifier, agentOutput.plugin?.version)
+  let result: RunResult
+  try {
+    const verifier = await runVerifier(config, dirs.repo)
+    await writeJson(resolve(dirs.verifier, "result.json"), verifier)
+    result = evaluateRun(config, plan, fingerprint, traces, agentOutput.stages, verifier, agentOutput.plugin?.version)
+  } catch (error) {
+    const failureClass = error instanceof EvalError ? error.failureClass : "infrastructure"
+    result = failedRun(
+      config,
+      plan,
+      fingerprint,
+      failureClass,
+      asErrorMessage(error),
+      traces,
+      agentOutput.stages
+    )
+  }
   const manifestPath = resolve(dirs.root, "manifest.json")
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as unknown
   await writeJson(manifestPath, migrateRunManifest(manifest, config, fingerprint))

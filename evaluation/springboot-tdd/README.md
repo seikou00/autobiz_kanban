@@ -73,6 +73,7 @@ npm run eval -- compare
 
 - `contract` proves that the untouched baseline fails and `gold.patch` passes.
 - `evaluate` revalidates native trace attribution and reruns the fixed hidden verifier without making model calls. A completed agent run that failed only during evaluator validation can therefore be recovered without paying for another model call. Re-evaluation migrates the run manifest to schema 2 while preserving its prior value as `originalFingerprint`.
+- The verifier prepares the pinned Docker image before starting the Maven timer. Image-pull and Docker-process failures are infrastructure failures and are never scored as task failures.
 - `compare` writes `reports/comparison.json` and `reports/comparison.md` and rejects mixed fingerprints.
 
 Each run directory retains the task checkout, agent diff, app metadata, native trace copy, Harness stage records, deterministic user-input decisions, verifier output, and final `result.json`. A run is resolved only when build, regression, feature, and integration evidence all pass. Run schema version 2 records `appVersion` as the trace runtime version and `appPackageVersion` as the CMBDevClaw product package version.

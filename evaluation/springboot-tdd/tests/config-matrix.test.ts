@@ -18,7 +18,7 @@ interface RawConfigFixture {
   task: { promptPath: string; sourcePath: string; provenancePath: string; repoCommit: string }
   app: { projectPath: string; commit: string; traceVersion: string }
   plugin: { root: string }
-  verifier: { hiddenTestPath: string; goldPatchPath: string; image: string }
+  verifier: { hiddenTestPath: string; goldPatchPath: string; image: string; imagePullTimeoutMs: number }
   conditions: Array<{ id: string; pluginEnabled: boolean }>
   workflow: { nodes: string[]; terminalCheckpoint: string }
 }
@@ -53,6 +53,7 @@ test("loads the pinned benchmark config and builds the balanced matrix", () => {
   assert.equal(config.app.traceVersion, "39.8.10")
   assert.equal(config.plugin.expectedVersion, "1.0.83")
   assert.equal(config.model.temperature, 0.01)
+  assert.equal(config.verifier.imagePullTimeoutMs, 1_800_000)
   assert.equal(matrix.length, 6)
   assert.deepEqual(matrix.map((item) => item.id), [
     "springboot-tdd__control__r01",

@@ -63,6 +63,7 @@ export interface VerifierConfig {
   hiddenTestPath: string
   goldPatchPath: string
   testClass: string
+  imagePullTimeoutMs: number
   timeoutMs: number
 }
 

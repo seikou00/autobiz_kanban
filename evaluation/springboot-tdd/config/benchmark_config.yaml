@@ -62,6 +62,7 @@
     "hiddenTestPath": "../verifier/springboot-tdd/WeightRecordApiBenchmarkTest.java",
     "goldPatchPath": "../verifier/springboot-tdd/gold.patch",
     "testClass": "WeightRecordApiBenchmarkTest",
+    "imagePullTimeoutMs": 1800000,
     "timeoutMs": 900000
   },
   "conditions": [
