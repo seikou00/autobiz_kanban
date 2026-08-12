@@ -256,6 +256,77 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(offenders),
         )
 
+    def test_plugin_script_cwd_rule_is_consistent_and_precedes_utest_commands(self) -> None:
+        execution_rule = "execute/shell 工具请求省略 `cwd` 字段"
+        missing_platforms: list[str] = []
+        for platform, commands in (_board_config().get("inspectCommands") or {}).items():
+            prompt = str(commands.get("system_prompt_inject", ""))
+            if execution_rule not in prompt:
+                missing_platforms.append(str(platform))
+        self.assertEqual(
+            missing_platforms,
+            [],
+            "every platform system prompt must keep the plugin-script cwd rule: "
+            + ", ".join(missing_platforms),
+        )
+
+        skill = (ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        first_command = 'python "${pluginPath}/hooks/inspect_skill_contract.py"'
+        self.assertIn(execution_rule, skill)
+        self.assertIn(first_command, skill)
+        self.assertLess(skill.index(execution_rule), skill.index(first_command))
+        self.assertIn(
+            "`${pluginWorkspace}/${projectDir}` 只作为产物路径或脚本的 `--workspace` 参数",
+            skill,
+        )
+        self.assertIn(
+            "`run_utest_command.py --cwd` 只表示 `<BUSINESS_REPO>` 内的相对执行目录",
+            skill,
+        )
+        self.assertIn("每次需要当前状态或 checkpoint 时重新运行该脚本", skill)
+        self.assertIn(
+            "不得直接读取 `.autobizdevops/state.json`、`.autobizdevops/STATE.md`、"
+            "`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`",
+            skill,
+        )
+
+    def test_skill_output_sections_never_declare_global_state_files(self) -> None:
+        state_files = (".autobizdevops/state.json", ".autobizdevops/STATE.md")
+        offenders: list[str] = []
+        for skill_path in sorted((ROOT / "skills").rglob("SKILL.md")):
+            in_output = False
+            output_heading_level = 0
+            for line_number, line in enumerate(
+                skill_path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                heading_marks = len(stripped) - len(stripped.lstrip("#"))
+                is_heading = heading_marks > 0 and stripped[heading_marks:].startswith(" ")
+                if is_heading:
+                    title = stripped[heading_marks:].strip()
+                    if "输出" in title:
+                        in_output = True
+                        output_heading_level = heading_marks
+                    elif in_output and heading_marks <= output_heading_level:
+                        in_output = False
+                    continue
+                if stripped in {"输出:", "输出："}:
+                    in_output = True
+                    output_heading_level = 7
+                    continue
+                if in_output and any(state_file in stripped for state_file in state_files):
+                    offenders.append(
+                        f"{skill_path.relative_to(ROOT)}:{line_number}: {stripped}"
+                    )
+        self.assertEqual(
+            offenders,
+            [],
+            "state.json and STATE.md are runtime state sources, not Skill outputs: "
+            + ", ".join(offenders),
+        )
+
 
     def test_biz_validate_invocation_paths_are_plugin_relative(self) -> None:
         stale_patterns = {

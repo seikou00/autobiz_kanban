@@ -8,9 +8,12 @@ The prompt carries:
 
 - `<SCOPE>`, `<SYSTEM>`, and `<UNIT>` references.
 - `batch_id`, `task_ids`, `execution_lane`, `workspace_ref`, and resolved repository path.
+- per task: `validationBoundary`, `acceptanceCriteria`, `validationCommands`, and `validationTestPlan` as written in `plans/Bxxx/plan.json`.
 - `post_implementation=true` and `tdd_rebuild=false`.
 - permitted write paths: tests, fixtures, mocks, test helpers, test-environment config, dependency manifests, and the matching lock file.
 - selected framework/domain reference output and environment inspection JSON.
+
+Test content and boundary come from the plan. Assert `testIntent.behavior` plus the `acceptanceCriteria` named in `covers`, and run the `validationCommands` entry the `commandId` points at. Read a spec or design anchor only when those fields leave the assertion undetermined; do not re-derive targets from specs, and do not substitute self-authored commands. A missing or dangling `validationTestPlan` entry is a blocking `contract_gap`.
 
 Resolve `framework` only from actually opened `<SYSTEM>`/`<UNIT>` documents. Resolve runner and package manager only from the assigned repository's manifests, lock files, and test configuration. A conflict is a blocking `contract_gap`. If the constraint does not name a framework, use repository facts and add a warning.
 
