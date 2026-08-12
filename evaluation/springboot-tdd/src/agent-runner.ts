@@ -64,7 +64,7 @@ export async function runAgent(
       publishProgress(onProgress, [threadId], [])
       const remainingMs = Math.floor(config.timeouts.totalMs - (performance.now() - started))
       if (remainingMs <= 0) throw new EvalError("timeout", "control 超过总超时", "检查 app 初始化耗时或提高 totalMs。")
-      const result = await invokeThread(session, config, threadId, taskPrompt, remainingMs)
+      const result = await invokeThread(session, config, threadId, taskPrompt, dirs.repo, remainingMs)
       if (result.timedOut) throw new EvalError("timeout", result.error ?? "control timeout", "提高总超时或检查模型运行状态。")
       if (result.error) throw new EvalError("agent", `control agent 失败：${result.error}`, "查看 app/trace 日志。")
       await assertPluginAbsent(session, config.plugin.expectedName)
@@ -129,6 +129,7 @@ export async function runAgent(
           config,
           threadId,
           turnMessage,
+          dirs.repo,
           Math.max(1, Math.floor(Math.min(stageRemainingMs, totalRemainingMs)))
         )
         userInput.push(...invoke.userInput)

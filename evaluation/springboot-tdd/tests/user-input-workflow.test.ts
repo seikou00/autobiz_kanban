@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { appendSkillInvocation, formatSkillInvocation } from "../src/cmbdevclaw-driver.ts"
+import { appendSkillInvocation, formatSkillInvocation, invokeThread } from "../src/cmbdevclaw-driver.ts"
 import { EvalError } from "../src/errors.ts"
 import { answerUserInput } from "../src/user-input.ts"
 import {
@@ -106,4 +106,90 @@ test("serializes the explicit CMBDevClaw plugin Skill protocol", () => {
   assert.match(block, /<description>Specs &lt;contract&gt;<\/description>/)
   assert.match(block, /<when_to_use>Before &gt; code<\/when_to_use>/)
   assert.ok(appendSkillInvocation("do it", { name: "autodev-specs", path: "/skill/SKILL.md" }).endsWith("</CMBDEVCLAW-SKILL-USE-V1>"))
+})
+
+test("auto-confirms git commits only inside the isolated evaluation workspace", async () => {
+  const originalWindow = (globalThis as any).window
+  const approvals: any[] = []
+  const commits: any[] = []
+  let approvalCallback: ((request: any) => Promise<void>) | undefined
+  try {
+    const api = {
+      userInput: { onRequest: () => () => undefined },
+      sandbox: {
+        onApprovalRequest: (_threadId: string, callback: (request: any) => Promise<void>) => {
+          approvalCallback = callback
+          return () => undefined
+        },
+        sendApprovalDecision: (decision: any) => approvals.push(decision)
+      },
+      workspace: {
+        commitWorktree: async (...args: any[]) => {
+          commits.push(args)
+          return { success: true }
+        }
+      },
+      agent: {
+        invoke: (_threadId: string, _message: string, callback: (event: any) => void) => {
+          queueMicrotask(async () => {
+            await approvalCallback?.({
+              id: "approval-1",
+              operation: "git_commit",
+              tool_call: { id: "tool-1" },
+              cwd: "/tmp/eval-repo",
+              suggestedGitWorktreePath: "/tmp/eval-repo",
+              suggestedCommitMessage: "checkpoint",
+              suggestedCommitFilePaths: ["src/Main.java"]
+            })
+            callback({ type: "done" })
+          })
+          return () => undefined
+        },
+        cancel: async () => undefined
+      }
+    }
+    ;(globalThis as any).window = {
+      api,
+      setTimeout: globalThis.setTimeout.bind(globalThis),
+      clearTimeout: globalThis.clearTimeout.bind(globalThis)
+    }
+    const session = {
+      page: { evaluate: async (callback: any, input: any) => await callback(input) }
+    } as any
+    const result = await invokeThread(
+      session,
+      { model: { id: "custom:test" } } as any,
+      "thread-1",
+      "run",
+      "/tmp/eval-repo",
+      1_000
+    )
+
+    assert.equal(result.error, undefined)
+    assert.deepEqual(commits, [["thread-1", "checkpoint", ["src/Main.java"], { worktreePath: "/tmp/eval-repo" }]])
+    assert.deepEqual(approvals, [{
+      requestId: "approval-1",
+      type: "approve",
+      tool_call_id: "tool-1",
+      commitResult: { success: true, commitMessage: "checkpoint" }
+    }])
+
+    const rejected = await invokeThread(
+      session,
+      { model: { id: "custom:test" } } as any,
+      "thread-1",
+      "run",
+      "/tmp/another-repo",
+      1_000
+    )
+    assert.match(rejected.error ?? "", /workspace 之外/)
+    assert.equal(commits.length, 1)
+    assert.deepEqual(approvals.at(-1), {
+      requestId: "approval-1",
+      type: "reject",
+      tool_call_id: "tool-1"
+    })
+  } finally {
+    ;(globalThis as any).window = originalWindow
+  }
 })

@@ -269,9 +269,16 @@ export async function invokeThread(
   config: BenchmarkConfig,
   threadId: string,
   message: string,
+  workspacePath: string,
   timeoutMs: number
 ): Promise<InvokeResult> {
-  return await session.page.evaluate(async (input: { threadId: string; message: string; modelId: string; timeoutMs: number }) => {
+  return await session.page.evaluate(async (input: {
+    threadId: string
+    message: string
+    modelId: string
+    workspacePath: string
+    timeoutMs: number
+  }) => {
     const api = (window as any).api
     return await new Promise<InvokeResult>((resolve) => {
       const events: Array<{ type: string; [key: string]: unknown }> = []
@@ -279,6 +286,7 @@ export async function invokeThread(
       const seenRequests = new Set<string>()
       let settled = false
       let streamCleanup = (): void => undefined
+      let approvalCleanup = (): void => undefined
       const userInputCleanup = api.userInput.onRequest(input.threadId, async (request: any) => {
         if (seenRequests.has(request.requestId)) return
         seenRequests.add(request.requestId)
@@ -299,16 +307,61 @@ export async function invokeThread(
         settled = true
         window.clearTimeout(timer)
         streamCleanup()
+        approvalCleanup()
         userInputCleanup()
         resolve({ events, userInput: decisions, timedOut, ...(error ? { error } : {}) })
       }
+      approvalCleanup = api.sandbox.onApprovalRequest(input.threadId, async (request: any) => {
+        if (request.operation !== "git_commit") return
+        const requestId = request._orchestratorRequestId ?? request.id
+        const toolCallId = request.tool_call?.id ?? request.id
+        const worktreePath = request.suggestedGitWorktreePath ?? request.cwd
+        if (!requestId || !toolCallId || worktreePath !== input.workspacePath) {
+          if (requestId && toolCallId) {
+            api.sandbox.sendApprovalDecision({ requestId, type: "reject", tool_call_id: toolCallId })
+          }
+          finish(false, "拒绝了评测 workspace 之外的 git commit 审批")
+          return
+        }
+        const commitMessage = typeof request.suggestedCommitMessage === "string" && request.suggestedCommitMessage.trim()
+          ? request.suggestedCommitMessage.trim()
+          : "evaluation checkpoint"
+        const filePaths = Array.isArray(request.suggestedCommitFilePaths)
+          ? request.suggestedCommitFilePaths.filter((value: unknown) => typeof value === "string" && value.length > 0)
+          : undefined
+        try {
+          const result = await api.workspace.commitWorktree(
+            input.threadId,
+            commitMessage,
+            filePaths,
+            { worktreePath }
+          )
+          api.sandbox.sendApprovalDecision({
+            requestId,
+            type: "approve",
+            tool_call_id: toolCallId,
+            commitResult: {
+              success: result.success === true,
+              ...(result.success === true ? { commitMessage } : {}),
+              ...(result.error ? { error: String(result.error) } : {})
+            }
+          })
+        } catch (error) {
+          api.sandbox.sendApprovalDecision({
+            requestId,
+            type: "approve",
+            tool_call_id: toolCallId,
+            commitResult: { success: false, error: String(error) }
+          })
+        }
+      })
       streamCleanup = api.agent.invoke(input.threadId, input.message, (event: any) => {
         events.push(event)
         if (event.type === "done") finish(false)
         if (event.type === "error") finish(false, String(event.message ?? event.error ?? "agent error"))
       }, input.modelId)
     })
-  }, { threadId, message, modelId: config.model.id, timeoutMs })
+  }, { threadId, message, modelId: config.model.id, workspacePath, timeoutMs })
 }
 
 export async function getRunDetail(session: CmbDevClawSession, binding: HarnessBinding): Promise<unknown> {
