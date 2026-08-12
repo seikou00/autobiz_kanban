@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "benchmarkId": "cmbdevclaw-springboot-tdd-v1",
+  "repeats": 3,
+  "reportRoot": "../reports",
+  "task": {
+    "id": "springboot-tdd",
+    "promptPath": "../tasks/springboot-tdd/task.md",
+    "sourcePath": "../tasks/springboot-tdd/source-task.md",
+    "provenancePath": "../tasks/springboot-tdd/provenance.json",
+    "repoUrl": "https://github.com/spring-projects/spring-petclinic.git",
+    "repoCommit": "30aab0ae764ad845b5eedd76028756835fec771f"
+  },
+  "app": {
+    "projectPath": "${CMBDEVCLAW_PROJECT:-../../../../CmbCoworkAgent}",
+    "commit": "0ab3bb562befbd41181b2f4c6436e321fb08bd60",
+    "version": "1.4.9",
+    "mainEntry": "out/main/index.js",
+    "electronBin": "node_modules/.bin/electron"
+  },
+  "plugin": {
+    "root": "../../..",
+    "packageScript": "package_workspace.sh",
+    "expectedName": "AutobizDevOps_Plugin_Kanban_latest",
+    "expectedVersion": "1.0.83"
+  },
+  "model": {
+    "id": "custom:cmbdevclaw-springboot-eval",
+    "displayName": "CMBDevClaw SpringBoot Eval",
+    "baseUrlEnv": "CMBDEVCLAW_EVAL_BASE_URL",
+    "modelEnv": "CMBDEVCLAW_EVAL_MODEL",
+    "apiKeyEnv": "CMBDEVCLAW_EVAL_API_KEY",
+    "maxTokens": 128000,
+    "maxOutputTokens": 16384,
+    "temperature": 0.01
+  },
+  "workflow": {
+    "feature": "pet-weight-tracking",
+    "projectDir": "spring-petclinic-eval",
+    "terminalCheckpoint": "verify_done",
+    "nodes": [
+      "dev.specs",
+      "dev.plan",
+      "dev.code",
+      "dev.review",
+      "dev.utest",
+      "dev.verify"
+    ],
+    "skills": {
+      "dev.specs": "autodev-specs",
+      "dev.plan": "autodev-plan",
+      "dev.code": "autodev-code",
+      "dev.review": "autodev-reviewer",
+      "dev.utest": "autodev-utest",
+      "dev.verify": "autodev-verify"
+    }
+  },
+  "verifier": {
+    "image": "zhangyiiiiii/swe-skills-bench-jvm@sha256:3b5219f2740fc8fd3b24409856181ae025fab0e256c43680ba7567d94a12a819",
+    "platform": "linux/amd64",
+    "hiddenTestPath": "../verifier/springboot-tdd/WeightRecordApiBenchmarkTest.java",
+    "goldPatchPath": "../verifier/springboot-tdd/gold.patch",
+    "testClass": "WeightRecordApiBenchmarkTest",
+    "timeoutMs": 900000
+  },
+  "conditions": [
+    { "id": "control", "pluginEnabled": false },
+    { "id": "full-chain", "pluginEnabled": true }
+  ],
+  "timeouts": {
+    "stageMs": 1800000,
+    "totalMs": 10800000
+  }
+}

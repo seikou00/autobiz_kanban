@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "dataset": {
+    "repository": "https://huggingface.co/datasets/zhangyi123456/SWE-Skills-Bench",
+    "commit": "553f0b7dbab78835c78dbf3cedb578fdd626cc4e",
+    "rowId": "springboot-tdd"
+  },
+  "upstream": {
+    "repoUrl": "https://github.com/spring-projects/spring-petclinic",
+    "repoCommit": "",
+    "dockerImage": "zhangyiiiiii/swe-skills-bench-jvm",
+    "taskSnapshot": "source-task.md"
+  },
+  "localBaseline": {
+    "repoCommit": "30aab0ae764ad845b5eedd76028756835fec771f",
+    "springBootVersion": "3.5.0",
+    "javaVersion": "17"
+  },
+  "deviations": [
+    {
+      "kind": "reproducibility",
+      "detail": "Upstream repo_commit was empty and the image used a mutable tag; this suite pins both repository and verifier image."
+    },
+    {
+      "kind": "verifier_replacement",
+      "detail": "The upstream verifier searched Visit* controller/service/test files although the task requests WeightRecord. This suite grades HTTP behavior and H2 persistence instead."
+    },
+    {
+      "kind": "contract_clarification",
+      "detail": "The shared task text makes JSON fields, ownership checks, positive validation, no-side-effect failures, and descending recordDate order explicit for both conditions."
+    }
+  ]
+}

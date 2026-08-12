@@ -1,0 +1,221 @@
+diff --git a/src/main/java/org/springframework/samples/petclinic/owner/WeightRecord.java b/src/main/java/org/springframework/samples/petclinic/owner/WeightRecord.java
+new file mode 100644
+index 0000000..e18311b
+--- /dev/null
++++ b/src/main/java/org/springframework/samples/petclinic/owner/WeightRecord.java
+@@ -0,0 +1,76 @@
++/*
++ * Copyright 2012-2025 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.springframework.samples.petclinic.owner;
++
++import java.time.LocalDate;
++
++import jakarta.persistence.Column;
++import jakarta.persistence.Entity;
++import jakarta.persistence.GeneratedValue;
++import jakarta.persistence.GenerationType;
++import jakarta.persistence.Id;
++import jakarta.persistence.Table;
++
++@Entity
++@Table(name = "weight_record")
++public class WeightRecord {
++
++	@Id
++	@GeneratedValue(strategy = GenerationType.IDENTITY)
++	private Long id;
++
++	@Column(name = "pet_id", nullable = false)
++	private Long petId;
++
++	@Column(name = "weight_kg", nullable = false)
++	private Double weightKg;
++
++	@Column(name = "record_date", nullable = false)
++	private LocalDate recordDate;
++
++	public Long getId() {
++		return this.id;
++	}
++
++	public void setId(Long id) {
++		this.id = id;
++	}
++
++	public Long getPetId() {
++		return this.petId;
++	}
++
++	public void setPetId(Long petId) {
++		this.petId = petId;
++	}
++
++	public Double getWeightKg() {
++		return this.weightKg;
++	}
++
++	public void setWeightKg(Double weightKg) {
++		this.weightKg = weightKg;
++	}
++
++	public LocalDate getRecordDate() {
++		return this.recordDate;
++	}
++
++	public void setRecordDate(LocalDate recordDate) {
++		this.recordDate = recordDate;
++	}
++
++}
+diff --git a/src/main/java/org/springframework/samples/petclinic/owner/WeightRecordController.java b/src/main/java/org/springframework/samples/petclinic/owner/WeightRecordController.java
+new file mode 100644
+index 0000000..749d297
+--- /dev/null
++++ b/src/main/java/org/springframework/samples/petclinic/owner/WeightRecordController.java
+@@ -0,0 +1,76 @@
++/*
++ * Copyright 2012-2025 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.springframework.samples.petclinic.owner;
++
++import java.time.LocalDate;
++import java.util.List;
++
++import jakarta.validation.Valid;
++import jakarta.validation.constraints.NotNull;
++import jakarta.validation.constraints.Positive;
++
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.GetMapping;
++import org.springframework.web.bind.annotation.PathVariable;
++import org.springframework.web.bind.annotation.PostMapping;
++import org.springframework.web.bind.annotation.RequestBody;
++import org.springframework.web.bind.annotation.RequestMapping;
++import org.springframework.web.bind.annotation.RestController;
++import org.springframework.web.server.ResponseStatusException;
++
++@RestController
++@RequestMapping("/owners/{ownerId}/pets/{petId}/weight")
++class WeightRecordController {
++
++	private final OwnerRepository owners;
++
++	private final WeightRecordRepository weightRecords;
++
++	WeightRecordController(OwnerRepository owners, WeightRecordRepository weightRecords) {
++		this.owners = owners;
++		this.weightRecords = weightRecords;
++	}
++
++	@PostMapping
++	ResponseEntity<WeightRecord> recordWeight(@PathVariable Integer ownerId, @PathVariable Long petId,
++			@Valid @RequestBody WeightRecordRequest request) {
++		verifyOwnership(ownerId, petId);
++		WeightRecord record = new WeightRecord();
++		record.setPetId(petId);
++		record.setWeightKg(request.weightKg());
++		record.setRecordDate(request.recordDate());
++		return ResponseEntity.status(HttpStatus.CREATED).body(this.weightRecords.save(record));
++	}
++
++	@GetMapping("/history")
++	List<WeightRecord> history(@PathVariable Integer ownerId, @PathVariable Long petId) {
++		verifyOwnership(ownerId, petId);
++		return this.weightRecords.findByPetIdOrderByRecordDateDesc(petId);
++	}
++
++	private void verifyOwnership(Integer ownerId, Long petId) {
++		Owner owner = this.owners.findById(ownerId)
++			.orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
++		if (petId > Integer.MAX_VALUE || petId < Integer.MIN_VALUE || owner.getPet(petId.intValue()) == null) {
++			throw new ResponseStatusException(HttpStatus.NOT_FOUND);
++		}
++	}
++
++	record WeightRecordRequest(@NotNull @Positive Double weightKg, @NotNull LocalDate recordDate) {
++	}
++
++}
+diff --git a/src/main/java/org/springframework/samples/petclinic/owner/WeightRecordRepository.java b/src/main/java/org/springframework/samples/petclinic/owner/WeightRecordRepository.java
+new file mode 100644
+index 0000000..136a007
+--- /dev/null
++++ b/src/main/java/org/springframework/samples/petclinic/owner/WeightRecordRepository.java
+@@ -0,0 +1,26 @@
++/*
++ * Copyright 2012-2025 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.springframework.samples.petclinic.owner;
++
++import java.util.List;
++
++import org.springframework.data.jpa.repository.JpaRepository;
++
++public interface WeightRecordRepository extends JpaRepository<WeightRecord, Long> {
++
++	List<WeightRecord> findByPetIdOrderByRecordDateDesc(Long petId);
++
++}
+diff --git a/src/main/resources/db/h2/schema.sql b/src/main/resources/db/h2/schema.sql
+index 4a6c322..dfd00de 100644
+--- a/src/main/resources/db/h2/schema.sql
++++ b/src/main/resources/db/h2/schema.sql
+@@ -2,6 +2,7 @@ DROP TABLE vet_specialties IF EXISTS;
+ DROP TABLE vets IF EXISTS;
+ DROP TABLE specialties IF EXISTS;
+ DROP TABLE visits IF EXISTS;
++DROP TABLE weight_record IF EXISTS;
+ DROP TABLE pets IF EXISTS;
+ DROP TABLE types IF EXISTS;
+ DROP TABLE owners IF EXISTS;
+@@ -62,3 +63,12 @@ CREATE TABLE visits (
+ );
+ ALTER TABLE visits ADD CONSTRAINT fk_visits_pets FOREIGN KEY (pet_id) REFERENCES pets (id);
+ CREATE INDEX visits_pet_id ON visits (pet_id);
++
++CREATE TABLE weight_record (
++  id          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
++  pet_id      INTEGER NOT NULL,
++  weight_kg   DOUBLE PRECISION NOT NULL,
++  record_date DATE NOT NULL
++);
++ALTER TABLE weight_record ADD CONSTRAINT fk_weight_record_pets FOREIGN KEY (pet_id) REFERENCES pets (id);
++CREATE INDEX weight_record_pet_date ON weight_record (pet_id, record_date);
