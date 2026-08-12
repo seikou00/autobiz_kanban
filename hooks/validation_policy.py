@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
@@ -18,8 +19,44 @@ BEHAVIOR_TASK_VALIDATION_KINDS = frozenset({
 })
 FRONTEND_COMPILE_VALIDATION_KINDS = frozenset({"build", "compile", "typecheck"})
 TASK_VALIDATION_KINDS = BEHAVIOR_TASK_VALIDATION_KINDS | FRONTEND_COMPILE_VALIDATION_KINDS
-BATCH_VALIDATION_KINDS = frozenset({"build", "typecheck", "lint", "compile"})
+# Batch plans deliberately expose one schema kind. Frontend build/typecheck
+# semantics are carried by argv and checked by compile_only_command_errors.
+BATCH_VALIDATION_KINDS = frozenset({"compile"})
 MAVEN_EXECUTABLES = frozenset({"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"})
+_MAVEN_PROJECT_LIST_FLAGS = ("-pl", "--projects")
+_MAVEN_OPTIONS_WITH_VALUE = frozenset({
+    "-f",
+    "--file",
+    "-gs",
+    "--global-settings",
+    "-pl",
+    "--projects",
+    "-s",
+    "--settings",
+    "-t",
+    "--toolchains",
+})
+_MAVEN_COMPILE_ONLY_GOALS = frozenset({
+    "clean",
+    "validate",
+    "initialize",
+    "generate-sources",
+    "process-sources",
+    "generate-resources",
+    "process-resources",
+    "compile",
+})
+_TEST_EXECUTABLES = frozenset({
+    "ava",
+    "jest",
+    "mocha",
+    "pytest",
+    "tox",
+    "unittest",
+    "vitest",
+})
+_FRONTEND_COMPILE_SCRIPT_MARKERS = ("build", "compile", "typecheck", "type-check")
+_TEST_SCRIPT_MARKERS = ("cypress", "e2e", "integration", "jest", "mocha", "playwright", "spec", "test", "vitest")
 
 _NOOP_EXECUTABLES = {"echo", "false", "printf", "true"}
 _INLINE_SHELL_FLAGS = {
@@ -79,7 +116,197 @@ def command_policy_errors(command: Any) -> list[str]:
     if any(item.lower() in inline_flags for item in argv[1:]):
         errors.append("validation_command_inline_shell_forbidden")
     errors.extend(maven_test_policy_errors(command))
+    errors.extend(maven_project_selector_errors(command))
     return errors
+
+
+def compile_only_command_errors(command: Any) -> list[str]:
+    """Enforce Code-stage compile commands across JVM and frontend toolchains.
+
+    Batch command ``kind`` is always ``compile``. Frontend build/typecheck is
+    represented by argv (for example ``npm run build`` or ``npx tsc --noEmit``).
+    Maven must reach the ``compile`` goal; validate/generate-sources alone do not
+    prove that production sources compile. Test-running goals and scripts fail.
+    """
+
+    argv = normalized_argv(command)
+    if not argv:
+        return []
+    executable = command_executable(argv)
+    lowered_args = [item.lower() for item in argv[1:]]
+    if executable in _TEST_EXECUTABLES:
+        return ["compile_command_executes_tests"]
+    if executable in MAVEN_EXECUTABLES:
+        goals: set[str] = set()
+        skip_next = False
+        for item in lowered_args:
+            if skip_next:
+                skip_next = False
+                continue
+            if item in _MAVEN_OPTIONS_WITH_VALUE:
+                skip_next = True
+                continue
+            if item.startswith("-"):
+                continue
+            goals.add(item.rsplit(":", 1)[-1])
+        if not goals or "compile" not in goals or not goals.issubset(_MAVEN_COMPILE_ONLY_GOALS):
+            return ["compile_command_not_compile_only"]
+        if any(item.startswith("-dtest=") or item.startswith("-dit.test=") for item in lowered_args):
+            return ["compile_command_executes_tests"]
+        return []
+    if executable in {
+        "npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"
+    }:
+        script = package_script_name(command)
+        if isinstance(script, str) and any(
+            marker in script.lower() for marker in _TEST_SCRIPT_MARKERS
+        ):
+            return ["compile_command_executes_tests"]
+        if not isinstance(script, str) or not any(
+            marker in script.lower() for marker in _FRONTEND_COMPILE_SCRIPT_MARKERS
+        ):
+            return ["compile_command_not_compile_only"]
+        return []
+    if executable in {"npx", "npx.cmd"}:
+        tool = lowered_args[0] if lowered_args else ""
+        if tool in _TEST_EXECUTABLES or any(marker in tool for marker in _TEST_SCRIPT_MARKERS):
+            return ["compile_command_executes_tests"]
+        if tool not in {"tsc", "vue-tsc", "vite", "webpack", "next", "ng"}:
+            return ["compile_command_not_compile_only"]
+        if tool in {"vite", "webpack", "next", "ng"} and "build" not in lowered_args[1:]:
+            return ["compile_command_not_compile_only"]
+        return []
+    if executable in {"gradle", "gradle.bat", "gradlew", "gradlew.bat"} and any(
+        "test" in item for item in lowered_args if not item.startswith("-")
+    ):
+        return ["compile_command_executes_tests"]
+    if executable in {"gradle", "gradle.bat", "gradlew", "gradlew.bat"}:
+        tasks = [item for item in lowered_args if not item.startswith("-")]
+        if not tasks or any(item in {"build", "check"} for item in tasks) or not all(
+            "compile" in item or item in {"assemble", "classes"} for item in tasks
+        ):
+            return ["compile_command_not_compile_only"]
+    return []
+
+
+def _normalized_repo_relative_path(value: str) -> str:
+    """Normalize a Git-root-relative path so two spellings compare equal."""
+
+    candidate = value.replace("\\", "/").strip()
+    while candidate.startswith("./"):
+        candidate = candidate[2:]
+    candidate = candidate.rstrip("/")
+    return candidate or "."
+
+
+def _maven_project_list_values(argv: list[str]) -> list[str]:
+    """Return raw -pl/--projects values, covering both `-pl x` and `--projects=x`."""
+
+    values: list[str] = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        lowered = token.lower()
+        if lowered in _MAVEN_PROJECT_LIST_FLAGS:
+            if index + 1 < len(argv):
+                values.append(argv[index + 1])
+            index += 2
+            continue
+        for flag in _MAVEN_PROJECT_LIST_FLAGS:
+            if lowered.startswith(f"{flag}="):
+                values.append(token[len(flag) + 1:])
+                break
+        index += 1
+    return values
+
+
+def maven_project_selector_errors(command: Any) -> list[str]:
+    """Reject `-pl <path>` that re-names the directory the command already runs in.
+
+    ``-pl`` selects modules from the reactor of the POM in ``cwd``. When ``cwd``
+    is already the module directory, that reactor contains only the module
+    itself, so a path selector naming the same directory can never resolve and
+    Maven exits non-zero with ``Could not find the selected project in the
+    reactor``. Selecting a submodule from an aggregator root keeps working and
+    is not flagged, so this only rejects the provably unresolvable spelling.
+    """
+
+    if not isinstance(command, dict):
+        return []
+    argv = normalized_argv(command)
+    if not argv or command_executable(argv) not in MAVEN_EXECUTABLES:
+        return []
+    cwd = command.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return []
+    normalized_cwd = _normalized_repo_relative_path(cwd)
+    if normalized_cwd == ".":
+        return []
+    for raw_value in _maven_project_list_values(argv):
+        for item in raw_value.split(","):
+            candidate = item.strip()
+            # `!module` excludes instead of selects; `:artifactId` is not a path.
+            if not candidate or candidate.startswith("!") or ":" in candidate:
+                continue
+            if _normalized_repo_relative_path(candidate) == normalized_cwd:
+                return ["maven_project_selector_duplicates_cwd"]
+    return []
+
+
+def maven_project_selector_workspace_errors(command: Any, command_dir: Path) -> list[str]:
+    """Validate Maven project selectors against the reactor POM in ``command_dir``.
+
+    A task command normally runs from its leaf module and needs no ``-pl``.
+    Path selectors are only meaningful when that directory is a Maven
+    aggregator. Keeping this filesystem-aware check separate lets the generic
+    command policy remain usable before a workspace has been resolved.
+    """
+
+    if not isinstance(command, dict):
+        return []
+    argv = normalized_argv(command)
+    if not argv or command_executable(argv) not in MAVEN_EXECUTABLES:
+        return []
+
+    selectors = [
+        item.strip()
+        for value in _maven_project_list_values(argv)
+        for item in value.split(",")
+        if item.strip() and not item.strip().startswith("!")
+    ]
+    if not selectors:
+        return []
+
+    command_dir = command_dir.resolve()
+    pom_path = command_dir / "pom.xml"
+    if not pom_path.is_file():
+        return []
+    try:
+        root = ET.parse(pom_path).getroot()
+    except (ET.ParseError, OSError):
+        return []
+    has_modules = any(
+        element.tag.rsplit("}", 1)[-1] == "module" and bool((element.text or "").strip())
+        for element in root.iter()
+    )
+    if not has_modules:
+        return ["maven_project_selector_requires_aggregator_cwd"]
+
+    for selector in selectors:
+        # Coordinates such as :artifactId cannot be verified as file paths.
+        if ":" in selector:
+            continue
+        normalized = selector.replace("\\", "/")
+        if "/" not in normalized and not normalized.startswith("."):
+            continue
+        selected_dir = (command_dir / normalized).resolve()
+        try:
+            selected_dir.relative_to(command_dir)
+        except ValueError:
+            return ["maven_project_selector_outside_cwd"]
+        if not (selected_dir / "pom.xml").is_file():
+            return ["maven_project_selector_path_missing"]
+    return []
 
 
 def maven_test_selectors(command: Any) -> list[str]:
@@ -191,23 +418,101 @@ def maven_test_target_sources(command_dir: Path, selector: str) -> list[Path]:
     return sorted(set(candidates))
 
 
-def maven_test_plan(command: Any, command_dir: Path) -> dict[str, Any] | None:
-    selectors = maven_test_selectors(command)
+def _maven_reactor_search_roots(command: Any, command_dir: Path) -> list[Path] | None:
+    """Resolve `-pl`/`--projects` path selectors to concrete module directories.
+
+    Returns ``None`` when the command has no resolvable path selector, meaning
+    the caller should fall back to searching the whole ``command_dir`` (the
+    unscoped default). Coordinate selectors (``:artifactId``) cannot be mapped
+    to a directory from the filesystem alone, so they also fall back to an
+    unrestricted search rather than risk silently excluding the real target.
+    """
+
+    argv = normalized_argv(command)
+    if not argv:
+        return None
+    selectors = [
+        item.strip()
+        for value in _maven_project_list_values(argv)
+        for item in value.split(",")
+        if item.strip() and not item.strip().startswith("!")
+    ]
     if not selectors:
         return None
-    targets = []
+    if any(":" in selector for selector in selectors):
+        return None
+
+    resolved_base = command_dir.resolve()
+    roots: list[Path] = []
     for selector in selectors:
-        files = maven_test_target_sources(command_dir, selector)
-        targets.append({
-            "selector": selector,
-            "mode": "reuse_existing" if files else "create_in_code",
-            "sourceFiles": [path.relative_to(command_dir).as_posix() for path in files],
-        })
-    return {
-        "commandId": command.get("id"),
-        "framework": "maven",
-        "targets": targets,
-    }
+        candidate = (command_dir / selector.replace("\\", "/")).resolve()
+        try:
+            candidate.relative_to(resolved_base)
+        except ValueError:
+            continue
+        if candidate.is_dir():
+            roots.append(candidate)
+    return roots or None
+
+
+def _maven_test_source_package(source: Path, root: Path) -> str | None:
+    """Extract the dotted package path for a test source below ``root``."""
+
+    try:
+        relative = source.relative_to(root)
+    except ValueError:
+        return None
+    parts = list(relative.parts)
+    for lang_dir in ("java", "kotlin", "groovy", "scala"):
+        if lang_dir in parts:
+            lang_index = parts.index(lang_dir)
+            return ".".join(parts[lang_index + 1:-1])
+    return None
+
+
+def check_maven_test_target_ambiguity(command: Any, command_dir: Path) -> list[str]:
+    """Check if a Maven test selector is ambiguous (matches multiple packages).
+
+    Honors `-pl`/`--projects` scoping: a selector that matches the same class
+    name in two different modules is only ambiguous if Maven would actually
+    search both of them. When the command restricts the reactor to a single
+    resolvable module, sources outside that module are not considered.
+
+    Returns list of error codes if ambiguous selectors are found.
+    """
+    selectors = maven_test_selectors(command)
+    if not selectors:
+        return []
+
+    search_roots = _maven_reactor_search_roots(command, command_dir) or [command_dir]
+
+    errors: list[str] = []
+    for selector in selectors:
+        # Skip fully qualified selectors (contains package path)
+        class_selector = selector.split("#", 1)[0].strip()
+        if "." in class_selector:
+            # Fully qualified, not ambiguous
+            continue
+
+        # Find all matching source files within the scoped reactor roots.
+        sources: set[Path] = set()
+        for root in search_roots:
+            sources.update(maven_test_target_sources(root, selector))
+        if len(sources) > 1:
+            # Extract package paths to check if they're actually different
+            packages = set()
+            for source in sources:
+                for root in search_roots:
+                    package = _maven_test_source_package(source, root)
+                    if package is not None:
+                        packages.add(package)
+                        break
+
+            if len(packages) > 1:
+                errors.append("maven_test_selector_ambiguous")
+                break
+
+    return errors
 
 
 def task_validation_kinds_for_lane(lane: str) -> frozenset[str]:
@@ -226,12 +531,14 @@ def package_script_name(command: Any) -> str | None:
         return None
     executable = command_executable(argv)
     args = argv[1:]
-    if executable not in {"npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd"} or not args:
+    if executable not in {
+        "npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"
+    } or not args:
         return None
     lowered = [item.lower() for item in args]
     if lowered[0] == "run" and len(args) > 1 and not args[1].startswith("-"):
         return args[1]
-    if executable in {"pnpm", "pnpm.cmd", "yarn", "yarn.cmd"} and not args[0].startswith("-"):
+    if executable in {"pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe"} and not args[0].startswith("-"):
         return args[0]
     if executable in {"npm", "npm.cmd"} and lowered[0] in {"start", "stop", "test"}:
         return args[0]
@@ -248,6 +555,32 @@ def package_script_policy_errors(script: Any) -> list[str]:
     if _NOOP_SCRIPT_RE.fullmatch(script):
         errors.append("validation_command_noop")
     return errors
+
+
+def compile_only_package_script_errors(script: Any) -> list[str]:
+    errors = package_script_policy_errors(script)
+    if errors or not isinstance(script, str):
+        return errors
+    lowered = script.lower()
+    if any(re.search(rf"(^|[\s;&|]){re.escape(marker)}(?:[\s:&|]|$)", lowered) for marker in _TEST_SCRIPT_MARKERS):
+        return ["compile_package_script_executes_tests"]
+    return []
+
+
+def compile_only_package_scripts_errors(scripts: Any, script_name: str) -> list[str]:
+    if not isinstance(scripts, dict):
+        return ["validation_package_script_missing"]
+    main_script = scripts.get(script_name)
+    errors = compile_only_package_script_errors(main_script)
+    if errors:
+        return errors
+    for lifecycle_name in (f"pre{script_name}", f"post{script_name}"):
+        if lifecycle_name not in scripts:
+            continue
+        lifecycle_errors = compile_only_package_script_errors(scripts.get(lifecycle_name))
+        if lifecycle_errors:
+            return lifecycle_errors
+    return []
 
 
 def frontend_compile_command_matches_kind(command: Any) -> bool:

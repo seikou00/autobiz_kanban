@@ -6,6 +6,8 @@ version: v1.2.1701
 
 ## 缺失产物处理
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature "${feature}" --plain
 ```

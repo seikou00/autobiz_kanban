@@ -1,6 +1,23 @@
 {
   "PreToolUse": [
     {
+      "matcher": "task|Task",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 hooks/augment_explore_task_prompt.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
+        },
+        {
+          "type": "command",
+          "command": "python3 hooks/augment_test_engineer_task_prompt.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
+        }
+      ]
+    },
+    {
       "matcher": "write_file|edit_file",
       "hooks": [
         {
@@ -24,7 +41,6 @@
             "additionalContext": "停止任务，补充产物"
           },
           "persistAfterInterrupt": true
-
         },
         {
           "type": "command",
@@ -36,12 +52,52 @@
             "additionalContext": "不要手工修改 .task-runs。先运行 code_task_context 并完成探索，再由 task_runner start；absolute-html/standard-html 还需完整读取 route SKILL、创建 route todos 并由 route SKILL 转交 parser。"
           },
           "persistAfterInterrupt": true
-
         },
         {
           "type": "command",
           "command": "python hooks/check-secrets-new.py",
           "timeout": 1000,
+          "persistAfterInterrupt": true
+        }
+      ]
+    },
+    {
+      "matcher": "read_file",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/check_state_read.py",
+          "timeout": 300,
+          "persistAfterInterrupt": true
+        }
+      ]
+    },
+    {
+      "matcher": "execute",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/performance_checker.py",
+          "timeout": 7200,
+          "persistAfterInterrupt": true
+        },
+        {
+          "type": "command",
+          "command": "python hooks/check_state_read.py",
+          "timeout": 300,
+          "persistAfterInterrupt": true
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "execute",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/artifact_sync_execute_hook.py",
+          "timeout": 120,
           "persistAfterInterrupt": true
         }
       ]

@@ -27,7 +27,7 @@
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
       "auto_next_step": "python3 ${pluginPath}/hooks/auto_next_step.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --event-json ${eventJson}"
     },
     "linux": {
@@ -42,7 +42,7 @@
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform linux --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
       "auto_next_step": "python ${pluginPath}/hooks/auto_next_step.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --event-json ${eventJson}"
     },
     "win32": {
@@ -57,7 +57,7 @@
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --write-board-config",
-      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --platform win32 --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
+      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}",
       "auto_next_step": "python ${pluginPath}\\hooks\\auto_next_step.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --event-json ${eventJson}"
     }
   },
@@ -207,6 +207,10 @@
         "group": "Biz",
         "skill": "autobiz-requirement-discuss",
         "order": 10,
+        "runtimePolicy": {
+          "agentMode": "solo",
+          "toolCustomConfig": { "task": { "enabled": false } }
+        },
         "description": "沉淀需求讨论稿 \n 产物：PRD_DISCUSS.md（需求讨论稿：澄清结论、边界与待确认项）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清。" } },
@@ -232,6 +236,10 @@
         "group": "Biz",
         "skill": "autobiz-prd-generate",
         "order": 20,
+        "runtimePolicy": {
+          "agentMode": "solo",
+          "toolCustomConfig": { "task": { "enabled": false } }
+        },
         "description": "生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
@@ -266,6 +274,14 @@
         "group": "Dev",
         "skill": "autodev-specs",
         "order": 30,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": { "task": { "enabled": true } },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": ["Explore", "critic"],
+            "customSubagentFiles": ["agents/explore.md", "agents/critic.md"]
+          }
+        },
         "description": "生成 proposal 与行为规格 \n 产物：proposal.md（变更提案：本轮目标、范围与非目标）、specs/**/*.md（行为规格：各能力 Requirement/Scenario 契约）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "当前阶段：行为规格。" } },
@@ -290,7 +306,7 @@
             { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true }
           ]
         },
-        "validators": ["proposal_contract", "specs_contract", "ui_context_json"]
+        "validators": ["proposal_contract", "specs_contract", "capability_spec_correspondence", "ui_context_json"]
       },
       {
         "id": "dev.plan",
@@ -298,6 +314,14 @@
         "group": "Dev",
         "skill": "autodev-plan",
         "order": 40,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": { "task": { "enabled": true } },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": ["Explore", "critic"],
+            "customSubagentFiles": ["agents/explore.md", "agents/critic.md"]
+          }
+        },
         "description": "生成技术设计和批次执行计划 \n 产物：design.md、plan.json（批次索引与项目状态）、plans/Bxxx/plan.json（每批最多5个任务）、PLAN.md",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-plan", "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。", "dialogTips": "当前阶段：技术设计与计划。" } },
@@ -334,6 +358,14 @@
         "group": "Dev",
         "skill": "autodev-code",
         "order": 50,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": { "task": { "enabled": true } },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": ["Explore", "code-reviewer", "code-simplifier", "verification"],
+            "customSubagentFiles": ["agents/explore.md", "agents/code-reviewer.md", "agents/code-simplifier.md", "agents/verification.md"]
+          }
+        },
         "description": "根据规格、设计和计划实现代码 \n 产物：项目源代码（本轮新增/修改的代码，按 plan.json 就地更新任务状态；无独立文档产物）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-code", "userMessage": "请使用 /autodev-code 继续推进当前 Feature。", "dialogTips": "当前阶段：代码实现。" } },
@@ -387,6 +419,14 @@
         "label": "需求实现评审",
         "group": "Dev",
         "skill": "autodev-reviewer",
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": { "task": { "enabled": true } },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [],
+            "customSubagentFiles": []
+          }
+        },
         "order": 60,
         "description": "评审代码实现是否满足规格 \n 产物：REVIEW_FINDINGS.json（结构化评审决策与发现机器事实源）、REQUIREMENTS_EVAL.md（可选人类可读评审报告）",
         "states": [
@@ -439,6 +479,14 @@
         "group": "Dev",
         "skill": "autodev-utest",
         "order": 70,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": { "task": { "enabled": true } },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": ["test-engineer"],
+            "customSubagentFiles": ["agents/test-engineer.md"]
+          }
+        },
         "description": "单元测试生成、验证与最小修复 \n 产物：UNIT_TEST_RESULT.json（结构化单测结果机器事实源）、test-output.log（单测运行原始输出日志）、UNIT_TEST_REPORT.md（可选人类可读单测报告）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-utest", "userMessage": "请使用 /autodev-utest 继续推进当前 Feature。", "dialogTips": "当前阶段：单元测试。" } },
@@ -499,8 +547,16 @@
         "label": "E2E 测试",
         "group": "Dev",
         "skill": "autodev-e2e",
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": { "task": { "enabled": true } },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [],
+            "customSubagentFiles": []
+          }
+        },
         "order": 80,
-        "description": "端到端测试 \n 产物：E2E_RESULT.json（结构化 E2E 结果机器事实源）、E2E_TEST_CASES.yaml（E2E 测试用例）、e2e-run.log（E2E 运行原始日志）、E2E_REPORT.md（可选人类可读 E2E 报告）",
+        "description": "端到端测试 \n 产物：E2E_TEST_CASES.yaml（唯一用例计划）、E2E_QUALITY_SCAN.json（质量门禁）、E2E_RESULT.json（机器结论）、e2e-run.log（JSONL 运行事实）、evidence/EVIDENCE.jsonl（可信执行证据）、e2e-diagnostics/**/*（诊断产物），可选 E2E_REPORT.md 与失败回流 FIX_REQUEST.json",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autodev-e2e", "userMessage": "请使用 /autodev-e2e 继续推进当前 Feature。", "dialogTips": "当前阶段：E2E 测试。" } },
@@ -563,11 +619,13 @@
             { "id": "e2e_report", "label": "E2E 测试报告", "artifactType": "file", "path": "E2E_REPORT.md", "required": false },
             { "id": "e2e_result_json", "label": "结构化 E2E 结果", "artifactType": "json", "path": "E2E_RESULT.json", "required": true },
             { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false },
+            { "id": "e2e_quality_scan", "label": "E2E 质量门禁", "artifactType": "json", "path": "E2E_QUALITY_SCAN.json", "required": false },
+            { "id": "e2e_diagnostics", "label": "E2E 诊断产物", "artifactType": "file", "path": "e2e-diagnostics/**/*", "required": false },
             { "id": "e2e_log", "label": "E2E 运行日志", "artifactType": "file", "path": "e2e-run.log", "required": true },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["ui_context_json", "e2e_result_json", "fix_request_json", "evidence_integrity"]
+        "validators": ["ui_context_json", "e2e_result_json", "e2e_cases_contract", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "dev.verify",

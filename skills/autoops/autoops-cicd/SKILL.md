@@ -13,6 +13,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 # /autoops-cicd — CI/CD 清单与流水线阻断处理
 
+使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
 ### 正常模式
 
 - 上游入口：`checkpoint = verify_done`

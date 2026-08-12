@@ -2,23 +2,32 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.render_session_context import (  # noqa: E402
+    _agent_config,
     _heading_slug,
     _parse_selected,
+    _runtime_policy,
     _unit_heading_label,
+    main,
     render,
 )
 from hooks.agents_repo import display_path_join  # noqa: E402
+from hooks.init_workspace import create_feature, init_workspace  # noqa: E402
+from board_core.state_store import load_state_json_records, write_state_records  # noqa: E402
 
 
 MANIFEST = {
@@ -76,12 +85,25 @@ def _local_repo(body="# 本地知识库\n- 本地约束\n"):
     return str(d)
 
 
-def _workspace(body="# 会话工作区指令\n- 工作区约束\n"):
-    """临时会话工作区目录；body 为 None 时不写 AGENTS.md（目录存在但无指令文件）。"""
+def _workspace(body="# 会话工作区指令\n- 工作区约束\n", *, context_body=None):
+    """临时会话工作区目录；body 为 None 时不写 AGENTS.md（目录存在但无指令文件）；
+    context_body 非 None 时额外写入 CONTEXT.md（领域词汇表，④ 层）。"""
     d = Path(tempfile.mkdtemp())
     if body is not None:
         (d / "AGENTS.md").write_text(body, encoding="utf-8")
+    if context_body is not None:
+        (d / "CONTEXT.md").write_text(context_body, encoding="utf-8")
     return str(d)
+
+
+# 领域词汇表（④ 层）测试正文：用词条独有的加粗标记校验注入，避免与其他段串味。
+GLOSSARY = "# 领域词汇表\n\n**导出任务 (ExportTask)**\n一次批量导出请求。\n_Avoid_: 下载任务\n"
+
+
+def _board_config(workflow):
+    path = Path(tempfile.mkdtemp()) / "board_config.json"
+    path.write_text(json.dumps({"workflow": workflow}, ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 class ParseSelectedTest(unittest.TestCase):
@@ -119,13 +141,512 @@ class RenderShapeTest(unittest.TestCase):
         res = render([], plugin_root=_plugin_root())
         self.assertIn("sessionContext", res)
         self.assertIn("agentmdLoadStatus", res)
+        self.assertIn("agentConfig", res)
+        self.assertNotIn("runtimePolicy", res)
         self.assertNotIn("inlineSystemPrompt", res)  # 破坏性切换，不留旧字段
+        self.assertEqual(
+            res["agentConfig"],
+            {
+                "agentMode": "solo",
+                "toolConfig": {"task": {"enabled": True}},
+                "subagentConfig": {
+                    "disabledBuiltinSubagents": [],
+                    "customSubagentFiles": [],
+                },
+            },
+        )
 
     def test_empty_selection_is_noop(self):
         res = render([], plugin_root=_plugin_root())
         self.assertTrue(res["ok"])
         self.assertEqual(res["sessionContext"], "")
         self.assertEqual(res["agentmdLoadStatus"], [])
+
+    def test_inlined_context_does_not_count_as_actual_file_read(self):
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        self.assertIn("不表示任何文件已被读取", prompt)
+        self.assertIn("复述不算读取", prompt)
+        self.assertIn("未用工具实际打开前，不得声称已读取", prompt)
+        # 产出义务：要求列出本轮实际打开的路径。措辞可调（范围限定等），
+        # 但「要报告打开了哪些、未打开的不得列入」这条主线不能没有。
+        self.assertIn("本轮通过工具实际打开了哪些", prompt)
+        self.assertIn("未打开的不得列入", prompt)
+
+    def test_mandatory_reads_cannot_be_skipped_during_requirements_discussion(self):
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+        )
+        prompt = res["sessionContext"]
+        # 协议按「任务」生效：非代码阶段（需求澄清等）不得据此判定整段不适用。
+        self.assertIn(
+            "本协议按「任务」生效，覆盖需求澄清、需求分析、向用户提问、设计、编码",
+            prompt,
+        )
+        self.assertIn("不得因当前不是代码阶段而跳过", prompt)
+        self.assertIn(
+            "本门禁覆盖需求澄清、需求分析、向用户提问、设计、编码",
+            prompt,
+        )
+        self.assertIn(
+            "“必须读取”“先读取”“必读”文件必须逐个通过文件读取、搜索或 shell 工具实际打开",
+            prompt,
+        )
+        self.assertIn(
+            "明确的必读指令高于模型对文件相关性的主观判断",
+            prompt,
+        )
+        self.assertIn(
+            "不得以“当前不是代码阶段”“需求澄清不需要”",
+            prompt,
+        )
+        self.assertIn(
+            "在该阶段首次分析、提问或答复前用工具打开该文件",
+            prompt,
+        )
+        self.assertIn(
+            "未取得工具读取证据前，不得声称已读、不得继续实质分析",
+            prompt,
+        )
+        self.assertIn("也不得据此开始实质分析、提问或答复", prompt)
+        self.assertIn("skill 的工作步骤不构成跳过本协议的理由", prompt)
+
+
+class RuntimePolicyTest(unittest.TestCase):
+    @staticmethod
+    def _feature_arguments(checkpoint="discuss_in_progress"):
+        root = Path(tempfile.mkdtemp()).resolve()
+        project = root / "demo"
+        project.mkdir()
+        init_workspace(project)
+        feature = "runtime-policy"
+        create_feature(project, feature)
+        records, errors, exists = load_state_json_records(project)
+        assert exists and not errors
+        record = dict(records[feature])
+        record["checkpoint"] = checkpoint
+        record["stage"] = checkpoint
+        records[feature] = record
+        write_state_records(project, records)
+        return project, feature, {
+            "plugin_workspace": str(root),
+            "project": project.name,
+            "feature": feature,
+        }
+
+    def test_session_context_commands_pass_explicit_project_and_feature_arguments(self):
+        config = json.loads(
+            (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
+        )
+        for platform in ("darwin", "linux", "win32"):
+            command = config["inspectCommands"][platform]["session_context_inject"]
+            self.assertNotIn("--node-id", command)
+            self.assertIn("--plugin-workspace ${pluginWorkspace}", command)
+            self.assertIn("--project ${projectDir}", command)
+            self.assertIn("--feature ${feature}", command)
+
+    def test_explicit_project_and_feature_select_node_policy(self):
+        project, feature, arguments = self._feature_arguments()
+        # biz.* 无子代理配置，保持 solo；dev.* 自 e3abd1f 起改为 multi 以配合子代理注入。
+        cases = (
+            ("discuss_in_progress", "solo", False),
+            ("prd_in_progress", "solo", False),
+            ("specs_in_progress", "multi", True),
+            ("code_in_progress", "multi", True),
+        )
+
+        for checkpoint, expected_agent_mode, expected_enabled in cases:
+            with self.subTest(checkpoint=checkpoint):
+                records, errors, exists = load_state_json_records(project)
+                self.assertTrue(exists)
+                self.assertEqual(errors, [])
+                record = dict(records[feature])
+                record["checkpoint"] = checkpoint
+                record["stage"] = checkpoint
+                records[feature] = record
+                write_state_records(project, records)
+
+                policy = render([], **arguments)["agentConfig"]
+                self.assertEqual(policy["agentMode"], expected_agent_mode)
+                self.assertEqual(
+                    policy["toolConfig"]["task"]["enabled"],
+                    expected_enabled,
+                )
+
+    def _write_checkpoint(self, project, feature, checkpoint, **extra):
+        records, errors, exists = load_state_json_records(project)
+        self.assertTrue(exists)
+        self.assertEqual(errors, [])
+        record = dict(records[feature])
+        record["checkpoint"] = checkpoint
+        record["stage"] = checkpoint
+        record.update(extra)
+        records[feature] = record
+        write_state_records(project, records)
+
+    def test_prd_done_session_gets_the_specs_node_policy(self):
+        """回归：prd_done 时宿主已按 nextAction 拉起 /autodev-specs，会话必须拿到 specs 的能力。
+
+        改之前策略取的是 currentNodeId（biz.prd，solo + 禁 task），新开会话因此启动不了
+        autodev-specs 依赖的 Explore 子代理。
+        """
+        project, feature, arguments = self._feature_arguments()
+        self._write_checkpoint(project, feature, "prd_done")
+
+        policy = render([], **arguments)["agentConfig"]
+        self.assertEqual(policy["agentMode"], "multi")
+        self.assertTrue(policy["toolConfig"]["task"]["enabled"])
+        self.assertEqual(
+            [Path(item).name for item in policy["subagentConfig"]["customSubagentFiles"]],
+            ["explore.md", "critic.md"],
+        )
+
+    def test_done_checkpoint_resolves_policy_through_next_action(self):
+        """每个 *_done 的策略都必须等于 nextAction 目标节点的策略——与宿主路由同源。"""
+        config = json.loads(
+            (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
+        )
+        nodes = config["workflow"]["nodes"]
+        node_id_by_skill = {node["skill"]: node["id"] for node in nodes}
+        project, feature, arguments = self._feature_arguments()
+
+        checked = 0
+        for node in nodes:
+            done_checkpoints = [
+                checkpoint
+                for checkpoint in node["checkpoints"]
+                if checkpoint.endswith("_done")
+            ]
+            next_skills = [
+                state["nextAction"]["slashSkill"]
+                for state in node["states"]
+                if state.get("nodeStatus") == "done"
+            ]
+            if not done_checkpoints or not next_skills:
+                continue
+            target_node_id = node_id_by_skill[next_skills[0]]
+            with self.subTest(checkpoint=done_checkpoints[0]):
+                self._write_checkpoint(project, feature, done_checkpoints[0])
+                self.assertEqual(
+                    render([], **arguments)["agentConfig"],
+                    _agent_config(_runtime_policy(target_node_id)),
+                )
+                checked += 1
+        self.assertEqual(checked, len(nodes) - 1)  # ops.archive 无 done 状态
+
+    def test_in_progress_checkpoint_keeps_the_current_node_policy(self):
+        """in_progress 的 nextAction 指向节点自身，解析必须退化回当前节点、不得放开 task。"""
+        project, feature, arguments = self._feature_arguments()
+        self._write_checkpoint(project, feature, "prd_in_progress")
+
+        self.assertEqual(
+            render([], **arguments)["agentConfig"],
+            _agent_config(_runtime_policy("biz.prd")),
+        )
+        self.assertFalse(render([], **arguments)["agentConfig"]["toolConfig"]["task"]["enabled"])
+
+    def test_needs_fix_falls_back_to_the_returning_node_policy(self):
+        """needs_fix 映射出的 blocked 状态无人定义，反查落空后退回回流目标节点。"""
+        project, feature, arguments = self._feature_arguments()
+        self._write_checkpoint(
+            project,
+            feature,
+            "needs_fix",
+            needsFixFromCheckpoint="code_in_progress",
+        )
+
+        self.assertEqual(
+            render([], **arguments)["agentConfig"],
+            _agent_config(_runtime_policy("dev.code")),
+        )
+
+    def test_explicit_node_id_overrides_project_and_feature_arguments(self):
+        _project, _feature, arguments = self._feature_arguments("discuss_in_progress")
+        policy = render([], node_id="dev.code", **arguments)["agentConfig"]
+        self.assertTrue(policy["toolConfig"]["task"]["enabled"])
+
+    def test_missing_arguments_or_feature_falls_back_to_defaults(self):
+        expected = {
+            "agentMode": "solo",
+            "toolConfig": {"task": {"enabled": True}},
+            "subagentConfig": {
+                "disabledBuiltinSubagents": [],
+                "customSubagentFiles": [],
+            },
+        }
+        self.assertEqual(render([])["agentConfig"], expected)
+
+        _project, _feature, arguments = self._feature_arguments()
+        arguments["feature"] = "missing-feature"
+        self.assertEqual(render([], **arguments)["agentConfig"], expected)
+
+    def test_process_environment_is_not_used_for_node_resolution(self):
+        expected = {
+            "agentMode": "solo",
+            "toolConfig": {"task": {"enabled": True}},
+            "subagentConfig": {
+                "disabledBuiltinSubagents": [],
+                "customSubagentFiles": [],
+            },
+        }
+        _project, _feature, arguments = self._feature_arguments()
+        environment = {
+            "PLUGIN_WORKSPACE": arguments["plugin_workspace"],
+            "PROJECT_DIR": arguments["project"],
+            "FEATURE_ID": arguments["feature"],
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(render([])["agentConfig"], expected)
+
+    def test_cli_arguments_select_node_policy(self):
+        _project, _feature, arguments = self._feature_arguments()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--plugin-workspace",
+                    arguments["plugin_workspace"],
+                    "--project",
+                    arguments["project"],
+                    "--feature",
+                    arguments["feature"],
+                    "--selected-deployUnit",
+                    "[]",
+                ]
+            )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
+
+    def test_board_config_disables_task_only_for_configured_early_nodes(self):
+        for node_id in ("biz.discuss", "biz.prd"):
+            policy = _runtime_policy(node_id)
+            self.assertEqual(policy["agentMode"], "solo")
+            self.assertFalse(policy["toolCustomConfig"]["task"]["enabled"])
+
+        # dev.specs 起各节点配置了子代理，子代理只能经 task 工具启动，因此必须放开 task；
+        # 同时自 e3abd1f（配合 devclaw1.4.9）起 agentMode 为 multi。
+        for node_id in ("dev.specs", "dev.plan", "dev.code", "dev.utest"):
+            policy = _runtime_policy(node_id)
+            self.assertEqual(policy["agentMode"], "multi")
+            self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
+
+    def test_board_config_nodes_with_subagents_keep_task_enabled(self):
+        """配置了 customSubagentFiles 的节点必须同时开放 task，否则子代理无法启动。"""
+        config = json.loads(
+            (ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8")
+        )
+
+        def walk(value):
+            if isinstance(value, dict):
+                nodes = value.get("nodes")
+                if isinstance(nodes, list):
+                    for node in nodes:
+                        if isinstance(node, dict):
+                            yield node
+                for key, nested in value.items():
+                    if key != "nodes":
+                        yield from walk(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    yield from walk(nested)
+
+        checked = 0
+        for node in walk(config["workflow"]):
+            policy = node.get("runtimePolicy")
+            if not isinstance(policy, dict):
+                continue
+            subagents = policy.get("subagentConfig") or {}
+            if not subagents.get("customSubagentFiles"):
+                continue
+            checked += 1
+            with self.subTest(node=node.get("id")):
+                self.assertTrue(
+                    policy["toolCustomConfig"]["task"]["enabled"],
+                    f"{node.get('id')} 配置了子代理但禁用了 task 工具",
+                )
+
+        self.assertGreater(checked, 0)
+
+    def test_missing_node_config_uses_required_defaults(self):
+        expected = {
+            "agentMode": "solo",
+            "toolCustomConfig": {"task": {"enabled": True}},
+        }
+        self.assertEqual(_runtime_policy(None), expected)
+        self.assertEqual(
+            _runtime_policy(
+                "dev.unknown",
+                board_config_path=_board_config({"nodes": []}),
+            ),
+            expected,
+        )
+
+    def test_reads_agent_mode_and_disabled_task_from_current_node(self):
+        config_path = _board_config(
+            {
+                "nodes": [
+                    {
+                        "id": "dev.specs",
+                        "runtimePolicy": {
+                            "agentMode": "solo",
+                            "toolCustomConfig": {"task": {"enabled": False}},
+                        },
+                    },
+                    {
+                        "id": "dev.code",
+                        "runtimePolicy": {
+                            "agentMode": "coordinator",
+                            "toolCustomConfig": {"task": {"enabled": True}},
+                        },
+                    },
+                ]
+            }
+        )
+
+        specs = render([], node_id="dev.specs", board_config_path=config_path)
+        code = render([], node_id="dev.code", board_config_path=config_path)
+
+        self.assertEqual(
+            specs["agentConfig"],
+            {
+                "agentMode": "solo",
+                "toolConfig": {"task": {"enabled": False}},
+                "subagentConfig": {
+                    "disabledBuiltinSubagents": [],
+                    "customSubagentFiles": [],
+                },
+            },
+        )
+        self.assertEqual(code["agentConfig"]["agentMode"], "coordinator")
+        self.assertTrue(code["agentConfig"]["toolConfig"]["task"]["enabled"])
+
+    def test_reads_subagent_config_from_current_node(self):
+        plugin_root = _plugin_root()
+        config_path = _board_config(
+            {
+                "nodes": [
+                    {
+                        "id": "dev.code",
+                        "runtimePolicy": {
+                            "subagentConfig": {
+                                "disabledBuiltinSubagents": ["designer"],
+                                "customSubagentFiles": [
+                                    "agents/domain-reviewer.md"
+                                ],
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+
+        config = render(
+            [],
+            node_id="dev.code",
+            board_config_path=config_path,
+            plugin_root=plugin_root,
+        )["agentConfig"]
+
+        self.assertEqual(
+            config["subagentConfig"],
+            {
+                "disabledBuiltinSubagents": ["designer"],
+                "customSubagentFiles": [
+                    display_path_join(plugin_root.resolve(), "agents/domain-reviewer.md")
+                ],
+            },
+        )
+
+    def test_custom_subagent_plugin_root_uses_target_platform_separator(self):
+        plugin_root = _plugin_root()
+        config_path = _board_config(
+            {
+                "nodes": [
+                    {
+                        "id": "dev.code",
+                        "runtimePolicy": {
+                            "subagentConfig": {
+                                "customSubagentFiles": [
+                                    "agents/explore.md"
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+
+        config = render(
+            [],
+            node_id="dev.code",
+            board_config_path=config_path,
+            plugin_root=plugin_root,
+            platform="win32",
+        )["agentConfig"]
+
+        self.assertEqual(
+            config["subagentConfig"]["customSubagentFiles"],
+            [display_path_join(plugin_root.resolve(), "agents/explore.md", platform="win32")],
+        )
+
+    def test_finds_runtime_policy_on_dynamic_node(self):
+        config_path = _board_config(
+            {
+                "nodes": [],
+                "dynamicStages": [
+                    {
+                        "id": "detail_design_before_code",
+                        "nodes": [
+                            {
+                                "id": "dev.detail_design",
+                                "runtimePolicy": {
+                                    "agentMode": "solo",
+                                    "toolCustomConfig": {"task": {"enabled": False}},
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        policy = _runtime_policy("dev.detail_design", board_config_path=config_path)
+        self.assertFalse(policy["toolCustomConfig"]["task"]["enabled"])
+
+    def test_invalid_fields_fall_back_independently(self):
+        config_path = _board_config(
+            {
+                "nodes": [
+                    {
+                        "id": "dev.code",
+                        "runtimePolicy": {
+                            "agentMode": "  ",
+                            "toolCustomConfig": {"task": {"enabled": "false"}},
+                        },
+                    }
+                ]
+            }
+        )
+        self.assertEqual(
+            _runtime_policy("dev.code", board_config_path=config_path),
+            {
+                "agentMode": "solo",
+                "toolCustomConfig": {"task": {"enabled": True}},
+            },
+        )
+
+    def test_invalid_selected_json_still_returns_runtime_policy(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["--node-id", "biz.discuss", "--selected-deployUnit", "not-json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
 
 
 class RenderRemoteTest(unittest.TestCase):
@@ -450,7 +971,8 @@ class RenderWorkspaceTest(unittest.TestCase):
         self.assertIn("## 会话工作区指令", prompt)  # 工作区指令的 ## 标题
         self.assertIn("- 工作区约束", prompt)  # AGENTS.md 正文（用正文独有的项目符号校验，避免与 ## 标题串味）
         self.assertNotIn("<WORKSPACE", prompt)  # 不再用 WORKSPACE 标签
-        self.assertNotIn("<SYSTEM", prompt)  # 未选单元 → 无系统段
+        # 断言系统段的开标签而非裸 "<SYSTEM"：启动协议正文本身会提到 <SYSTEM> 标签名。
+        self.assertNotIn('<SYSTEM id="sys-', prompt)  # 未选单元 → 无系统段
         # 工作区指令进 agentmdLoadStatus：deployUnitId=本地工作区、source=local、loaded=True。
         status = res["agentmdLoadStatus"]
         self.assertEqual(len(status), 1)
@@ -570,6 +1092,111 @@ class RenderWorkspaceTest(unittest.TestCase):
         self.assertTrue(status[0]["loaded"])
         self.assertEqual(status[1]["deployUnitId"], "LF39.18_Outservice")
         self.assertIn("remote 1", res["message"])  # 单元摘要只数单元，不含工作区
+
+
+class RenderDomainContextTest(unittest.TestCase):
+    def test_domain_context_injected_after_unit_with_selection(self):
+        # 选中单元 + 工作区 AGENTS.md + CONTEXT.md：④ 段以裸标签外包、排在单元级整段之后。
+        ws = _workspace(context_body=GLOSSARY)
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+            session_workspace_path=ws,
+        )
+        prompt = res["sessionContext"]
+        self.assertIn('<DOMAIN_CONTEXT id="domain-context" scope="项目级领域词汇表">', prompt)
+        self.assertRegex(prompt, r'<DOMAIN_CONTEXT[^>]*>\n\n')
+        self.assertIn("\n\n</DOMAIN_CONTEXT>", prompt)
+        self.assertIn("**导出任务 (ExportTask)**", prompt)
+        self.assertLess(prompt.index("</UNIT>"), prompt.index("<DOMAIN_CONTEXT"))
+        # 状态顺序：本地工作区 → 领域词汇表 → 各单元；词汇表 local/loaded、路径指向 CONTEXT.md
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(
+            [s["deployUnitId"] for s in status],
+            ["本地工作区", "领域词汇表", "LF39.18_Outservice"],
+        )
+        self.assertTrue(status[1]["loaded"])
+        self.assertEqual(status[1]["source"], "local")
+        self.assertEqual(status[1]["path"], display_path_join(ws, "CONTEXT.md"))
+        # message 的单元摘要不把会话级条目算进去
+        self.assertIn("remote 1 / local 0 / 缺 0", res["message"])
+
+    def test_domain_context_only_no_selection(self):
+        # 未选单元、无工作区 AGENTS.md、仅 CONTEXT.md → 只注入 ④ 段，无 SCOPE/SYSTEM/UNIT。
+        ws = _workspace(body=None, context_body=GLOSSARY)
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        self.assertTrue(res["ok"])
+        prompt = res["sessionContext"]
+        self.assertIn("<DOMAIN_CONTEXT", prompt)
+        self.assertIn("**导出任务 (ExportTask)**", prompt)
+        self.assertNotIn("## 适用范围", prompt)  # 词汇表不进适用范围表 → 无绑定行 → 整表跳过
+        # 断言各段的开标签而非裸标签名：启动协议正文本身会提到 <SCOPE>/<SYSTEM>/<UNIT>。
+        self.assertNotIn('<UNIT id=', prompt)
+        self.assertNotIn('<SYSTEM id="sys-', prompt)
+        self.assertEqual(res["message"], "未选择部署单元，仅注入领域词汇表")
+        status = res["agentmdLoadStatus"]
+        self.assertEqual(len(status), 1)
+        self.assertEqual(status[0]["deployUnitId"], "领域词汇表")
+
+    def test_domain_context_and_workspace_coexist_no_dedup(self):
+        # AGENTS.md 与 CONTEXT.md 同目录并存：两段都注入、互不去重、状态各一条。
+        ws = _workspace(context_body=GLOSSARY)
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        prompt = res["sessionContext"]
+        self.assertIn("## 会话工作区指令", prompt)
+        self.assertIn("- 工作区约束", prompt)
+        self.assertEqual(prompt.count("<DOMAIN_CONTEXT"), 1)
+        self.assertIn("**导出任务 (ExportTask)**", prompt)
+        self.assertEqual(res["message"], "未选择部署单元，仅注入会话工作区指令、领域词汇表")
+        status = res["agentmdLoadStatus"]
+        self.assertEqual([s["deployUnitId"] for s in status], ["本地工作区", "领域词汇表"])
+
+    def test_domain_context_missing_file_skips_section(self):
+        # 只有 AGENTS.md、无 CONTEXT.md → 不生成 ④ 段、无其状态条目（缺失是常态不是错误）。
+        ws = _workspace()
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": "/repo/out"}],
+            plugin_root=_plugin_root(),
+            session_workspace_path=ws,
+        )
+        self.assertNotIn("<DOMAIN_CONTEXT", res["sessionContext"])
+        self.assertFalse(
+            any(s["deployUnitId"] == "领域词汇表" for s in res["agentmdLoadStatus"])
+        )
+
+    def test_domain_context_blank_file_skips_section(self):
+        # CONTEXT.md 全空白等同缺失；连同无 AGENTS.md、未选单元 → 空注入。
+        ws = _workspace(body=None, context_body="   \n\n")
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws)
+        self.assertEqual(res["sessionContext"], "")
+        self.assertEqual(res["agentmdLoadStatus"], [])
+        self.assertEqual(res["message"], "未选择部署单元，无需注入")
+
+    def test_domain_context_untouched_by_agents_dedup(self):
+        # 会话工作区 == 单元 localRepoPath 且单元走 local 兜底：AGENTS.md 同文件去重照旧生效，
+        # CONTEXT.md 文件名不同、不受去重影响，照常注入。
+        local = _local_repo()
+        (Path(local) / "CONTEXT.md").write_text(GLOSSARY, encoding="utf-8")
+        res = render(
+            [{"deployUnitId": "LF39.18_Outservice", "localRepoPath": local}],
+            plugin_root=_plugin_root(write_remote=("LF39.system",)),  # 单元 remote 缺失→local 兜底
+            session_workspace_path=local,
+        )
+        prompt = res["sessionContext"]
+        self.assertNotIn("## 会话工作区指令", prompt)  # AGENTS.md 去重仍生效
+        self.assertIn("<DOMAIN_CONTEXT", prompt)  # 词汇表不受去重影响
+        self.assertIn("**导出任务 (ExportTask)**", prompt)
+        # 工作区条目被去重丢弃后，词汇表条目居首，其后各单元
+        status = res["agentmdLoadStatus"]
+        self.assertEqual([s["deployUnitId"] for s in status], ["领域词汇表", "LF39.18_Outservice"])
+
+    def test_win32_domain_context_status_uses_backslash(self):
+        ws = _workspace(body=None, context_body=GLOSSARY)
+        res = render([], plugin_root=_plugin_root(), session_workspace_path=ws, platform="win32")
+        self.assertEqual(
+            res["agentmdLoadStatus"][0]["path"],
+            display_path_join(ws, "CONTEXT.md", platform="win32"),
+        )
 
 
 if __name__ == "__main__":

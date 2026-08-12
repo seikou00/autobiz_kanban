@@ -1,126 +1,184 @@
 ---
 name: autodev-e2e
-description: 对单个 feature 执行端到端测试。作为 Autodev 根流程中的正式阶段，承接 autodev-utest 的 UNIT_TEST_RESULT.json，输出 E2E_RESULT.json / E2E_TEST_CASES.yaml / e2e-run.log，并按 checkpoint 做 e2e_done / needs_fix 分支决策。默认由当前会话内联执行；可使用后台进程启动服务或运行长时间测试命令。
-version: v1.1.1604
+description: E2E 验证单个 Autodev feature 的真实用户主链路。用于 autodev-utest 完成后进入 E2E 阶段，或从 e2e_in_progress 恢复执行；以 Playwright Test 可信执行、质量扫描、Evidence 和结构化结果裁定 e2e_done 或 needs_fix。
+version: v1.2.0811
 ---
 
-# autodev-e2e — E2E 阶段技能
+# /autodev-e2e - 端到端测试
 
+以脚本派生的质量门禁、Playwright JSON report、Evidence、`E2E_RESULT.json` 与 JSONL 运行日志为完成标准。探索、截图或静态代码存在不能裁定 PASS。
 
-## 缺失产物处理
+## 运行契约
+
+写入：
+
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_TEST_CASES.yaml`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_QUALITY_SCAN.json`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/E2E_RESULT.json`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/e2e-run.log`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/e2e-diagnostics/round-<index>/*`
+- 可选 `E2E_REPORT.md`；失败回流时可选 `FIX_REQUEST.json`
+
+`E2E_TEST_CASES.yaml` 是唯一用例计划。Markdown 报告只提供人类视图。
+
+## 建立上下文与恢复
 
 ```bash
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-e2e --feature "${feature}" --plain
-```
-
-
-## State 快照读取
-
-确定 `{slug}` 后，第一步调用脚本读取当前 Feature 快照，并把 stdout 捕获为 `CHECKPOINT`：
-
-```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
-```
-
-后续准入、恢复和分支决策直接取用 `CHECKPOINT`。若 `CHECKPOINT` 为空、未知，或无法唯一确定当前 Feature，必须停止并提示用户选择 Feature。
-
-## 输入与行为依据
-
-消费执行清单：按「流程契约」一节取本 Feature 的执行清单，读取 `## 输入产物` 列出的产物原件，按各自 `读取方式` 抽取重点；标『未生成』的可选 input 按其 `缺失处理`（降级）继续，清单未列出的产物不读不等。清单未列出的上游产物（其所属阶段被跳过或不在本工作流链）在可选人类报告中统一注明「不在本工作流产物清单」，而非「缺失」。
-
-各输入的用途以其 `读取方式` 为准；行为契约（specs 的 Requirement / Scenario）是 E2E pass/fail 的主要行为依据。
-
-读取 `plan.json.deferredValidationIssues[]` 及对应 batch plan 明细。Code 延期项不是 PASS：能映射到用户主链路的 `scope=task` 问题必须进入 P0/P1 E2E 用例；`scope=batch/project` 的集成、环境问题必须在服务启动/扩大验证时复核。用例或报告记录原 `issueId` 与 `evidenceIds`，通过新鲜 E2E evidence 证明已解决；无法在本阶段复核时保留为 manual/missing，不得静默丢弃。
-
-禁止写入：
-
-- 不要修改执行清单列出的任何 input（凡在清单中即只读）。
-- 不要为通过 E2E 而弱化断言、删除用例、伪造报告。
-
-每轮 E2E 必须优先以 specs 中属于用户主链路的 Requirement / Scenario 生成结构化测试用例；相关 API Decision 或 Data Decision 只作为执行和断言上下文。涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由、用户可见流程的 P0/P1 用例必须标记 `ui_required: true`。
-
-E2E 用例的稳定 ID 规则：
-
-- 用例 `id` 统一使用 `E2E-{slug}-001`、`E2E-{slug}-002` ...
-- `source.specs_contract` 必须优先引用稳定 ID，例如 `specs/<capability>/spec.md#REQ-001` / `#SCN-001`
-- `E2E_RESULT.json` 中的失败项与回流说明必须回链到相同的 `REQ-001` / `SCN-001`
-
-每次 E2E 命令或人工驱动执行结束后，必须把运行结果追加到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` 末尾；这是 feature 产物目录下的证据流，不得写到业务代码仓库根目录或当前 cwd 下的临时 `.autobizdevops`。使用 `hooks/evidence_store.py append` 写入 taskId（优先来自 `plan.json`）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并把运行日志尾部作为 evidence tail 保存；append 工具会默认从 `PLUGIN_WORKSPACE/PROJECT_DIR` 定位产物根，手写命令时可显式加 `--workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"`。`ev_XXXX` 按全流顺序自动递增，不按阶段重排；`E2E_RESULT.json` 的每个用例结论都必须引用对应 `ev_XXXX`。不得插入旧记录前、重编号、截断、重写、删除 `EVIDENCE.index.json` 后重建或手动修改 `EVIDENCE.index.json`。若 append 或 checkpoint 报 `evidence_stream_rewritten_or_truncated` / `missing_evidence_index_for_nonempty_stream`，必须恢复被改写前的 `EVIDENCE.jsonl` / `EVIDENCE.index.json`，无法恢复时停止并向用户报告。
-
-同时必须通过 `${pluginPath}/hooks/e2e_result_writer.py` 写入 `E2E_RESULT.json` 作为机器事实源，禁止直接整份写入或编辑该 JSON。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 case 必须用 `specRefs` 回链 Requirement / Scenario，并引用对应 `evidenceIds`。若 case 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`、`pageRefs`、`interactionRefs`、`visualSourceRefs`；非 UI case 不要伪造 UI refs。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。优先使用 `e2e_result_writer.py init`、`add-case/update-case`、`derive-scenario-coverage` 与 `set-verdict`；caseId 由 writer 生成 `E2E-{feature}-001` 形式。
-
-推进 `e2e_done` 或 `needs_fix` 前必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.e2e --feature "${feature}"`。writer 的本地 `validate` 只做结构检查，不能替代 stage gate。
-
-```json
-{
-  "version": 1,
-  "verdict": "PASS",
-  "scenarioCoverage": [
-    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
-  ],
-  "cases": [
-    {
-      "caseId": "E2E-alpha-001",
-      "taskId": "T001",
-      "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
-      "evidenceIds": ["ev_0001"],
-      "uiRequired": true,
-      "pageRefs": ["PAGE-001"],
-      "interactionRefs": ["UIX-001"],
-      "visualSourceRefs": ["VIS-001"],
-      "executionMode": "manual",
-      "steps": [{"action": "open", "expected": "visible", "result": "PASS"}],
-      "verdict": "PASS"
-    }
-  ]
-}
-```
-
-## Checkpoint 写入
-
-开始 E2E 前推进到 `e2e_in_progress`，写入后立即刷新 `CHECKPOINT`：
-
-```bash
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-E2E 通过后推进到 `e2e_done`；若存在明确失败并需要回流，必须先写 `FIX_REQUEST.json`，再推进到 `needs_fix`。每次写入后都必须刷新 `CHECKPOINT`：
+读取 `specs/**/*.md`、`design.md`、`plan.json`、batch plan、`REVIEW_FINDINGS.json`、单测结果和项目 Playwright 配置。`deferredValidationIssues[]` 映射到具体用例或明确的 manual/missing 结论。
 
-```json
-{
-  "version": 1,
-  "featureId": "alpha",
-  "sourceCheckpoint": "e2e_in_progress",
-  "sourceNodeId": "dev.e2e",
-  "suggestedCheckpoint": "code_in_progress",
-  "rootCause": "implementation_bug",
-  "blockingReason": "E2E case failed",
-  "humanActionRequired": false,
-  "failedSpecRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
-  "failedEvidenceIds": ["ev_0001"],
-  "failedDesignRefs": [],
-  "failedUiRefs": {
-    "pageRefs": ["PAGE-001"],
-    "interactionRefs": ["UIX-001"],
-    "visualSourceRefs": ["VIS-001"]
-  },
-  "createdAt": "2026-06-24T00:00:00Z"
-}
-```
-
-若失败用例不是 UI 用例，`failedUiRefs` 可省略；若失败指向 UI 页面、交互或视觉输入，必须引用 `UI_CONTEXT.json` 中真实存在的 ID。
+恢复时读取全部 E2E 机器产物和 `e2e-diagnostics/**/**/*.pending.json`。旧格式 `E2E_RESULT.json` 或纯文本 `e2e-run.log` 只读保留，列出需重新执行的用例；旧产物不能形成新 PASS。存在 pending 时执行：
 
 ```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.e2e --feature "${feature}"
+python "${pluginPath}/hooks/run_e2e_command.py" resume \
+  --workspace "${pluginWorkspace}/${projectDir}" \
+  --feature "${feature}" \
+  --run-id "<runId>"
+```
+
+## 生成用例并开轮
+
+读取 [`${pluginPath}/skills/autodev/autodev-e2e/reference/testcase-generation.md`](reference/testcase-generation.md)，生成或更新 `E2E_TEST_CASES.yaml`。每条持久化 Playwright 测试以完整 tag 或标题标记 `[<caseId>]` 精确绑定 case。
+
+首次执行：
+
+```bash
+python "${pluginPath}/hooks/e2e_result_writer.py" init \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
+python "${pluginPath}/hooks/e2e_result_writer.py" add-case \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
+  --task-id "<taskId>" --spec-ref "<spec#REQ-NNN>" --spec-ref "<spec#SCN-NNN>" \
+  --priority P0 --ui-required true --execution-mode mixed \
+  --step-json '{"action":"<action>","expected":"<visible result>","verification":{"type":"ui","details":"<mechanical assertion>"}}'
+python "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --kind initial
+```
+
+任何测试资产或源码修复前开 repair 轮；最多三轮：
+
+```bash
+python "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --kind repair
+```
+
+## 有头探索与持久化资产
+
+`ui_required: true` 的 P0/P1 优先使用 DevClaw 内置的有头 Chrome Playwright CLI 探索真实页面。确认入口 URL、可访问名称、稳定 locator、鉴权、测试数据、console 与 network；探索不写 verdict Evidence。
+
+读取 [`${pluginPath}/skills/autodev/autodev-e2e/reference/test-playwright-script.md`](reference/test-playwright-script.md)。复用项目配置、fixture、helper 与 Page Object；缺失时只补当前 feature 的最小资产。持久化 spec 不使用探索 snapshot 的临时元素引用，认证通过项目 setup 或明确 `storageState` 建立。
+
+探索、服务与鉴权事实写 JSONL note：
+
+```bash
+python "${pluginPath}/hooks/run_e2e_command.py" note \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
+  --phase discovery --text "<URL、auth、service、locator 或诊断摘要>"
+```
+
+## 质量门禁
+
+读取 [`${pluginPath}/skills/autodev/autodev-e2e/reference/e2e-quality-gate.md`](reference/e2e-quality-gate.md)。先扫描持久化 spec 及其依赖：
+
+```bash
+python "${pluginPath}/hooks/e2e_quality_check.py" scan \
+  --workspace "${pluginWorkspace}/${projectDir}" \
+  --feature "${feature}" \
+  --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
+  --spec-path "<relative Playwright spec>" \
+  --input "<语义审查实际读取的源文件>"
+```
+
+无法解析的 alias、barrel、动态 import 或自定义 fixture 注入用保守目录哈希补齐后重扫：
+
+```bash
+python "${pluginPath}/hooks/e2e_quality_check.py" scan \
+  --workspace "${pluginWorkspace}/${projectDir}" \
+  --feature "${feature}" \
+  --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
+  --spec-path "<relative Playwright spec>" \
+  --input-dir "<relative conservative directory>"
+```
+
+逐条裁定 candidate；误报使用 `dismissed` 并填写理由，真实问题使用 `confirmed` 后修复和重扫。语义审查新问题以 `semantic:<name>` 登记。
+
+```bash
+python "${pluginPath}/hooks/e2e_quality_check.py" resolve \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
+  --finding-id "<findingId>" --status dismissed \
+  --reviewer autodev-e2e --rationale "<why false positive>" \
+  --input "<reviewed source>"
+python "${pluginPath}/hooks/e2e_result_writer.py" sync-quality-gate \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
+```
+
+任一未裁定或确认的 blocker、未解析 import、登记输入哈希变化都阻断 verdict。
+
+## 干净上下文裁定
+
+每个 case 单独用 `--grep <caseId>` 重放；浏览器跟随项目配置。只接受直接 Playwright Test 命令，不使用探索 CLI 或 `npm/pnpm/yarn run` 包脚本。
+
+```bash
+python "${pluginPath}/hooks/run_e2e_command.py" run \
+  --workspace "${pluginWorkspace}/${projectDir}" \
+  --feature "${feature}" \
+  --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
+  --case-id "<caseId>" --task-id "<taskId>" \
+  --spec-ref "<spec#REQ-NNN>" --spec-ref "<spec#SCN-NNN>" \
+  --spec-path "<relative Playwright spec>" \
+  --entry-url "<URL>" --auth-status "<bypassed|pre_authenticated|not_required>" \
+  -- npx --yes --package @playwright/test playwright test \
+  "<relative Playwright spec>" --grep "<caseId>"
+```
+
+执行器注入 JSON reporter，记录实际 Playwright version、project、配置与报告哈希，派生 PASS/FAIL/FLAKY/BLOCKED，并按同一 `runId` 提交 Evidence、`verdict_run` 日志和 execution。中断后使用 pending 的 `runId` 恢复，不重跑命令。
+
+## 失败分类与修复
+
+固定诊断顺序：复现 → trace/report → console/network → 分类 → 最小修复或回流。
+
+| 分类 | 处置 | FIX_REQUEST 映射 |
+|---|---|---|
+| `test_bug` | 只修 spec、fixture、Page Object、mock、测试辅助、测试数据或 E2E 配置 | 不生成 |
+| `source_bug` | 当前 feature 最小源码修复；越界停止 | `implementation_bug` → `code_in_progress` |
+| `contract_gap` | 不猜测预期，回流规格或设计 | `spec_gap` / `requirement_ambiguous` → `specs_in_progress`；`design_conflict` → `plan_in_progress` |
+| `environment` | 记录服务、依赖、浏览器、命令证据 | `environment_issue` → `cicd_in_progress` |
+| `auth` | 记录身份、方法、缺失权限，不记录敏感值 | `permission_issue` → `cicd_in_progress`，`humanActionRequired: true` |
+| `data` | 记录缺失数据与最小准备条件 | `dependency_issue` → `cicd_in_progress` |
+| `flaky` | 用重复结果与诊断定位；不增加 retry、timeout 或固定 sleep 洗绿 | 不生成；预算内未定位按 unknown |
+| `unknown` | 停止猜测性修复，记录已排除项 | `unknown` → `code_in_progress`，`humanActionRequired: true` |
+
+每次 repair 轮重跑质量扫描与全部用例。修复预算耗尽、根因不清或超出 feature 时停止。
+
+## 派生 coverage 与最终 verdict
+
+```bash
+python "${pluginPath}/hooks/e2e_result_writer.py" derive-scenario-coverage \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
+python "${pluginPath}/hooks/e2e_result_writer.py" finalize \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
+python "${pluginPath}/hooks/e2e_result_writer.py" validate \
+  --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --gate
+```
+
+`finalize` 只在质量门禁、本轮 execution、新鲜 Evidence、coverage、三方字段与哈希链全部成立时派生 case/root PASS。不存在写 PASS 的人工参数。
+
+PASS 时：
+
+```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
+
+FAIL/BLOCKED 时写明分类、诊断与映射；需要回流时生成合法 `FIX_REQUEST.json` 后：
 
 ```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.e2e --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-**Skill 完成。**
+## 完成交接
+
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

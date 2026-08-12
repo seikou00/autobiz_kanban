@@ -17,7 +17,7 @@ from board_core.contracts import load_record_workflow_contracts, load_repo_workf
 from board_core.state_store import get_state_json_path, load_state_json_records_result  # noqa: E402
 from board_core.workflow import (  # noqa: E402
     derive_node_status,
-    find_current_node,
+    find_effective_current_node,
     skippable_node_ids,
 )
 from board_core.workflow_compiler import (  # noqa: E402
@@ -104,18 +104,17 @@ def _recommended_next_skill_for_record(workspace: Path, record: dict, allowed_ne
 
 
 def _load_fix_request(workspace: Path, feature: str, allowed_next: list[str]) -> tuple[dict | None, list[str]]:
-    path = FIX_REQUEST_RELATIVE_PATH / feature / "FIX_REQUEST.json"
-    full_path = workspace / path
+    full_path = workspace / FIX_REQUEST_RELATIVE_PATH / feature / "FIX_REQUEST.json"
     if not full_path.is_file() or full_path.stat().st_size <= 0:
         return None, [f"FIX_REQUEST.json 未找到: {full_path}"]
     try:
         data = json.loads(full_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         return None, [f"FIX_REQUEST.json 非法: {exc}"]
     if not isinstance(data, dict):
         return None, ["FIX_REQUEST.json root 必须是 object"]
     suggested = data.get("suggestedCheckpoint")
-    if not isinstance(suggested, str) or not suggested:
+    if not isinstance(suggested, str) or not suggested.strip():
         return data, ["FIX_REQUEST.json 缺少 suggestedCheckpoint"]
     if allowed_next and suggested not in allowed_next:
         return data, [f"FIX_REQUEST.json suggestedCheckpoint 不在允许回流中: {suggested}"]
@@ -209,10 +208,12 @@ def _workflow_choice_payload(
 def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
     workspace = workspace.resolve()
     result = load_state_json_records_result(workspace)
-    errors = list(result.errors)
+    errors = list(result.fatal_errors)
     if not result.exists:
         errors.append(f"state.json 未找到: {get_state_json_path(workspace)}")
     record = result.records.get(feature)
+    if record is None:
+        errors.extend(result.record_errors.get(feature, []))
     if record is None and not errors:
         errors.append(f"feature '{feature}' 未在 state.json 中找到")
     if errors or record is None:
@@ -251,40 +252,48 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         }, 1
 
     nodes = config["workflow"]["nodes"]
-    if checkpoint == "needs_fix":
-        allowed_next = _allowed_next(config, checkpoint)
-        fix_request, fix_request_errors = _load_fix_request(workspace, feature, allowed_next)
-        suggested = fix_request.get("suggestedCheckpoint") if isinstance(fix_request, dict) else None
-        if isinstance(suggested, str) and suggested in allowed_next:
-            allowed_next = [suggested]
-        elif fix_request_errors:
-            allowed_next = []
-        workflow_skipped = normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))
-        return {
-            "ok": True,
-            "feature": feature,
-            "workflowProfile": workflow_profile,
-            "workflowTemplate": workflow_template,
-            "workflowDecisions": workflow_decisions,
-            "workflowSkippedNodes": list(workflow_skipped),
-            "checkpoint": checkpoint,
-            "currentNodeId": "needs_fix",
-            "currentNodeStatus": "blocked",
-            "currentStateId": "blocked",
-            "allowedNextCheckpoints": allowed_next,
-            "recommendedNextSkill": _recommended_next_skill_for_record(workspace, record, allowed_next),
-            "fixRequest": fix_request,
-            "fixRequestErrors": fix_request_errors,
-            "requiresProfileChoice": False,
-            "profileChoices": [],
-            "requiresWorkflowChoice": False,
-            "workflowChoices": [],
-            "skippableNodes": [],
-            "nextAction": {},
-        }, 0
-
-    current_idx, current_node_id = find_current_node(nodes, checkpoint)
+    current_idx, current_node_id = find_effective_current_node(
+        nodes,
+        checkpoint,
+        record.get("needsFixFromCheckpoint"),
+        stage=record.get("stage"),
+        stage_labels=config["workflow"]["checkpoints"]["stageLabels"],
+    )
+    legacy_needs_fix = checkpoint == "needs_fix" and current_idx < 0
+    if legacy_needs_fix:
+        current_node_id = "needs_fix"
     if current_idx < 0:
+        if legacy_needs_fix:
+            allowed_next = _allowed_next(config, checkpoint)
+            fix_request, fix_request_errors = _load_fix_request(workspace, feature, allowed_next)
+            suggested = fix_request.get("suggestedCheckpoint") if isinstance(fix_request, dict) else None
+            if isinstance(suggested, str) and suggested in allowed_next:
+                allowed_next = [suggested]
+            elif fix_request_errors:
+                allowed_next = []
+            return {
+                "ok": True,
+                "feature": feature,
+                "workflowProfile": workflow_profile,
+                "workflowTemplate": workflow_template,
+                "workflowDecisions": workflow_decisions,
+                "workflowSkippedNodes": list(normalize_workflow_skipped_nodes(record.get("workflowSkippedNodes"))),
+                "checkpoint": checkpoint,
+                "currentNodeId": current_node_id,
+                "blockedSourceNodeId": None,
+                "currentNodeStatus": "blocked",
+                "currentStateId": "blocked",
+                "allowedNextCheckpoints": allowed_next,
+                "recommendedNextSkill": _recommended_next_skill_for_record(workspace, record, allowed_next),
+                "fixRequest": fix_request,
+                "fixRequestErrors": fix_request_errors,
+                "requiresProfileChoice": False,
+                "profileChoices": [],
+                "requiresWorkflowChoice": False,
+                "workflowChoices": [],
+                "skippableNodes": [],
+                "nextAction": {},
+            }, 0
         return {
             "ok": False,
             "feature": feature,
@@ -304,6 +313,15 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
     )
     next_action = _state_next_action(nodes[current_idx], node_status)
     allowed_next = _allowed_next(config, checkpoint)
+    fix_request = None
+    fix_request_errors: list[str] = []
+    if checkpoint == "needs_fix":
+        fix_request, fix_request_errors = _load_fix_request(workspace, feature, allowed_next)
+        suggested = fix_request.get("suggestedCheckpoint") if isinstance(fix_request, dict) else None
+        if isinstance(suggested, str) and suggested in allowed_next:
+            allowed_next = [suggested]
+        elif fix_request_errors:
+            allowed_next = []
     # Subset templates have a fixed chain: no profile or dynamic-stage choices.
     is_standard_template = workflow_template == BASE_WORKFLOW_TEMPLATE
     profile_choices = _profile_choice_payload(workspace, checkpoint) if is_standard_template else []
@@ -327,12 +345,13 @@ def resolve_route(workspace: Path, feature: str) -> tuple[dict, int]:
         "workflowSkippedNodes": list(workflow_skipped),
         "checkpoint": checkpoint,
         "currentNodeId": current_node_id,
+        "blockedSourceNodeId": current_node_id if checkpoint == "needs_fix" else None,
         "currentNodeStatus": node_status,
         "currentStateId": node_status,
         "allowedNextCheckpoints": allowed_next,
         "recommendedNextSkill": _recommended_next_skill_for_record(workspace, record, allowed_next),
-        "fixRequest": None,
-        "fixRequestErrors": [],
+        "fixRequest": fix_request,
+        "fixRequestErrors": fix_request_errors,
         "requiresProfileChoice": checkpoint == PROFILE_CHOICE_CHECKPOINT and len(profile_choices) > 1,
         "profileChoices": profile_choices,
         "requiresWorkflowChoice": bool(workflow_choices),

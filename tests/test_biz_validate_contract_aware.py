@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from board_core.state_store import write_state_records  # noqa: E402
 from skills.autobiz.hooks.biz_validate import validate_discuss, validate_prd  # noqa: E402
-from tests.test_biz_validate_prd import VALID_PRD, write_confirmed_non_ui_context  # noqa: E402
+from tests.test_biz_validate_prd import VALID_PRD  # noqa: E402
 
 
 CUSTOM_WITH_PRD_NODE = {
@@ -42,7 +42,6 @@ class BizValidateContractAwareTests(unittest.TestCase):
         feature_dir.mkdir(parents=True)
         if prd_content is not None:
             (feature_dir / "PRD.md").write_text(prd_content, encoding="utf-8")
-            write_confirmed_non_ui_context(feature_dir)
         write_state_records(workspace, {"alpha": dict(record)})
         return workspace
 

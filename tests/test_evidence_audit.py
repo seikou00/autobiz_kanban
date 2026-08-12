@@ -80,6 +80,12 @@ class EvidenceAuditTest(unittest.TestCase):
                         "taskSetStatus": "finalized",
                         "activeBatchId": None,
                         "nextBatchId": "B002",
+                        "taskValidationPolicy": {
+                            "mode": "defer_to_test_stages",
+                            "orchestration": "inline",
+                            "codeGate": "batch_compile_only",
+                            "maxTestStageRepairAttempts": 3,
+                        },
                         "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
                         "batchValidationProfiles": {
                             "backend": {

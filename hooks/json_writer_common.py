@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -33,11 +34,22 @@ for candidate in (ROOT, HOOKS_DIR, AUTODEV_HOOKS_DIR):
 from hooks.paths import get_plugin_output_workspace  # noqa: E402
 
 
-POSTCHECK_FAIL_RE = re.compile(r"^POST_SKILL_FAIL\s+skill=(?P<skill>\S+)\s+reason=(?P<reason>\S+)(?P<detail>.*)$")
+POSTCHECK_FAIL_RE = re.compile(
+    r"^POST_SKILL_FAIL\s+skill=(?P<skill>\S+)\s+reason=(?P<reason>\S+)"
+    r"(?P<detail>.*?)(?:\s+payload=(?P<payload>\{.*\}))?$"
+)
+
+# 结构化字段随 FAIL 行尾的 payload 一起到达，一条错误一行；同 reason 重复出现时
+# 每条错误各自带 target/action，不做跨行配对。旧行没有 payload，按原样降级。
+POSTCHECK_PAYLOAD_FIELDS = ("artifact", "target", "problem", "action", "route")
 
 
 class WriterError(RuntimeError):
     """Raised for expected writer failures that should be rendered as JSON."""
+
+
+class WriterEncodingError(WriterError):
+    """Raised when JSON input cannot safely round-trip through UTF-8."""
 
 
 @dataclass(frozen=True)
@@ -45,7 +57,7 @@ class WriterResult:
     ok: bool
     path: Path | None = None
     changed: bool = False
-    errors: list[dict[str, str]] | None = None
+    errors: list[dict[str, Any]] | None = None
     data: dict[str, Any] | None = None
 
 
@@ -78,6 +90,10 @@ def with_result_data(result: WriterResult, **data: Any) -> WriterResult:
     merged = dict(result.data or {})
     merged.update(data)
     return WriterResult(ok=result.ok, path=result.path, changed=result.changed, errors=result.errors, data=merged)
+
+
+def shell_join(argv: list[str]) -> str:
+    return " ".join(shlex.quote(item) for item in argv)
 
 
 def fail_if_artifact_exists(path: Path, *, force: bool) -> WriterResult | None:
@@ -129,9 +145,16 @@ def load_json(path: Path, *, default: Any | None = None) -> Any:
             return default
         raise WriterError(f"JSON 产物不存在: {path}")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        raise _encoding_error(
+            f"JSON 文件 {path}",
+            f"第 {exc.start} 个字节不是有效 UTF-8",
+        ) from exc
     except json.JSONDecodeError as exc:
         raise WriterError(f"JSON 产物格式错误: {path}:{exc}") from exc
+    _reject_unicode_surrogates(data, source=f"JSON 文件 {path}")
+    return data
 
 
 def require_finalized_plan(workspace: Path, feature: str) -> WriterResult | None:
@@ -145,6 +168,7 @@ def require_finalized_plan(workspace: Path, feature: str) -> WriterResult | None
 def atomic_write_json(path: Path, data: Any) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    _ensure_utf8_encodable(content, source=f"写入 {path}")
     old = path.read_text(encoding="utf-8") if path.is_file() else None
     if old == content:
         return False
@@ -159,6 +183,7 @@ def write_text(path: Path, content: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not content.endswith("\n"):
         content += "\n"
+    _ensure_utf8_encodable(content, source=f"写入 {path}")
     old = path.read_text(encoding="utf-8") if path.is_file() else None
     if old == content:
         return False
@@ -194,9 +219,11 @@ def string_list(value: Any) -> list[str]:
 
 def parse_json_value(raw: str) -> Any:
     try:
-        return json.loads(raw)
+        data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise WriterError(f"参数不是合法 JSON: {raw}") from exc
+    _reject_unicode_surrogates(data, source="命令行 JSON 参数")
+    return data
 
 
 def read_object_file(path: str | Path) -> dict[str, Any]:
@@ -207,20 +234,75 @@ def read_object_file(path: str | Path) -> dict[str, Any]:
 
 
 def read_object_stdin() -> dict[str, Any]:
-    raw = sys.stdin.read()
-    if not raw.strip():
+    raw_bytes = sys.stdin.buffer.read()
+    if not raw_bytes.strip():
         raise WriterError("stdin 为空；请通过 stdin 传入单个 JSON object")
+    try:
+        raw = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise _encoding_error(
+            "stdin",
+            f"第 {exc.start} 个字节不是有效 UTF-8",
+        ) from exc
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise WriterError(f"stdin 不是合法 JSON: {exc}") from exc
+    _reject_unicode_surrogates(data, source="stdin JSON")
     if not isinstance(data, dict):
         raise WriterError("stdin JSON 顶层必须是 object")
     return data
 
 
-def parse_postcheck_output(output: str, *, fallback_message: str = "") -> list[dict[str, str]]:
-    errors: list[dict[str, str]] = []
+def _encoding_error(source: str, cause: str) -> WriterEncodingError:
+    return WriterEncodingError(
+        f"{source} 编码错误：{cause}。原因：非 UTF-8 输入会把中文路径解码成 "
+        "Unicode surrogate；损坏的 JSON Unicode 转义也会产生同样的问题，之后无法安全写入 "
+        "UTF-8 计划文件。修复：将 JSON 以 UTF-8 字节重新传入；不要使用 python -c、echo "
+        "或系统默认编码拼接含中文 JSON。"
+        "请改用 UTF-8 JSON 文件配合 --body-file，或让宿主直接以 UTF-8 bytes 传给 "
+        "--body-stdin。"
+    )
+
+
+def _first_surrogate_path(value: Any, path: str = "$") -> str | None:
+    if isinstance(value, str):
+        for index, character in enumerate(value):
+            if 0xD800 <= ord(character) <= 0xDFFF:
+                return f"{path}[{index}]"
+        return None
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            found = _first_surrogate_path(item, f"{path}[{index}]")
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_path = _first_surrogate_path(key, f"{path}.<key>")
+            if key_path is not None:
+                return key_path
+            found = _first_surrogate_path(item, f"{path}.{key}")
+            if found is not None:
+                return found
+    return None
+
+
+def _reject_unicode_surrogates(value: Any, *, source: str) -> None:
+    path = _first_surrogate_path(value)
+    if path is not None:
+        raise _encoding_error(source, f"JSON 在 {path} 包含 Unicode surrogate")
+
+
+def _ensure_utf8_encodable(content: str, *, source: str) -> None:
+    try:
+        content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _encoding_error(source, "内容包含无法编码为 UTF-8 的 Unicode surrogate") from exc
+
+
+def parse_postcheck_output(output: str, *, fallback_message: str = "") -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
         if not line:
@@ -228,13 +310,26 @@ def parse_postcheck_output(output: str, *, fallback_message: str = "") -> list[d
         match = POSTCHECK_FAIL_RE.match(line)
         if match:
             detail = match.group("detail").strip()
-            errors.append(
-                {
-                    "skill": match.group("skill"),
-                    "reason": match.group("reason"),
-                    "detail": detail,
-                }
-            )
+            error = {
+                "skill": match.group("skill"),
+                "reason": match.group("reason"),
+                "detail": detail,
+            }
+            raw_payload = match.group("payload")
+            if raw_payload:
+                try:
+                    payload = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict):
+                    for field in POSTCHECK_PAYLOAD_FIELDS:
+                        value = payload.get(field)
+                        if isinstance(value, str) and value:
+                            error[field] = value
+                    diagnostics = payload.get("diagnostics")
+                    if isinstance(diagnostics, dict):
+                        error["diagnostics"] = diagnostics
+            errors.append(error)
         elif line.startswith("POST_SKILL_FAIL"):
             errors.append(_error("postcheck_failure", line))
     if not errors and fallback_message:

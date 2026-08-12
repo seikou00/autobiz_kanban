@@ -32,7 +32,7 @@ from hooks.plan_json import (  # noqa: E402
     validate_task_collection,
     write_plan_json,
 )
-from hooks.evidence_kernel import check_record_artifacts, write_pending  # noqa: E402
+from hooks.evidence_kernel import check_record_artifacts, unlink_if_exists, write_pending  # noqa: E402
 from hooks.evidence_kernel import write_sidecar  # noqa: E402
 
 
@@ -120,6 +120,12 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
             "taskSetStatus": "finalized",
             "activeBatchId": None if all_done else "B001",
             "nextBatchId": None,
+            "taskValidationPolicy": {
+                "mode": "defer_to_test_stages",
+                "orchestration": "inline",
+                "codeGate": "batch_compile_only",
+                "maxTestStageRepairAttempts": 3,
+            },
             "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
             "batchValidationProfiles": {
                 execution_lane: {
@@ -248,6 +254,18 @@ def append_current_evidence(
     )
 
 
+class EvidenceKernelTest(unittest.TestCase):
+    def test_unlink_if_exists_removes_file_and_tolerates_missing_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "cleanup.json"
+            path.write_text("cleanup\n", encoding="utf-8")
+
+            unlink_if_exists(path)
+            self.assertFalse(path.exists())
+
+            unlink_if_exists(path)
+
+
 class PlanJsonTest(unittest.TestCase):
     def test_plan_accepts_structured_completion_contract(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
@@ -363,6 +381,46 @@ class PlanJsonTest(unittest.TestCase):
             any(error.startswith("T001.validationTestPlan") for error in errors),
             errors,
         )
+
+    def test_defer_to_test_stages_validation_test_plan_schema_is_strict(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task["validationTestPlan"] = [
+            {
+                "commandId": "VAL-T001-01",
+                "assetType": "unit_test",
+                "executionStage": "with_code",
+                "covers": ["AC-T001-01"],
+                "testIntent": {
+                    "behavior": "the behavior is observable",
+                    "acceptanceCriteria": task["acceptanceCriteria"],
+                },
+            }
+        ]
+
+        self.assertEqual(
+            validate_test_tasks(plan, defer_to_test_stages=True),
+            [],
+        )
+
+        task["validationTestPlan"][0]["covers"] = ["T001"]
+        task["validationTestPlan"][0]["testIntent"]["acceptanceCriteria"] = []
+        errors = validate_test_tasks(plan, defer_to_test_stages=True)
+        self.assertIn(
+            "T001.validationTestPlan[0].covers_unknown:T001",
+            errors,
+        )
+        self.assertIn(
+            "T001.validationTestPlan[0].testIntent.acceptanceCriteria_mismatch",
+            errors,
+        )
+
+        task["validationTestPlan"][0]["targets"] = [
+            {"selector": "MissingTest", "mode": "create_in_code"}
+        ]
+        errors = validate_test_tasks(plan, defer_to_test_stages=True)
+        self.assertIn("T001.validationTestPlan[0].targets_forbidden", errors)
+        self.assertIn("T001.validationTestPlan[0].create_in_code_forbidden", errors)
 
     def test_plan_requires_workspace_roots_for_nonempty_scope_paths(self) -> None:
         plan = valid_plan(status="todo", evidence_ids=[])
@@ -1249,57 +1307,6 @@ class EvidenceStoreTest(unittest.TestCase):
 
 
 class EvidenceGateTest(unittest.TestCase):
-    def test_code_done_requires_project_check_pass(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            plan = valid_plan()
-            write_test_plan(feature_dir, plan)
-            append_current_evidence(feature_dir)
-
-            errors = check_code_done(feature_dir)
-
-            self.assertIn("missing_project_validation_pass:PROJECT-VAL-001", errors)
-
-    def test_code_done_rejects_legacy_completion_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            write_test_plan(feature_dir, valid_plan())
-            append_pass_evidence(feature_dir)
-
-            errors = check_code_done(feature_dir)
-
-            self.assertIn("T001.completion_evidence_requires_detail_v2:ev_0001", errors)
-
-    def test_code_done_requires_completion_evidence_to_belong_to_task(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            write_test_plan(feature_dir, valid_plan())
-            append_current_evidence(feature_dir, task_id="T002")
-
-            errors = check_code_done(feature_dir)
-
-            self.assertIn("T001.evidence_task_mismatch:ev_0001:T002", errors)
-
-    def test_code_done_requires_planned_command_and_acceptance_coverage(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            write_test_plan(feature_dir, valid_plan())
-            append_current_evidence(
-                feature_dir,
-                command_id="VAL-T001-99",
-                checked_criteria=["AC-T001-99"],
-            )
-
-            errors = check_code_done(feature_dir)
-
-            self.assertIn("T001.unplanned_validation_command:VAL-T001-99", errors)
-            self.assertIn("T001.missing_acceptance_coverage:AC-T001-01", errors)
-            self.assertIn("T001.missing_required_validation_pass:VAL-T001-01", errors)
-
     def test_code_done_gate_requires_structured_done_plan_and_runner_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
@@ -1333,32 +1340,5 @@ class EvidenceGateTest(unittest.TestCase):
 
             self.assertIn("plan_json:T001.blockers_unresolved", errors)
             self.assertIn("unresolved_blocker:T001", errors)
-
-    def test_code_done_gate_does_not_count_smoke_pass_as_validation_pass(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            write_test_plan(feature_dir, valid_plan(status="done", evidence_ids=["ev_0001"]))
-            append_evidence(
-                feature_dir,
-                {
-                    "featureId": "alpha",
-                    "checkpoint": "code_in_progress",
-                    "nodeId": "dev.code",
-                    "skill": "autodev-code",
-                    "taskId": "T001",
-                    "action": "smoke",
-                    "specRefs": ["specs/capability/spec.md#REQ-001", "#SCN-001"],
-                    "designRefs": ["design.md#D-001"],
-                    "changedFiles": ["tests/smoke/cap_smoke.py"],
-                    "validation": {"command": "python tests/smoke/cap_smoke.py", "exitCode": 0, "result": "pass"},
-                    "smoke": {"testId": "SMK-001", "command": "python tests/smoke/cap_smoke.py", "exitCode": 0, "result": "pass"},
-                },
-            )
-
-            errors = check_code_done(feature_dir)
-            self.assertTrue(any("completion_evidence_not_pass" in error for error in errors))
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,17 @@ def validate_stage(*, workspace: Path, feature: str, stage: str) -> WriterResult
 
     code, message, output = capture_stdout(_run)
     errors = parse_postcheck_output(output, fallback_message=message if code else "")
+    invalid_task_ids: list[str] = []
+    for error in errors:
+        diagnostics = error.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            continue
+        candidates = diagnostics.get("taskIds")
+        if not isinstance(candidates, list):
+            candidates = [diagnostics.get("taskId")]
+        for task_id in candidates:
+            if isinstance(task_id, str) and task_id and task_id not in invalid_task_ids:
+                invalid_task_ids.append(task_id)
     return WriterResult(
         ok=code == 0,
         changed=False,
@@ -80,6 +91,11 @@ def validate_stage(*, workspace: Path, feature: str, stage: str) -> WriterResult
             "skill": skill,
             "feature": feature,
             "message": message,
+            "validationReport": {
+                "ok": not errors,
+                "invalidTaskIds": invalid_task_ids,
+                "issueCount": len(errors),
+            },
         },
     )
 

@@ -37,7 +37,7 @@ SCHEMA_VERSION = "autobizdevops.state.read.v1"
 def _build_payload(workspace: Path) -> tuple[dict[str, Any], int]:
     result = load_state_json_records_result(workspace)
     state_json_path = get_state_json_path(workspace)
-    errors = list(result.errors)
+    errors = list(result.fatal_errors)
 
     if not result.exists:
         errors.append(f"state.json 未找到: {state_json_path}")
@@ -50,6 +50,7 @@ def _build_payload(workspace: Path) -> tuple[dict[str, Any], int]:
         "exists": result.exists,
         "ok": result.exists and not errors,
         "errors": errors,
+        "recordErrors": result.record_errors,
     }
 
     payload["records"] = result.records
@@ -65,12 +66,16 @@ def _read_feature_checkpoint(workspace: Path, feature: str) -> tuple[str, int]:
         print(f"state.json 未找到: {state_json_path}", file=sys.stderr)
         return "", 1
 
-    if result.errors:
-        for error in result.errors:
+    if result.fatal_errors:
+        for error in result.fatal_errors:
             print(error, file=sys.stderr)
         return "", 1
 
     record = result.records.get(feature)
+    if record is None and result.record_errors.get(feature):
+        for error in result.record_errors[feature]:
+            print(error, file=sys.stderr)
+        return "", 1
     if record is None:
         print(f"feature '{feature}' 未在 state.json 中找到", file=sys.stderr)
         return "", 1

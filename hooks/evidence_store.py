@@ -25,6 +25,7 @@ try:
         output_duplicates_record,
         prepare_log,
         pending_path,
+        unlink_if_exists,
         write_log,
         write_json_artifact,
         write_pending,
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover - direct script execution path
         output_duplicates_record,
         prepare_log,
         pending_path,
+        unlink_if_exists,
         write_log,
         write_json_artifact,
         write_pending,
@@ -237,19 +239,6 @@ def validate_record(record: dict[str, Any]) -> list[str]:
             output_tail_path = validation.get("outputTailPath")
             if result == "fail" and (not isinstance(output_tail_path, str) or not output_tail_path.strip()):
                 errors.append("validation.outputTailPath_missing")
-    if record.get("action") == "batch_closure":
-        coverage = record.get("coverage")
-        if record.get("taskId") != "__batch__" or not isinstance(record.get("batchId"), str):
-            errors.append("batch_closure_identity_invalid")
-        if not isinstance(coverage, dict):
-            errors.append("batch_closure.coverage_missing")
-        else:
-            if coverage.get("mode") != "task_covered" or coverage.get("result") != "pass":
-                errors.append("batch_closure.coverage_invalid")
-            if not _string_list(coverage.get("commandIds")) or not coverage.get("commandIds"):
-                errors.append("batch_closure.commandIds_missing")
-            if not _string_list(coverage.get("sourceEvidenceIds")) or not coverage.get("sourceEvidenceIds"):
-                errors.append("batch_closure.sourceEvidenceIds_missing")
     if record.get("action") == "smoke":
         smoke = record.get("smoke")
         if not isinstance(smoke, dict):
@@ -495,7 +484,7 @@ def _recover_pending_appends(target_feature_dir: Path) -> None:
         }
         streamed = by_id.get(evidence_id)
         if streamed is None:
-            log_path(target_feature_dir, evidence_id).unlink(missing_ok=True)
+            unlink_if_exists(log_path(target_feature_dir, evidence_id))
             path.unlink()
             continue
         if streamed != pending:
@@ -591,28 +580,11 @@ def _records_from_bytes(content: bytes) -> tuple[dict[str, Any], ...]:
     return tuple(records)
 
 
-def _running_task_validation_batches(target_feature_dir: Path) -> list[str]:
-    running: list[str] = []
-    plans_dir = target_feature_dir / "plans"
-    if not plans_dir.is_dir():
-        return running
-    for path in sorted(plans_dir.glob("B*/plan.json")):
-        try:
-            batch = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        validation = batch.get("taskValidation") if isinstance(batch, dict) else None
-        if isinstance(validation, dict) and validation.get("status") == "running":
-            running.append(str(batch.get("batchId") or path.parent.name))
-    return running
-
-
 def append_evidence(
     target_feature_dir: Path,
     record: dict[str, Any],
     *,
     output_tail: str | None = None,
-    allow_during_task_validation: bool = False,
 ) -> dict[str, Any]:
     """Append a single evidence record and refresh the integrity index.
 
@@ -627,12 +599,6 @@ def append_evidence(
         raise EvidenceStoreError("evidence_id_must_be_allocated_by_store")
 
     with EvidenceLock(target_feature_dir):
-        if not allow_during_task_validation:
-            running_batches = _running_task_validation_batches(target_feature_dir)
-            if running_batches:
-                raise EvidenceStoreError(
-                    "task_validation_evidence_frozen:" + ",".join(running_batches)
-                )
         _recover_pending_appends(target_feature_dir)
         _ensure_index_matches(target_feature_dir, allow_missing_for_empty_stream=True)
         records = read_records(stream_path(target_feature_dir))
@@ -690,7 +656,7 @@ def append_evidence(
             feature_id=str(payload.get("featureId") or target_feature_dir.name),
             verify_existing=False,
         )
-        pending_path(target_feature_dir, str(evidence_id)).unlink(missing_ok=True)
+        unlink_if_exists(pending_path(target_feature_dir, str(evidence_id)))
         return payload
 
 
@@ -734,10 +700,21 @@ def _cmd_append(args: argparse.Namespace) -> int:
     if record.get("skill") == "autodev-code" and record.get("action") in {
         "validation",
         "batch_validation",
-        "batch_closure",
         "project_check",
     }:
         print("code_validation_requires_task_runner", file=sys.stderr)
+        return 1
+    if record.get("skill") == "autodev-e2e" and record.get("action") in {
+        "validation",
+        "batch_validation",
+        "project_check",
+    }:
+        print(
+            "e2e_validation_requires_e2e_runner。修复：使用 "
+            "`${pluginPath}/hooks/run_e2e_command.py run ... -- playwright test ...` "
+            "产生真实退出码、Playwright JSON report 与 Evidence。",
+            file=sys.stderr,
+        )
         return 1
     tail = Path(args.output_tail).read_text(encoding="utf-8", errors="ignore") if args.output_tail else None
     try:

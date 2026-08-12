@@ -310,7 +310,7 @@ class SkipRequestRuleTests(unittest.TestCase):
 
     def test_rejects_outside_node_checkpoint(self) -> None:
         errors = validate_skip_request(self.nodes(), "needs_fix", ["b"])
-        self.assertTrue(any("不属于任何节点" in error for error in errors))
+        self.assertTrue(any("needs_fix 阻断状态" in error for error in errors))
 
     def test_rejects_locked_node(self) -> None:
         errors = validate_skip_request(

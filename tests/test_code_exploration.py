@@ -202,60 +202,6 @@ class CacheClassificationTest(unittest.TestCase):
             self.assertEqual(trusted.changed_paths, frozenset({"existing.txt"}))
             self.assertEqual(trusted.evidence_ids, (evidence["evidenceId"],))
             self.assertEqual(trusted.latest_files, {"existing.txt": "new"})
-
-    def test_task_covered_closure_is_trusted_without_batch_run(self) -> None:
-        from hooks.code_exploration import collect_trusted_evolution
-        from hooks.evidence_store import append_evidence
-        from hooks.plan_json import PlanBundle
-
-        with tempfile.TemporaryDirectory() as tmp:
-            feature_dir = Path(tmp) / "alpha"
-            feature_dir.mkdir()
-            closure = append_evidence(
-                feature_dir,
-                {
-                    "featureId": "alpha",
-                    "checkpoint": "code_in_progress",
-                    "nodeId": "dev.code",
-                    "skill": "autodev-code",
-                    "taskId": "__batch__",
-                    "batchId": "B001",
-                    "action": "batch_closure",
-                    "runId": "task-run-1",
-                    "summary": "covered by task evidence",
-                    "coverage": {
-                        "mode": "task_covered",
-                        "commandIds": ["VAL-T001-01"],
-                        "sourceEvidenceIds": ["ev_0000"],
-                        "result": "pass",
-                    },
-                },
-            )
-            task = {"id": "T001", "status": "done", "completionEvidenceIds": []}
-            bundle = PlanBundle(
-                root={"batches": [{"id": "B001"}]},
-                batches={
-                    "B001": {
-                        "batchId": "B001",
-                        "tasks": [task],
-                        "batchValidation": {
-                            "mode": "task_covered",
-                            "status": "passed",
-                            "commands": [],
-                            "latestPassEvidenceIds": [closure["evidenceId"]],
-                        },
-                    }
-                },
-                tasks=[task],
-                task_batches={"T001": "B001"},
-            )
-
-            trusted = collect_trusted_evolution(feature_dir, bundle, None, "code")
-
-            self.assertEqual(trusted.evidence_ids, (closure["evidenceId"],))
-            self.assertEqual(trusted.untrusted_reasons, ())
-            self.assertIsNone(trusted.latest_files)
-
     def _snapshot(
         self,
         *,
@@ -569,12 +515,13 @@ class CacheClassificationTest(unittest.TestCase):
 
 
 class CodeExplorationWriterTest(unittest.TestCase):
-    def _run_writer(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def _run_writer(self, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "hooks/code_exploration_writer.py", *args],
             cwd=Path(__file__).resolve().parents[1],
             capture_output=True,
             text=True,
+            input=input_text,
             check=False,
         )
 
@@ -633,6 +580,109 @@ class CodeExplorationWriterTest(unittest.TestCase):
         self.assertEqual(payload["recordExample"]["findings"]["moduleMap"][0]["ownerLane"], "backend")
         self.assertEqual(payload["patchExample"]["findingUpdates"], {})
         self.assertEqual(payload["patchExample"]["reviewedPaths"], ["src/service.py"])
+        self.assertEqual(payload["recordBodySchema"]["required"], ["findings"])
+        self.assertEqual(
+            payload["recordBodySchema"]["properties"]["findings"]["required"],
+            ["moduleMap", "conventions", "integrationPoints", "testEntrypoints", "validationPatterns"],
+        )
+        self.assertIn("--body-stdin", payload["bodyInput"]["preferred"])
+
+    def test_cli_argument_errors_are_machine_readable(self) -> None:
+        result = self._run_writer("record", "--body-stdin", input_text="{}")
+
+        self.assertEqual(result.returncode, 2)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["error"], "code_exploration_cli_arguments_invalid")
+        self.assertEqual(payload["requiredAction"], "repair_cli_arguments")
+        self.assertIn("--task-id", payload["issues"][0]["detail"])
+        self.assertIn("contract", payload["contractCommand"])
+
+    def test_contract_can_return_focused_record_schema(self) -> None:
+        result = self._run_writer("contract", "--section", "record")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["section"], "record")
+        self.assertIn("recordBodySchema", payload)
+        self.assertIn("recordExample", payload)
+        self.assertNotIn("policies", payload)
+        self.assertNotIn("patchBodySchema", payload)
+
+    def test_record_reports_all_body_violations_with_json_paths(self) -> None:
+        from tests.test_task_runner import _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
+            body = json.dumps(
+                {
+                    "findings": {
+                        "moduleMap": [{"path": "../escape", "role": ""}],
+                        "conventions": "wrong",
+                        "integrationPoints": [],
+                        "testEntrypoints": [{"cwd": ".", "scope": "tests"}],
+                        "validationPatterns": [{"kind": "compile", "cwd": ".", "scope": "compile"}],
+                    },
+                    "exploredPaths": ["../outside", 7],
+                    "sharedPaths": "wrong",
+                }
+            )
+            result = self._run_writer(
+                "record", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+                "--expected-cache-sha256", "missing", "--body-stdin", input_text=body,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["error"], "code_exploration_record_body_invalid")
+            paths = {issue["path"] for issue in payload["issues"]}
+            self.assertTrue(
+                {
+                    "findings.moduleMap[0].path",
+                    "findings.moduleMap[0].role",
+                    "findings.conventions",
+                    "findings.testEntrypoints[0].argv",
+                    "findings.validationPatterns[0].argv",
+                    "exploredPaths[0]",
+                    "exploredPaths[1]",
+                    "sharedPaths",
+                }.issubset(paths)
+            )
+            self.assertEqual(payload["requiredAction"], "repair_record_body")
+            self.assertIn("recordExample", payload)
+
+    def test_record_accepts_stdin_and_rejects_body_file_inside_repository(self) -> None:
+        from tests.test_task_runner import _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
+            body = json.dumps(
+                {
+                    "findings": {
+                        "moduleMap": [], "conventions": [], "integrationPoints": [],
+                        "testEntrypoints": [], "validationPatterns": [],
+                    },
+                    "exploredPaths": [], "sharedPaths": [],
+                }
+            )
+            stdin_result = self._run_writer(
+                "record", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+                "--expected-cache-sha256", "missing", "--body-stdin", input_text=body,
+            )
+            self.assertEqual(stdin_result.returncode, 0, stdin_result.stdout + stdin_result.stderr)
+
+            inside = repo / "exploration-record.json"
+            inside.write_text(body, encoding="utf-8")
+            rejected = self._run_writer(
+                "record", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(repo),
+                "--expected-cache-sha256", "missing", "--body-file", str(inside),
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            payload = json.loads(rejected.stdout)
+            self.assertEqual(payload["error"], "code_exploration_body_file_inside_repository")
+            self.assertEqual(payload["requiredAction"], "use_body_stdin_or_external_temp_file")
 
     def test_record_missing_cache_then_inspect_fresh_and_reject_wrong_cas(self) -> None:
         from tests.test_task_runner import _workspace
@@ -717,357 +767,6 @@ class CodeExplorationWriterTest(unittest.TestCase):
             )
             self.assertNotEqual(wrong.returncode, 0)
             self.assertIn("code_exploration_cache_sha_mismatch", wrong.stdout)
-
-    def test_implemented_task_change_is_trusted_within_deferred_batch(self) -> None:
-        from tests.test_task_runner import (
-            _configure_deferred_task_validation,
-            _read_batch,
-            _workspace,
-            _write_batch,
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
-            root_path = feature_dir / "plan.json"
-            root = json.loads(root_path.read_text(encoding="utf-8"))
-            batch = _read_batch(feature_dir)
-            second = copy.deepcopy(batch["tasks"][0])
-            second.update({"id": "T002", "title": "second", "deps": ["T001"]})
-            second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
-            second["validationCommands"][0].update(
-                {"id": "VAL-T002-01", "covers": ["AC-T002-01"]}
-            )
-            root["batches"][0]["taskIds"].append("T002")
-            batch["tasks"].append(second)
-            batch["taskCount"] = 2
-            root_path.write_text(
-                json.dumps(root, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            _write_batch(feature_dir, batch)
-            _configure_deferred_task_validation(feature_dir)
-
-            body = Path(tmp) / "record.json"
-            self._body(body)
-            recorded = self._run_writer(
-                "record", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(repo),
-                "--expected-cache-sha256", "missing", "--body-file", str(body),
-            )
-            self.assertEqual(recorded.returncode, 0, recorded.stdout + recorded.stderr)
-
-            started = subprocess.run(
-                [sys.executable, "hooks/task_runner.py", "start", "--workspace", str(workspace),
-                 "--feature", "alpha", "--task-id", "T001", "--code-workspace", str(repo)],
-                cwd=Path(__file__).resolve().parents[1],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-            run_id = json.loads(started.stdout)["runId"]
-            (repo / "existing.txt").write_text("implemented\n", encoding="utf-8")
-            finished = subprocess.run(
-                [sys.executable, "hooks/task_runner.py", "finish-implementation",
-                 "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001",
-                 "--run-id", run_id, "--code-workspace", str(repo)],
-                cwd=Path(__file__).resolve().parents[1],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-
-            inspected = self._run_writer(
-                "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T002", "--code-workspace", str(repo),
-            )
-            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
-            cache = json.loads(inspected.stdout)["explorationCaches"][0]
-            self.assertEqual(cache["status"], "fresh_with_trusted_changes")
-            self.assertEqual(cache["changedPaths"], ["existing.txt"])
-            self.assertEqual(cache["matchedImplementationTaskIds"], ["T001"])
-            self.assertEqual(cache["matchedImplementationEvidenceIds"], ["ev_0001"])
-            self.assertEqual(cache["matchedEvidenceIds"], [])
-            self.assertEqual(cache["untrustedReasons"], [])
-
-            for trusted_status in ["validating", "failed", "in_progress"]:
-                batch = _read_batch(feature_dir)
-                batch["tasks"][0]["status"] = trusted_status
-                _write_batch(feature_dir, batch)
-                inspected = self._run_writer(
-                    "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                    "--task-id", "T002", "--code-workspace", str(repo),
-                )
-                self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
-                cache = json.loads(inspected.stdout)["explorationCaches"][0]
-                self.assertEqual(cache["status"], "fresh_with_trusted_changes")
-                self.assertEqual(cache["matchedImplementationTaskIds"], ["T001"])
-                self.assertEqual(cache["untrustedReasons"], [])
-
-            batch = _read_batch(feature_dir)
-            batch["tasks"][0]["status"] = "implemented"
-            _write_batch(feature_dir, batch)
-            stream = feature_dir / "evidence" / "EVIDENCE.jsonl"
-            records = [json.loads(line) for line in stream.read_text(encoding="utf-8").splitlines()]
-            records[0]["transientValidationFiles"] = "not-a-list"
-            stream.write_text(
-                "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
-                encoding="utf-8",
-            )
-            inspected = self._run_writer(
-                "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T002", "--code-workspace", str(repo),
-            )
-            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
-            cache = json.loads(inspected.stdout)["explorationCaches"][0]
-            self.assertEqual(cache["status"], "stale")
-            self.assertEqual(cache["changedPaths"], ["existing.txt"])
-            self.assertEqual(cache["unexplainedPaths"], ["existing.txt"])
-            self.assertEqual(cache["matchedImplementationTaskIds"], [])
-            self.assertIn("ev_0001:invalid_transientValidationFiles", cache["untrustedReasons"])
-
-    def test_completed_task_change_is_reusable_then_patch_advances_to_fresh(self) -> None:
-        from tests.test_task_runner import _read_batch, _workspace, _write_batch
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
-            root_path = feature_dir / "plan.json"
-            root = json.loads(root_path.read_text(encoding="utf-8"))
-            batch = _read_batch(feature_dir)
-            second = copy.deepcopy(batch["tasks"][0])
-            second.update({"id": "T002", "title": "second", "deps": ["T001"]})
-            second["acceptanceCriteria"][0]["id"] = "AC-T002-01"
-            second["validationCommands"][0].update(
-                {"id": "VAL-T002-01", "covers": ["AC-T002-01"]}
-            )
-            root["batches"][0]["taskIds"].append("T002")
-            batch["tasks"].append(second)
-            batch["taskCount"] = 2
-            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            _write_batch(feature_dir, batch)
-
-            body = Path(tmp) / "record.json"
-            self._body(body)
-            recorded = self._run_writer(
-                "record", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(repo),
-                "--expected-cache-sha256", "missing", "--body-file", str(body),
-            )
-            self.assertEqual(recorded.returncode, 0, recorded.stdout + recorded.stderr)
-
-            started = subprocess.run(
-                [sys.executable, "hooks/task_runner.py", "start", "--workspace", str(workspace),
-                 "--feature", "alpha", "--task-id", "T001", "--code-workspace", str(repo)],
-                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False,
-            )
-            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-            run_id = json.loads(started.stdout)["runId"]
-            (repo / "existing.txt").write_text("implemented\n", encoding="utf-8")
-            transient_test = repo / "tests" / "temp_validation.py"
-            transient_test.parent.mkdir(parents=True)
-            transient_test.write_text("def test_temp(): pass\n", encoding="utf-8")
-            completed = subprocess.run(
-                [sys.executable, "hooks/task_runner.py", "complete", "--workspace", str(workspace),
-                 "--feature", "alpha", "--task-id", "T001", "--run-id", run_id,
-                 "--code-workspace", str(repo)],
-                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            evidence_lines = (feature_dir / "evidence" / "EVIDENCE.jsonl").read_text(encoding="utf-8").splitlines()
-            evidence = json.loads(evidence_lines[-1])
-            self.assertEqual(evidence["transientValidationFiles"], ["tests/temp_validation.py"])
-
-            inspected = self._run_writer(
-                "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T002", "--code-workspace", str(repo),
-            )
-            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
-            cache = json.loads(inspected.stdout)["explorationCaches"][0]
-            self.assertEqual(cache["status"], "fresh_with_trusted_changes")
-            cache_path = feature_dir / "cache" / "code-exploration" / repo.name / "backend.json"
-            persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-            persisted["capturedBatchId"] = "B000"
-            cache_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            inspected = self._run_writer(
-                "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T002", "--code-workspace", str(repo),
-            )
-            cache = json.loads(inspected.stdout)["explorationCaches"][0]
-            self.assertEqual(cache["status"], "reusable_with_changes")
-            self.assertEqual(cache["matchedTaskIds"], ["T001"])
-            self.assertEqual(cache["changedPaths"], ["existing.txt"])
-
-            patch_body = Path(tmp) / "patch.json"
-            before_rejected_patch = cache_path.read_bytes()
-            patch_body.write_text(
-                json.dumps(
-                    {
-                        "reviewedPaths": [],
-                        "findingUpdates": {},
-                        "exploredPathsAdd": [],
-                        "sharedPathsAdd": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            rejected = self._run_writer(
-                "patch", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T002", "--code-workspace", str(repo),
-                "--expected-cache-sha256", cache["cacheSha256"], "--body-file", str(patch_body),
-            )
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("code_exploration_reviewed_paths_incomplete:existing.txt", rejected.stdout)
-            self.assertEqual(cache_path.read_bytes(), before_rejected_patch)
-
-            patch_body.write_text(
-                json.dumps(
-                    {
-                        "reviewedPaths": ["existing.txt"],
-                        "findingUpdates": {
-                            "testEntrypoints": [
-                                {"cwd": ".", "scope": "missing required argv"}
-                            ]
-                        },
-                        "exploredPathsAdd": [],
-                        "sharedPathsAdd": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            invalid_findings = self._run_writer(
-                "patch", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T002", "--code-workspace", str(repo),
-                "--expected-cache-sha256", cache["cacheSha256"], "--body-file", str(patch_body),
-            )
-            self.assertNotEqual(invalid_findings.returncode, 0)
-            self.assertIn("code_exploration_findings_invalid", invalid_findings.stdout)
-            self.assertEqual(cache_path.read_bytes(), before_rejected_patch)
-
-            patch_body.write_text(
-                json.dumps(
-                    {
-                        "reviewedPaths": ["existing.txt"],
-                        "findingUpdates": {},
-                        "exploredPathsAdd": [],
-                        "sharedPathsAdd": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            patched = self._run_writer(
-                "patch", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T002", "--code-workspace", str(repo),
-                "--expected-cache-sha256", cache["cacheSha256"], "--body-file", str(patch_body),
-            )
-            self.assertEqual(patched.returncode, 0, patched.stdout + patched.stderr)
-
-            fresh = self._run_writer(
-                "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T002", "--code-workspace", str(repo),
-            )
-            self.assertEqual(fresh.returncode, 0, fresh.stdout + fresh.stderr)
-            self.assertEqual(json.loads(fresh.stdout)["explorationCaches"][0]["status"], "fresh")
-
-    def test_two_completed_tasks_are_absorbed_by_one_patch(self) -> None:
-        from tests.test_task_runner import _read_batch, _workspace, _write_batch
-
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
-            root_path = feature_dir / "plan.json"
-            root = json.loads(root_path.read_text(encoding="utf-8"))
-            batch = _read_batch(feature_dir)
-            base_task = batch["tasks"][0]
-            tasks = [base_task]
-            for index, dependencies in ((2, []), (3, ["T001", "T002"])):
-                item = copy.deepcopy(base_task)
-                task_id = f"T{index:03d}"
-                item.update({"id": task_id, "title": task_id, "deps": dependencies})
-                item["acceptanceCriteria"][0]["id"] = f"AC-{task_id}-01"
-                item["validationCommands"][0].update(
-                    {"id": f"VAL-{task_id}-01", "covers": [f"AC-{task_id}-01"]}
-                )
-                tasks.append(item)
-            root["batches"][0]["taskIds"] = [item["id"] for item in tasks]
-            batch["tasks"] = tasks
-            batch["taskCount"] = len(tasks)
-            root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            _write_batch(feature_dir, batch)
-
-            body = Path(tmp) / "record.json"
-            self._body(body)
-            recorded = self._run_writer(
-                "record", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(repo),
-                "--expected-cache-sha256", "missing", "--body-file", str(body),
-            )
-            self.assertEqual(recorded.returncode, 0, recorded.stdout + recorded.stderr)
-
-            # Independent tasks may complete in a different order than the plan.
-            for task_id in ("T002", "T001"):
-                started = subprocess.run(
-                    [sys.executable, "hooks/task_runner.py", "start", "--workspace", str(workspace),
-                     "--feature", "alpha", "--task-id", task_id, "--code-workspace", str(repo)],
-                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-                (repo / "existing.txt").write_text(f"{task_id}\n", encoding="utf-8")
-                completed = subprocess.run(
-                    [sys.executable, "hooks/task_runner.py", "complete", "--workspace", str(workspace),
-                     "--feature", "alpha", "--task-id", task_id,
-                     "--run-id", json.loads(started.stdout)["runId"], "--code-workspace", str(repo)],
-                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-
-            inspected = self._run_writer(
-                "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T003", "--code-workspace", str(repo),
-            )
-            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
-            cache = json.loads(inspected.stdout)["explorationCaches"][0]
-            self.assertEqual(cache["status"], "fresh_with_trusted_changes")
-            cache_path = feature_dir / "cache" / "code-exploration" / repo.name / "backend.json"
-            persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-            persisted["capturedBatchId"] = "B000"
-            cache_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            inspected = self._run_writer(
-                "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T003", "--code-workspace", str(repo),
-            )
-            cache = json.loads(inspected.stdout)["explorationCaches"][0]
-            self.assertEqual(cache["status"], "reusable_with_changes")
-            self.assertEqual(cache["matchedTaskIds"], ["T001", "T002"])
-            self.assertEqual(len(cache["matchedEvidenceIds"]), 2)
-
-            patch_body = Path(tmp) / "patch.json"
-            patch_body.write_text(
-                json.dumps(
-                    {
-                        "reviewedPaths": cache["changedPaths"],
-                        "findingUpdates": {},
-                        "exploredPathsAdd": [],
-                        "sharedPathsAdd": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            patched = self._run_writer(
-                "patch", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T003", "--code-workspace", str(repo),
-                "--expected-cache-sha256", cache["cacheSha256"], "--body-file", str(patch_body),
-            )
-            self.assertEqual(patched.returncode, 0, patched.stdout + patched.stderr)
-            persisted = json.loads(cache_path.read_text(encoding="utf-8"))
-            self.assertEqual(persisted["evidenceCoverage"]["explainedTaskIds"], ["T001", "T002"])
-
-            fresh = self._run_writer(
-                "inspect", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T003", "--code-workspace", str(repo),
-            )
-            self.assertEqual(json.loads(fresh.stdout)["explorationCaches"][0]["status"], "fresh")
-
-
 class CodeTaskContextCacheTest(unittest.TestCase):
     def test_context_exploration_failure_is_machine_blocking(self) -> None:
         from hooks.code_exploration import CodeExplorationError
@@ -1116,6 +815,9 @@ class CodeTaskContextCacheTest(unittest.TestCase):
             repo = Path(tmp) / "repo"
             repo.mkdir()
             _git(repo, "init", "-b", "main")
+            (repo / ".git" / "info" / "exclude").write_text(
+                ".cmbdevclaw/large_tool_results/\n", encoding="utf-8"
+            )
             (repo / "src.txt").write_text("source\n", encoding="utf-8")
 
             result = build_context(
@@ -1167,16 +869,42 @@ class CodeTaskContextCacheTest(unittest.TestCase):
                     "requiresPatch": False,
                 },
             )
-            self.assertEqual(
-                result.data["explorationDirective"],
-                {
-                    "phase": "batch_bootstrap",
-                    "scopeSource": "batchExplorationScope",
-                    "fullExplorationAllowed": True,
-                    "requiresRecord": True,
-                    "requiresPatch": False,
-                },
+            directive = result.data["explorationDirective"]
+            self.assertEqual(directive["phase"], "batch_bootstrap")
+            self.assertEqual(directive["scopeSource"], "batchExplorationScope")
+            self.assertTrue(directive["fullExplorationAllowed"])
+            self.assertTrue(directive["requiresRecord"])
+            self.assertFalse(directive["requiresPatch"])
+            self.assertEqual(directive["requiredAction"], "record_code_exploration_before_start")
+            self.assertEqual(len(directive["nextCommands"]), 1)
+            self.assertEqual(directive["nextCommands"][0]["action"], "record_code_exploration")
+            self.assertTrue(result.data["explorationBlocked"])
+            self.assertFalse(result.data["implementationAllowed"])
+            self.assertFalse(result.data["startAllowed"])
+
+    def test_context_blocks_before_exploration_when_runtime_path_is_unignored(self) -> None:
+        from hooks.code_task_context import build_context
+        from tests.test_task_runner import _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
+            (repo / ".git" / "info" / "exclude").unlink()
+            result = build_context(
+                workspace=workspace,
+                feature="alpha",
+                task_id="T001",
+                code_workspaces=[repo],
             )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.data["requiredAction"], "configure_git_ignore_and_retry_context")
+            self.assertTrue(result.data["explorationBlocked"])
+            self.assertFalse(result.data["startAllowed"])
+            self.assertEqual(
+                result.data["runtimeIgnoreIssues"][0]["path"],
+                ".cmbdevclaw/large_tool_results/",
+            )
+            self.assertIn("--code-workspace", result.data["retryContextArgv"])
 
     def test_backend_context_never_projects_frontend_shared_findings(self) -> None:
         from hooks.code_task_context import build_context
@@ -1234,16 +962,17 @@ class CodeTaskContextCacheTest(unittest.TestCase):
             self.assertEqual(cache["findings"]["moduleMap"][0]["role"], "backend contract")
             self.assertNotIn("frontend contract", json.dumps(cache, ensure_ascii=False))
             self.assertTrue(frontend_path.is_file())
-            self.assertEqual(
-                result.data["explorationDirective"],
-                {
-                    "phase": "task_guard",
-                    "scopeSource": "taskContract.scope",
-                    "fullExplorationAllowed": False,
-                    "requiresRecord": False,
-                    "requiresPatch": False,
-                },
-            )
+            directive = result.data["explorationDirective"]
+            self.assertEqual(directive["phase"], "task_guard")
+            self.assertEqual(directive["scopeSource"], "taskContract.scope")
+            self.assertFalse(directive["fullExplorationAllowed"])
+            self.assertFalse(directive["requiresRecord"])
+            self.assertFalse(directive["requiresPatch"])
+            self.assertEqual(directive["requiredAction"], "start_task")
+            self.assertEqual(directive["nextCommands"], [])
+            self.assertIn("start", directive["startArgv"])
+            self.assertIn("--code-workspace", directive["startArgv"])
+            self.assertTrue(result.data["startAllowed"])
 
 
 if __name__ == "__main__":

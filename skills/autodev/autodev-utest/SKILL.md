@@ -1,7 +1,7 @@
 ---
 name: autodev-utest
-description: "Dev 阶段单元测试生成与单测驱动最小修复技能。"
-version: v1.2.1701
+description: "Dev 阶段单元测试协调、生成、执行与单测驱动最小修复技能。"
+version: v1.2.08101
 ---
 
 ## 缺失产物处理
@@ -10,230 +10,198 @@ version: v1.2.1701
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "${feature}" --plain
 ```
 
-
-# /autodev-utest - 单测生成与最小修复
+# /autodev-utest - 单测协调与验证
 
 ## 阶段定位
 
-本技能的职责不是只补测试，也不是自由修代码，而是用单元测试把当前 feature 的实现拉到可验证状态。
-
-核心目标：
-
-- 从执行清单列出的内容提取需要单测覆盖的行为，其中 JSON 为机器事实源。
-- 为当前 feature 生成或补齐单元测试。
-- 逐个运行测试，保留原始测试日志。
-- 对失败进行根因归类。
-- 在边界内做最小修复：测试代码问题修测试，当前 feature 的业务实现问题可修生产代码。
-- 生成 `UNIT_TEST_RESULT.json`，为 E2E 与 Verify 阶段提供机器事实源；`UNIT_TEST_REPORT.md` 只是可选人类报告。
-
-## 稳定 ID 规范
-
-- Test Plan 中的测试目标使用 `UT-001`、`UT-002` ...
-- Coverage Matrix 中的 Source / Requirement / Scenario 必须使用稳定引用：`specs/<capability>/spec.md#REQ-001`、`#SCN-001`、`design.md#API-001`。
-- `UNIT_TEST_RESULT.json` 中的 targets、scenarioCoverage 与 evidenceIds 必须保持同一组 ID；`UNIT_TEST_REPORT.md` 若生成，也应投影同一组 ID。
-- 新建测试目标继续递增，不允许重用已删除或已完成的 ID。
-
-## 执行主体
-
-本 skill 默认且只能由当前会话内联执行：
-
-- 当前会话直接读取源码、生成测试、执行验证、分析失败、做最小修复、更新状态文件。
-- 不得把测试生成、失败归因、代码修复或报告编写委派给下级 agent 或子 agent。
-- 后台进程只允许用于运行构建或测试命令，不承担 agent 工作。
+从 `proposal.md`、`specs/**/*.md`、`design.md`、根 `plan.json`、`plans/Bxxx/plan.json`、`REQUIREMENTS_EVAL.md` 和 evidence 提取当前 feature 的测试目标。生成或补齐单测，运行真实命令，归因失败，生成 `UNIT_TEST_REPORT.md` 与 `UNIT_TEST_RESULT.json`。
 
 调用脚本读取当前 Feature 快照：
 
 ```bash
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-后续准入、恢复和完成判断直接取用 `CHECKPOINT`。
+每次需要当前 checkpoint 时重新读取，不从 `hooks.ndjson` 推断。
 
 ## 参数
 
-扫描 `$ARGUMENTS`：
-
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--mode auto` | 是 | 先归因，再决定修测试还是修业务代码 |
-| `--mode test` | 否 | 只允许修改测试代码、fixture、mock、测试辅助文件 |
-| `--mode code` | 否 | 只允许在已有失败测试锚定下修当前 feature 的业务代码 |
-| `--no-fix` | 否 | 只生成、运行、记录，不做任何修复 |
-| `--max-fix N` | `3` | 单个根因最多修复尝试次数 |
+| `--mode auto` | 是 | 测试工程师修复测试自身问题；生产缺陷由主协调器按门槛修复 |
+| `--mode test` | 否 | 只修改测试与测试环境 |
+| `--mode code` | 否 | 主协调器只在已有失败测试锚定下修当前 feature 生产代码 |
+| `--no-fix` | 否 | 只生成、运行、记录 |
+| `--max-fix N` | `3` | 单个生产根因最多修复尝试次数 |
 
 ## 输入与产物
+
 ```text
 FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
 ```
 
-读取输入（消费执行清单）：
+读取：
 
-- 按「流程契约」一节取本 Feature 的执行清单，读取 `## 输入产物` 列出的上游产物原件，按各自 `读取方式` 抽取重点。
-- 标『未生成』的可选 input 按其 `缺失处理`（降级）继续，不要硬等；清单未列出的产物不读不等。
-- 与当前 feature 相关的源码、已有测试、构建配置
-- `plan.json.deferredValidationIssues[]` 以及对应 `plans/Bxxx/plan.json` 中的 TASK/Batch 延期详情。它们是 Code 阶段未解决验证项，不是 PASS；按 `taskId/commandId/errorCategory/evidenceIds` 建立优先测试或环境复核目标。
+- `<AGENTS_INSTRUCTIONS>` 中的 `<SCOPE>`、`<SYSTEM>`、`<UNIT>` 引用及其真实文档。
+- 根 `plan.json.batches[]` 及每个 `plans/Bxxx/plan.json` 的 `executionLane`、任务 `workspaceRef`、scope、spec/design refs 与 validation commands。
+- 当前 feature 源码、已有测试、构建清单、锁文件和测试配置。
+- `plan.json.deferredValidationIssues[]` 及对应 Batch/TASK 延期详情。
+- `${pluginPath}/skills/autodev/autodev-utest/reference/test-engineer-task-protocol.md`。
 
-输出产物：
+输出：
 
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl`（append-only 证据流）
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`
-- `.autobizdevops/state.json` 与自动生成视图 `.autobizdevops/STATE.md`
+- validation Evidence、`.autobizdevops/state.json` 与自动生成视图 `.autobizdevops/STATE.md`
 
-禁止修改：
+测试工程师只允许修改：
 
-- 执行清单列出的任何 input
-- 本节点 outputs 之外的其他阶段产物
-- 与当前 feature 无关的业务代码
-- 生产代码中的测试专用入口、测试专用分支、伪造实现
+- 测试源码、fixture、mock、测试辅助代码。
+- 测试环境配置、依赖 manifest 与对应的单一锁文件。
 
-允许修改：
+测试工程师不得修改生产源码。生产缺陷返回 `source_fix_request`。
 
-- 当前 feature 直接相关的测试文件、fixture、mock、测试工具类。
-- 当前 feature 直接相关的业务代码，但必须满足“最小业务修复门槛”。
+## 执行主体与派发顺序
 
-## 最小业务修复门槛
+task 工具可用时，主协调器必须使用 `test-engineer-autodev`：
 
-只有同时满足以下条件，才允许修改业务代码：
+```bash
+python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
+```
 
-1. 已有或新生成的单元测试能稳定复现失败。
-2. 已确认失败不是测试代码、mock、fixture、命令或环境问题。
-3. 失败行为能映射到 `specs/**/*.md`、`design.md` 或 `REVIEW_FINDINGS.json` 中的当前 feature 契约。
-4. 已定位到当前 feature 直接相关的最小代码区域。
-5. 修复不需要改变需求、接口契约、数据模型或跨模块设计。
-6. 修复后必须重跑精确失败测试，并重跑受影响测试类或模块。
+1. 按根 `plan.json.batches[]` 原顺序建立 `(executionLane, workspaceRef)` assignment，并保留各 lane 内的 Batch 顺序。
+2. 先串行执行全部 backend assignments，再串行执行全部 frontend assignments；其他 lane 排在其后。
+3. 一次只派发一个 assignment；收到完整返回后再派发下一个，不并发跨 Batch 或跨仓库测试。
+4. prompt 包含 SCOPE/SYSTEM/UNIT 引用、Batch/TASK、lane、workspace、解析后的仓库路径、允许写入边界、`post_implementation=true`、`tdd_rebuild=false`、失败分类和固定返回字段。
+5. 收集 `status`、`assignment`、`constraint_files`、`lane`、`framework`、`runner`、`environment_initialization`、`test_targets`、`command_results`、`evidence_ids`、`failure_classification`、`source_fix_request`、`e2e_handoff`、`warnings`。
 
-若任一条件不满足，禁止修改业务代码。记录为 `contract_gap`、`environment`、`flaky` 或 `unknown`，并停止推进 `unit_test_done`。
+task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/workspace 顺序执行下述检查、参考渲染、命令记录、归因和报告流程。
 
-## 失败归因
+## 约束与环境
 
-每个失败必须归入以下之一：
+`<SCOPE>` 决定 deploy unit 与仓库边界。framework 只来自已实际打开的 `<SYSTEM>`/`<UNIT>` 文档；runner、构建工具和包管理器只来自真实 `pom.xml`、Gradle 文件、`package.json`、锁文件和测试配置。
 
-| 类型 | 含义 | 允许动作 |
-|------|------|----------|
-| `test_bug` | 测试代码、断言、mock、fixture、测试数据或命令错误 | 修测试代码 |
-| `source_bug` | 当前 feature 的业务实现不满足已确认契约 | 最小修业务代码 |
-| `contract_gap` | proposal/specs/design/实现/测试之间存在冲突或缺口 | 停止并记录回流建议 |
-| `environment` | 依赖、数据库、网络、权限、命令、构建环境问题 | 记录阻断和复现命令 |
-| `flaky` | 非确定性失败，重跑结果不一致 | 标记 flaky，记录重跑证据 |
-| `unknown` | 无法可靠归因 | 停止，不继续猜修 |
+- 系统约束与工程事实冲突：`contract_gap`，阻断 assignment。
+- 系统约束未声明 framework：从工程事实回落并记录 warning。
+- 已有 Jest/Vitest：原样复用。
+- Next/Nuxt 或其他栈：仅复用既有 runner；没有 runner 时为 `environment` 阻断。
 
-禁止为了通过测试而弱化断言、删除核心用例、改写需求产物、跳过失败测试或伪造日志。
+对每个 assignment 运行只读检查：
+
+```bash
+python "${pluginPath}/hooks/inspect_test_environment.py" --framework <spring|vue|react> --workspace "<BUSINESS_REPO>" --json
+```
+
+`status=init_required` 时读取并应用：
+
+```text
+${pluginPath}/skills/autodev/autodev-utest/reference/test-environment-profiles.md
+```
+
+环境初始化只修改测试配置、manifest 与对应锁文件。初始化命令使用 `--kind setup`，随后重新运行 inspector。`conflict` / `unsupported` 不做猜测性初始化；网络或安装授权被拒绝时分类为 `environment` 并阻断。
+
+## 测试域路由
+
+Spring Boot 2/3 按目标选择 `fundamentals`、`mvc`、`security`、`websocket`、`persistence`：
+
+```bash
+python "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>
+```
+
+Vue3/React 按目标选择 `fundamentals`、`component`、`logic`、`state`、`integration`：
+
+```bash
+python "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|react> --domain <domain>
+```
+
+路由：
+
+| 被测目标 | 测试域 |
+|---|---|
+| 纯函数、工具函数 | `unit` / 前端 `fundamentals` |
+| hook、composable | `logic` |
+| store | `state` |
+| 组件 | `component` |
+| router、page、API adapter | `integration` |
+
+真实浏览器、多页面导航或真实网络链路只写入 `e2e_handoff`，不生成 Playwright/Cypress。
 
 ## 工作流程
-
-### 前置检查
-
-- 确认执行清单中的产物存在。
-- 读取项目测试约定。
-- 识别构建工具：Maven、Gradle、npm、pnpm、yarn、pytest、go test 等。不要假设一定是 Java/Maven。
-
-执行清单中任一产物缺失时，保持 checkpoint 不变，向用户列出缺失文件后结束。
 
 ### 写入开始 checkpoint
 
 ```bash
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
 ```
 
-### 建立单测计划
+### 建立测试计划
 
-生成测试矩阵，优先沉淀到 `UNIT_TEST_RESULT.json.targets[]`；若生成 `UNIT_TEST_REPORT.md`，可同步写入其 `## Test Plan`：
-
-若存在 Code 延期问题，先处理 `scope=task` 且能映射到单元边界的项，并把其 `issueId`、原失败 evidence 和处理结果写入报告 Handoff/Failure Analysis；`scope=batch/project` 的编译、集成或环境项放入扩大验证。延期项无法由单测覆盖时保留给 E2E 或人工处理，不得把 Code 的 deferred 状态当成既有测试通过。
+把 specs Requirement/Scenario、design 契约、评审风险和延期验证映射到稳定 UT target：
 
 ```markdown
 | ID | Source | Behavior | Test Target | Priority | Status |
 |----|--------|----------|-------------|----------|--------|
-| UT-001 | specs/foo/spec.md#REQ-001 / #SCN-001 | ... | FooServiceTest#should... | P0 | planned |
+| UT-001 | specs/foo/spec.md / SCN-001 | ... | FooServiceTest#should... | P0 | planned |
 ```
 
-优先级：
+- P0：核心 Requirement/Scenario 与高风险路径。
+- P1：边界、异常、权限、状态、幂等与数据一致性。
+- P2：兼容性和非核心维护性补充。
+- `scope=task` 且能映射到单元边界的延期项优先；batch/project 项进入扩大验证。
 
-- P0：核心 Requirement / Scenario、关键业务规则、已在评审中标为高风险的路径。
-- P1：边界值、异常分支、权限/状态/幂等/数据一致性。
-- P2：兼容性、非核心边界、可维护性补充。
+### 生成测试
 
-**在 seam（公开边界）上测行为**：seam 是调用方真正使用的接口，测试站在 seam 上、不伸进内部。非 public 方法默认不直接测试，通过 public 行为间接覆盖；只有工具类、纯函数、复杂算法或项目约定允许时，才直接测非 public，并在报告中说明原因。别走侧信道（如直接查库断言），要通过接口取回验证——判定与好 / 坏例见 `${pluginPath}/skills/references/test-quality.md`。
+每个目标：
 
-### 生成或补齐单测
+1. 读取同仓库最邻近的 2 至 3 个测试，匹配 runner、命名和 setup/teardown。
+2. 在公开 seam 上写一个行为目标；按 `${pluginPath}/skills/references/test-quality.md` 选择 mock 边界。
+3. 后实现测试使用 `post_implementation=true`、`tdd_rebuild=false`；首次即通过记 `characterization_pass`，不得删除现有生产实现制造 red。
+4. 测试自身错误由测试工程师修复并重跑同一精确目标。
 
-每次只处理一个测试目标：
+### 执行与证据
 
-1. 读取最邻近的 2 到 3 个已有测试文件，匹配项目风格。
-2. 选择最小测试入口，优先测试真实行为。
-3. Mock 只在系统边界用（外部 API / DB / 时间 / 随机 / 文件系统）；绝不 mock 自己的类或内部协作者，也不得只测试 mock 行为。边界规则与可测性设计（DI / SDK 式接口）见 `${pluginPath}/skills/references/test-quality.md`。
-4. 写入一个测试方法或一个最小测试文件。
-5. 在 `UNIT_TEST_RESULT.json.targets[]` 立刻追加或更新该测试目标的状态；`UNIT_TEST_REPORT.md` 若生成，再同步人类视图。
-
-若当前行为是新需求或缺陷修复，优先走 red-green：
-
-1. 写测试。
-2. 运行精确测试。
-3. 确认测试因预期原因失败。
-4. 再进入最小修复。
-
-若当前行为已经由实现支持，测试可能首次运行即通过。此时必须在报告中标记为 `characterization_pass`，不能伪造 red 阶段。**此路径是同义反复（tautological）高发区**：不要对着实现把断言写成它的镜像；期望值必须来自独立事实源（spec 的验收结果 / 已知常量 / 手算样例），绝不按代码的算法重算——否则测试构造上恒过、永不与代码分歧。
-
-### 执行精确测试
-
-必须优先运行精确到测试方法或最小测试文件的命令，例如：
+setup 命令：
 
 ```bash
-mvn test -Dtest=FooServiceTest#shouldRejectEmptyName
-./gradlew test --tests "com.example.FooServiceTest.shouldRejectEmptyName"
-npm test -- FooService.test.ts -t "rejects empty name"
-pytest tests/test_foo.py::test_rejects_empty_name
+python "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --code-workspace "<BUSINESS_REPO>" --cwd "<RELATIVE_CWD>" -- <argv...>
 ```
 
-所有命令输出必须追加到：
+test 命令；首次执行可省略 `--target-id` 自动分配，重跑必须复用返回的 ID：
 
-```text
-${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log
+```bash
+python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --code-workspace "<BUSINESS_REPO>" --cwd "<RELATIVE_CWD>" --target-id "<UT_ID>" --task-id "<TASK_ID>" --spec-ref "<SPEC_REF>" -- <argv...>
 ```
 
-每次测试命令结束后，还必须用 `hooks/evidence_store.py append` 向 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/evidence/EVIDENCE.jsonl` 末尾追加 validation evidence；这是 feature 产物目录下的证据流，不得写到业务代码仓库根目录或当前 cwd 下的临时 `.autobizdevops`。append 工具会默认从 `PLUGIN_WORKSPACE/PROJECT_DIR` 定位产物根；手写命令时可显式加 `--workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"`。记录 taskId（必须来自 `plans/Bxxx/plan.json.tasks[].id`，无 plan 契约时来自本阶段建立的轻量任务 ID）、specRefs、designRefs、changedFiles、validation.command/exitCode/result，并将真实输出写入 evidence log。`ev_XXXX` 由 append 工具按当前流末尾自动递增；不得插入、重排、重编号、删除旧记录或手改 index。结构化记录只存在 JSONL，不得新增 `ev_XXXX.json` sidecar。
+执行器必须接收 argv，不接收 shell 命令字符串；cwd 不得越出分配仓库。完整输出追加到 `test-output.log`。test 执行追加 `autodev-utest` validation Evidence，并创建或更新同一 UT target；重跑保留历史 evidence IDs。
 
-日志中至少保留：
+### 失败分类与修复
 
-- 时间。
-- 工作目录。
-- 命令。
-- 退出码。
-- 输出摘要或完整输出。
+| 类型 | 处置 |
+|------|------|
+| `test_bug` | 测试工程师只修测试、fixture、mock、辅助代码或测试环境配置，重跑原命令 |
+| `source_bug` | 返回 `source_fix_request`，测试工程师不改生产源码 |
+| `contract_gap` | 阻断并回流约束/计划 |
+| `environment` | 记录环境与复现命令；只应用受支持 initProfile |
+| `flaky` | 记录多次重跑结果与根因 |
+| `unknown` | 停止，不猜修 |
 
-### 失败归因与最小修复
+主协调器收到 `source_fix_request` 后：
 
-测试失败时，按顺序处理：
+1. 确认失败测试稳定复现并映射当前 feature specs/design。
+2. 排除测试、命令与环境问题。
+3. 在 `--mode auto|code` 且未超过 `--max-fix` 时做最小生产修复；`--mode test` 或 `--no-fix` 不修生产代码。
+4. 重新派发原 Batch/lane/workspace assignment，复用 UT target 并追加新 Evidence。
 
-1. 完整读取错误、堆栈、失败断言。
-2. 确认是否能稳定复现。
-3. 查最近改动、相似实现、相似测试。
-4. 形成单一根因假设，写入报告。
-5. 根据归因选择动作：
-   - `test_bug`：只改测试、fixture、mock 或测试辅助代码。
-   - `source_bug`：只做当前 feature 范围内的最小业务修复。
-   - 其他类型：停止或记录阻断，不做猜测性修复。
-6. 每次只做一个修复尝试。
-7. 修复后立即重跑同一个精确测试。
+达到 `--max-fix` 仍失败，保留 `unit_test_in_progress` 并记录阻断。
 
-单个根因修复尝试达到 `--max-fix` 仍失败时，停止修复，写入 `needs_fix` 证据，不得继续堆叠补丁。
+### 扩大验证
 
-### 扩大验证范围
+所有 P0/P1 精确目标通过后，按 assignment 顺序重跑修改过的测试文件、受影响模块轻量测试，以及项目约定的编译/测试编译命令。扩大验证失败必须归因，不得用精确测试通过覆盖失败。
 
-当所有 P0/P1 单测目标通过后，执行扩大验证：
+### 生成结果与报告
 
-1. 重跑本轮新增或修改的测试类。
-2. 重跑受影响模块的轻量测试命令。
-3. 若项目约定要求，运行编译或测试编译命令。
-
-扩大验证失败时，必须回到『失败归因与最小修复』。不得只因精确测试通过就推进完成。
-
-### 生成最终报告
-
-可同步生成 `UNIT_TEST_REPORT.md` 作为人类报告；若生成，建议包含以下章节：
+主协调器聚合所有 assignment 返回，生成 `UNIT_TEST_REPORT.md`：
 
 ```markdown
 # Unit Test Report
@@ -245,109 +213,60 @@ ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.
 - **Test Log:** test-output.log
 
 ## Test Plan
-
 ## Execution Summary
-
 ## Coverage Matrix
-
 ## Failure Analysis
-
 ## Fix Attempts
-
 ## Commands
-
 ## Handoff
 ```
 
-`Coverage Matrix` 至少要映射 specs Requirement / Scenario 或 design 契约到测试方法，并使用稳定 ID：
+`Coverage Matrix` 映射 Requirement/Scenario 或 design 契约到测试与 Evidence；`Fix Attempts` 记录分类、修改文件、假设、命令和结果；`Handoff` 汇总 `e2e_handoff`、人工确认项和阻断。
 
-```markdown
-| Source | Requirement / Scenario | Test | Result | Evidence |
-|--------|------------------------|------|--------|----------|
-```
-
-`Fix Attempts` 必须列出每一次修复：
-
-```markdown
-| ID | Classification | Files Changed | Hypothesis | Command | Result |
-|----|----------------|---------------|------------|---------|--------|
-```
-
-`Handoff` 必须明确：
-
-- E2E 阶段应重点覆盖的链路。
-- 仍需人工确认的项。
-- 若失败，返回用户确认。
-
-同时必须通过 `${pluginPath}/hooks/unit_test_result_writer.py` 写入 `UNIT_TEST_RESULT.json` 作为机器事实源，禁止直接整份写入或编辑该 JSON。JSON 只承载结构化结论，不和 Markdown 做文本对账；每个 target 必须用 `specRefs` 回链 Requirement / Scenario，并引用本阶段写入的 `evidenceIds`。若 target 指向 `UI_CONTEXT.json` 中的 UI task 或 UI scenario，必须投影 `uiRequired=true`；非 UI target 不要伪造 UI 标记。`scenarioCoverage` 必须以 specs 中全部 `SCN-xxx` 为分母，逐行写出 `pass` / `fail` / `manual` / `missing`；`pass` 行必须引用能通过 `specRefs` 覆盖该场景的 evidence。优先使用 `unit_test_result_writer.py init --from-plan`、`add-target/update-target`、`derive-scenario-coverage` 与 `set-verdict`。
-
-推进 `unit_test_done` 前必须运行 `${pluginPath}/hooks/stage_gate.py validate --stage dev.utest --feature "${feature}"`。writer 的本地 `validate` 只做结构检查，不能替代 stage gate。
-
-```json
-{
-  "version": 1,
-  "verdict": "PASS",
-  "scenarioCoverage": [
-    {"scenarioRef": "SCN-001", "evidenceIds": ["ev_0001"], "verdict": "pass"}
-  ],
-  "targets": [
-    {
-      "targetId": "UT-001",
-      "taskId": "T001",
-      "uiRequired": true,
-      "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
-      "evidenceIds": ["ev_0001"],
-      "result": "PASS",
-      "command": "pytest tests/test_cap.py::test_happy_path",
-      "coverage": {"lines": 12}
-    }
-  ]
-}
-```
-
-### 分支决策
-
-可以推进 `unit_test_done` 的条件：
-
-- P0 单测目标全部 PASS。
-- P1 单测目标 PASS，或有明确可接受原因并标记 `PASS_WITH_WARNINGS`。
-- `UNIT_TEST_RESULT.json` 与 `test-output.log` 均已写入。
-- `evidence/EVIDENCE.jsonl` 已追加本阶段 validation evidence，完整性校验通过。
-- 所有业务代码修复都有对应失败测试锚点和重跑通过证据。
-- 扩大验证命令已运行，并在报告中记录结果。
-- `UNIT_TEST_RESULT.json.verdict` 为 `PASS` 或 `PASS_WITH_WARNINGS`，且每个 target 带 `taskId`、`specRefs`、`evidenceIds`、`result`、`command`。
-
-推进命令：
+由 writer 派生 coverage、设置 verdict 并校验稳定 JSON 契约：
 
 ```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.utest --feature "${feature}"
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
-CHECKPOINT=$(python "${pluginPath}/read_state_json.py" --feature "${feature}")
+python "${pluginPath}/hooks/unit_test_result_writer.py" derive-scenario-coverage --feature "${feature}"
+python "${pluginPath}/hooks/unit_test_result_writer.py" set-verdict --feature "${feature}" <PASS|PASS_WITH_WARNINGS|FAIL|BLOCKED>
+python "${pluginPath}/hooks/unit_test_result_writer.py" validate --feature "${feature}" --structure --gate
 ```
 
-若存在 `FAIL`、`BLOCKED`、未归因失败、合同缺口或超过最大修复次数，保持 `unit_test_in_progress`，向用户报告阻断。只有根路由或后续验收阶段需要统一回流时，才使用 `needs_fix`。
+## 分支决策
+
+推进 `unit_test_done`：
+
+- P0 全部 PASS。
+- P1 PASS，或有明确原因并标记 `PASS_WITH_WARNINGS`。
+- 报告、日志、结果 JSON、Evidence 完整且 writer 校验通过。
+- 源码修复均有失败测试锚点和重跑通过 Evidence。
+- 扩大验证已执行并记录。
+
+```bash
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
+```
+
+存在 FAIL、BLOCKED、未归因失败、`contract_gap` 或超过修复次数时保持 `unit_test_in_progress`。
 
 ## 质量规则
 
-1. 测试必须验证业务行为、站在 seam 上，不以覆盖率数字替代断言质量；主动规避三个反模式——**实现耦合**（测内部 / 走侧信道，重构不改行为却挂）、**同义反复**（期望值按代码算法重算，恒过）、**水平切片**（先写全部测试；改用一测一实现的垂直切片）。判定与好 / 坏例见 `${pluginPath}/skills/references/test-quality.md`。
-2. 不得只为提高覆盖率而生成无意义测试。
-3. 不得删除、跳过、弱化已有失败测试。
-4. 不得把 mock 调用次数当成唯一业务断言，除非该调用本身就是契约。
-5. 不得为测试向生产代码添加测试专用方法、测试专用开关或伪实现。
-6. 每个“已修复”结论都必须有新鲜测试命令和退出码证据。
-7. 不能确定根因时，停止并记录，不猜修。
+1. 测试验证业务行为并站在公开 seam 上；实现耦合、同义反复与水平切片判定见 `${pluginPath}/skills/references/test-quality.md`。
+2. 不以覆盖率数字替代断言质量，不生成无意义测试。
+3. 不删除、跳过或弱化已有失败测试。
+4. mock 调用次数不得作为唯一业务断言，除非调用本身就是契约。
+5. 不向生产代码添加测试专用入口、开关或伪实现。
+6. 每个修复结论必须有新鲜命令与退出码 Evidence。
+7. 根因不确定时停止并记录。
 
 ## 输出清单
 
-- [ ] 已读取必需输入和项目约束。
+- [ ] 已读取 SCOPE/SYSTEM/UNIT、根/Batch 计划和工程事实。
 - [ ] 已写入 `unit_test_in_progress`。
-- [ ] 已建立 Test Plan。
-- [ ] 已生成或补齐单测。
-- [ ] 已运行精确测试并记录到 `test-output.log`。
-- [ ] 已将单测运行结果 append 到 `evidence/EVIDENCE.jsonl`，并在报告中引用 evidenceId。
-- [ ] 允许范围内的最小修复均已验证。
-- [ ] 已执行扩大验证。
-- [ ] `UNIT_TEST_RESULT.json` 已写入，JSON 是下游机器主入口。
+- [ ] 已按 Batch、lane、workspace 串行完成 assignment。
+- [ ] 已检查/初始化测试环境并渲染专项参考。
+- [ ] 已生成测试并通过 runner 记录命令、日志、Evidence 与 UT target。
+- [ ] 失败已分类，测试自修与 `source_fix_request` 已闭环。
+- [ ] 已执行扩大验证并生成报告。
+- [ ] 已派生 coverage、设置 verdict、校验 `UNIT_TEST_RESULT.json`。
 - [ ] 成功时已推进 `unit_test_done`。
 
-**Skill 完成。**
+技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

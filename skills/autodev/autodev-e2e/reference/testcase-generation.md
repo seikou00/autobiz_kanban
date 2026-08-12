@@ -37,6 +37,7 @@
 - 每个用例必须标注 `ui_required: true | false`
 - 当 Requirement / Scenario 涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由或用户可见流程时，必须设置 `ui_required: true`
 - 涉及 UI 的 P0 主链路必须以浏览器步骤开头，并包含页面最终状态断言
+- `ui_required: true` 的 P0/P1 用例最后一步必须是可机械判定的 UI 最终状态断言
 - API/database 只能作为补充证据，不能替代 UI-required 主用户路径
 - 禁止把“Controller 存在”“代码实现”“函数存在”“文件存在”作为 E2E pass 依据
 - 优先级定义：
@@ -115,8 +116,12 @@ steps:
     action: 刷新页面并查看最新评论
     expected: 新评论出现在列表中
     verification:
-      type: database
-      details: comments 表中存在 body=hello from e2e 的记录
+      type: ui
+      details: 评论列表中可见文本 hello from e2e
+
+supplemental_verification:
+  - type: database
+    details: comments 表中存在 body=hello from e2e 的记录，仅作持久化补充证据
 
 cleanup:
   - 删除本用例创建的评论数据
@@ -146,6 +151,8 @@ cleanup:
 - `specs_contract`：建议填写，指向 specs 文件、Requirement 和 Scenario；优先写稳定 ID
 - `design_contract`：涉及 HTTP/API 或数据变更时建议填写 API/Data Decision
 - `regression_risks`：当该用例来自当前回归风险时建议填写
+
+执行结果继续在 `E2E_RESULT.json` 中使用相同 `caseId`，并记录 `taskId`、`specRefs`、本轮 execution、Evidence ID 与 verdict；`E2E_TEST_CASES.yaml` 不承载机器 PASS。
 
 ### `steps`
 

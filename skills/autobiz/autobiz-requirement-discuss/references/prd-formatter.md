@@ -5,6 +5,8 @@ description: 格式化需求文档。根据用户上传的原需求文档，按�
 
 # PRD 格式化技能
 
+使用 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
 根据用户上传的原需求，按照模板格式重写需求文档。
 
 ## 工作流程

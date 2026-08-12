@@ -18,14 +18,14 @@ AUTODEV_HOOKS = ROOT / "skills" / "autodev" / "hooks"
 if str(AUTODEV_HOOKS) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS))
 
-from hooks.json_writer_common import parse_postcheck_output  # noqa: E402
+from hooks.json_writer_common import parse_postcheck_output, shell_join  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
-    BATCH_VALIDATION_KINDS,
     MAX_BATCH_TASKS,
     TASK_VALIDATION_KINDS,
     task_set_digest,
 )
+from hooks.plan_writer import _annotate_validation_test_plan  # noqa: E402
 from hooks.stage_gate import validate_stage  # noqa: E402
 from skills.autodev.hooks.artifact_check import run_postcheck  # noqa: E402
 
@@ -56,6 +56,7 @@ def _workspace(root: Path) -> tuple[Path, Path]:
         json.dumps({"schemaVersion": "autobizdevops.state.v3", "features": {"alpha": _state_record()}}, indent=2),
         encoding="utf-8",
     )
+    _write_design(feature_dir)
     return workspace, feature_dir
 
 
@@ -100,27 +101,29 @@ def _write_design(feature_dir: Path) -> None:
             [
                 "# 技术设计: cap",
                 "## 1. Context / 输入上下文",
-                "## 2. Spec Traceability / 规格追踪",
+                "## 2. Code Evidence",
+                "- Existing implementation: none",
+                "## 3. Spec Traceability / 规格追踪",
                 "| Spec | Requirement / Scenario | Design Coverage |",
                 "|------|------------------------|-----------------|",
                 "| specs/cap/spec.md | Requirement [REQ-001] / Scenario [SCN-001] | API-001 / DATA-001 / D-001 |",
                 "| specs/cap/spec.md | Requirement [REQ-001] / Scenario [SCN-002] | API-001 / DATA-001 / D-001 |",
-                "## 3. API Decisions / 接口决策",
-                "- x-auto-no-http-api: true",
+                "## 4. API Decisions / 接口决策",
+                "- x-auto-no-http-api: false",
                 "| ID | Method | Path / Entry | Request | Response | Errors | Auth/Tenant/Audit | Status |",
                 "|----|--------|--------------|---------|----------|--------|-------------------|--------|",
                 "| API-001 | 无 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
-                "## 4. Data Decisions / 数据决策",
-                "- x-auto-no-sql: true",
+                "## 5. Data Decisions / 数据决策",
+                "- x-auto-no-sql: false",
                 "| ID | Table/Model | Change | Fields | Index/Migration | Rollback | Status |",
                 "|----|-------------|--------|--------|-----------------|----------|--------|",
                 "| DATA-001 | 无 | 无 | 无 | 无 | 无 | 已确认 |",
-                "## 5. Technical Design / 技术设计",
+                "## 6. Technical Design / 技术设计",
                 "### Decisions",
                 "| ID | Decision | Rationale | Alternatives | Status |",
                 "|----|----------|-----------|--------------|--------|",
                 "| D-001 | no-op | no-op | none | 已确认 |",
-                "## 6. Risks / Open Questions",
+                "## 7. Risks / Open Questions",
                 "| ID | Type | Description | Impact | Owner/Next Step |",
                 "|----|------|-------------|--------|-----------------|",
                 "| R-001 | 风险 | none | low | none |",
@@ -191,6 +194,12 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                 "taskSetStatus": "finalized",
                 "activeBatchId": "B001",
                 "nextBatchId": None,
+                "taskValidationPolicy": {
+                    "mode": "defer_to_test_stages",
+                    "orchestration": "inline",
+                    "codeGate": "batch_compile_only",
+                    "maxTestStageRepairAttempts": 3,
+                },
                 "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
                 "batches": [{
                     "id": "B001", "path": "plans/B001/plan.json", "title": "cap",
@@ -296,9 +305,9 @@ def _plan_task_body() -> dict:
         "validationBoundary": "public behavior seam validated by the task command",
         "nonGoals": ["do not change unrelated behavior"],
         "specRefs": ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-001"],
-        "designRefs": ["design.md#D-001"],
-        "apiIds": [],
-        "dataIds": [],
+        "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+        "apiIds": ["API-001"],
+        "dataIds": ["DATA-001"],
         "decisionIds": ["D-001"],
         "validationCommands": [
             {
@@ -435,11 +444,15 @@ def _named_code_workspace(
 
 
 class JsonWriterTests(unittest.TestCase):
+    def test_shell_join_quotes_arguments_on_python_37(self) -> None:
+        self.assertEqual(shell_join(["python", "hello world", "plain"]), "python 'hello world' plain")
+
     def test_plan_writer_binds_each_task_to_one_of_multiple_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)  # Add design.md for artifact ref validation
             _, backend_module = _named_code_workspace(
                 root,
                 "backend-repo",
@@ -507,24 +520,14 @@ class JsonWriterTests(unittest.TestCase):
                 )
             )
             backend_task = next(task for task in draft["tasks"] if task["id"] == "T001")
-            self.assertEqual(
-                backend_task["validationTestPlan"],
-                [
-                    {
-                        "commandId": "VAL-T001-01",
-                        "framework": "maven",
-                        "targets": [
-                            {
-                                "selector": "TargetTest",
-                                "mode": "create_in_code",
-                                "sourceFiles": [],
-                            }
-                        ],
-                        "cwd": "backend/service",
-                        "repo": "backend-repo",
-                    }
-                ],
-            )
+            self.assertEqual(len(backend_task["validationTestPlan"]), 1)
+            test_intent = backend_task["validationTestPlan"][0]
+            self.assertEqual(test_intent["commandId"], "VAL-T001-01")
+            self.assertEqual(test_intent["assetType"], "unit_test")
+            self.assertEqual(test_intent["executionStage"], "with_code")
+            self.assertNotIn("targets", test_intent)
+            self.assertNotIn("create_in_code", json.dumps(test_intent))
+            self.assertTrue(test_intent["testIntent"]["behavior"])
 
             frontend_detail = _draft_detail_body(frontend)
             frontend_detail["validationCommands"][0].update({"argv": ["npm", "test"]})
@@ -574,6 +577,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)  # Add design.md for artifact ref validation
             backend_repo, _ = _named_code_workspace(root, "backend-repo")
             frontend_repo, _ = _named_code_workspace(root, "frontend-repo")
             _, replacement_frontend = _named_code_workspace(
@@ -649,6 +653,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
+            _write_design(feature_dir)  # Add design.md for artifact ref validation
             task = _plan_task_body()
             group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
 
@@ -700,6 +705,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir)
+            _write_design(feature_dir)  # Add design.md for artifact ref validation
             task = _plan_task_body()
             task.update(
                 {
@@ -753,36 +759,12 @@ class JsonWriterTests(unittest.TestCase):
             self.assertIn("执行模式: external_dependency", plan_md)
             self.assertIn("system=LF39.05_bczhaohuapi", plan_md)
 
-    def test_plan_writer_rejects_create_in_code_for_verified_existing_task(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace, feature_dir = _workspace(root)
-            _write_specs(feature_dir)
-            _, module = _code_module(root)
-            task = _plan_task_body()
-            task["executionMode"] = "verified_existing"
-            group_file = _write_task_groups(root / "task-groups.json", [task])
-            prepared = _run(
-                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
-                "--feature", "alpha", "--group-file", str(group_file),
-                "--code-workspace", str(module),
-            )
-            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
-
-            detail = _draft_detail_body(task)
-            detail["validationCommands"][0]["argv"] = ["mvn", "test", "-Dtest=MissingTest"]
-            detail_path = root / "T001-detail.json"
-            detail_path.write_text(json.dumps(detail), encoding="utf-8")
-            detailed = _run(
-                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
-                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
-            )
-            self.assertNotEqual(detailed.returncode, 0)
-            self.assertIn("T001.verified_existing_create_in_code_forbidden", detailed.stdout)
-            draft_text = (
-                feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
-            ).read_text(encoding="utf-8")
-            self.assertNotIn("MissingTest", draft_text)
+    def test_plan_writer_default_never_emits_create_in_code_for_verified_existing_task(self) -> None:
+        task = _plan_task_body()
+        annotated = _annotate_validation_test_plan(task, [])
+        self.assertEqual(annotated["validationTestPlan"][0]["commandId"], "VAL-T001-01")
+        self.assertNotIn("targets", annotated["validationTestPlan"][0])
+        self.assertNotIn("create_in_code", json.dumps(annotated["validationTestPlan"]))
 
     def test_plan_writer_prepare_draft_projects_backend_and_frontend_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -816,6 +798,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
             backend_a, _ = _named_code_workspace(root, "backend-a", manifest="pom.xml")
             backend_b, _ = _named_code_workspace(root, "backend-b", manifest="pom.xml")
             first = _plan_task_body()
@@ -919,6 +902,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             task = _plan_task_body()
             group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
             self.assertEqual(_run(
@@ -1006,6 +990,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             task = _plan_task_body()
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
@@ -1059,6 +1044,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
             first = _plan_task_body()
             second = _plan_task_body()
             second.update({"id": "T002", "title": "second", "deps": ["T001"]})
@@ -1229,6 +1215,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             _, module = _code_module(root)
             task = _plan_task_body()
             task["uiRequired"] = True
@@ -1282,6 +1269,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
             task = _plan_task_body()
@@ -1307,6 +1295,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
             first = _plan_task_body()
@@ -1369,6 +1358,7 @@ class JsonWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
             task_dir = Path(tmp) / "tasks"
             task_dir.mkdir()
             backend = _plan_task_body()
@@ -1425,6 +1415,7 @@ class JsonWriterTests(unittest.TestCase):
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
             _write_specs(feature_dir)
+            _write_design(feature_dir)
             _, module = _code_module(root)
             task_dir = root / "tasks"
             task_dir.mkdir()
@@ -1471,6 +1462,38 @@ class JsonWriterTests(unittest.TestCase):
                 root_plan["batchValidationProfiles"]["backend"]["commands"][0]["cwd"],
                 "backend/service",
             )
+
+    def test_plan_writer_rejects_project_selector_from_leaf_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _, module = _code_module(root)
+            task_dir = root / "tasks"
+            task_dir.mkdir()
+            task = _plan_task_body()
+            task["scope"].update({
+                "workspaceRoots": {"default": "backend/service"},
+                "paths": ["src/main/java/example"],
+            })
+            task["validationCommands"][0].update({
+                "argv": [
+                    "mvn", "test", "-Dtest=ProtocolCtrlApplyTest",
+                    "-pl", "backend/service/LF39.05_bccompliancemng",
+                ],
+                "cwd": "backend/service",
+            })
+            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+
+            result = _run(
+                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+                "--code-workspace", str(module),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("maven_project_selector_requires_aggregator_cwd", result.stdout)
 
     def test_plan_writer_rejects_missing_validation_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1573,6 +1596,67 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("T001.visualSourceRefs_must_be_string_array", result.stdout)
             self.assertIn("T001.frontendRoute_missing", result.stdout)
+
+    def test_plan_writer_grouping_returns_all_invalid_tasks_and_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+
+            def oversized_task(task_id: str, start: int) -> dict:
+                task = _plan_task_body()
+                task["id"] = task_id
+                task["title"] = f"{task_id} oversized"
+                task["specRefs"] = [
+                    "specs/cap/spec.md#REQ-001",
+                    *[
+                        f"specs/cap/spec.md#SCN-{index:03d}"
+                        for index in range(start, start + 6)
+                    ],
+                ]
+                task["mergedScenarioRefs"] = []
+                task.pop("splitRationale", None)
+                return task
+
+            group_file = _write_task_groups(
+                root / "task-groups.json",
+                [oversized_task("T001", 1), oversized_task("T002", 7)],
+            )
+            result = _run(
+                "plan_writer.py",
+                "preflight-task-groups",
+                "--workspace",
+                str(workspace),
+                "--feature",
+                "alpha",
+                "--group-file",
+                str(group_file),
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["validation"]["invalidTaskIds"], ["T001", "T002"])
+            issues = payload["validation"]["issues"]
+            self.assertEqual(
+                {(issue["taskIds"][0], issue["reason"]) for issue in issues},
+                {
+                    ("T001", "missing_plan_task_merged_scenario_refs"),
+                    ("T001", "missing_plan_task_split_rationale"),
+                    ("T002", "missing_plan_task_merged_scenario_refs"),
+                    ("T002", "missing_plan_task_split_rationale"),
+                },
+            )
+            merged_issue = next(
+                issue
+                for issue in issues
+                if issue["taskIds"] == ["T001"]
+                and issue["reason"] == "missing_plan_task_merged_scenario_refs"
+            )
+            self.assertEqual(len(merged_issue["diagnostics"]["expectedRefs"]), 6)
+            self.assertEqual(
+                merged_issue["diagnostics"]["violations"][0]["code"],
+                "merged_scenario_refs_missing",
+            )
 
     def test_plan_writer_freezes_all_ui_refs_after_grouping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1744,17 +1828,14 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["taskValidationPolicy"],
             {
-                "mode": "deferred_batch",
-                "orchestration": "single_batch_subagent",
-                "failStrategy": "repair_then_defer",
-                "maxConcurrency": 1,
-                "agentScope": "task_and_batch_validation_commands",
-                "maxRepairAttempts": 2,
-                "environmentFailureDisposition": "defer",
-                "exhaustedRepairDisposition": "defer",
-                "taskCommandTiming": "after_all_batch_tasks_implemented",
-                "batchCommandTiming": "after_all_task_commands_pass",
+                "mode": "defer_to_test_stages",
+                "orchestration": "inline",
+                "codeGate": "batch_compile_only",
+                "maxTestStageRepairAttempts": 3,
+                "taskCommandTiming": "test_stages_only",
+                "codeCommandTiming": "after_all_batch_tasks_implemented",
                 "validationTarget": "batch_final_snapshot",
+                "codeStageTestExecution": "forbidden",
             },
         )
         self.assertNotIn("status", contract["taskInputExample"])
@@ -1815,29 +1896,18 @@ class JsonWriterTests(unittest.TestCase):
         self.assertTrue(contract["validationCommandPolicy"]["packageScriptMustExist"])
         self.assertTrue(contract["validationCommandPolicy"]["mavenTargetMustBeConcreteClass"])
         self.assertEqual(
-            contract["validationTestPlanPolicy"]["modes"],
-            ["reuse_existing", "create_in_code"],
-        )
-        self.assertFalse(
-            contract["validationTestPlanPolicy"]["createdTestRecordedAsChangedFile"]
+            contract["validationTestPlanPolicy"]["targetModes"],
+            [],
         )
         self.assertEqual(
-            contract["validationTestPlanPolicy"]["byExecutionMode"],
-            {
-                "code": ["reuse_existing", "create_in_code"],
-                "verified_existing": ["reuse_existing"],
-                "external_dependency": [],
-            },
+            contract["validationTestPlanPolicy"]["representation"],
+            "test_intent_only",
         )
         self.assertEqual(
-            contract["validationTestPlanPolicy"]["missingTargetActionByExecutionMode"],
-            {
-                "code": "continue_current_implementation_and_create_validation_tests",
-                "verified_existing": "return_to_plan_and_reuse_existing_validation",
-                "external_dependency": "record_external_dependency_without_local_test",
-            },
+            contract["validationTestPlanPolicy"]["createInCodeAllowed"],
+            False,
         )
-        self.assertEqual(contract["batchValidationKinds"], sorted(BATCH_VALIDATION_KINDS))
+        self.assertEqual(contract["batchValidationKinds"], ["compile"])
         self.assertEqual(
             contract["projectValidationCommand"]["allowedKinds"],
             ["e2e_test", "integration_test", "static_check"],
@@ -1857,11 +1927,12 @@ class JsonWriterTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            contract["batchValidationMode"]["command"],
-            "set-batch-validation-mode --lane <backend|frontend> --mode <task_covered|commands>",
+            contract["batchValidationMode"],
+            {
+                "mode": "commands",
+                "requiredGate": "one required compile command per used lane and workspace",
+            },
         )
-        self.assertIn("frontend lane only", contract["batchValidationMode"]["taskCoveredRequirements"])
-        self.assertIn("commands mode", contract["batchValidationMode"]["backendRequirement"])
         self.assertEqual(contract["workspaceContract"]["field"], "scope.workspaceRoots")
         self.assertEqual(contract["workspaceContract"]["taskBindingField"], "workspaceRef")
         self.assertEqual(contract["workspaceContract"]["maxWorkspaceRefsPerTask"], 1)
@@ -1876,10 +1947,10 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["validationEnvironmentPolicy"],
             {
-                "preflightBeforeRun": False,
-                "missingExecutableResult": "blocked_evidence_and_defer",
-                "runtimeEnvironmentResult": "blocked_evidence_and_defer",
-                "requiredActions": ["record_deferred_and_continue"],
+                "preflightBeforeRun": True,
+                "missingExecutableResult": "block_batch_compile",
+                "runtimeEnvironmentResult": "block_batch_compile",
+                "requiredActions": ["fix_compile_environment_and_retry_batch_compile"],
                 "planOrDigestRebuildRequired": False,
             },
         )
@@ -1935,7 +2006,6 @@ class JsonWriterTests(unittest.TestCase):
                 "command": "finalize-task-draft",
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
-                    "set-batch-validation-mode",
                     "add-batch-validation-command",
                     "add-project-validation-command",
                     "render-md",
@@ -1946,6 +2016,7 @@ class JsonWriterTests(unittest.TestCase):
         self.assertTrue(contract["collectingRepairs"]["preserveUnchangedTaskDetails"])
         self.assertFalse(contract["draftWorkflow"]["standaloneTaskFiles"])
         self.assertEqual(contract["draftWorkflow"]["groupLock"], "groupingDigest")
+        self.assertEqual(contract["draftWorkflow"]["persistentDesignLock"], ".design-contract.lock.json")
         self.assertEqual(
             contract["draftWorkflow"]["scopeWorkspaceRootsSource"],
             "prepare-task-draft --code-workspace",
@@ -2144,6 +2215,32 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual([error["reason"] for error in result.errors or []], [])
             self.assertEqual(output.getvalue().strip(), "")
             self.assertFalse((feature_dir / "SMOKE_TEST_PLAN.json").exists())
+
+    def test_postcheck_rejects_unknown_design_ref_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_proposal(feature_dir)
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            _write_plan(feature_dir)
+
+            batch_path = feature_dir / "plans" / "B001" / "plan.json"
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+            batch["tasks"][0]["designRefs"] = [
+                "design.md#API-777",
+                "design.md#DATA-001",
+                "design.md#D-001",
+            ]
+            batch_path.write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            root["taskSetDigest"] = task_set_digest(root, {"B001": batch})
+            (feature_dir / "plan.json").write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code, _ = run_postcheck(ROOT, workspace, "autodev-plan", "alpha", workflow_record=_state_record())
+            self.assertNotEqual(code, 0)
+            self.assertIn("missing_ref_anchor", output.getvalue())
 
     def test_plan_structure_passes_while_stage_gate_fails_on_missing_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3053,14 +3150,14 @@ class JsonWriterTests(unittest.TestCase):
                 "T001",
                 "--spec-ref",
                 "specs/cap/spec.md#SCN-001",
-                "--evidence-id",
-                "ev_0001",
+                "--priority",
+                "P0",
+                "--ui-required",
+                "true",
                 "--execution-mode",
-                "manual",
-                "--verdict",
-                "PASS",
+                "browser",
                 "--step-json",
-                '{"action":"open","expected":"ok"}',
+                '{"action":"open","expected":"ok","verification":{"type":"ui","details":"visible"}}',
             )
             review = _run(
                 "review_findings_writer.py",
@@ -3125,9 +3222,7 @@ class JsonWriterTests(unittest.TestCase):
                 "--task-id",
                 "T001",
                 "--execution-mode",
-                "manual",
-                "--verdict",
-                "PASS",
+                "browser",
             )
             review = _run(
                 "review_findings_writer.py",
@@ -3147,7 +3242,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotEqual(unit.returncode, 0)
             self.assertIn("missing_unit_target_trace_args", unit.stdout)
             self.assertNotEqual(e2e.returncode, 0)
-            self.assertIn("missing_e2e_case_args", e2e.stdout)
+            self.assertIn("required", e2e.stderr)
             self.assertNotEqual(review.returncode, 0)
             self.assertIn("missing_review_finding_args", review.stdout)
 

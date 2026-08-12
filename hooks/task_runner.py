@@ -17,7 +17,6 @@ import sys
 import tempfile
 import time
 import uuid
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -29,17 +28,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence, read_records, stream_path  # noqa: E402
-from hooks.evidence_kernel import FileLock  # noqa: E402
+from hooks.evidence_kernel import FileLock, unlink_if_exists  # noqa: E402
 from hooks.code_exploration import CodeExplorationError, inspect_exploration_cache  # noqa: E402
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
-    DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS,
+    BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
     EXECUTION_LANES,
     PlanBundle,
-    batch_validation_terminal,
-    code_validation_fail_strategy,
-    code_validation_max_repair_attempts,
-    deferred_task_validation_enabled,
+    defer_to_test_stages_enabled,
     bundle_unfinished_tasks,
     find_task,
     load_plan_bundle,
@@ -47,28 +43,16 @@ from hooks.plan_json import (  # noqa: E402
     task_contract_sha256,
     task_execution_lane,
     task_execution_mode,
-    task_validation_terminal,
     task_workspace_roots,
-    validation_command_manifest_names,
 )
 from hooks.plan_writer import (  # noqa: E402
     PlanWriterInputError,
     activate_batch as activate_plan_batch,
-    invalidate_deferred_task_validation_for_repair,
-    record_batch_validation_attempt,
-    record_batch_validation_deferral,
-    record_deferred_task_validation_attempt,
-    record_deferred_task_validation_deferral,
-    record_project_check_attempt,
-    record_project_check_deferral,
+    begin_batch_compile_repair,
+    mark_batch_tasks_done_after_compile,
     record_task_implementation,
-    record_task_covered_batch,
-    record_task_attempt,
-    recover_plan_write_transaction,
-    request_batch_revalidation,
     set_task_execution_status,
-    start_batch_validation_run,
-    start_deferred_task_validation,
+    update_batch_compile_status,
 )
 from hooks.repository_snapshot import (  # noqa: E402
     RepositoryMap,
@@ -87,16 +71,11 @@ from hooks.task_run_integrity import (  # noqa: E402
 )
 from hooks.validation_policy import (  # noqa: E402
     command_policy_errors,
-    maven_test_plan,
-    maven_test_selectors,
+    compile_only_command_errors,
+    compile_only_package_scripts_errors,
+    maven_project_selector_workspace_errors,
     package_script_name,
-    package_script_policy_errors,
-    task_validation_assurance_level,
     task_validation_kinds_for_lane,
-)
-from hooks.validation_groups import (  # noqa: E402
-    plan_validation_groups,
-    validation_groups_sha256_payload,
 )
 
 
@@ -107,10 +86,6 @@ COMPILE_DIAGNOSTIC_DRAIN_SECONDS = 2.0
 PROCESS_TERMINATION_GRACE_SECONDS = 3.0
 VALIDATION_DIAGNOSTIC_BUFFER_BYTES = 64 * 1024
 WINDOWS_BATCH_EXECUTABLE_SUFFIXES = frozenset({".bat", ".cmd"})
-TASK_VALIDATION_RUN_TYPE = "batch_task_validation"
-TASK_VALIDATION_RUNNING_COMMANDS = ["validate-batch-task"]
-TASK_VALIDATION_BATCH_CHECK_COMMANDS = ["batch-check"]
-TASK_VALIDATION_FAILED_COMMANDS = ["start-validation-repair", "start-batch-task-validation"]
 VALIDATION_DIAGNOSTIC_PATH_RE = re.compile(
     r"(?P<path>(?:[A-Za-z]:[\\/]|/)?[^\r\n]*?\.(?:java|kt|kts|groovy|scala|js|jsx|ts|tsx|vue|py))"
     r"(?=:\[?\d|:\s|$)",
@@ -124,7 +99,7 @@ class TaskRunnerError(ValueError):
         self.details = details
 
 
-@dataclass(frozen=True)
+@dataclass
 class ValidationProcessResult:
     exit_code: int | None
     output: str
@@ -146,44 +121,6 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _validation_deferral_issue(
-    *,
-    scope: str,
-    run_id: str,
-    command_id: str | None,
-    error_category: str,
-    reason: str,
-    repair_attempts: int,
-    max_repair_attempts: int,
-    evidence_ids: list[str],
-    batch_id: str | None = None,
-    task_id: str | None = None,
-    failure_category: str | None = None,
-    diagnostic_paths: list[str] | None = None,
-    validation_failures: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    identity = "-".join(
-        item for item in (scope, batch_id, task_id, command_id, run_id) if isinstance(item, str) and item
-    )
-    return {
-        "issueId": f"code-validation-{identity}",
-        "status": "deferred",
-        "scope": scope,
-        **({"batchId": batch_id} if batch_id is not None else {}),
-        **({"taskId": task_id} if task_id is not None else {}),
-        "runId": run_id,
-        "commandId": command_id,
-        "reason": reason,
-        "errorCategory": error_category,
-        **({"failureCategory": failure_category} if failure_category is not None else {}),
-        "repairAttempts": repair_attempts,
-        "maxRepairAttempts": max_repair_attempts,
-        "evidenceIds": list(evidence_ids),
-        "diagnosticPaths": list(diagnostic_paths or []),
-        "validationFailures": list(validation_failures or []),
-        "handoffStages": ["dev.utest", "dev.e2e"],
-        "createdAt": _utc_now(),
-    }
 
 
 def _emit(ok: bool, **data: Any) -> int:
@@ -216,12 +153,8 @@ def _run_path(feature_dir: Path, task_id: str, run_id: str) -> Path:
     return _runs_dir(feature_dir, task_id) / f"{run_id}.json"
 
 
-def _batch_run_path(feature_dir: Path, batch_id: str, run_id: str) -> Path:
-    return feature_dir / ".batch-runs" / batch_id / f"{run_id}.json"
 
 
-def _task_validation_run_path(feature_dir: Path, batch_id: str, run_id: str) -> Path:
-    return feature_dir / ".batch-task-validation-runs" / batch_id / f"{run_id}.json"
 
 
 def _task_run_lock(feature_dir: Path) -> FileLock:
@@ -255,7 +188,7 @@ def _unfinished_dependencies(plan: PlanBundle, task: dict[str, Any]) -> list[str
     }
     task_id = str(task.get("id", ""))
     task_batch = plan.task_batches.get(task_id)
-    deferred = deferred_task_validation_enabled(plan.root)
+    deferred = defer_to_test_stages_enabled(plan.root)
     unfinished: list[str] = []
     for dep in task.get("deps", []):
         if not isinstance(dep, str):
@@ -415,35 +348,6 @@ def _assert_workspace_ref_matches(
         )
 
 
-def _assert_validation_command_workspaces(
-    commands: list[dict[str, Any]],
-    workspace_roots: dict[str, str],
-    repositories: RepositoryMap,
-    *,
-    contract_name: str,
-) -> None:
-    for index, command in enumerate(commands):
-        repository_id, repo = _command_repository(command, repositories)
-        cwd = command.get("cwd")
-        command_dir = (repo / str(cwd)).resolve()
-        if not command_dir.is_dir():
-            raise TaskRunnerError(
-                f"validation_cwd_missing:{command.get('id', index)}",
-                contract=contract_name,
-                cwd=cwd,
-                repository=repository_id,
-            )
-        manifests = validation_command_manifest_names(command)
-        if manifests and not any((command_dir / name).is_file() for name in manifests):
-            raise TaskRunnerError(
-                f"validation_manifest_missing:{command.get('id', index)}",
-                contract=contract_name,
-                cwd=cwd,
-                repository=repository_id,
-                expectedManifests=list(manifests),
-            )
-
-
 def _resolved_scope_paths(
     task: dict[str, Any],
     contexts: list[dict[str, str]],
@@ -497,17 +401,6 @@ def _assert_requested_workspaces_match(
         )
 
 
-def _repository_snapshots_match(
-    expected: list[dict[str, Any]],
-    actual: list[dict[str, Any]],
-) -> bool:
-    expected_snapshots = {
-        str(item.get("id")): item.get("snapshot") for item in expected if isinstance(item, dict)
-    }
-    actual_snapshots = {
-        str(item.get("id")): item.get("snapshot") for item in actual if isinstance(item, dict)
-    }
-    return expected_snapshots == actual_snapshots
 
 
 def _state_repositories(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -807,27 +700,35 @@ def _start_task_unlocked(
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(feature_dir, task_id)
-    if deferred_task_validation_enabled(plan.root):
+    if defer_to_test_stages_enabled(plan.root):
         batch = plan.batches.get(batch_id)
-        task_validation = batch.get("taskValidation") if isinstance(batch, dict) else None
-        if isinstance(task_validation, dict) and task_validation.get("status") == "running":
+        batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
+        compile_status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
+        is_compile_repair = (
+            isinstance(repair_context, dict)
+            and repair_context.get("batchCompileRepair") is True
+        )
+        if compile_status == "failed" and not is_compile_repair:
             raise TaskRunnerError(
-                f"task_validation_workspace_frozen:{batch_id}",
-                requiredAction="call_code_session_for_validation_subagent_handoff",
-                activeRunId=task_validation.get("activeRunId"),
-                currentTaskId=task_validation.get("currentTaskId"),
+                f"batch_compile_repair_requires_explicit_start:{task_id}",
+                requiredAction="start_batch_compile_repair",
+                repairOwnerTaskIds=batch_compile.get("repairOwnerTaskIds", []),
             )
-        task_status = normalize_status(task.get("status"))
-        if task_status == "failed":
+        if compile_status == "repairing" and not is_compile_repair:
             raise TaskRunnerError(
-                f"deferred_validation_repair_requires_explicit_start:{task_id}",
-                requiredAction="start_validation_repair",
+                f"batch_compile_repair_already_running:{batch_id}",
+                requiredAction="continue_batch_compile_repair",
+                repairTaskId=batch_compile.get("repairTaskId"),
             )
-        if task_status == "implemented":
-            raise TaskRunnerError(f"task_implementation_already_ready:{task_id}")
+        if normalize_status(task.get("status")) == "implemented" and not is_compile_repair:
+            raise TaskRunnerError(
+                f"task_implementation_already_ready:{task_id}",
+                requiredAction="run_batch_compile",
+            )
     if task.get("blockers"):
         raise TaskRunnerError(f"task_has_blockers:{task_id}")
-    if unfinished := _unfinished_dependencies(plan, task):
+    unfinished = _unfinished_dependencies(plan, task)
+    if unfinished:
         raise TaskRunnerError("unfinished_task_dependencies:" + ",".join(unfinished))
     if normalize_status(task.get("status")) == "done":
         raise TaskRunnerError(f"task_already_done:{task_id}")
@@ -847,12 +748,6 @@ def _start_task_unlocked(
     workspace_roots = task_workspace_roots(task)
     _assert_workspace_ref_matches(task.get("workspaceRef"), scope_workspaces, contract_name=task_id)
     _assert_workspace_roots_match(workspace_roots, scope_workspaces, contract_name=task_id)
-    _assert_validation_command_workspaces(
-        [item for item in task.get("validationCommands", []) if isinstance(item, dict)],
-        workspace_roots,
-        repositories,
-        contract_name=task_id,
-    )
     active = _active_feature_runs(feature_dir)
     if active:
         active_tasks = sorted({item.partition(":")[0] for item in active})
@@ -960,10 +855,6 @@ def _start_task_unlocked(
                 "source": "current_cache",
                 "repositories": repository_gates,
             }
-    validation_test_targets = _maven_validation_test_targets(
-        [item for item in task.get("validationCommands", []) if isinstance(item, dict)],
-        repositories,
-    )
     declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
     repository_state = _repository_state(repositories)
 
@@ -991,9 +882,6 @@ def _start_task_unlocked(
         "startedAt": _utc_now(),
         "snapshot": repository_state[0]["snapshot"],
         "evidenceIds": [],
-        "completionEvidenceIds": [],
-        "completedCommandEvidence": {},
-        "validationTestTargets": validation_test_targets,
     }
     pending_revalidation = task.get("pendingRevalidation")
     if isinstance(pending_revalidation, dict):
@@ -1034,133 +922,8 @@ def _load_run(feature_dir: Path, task_id: str, run_id: str) -> tuple[Path, dict[
     return path, state
 
 
-def _validate_run_evidence(feature_dir: Path, state: dict[str, Any]) -> None:
-    records = {
-        str(record.get("evidenceId")): record
-        for record in read_records(stream_path(feature_dir))
-        if isinstance(record.get("evidenceId"), str)
-    }
-    run_id = state.get("runId")
-    task_id = state.get("taskId")
-    completion_ids = set(state.get("completionEvidenceIds", []))
-    completed_commands = (
-        state.get("completedCommandEvidence")
-        if isinstance(state.get("completedCommandEvidence"), dict)
-        else {}
-    )
-    expected_changed_files = state.get("changedFiles")
-    expected_file_changes = state.get("fileChanges")
-    expected_transient_validation_files = state.get("transientValidationFiles", [])
-    expected_mode = state.get("completionMode")
-    for evidence_id in state.get("evidenceIds", []):
-        record = records.get(str(evidence_id))
-        if record is None:
-            raise TaskRunnerError(f"task_run_evidence_missing:{evidence_id}")
-        if record.get("taskId") != task_id:
-            raise TaskRunnerError(f"task_run_evidence_task_mismatch:{evidence_id}")
-        if record.get("runId") != run_id:
-            raise TaskRunnerError(f"task_run_evidence_run_mismatch:{evidence_id}")
-        if expected_mode is None:
-            expected_mode = record.get("completionMode")
-            state["completionMode"] = expected_mode
-        elif record.get("completionMode") != expected_mode:
-            raise TaskRunnerError(f"task_run_evidence_completion_mode_mismatch:{evidence_id}")
-        if expected_changed_files is None:
-            expected_changed_files = record.get("changedFiles")
-            state["changedFiles"] = expected_changed_files
-        elif record.get("changedFiles") != expected_changed_files:
-            raise TaskRunnerError(f"task_run_evidence_changed_files_mismatch:{evidence_id}")
-        if expected_file_changes is None:
-            expected_file_changes = record.get("fileChanges")
-            state["fileChanges"] = expected_file_changes
-        elif record.get("fileChanges") != expected_file_changes:
-            raise TaskRunnerError(f"task_run_evidence_file_changes_mismatch:{evidence_id}")
-        if record.get("transientValidationFiles", []) != expected_transient_validation_files:
-            raise TaskRunnerError(
-                f"task_run_evidence_transient_validation_files_mismatch:{evidence_id}"
-            )
-        if evidence_id in completion_ids:
-            validation = record.get("validation")
-            if not isinstance(validation, dict) or validation.get("result") != "pass":
-                raise TaskRunnerError(f"task_run_completion_evidence_not_pass:{evidence_id}")
-    for command_id, attempt in completed_commands.items():
-        if not isinstance(attempt, dict):
-            raise TaskRunnerError(f"invalid_completed_command_evidence:{command_id}")
-        evidence_id = attempt.get("evidenceId")
-        record = records.get(str(evidence_id))
-        validation = record.get("validation") if isinstance(record, dict) else None
-        if (
-            not isinstance(validation, dict)
-            or validation.get("commandId") != command_id
-            or validation.get("result") != attempt.get("result")
-        ):
-            raise TaskRunnerError(f"completed_command_evidence_mismatch:{command_id}")
 
 
-def _adopt_streamed_run_evidence(
-    feature_dir: Path,
-    state: dict[str, Any],
-    task: dict[str, Any],
-) -> None:
-    path = stream_path(feature_dir)
-    if not path.is_file():
-        return
-    planned = {
-        str(command.get("id")): command
-        for command in task.get("validationCommands", [])
-        if isinstance(command, dict) and isinstance(command.get("id"), str)
-    }
-    completed = (
-        dict(state.get("completedCommandEvidence"))
-        if isinstance(state.get("completedCommandEvidence"), dict)
-        else {}
-    )
-    evidence_ids = list(state.get("evidenceIds", [])) if isinstance(state.get("evidenceIds"), list) else []
-    completion_ids = (
-        list(state.get("completionEvidenceIds", []))
-        if isinstance(state.get("completionEvidenceIds"), list)
-        else []
-    )
-    for record in read_records(path):
-        if record.get("taskId") != state.get("taskId") or record.get("runId") != state.get("runId"):
-            continue
-        validation = record.get("validation")
-        command_id = validation.get("commandId") if isinstance(validation, dict) else None
-        if not isinstance(command_id, str) or command_id not in planned:
-            raise TaskRunnerError(f"streamed_run_evidence_unplanned_command:{command_id}")
-        evidence_id = record.get("evidenceId")
-        if not isinstance(evidence_id, str):
-            raise TaskRunnerError(f"streamed_run_evidence_missing_id:{command_id}")
-        existing = completed.get(command_id)
-        if isinstance(existing, dict) and existing.get("evidenceId") != evidence_id:
-            raise TaskRunnerError(f"duplicate_run_command_evidence:{command_id}")
-        command = planned[command_id]
-        for field in ("argv", "cwd", "kind", "required", "repo"):
-            if validation.get(field) != command.get(field):
-                raise TaskRunnerError(f"streamed_run_evidence_command_mismatch:{command_id}:{field}")
-        if record.get("completionMode") != state.get("completionMode"):
-            raise TaskRunnerError(f"streamed_run_evidence_completion_mode_mismatch:{evidence_id}")
-        if record.get("changedFiles") != state.get("changedFiles"):
-            raise TaskRunnerError(f"streamed_run_evidence_changed_files_mismatch:{evidence_id}")
-        if record.get("fileChanges") != state.get("fileChanges"):
-            raise TaskRunnerError(f"streamed_run_evidence_file_changes_mismatch:{evidence_id}")
-        if record.get("transientValidationFiles", []) != state.get("transientValidationFiles", []):
-            raise TaskRunnerError(
-                f"streamed_run_evidence_transient_validation_files_mismatch:{evidence_id}"
-            )
-        result = validation.get("result")
-        completed[command_id] = {
-            "evidenceId": evidence_id,
-            "result": result,
-            "required": validation.get("required"),
-        }
-        if evidence_id not in evidence_ids:
-            evidence_ids.append(evidence_id)
-        if result == "pass" and validation.get("required") is True and evidence_id not in completion_ids:
-            completion_ids.append(evidence_id)
-    state["completedCommandEvidence"] = completed
-    state["evidenceIds"] = evidence_ids
-    state["completionEvidenceIds"] = completion_ids
 
 
 def _validate_supporting_files(repositories: RepositoryMap, supporting_files: list[str]) -> list[str]:
@@ -1194,231 +957,8 @@ def _command_repository(command: dict[str, Any], repositories: RepositoryMap) ->
     return requested, repositories[requested]
 
 
-def _maven_command_directory(command: dict[str, Any], repositories: RepositoryMap) -> Path:
-    _, repo = _command_repository(command, repositories)
-    command_dir = (repo / str(command.get("cwd"))).resolve()
-    try:
-        command_dir.relative_to(repo)
-    except ValueError as exc:
-        raise TaskRunnerError(f"validation_cwd_outside_repository:{command.get('cwd')}") from exc
-    return command_dir
 
 
-def _maven_validation_test_targets(
-    commands: list[dict[str, Any]],
-    repositories: RepositoryMap,
-) -> list[dict[str, Any]]:
-    targets: list[dict[str, Any]] = []
-    for command in commands:
-        if not maven_test_selectors(command):
-            continue
-        command_dir = _maven_command_directory(command, repositories)
-        plan = maven_test_plan(command, command_dir)
-        if plan is not None:
-            targets.append({
-                **plan,
-                "cwd": command.get("cwd"),
-                **({"repo": command.get("repo")} if command.get("repo") else {}),
-            })
-    return targets
-
-
-def _maven_test_target_errors(command: dict[str, Any], command_dir: Path) -> list[str]:
-    plan = maven_test_plan(command, command_dir)
-    if plan is None:
-        return []
-    return [
-        f"validation_maven_test_target_missing:{command.get('id', '')}:{target.get('selector')}"
-        for target in plan.get("targets", [])
-        if isinstance(target, dict) and target.get("mode") == "create_in_code"
-    ]
-
-
-def _maven_report_snapshot(command_dir: Path) -> dict[str, int]:
-    reports: dict[str, int] = {}
-    if not command_dir.is_dir():
-        return reports
-    for path in command_dir.rglob("TEST-*.xml"):
-        parts = set(path.relative_to(command_dir).parts)
-        if not parts.intersection({"surefire-reports", "failsafe-reports"}):
-            continue
-        try:
-            reports[str(path)] = path.stat().st_mtime_ns
-        except OSError:
-            continue
-    return reports
-
-
-def _maven_report_matches_selector(root: ET.Element, selector: str) -> bool:
-    class_selector, separator, method_selector = selector.partition("#")
-    class_selector = class_selector.strip()
-    expected_simple = class_selector.rsplit(".", 1)[-1]
-    for suite in root.iter("testsuite"):
-        suite_name = str(suite.get("name", ""))
-        suite_class = suite_name.rsplit("$", 1)[0]
-        suite_matches = (
-            suite_name == class_selector
-            or suite_class == class_selector
-            or suite_name.endswith(f".{class_selector}")
-            or suite_class.endswith(f".{class_selector}")
-            or suite_name == expected_simple
-            or suite_class == expected_simple
-        )
-        for testcase in suite.iter("testcase"):
-            testcase_class = str(testcase.get("classname", ""))
-            class_matches = suite_matches or (
-                testcase_class == class_selector
-                or testcase_class.endswith(f".{class_selector}")
-                or testcase_class.rsplit(".", 1)[-1] == expected_simple
-            )
-            if not class_matches:
-                continue
-            if testcase.find("skipped") is not None:
-                continue
-            if separator:
-                testcase_name = str(testcase.get("name", ""))
-                if not (
-                    testcase_name == method_selector
-                    or testcase_name.startswith(f"{method_selector}[")
-                    or testcase_name.startswith(f"{method_selector}(")
-                ):
-                    continue
-            return True
-    return False
-
-
-def _maven_selector_report_result(
-    roots: list[ET.Element],
-    selector: str,
-) -> dict[str, Any]:
-    class_selector, separator, method_selector = selector.partition("#")
-    class_selector = class_selector.strip()
-    expected_simple = class_selector.rsplit(".", 1)[-1]
-    matched = 0
-    skipped = 0
-    failures: list[dict[str, str]] = []
-    for root in roots:
-        for suite in root.iter("testsuite"):
-            suite_name = str(suite.get("name", ""))
-            suite_class = suite_name.rsplit("$", 1)[0]
-            suite_matches = (
-                suite_name == class_selector
-                or suite_class == class_selector
-                or suite_name.endswith(f".{class_selector}")
-                or suite_class.endswith(f".{class_selector}")
-                or suite_name == expected_simple
-                or suite_class == expected_simple
-            )
-            for testcase in suite.iter("testcase"):
-                testcase_class = str(testcase.get("classname", ""))
-                class_matches = suite_matches or (
-                    testcase_class == class_selector
-                    or testcase_class.endswith(f".{class_selector}")
-                    or testcase_class.rsplit(".", 1)[-1] == expected_simple
-                )
-                if not class_matches:
-                    continue
-                testcase_name = str(testcase.get("name", ""))
-                if separator and not (
-                    testcase_name == method_selector
-                    or testcase_name.startswith(f"{method_selector}[")
-                    or testcase_name.startswith(f"{method_selector}(")
-                ):
-                    continue
-                matched += 1
-                if testcase.find("skipped") is not None:
-                    skipped += 1
-                    continue
-                for element_name, failure_kind in (
-                    ("failure", "assertion_failure"),
-                    ("error", "unexpected_exception"),
-                ):
-                    element = testcase.find(element_name)
-                    if element is None:
-                        continue
-                    failures.append({
-                        "selector": selector,
-                        "testCase": testcase_name,
-                        "failureKind": failure_kind,
-                        "exceptionClass": str(element.get("type", "")),
-                        "message": str(element.get("message", ""))[:1000],
-                    })
-    if failures:
-        status = "fail"
-    elif matched > skipped:
-        status = "pass"
-    else:
-        status = "not_executed"
-    return {
-        "selector": selector,
-        "status": status,
-        "matchedCount": matched,
-        "skippedCount": skipped,
-        "failures": failures,
-    }
-
-
-def _fresh_maven_report_roots(
-    command_dir: Path,
-    before_reports: dict[str, int],
-) -> list[ET.Element]:
-    roots: list[ET.Element] = []
-    for path_string, mtime in _maven_report_snapshot(command_dir).items():
-        if before_reports.get(path_string) == mtime:
-            continue
-        try:
-            roots.append(ET.parse(path_string).getroot())
-        except (ET.ParseError, OSError):
-            continue
-    return roots
-
-
-def _maven_test_execution_errors(
-    command: dict[str, Any],
-    command_dir: Path,
-    before_reports: dict[str, int],
-) -> list[str]:
-    selectors = maven_test_selectors(command)
-    if not selectors:
-        return []
-    fresh_reports = []
-    for path_string, mtime in _maven_report_snapshot(command_dir).items():
-        if before_reports.get(path_string) != mtime:
-            fresh_reports.append(Path(path_string))
-    if not fresh_reports:
-        return [f"validation_maven_test_report_missing:{command.get('id', '')}"]
-    errors: list[str] = []
-    for selector in selectors:
-        executed = False
-        for path in fresh_reports:
-            try:
-                root = ET.parse(path).getroot()
-            except (ET.ParseError, OSError):
-                continue
-            if _maven_report_matches_selector(root, selector):
-                executed = True
-                break
-        if not executed:
-            errors.append(
-                f"validation_maven_test_not_executed:{command.get('id', '')}:{selector}"
-            )
-    return errors
-
-
-def _fresh_maven_failure_results(
-    command: dict[str, Any],
-    command_dir: Path,
-    before_reports: dict[str, int],
-) -> list[dict[str, Any]]:
-    selectors = maven_test_selectors(command)
-    if not selectors:
-        return []
-    roots = _fresh_maven_report_roots(command_dir, before_reports)
-    return [
-        result
-        for selector in selectors
-        if (result := _maven_selector_report_result(roots, selector))["failures"]
-    ]
 
 
 def _runtime_environment_failure_category(output: str) -> str | None:
@@ -1492,12 +1032,8 @@ def _validation_environment_error(
     command_id = str(command.get("id", ""))
     executable = str(command.get("argv", [""])[0])
     details: dict[str, Any] = {
-        "runType": TASK_VALIDATION_RUN_TYPE,
-        "requiredAction": (
-            "fix_validation_environment_and_retry_same_run"
-            if retry_same_run
-            else "fix_validation_environment_and_retry_batch_validation"
-        ),
+        "runType": "batch_compile",
+        "requiredAction": "fix_compile_environment_and_retry_batch_compile",
         "errorCategory": "environment_failure",
         "failureCategory": category,
         "failedValidationTaskId": task_id,
@@ -1508,14 +1044,10 @@ def _validation_environment_error(
         "cwd": command.get("cwd"),
         "detail": detail,
         "evidenceIds": [],
-        "allowedCommands": (
-            TASK_VALIDATION_RUNNING_COMMANDS
-            if retry_same_run
-            else ["start-batch-task-validation"]
-        ),
+        "allowedCommands": ["batch-compile"],
         "userMessage": (
-            f"校验命令 {command_id} 无法运行（{category}）。请修复验证环境后重新运行校验；"
-            + ("继续使用原 runId。" if retry_same_run else "无需修改代码或 Plan。")
+            f"编译命令 {command_id} 无法运行（{category}）。"
+            "请修复编译环境后重新执行 batch-compile。"
         ),
     }
     if run_id is not None:
@@ -1554,6 +1086,12 @@ def _assert_validation_command_environment(
         )
     _, repo = _command_repository(command, repositories)
     command_cwd = (repo / str(command.get("cwd"))).resolve()
+    if command_cwd.is_dir():
+        selector_errors = maven_project_selector_workspace_errors(command, command_cwd)
+        if selector_errors:
+            raise TaskRunnerError(
+                f"validation_command_policy_violation:{command.get('id', '')}:{selector_errors[0]}"
+            )
     script_name = package_script_name(command)
     if script_name is not None:
         package_path = command_cwd / "package.json"
@@ -1570,8 +1108,7 @@ def _assert_validation_command_environment(
                 task_id=task_id,
             ) from exc
         scripts = package.get("scripts") if isinstance(package, dict) else None
-        script = scripts.get(script_name) if isinstance(scripts, dict) else None
-        script_errors = package_script_policy_errors(script)
+        script_errors = compile_only_package_scripts_errors(scripts, script_name)
         if script_errors:
             raise _validation_environment_error(
                 command,
@@ -1674,6 +1211,12 @@ def _definitive_compile_failure_category(
     command: dict[str, Any],
     repositories: RepositoryMap,
 ) -> str | None:
+    """Detect a definitive compiler diagnostic for the compile-only batch gate.
+
+    The Code stage has no test-validation branch. Even if a misconfigured build
+    mentions test sources or testCompile, the result remains a source compile
+    failure and must never activate test-specific execution or repair behavior.
+    """
     lowered = output.lower().replace("\\", "/")
     explicit_compile_markers = (
         "compilation error",
@@ -1694,7 +1237,6 @@ def _definitive_compile_failure_category(
         "has private access",
         "does not override",
     )
-    diagnostic_paths = _validation_diagnostic_paths(output, command, repositories)
     has_explicit_compile_marker = any(
         marker in line
         and ("[error]" in line or "failed to execute goal" in line)
@@ -1708,13 +1250,6 @@ def _definitive_compile_failure_category(
     )
     if not has_explicit_compile_marker and not has_path_compile_marker:
         return None
-    if (
-        any("/src/test/" in f"/{path.lower()}" for path in diagnostic_paths)
-        or "testcompile" in lowered
-        or "test compilation failure" in lowered
-        or "maven-testcompile" in lowered
-    ):
-        return "test_compile_failure"
     return "source_compile_failure"
 
 
@@ -1917,8 +1452,11 @@ def _run_validation_process(
                             compile_deadline = (
                                 time.monotonic() + COMPILE_DIAGNOSTIC_DRAIN_SECONDS
                             )
-                        if detected == "test_compile_failure" or compile_category is None:
+                        if compile_category is None:
                             compile_category = detected
+
+            # 新增：环境错误检测
+            environment_failure_category: str | None = None
 
             while True:
                 read_available_output()
@@ -1928,6 +1466,23 @@ def _run_validation_process(
                     if compile_category is not None:
                         termination_reason = "compile_diagnostic"
                     break
+
+                # 检测环境错误（每次轮询都检查）
+                decoded_output = _decode_validation_output(bytes(rolling_output))
+                env_failure = _runtime_environment_failure_category(decoded_output)
+                if env_failure is not None:
+                    environment_failure_category = env_failure
+                    termination_reason = "environment_failure"
+                    _emit_validation_progress(
+                        "validation_environment_failure",
+                        commandId=str(command.get("id", "")),
+                        elapsedSeconds=round(now - started_at, 3),
+                        category=env_failure,
+                    )
+                    process_tree_terminated = _terminate_validation_process_tree(process)
+                    read_available_output()
+                    break
+
                 if compile_category is not None and (
                     (compile_deadline is not None and now >= compile_deadline)
                     or now >= hard_deadline
@@ -1957,12 +1512,12 @@ def _run_validation_process(
         output = _decode_validation_output(log_path.read_bytes())
     finally:
         try:
-            log_path.unlink(missing_ok=True)
+            unlink_if_exists(log_path)
         except OSError:
             pass
         if wrapper_path is not None:
             try:
-                wrapper_path.unlink(missing_ok=True)
+                unlink_if_exists(wrapper_path)
             except OSError:
                 pass
 
@@ -2011,12 +1566,6 @@ def _run_validation(
         command_cwd.relative_to(repo)
     except ValueError as exc:
         raise TaskRunnerError(f"validation_cwd_outside_repository:{cwd}") from exc
-    maven_before_reports: dict[str, int] = {}
-    if maven_test_selectors(command):
-        maven_before_reports = _maven_report_snapshot(command_cwd)
-        target_errors = _maven_test_target_errors(command, command_cwd)
-        if target_errors:
-            return 1, "\n".join(target_errors)
     timeout = command.get("timeoutSeconds", DEFAULT_TIMEOUT_SECONDS)
     if not isinstance(timeout, int) or timeout <= 0:
         timeout = DEFAULT_TIMEOUT_SECONDS
@@ -2045,28 +1594,13 @@ def _run_validation(
                 f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
             )
         if process_result.termination_reason == "command_timeout":
-            diagnostic_paths = _validation_diagnostic_paths(
+            error_category = _definitive_compile_failure_category(
                 output, command, repositories
             )
-            error_category = _validation_error_category(
-                command, output, diagnostic_paths
-            )
-            if error_category in {"source_compile_failure", "test_compile_failure"}:
+            if error_category == "source_compile_failure":
                 return 1, (
                     f"{output}\nvalidation_process_timeout_after_compile_failure:"
                     f"{error_category}:timeoutSeconds={timeout}:"
-                    f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
-                )
-            maven_failures = _fresh_maven_failure_results(
-                command,
-                command_cwd,
-                maven_before_reports,
-            )
-            if maven_failures:
-                return 1, (
-                    f"{output}\nvalidation_maven_test_failures_detected_after_timeout:"
-                    f"{json.dumps(maven_failures, ensure_ascii=False, separators=(',', ':'))}:"
-                    f"timeoutSeconds={timeout}:"
                     f"processTreeTerminated={str(process_result.process_tree_terminated).lower()}"
                 )
             raise _validation_environment_error(
@@ -2101,15 +1635,6 @@ def _run_validation(
                     batch_id=batch_id,
                     task_id=task_id,
                 )
-        if exit_code == 0 and maven_test_selectors(command):
-            execution_errors = _maven_test_execution_errors(
-                command,
-                command_cwd,
-                maven_before_reports,
-            )
-            if execution_errors:
-                output = f"{output}\n" + "\n".join(execution_errors)
-                return 1, output
         return int(exit_code or 0), output
     except OSError as exc:
         raise _validation_environment_error(
@@ -2158,134 +1683,12 @@ def _has_required_task_validation(task: dict[str, Any]) -> bool:
     )
 
 
-def _create_in_code_validation_targets(task: dict[str, Any]) -> list[str]:
-    return [
-        str(target.get("selector"))
-        for plan in task.get("validationTestPlan", [])
-        if isinstance(plan, dict)
-        for target in plan.get("targets", [])
-        if isinstance(target, dict)
-        and target.get("mode") == "create_in_code"
-        and isinstance(target.get("selector"), str)
-    ]
 
 
-def _missing_maven_validation_targets(
-    task: dict[str, Any],
-    repositories: RepositoryMap,
-) -> list[str]:
-    return sorted({
-        str(target.get("selector"))
-        for plan in _maven_validation_test_targets(
-            [
-                command
-                for command in task.get("validationCommands", [])
-                if isinstance(command, dict)
-            ],
-            repositories,
-        )
-        for target in plan.get("targets", [])
-        if isinstance(target, dict)
-        and target.get("mode") == "create_in_code"
-        and isinstance(target.get("selector"), str)
-    })
 
 
-def _require_validation_targets_ready(
-    task: dict[str, Any],
-    execution_mode: str,
-    repositories: RepositoryMap,
-) -> None:
-    missing_targets = _missing_maven_validation_targets(task, repositories)
-    if not missing_targets:
-        return
-    if execution_mode == "code":
-        raise TaskRunnerError(
-            "code_task_validation_test_creation_required",
-            requiredAction="continue_current_implementation_and_create_validation_tests",
-            selectors=missing_targets,
-        )
-    if execution_mode == "verified_existing":
-        raise TaskRunnerError(
-            "verified_existing_requires_reusable_validation",
-            requiredAction="return_to_plan_and_reuse_existing_validation",
-            selectors=missing_targets,
-        )
 
 
-def _record_for_command(
-    *,
-    feature: str,
-    task: dict[str, Any],
-    run_id: str,
-    command: dict[str, Any],
-    exit_code: int,
-    completion_mode: str,
-    file_changes: list[dict[str, str]],
-    transient_validation_files: list[str],
-    supporting_files: list[str],
-    no_change_why: str | None,
-    repository_id: str | None,
-    revalidation: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    changed_files = sorted(
-        {
-            value
-            for change in file_changes
-            for value in (change.get("path"), change.get("fromPath"))
-            if isinstance(value, str)
-        }
-    )
-    checked_criteria = [item for item in command.get("covers", []) if isinstance(item, str)]
-    result = "pass" if exit_code == 0 else "fail"
-    no_code_change = completion_mode == "verified_existing"
-    return {
-        "featureId": feature,
-        "checkpoint": "code_in_progress",
-        "nodeId": "dev.code",
-        "skill": "autodev-code",
-        "taskId": task.get("id"),
-        "action": "validation",
-        "detailVersion": 2,
-        "runId": run_id,
-        "completionMode": completion_mode,
-        "summary": f"{command.get('id')} validation {result}",
-        "implementation": {
-            "noCodeChange": no_code_change,
-            "whatChanged": [] if no_code_change else changed_files,
-            "why": no_change_why if no_code_change else str(task.get("goal", "task implementation")),
-        },
-        "specRefs": task.get("specRefs", []),
-        "designRefs": task.get("designRefs", []),
-        "changedFiles": changed_files,
-        "fileChanges": file_changes,
-        "transientValidationFiles": transient_validation_files,
-        "supportingFiles": supporting_files,
-        "checkedCriteria": checked_criteria,
-        "validation": {
-            "commandId": command.get("id"),
-            "argv": command.get("argv"),
-            "command": " ".join(str(item) for item in command.get("argv", [])),
-            "cwd": command.get("cwd"),
-            "kind": command.get("kind"),
-            "assuranceLevel": task_validation_assurance_level(command),
-            "required": command.get("required"),
-            **({"repo": repository_id} if repository_id else {}),
-            "exitCode": exit_code,
-            "result": result,
-        },
-        **(
-            {
-                "attemptType": revalidation.get("attemptType"),
-                "triggeredByBatchEvidenceIds": list(
-                    revalidation.get("triggeredByBatchEvidenceIds", [])
-                ),
-                "supersedesEvidenceIds": list(revalidation.get("supersedesEvidenceIds", [])),
-            }
-            if isinstance(revalidation, dict)
-            else {}
-        ),
-    }
 
 
 def _implementation_record(
@@ -2311,7 +1714,7 @@ def _implementation_record(
         "action": "implementation",
         "runId": run_id,
         "completionMode": completion_mode,
-        "summary": f"{task.get('id')} implementation ready for deferred validation",
+        "summary": f"{task.get('id')} implementation ready for batch compile",
         "implementation": {
             "noCodeChange": no_code_change,
             "whatChanged": [] if no_code_change else changed_files,
@@ -2343,15 +1746,11 @@ def _finish_implementation_unlocked(
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
     execution_mode = task_execution_mode(task)
-    if not deferred_task_validation_enabled(plan.root):
+    if not defer_to_test_stages_enabled(plan.root):
         raise TaskRunnerError(
-            f"finish_implementation_requires_deferred_plan:{task_id}",
-            requiredAction="use_complete_for_legacy_plan",
+            f"finish_implementation_requires_compile_only_plan:{task_id}",
+            requiredAction="rebuild_plan_with_defer_to_test_stages",
         )
-    batch = plan.batches.get(batch_id)
-    task_validation = batch.get("taskValidation") if isinstance(batch, dict) else None
-    if isinstance(task_validation, dict) and task_validation.get("status") == "running":
-        raise TaskRunnerError(f"task_validation_workspace_frozen:{batch_id}")
     path, state = _load_run(feature_dir, task_id, run_id)
     if state.get("taskContractSha256") != task_contract_sha256(task):
         raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
@@ -2392,7 +1791,7 @@ def _finish_implementation_unlocked(
         raise TaskRunnerError(
             "stale_implementation_run",
             requiredAction=(
-                "start_validation_repair"
+                "start_batch_compile_repair"
                 if task_status == "failed"
                 else "use_latest_implementation_run"
                 if isinstance(latest_implementation_run_id, str)
@@ -2409,16 +1808,6 @@ def _finish_implementation_unlocked(
         raise TaskRunnerError(f"task_run_not_implementation_finishable:{state.get('status')}")
 
     file_changes, final_repositories = _repository_changes(state, repositories)
-    file_changes, transient_validation_files = _partition_transient_validation_changes(
-        state,
-        file_changes,
-        final_repositories,
-    )
-    historical_file_changes = _historical_task_file_changes(
-        feature_dir,
-        task_id,
-        run_id,
-    )
     repair_context = state.get("repairContext")
     repair_context = repair_context if isinstance(repair_context, dict) else None
     adopted_file_changes = (
@@ -2426,9 +1815,44 @@ def _finish_implementation_unlocked(
         if isinstance(repair_context, dict)
         else []
     )
+    adopted_file_changes = (
+        adopted_file_changes if isinstance(adopted_file_changes, list) else []
+    )
+    repair_file_changes = _merge_file_changes(adopted_file_changes, file_changes)
+    test_asset_changes = sorted({
+        path
+        for change in repair_file_changes
+        for path in (change.get("path"), change.get("fromPath"))
+        if isinstance(path, str)
+        and _is_transient_validation_path(path.split(":", 1)[-1])
+    })
+    if test_asset_changes:
+        raise TaskRunnerError(
+            "code_stage_test_changes_forbidden",
+            requiredAction="restore_test_changes_and_continue_production_implementation",
+            testFiles=test_asset_changes,
+        )
+    transient_validation_files: list[str] = []
+    historical_file_changes = _historical_task_file_changes(
+        feature_dir,
+        task_id,
+        run_id,
+    )
+    if (
+        isinstance(repair_context, dict)
+        and repair_context.get("batchCompileRepair") is True
+        and not repair_file_changes
+    ):
+        raise TaskRunnerError(
+            "batch_compile_repair_requires_code_changes",
+            requiredAction="continue_model_repair",
+            batchId=batch_id,
+            taskId=task_id,
+            repairAttempt=repair_context.get("batchCompileRepairAttempt"),
+        )
     cumulative_file_changes = _merge_file_changes(
         historical_file_changes,
-        adopted_file_changes if isinstance(adopted_file_changes, list) else None,
+        adopted_file_changes,
         file_changes,
     )
     adopted_transient_files = (
@@ -2461,7 +1885,6 @@ def _finish_implementation_unlocked(
             resolvedScopePaths=scope_paths,
         )
     normalized_supporting = _validate_supporting_files(repositories, supporting_files)
-    _require_validation_targets_ready(task, execution_mode, repositories)
     if cumulative_file_changes or transient_validation_files:
         if execution_mode == "external_dependency":
             raise TaskRunnerError(
@@ -2513,19 +1936,6 @@ def _finish_implementation_unlocked(
                 f"verified_existing_conflicts_with_prior_run_changes:{prior_run_id}:"
                 + ",".join(prior_changed_files),
                 requiredAction="resume_original_run_or_rebuild_baseline",
-            )
-        create_targets = _create_in_code_validation_targets(task)
-        if create_targets and execution_mode == "code":
-            raise TaskRunnerError(
-                "code_task_validation_test_creation_required",
-                requiredAction="continue_current_implementation_and_create_validation_tests",
-                selectors=create_targets,
-            )
-        if create_targets and execution_mode == "verified_existing":
-            raise TaskRunnerError(
-                "verified_existing_requires_reusable_validation",
-                requiredAction="return_to_plan_and_reuse_existing_validation",
-                selectors=create_targets,
             )
         if execution_mode != "external_dependency" and not _has_required_task_validation(task):
             raise TaskRunnerError("verified_existing_requires_task_validation")
@@ -2592,334 +2002,15 @@ def _finish_implementation_unlocked(
         "implementationEvidenceId": evidence_id,
     })
     if isinstance(result.data, dict):
-        for field in ("batchContinuation", "taskValidation"):
+        for field in ("batchContinuation", "batchCompile"):
             if isinstance(result.data.get(field), dict):
                 state[field] = result.data[field]
     _save_run(path, state)
     return True, state
 
 
-def _complete_task_unlocked(
-    workspace: Path,
-    feature: str,
-    task_id: str,
-    code_workspace: Path | list[Path],
-    run_id: str,
-    *,
-    no_code_change_why: str | None,
-    supporting_files: list[str],
-) -> tuple[bool, dict[str, Any]]:
-    feature_dir = _feature_dir(workspace, feature)
-    plan, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
-    execution_mode = task_execution_mode(task)
-    if deferred_task_validation_enabled(plan.root):
-        raise TaskRunnerError(
-            f"complete_disabled_for_deferred_validation:{task_id}",
-            requiredAction="use_finish_implementation",
-        )
-    path, state = _load_run(feature_dir, task_id, run_id)
-    if state.get("taskContractSha256") != task_contract_sha256(task):
-        raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
-    stored_batch = state.get("batchId")
-    if stored_batch is not None and stored_batch != batch_id:
-        raise TaskRunnerError(f"task_batch_changed_after_start:{task_id}")
-    requested_workspaces = (
-        [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
-    )
-    repositories = _resolve_repositories(requested_workspaces)
-    _assert_repositories_match(state, repositories)
-    _assert_requested_workspaces_match(state, requested_workspaces, repositories)
-    if state.get("status") in {"done", "failed"}:
-        return state.get("status") == "done", state
-    if state.get("status") == "evidence_written":
-        _validate_run_evidence(feature_dir, state)
-        _save_run(path, state)
-        success = bool(state.get("success"))
-        result = record_task_attempt(
-            workspace,
-            feature,
-            task_id,
-            list(state.get("evidenceIds", [])),
-            completion_evidence_ids=list(state.get("completionEvidenceIds", [])),
-            success=success,
-            expected_task_contract_sha256=str(state.get("taskContractSha256", "")),
-            revalidation=state.get("revalidation") if isinstance(state.get("revalidation"), dict) else None,
-        )
-        if not result.ok:
-            raise TaskRunnerError("plan_binding_failed")
-        if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
-            state["batchHandoff"] = result.data["batchHandoff"]
-        if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
-            state["batchContinuation"] = result.data["batchContinuation"]
-        if isinstance(result.data, dict) and isinstance(result.data.get("batchCheck"), dict):
-            state["batchCheck"] = result.data["batchCheck"]
-        state["status"] = "done" if success else "failed"
-        _save_run(path, state)
-        return success, state
-    if state.get("status") == "validation_running" and state.get("evidenceIds"):
-        _validate_run_evidence(feature_dir, state)
-        _save_run(path, state)
-
-    repository_states = _state_repositories(state)
-    multiple_repositories = len(repository_states) > 1
-    file_changes, final_repositories = _repository_changes(state, repositories)
-    file_changes, transient_validation_files = _partition_transient_validation_changes(
-        state,
-        file_changes,
-        final_repositories,
-    )
-    historical_file_changes = _historical_task_file_changes(
-        feature_dir,
-        task_id,
-        run_id,
-    )
-    cumulative_file_changes = _merge_file_changes(historical_file_changes, file_changes)
-    _, scope_paths = _run_scope_paths(state, task)
-    outside_workspace = [
-        changed_path
-        for change in cumulative_file_changes
-        for changed_path in (change.get("path"), change.get("fromPath"))
-        if isinstance(changed_path, str)
-        and not _paths_within_requested_workspaces([changed_path], state)
-    ]
-    if outside_workspace:
-        raise TaskRunnerError(
-            "out_of_scope_changes_detected:" + ",".join(sorted(set(outside_workspace))),
-            requiredAction="fix_workspace_and_retry_same_run",
-            runId=run_id,
-            changedFiles=_changed_files(cumulative_file_changes),
-            resolvedScopePaths=scope_paths,
-            requestedCodeWorkspaces=state.get("requestedCodeWorkspaces", []),
-            resolvedGitRoots=[str(item) for item in repositories.values()],
-        )
-    normalized_supporting = _validate_supporting_files(repositories, supporting_files)
-    _require_validation_targets_ready(task, execution_mode, repositories)
-    if cumulative_file_changes or transient_validation_files:
-        if execution_mode == "external_dependency":
-            raise TaskRunnerError(
-                "external_dependency_code_changes_forbidden",
-                requiredAction="restore_task_snapshot_and_finish_as_external_dependency",
-                changedFiles=_changed_files(cumulative_file_changes),
-                transientValidationFiles=transient_validation_files,
-            )
-        if execution_mode == "verified_existing":
-            raise TaskRunnerError(
-                "verified_existing_code_changes_forbidden",
-                requiredAction="restore_task_snapshot_or_return_to_plan",
-                changedFiles=_changed_files(cumulative_file_changes),
-                transientValidationFiles=transient_validation_files,
-            )
-        if no_code_change_why or normalized_supporting:
-            if not file_changes and no_code_change_why:
-                conflict = _prior_aborted_run_conflict(
-                    feature_dir,
-                    task,
-                    run_id,
-                    repositories,
-                    state,
-                )
-                if conflict:
-                    prior_run_id, prior_changed_files = conflict
-                    raise TaskRunnerError(
-                        f"verified_existing_conflicts_with_prior_run_changes:{prior_run_id}:"
-                        + ",".join(prior_changed_files),
-                        requiredAction="resume_original_run_or_rebuild_baseline",
-                        priorRunId=prior_run_id,
-                        changedFiles=prior_changed_files,
-                    )
-            raise TaskRunnerError("no_code_change_claim_conflicts_with_snapshot")
-        completion_mode = "implemented"
-    else:
-        if not no_code_change_why or not normalized_supporting:
-            raise TaskRunnerError("no_code_change_requires_reason_and_supporting_files")
-        conflict = _prior_aborted_run_conflict(
-            feature_dir,
-            task,
-            run_id,
-            repositories,
-            state,
-        )
-        if conflict:
-            prior_run_id, prior_changed_files = conflict
-            raise TaskRunnerError(
-                f"verified_existing_conflicts_with_prior_run_changes:{prior_run_id}:"
-                + ",".join(prior_changed_files),
-                requiredAction="resume_original_run_or_rebuild_baseline",
-                priorRunId=prior_run_id,
-                changedFiles=prior_changed_files,
-            )
-        create_targets = _create_in_code_validation_targets(task)
-        if create_targets and execution_mode == "code":
-            raise TaskRunnerError(
-                "code_task_validation_test_creation_required",
-                requiredAction="continue_current_implementation_and_create_validation_tests",
-                selectors=create_targets,
-            )
-        if create_targets and execution_mode == "verified_existing":
-            raise TaskRunnerError(
-                "verified_existing_requires_reusable_validation",
-                requiredAction="return_to_plan_and_reuse_existing_validation",
-                selectors=create_targets,
-            )
-        if execution_mode != "external_dependency" and not _has_required_task_validation(task):
-            raise TaskRunnerError("verified_existing_requires_task_validation")
-        completion_mode = "verified_existing"
-
-    if execution_mode != "external_dependency":
-        _check_required_coverage(task)
-    changed_files = _changed_files(cumulative_file_changes)
-    if state.get("status") == "validation_running":
-        if (
-            state.get("changedFiles") != changed_files
-            or state.get("fileChanges") != cumulative_file_changes
-        ):
-            raise TaskRunnerError("task_run_workspace_changed_after_validation_started")
-        if state.get("completionMode") != completion_mode:
-            raise TaskRunnerError("task_run_completion_mode_changed")
-    state.update(
-        {
-            "status": "validation_running",
-            "completionMode": completion_mode,
-            "changedFiles": changed_files,
-            "fileChanges": cumulative_file_changes,
-            "transientValidationFiles": transient_validation_files,
-            "finalSnapshot": final_repositories[0]["snapshot"],
-            "finalRepositories": final_repositories,
-            "supportingFiles": normalized_supporting,
-            "noCodeChangeWhy": no_code_change_why,
-        }
-    )
-    _save_run(path, state)
-
-    completed_commands = state.get("completedCommandEvidence")
-    if not isinstance(completed_commands, dict):
-        completed_commands = {}
-    _adopt_streamed_run_evidence(feature_dir, state, task)
-    completed_commands = state.get("completedCommandEvidence", {})
-    _save_run(path, state)
-    if state.get("evidenceIds"):
-        _validate_run_evidence(feature_dir, state)
-    evidence_ids = [
-        str(item.get("evidenceId"))
-        for item in completed_commands.values()
-        if isinstance(item, dict) and isinstance(item.get("evidenceId"), str)
-    ]
-    pass_evidence_ids = [
-        str(item.get("evidenceId"))
-        for item in completed_commands.values()
-        if isinstance(item, dict)
-        and isinstance(item.get("evidenceId"), str)
-        and item.get("result") == "pass"
-        and item.get("required") is True
-    ]
-    required_failed = any(
-        isinstance(item, dict) and item.get("result") != "pass" and item.get("required") is True
-        for item in completed_commands.values()
-    )
-    for command in task.get("validationCommands", []):
-        if not isinstance(command, dict):
-            continue
-        command_id = command.get("id")
-        if isinstance(command_id, str) and command_id in completed_commands:
-            continue
-        command_repository_id, _ = _command_repository(command, repositories)
-        exit_code, output = _run_validation(
-            command,
-            repositories,
-            run_id=run_id,
-            batch_id=batch_id,
-            task_id=task_id,
-        )
-        if not _repository_snapshots_match(final_repositories, _repository_state(repositories)):
-            raise TaskRunnerError(f"validation_modified_workspace:{command_id}")
-        record = _record_for_command(
-            feature=feature,
-            task=task,
-            run_id=run_id,
-            command=command,
-            exit_code=exit_code,
-            completion_mode=completion_mode,
-            file_changes=cumulative_file_changes,
-            transient_validation_files=transient_validation_files,
-            supporting_files=normalized_supporting,
-            no_change_why=no_code_change_why,
-            repository_id=command_repository_id if multiple_repositories or command.get("repo") else None,
-            revalidation=state.get("revalidation") if isinstance(state.get("revalidation"), dict) else None,
-        )
-        try:
-            evidence = append_evidence(feature_dir, record, output_tail=output)
-        except EvidenceStoreError as exc:
-            raise TaskRunnerError(f"evidence_append_failed:{exc}") from exc
-        evidence_id = str(evidence["evidenceId"])
-        evidence_ids.append(evidence_id)
-        if exit_code == 0 and command.get("required") is True:
-            pass_evidence_ids.append(evidence_id)
-        if exit_code != 0 and command.get("required") is True:
-            required_failed = True
-        if isinstance(command_id, str):
-            completed_commands[command_id] = {
-                "evidenceId": evidence_id,
-                "result": "pass" if exit_code == 0 else "fail",
-                "required": command.get("required"),
-            }
-            state.update(
-                {
-                    "status": "validation_running",
-                    "completedCommandEvidence": completed_commands,
-                    "evidenceIds": evidence_ids,
-                    "completionEvidenceIds": pass_evidence_ids,
-                }
-            )
-            _save_run(path, state)
-
-    success = not required_failed
-    state.update(
-        {
-            "status": "evidence_written",
-            "success": success,
-            "evidenceIds": evidence_ids,
-            "completionEvidenceIds": pass_evidence_ids if success else [],
-        }
-    )
-    _save_run(path, state)
-    result = record_task_attempt(
-        workspace,
-        feature,
-        task_id,
-        evidence_ids,
-        completion_evidence_ids=pass_evidence_ids if success else [],
-        success=success,
-        expected_task_contract_sha256=str(state.get("taskContractSha256", "")),
-        revalidation=state.get("revalidation") if isinstance(state.get("revalidation"), dict) else None,
-    )
-    if not result.ok:
-        raise TaskRunnerError("plan_binding_failed")
-    if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
-        state["batchHandoff"] = result.data["batchHandoff"]
-    if isinstance(result.data, dict) and isinstance(result.data.get("batchContinuation"), dict):
-        state["batchContinuation"] = result.data["batchContinuation"]
-    if isinstance(result.data, dict) and isinstance(result.data.get("batchCheck"), dict):
-        state["batchCheck"] = result.data["batchCheck"]
-    batch_check = state.get("batchCheck")
-    if success and isinstance(batch_check, dict) and batch_check.get("mode") == "task_covered":
-        closure = _close_task_covered_batch(
-            workspace,
-            feature,
-            str(batch_check.get("activeBatchId")),
-            run_id,
-        )
-        state["batchCheck"] = closure
-        state["batchClosureEvidenceId"] = closure["closureEvidenceId"]
-        if isinstance(closure.get("batchHandoff"), dict):
-            state["batchHandoff"] = closure["batchHandoff"]
-    state["status"] = "done" if success else "failed"
-    _save_run(path, state)
-    return success, state
 
 
-def _batch_commands_sha256(commands: list[dict[str, Any]]) -> str:
-    content = json.dumps(commands, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(content).hexdigest()
 
 
 def _repository_state_sha256(repository_state: list[dict[str, Any]]) -> str:
@@ -2932,75 +2023,146 @@ def _repository_state_sha256(repository_state: list[dict[str, Any]]) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _task_validation_run_integrity_sha256(state: dict[str, Any]) -> str:
-    fields = (
-        "version",
-        "runId",
-        "featureId",
-        "batchId",
-        "taskOrder",
-        "taskContractSha256ByTask",
-        "requestedCodeWorkspaces",
-        "repositories",
-        "batchSnapshotSha256",
-        "startedAt",
-    )
-    integrity_data = {field: state.get(field) for field in fields}
-    integrity_data["executionPlan"] = validation_groups_sha256_payload(
-        state.get("executionGroups", [])
-        if isinstance(state.get("executionGroups"), list)
-        else []
-    )
-    content = json.dumps(
-        integrity_data,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(content).hexdigest()
+def _batch_compile_snapshot_path(feature_dir: Path, batch_id: str) -> Path:
+    return feature_dir / ".task-runs" / ".batch-compile" / f"{batch_id}.json"
 
 
-def _save_task_validation_run(path: Path, state: dict[str, Any]) -> None:
-    expected = _task_validation_run_integrity_sha256(state)
-    stored = state.get("integritySha256")
-    if stored is not None and stored != expected:
-        raise TaskRunnerError("task_validation_run_integrity_mismatch")
-    state["integritySha256"] = expected
-    state["updatedAt"] = _utc_now()
-    atomic_write_json(path, state)
-
-
-def _load_task_validation_run(
+def _persist_batch_compile_workspace_state(
     feature_dir: Path,
+    feature: str,
     batch_id: str,
-    run_id: str,
-) -> tuple[Path, dict[str, Any]]:
-    path = _task_validation_run_path(feature_dir, batch_id, run_id)
-    if not path.is_file():
-        raise TaskRunnerError(f"task_validation_run_not_found:{run_id}")
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise TaskRunnerError(f"invalid_task_validation_run:{run_id}") from exc
-    if not isinstance(state, dict) or state.get("batchId") != batch_id:
-        raise TaskRunnerError(f"invalid_task_validation_run:{run_id}")
-    if state.get("integritySha256") != _task_validation_run_integrity_sha256(state):
-        raise TaskRunnerError("task_validation_run_integrity_mismatch")
-    return path, state
+    compile_result: dict[str, Any],
+) -> None:
+    """Keep the failed compile baseline needed to adopt a model's early repair."""
 
-
-def _validation_allowed_commands(state: dict[str, Any]) -> list[str]:
-    if state.get("status") == "failed":
-        return []
-    batch_check = state.get("batchCheck")
+    repository_state = compile_result.get("workspaceState")
+    snapshot_sha256 = compile_result.get("workspaceSnapshotSha256")
     if (
-        isinstance(batch_check, dict)
-        and batch_check.get("requiredAction") == "run_batch_check"
+        compile_result.get("compileStatus") != "failed"
+        or not isinstance(repository_state, list)
+        or not repository_state
+        or not isinstance(snapshot_sha256, str)
+        or _repository_state_sha256(repository_state) != snapshot_sha256
     ):
-        return list(TASK_VALIDATION_BATCH_CHECK_COMMANDS)
-    if isinstance(state.get("currentTaskId"), str):
-        return list(TASK_VALIDATION_RUNNING_COMMANDS)
-    return []
+        return
+    atomic_write_json(
+        _batch_compile_snapshot_path(feature_dir, batch_id),
+        {
+            "version": 1,
+            "featureId": feature,
+            "batchId": batch_id,
+            "commandId": compile_result.get("commandId"),
+            "compileStatus": "failed",
+            "workspaceSnapshotSha256": snapshot_sha256,
+            "repositories": repository_state,
+            "capturedAt": _utc_now(),
+        },
+    )
+
+
+def _repository_state_matches(
+    repository_state: Any,
+    expected_snapshot_sha256: str,
+) -> bool:
+    return (
+        isinstance(repository_state, list)
+        and bool(repository_state)
+        and _repository_state_sha256(repository_state) == expected_snapshot_sha256
+    )
+
+
+def _failed_compile_repository_state(
+    feature_dir: Path,
+    feature: str,
+    batch_id: str,
+    command_id: Any,
+    expected_snapshot_sha256: str,
+) -> list[dict[str, Any]] | None:
+    """Load an exact failed-compile baseline, including pre-upgrade run fallback."""
+
+    snapshot_path = _batch_compile_snapshot_path(feature_dir, batch_id)
+    try:
+        record = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = None
+    if (
+        isinstance(record, dict)
+        and record.get("version") == 1
+        and record.get("featureId") == feature
+        and record.get("batchId") == batch_id
+        and record.get("commandId") == command_id
+        and record.get("compileStatus") == "failed"
+        and record.get("workspaceSnapshotSha256") == expected_snapshot_sha256
+        and _repository_state_matches(record.get("repositories"), expected_snapshot_sha256)
+    ):
+        return [item for item in record["repositories"] if isinstance(item, dict)]
+
+    # Older runner versions did not persist a dedicated compile snapshot. A
+    # completed task run normally has the same final repository state because
+    # compile outputs are ignored. Reuse it only when its digest is exact.
+    for run_path in sorted((feature_dir / ".task-runs").glob("T*/*.json"), reverse=True):
+        try:
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(run, dict)
+            or run.get("featureId") != feature
+            or run.get("batchId") != batch_id
+            or strict_task_run_integrity_error(run) is not None
+        ):
+            continue
+        for field in ("finalRepositories", "abortRepositories", "repositories"):
+            repository_state = run.get(field)
+            if _repository_state_matches(repository_state, expected_snapshot_sha256):
+                return [item for item in repository_state if isinstance(item, dict)]
+    return None
+
+
+def _repository_state_file_changes(
+    before_state: list[dict[str, Any]],
+    after_state: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    before_by_id = {
+        str(item.get("id")): item
+        for item in before_state
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    after_by_id = {
+        str(item.get("id")): item
+        for item in after_state
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if not before_by_id or set(before_by_id) != set(after_by_id):
+        raise TaskRunnerError("batch_compile_repair_repository_state_mismatch")
+    multiple = len(before_by_id) > 1
+    changes: list[dict[str, str]] = []
+    for repository_id in sorted(before_by_id):
+        before = before_by_id[repository_id]
+        after = after_by_id[repository_id]
+        if before.get("path") != after.get("path"):
+            raise TaskRunnerError("batch_compile_repair_repository_state_mismatch")
+        before_snapshot = before.get("snapshot")
+        after_snapshot = after.get("snapshot")
+        if not isinstance(before_snapshot, dict) or not isinstance(after_snapshot, dict):
+            raise TaskRunnerError("batch_compile_repair_repository_snapshot_missing")
+        repository_changes = _snapshot_changes(before_snapshot, after_snapshot)
+        if multiple:
+            for change in repository_changes:
+                change["path"] = f"{repository_id}:{change['path']}"
+                if "fromPath" in change:
+                    change["fromPath"] = f"{repository_id}:{change['fromPath']}"
+                change["repository"] = repository_id
+        changes.extend(repository_changes)
+    return changes
+
+
+
+
+
+
+
+
 
 
 def _normalize_diagnostic_path(
@@ -3050,40 +2212,6 @@ def _validation_diagnostic_paths(
     return paths
 
 
-def _validation_error_category(
-    command: dict[str, Any],
-    output: str,
-    diagnostic_paths: list[str],
-) -> str:
-    lowered = output.lower().replace("\\", "/")
-    if any(
-        marker in lowered
-        for marker in (
-            "validation_maven_test_report_missing",
-            "validation_maven_test_not_executed",
-            "validation_maven_test_target_missing",
-            "validation_command_policy_violation",
-        )
-    ):
-        return "validation_contract_failure"
-    if any("/src/test/" in f"/{path.lower()}" for path in diagnostic_paths) or any(
-        marker in lowered
-        for marker in ("testcompile", "test compilation failure", "maven-testcompile")
-    ):
-        return "test_compile_failure"
-    if any("/src/main/" in f"/{path.lower()}" for path in diagnostic_paths) or any(
-        marker in lowered
-        for marker in (
-            "compilation failure",
-            "compilation error",
-            "cannot find symbol",
-            "maven-compiler-plugin",
-        )
-    ):
-        return "source_compile_failure"
-    return "behavior_test_failure"
-
-
 def _evidence_paths(record: dict[str, Any]) -> set[str]:
     paths = {
         item
@@ -3130,2473 +2258,62 @@ def _validation_repair_owner_task_ids(
     return owners or [failed_validation_task_id]
 
 
-def _validation_failure_details(
-    feature_dir: Path,
-    batch: dict[str, Any],
-    task_id: str,
-    command: dict[str, Any],
-    output: str,
-    repositories: RepositoryMap,
-) -> dict[str, Any]:
-    diagnostic_paths = _validation_diagnostic_paths(output, command, repositories)
-    error_category = _validation_error_category(command, output, diagnostic_paths)
-    return {
-        "failedValidationTaskId": task_id,
-        "failedTaskId": task_id,
-        "failedCommandId": command.get("id"),
-        "errorCategory": error_category,
-        "diagnosticPaths": diagnostic_paths,
-        "repairOwnerTaskIds": _validation_repair_owner_task_ids(
-            feature_dir,
-            batch,
-            task_id,
-            diagnostic_paths,
-        ),
-    }
 
 
-def _validation_repair_state(root: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
-    attempts = int(task.get("validationRepairAttempts", 0))
-    maximum = code_validation_max_repair_attempts(root)
-    return {
-        "attempts": attempts,
-        "maxAttempts": maximum,
-        "exhausted": attempts >= maximum,
-    }
 
 
-def _task_validation_context(state: dict[str, Any]) -> dict[str, Any]:
-    failed = state.get("status") == "failed"
-    allowed_commands = _validation_allowed_commands(state)
-    context = {
-        "runType": TASK_VALIDATION_RUN_TYPE,
-        "featureId": state.get("featureId"),
-        "batchId": state.get("batchId"),
-        "runId": state.get("runId"),
-        "taskOrder": state.get("taskOrder", []),
-        "currentTaskId": state.get("currentTaskId"),
-        "requestedCodeWorkspaces": state.get("requestedCodeWorkspaces", []),
-        "batchSnapshotSha256": state.get("batchSnapshotSha256"),
-        "agentScope": "task_and_batch_validation_commands",
-        "phase": (
-            "failed_handoff"
-            if failed
-            else "batch_check"
-            if allowed_commands == TASK_VALIDATION_BATCH_CHECK_COMMANDS
-            else "task_validation"
-        ),
-        "allowedCommands": allowed_commands,
-        "allowedRunnerCommands": allowed_commands,
-        "commandAudience": "validation_subagent_only",
-        "executorDirective": {
-            "requiredExecutor": "batch_validation_subagent",
-            "mainAgentAction": (
-                "start_validation_repair" if failed else "spawn_subagent_immediately"
-            ),
-            "mainAgentAllowedRunnerCommands": (
-                ["start-validation-repair"] if failed else []
-            ),
-            "mainAgentPreflightAllowed": False,
-            "passValidationContextVerbatim": True,
-        },
-        "subagentProtocol": {
-            "version": "batch-validation-subagent.v4",
-            "singleSubagent": True,
-            "workspaceReadOnly": True,
-            "runnerCommandsOnly": True,
-            "asyncExecution": {
-                "executeInBackground": True,
-                "pollTool": "task_output",
-                "pollTimeoutMs": 120000,
-                "pollTimeoutIsTerminal": False,
-                "reuseTaskIdOnPollTimeout": True,
-                "progressStream": "stderr",
-                "progressEvents": [
-                    "validation_process_started",
-                    "validation_process_running",
-                    "validation_process_finished",
-                ],
-                "finalResultStream": "stdout",
-            },
-            "terminalResultPolicy": {
-                "environmentFailure": "record_deferred_and_continue",
-                "repairAttemptsExhausted": "record_deferred_and_continue",
-                "maxRepairAttempts": state.get(
-                    "maxRepairAttempts",
-                    DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS,
-                ),
-                "forbidSecondSubagentForDiagnostics": True,
-                "forbidDuplicateRunnerInvocation": True,
-                "forbidDirectBuildToolInvocation": True,
-                "ordinaryFailure": "handoff_to_main_agent_without_batch_check",
-            },
-        },
-        "executionGroups": [
-            {
-                "id": group.get("id"),
-                "strategy": group.get("strategy"),
-                "status": group.get("status"),
-                "taskIds": group.get("taskIds", []),
-            }
-            for group in state.get("executionGroups", [])
-            if isinstance(group, dict)
-        ],
-    }
-    for field in (
-        "failedValidationTaskId",
-        "failedTaskId",
-        "failedCommandId",
-        "errorCategory",
-        "diagnosticPaths",
-        "repairOwnerTaskIds",
-        "validationFailures",
-        "repairState",
-    ):
-        if field in state:
-            context[field] = state.get(field)
-    context["nextActor"] = "main_agent" if failed else "validation_subagent"
-    context["validationSubagentTerminal"] = failed
-    return context
 
 
-def _terminal_task_validation_handoff_context(
-    state: dict[str, Any],
-    *,
-    main_agent_action: str,
-    main_agent_commands: list[str],
-) -> dict[str, Any]:
-    context = _task_validation_context(state)
-    context.update({
-        "phase": "failed_handoff",
-        "allowedCommands": [],
-        "allowedRunnerCommands": [],
-        "nextActor": "main_agent",
-        "validationSubagentTerminal": True,
-    })
-    directive = context.get("executorDirective")
-    if isinstance(directive, dict):
-        directive.update({
-            "mainAgentAction": main_agent_action,
-            "mainAgentAllowedRunnerCommands": main_agent_commands,
-        })
-    return context
 
 
-def _start_deferred_task_validation_unlocked(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    code_workspace: Path | list[Path],
-) -> dict[str, Any]:
-    feature_dir = _feature_dir(workspace, feature)
-    try:
-        bundle = load_plan_bundle(feature_dir)
-    except ValueError as exc:
-        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
-    if not deferred_task_validation_enabled(bundle.root):
-        raise TaskRunnerError(f"deferred_task_validation_not_enabled:{batch_id}")
-    if bundle.root.get("activeBatchId") != batch_id:
-        raise TaskRunnerError(f"batch_not_active:{batch_id}")
-    batch = bundle.batches.get(batch_id)
-    if not isinstance(batch, dict):
-        raise TaskRunnerError(f"batch_not_found:{batch_id}")
-    validation = batch.get("taskValidation")
-    validation_status = validation.get("status") if isinstance(validation, dict) else None
-    if not isinstance(validation, dict) or validation_status not in {"ready", "failed"}:
-        raise TaskRunnerError(f"task_validation_not_startable:{batch_id}:{validation_status}")
-    if _active_feature_runs(feature_dir):
-        raise TaskRunnerError("active_task_run_blocks_batch_task_validation")
-    requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
-    if len(requested_workspaces) != 1:
-        raise TaskRunnerError(
-            "batch_task_validation_requires_single_code_workspace",
-            batchId=batch_id,
-            requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
-        )
-    repositories = _resolve_repositories(requested_workspaces)
-    _assert_runtime_artifacts_ignored(repositories)
-    scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
-    for task in batch.get("tasks", []):
-        if not isinstance(task, dict):
-            continue
-        workspace_roots = task_workspace_roots(task)
-        _assert_workspace_ref_matches(
-            task.get("workspaceRef"),
-            scope_workspaces,
-            contract_name=str(task.get("id")),
-        )
-        _assert_workspace_roots_match(
-            workspace_roots,
-            scope_workspaces,
-            contract_name=str(task.get("id")),
-        )
-        task_commands = [
-            item for item in task.get("validationCommands", []) if isinstance(item, dict)
-        ]
-        _assert_validation_command_workspaces(
-            task_commands,
-            workspace_roots,
-            repositories,
-            contract_name=str(task.get("id")),
-        )
-    batch_validation = batch.get("batchValidation")
-    batch_commands = (
-        [
-            command
-            for command in batch_validation.get("commands", [])
-            if isinstance(command, dict)
-        ]
-        if isinstance(batch_validation, dict)
-        else []
-    )
-    baseline = _repository_state(repositories)
-    snapshot_sha256 = _repository_state_sha256(baseline)
-    run_id = _new_run_id()
-    result = start_deferred_task_validation(
-        workspace,
-        feature,
-        batch_id,
-        run_id,
-        snapshot_sha256,
-    )
-    if not result.ok:
-        detail = ";".join(
-            f"{item.get('reason')}:{item.get('detail', '')}"
-            for item in result.errors or []
-            if isinstance(item, dict)
-        )
-        raise TaskRunnerError(detail or "task_validation_plan_start_failed")
-    refreshed = load_plan_bundle(feature_dir)
-    refreshed_batch = refreshed.batches[batch_id]
-    refreshed_validation = refreshed_batch["taskValidation"]
-    execution_groups = plan_validation_groups(refreshed_batch)
-    state = {
-        "version": 2,
-        "runId": run_id,
-        "featureId": feature,
-        "batchId": batch_id,
-        "status": "running",
-        "taskOrder": list(refreshed_validation.get("taskOrder", [])),
-        "currentTaskId": refreshed_validation.get("currentTaskId"),
-        "completedTaskIds": list(refreshed_validation.get("completedTaskIds", [])),
-        "taskContractSha256ByTask": {
-            str(task.get("id")): task_contract_sha256(task)
-            for task in refreshed_batch.get("tasks", [])
-            if isinstance(task, dict)
-        },
-        "requestedCodeWorkspaces": [str(path.resolve()) for path in requested_workspaces],
-        "repositories": baseline,
-        "batchSnapshotSha256": snapshot_sha256,
-        "completedCommandEvidence": {},
-        "executionGroups": execution_groups,
-        "evidenceIds": [],
-        "maxRepairAttempts": code_validation_max_repair_attempts(refreshed.root),
-        "startedAt": _utc_now(),
-    }
-    _save_task_validation_run(
-        _task_validation_run_path(feature_dir, batch_id, run_id),
-        state,
-    )
-    return state
 
 
-def _deferred_validation_implementation_context(
-    feature_dir: Path,
-    task: dict[str, Any],
-) -> tuple[str, list[dict[str, str]], list[str], str | None, list[str]]:
-    evidence_id = task.get("latestImplementationEvidenceId")
-    record = next(
-        (
-            item
-            for item in read_records(stream_path(feature_dir))
-            if item.get("evidenceId") == evidence_id
-            and item.get("action") == "implementation"
-            and item.get("taskId") == task.get("id")
-        ),
-        None,
-    )
-    if not isinstance(record, dict):
-        raise TaskRunnerError(f"implementation_evidence_missing:{task.get('id')}:{evidence_id}")
-    return (
-        str(record.get("completionMode", "implemented")),
-        list(record.get("fileChanges", [])) if isinstance(record.get("fileChanges"), list) else [],
-        list(record.get("transientValidationFiles", []))
-        if isinstance(record.get("transientValidationFiles"), list)
-        else [],
-        record.get("implementation", {}).get("why")
-        if isinstance(record.get("implementation"), dict)
-        else None,
-        list(record.get("supportingFiles", [])) if isinstance(record.get("supportingFiles"), list) else [],
-    )
 
 
-def _adopt_deferred_validation_evidence(
-    feature_dir: Path,
-    state: dict[str, Any],
-    task: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    task_id = str(task.get("id"))
-    planned = {
-        str(command.get("id")): command
-        for command in task.get("validationCommands", [])
-        if isinstance(command, dict) and isinstance(command.get("id"), str)
-    }
-    all_completed = state.get("completedCommandEvidence")
-    all_completed = all_completed if isinstance(all_completed, dict) else {}
-    completed = all_completed.get(task_id)
-    completed = dict(completed) if isinstance(completed, dict) else {}
-    for record in read_records(stream_path(feature_dir)):
-        if (
-            record.get("action") != "validation"
-            or record.get("taskId") != task_id
-            or record.get("runId") != state.get("runId")
-            or record.get("validationTarget") != "batch_final_snapshot"
-        ):
-            continue
-        validation = record.get("validation")
-        command_id = validation.get("commandId") if isinstance(validation, dict) else None
-        if not isinstance(command_id, str) or command_id not in planned:
-            raise TaskRunnerError(f"streamed_task_validation_unplanned_command:{command_id}")
-        evidence_id = record.get("evidenceId")
-        existing = completed.get(command_id)
-        if isinstance(existing, dict) and existing.get("evidenceId") != evidence_id:
-            raise TaskRunnerError(f"duplicate_task_validation_command_evidence:{command_id}")
-        completed[command_id] = {
-            "evidenceId": evidence_id,
-            "result": validation.get("result"),
-            "required": validation.get("required"),
-            **(
-                {"failure": validation.get("failure")}
-                if isinstance(validation.get("failure"), dict)
-                else {}
-            ),
-        }
-    all_completed[task_id] = completed
-    state["completedCommandEvidence"] = all_completed
-    evidence_ids = state.get("evidenceIds")
-    evidence_ids = list(evidence_ids) if isinstance(evidence_ids, list) else []
-    for item in completed.values():
-        evidence_id = item.get("evidenceId") if isinstance(item, dict) else None
-        if isinstance(evidence_id, str) and evidence_id not in evidence_ids:
-            evidence_ids.append(evidence_id)
-    state["evidenceIds"] = evidence_ids
-    return completed
 
 
-def _validation_group_for_command(
-    state: dict[str, Any],
-    task_id: str,
-    command_id: str,
-) -> dict[str, Any]:
-    for group in state.get("executionGroups", []):
-        if not isinstance(group, dict):
-            continue
-        if any(
-            isinstance(logical, dict)
-            and logical.get("taskId") == task_id
-            and logical.get("commandId") == command_id
-            for logical in group.get("logicalCommands", [])
-        ):
-            return group
-    raise TaskRunnerError(f"task_validation_execution_group_missing:{task_id}:{command_id}")
 
 
-def _validation_group_evidence_complete(
-    state: dict[str, Any],
-    group: dict[str, Any],
-) -> bool:
-    completed_by_task = state.get("completedCommandEvidence")
-    if not isinstance(completed_by_task, dict):
-        return False
-    for logical in group.get("logicalCommands", []):
-        if not isinstance(logical, dict):
-            return False
-        completed = completed_by_task.get(str(logical.get("taskId")))
-        if not isinstance(completed, dict) or str(logical.get("commandId")) not in completed:
-            return False
-    return True
 
 
-def _run_deferred_validation_group(
-    group: dict[str, Any],
-    repositories: RepositoryMap,
-    *,
-    run_id: str,
-    batch_id: str,
-    task_id: str,
-) -> tuple[str, int, str, list[dict[str, Any]]]:
-    physical_command = group.get("physicalCommand")
-    if not isinstance(physical_command, dict):
-        raise TaskRunnerError(f"task_validation_physical_command_missing:{group.get('id')}")
-    strategy = str(group.get("strategy"))
-    before_reports: dict[str, int] = {}
-    command_dir: Path | None = None
-    if strategy == "maven_test_aggregate":
-        command_dir = _maven_command_directory(physical_command, repositories)
-        before_reports = _maven_report_snapshot(command_dir)
-    attempt_number = len(group.get("attempts", [])) + 1
-    shared_execution_id = f"{run_id}:{group.get('id')}:{attempt_number}"
-    try:
-        physical_exit_code, output = _run_validation(
-            physical_command,
-            repositories,
-            run_id=run_id,
-            batch_id=batch_id,
-            task_id=task_id,
-        )
-    except TaskRunnerError as exc:
-        logical = next(
-            (
-                item
-                for item in group.get("logicalCommands", [])
-                if isinstance(item, dict) and item.get("taskId") == task_id
-            ),
-            None,
-        )
-        if isinstance(logical, dict):
-            logical_command_id = logical.get("commandId")
-            exc.details["executionGroupId"] = group.get("id")
-            exc.details["physicalCommandId"] = physical_command.get("id")
-            exc.details["failedCommandId"] = logical_command_id
-            exc.details["commandId"] = logical_command_id
-        raise
-    logical_results: list[dict[str, Any]] = []
-    roots = (
-        _fresh_maven_report_roots(command_dir, before_reports)
-        if strategy == "maven_test_aggregate" and command_dir is not None
-        else []
-    )
-    outcomes = {
-        selector: _maven_selector_report_result(roots, selector)
-        for logical in group.get("logicalCommands", [])
-        if isinstance(logical, dict)
-        for selector in logical.get("selectors", [])
-        if isinstance(selector, str)
-    }
-    any_reported_test_failed = any(
-        outcome.get("status") == "fail" for outcome in outcomes.values()
-    )
-    for logical in group.get("logicalCommands", []):
-        if not isinstance(logical, dict):
-            continue
-        logical_exit_code = physical_exit_code
-        logical_output = output
-        selector_results = [
-            outcomes[selector]
-            for selector in logical.get("selectors", [])
-            if isinstance(selector, str) and selector in outcomes
-        ]
-        test_failures = [
-            failure
-            for outcome in selector_results
-            for failure in outcome.get("failures", [])
-            if isinstance(failure, dict)
-        ]
-        if strategy == "maven_test_aggregate" and roots:
-            missing = [
-                outcome.get("selector")
-                for outcome in selector_results
-                if outcome.get("status") == "not_executed"
-            ]
-            if missing:
-                logical_exit_code = 1
-                logical_output = (
-                    f"{output}\n"
-                    + "\n".join(
-                        f"validation_maven_test_not_executed:{logical.get('commandId')}:{selector}"
-                        for selector in missing
-                    )
-                )
-            elif test_failures:
-                logical_exit_code = 1
-            elif physical_exit_code == 0 or any_reported_test_failed:
-                logical_exit_code = 0
-        logical_results.append({
-            "taskId": logical.get("taskId"),
-            "commandId": logical.get("commandId"),
-            "command": logical.get("command"),
-            "selectors": list(logical.get("selectors", [])),
-            "exitCode": logical_exit_code,
-            "output": logical_output,
-            "selectorResults": selector_results,
-            "testFailures": test_failures,
-        })
-    return shared_execution_id, physical_exit_code, output, logical_results
 
 
-def _record_deferred_validation_group(
-    feature_dir: Path,
-    batch: dict[str, Any],
-    state: dict[str, Any],
-    path: Path,
-    group: dict[str, Any],
-    shared_execution_id: str,
-    physical_exit_code: int,
-    output: str,
-    logical_results: list[dict[str, Any]],
-    repositories: RepositoryMap,
-) -> None:
-    tasks_by_id = {
-        str(task.get("id")): task
-        for task in batch.get("tasks", [])
-        if isinstance(task, dict) and isinstance(task.get("id"), str)
-    }
-    failures_by_command: dict[tuple[str, str], dict[str, Any]] = {}
-    validation_failures: list[dict[str, Any]] = []
-    repair_owner_task_ids: list[str] = []
-    for logical in logical_results:
-        if logical.get("exitCode") == 0:
-            continue
-        logical_task_id = str(logical.get("taskId"))
-        logical_command_id = str(logical.get("commandId"))
-        command = logical.get("command")
-        if not isinstance(command, dict):
-            continue
-        failure = _validation_failure_details(
-            feature_dir,
-            batch,
-            logical_task_id,
-            command,
-            str(logical.get("output", "")),
-            repositories,
-        )
-        entry = {
-            "taskId": logical_task_id,
-            "commandId": logical_command_id,
-            "selectors": list(logical.get("selectors", [])),
-            "errorCategory": failure.get("errorCategory"),
-            "diagnosticPaths": list(failure.get("diagnosticPaths", [])),
-            "repairOwnerTaskIds": list(failure.get("repairOwnerTaskIds", [])),
-            "testFailures": list(logical.get("testFailures", [])),
-        }
-        validation_failures.append(entry)
-        for owner in entry["repairOwnerTaskIds"]:
-            if isinstance(owner, str) and owner not in repair_owner_task_ids:
-                repair_owner_task_ids.append(owner)
-        failures_by_command[(logical_task_id, logical_command_id)] = failure
 
-    completed_by_task = state.get("completedCommandEvidence")
-    completed_by_task = completed_by_task if isinstance(completed_by_task, dict) else {}
-    group_evidence_ids: list[str] = []
-    for logical in logical_results:
-        logical_task_id = str(logical.get("taskId"))
-        logical_command_id = str(logical.get("commandId"))
-        task = tasks_by_id.get(logical_task_id)
-        command = logical.get("command")
-        if not isinstance(task, dict) or not isinstance(command, dict):
-            continue
-        completed = completed_by_task.get(logical_task_id)
-        completed = dict(completed) if isinstance(completed, dict) else {}
-        if logical_command_id in completed:
-            continue
-        completion_mode, file_changes, transient_files, no_change_why, supporting_files = (
-            _deferred_validation_implementation_context(feature_dir, task)
-        )
-        repository_id, _ = _command_repository(command, repositories)
-        record = _record_for_command(
-            feature=str(state.get("featureId")),
-            task=task,
-            run_id=str(state.get("runId")),
-            command=command,
-            exit_code=int(logical.get("exitCode", 1)),
-            completion_mode=completion_mode,
-            file_changes=file_changes,
-            transient_validation_files=transient_files,
-            supporting_files=supporting_files,
-            no_change_why=no_change_why,
-            repository_id=(
-                repository_id if len(repositories) > 1 or command.get("repo") else None
-            ),
-            revalidation=(
-                task.get("pendingRevalidation")
-                if isinstance(task.get("pendingRevalidation"), dict)
-                else None
-            ),
-        )
-        record["validation"].update({
-            "executionGroupId": group.get("id"),
-            "executionStrategy": group.get("strategy"),
-            "sharedExecutionId": shared_execution_id,
-            "logicalArgv": command.get("argv", []),
-            "physicalArgv": group.get("physicalCommand", {}).get("argv", []),
-            "physicalExitCode": physical_exit_code,
-            "selectors": list(logical.get("selectors", [])),
-            "selectorResults": list(logical.get("selectorResults", [])),
-            "testFailures": list(logical.get("testFailures", [])),
-        })
-        failure = failures_by_command.get((logical_task_id, logical_command_id))
-        if isinstance(failure, dict):
-            record["validation"]["failure"] = {
-                **failure,
-                "validationFailures": validation_failures,
-                "repairOwnerTaskIds": repair_owner_task_ids,
-            }
-        record.update({
-            "validationTarget": "batch_final_snapshot",
-            "batchId": state.get("batchId"),
-            "batchSnapshotSha256": state.get("batchSnapshotSha256"),
-            "implementationRevision": task.get("implementationRevision", 0),
-            "latestImplementationEvidenceId": task.get("latestImplementationEvidenceId"),
-        })
-        try:
-            evidence = append_evidence(
-                feature_dir,
-                record,
-                output_tail=str(logical.get("output", output)),
-                allow_during_task_validation=True,
-            )
-        except EvidenceStoreError as exc:
-            raise TaskRunnerError(f"evidence_append_failed:{exc}") from exc
-        evidence_id = str(evidence["evidenceId"])
-        group_evidence_ids.append(evidence_id)
-        if isinstance(failure, dict):
-            failure = {
-                **failure,
-                "validationFailures": validation_failures,
-                "repairOwnerTaskIds": repair_owner_task_ids,
-            }
-        completed[logical_command_id] = {
-            "evidenceId": evidence_id,
-            "result": "pass" if logical.get("exitCode") == 0 else "fail",
-            "required": command.get("required"),
-            **({"failure": failure} if isinstance(failure, dict) else {}),
-        }
-        completed_by_task[logical_task_id] = completed
-        state["completedCommandEvidence"] = completed_by_task
-        state["evidenceIds"] = [
-            *[item for item in state.get("evidenceIds", []) if isinstance(item, str)],
-            evidence_id,
-        ]
-        _save_task_validation_run(path, state)
-    group["status"] = "done"
-    group.setdefault("attempts", []).append({
-        "sharedExecutionId": shared_execution_id,
-        "physicalExitCode": physical_exit_code,
-        "evidenceIds": group_evidence_ids,
-        "completedAt": _utc_now(),
-    })
-    _save_task_validation_run(path, state)
 
 
-def _close_task_covered_batch_as_deferred(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    run_id: str,
-) -> dict[str, Any]:
-    feature_dir = _feature_dir(workspace, feature)
-    bundle = load_plan_bundle(feature_dir)
-    batch = bundle.batches.get(batch_id)
-    task_validation = batch.get("taskValidation") if isinstance(batch, dict) else None
-    issues = (
-        [item for item in task_validation.get("deferredIssues", []) if isinstance(item, dict)]
-        if isinstance(task_validation, dict)
-        else []
-    )
-    if not issues:
-        raise TaskRunnerError(f"task_covered_deferred_issue_missing:{batch_id}")
 
-    def unique_strings(values: list[Any]) -> list[str]:
-        result: list[str] = []
-        for value in values:
-            if isinstance(value, str) and value not in result:
-                result.append(value)
-        return result
 
-    source_evidence_ids = unique_strings([
-        evidence_id
-        for issue in issues
-        for evidence_id in issue.get("evidenceIds", [])
-    ])
-    diagnostic_paths = unique_strings([
-        diagnostic_path
-        for issue in issues
-        for diagnostic_path in issue.get("diagnosticPaths", [])
-    ])
-    validation_failures = [
-        failure
-        for issue in issues
-        for failure in issue.get("validationFailures", [])
-        if isinstance(failure, dict)
-    ]
-    categories = unique_strings([issue.get("errorCategory") for issue in issues])
-    failure_categories = unique_strings([issue.get("failureCategory") for issue in issues])
-    command_ids = unique_strings([issue.get("commandId") for issue in issues])
-    reason = (
-        "repair_attempts_exhausted"
-        if any(issue.get("reason") == "repair_attempts_exhausted" for issue in issues)
-        else "environment_failure"
-    )
-    error_category = categories[0] if len(categories) == 1 else "validation_contract_failure"
-    failure_category = failure_categories[0] if len(failure_categories) == 1 else None
-    existing_record = next(
-        (
-            record
-            for record in read_records(stream_path(feature_dir))
-            if record.get("action") == "batch_validation"
-            and record.get("taskId") == "__batch__"
-            and record.get("batchId") == batch_id
-            and record.get("runId") == run_id
-            and isinstance(record.get("coverage"), dict)
-            and record["coverage"].get("mode") == "task_covered"
-            and record["coverage"].get("result") == "deferred"
-        ),
-        None,
-    )
-    if existing_record is None:
-        batch_evidence = append_evidence(
-            feature_dir,
-            {
-                "featureId": feature,
-                "checkpoint": "code_in_progress",
-                "nodeId": "dev.code",
-                "skill": "autodev-code",
-                "taskId": "__batch__",
-                "batchId": batch_id,
-                "action": "batch_validation",
-                "detailVersion": 2,
-                "runId": run_id,
-                "completionMode": "verified_existing",
-                "summary": f"{batch_id} task-covered validation deferred",
-                "implementation": {
-                    "noCodeChange": True,
-                    "whatChanged": [],
-                    "why": "One or more task validations were deferred",
-                },
-                "specRefs": [],
-                "designRefs": [],
-                "changedFiles": [],
-                "fileChanges": [],
-                "transientValidationFiles": [],
-                "supportingFiles": [],
-                "checkedCriteria": [],
-                "validation": {
-                    "commandId": "__task_covered_deferred__",
-                    "argv": ["task-covered", "deferred"],
-                    "command": "task-covered deferred",
-                    "cwd": ".",
-                    "kind": "build",
-                    "required": True,
-                    "exitCode": 1,
-                    "result": "blocked",
-                    "failure": {
-                        "errorCategory": error_category,
-                        **(
-                            {"failureCategory": failure_category}
-                            if failure_category is not None
-                            else {}
-                        ),
-                        "diagnosticPaths": diagnostic_paths,
-                        "validationFailures": validation_failures,
-                    },
-                },
-                "coverage": {
-                    "mode": "task_covered",
-                    "result": "deferred",
-                    "sourceEvidenceIds": source_evidence_ids,
-                },
-            },
-            output_tail="Task-covered batch deferred because one or more task validations remain unresolved.",
-            allow_during_task_validation=True,
-        )
-    else:
-        coverage = existing_record.get("coverage")
-        if coverage.get("sourceEvidenceIds") != source_evidence_ids:
-            raise TaskRunnerError(f"task_covered_deferred_evidence_mismatch:{batch_id}")
-        batch_evidence = existing_record
-    batch_evidence_id = batch_evidence.get("evidenceId")
-    if not isinstance(batch_evidence_id, str):
-        raise TaskRunnerError(f"task_covered_deferred_evidence_invalid:{batch_id}")
 
-    batch_issue = _validation_deferral_issue(
-        scope="batch",
-        run_id=run_id,
-        batch_id=batch_id,
-        task_id=None,
-        command_id=command_ids[0] if len(command_ids) == 1 else None,
-        error_category=error_category,
-        failure_category=failure_category,
-        reason=reason,
-        repair_attempts=max(int(issue.get("repairAttempts", 0)) for issue in issues),
-        max_repair_attempts=max(int(issue.get("maxRepairAttempts", 0)) for issue in issues),
-        evidence_ids=[batch_evidence_id],
-        diagnostic_paths=diagnostic_paths,
-        validation_failures=validation_failures,
-    )
-    result = record_batch_validation_deferral(
-        workspace,
-        feature,
-        batch_id,
-        [batch_evidence_id],
-        run_id=run_id,
-        issue=batch_issue,
-    )
-    if not result.ok:
-        raise TaskRunnerError("batch_validation_deferral_plan_binding_failed")
-    handoff = result.data.get("batchHandoff") if isinstance(result.data, dict) else None
-    refreshed = load_plan_bundle(feature_dir)
-    required_action = (
-        handoff.get("requiredAction")
-        if isinstance(handoff, dict)
-        else "run_project_check"
-        if refreshed.root.get("projectValidationCommands")
-        else "code_done_ready"
-    )
-    return {
-        "mode": "task_covered",
-        "requiredAction": required_action,
-        "activeBatchId": None,
-        "status": "deferred",
-        "deferredIssue": batch_issue,
-        **({"batchHandoff": handoff} if isinstance(handoff, dict) else {}),
-    }
 
 
-def _defer_deferred_task_validation(
-    workspace: Path,
-    feature: str,
-    feature_dir: Path,
-    batch: dict[str, Any],
-    task: dict[str, Any],
-    command: dict[str, Any],
-    repositories: RepositoryMap,
-    state: dict[str, Any],
-    path: Path,
-    failure: dict[str, Any],
-    attempt_evidence_ids: list[str] | None = None,
-) -> dict[str, Any]:
-    task_id = str(task.get("id"))
-    batch_id = str(state.get("batchId"))
-    run_id = str(state.get("runId"))
-    evidence_ids = [
-        evidence_id
-        for evidence_id in attempt_evidence_ids or []
-        if isinstance(evidence_id, str)
-    ]
-    if not evidence_ids:
-        completion_mode, file_changes, transient_files, no_change_why, supporting_files = (
-            _deferred_validation_implementation_context(feature_dir, task)
-        )
-        repository_id, _ = _command_repository(command, repositories)
-        record = _record_for_command(
-            feature=feature,
-            task=task,
-            run_id=run_id,
-            command=command,
-            exit_code=1,
-            completion_mode=completion_mode,
-            file_changes=file_changes,
-            transient_validation_files=transient_files,
-            supporting_files=supporting_files,
-            no_change_why=no_change_why,
-            repository_id=(
-                repository_id if len(repositories) > 1 or command.get("repo") else None
-            ),
-            revalidation=(
-                task.get("pendingRevalidation")
-                if isinstance(task.get("pendingRevalidation"), dict)
-                else None
-            ),
-        )
-        record["validation"]["result"] = "blocked"
-        record["validation"]["failure"] = dict(failure)
-        record.update({
-            "validationTarget": "batch_final_snapshot",
-            "batchId": batch_id,
-            "batchSnapshotSha256": state.get("batchSnapshotSha256"),
-            "implementationRevision": task.get("implementationRevision", 0),
-            "latestImplementationEvidenceId": task.get("latestImplementationEvidenceId"),
-        })
-        output = str(failure.get("detail") or failure.get("userMessage") or "validation deferred")
-        evidence = append_evidence(
-            feature_dir,
-            record,
-            output_tail=output,
-            allow_during_task_validation=True,
-        )
-        evidence_ids = [str(evidence["evidenceId"])]
-    external_dependency = failure.get("errorCategory") == "external_dependency"
-    max_repairs = (
-        0
-        if external_dependency
-        else code_validation_max_repair_attempts(load_plan_bundle(feature_dir).root)
-    )
-    repair_attempts = int(task.get("validationRepairAttempts", 0))
-    error_category = str(failure.get("errorCategory") or "validation_contract_failure")
-    reason = (
-        "external_dependency"
-        if external_dependency
-        else "environment_failure"
-        if error_category == "environment_failure"
-        else "repair_attempts_exhausted"
-    )
-    issue = _validation_deferral_issue(
-        scope="task",
-        run_id=run_id,
-        batch_id=batch_id,
-        task_id=task_id,
-        command_id=str(command.get("id")) if command.get("id") is not None else None,
-        error_category=error_category,
-        failure_category=(
-            str(failure.get("failureCategory"))
-            if failure.get("failureCategory") is not None
-            else None
-        ),
-        reason=reason,
-        repair_attempts=repair_attempts,
-        max_repair_attempts=max_repairs,
-        evidence_ids=evidence_ids,
-        diagnostic_paths=list(failure.get("diagnosticPaths", [])),
-        validation_failures=list(failure.get("validationFailures", [])),
-    )
-    result = record_deferred_task_validation_deferral(
-        workspace, feature, batch_id, task_id, run_id, evidence_ids, issue
-    )
-    if not result.ok:
-        raise TaskRunnerError(
-            "task_validation_deferral_plan_binding_failed",
-            planWriterErrors=result.errors or [],
-        )
-    existing_evidence_ids = [
-        item for item in state.get("evidenceIds", []) if isinstance(item, str)
-    ]
-    state["evidenceIds"] = [
-        *existing_evidence_ids,
-        *(item for item in evidence_ids if item not in existing_evidence_ids),
-    ]
-    state.setdefault("deferredIssues", []).append(issue)
-    state["completedTaskIds"] = [
-        *[item for item in state.get("completedTaskIds", []) if isinstance(item, str)],
-        task_id,
-    ]
-    data = result.data if isinstance(result.data, dict) else {}
-    next_task_id = data.get("nextTaskId")
-    if isinstance(next_task_id, str):
-        state["currentTaskId"] = next_task_id
-        state["status"] = "running"
-        state["success"] = True
-        state["requiredAction"] = "continue_batch_task_validation"
-        _save_task_validation_run(path, state)
-        return state
 
-    state["currentTaskId"] = None
-    refreshed = load_plan_bundle(feature_dir)
-    batch_validation = refreshed.batches[batch_id].get("batchValidation")
-    mode = (
-        batch_validation.get("mode", "commands" if batch_validation.get("commands") else None)
-        if isinstance(batch_validation, dict)
-        else None
-    )
-    if mode == "task_covered":
-        state["batchCheck"] = _close_task_covered_batch_as_deferred(
-            workspace, feature, batch_id, run_id
-        )
-    else:
-        state["batchCheck"] = {
-            "requiredAction": "run_batch_check",
-            "activeBatchId": batch_id,
-            "mode": mode,
-            "activeRunId": (
-                batch_validation.get("activeRunId")
-                if isinstance(batch_validation, dict)
-                else None
-            ),
-        }
-    state.update({
-        "status": "done",
-        "success": True,
-        "validationOutcome": "passed_with_deferred",
-    })
-    _save_task_validation_run(path, state)
-    return state
 
 
-def _fail_deferred_validation_for_workspace_change(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    task_id: str,
-    state: dict[str, Any],
-    path: Path,
-    failure: dict[str, Any],
-) -> None:
-    completed_by_task = state.get("completedCommandEvidence")
-    completed_by_task = completed_by_task if isinstance(completed_by_task, dict) else {}
-    completed = completed_by_task.get(task_id)
-    completed = completed if isinstance(completed, dict) else {}
-    evidence_ids = [
-        str(item.get("evidenceId"))
-        for item in completed.values()
-        if isinstance(item, dict) and isinstance(item.get("evidenceId"), str)
-    ]
-    result = record_deferred_task_validation_attempt(
-        workspace,
-        feature,
-        batch_id,
-        task_id,
-        str(state.get("runId")),
-        evidence_ids,
-        completion_evidence_ids=[],
-        success=False,
-        batch_snapshot_sha256=str(state.get("batchSnapshotSha256")),
-        failure=failure,
-    )
-    if not result.ok:
-        raise TaskRunnerError(
-            "task_validation_workspace_failure_binding_failed",
-            planWriterErrors=result.errors or [],
-        )
-    state.update({"status": "failed", "success": False, **failure})
-    _save_task_validation_run(path, state)
 
 
-def _defer_external_dependency_task(
-    workspace: Path,
-    feature: str,
-    feature_dir: Path,
-    task: dict[str, Any],
-    state: dict[str, Any],
-    path: Path,
-) -> dict[str, Any]:
-    task_id = str(task.get("id"))
-    batch_id = str(state.get("batchId"))
-    run_id = str(state.get("runId"))
-    dependency = task.get("externalDependency")
-    dependency = dependency if isinstance(dependency, dict) else {}
-    completion_mode, file_changes, transient_files, no_change_why, supporting_files = (
-        _deferred_validation_implementation_context(feature_dir, task)
-    )
-    command = {
-        "id": "__external_dependency__",
-        "argv": ["external-dependency", "record"],
-        "cwd": ".",
-        "kind": "static_check",
-        "required": True,
-        "covers": [
-            str(item.get("id"))
-            for item in task.get("acceptanceCriteria", [])
-            if isinstance(item, dict) and isinstance(item.get("id"), str)
-        ],
-    }
-    record = _record_for_command(
-        feature=feature,
-        task=task,
-        run_id=run_id,
-        command=command,
-        exit_code=1,
-        completion_mode=completion_mode,
-        file_changes=file_changes,
-        transient_validation_files=transient_files,
-        supporting_files=supporting_files,
-        no_change_why=no_change_why,
-        repository_id=None,
-    )
-    failure = {
-        "failedValidationTaskId": task_id,
-        "failedTaskId": task_id,
-        "failedCommandId": None,
-        "errorCategory": "external_dependency",
-        "diagnosticPaths": list(dependency.get("trackingRefs", [])),
-        "repairOwnerTaskIds": [],
-        "detail": (
-            f"External dependency remains owned by {dependency.get('owner', 'unknown')} "
-            f"in {dependency.get('system', 'unknown')}"
-        ),
-    }
-    record["validation"]["result"] = "blocked"
-    record["validation"]["failure"] = dict(failure)
-    record.update({
-        "validationTarget": "batch_final_snapshot",
-        "batchId": batch_id,
-        "batchSnapshotSha256": state.get("batchSnapshotSha256"),
-        "implementationRevision": task.get("implementationRevision", 0),
-        "latestImplementationEvidenceId": task.get("latestImplementationEvidenceId"),
-        "externalDependency": dict(dependency),
-    })
-    evidence = append_evidence(
-        feature_dir,
-        record,
-        output_tail=failure["detail"],
-        allow_during_task_validation=True,
-    )
-    evidence_id = str(evidence["evidenceId"])
-    issue = _validation_deferral_issue(
-        scope="task",
-        run_id=run_id,
-        batch_id=batch_id,
-        task_id=task_id,
-        command_id=None,
-        error_category="external_dependency",
-        reason="external_dependency",
-        repair_attempts=0,
-        max_repair_attempts=0,
-        evidence_ids=[evidence_id],
-        diagnostic_paths=list(dependency.get("trackingRefs", [])),
-    )
-    result = record_deferred_task_validation_deferral(
-        workspace, feature, batch_id, task_id, run_id, [evidence_id], issue
-    )
-    if not result.ok:
-        raise TaskRunnerError(
-            "external_dependency_plan_binding_failed",
-            planWriterErrors=result.errors or [],
-        )
-    existing_ids = [item for item in state.get("evidenceIds", []) if isinstance(item, str)]
-    state["evidenceIds"] = [*existing_ids, *(
-        [evidence_id] if evidence_id not in existing_ids else []
-    )]
-    state.setdefault("deferredIssues", []).append(issue)
-    state["completedTaskIds"] = [
-        *[item for item in state.get("completedTaskIds", []) if isinstance(item, str)],
-        task_id,
-    ]
-    data = result.data if isinstance(result.data, dict) else {}
-    next_task_id = data.get("nextTaskId")
-    if isinstance(next_task_id, str):
-        state.update({
-            "currentTaskId": next_task_id,
-            "status": "running",
-            "success": True,
-            "requiredAction": "continue_batch_task_validation",
-        })
-        _save_task_validation_run(path, state)
-        return state
-    state["currentTaskId"] = None
-    refreshed = load_plan_bundle(feature_dir)
-    batch_validation = refreshed.batches[batch_id].get("batchValidation")
-    mode = (
-        batch_validation.get("mode", "commands" if batch_validation.get("commands") else None)
-        if isinstance(batch_validation, dict)
-        else None
-    )
-    if mode == "task_covered":
-        state["batchCheck"] = _close_task_covered_batch_as_deferred(
-            workspace, feature, batch_id, run_id
-        )
-    else:
-        state["batchCheck"] = {
-            "requiredAction": "run_batch_check",
-            "activeBatchId": batch_id,
-            "mode": mode,
-            "activeRunId": (
-                batch_validation.get("activeRunId")
-                if isinstance(batch_validation, dict)
-                else None
-            ),
-        }
-    state.update({
-        "status": "done",
-        "success": True,
-        "validationOutcome": "passed_with_deferred",
-    })
-    _save_task_validation_run(path, state)
-    return state
 
 
-def _validate_deferred_task_unlocked(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    task_id: str,
-    code_workspace: Path | list[Path],
-    run_id: str,
-) -> tuple[bool, dict[str, Any]]:
-    feature_dir = _feature_dir(workspace, feature)
-    path, state = _load_task_validation_run(feature_dir, batch_id, run_id)
-    if state.get("status") in {"done", "failed"}:
-        return state.get("status") == "done", state
-    if state.get("currentTaskId") != task_id:
-        raise TaskRunnerError(
-            f"task_validation_out_of_order:expected={state.get('currentTaskId')};actual={task_id}"
-        )
-    bundle, actual_batch_id, task = _load_plan_and_task(
-        feature_dir,
-        task_id,
-        require_active_batch=False,
-    )
-    if actual_batch_id != batch_id or not deferred_task_validation_enabled(bundle.root):
-        raise TaskRunnerError(f"task_validation_contract_mismatch:{task_id}")
-    plan_batch = bundle.batches.get(batch_id)
-    plan_task_validation = (
-        plan_batch.get("taskValidation") if isinstance(plan_batch, dict) else None
-    )
-    expected_contract = state.get("taskContractSha256ByTask", {}).get(task_id)
-    if expected_contract != task_contract_sha256(task):
-        raise TaskRunnerError(f"task_contract_changed_after_validation_start:{task_id}")
-    requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
-    if len(requested_workspaces) != 1:
-        raise TaskRunnerError(
-            "batch_task_validation_requires_single_code_workspace",
-            batchId=batch_id,
-            requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
-        )
-    repositories = _resolve_repositories(requested_workspaces)
-    _assert_repositories_match(state, repositories)
-    scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
-    _assert_workspace_ref_matches(task.get("workspaceRef"), scope_workspaces, contract_name=task_id)
-    if [str(workspace_path.resolve()) for workspace_path in requested_workspaces] != state.get(
-        "requestedCodeWorkspaces"
-    ):
-        raise TaskRunnerError("task_validation_workspace_mismatch")
-    current_repository_state = _repository_state(repositories)
-    current_snapshot_sha256 = _repository_state_sha256(current_repository_state)
-    expected_snapshot_sha256 = state.get("batchSnapshotSha256")
-    workspace_changed = current_snapshot_sha256 != expected_snapshot_sha256
-    recovering_passed_plan = (
-        isinstance(plan_task_validation, dict)
-        and plan_task_validation.get("status") == "passed"
-        and plan_task_validation.get("lastRunId") == run_id
-    )
-    if workspace_changed and recovering_passed_plan:
-        raise TaskRunnerError(
-            "task_validation_workspace_changed_after_pass",
-            requiredAction="restore_batch_snapshot_and_retry_same_run",
-            runId=run_id,
-            expectedBatchSnapshotSha256=expected_snapshot_sha256,
-            currentBatchSnapshotSha256=current_snapshot_sha256,
-        )
-    if workspace_changed:
-        file_changes, _ = _repository_changes(state, repositories)
-        diagnostic_paths = _changed_files(file_changes)
-        failure = {
-            "failedValidationTaskId": task_id,
-            "failedTaskId": task_id,
-            "failedCommandId": None,
-            "errorCategory": "workspace_changed",
-            "diagnosticPaths": diagnostic_paths,
-            "repairOwnerTaskIds": _validation_repair_owner_task_ids(
-                feature_dir,
-                plan_batch,
-                task_id,
-                diagnostic_paths,
-            ),
-        }
-        state["repairState"] = _validation_repair_state(bundle.root, task)
-        _fail_deferred_validation_for_workspace_change(
-            workspace,
-            feature,
-            batch_id,
-            task_id,
-            state,
-            path,
-            failure,
-        )
-        raise TaskRunnerError(
-            "task_validation_workspace_changed",
-            requiredAction="start_validation_repair",
-            runType=TASK_VALIDATION_RUN_TYPE,
-            runId=run_id,
-            batchId=batch_id,
-            evidenceIds=state.get("evidenceIds", []),
-            batchSnapshotSha256=state.get("batchSnapshotSha256"),
-            allowedCommands=TASK_VALIDATION_FAILED_COMMANDS,
-            **failure,
-        )
-    if (
-        recovering_passed_plan
-    ):
-        batch_validation = plan_batch.get("batchValidation") if isinstance(plan_batch, dict) else None
-        mode = (
-            batch_validation.get("mode", "commands" if batch_validation.get("commands") else None)
-            if isinstance(batch_validation, dict)
-            else None
-        )
-        if mode == "task_covered" and batch_validation.get("status") != "passed":
-            state["batchCheck"] = _close_task_covered_batch(
-                workspace,
-                feature,
-                batch_id,
-                run_id,
-            )
-        elif mode == "commands":
-            state["batchCheck"] = {
-                "requiredAction": "run_batch_check",
-                "activeBatchId": batch_id,
-                "mode": mode,
-                "activeRunId": batch_validation.get("activeRunId"),
-            }
-        state.update({"status": "done", "success": True, "currentTaskId": None})
-        _save_task_validation_run(path, state)
-        return True, state
-    # Adoption is batch-wide: an earlier logical task may already have received
-    # evidence from the shared physical execution.
-    for batch_task in plan_batch.get("tasks", []):
-        if isinstance(batch_task, dict):
-            _adopt_deferred_validation_evidence(feature_dir, state, batch_task)
-    _save_task_validation_run(path, state)
-    if task_execution_mode(task) == "external_dependency":
-        return True, _defer_external_dependency_task(
-            workspace,
-            feature,
-            feature_dir,
-            task,
-            state,
-            path,
-        )
-    for command in task.get("validationCommands", []):
-        if not isinstance(command, dict) or not isinstance(command.get("id"), str):
-            continue
-        group = _validation_group_for_command(state, task_id, command["id"])
-        completed = state.get("completedCommandEvidence", {})
-        task_completed = completed.get(task_id) if isinstance(completed, dict) else None
-        if (
-            isinstance(task_completed, dict)
-            and command["id"] in task_completed
-            and _validation_group_evidence_complete(state, group)
-        ):
-            continue
-        try:
-            shared_execution_id, physical_exit_code, output, logical_results = (
-                _run_deferred_validation_group(
-                    group,
-                    repositories,
-                    run_id=run_id,
-                    batch_id=batch_id,
-                    task_id=task_id,
-                )
-            )
-        except TaskRunnerError as exc:
-            if exc.details.get("errorCategory") != "environment_failure":
-                raise
-            if code_validation_fail_strategy(bundle.root) != "repair_then_defer":
-                raise
-            failure = {
-                **exc.details,
-                "diagnosticPaths": list(exc.details.get("diagnosticPaths", [])),
-                "validationFailures": list(exc.details.get("validationFailures", [])),
-            }
-            deferred_state = _defer_deferred_task_validation(
-                workspace,
-                feature,
-                feature_dir,
-                plan_batch,
-                task,
-                command,
-                repositories,
-                state,
-                path,
-                failure,
-            )
-            return True, deferred_state
-        if _repository_state_sha256(_repository_state(repositories)) != state.get("batchSnapshotSha256"):
-            file_changes, _ = _repository_changes(state, repositories)
-            diagnostic_paths = _changed_files(file_changes)
-            workspace_failure = {
-                "failedValidationTaskId": task_id,
-                "failedTaskId": task_id,
-                "failedCommandId": command.get("id"),
-                "errorCategory": "workspace_changed",
-                "diagnosticPaths": diagnostic_paths,
-                "repairOwnerTaskIds": _validation_repair_owner_task_ids(
-                    feature_dir, plan_batch, task_id, diagnostic_paths
-                ),
-            }
-            _fail_deferred_validation_for_workspace_change(
-                workspace, feature, batch_id, task_id, state, path, workspace_failure
-            )
-            raise TaskRunnerError(
-                f"validation_modified_workspace:{command.get('id')}",
-                requiredAction="restore_batch_snapshot_before_validation_repair",
-                runType=TASK_VALIDATION_RUN_TYPE,
-                runId=run_id,
-                batchId=batch_id,
-                evidenceIds=state.get("evidenceIds", []),
-                batchSnapshotSha256=state.get("batchSnapshotSha256"),
-                allowedCommands=TASK_VALIDATION_FAILED_COMMANDS,
-                **workspace_failure,
-            )
-        _record_deferred_validation_group(
-            feature_dir, plan_batch, state, path, group,
-            shared_execution_id, physical_exit_code, output, logical_results, repositories
-        )
 
-    completed = state.get("completedCommandEvidence", {})
-    completed = completed.get(task_id, {}) if isinstance(completed, dict) else {}
-    completed = completed if isinstance(completed, dict) else {}
-    evidence_ids = [
-        str(item.get("evidenceId"))
-        for item in completed.values()
-        if isinstance(item, dict) and isinstance(item.get("evidenceId"), str)
-    ]
-    pass_evidence_ids = [
-        str(item.get("evidenceId"))
-        for item in completed.values()
-        if isinstance(item, dict) and isinstance(item.get("evidenceId"), str)
-        and item.get("result") == "pass" and item.get("required") is True
-    ]
-    required_failed = any(
-        isinstance(item, dict) and item.get("required") is True and item.get("result") != "pass"
-        for item in completed.values()
-    )
-    failure = next(
-        (item.get("failure") for item in completed.values()
-         if isinstance(item, dict) and isinstance(item.get("failure"), dict)),
-        None,
-    )
 
-    success = not required_failed
-    result = record_deferred_task_validation_attempt(
-        workspace,
-        feature,
-        batch_id,
-        task_id,
-        run_id,
-        evidence_ids,
-        completion_evidence_ids=pass_evidence_ids if success else [],
-        success=success,
-        batch_snapshot_sha256=str(state.get("batchSnapshotSha256")),
-        failure=failure,
-    )
-    if not result.ok:
-        raise TaskRunnerError(
-            "task_validation_plan_binding_failed",
-            planWriterErrors=result.errors or [],
-        )
-    if not success:
-        failure = failure or {
-            "failedValidationTaskId": task_id,
-            "failedTaskId": task_id,
-            "failedCommandId": None,
-            "errorCategory": "behavior_test_failure",
-            "diagnosticPaths": [],
-            "repairOwnerTaskIds": [task_id],
-        }
-        max_repairs = code_validation_max_repair_attempts(bundle.root)
-        repair_attempts = int(task.get("validationRepairAttempts", 0))
-        if (
-            repair_attempts >= max_repairs
-            and code_validation_fail_strategy(bundle.root) == "repair_then_defer"
-        ):
-            deferred_state = _defer_deferred_task_validation(
-                workspace,
-                feature,
-                feature_dir,
-                plan_batch,
-                task,
-                next(
-                    (
-                        item
-                        for item in task.get("validationCommands", [])
-                        if isinstance(item, dict)
-                        and item.get("id") == failure.get("failedCommandId")
-                    ),
-                    next(
-                        (item for item in task.get("validationCommands", []) if isinstance(item, dict)),
-                        {},
-                    ),
-                ),
-                repositories,
-                state,
-                path,
-                failure,
-                attempt_evidence_ids=evidence_ids,
-            )
-            return True, deferred_state
-        state.update({
-            "status": "failed",
-            "success": False,
-            "repairState": _validation_repair_state(bundle.root, task),
-            **failure,
-        })
-        _save_task_validation_run(path, state)
-        return False, state
 
-    data = result.data if isinstance(result.data, dict) else {}
-    next_task_id = data.get("nextTaskId")
-    if isinstance(next_task_id, str):
-        state["currentTaskId"] = next_task_id
-        state["completedTaskIds"] = [
-            *[item for item in state.get("completedTaskIds", []) if isinstance(item, str)],
-            task_id,
-        ]
-        _save_task_validation_run(path, state)
-        return True, state
 
-    state["completedTaskIds"] = list(state.get("taskOrder", []))
-    state["currentTaskId"] = None
-    refreshed = load_plan_bundle(feature_dir)
-    batch = refreshed.batches[batch_id]
-    refreshed_task_validation = batch.get("taskValidation")
-    has_deferred_tasks = (
-        isinstance(refreshed_task_validation, dict)
-        and refreshed_task_validation.get("status") == "passed_with_deferred"
-    )
-    batch_validation = batch.get("batchValidation")
-    mode = (
-        batch_validation.get("mode", "commands" if batch_validation.get("commands") else None)
-        if isinstance(batch_validation, dict)
-        else None
-    )
-    if mode == "task_covered":
-        closure = (
-            _close_task_covered_batch_as_deferred(workspace, feature, batch_id, run_id)
-            if has_deferred_tasks
-            else _close_task_covered_batch(workspace, feature, batch_id, run_id)
-        )
-        state["batchCheck"] = closure
-        if isinstance(closure.get("closureEvidenceId"), str):
-            state["batchClosureEvidenceId"] = closure["closureEvidenceId"]
-    else:
-        state["batchCheck"] = {
-            "requiredAction": "run_batch_check",
-            "activeBatchId": batch_id,
-            "mode": mode,
-            "activeRunId": (
-                batch_validation.get("activeRunId") if isinstance(batch_validation, dict) else None
-            ),
-        }
-    state.update({
-        "status": "done",
-        "success": True,
-        **({"validationOutcome": "passed_with_deferred"} if has_deferred_tasks else {}),
-    })
-    _save_task_validation_run(path, state)
-    return True, state
 
 
-def _task_covered_closure_record(
-    *,
-    feature: str,
-    batch_id: str,
-    run_id: str,
-    coverage_command_ids: list[str],
-    source_evidence_ids: list[str],
-) -> dict[str, Any]:
-    return {
-        "featureId": feature,
-        "checkpoint": "code_in_progress",
-        "nodeId": "dev.code",
-        "skill": "autodev-code",
-        "taskId": "__batch__",
-        "batchId": batch_id,
-        "action": "batch_closure",
-        "runId": run_id,
-        "summary": f"{batch_id} covered by current task validation evidence",
-        "specRefs": [],
-        "designRefs": [],
-        "changedFiles": [],
-        "coverage": {
-            "mode": "task_covered",
-            "commandIds": coverage_command_ids,
-            "sourceEvidenceIds": source_evidence_ids,
-            "result": "pass",
-        },
-    }
 
 
-def _close_task_covered_batch(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    run_id: str,
-) -> dict[str, Any]:
-    feature_dir = _feature_dir(workspace, feature)
-    bundle = load_plan_bundle(feature_dir)
-    batch = bundle.batches.get(batch_id)
-    if not isinstance(batch, dict):
-        raise TaskRunnerError(f"batch_not_found:{batch_id}")
-    if deferred_task_validation_enabled(bundle.root):
-        task_validation = batch.get("taskValidation")
-        if not isinstance(task_validation, dict) or not task_validation_terminal(
-            task_validation.get("status")
-        ):
-            raise TaskRunnerError(
-                f"batch_check_requires_task_validation_passed:{batch_id}",
-                requiredAction="run_batch_task_validation",
-            )
-    validation = batch.get("batchValidation")
-    if not isinstance(validation, dict) or validation.get("mode") != "task_covered":
-        raise TaskRunnerError(f"batch_validation_mode_mismatch:{batch_id}")
-    coverage_command_ids = [
-        item for item in validation.get("coverageCommandIds", []) if isinstance(item, str)
-    ]
-    records = read_records(stream_path(feature_dir))
-    by_id = {
-        str(record.get("evidenceId")): record
-        for record in records
-        if isinstance(record.get("evidenceId"), str)
-    }
-    source_by_command: dict[str, str] = {}
-    for task in batch.get("tasks", []):
-        if not isinstance(task, dict):
-            continue
-        for evidence_id in task.get("completionEvidenceIds", []):
-            record = by_id.get(str(evidence_id))
-            command = record.get("validation") if isinstance(record, dict) else None
-            command_id = command.get("commandId") if isinstance(command, dict) else None
-            if command_id in coverage_command_ids and isinstance(evidence_id, str):
-                source_by_command[str(command_id)] = evidence_id
-    missing = [command_id for command_id in coverage_command_ids if command_id not in source_by_command]
-    if missing:
-        raise TaskRunnerError("task_covered_evidence_missing:" + ",".join(missing))
-    source_evidence_ids = [source_by_command[command_id] for command_id in coverage_command_ids]
-    existing = next(
-        (
-            record
-            for record in records
-            if record.get("action") == "batch_closure"
-            and record.get("taskId") == "__batch__"
-            and record.get("batchId") == batch_id
-            and record.get("runId") == run_id
-        ),
-        None,
-    )
-    if existing is None:
-        evidence = append_evidence(
-            feature_dir,
-            _task_covered_closure_record(
-                feature=feature,
-                batch_id=batch_id,
-                run_id=run_id,
-                coverage_command_ids=coverage_command_ids,
-                source_evidence_ids=source_evidence_ids,
-            ),
-        )
-    else:
-        coverage = existing.get("coverage")
-        if not isinstance(coverage, dict) or coverage.get("commandIds") != coverage_command_ids or coverage.get(
-            "sourceEvidenceIds"
-        ) != source_evidence_ids:
-            raise TaskRunnerError(f"batch_closure_evidence_mismatch:{batch_id}")
-        evidence = existing
-    evidence_id = evidence.get("evidenceId")
-    if not isinstance(evidence_id, str):
-        raise TaskRunnerError(f"batch_closure_evidence_invalid:{batch_id}")
-    result = record_task_covered_batch(
-        workspace,
-        feature,
-        batch_id,
-        evidence_id,
-        run_id=run_id,
-    )
-    if not result.ok:
-        raise TaskRunnerError("batch_closure_plan_binding_failed")
-    handoff = result.data.get("batchHandoff") if isinstance(result.data, dict) else None
-    refreshed = load_plan_bundle(feature_dir)
-    project_commands = refreshed.root.get("projectValidationCommands")
-    required_action = (
-        handoff.get("requiredAction")
-        if isinstance(handoff, dict)
-        else "run_project_check"
-        if isinstance(project_commands, list) and project_commands
-        else "code_done_ready"
-    )
-    return {
-        "mode": "task_covered",
-        "requiredAction": required_action,
-        "activeBatchId": None,
-        "closureEvidenceId": evidence_id,
-        **({"batchHandoff": handoff} if isinstance(handoff, dict) else {}),
-    }
 
 
-def _record_for_batch_command(
-    *,
-    feature: str,
-    batch_id: str,
-    run_id: str,
-    command: dict[str, Any],
-    exit_code: int,
-    file_changes: list[dict[str, str]],
-    repository_id: str | None,
-) -> dict[str, Any]:
-    changed_files = _changed_files(file_changes)
-    result = "pass" if exit_code == 0 else "fail"
-    no_code_change = not file_changes
-    return {
-        "featureId": feature,
-        "checkpoint": "code_in_progress",
-        "nodeId": "dev.code",
-        "skill": "autodev-code",
-        "taskId": "__batch__",
-        "batchId": batch_id,
-        "action": "batch_validation",
-        "detailVersion": 2,
-        "runId": run_id,
-        "completionMode": "verified_existing" if no_code_change else "implemented",
-        "summary": f"{command.get('id')} batch validation {result}",
-        "implementation": {
-            "noCodeChange": no_code_change,
-            "whatChanged": [] if no_code_change else changed_files,
-            "why": (
-                "Batch-level checks validate the completed workspace without changing files"
-                if no_code_change
-                else "Changes repair the failed batch validation"
-            ),
-        },
-        "specRefs": [],
-        "designRefs": [],
-        "changedFiles": changed_files,
-        "fileChanges": file_changes,
-        "transientValidationFiles": [],
-        "supportingFiles": [],
-        "checkedCriteria": [str(command.get("id"))],
-        "validation": {
-            "commandId": command.get("id"),
-            "argv": command.get("argv"),
-            "command": " ".join(str(item) for item in command.get("argv", [])),
-            "cwd": command.get("cwd"),
-            "kind": command.get("kind"),
-            "required": command.get("required"),
-            **({"repo": repository_id} if repository_id else {}),
-            "exitCode": exit_code,
-            "result": result,
-        },
-    }
 
 
-def _affected_tasks_for_batch_changes(
-    batch: dict[str, Any],
-    file_changes: list[dict[str, str]],
-    requested_workspaces: list[Path],
-    repositories: RepositoryMap,
-) -> list[str]:
-    changed_paths = _changed_files(file_changes)
-    if not changed_paths:
-        return []
-    scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
-    if not _paths_within_workspace_contexts(changed_paths, scope_workspaces):
-        outside = [
-            path
-            for path in changed_paths
-            if not _paths_within_workspace_contexts([path], scope_workspaces)
-        ]
-        raise TaskRunnerError(
-            "batch_fix_outside_workspace:" + ",".join(sorted(set(outside))),
-            requiredAction="fix_workspace_and_retry_same_batch_run",
-            changedFiles=changed_paths,
-        )
-    batch_task_ids: list[str] = []
-    for task in batch.get("tasks", []):
-        if not isinstance(task, dict) or not isinstance(task.get("id"), str):
-            continue
-        task_id = str(task["id"])
-        batch_task_ids.append(task_id)
-    # A batch is validated against one final workspace snapshot. Without a
-    # hard path allowlist, any repair change can affect the whole batch and
-    # must conservatively trigger full TASK revalidation.
-    return batch_task_ids
 
 
-def _load_batch_run(feature_dir: Path, batch_id: str, run_id: str) -> tuple[Path, dict[str, Any]]:
-    path = _batch_run_path(feature_dir, batch_id, run_id)
-    if not path.is_file():
-        raise TaskRunnerError(f"batch_run_not_found:{run_id}")
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise TaskRunnerError(f"invalid_batch_run:{run_id}") from exc
-    if not isinstance(state, dict) or state.get("batchId") != batch_id:
-        raise TaskRunnerError(f"invalid_batch_run:{run_id}")
-    return path, state
 
 
-def _active_batch_run_ids(feature_dir: Path, batch_id: str) -> list[str]:
-    active: list[str] = []
-    for path in (feature_dir / ".batch-runs" / batch_id).glob("*.json"):
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if (
-            isinstance(state, dict)
-            and state.get("batchId") == batch_id
-            and state.get("status") not in {"done", "failed", "aborted"}
-        ):
-            run_id = state.get("runId")
-            active.append(run_id if isinstance(run_id, str) else path.stem)
-    return sorted(set(active))
 
 
-def _batch_record_matches_attempt(
-    record: dict[str, Any],
-    *,
-    state: dict[str, Any],
-    command: dict[str, Any],
-) -> None:
-    evidence_id = str(record.get("evidenceId", ""))
-    if (
-        record.get("action") != "batch_validation"
-        or record.get("taskId") != "__batch__"
-        or record.get("batchId") != state.get("batchId")
-        or record.get("runId") != state.get("runId")
-    ):
-        raise TaskRunnerError(f"batch_run_evidence_identity_mismatch:{evidence_id}")
-    validation = record.get("validation")
-    command_id = command.get("id")
-    if not isinstance(validation, dict) or validation.get("commandId") != command_id:
-        raise TaskRunnerError(f"batch_run_evidence_command_mismatch:{command_id}:id")
-    for field in ("argv", "cwd", "kind", "required", "repo"):
-        if validation.get(field) != command.get(field):
-            raise TaskRunnerError(f"batch_run_evidence_command_mismatch:{command_id}:{field}")
-    expected_file_changes = state.get("attemptFileChanges", [])
-    if record.get("fileChanges") != expected_file_changes:
-        raise TaskRunnerError(f"batch_run_evidence_file_changes_mismatch:{evidence_id}")
-    if record.get("changedFiles") != _changed_files(expected_file_changes):
-        raise TaskRunnerError(f"batch_run_evidence_changed_files_mismatch:{evidence_id}")
 
 
-def _adopt_streamed_batch_evidence(
-    feature_dir: Path,
-    state: dict[str, Any],
-    commands: list[dict[str, Any]],
-) -> None:
-    evidence_path = stream_path(feature_dir)
-    if not evidence_path.is_file():
-        return
-    planned = {
-        str(command.get("id")): command
-        for command in commands
-        if isinstance(command.get("id"), str)
-    }
-    completed = (
-        dict(state.get("completedCommandEvidence"))
-        if isinstance(state.get("completedCommandEvidence"), dict)
-        else {}
-    )
-    historical_ids = set(state.get("evidenceIds", [])) if isinstance(state.get("evidenceIds"), list) else set()
-    attempt_ids = (
-        list(state.get("attemptEvidenceIds"))
-        if isinstance(state.get("attemptEvidenceIds"), list)
-        else []
-    )
-    for record in read_records(evidence_path):
-        if (
-            record.get("action") != "batch_validation"
-            or record.get("batchId") != state.get("batchId")
-            or record.get("runId") != state.get("runId")
-        ):
-            continue
-        evidence_id = record.get("evidenceId")
-        if not isinstance(evidence_id, str) or evidence_id in historical_ids or evidence_id in attempt_ids:
-            continue
-        validation = record.get("validation")
-        command_id = validation.get("commandId") if isinstance(validation, dict) else None
-        if not isinstance(command_id, str) or command_id not in planned:
-            raise TaskRunnerError(f"streamed_batch_evidence_unplanned_command:{command_id}")
-        if command_id in completed:
-            raise TaskRunnerError(f"duplicate_batch_run_command_evidence:{command_id}")
-        command = planned[command_id]
-        _batch_record_matches_attempt(record, state=state, command=command)
-        completed[command_id] = {
-            "evidenceId": evidence_id,
-            "result": validation.get("result"),
-            "required": validation.get("required"),
-            **(
-                {"failure": dict(validation["failure"])}
-                if isinstance(validation.get("failure"), dict)
-                else {}
-            ),
-        }
-        attempt_ids.append(evidence_id)
-    state["completedCommandEvidence"] = completed
-    state["attemptEvidenceIds"] = attempt_ids
 
-
-def _validate_batch_attempt_evidence(
-    feature_dir: Path,
-    state: dict[str, Any],
-    commands: list[dict[str, Any]],
-) -> None:
-    records = {
-        str(record.get("evidenceId")): record
-        for record in read_records(stream_path(feature_dir))
-        if isinstance(record.get("evidenceId"), str)
-    }
-    planned = {
-        str(command.get("id")): command
-        for command in commands
-        if isinstance(command.get("id"), str)
-    }
-    completed = state.get("completedCommandEvidence")
-    if not isinstance(completed, dict):
-        raise TaskRunnerError("batch_run_completed_commands_missing")
-    for command_id, attempt in completed.items():
-        if command_id not in planned or not isinstance(attempt, dict):
-            raise TaskRunnerError(f"invalid_batch_completed_command:{command_id}")
-        evidence_id = attempt.get("evidenceId")
-        record = records.get(str(evidence_id))
-        if not isinstance(record, dict):
-            raise TaskRunnerError(f"batch_run_evidence_missing:{evidence_id}")
-        _batch_record_matches_attempt(record, state=state, command=planned[command_id])
-
-
-def _defer_batch_validation_run(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    feature_dir: Path,
-    path: Path,
-    state: dict[str, Any],
-    command: dict[str, Any],
-    repositories: RepositoryMap,
-    failure: dict[str, Any],
-) -> tuple[bool, dict[str, Any]]:
-    run_id = str(state.get("runId"))
-    file_changes = list(state.get("attemptFileChanges", []))
-    repository_id, _ = _command_repository(command, repositories)
-    record = _record_for_batch_command(
-        feature=feature,
-        batch_id=batch_id,
-        run_id=run_id,
-        command=command,
-        exit_code=1,
-        file_changes=file_changes,
-        repository_id=(
-            repository_id if len(repositories) > 1 or command.get("repo") else None
-        ),
-    )
-    record["validation"]["result"] = "blocked"
-    record["validation"]["failure"] = dict(failure)
-    output = str(failure.get("detail") or failure.get("userMessage") or "validation deferred")
-    evidence = append_evidence(feature_dir, record, output_tail=output)
-    evidence_id = str(evidence["evidenceId"])
-    bundle = load_plan_bundle(feature_dir)
-    max_repairs = code_validation_max_repair_attempts(bundle.root)
-    issue = _validation_deferral_issue(
-        scope="batch",
-        run_id=run_id,
-        batch_id=batch_id,
-        task_id=None,
-        command_id=str(command.get("id")) if command.get("id") is not None else None,
-        error_category=str(failure.get("errorCategory") or "validation_contract_failure"),
-        failure_category=(
-            str(failure.get("failureCategory"))
-            if failure.get("failureCategory") is not None
-            else None
-        ),
-        reason=(
-            "environment_failure"
-            if failure.get("errorCategory") == "environment_failure"
-            else "repair_attempts_exhausted"
-        ),
-        repair_attempts=max(0, len(state.get("attempts", [])) - 1),
-        max_repair_attempts=max_repairs,
-        evidence_ids=[evidence_id],
-        diagnostic_paths=list(failure.get("diagnosticPaths", [])),
-    )
-    result = record_batch_validation_deferral(
-        workspace, feature, batch_id, [evidence_id], run_id=run_id, issue=issue
-    )
-    if not result.ok:
-        raise TaskRunnerError(
-            "batch_validation_deferral_plan_binding_failed",
-            planWriterErrors=result.errors or [],
-        )
-    handoff = result.data.get("batchHandoff") if isinstance(result.data, dict) else None
-    state["evidenceIds"] = [
-        *[item for item in state.get("evidenceIds", []) if isinstance(item, str)],
-        evidence_id,
-    ]
-    state.update({
-        "status": "done",
-        "success": True,
-        "validationOutcome": "deferred",
-        "deferredIssue": issue,
-        "requiredAction": (
-            handoff.get("requiredAction")
-            if isinstance(handoff, dict)
-            else "run_project_check"
-            if bundle.root.get("projectValidationCommands")
-            else "code_done_ready"
-        ),
-    })
-    if isinstance(handoff, dict):
-        state["batchHandoff"] = handoff
-    state.pop("pendingBinding", None)
-    _save_run(path, state)
-    return True, state
-
-
-def _bind_batch_attempt(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    feature_dir: Path,
-    path: Path,
-    state: dict[str, Any],
-    commands: list[dict[str, Any]],
-) -> tuple[bool, dict[str, Any]]:
-    binding = state.get("pendingBinding")
-    if not isinstance(binding, dict):
-        raise TaskRunnerError("batch_run_pending_binding_missing")
-    _validate_batch_attempt_evidence(feature_dir, state, commands)
-    attempt_evidence_ids = list(binding.get("evidenceIds", []))
-    passing_evidence_ids = list(binding.get("passingEvidenceIds", []))
-    success = binding.get("result") == "pass"
-    affected_task_ids = [
-        str(task_id)
-        for task_id in binding.get("affectedTaskIds", [])
-        if isinstance(task_id, str)
-    ]
-    if success and affected_task_ids:
-        result = request_batch_revalidation(
-            workspace,
-            feature,
-            batch_id,
-            passing_evidence_ids,
-            affected_task_ids=affected_task_ids,
-            run_id=str(state.get("runId")),
-            attempt_evidence_ids=attempt_evidence_ids,
-        )
-        if not result.ok:
-            raise TaskRunnerError("batch_revalidation_plan_binding_failed")
-        state["status"] = "revalidation_required"
-        state["success"] = False
-        refreshed = load_plan_bundle(feature_dir)
-        deferred = deferred_task_validation_enabled(refreshed.root)
-        state["requiredAction"] = (
-            "run_batch_task_validation" if deferred else "revalidate_affected_tasks"
-        )
-        state["affectedTaskIds"] = (
-            [
-                str(task.get("id"))
-                for task in refreshed.batches.get(batch_id, {}).get("tasks", [])
-                if isinstance(task, dict)
-            ]
-            if deferred
-            else affected_task_ids
-        )
-        state["revalidationBaselineRepositories"] = state.get("finalRepositories", [])
-        state["triggeredByBatchEvidenceIds"] = passing_evidence_ids
-        state.pop("pendingBinding", None)
-        _save_run(path, state)
-        return True, state
-
-    refreshed_bundle = load_plan_bundle(feature_dir)
-    max_repairs = code_validation_max_repair_attempts(refreshed_bundle.root)
-    attempts = state.get("attempts") if isinstance(state.get("attempts"), list) else []
-    if (
-        not success
-        and len(attempts) >= max_repairs + 1
-        and code_validation_fail_strategy(refreshed_bundle.root) == "repair_then_defer"
-    ):
-        failed_command = next(
-            (
-                (command_id, attempt)
-                for command_id, attempt in state.get("completedCommandEvidence", {}).items()
-                if isinstance(attempt, dict)
-                and attempt.get("required") is True
-                and attempt.get("result") != "pass"
-            ),
-            None,
-        )
-        failed_command_id = failed_command[0] if failed_command is not None else None
-        failure = (
-            failed_command[1].get("failure")
-            if failed_command is not None and isinstance(failed_command[1].get("failure"), dict)
-            else {}
-        )
-        issue = _validation_deferral_issue(
-            scope="batch",
-            run_id=str(state.get("runId")),
-            batch_id=batch_id,
-            task_id=None,
-            command_id=str(failed_command_id) if failed_command_id is not None else None,
-            error_category=str(failure.get("errorCategory") or "validation_contract_failure"),
-            failure_category=(
-                str(failure.get("failureCategory"))
-                if failure.get("failureCategory") is not None
-                else None
-            ),
-            reason="repair_attempts_exhausted",
-            repair_attempts=max(0, len(attempts) - 1),
-            max_repair_attempts=max_repairs,
-            evidence_ids=attempt_evidence_ids,
-            diagnostic_paths=list(failure.get("diagnosticPaths", [])),
-            validation_failures=list(failure.get("validationFailures", [])),
-        )
-        result = record_batch_validation_deferral(
-            workspace,
-            feature,
-            batch_id,
-            attempt_evidence_ids,
-            run_id=str(state.get("runId")),
-            issue=issue,
-        )
-        if not result.ok:
-            raise TaskRunnerError("batch_validation_deferral_plan_binding_failed")
-        handoff = result.data.get("batchHandoff") if isinstance(result.data, dict) else None
-        state.update({
-            "status": "done",
-            "success": True,
-            "validationOutcome": "deferred",
-            "deferredIssue": issue,
-            "requiredAction": (
-                handoff.get("requiredAction")
-                if isinstance(handoff, dict)
-                else "run_project_check"
-                if refreshed_bundle.root.get("projectValidationCommands")
-                else "code_done_ready"
-            ),
-        })
-        if isinstance(handoff, dict):
-            state["batchHandoff"] = handoff
-        state.pop("pendingBinding", None)
-        _save_run(path, state)
-        return True, state
-
-    result = record_batch_validation_attempt(
-        workspace,
-        feature,
-        batch_id,
-        attempt_evidence_ids,
-        success=success,
-        run_id=str(state.get("runId")),
-        passing_evidence_ids=passing_evidence_ids,
-    )
-    if not result.ok:
-        raise TaskRunnerError("batch_validation_plan_binding_failed")
-    if isinstance(result.data, dict) and isinstance(result.data.get("batchHandoff"), dict):
-        state["batchHandoff"] = result.data["batchHandoff"]
-    state["status"] = "done" if success else "failed"
-    state["success"] = success
-    if success:
-        state.pop("affectedTaskIds", None)
-        state.pop("revalidationBaselineRepositories", None)
-        state.pop("triggeredByBatchEvidenceIds", None)
-    state["requiredAction"] = (
-        state.get("batchHandoff", {}).get("requiredAction")
-        if isinstance(state.get("batchHandoff"), dict)
-        else "batch_validation_passed" if success else "fix_batch_and_retry_same_run"
-    )
-    state.pop("pendingBinding", None)
-    _save_run(path, state)
-    return success, state
-
-
-def _run_batch_checks_unlocked(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    code_workspace: Path | list[Path],
-    run_id: str | None,
-) -> tuple[bool, dict[str, Any]]:
-    feature_dir = _feature_dir(workspace, feature)
-    recovery = recover_plan_write_transaction(workspace, feature)
-    if not recovery.ok:
-        reasons = ";".join(
-            str(error.get("reason", "unknown"))
-            for error in recovery.errors or []
-            if isinstance(error, dict)
-        )
-        raise TaskRunnerError(f"plan_write_transaction_recovery_failed:{reasons}")
-    try:
-        bundle = load_plan_bundle(feature_dir)
-    except ValueError as exc:
-        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
-    batch = bundle.batches.get(batch_id)
-    if not isinstance(batch, dict):
-        raise TaskRunnerError(f"batch_not_found:{batch_id}")
-    validation = batch.get("batchValidation")
-    if not isinstance(validation, dict):
-        raise TaskRunnerError(f"batch_validation_contract_missing:{batch_id}")
-    mode = validation.get("mode", "commands" if validation.get("commands") else None)
-    if mode != "commands":
-        raise TaskRunnerError(f"batch_check_not_required:{batch_id}:{mode}")
-    commands = [item for item in validation.get("commands", []) if isinstance(item, dict)]
-    if not commands or not any(command.get("required") is True for command in commands):
-        raise TaskRunnerError(f"batch_validation_commands_missing:{batch_id}")
-    commands_sha256 = _batch_commands_sha256(commands)
-
-    requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
-    if len(requested_workspaces) != 1:
-        raise TaskRunnerError(
-            "batch_check_requires_single_code_workspace",
-            batchId=batch_id,
-            requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
-        )
-    repositories = _resolve_repositories(requested_workspaces)
-    _assert_runtime_artifacts_ignored(repositories)
-    scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
-    batch_workspace_root_sets = {
-        tuple(sorted(task_workspace_roots(task).items()))
-        for task in batch.get("tasks", [])
-        if isinstance(task, dict) and task_workspace_roots(task)
-    }
-    batch_workspace_roots = (
-        dict(next(iter(batch_workspace_root_sets)))
-        if len(batch_workspace_root_sets) == 1
-        else {}
-    )
-    _assert_workspace_roots_match(
-        batch_workspace_roots,
-        scope_workspaces,
-        contract_name=batch_id,
-    )
-    for task in batch.get("tasks", []):
-        if isinstance(task, dict):
-            _assert_workspace_ref_matches(
-                task.get("workspaceRef"),
-                scope_workspaces,
-                contract_name=str(task.get("id")),
-            )
-    _assert_validation_command_workspaces(
-        commands,
-        batch_workspace_roots,
-        repositories,
-        contract_name=batch_id,
-    )
-    path: Path
-    if run_id is None:
-        if bundle.root.get("activeBatchId") != batch_id:
-            raise TaskRunnerError(f"batch_validation_not_active:{batch_id}")
-        unfinished = [
-            str(task.get("id"))
-            for task in batch.get("tasks", [])
-            if isinstance(task, dict) and normalize_status(task.get("status")) != "done"
-        ]
-        if unfinished:
-            raise TaskRunnerError("batch_validation_requires_tasks_done:" + ",".join(unfinished))
-        active_run_id = validation.get("activeRunId")
-        if isinstance(active_run_id, str):
-            raise TaskRunnerError(
-                f"active_batch_run_exists:{active_run_id}",
-                requiredAction="retry_same_batch_run",
-                runId=active_run_id,
-            )
-        orphaned_run_ids = _active_batch_run_ids(feature_dir, batch_id)
-        if len(orphaned_run_ids) > 1:
-            raise TaskRunnerError(
-                "multiple_active_batch_runs:" + ",".join(orphaned_run_ids),
-                requiredAction="inspect_batch_runs",
-                runIds=orphaned_run_ids,
-            )
-        if orphaned_run_ids:
-            orphaned_run_id = orphaned_run_ids[0]
-            raise TaskRunnerError(
-                f"active_batch_run_exists:{orphaned_run_id}",
-                requiredAction="retry_same_batch_run",
-                runId=orphaned_run_id,
-            )
-        run_id = _new_run_id()
-        repository_state = _repository_state(repositories)
-        state = {
-            "version": 1,
-            "runId": run_id,
-            "featureId": feature,
-            "batchId": batch_id,
-            "status": "started",
-            "commandsSha256": commands_sha256,
-            "commands": commands,
-            "codeWorkspace": str(next(iter(repositories.values()))),
-            "requestedCodeWorkspaces": [item["requestedPath"] for item in scope_workspaces],
-            "resolvedGitRoots": [item["resolvedGitRoot"] for item in scope_workspaces],
-            "scopePathBase": "requested_code_workspace",
-            "scopeWorkspaces": scope_workspaces,
-            "repositories": repository_state,
-            "snapshot": repository_state[0]["snapshot"],
-            "snapshotMode": "git_visible_file_content_sha256",
-            "startedAt": _utc_now(),
-            "attempts": [],
-            "evidenceIds": [],
-        }
-        path = _batch_run_path(feature_dir, batch_id, run_id)
-        _save_run(path, state)
-        started = start_batch_validation_run(workspace, feature, batch_id, run_id)
-        if not started.ok:
-            raise TaskRunnerError("batch_validation_start_binding_failed")
-    else:
-        path, state = _load_batch_run(feature_dir, batch_id, run_id)
-        if state.get("commandsSha256") != commands_sha256:
-            raise TaskRunnerError(f"batch_validation_commands_changed:{batch_id}")
-        _assert_repositories_match(state, repositories)
-        _assert_requested_workspaces_match(state, requested_workspaces, repositories)
-        if state.get("status") not in {"done", "evidence_written"} and validation.get("activeRunId") is None:
-            started = start_batch_validation_run(workspace, feature, batch_id, run_id)
-            if not started.ok:
-                raise TaskRunnerError("batch_validation_start_binding_failed")
-        if state.get("status") == "done":
-            return True, state
-        if state.get("status") == "evidence_written":
-            return _bind_batch_attempt(
-                workspace,
-                feature,
-                batch_id,
-                feature_dir,
-                path,
-                state,
-                commands,
-            )
-        if bundle.root.get("activeBatchId") != batch_id:
-            raise TaskRunnerError(f"batch_validation_not_active:{batch_id}")
-        unfinished = [
-            str(task.get("id"))
-            for task in batch.get("tasks", [])
-            if isinstance(task, dict) and normalize_status(task.get("status")) != "done"
-        ]
-        if unfinished:
-            raise TaskRunnerError("batch_validation_requires_tasks_done:" + ",".join(unfinished))
-
-    if state.get("status") != "validation_running":
-        file_changes, _ = _repository_changes(state, repositories)
-        revalidation_baseline = state.get("revalidationBaselineRepositories")
-        if isinstance(revalidation_baseline, list) and revalidation_baseline:
-            relevant_changes, _ = _repository_changes(
-                {"repositories": revalidation_baseline},
-                repositories,
-            )
-        else:
-            relevant_changes = file_changes
-        affected_task_ids = _affected_tasks_for_batch_changes(
-            batch,
-            relevant_changes,
-            requested_workspaces,
-            repositories,
-        )
-        validation_snapshot = _repository_state(repositories)
-        state.update(
-            {
-                "status": "validation_running",
-                "attemptNumber": len(state.get("attempts", [])) + 1,
-                "attemptFileChanges": file_changes,
-                "attemptAffectedTaskIds": affected_task_ids,
-                "attemptRepositories": validation_snapshot,
-                "attemptEvidenceIds": [],
-                "completedCommandEvidence": {},
-            }
-        )
-        _save_run(path, state)
-    else:
-        validation_snapshot = state.get("attemptRepositories")
-        if not isinstance(validation_snapshot, list) or not _repository_snapshots_match(
-            validation_snapshot,
-            _repository_state(repositories),
-        ):
-            raise TaskRunnerError("batch_run_workspace_changed_after_validation_started")
-        file_changes = list(state.get("attemptFileChanges", []))
-        affected_task_ids = list(state.get("attemptAffectedTaskIds", []))
-
-    _adopt_streamed_batch_evidence(feature_dir, state, commands)
-    _save_run(path, state)
-    completed_commands = state.get("completedCommandEvidence")
-    completed_commands = completed_commands if isinstance(completed_commands, dict) else {}
-    multiple_repositories = len(repositories) > 1
-    for command in commands:
-        command_id = str(command.get("id", ""))
-        if command_id in completed_commands:
-            continue
-        repository_id, _ = _command_repository(command, repositories)
-        try:
-            exit_code, output = _run_validation(
-                command,
-                repositories,
-                run_id=run_id,
-                batch_id=batch_id,
-            )
-        except TaskRunnerError as exc:
-            if exc.details.get("errorCategory") != "environment_failure":
-                raise
-            if code_validation_fail_strategy(bundle.root) != "repair_then_defer":
-                raise
-            return _defer_batch_validation_run(
-                workspace,
-                feature,
-                batch_id,
-                feature_dir,
-                path,
-                state,
-                command,
-                repositories,
-                exc.details,
-            )
-        if not _repository_snapshots_match(validation_snapshot, _repository_state(repositories)):
-            raise TaskRunnerError(f"batch_validation_modified_workspace:{command.get('id', '')}")
-        record = _record_for_batch_command(
-            feature=feature,
-            batch_id=batch_id,
-            run_id=run_id,
-            command=command,
-            exit_code=exit_code,
-            file_changes=file_changes,
-            repository_id=repository_id if multiple_repositories or command.get("repo") else None,
-        )
-        failure: dict[str, Any] | None = None
-        if exit_code != 0:
-            diagnostic_paths = _validation_diagnostic_paths(output, command, repositories)
-            failure = {
-                "failedCommandId": command_id,
-                "errorCategory": _validation_error_category(command, output, diagnostic_paths),
-                "diagnosticPaths": diagnostic_paths,
-            }
-            record["validation"]["failure"] = dict(failure)
-        evidence = append_evidence(feature_dir, record, output_tail=output)
-        evidence_id = str(evidence["evidenceId"])
-        completed_commands[command_id] = {
-            "evidenceId": evidence_id,
-            "result": "pass" if exit_code == 0 else "fail",
-            "required": command.get("required"),
-            **({"failure": failure} if failure is not None else {}),
-        }
-        state["completedCommandEvidence"] = completed_commands
-        state["attemptEvidenceIds"] = [
-            str(completed_commands[str(item.get("id"))]["evidenceId"])
-            for item in commands
-            if str(item.get("id")) in completed_commands
-        ]
-        _save_run(path, state)
-
-    attempt_evidence_ids = list(state.get("attemptEvidenceIds", []))
-    passing_evidence_ids = [
-        str(attempt.get("evidenceId"))
-        for attempt in completed_commands.values()
-        if isinstance(attempt, dict)
-        and attempt.get("result") == "pass"
-        and attempt.get("required") is True
-    ]
-    success = not any(
-        isinstance(attempt, dict)
-        and attempt.get("required") is True
-        and attempt.get("result") != "pass"
-        for attempt in completed_commands.values()
-    )
-    evidence_history = state.get("evidenceIds") if isinstance(state.get("evidenceIds"), list) else []
-    state["evidenceIds"] = [
-        *evidence_history,
-        *(evidence_id for evidence_id in attempt_evidence_ids if evidence_id not in evidence_history),
-    ]
-    attempts = state.get("attempts") if isinstance(state.get("attempts"), list) else []
-    attempts.append(
-        {
-            "attempt": len(attempts) + 1,
-            "evidenceIds": attempt_evidence_ids,
-            "passingEvidenceIds": passing_evidence_ids,
-            "result": "pass" if success else "fail",
-            "completedAt": _utc_now(),
-        }
-    )
-    state["attempts"] = attempts
-    state["finalRepositories"] = _repository_state(repositories)
-    state["success"] = success
-    state["status"] = "evidence_written"
-    state["pendingBinding"] = {
-        "result": "pass" if success else "fail",
-        "evidenceIds": attempt_evidence_ids,
-        "passingEvidenceIds": passing_evidence_ids if success else [],
-        "affectedTaskIds": affected_task_ids if success else [],
-    }
-    _save_run(path, state)
-    return _bind_batch_attempt(
-        workspace,
-        feature,
-        batch_id,
-        feature_dir,
-        path,
-        state,
-        commands,
-    )
-
-
-def run_batch_checks(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    code_workspace: Path | list[Path],
-    run_id: str | None = None,
-) -> tuple[bool, dict[str, Any]]:
-    feature_dir = _feature_dir(workspace, feature)
-    with _task_run_lock(feature_dir):
-        return _run_batch_checks_unlocked(workspace, feature, batch_id, code_workspace, run_id)
 
 
 def _run_scope_paths(
@@ -5656,11 +2373,8 @@ def _paths_within_workspace_contexts(
 
 
 def _paths_within_requested_workspaces(paths: list[str], state: dict[str, Any]) -> bool:
-    # Legacy runs were rooted at the complete Git repository and did not
-    # persist workspace contexts. Preserve that contract while new runs keep
-    # the requested module boundary hard.
     if state.get("scopePathBase") != "requested_code_workspace":
-        return True
+        return False
     return _paths_within_workspace_contexts(paths, state.get("scopeWorkspaces"))
 
 
@@ -5737,14 +2451,14 @@ def _abort_task_unlocked(
     if file_changes and not force_with_changes:
         raise TaskRunnerError(
             "task_run_has_unrecorded_changes:" + ",".join(changed_files),
-            requiredAction="fix_workspace_and_retry_complete_or_force_abort",
+            requiredAction="fix_workspace_and_retry_finish_implementation_or_force_abort",
             changedFiles=changed_files,
             resolvedGitRoots=[str(item) for item in repositories.values()],
         )
     if file_changes and force_with_changes and not abort_why:
         raise TaskRunnerError(
             "abort_with_changes_requires_reason",
-            requiredAction="provide_abort_reason_or_retry_complete",
+            requiredAction="provide_abort_reason_or_retry_finish_implementation",
             changedFiles=changed_files,
         )
     state["status"] = "aborted"
@@ -5795,11 +2509,7 @@ def _resume_task_unlocked(
     path, state = _load_run(feature_dir, task_id, run_id)
     if state.get("status") != "aborted":
         raise TaskRunnerError(f"task_run_cannot_resume:{state.get('status')}")
-    if (
-        state.get("evidenceIds")
-        or state.get("completionEvidenceIds")
-        or state.get("completedCommandEvidence")
-    ):
+    if state.get("evidenceIds"):
         raise TaskRunnerError("task_run_cannot_resume_with_evidence")
     if state.get("taskContractSha256") != task_contract_sha256(task):
         raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
@@ -5846,224 +2556,6 @@ def _resume_task_unlocked(
     return state
 
 
-def _run_project_checks_unlocked(
-    workspace: Path,
-    feature: str,
-    code_workspace: Path | list[Path],
-) -> tuple[bool, list[str]]:
-    feature_dir = _feature_dir(workspace, feature)
-    try:
-        bundle = load_plan_bundle(feature_dir)
-    except ValueError as exc:
-        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
-    if unfinished := bundle_unfinished_tasks(bundle):
-        raise TaskRunnerError("project_check_requires_all_tasks_done:" + ",".join(unfinished))
-    if bundle.root.get("activeBatchId") is not None or bundle.root.get("nextBatchId") is not None:
-        raise TaskRunnerError("project_check_requires_all_batches_done")
-    if (feature_dir / "BATCH_HANDOFF.json").exists():
-        raise TaskRunnerError("project_check_blocked_by_batch_handoff")
-    repositories = _resolve_repositories(code_workspace)
-    project_commands = [
-        command
-        for command in bundle.root.get("projectValidationCommands", [])
-        if isinstance(command, dict)
-    ]
-    project_snapshot = _repository_state(repositories)
-    evidence_ids: list[str] = []
-    failed_evidence_ids: list[str] = []
-    current_failures: list[dict[str, Any]] = []
-    required_failed = False
-    run_id = _new_run_id()
-    for command in project_commands:
-        repository_id, _ = _command_repository(command, repositories)
-        try:
-            exit_code, output = _run_validation(
-                command,
-                repositories,
-                run_id=run_id,
-                retry_same_run=False,
-            )
-        except TaskRunnerError as exc:
-            if exc.details.get("errorCategory") != "environment_failure":
-                raise
-            if code_validation_fail_strategy(bundle.root) != "repair_then_defer":
-                raise
-            repository_id, _ = _command_repository(command, repositories)
-            record = {
-                "featureId": feature,
-                "checkpoint": "code_in_progress",
-                "nodeId": "dev.code",
-                "skill": "autodev-code",
-                "taskId": "__project__",
-                "action": "project_check",
-                "detailVersion": 2,
-                "runId": run_id,
-                "completionMode": "verified_existing",
-                "summary": f"{command.get('id')} project check deferred",
-                "implementation": {
-                    "noCodeChange": True,
-                    "whatChanged": [],
-                    "why": "Project validation environment was unavailable",
-                },
-                "specRefs": [],
-                "designRefs": [],
-                "changedFiles": [],
-                "fileChanges": [],
-                "supportingFiles": [],
-                "checkedCriteria": [str(command.get("id"))],
-                "validation": {
-                    "commandId": command.get("id"),
-                    "argv": command.get("argv"),
-                    "command": " ".join(str(item) for item in command.get("argv", [])),
-                    "cwd": command.get("cwd"),
-                    "kind": command.get("kind"),
-                    "required": command.get("required"),
-                    **({"repo": repository_id} if len(repositories) > 1 or command.get("repo") else {}),
-                    "exitCode": 1,
-                    "result": "blocked",
-                    "failure": dict(exc.details),
-                },
-            }
-            evidence = append_evidence(
-                feature_dir,
-                record,
-                output_tail=str(exc.details.get("detail") or exc.details.get("userMessage") or exc),
-            )
-            evidence_ids.append(str(evidence["evidenceId"]))
-            max_repairs = code_validation_max_repair_attempts(bundle.root)
-            issue = _validation_deferral_issue(
-                scope="project",
-                run_id=run_id,
-                batch_id=None,
-                task_id=None,
-                command_id=str(command.get("id")),
-                error_category="environment_failure",
-                failure_category=(
-                    str(exc.details.get("failureCategory"))
-                    if exc.details.get("failureCategory") is not None
-                    else None
-                ),
-                reason="environment_failure",
-                repair_attempts=0,
-                max_repair_attempts=max_repairs,
-                evidence_ids=evidence_ids,
-            )
-            result = record_project_check_deferral(
-                workspace, feature, evidence_ids, issue
-            )
-            if not result.ok:
-                raise TaskRunnerError("project_check_deferral_plan_binding_failed")
-            return True, evidence_ids
-        if not _repository_snapshots_match(project_snapshot, _repository_state(repositories)):
-            raise TaskRunnerError(f"project_validation_modified_workspace:{command.get('id', '')}")
-        diagnostic_paths = (
-            _validation_diagnostic_paths(output, command, repositories)
-            if exit_code != 0
-            else []
-        )
-        failure = (
-            {
-                "failedCommandId": command.get("id"),
-                "errorCategory": _validation_error_category(command, output, diagnostic_paths),
-                "diagnosticPaths": diagnostic_paths,
-            }
-            if exit_code != 0
-            else None
-        )
-        record = {
-            "featureId": feature,
-            "checkpoint": "code_in_progress",
-            "nodeId": "dev.code",
-            "skill": "autodev-code",
-            "taskId": "__project__",
-            "action": "project_check",
-            "detailVersion": 2,
-            "runId": run_id,
-            "completionMode": "verified_existing",
-            "summary": f"{command.get('id')} project check",
-            "implementation": {
-                "noCodeChange": True,
-                "whatChanged": [],
-                "why": "Project-level checks validate the completed workspace without changing files",
-            },
-            "specRefs": [],
-            "designRefs": [],
-            "changedFiles": [],
-            "fileChanges": [],
-            "supportingFiles": [],
-            "checkedCriteria": [str(command.get("id"))],
-            "validation": {
-                "commandId": command.get("id"),
-                "argv": command.get("argv"),
-                "command": " ".join(str(item) for item in command.get("argv", [])),
-                "cwd": command.get("cwd"),
-                "kind": command.get("kind"),
-                "required": command.get("required"),
-                **({"repo": repository_id} if len(repositories) > 1 or command.get("repo") else {}),
-                "exitCode": exit_code,
-                "result": "pass" if exit_code == 0 else "fail",
-                **({"failure": failure} if failure is not None else {}),
-            },
-        }
-        evidence = append_evidence(feature_dir, record, output_tail=output)
-        evidence_id = str(evidence["evidenceId"])
-        evidence_ids.append(evidence_id)
-        if command.get("required") is True and exit_code != 0:
-            required_failed = True
-            failed_evidence_ids.append(evidence_id)
-            if failure is not None:
-                current_failures.append(failure)
-    success = not required_failed
-    if not success:
-        failed_run_ids = [
-            item
-            for item in bundle.root.get("projectValidationFailedRunIds", [])
-            if isinstance(item, str)
-        ]
-        if run_id not in failed_run_ids:
-            failed_run_ids.append(run_id)
-        max_repairs = code_validation_max_repair_attempts(bundle.root)
-        if (
-            len(failed_run_ids) >= max_repairs + 1
-            and code_validation_fail_strategy(bundle.root) == "repair_then_defer"
-        ):
-            failure = current_failures[0] if current_failures else {}
-            failed_command_id = failure.get("failedCommandId")
-            issue = _validation_deferral_issue(
-                scope="project",
-                run_id=run_id,
-                batch_id=None,
-                task_id=None,
-                command_id=str(failed_command_id) if failed_command_id is not None else None,
-                error_category=str(failure.get("errorCategory") or "validation_contract_failure"),
-                failure_category=(
-                    str(failure.get("failureCategory"))
-                    if failure.get("failureCategory") is not None
-                    else None
-                ),
-                reason="repair_attempts_exhausted",
-                repair_attempts=max(0, len(failed_run_ids) - 1),
-                max_repair_attempts=max_repairs,
-                evidence_ids=failed_evidence_ids,
-                diagnostic_paths=list(failure.get("diagnosticPaths", [])),
-                validation_failures=list(failure.get("validationFailures", [])),
-            )
-            result = record_project_check_deferral(
-                workspace, feature, evidence_ids, issue
-            )
-            if not result.ok:
-                raise TaskRunnerError("project_check_deferral_plan_binding_failed")
-            return True, evidence_ids
-    result = record_project_check_attempt(
-        workspace,
-        feature,
-        evidence_ids,
-        success=success,
-        run_id=run_id,
-    )
-    if not result.ok:
-        raise TaskRunnerError("project_check_plan_binding_failed")
-    return success, evidence_ids
 
 
 def start_task(
@@ -6077,27 +2569,6 @@ def start_task(
         return _start_task_unlocked(workspace, feature, task_id, code_workspace)
 
 
-def complete_task(
-    workspace: Path,
-    feature: str,
-    task_id: str,
-    code_workspace: Path | list[Path],
-    run_id: str,
-    *,
-    no_code_change_why: str | None,
-    supporting_files: list[str],
-) -> tuple[bool, dict[str, Any]]:
-    feature_dir = _feature_dir(workspace, feature)
-    with _task_run_lock(feature_dir):
-        return _complete_task_unlocked(
-            workspace,
-            feature,
-            task_id,
-            code_workspace,
-            run_id,
-            no_code_change_why=no_code_change_why,
-            supporting_files=supporting_files,
-        )
 
 
 def finish_implementation(
@@ -6123,174 +2594,188 @@ def finish_implementation(
         )
 
 
-def start_batch_task_validation(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    code_workspace: Path | list[Path],
-) -> dict[str, Any]:
-    feature_dir = _feature_dir(workspace, feature)
-    with _task_run_lock(feature_dir):
-        return _start_deferred_task_validation_unlocked(
-            workspace,
-            feature,
-            batch_id,
-            code_workspace,
-        )
 
 
-def validate_batch_task(
+
+
+
+
+def start_batch_compile_repair(
     workspace: Path,
     feature: str,
     batch_id: str,
     task_id: str,
     code_workspace: Path | list[Path],
-    run_id: str,
-) -> tuple[bool, dict[str, Any]]:
-    feature_dir = _feature_dir(workspace, feature)
-    with _task_run_lock(feature_dir):
-        return _validate_deferred_task_unlocked(
-            workspace,
-            feature,
-            batch_id,
-            task_id,
-            code_workspace,
-            run_id,
-        )
-
-
-def start_validation_repair(
-    workspace: Path,
-    feature: str,
-    task_id: str,
-    code_workspace: Path | list[Path],
-    *,
-    adopt_workspace_changes: bool = False,
 ) -> dict[str, Any]:
+    """Start a model-owned task run that repairs a failed batch compile."""
+
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
-        bundle, batch_id, task = _load_plan_and_task(feature_dir, task_id)
-        if not deferred_task_validation_enabled(bundle.root):
-            raise TaskRunnerError(f"deferred_task_validation_not_enabled:{task_id}")
+        bundle, actual_batch_id, task = _load_plan_and_task(feature_dir, task_id)
+        if actual_batch_id != batch_id:
+            raise TaskRunnerError(
+                f"batch_compile_repair_task_batch_mismatch:{task_id}",
+                expectedBatchId=batch_id,
+                actualBatchId=actual_batch_id,
+            )
+        if not defer_to_test_stages_enabled(bundle.root):
+            raise TaskRunnerError(f"defer_to_test_stages_not_enabled:{batch_id}")
         batch = bundle.batches.get(batch_id)
-        validation = batch.get("taskValidation") if isinstance(batch, dict) else None
-        if not isinstance(validation, dict) or validation.get("status") != "failed":
-            raise TaskRunnerError(f"validation_repair_requires_failed_validation:{task_id}")
-        repair_owner_task_ids = validation.get("repairOwnerTaskIds")
-        repair_owner_task_ids = (
-            [str(item) for item in repair_owner_task_ids if isinstance(item, str)]
-            if isinstance(repair_owner_task_ids, list)
+        batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
+        if not isinstance(batch_compile, dict) or batch_compile.get("status") != "failed":
+            raise TaskRunnerError(f"batch_compile_repair_requires_failed:{batch_id}")
+        owner_ids = batch_compile.get("repairOwnerTaskIds")
+        owner_ids = (
+            [str(item) for item in owner_ids if isinstance(item, str)]
+            if isinstance(owner_ids, list)
             else []
         )
-        if not repair_owner_task_ids:
-            fallback = validation.get("failedValidationTaskId") or validation.get("currentTaskId")
-            repair_owner_task_ids = [str(fallback)] if isinstance(fallback, str) else []
-        if task_id not in repair_owner_task_ids:
+        if task_id not in owner_ids:
             raise TaskRunnerError(
-                f"validation_repair_owner_mismatch:{task_id}",
-                runType=TASK_VALIDATION_RUN_TYPE,
-                failedValidationTaskId=validation.get("failedValidationTaskId"),
-                repairOwnerTaskIds=repair_owner_task_ids,
-                allowedCommands=TASK_VALIDATION_FAILED_COMMANDS,
+                f"batch_compile_repair_owner_mismatch:{task_id}",
+                repairOwnerTaskIds=owner_ids,
             )
-        last_run_id = validation.get("lastRunId")
-        if not isinstance(last_run_id, str):
-            raise TaskRunnerError(f"task_validation_failed_run_missing:{batch_id}")
-        _, validation_run = _load_task_validation_run(feature_dir, batch_id, last_run_id)
+        attempts = int(batch_compile.get("repairAttempts", 0))
+        if attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS:
+            raise TaskRunnerError(
+                f"batch_compile_repair_attempts_exhausted:{batch_id}",
+                requiredAction="escalate_batch_compile_repair_exhausted",
+                nextActor="main_agent",
+                repairAttempts=attempts,
+                maxRepairAttempts=BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+            )
+        if normalize_status(task.get("status")) != "implemented":
+            raise TaskRunnerError(f"batch_compile_repair_task_not_implemented:{task_id}")
+
         requested_workspaces = (
             [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
         )
         if len(requested_workspaces) != 1:
             raise TaskRunnerError(
-                "batch_task_validation_requires_single_code_workspace",
-                batchId=batch_id,
+                "batch_compile_repair_requires_single_workspace",
                 requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
             )
-        repositories = _resolve_repositories(requested_workspaces)
-        _assert_repositories_match(validation_run, repositories)
-        actual_requested = [str(path.resolve()) for path in requested_workspaces]
-        if actual_requested != validation_run.get("requestedCodeWorkspaces"):
+        expected_workspaces = batch_compile.get("requestedCodeWorkspaces")
+        actual_workspaces = [str(path.resolve()) for path in requested_workspaces]
+        if expected_workspaces != actual_workspaces:
             raise TaskRunnerError(
-                "task_validation_repair_workspace_mismatch",
-                expectedRequestedCodeWorkspaces=validation_run.get("requestedCodeWorkspaces"),
-                requestedCodeWorkspaces=actual_requested,
+                "batch_compile_repair_workspace_mismatch",
+                expectedRequestedCodeWorkspaces=expected_workspaces,
+                requestedCodeWorkspaces=actual_workspaces,
             )
+        repositories = _resolve_repositories(requested_workspaces)
         current_repository_state = _repository_state(repositories)
-        expected_repository_state = _state_repositories(validation_run)
-        snapshots_match = _repository_snapshots_match(
-            expected_repository_state,
-            current_repository_state,
-        )
+        current_snapshot = _repository_state_sha256(current_repository_state)
+        expected_snapshot = batch_compile.get("workspaceSnapshotSha256")
+        if not isinstance(expected_snapshot, str):
+            raise TaskRunnerError("batch_compile_repair_workspace_snapshot_missing")
+
         adopted_file_changes: list[dict[str, str]] = []
-        adopted_transient_files: list[str] = []
-        if not snapshots_match:
-            file_changes, final_repositories = _repository_changes(validation_run, repositories)
-            changed_files = _changed_files(file_changes)
-            if not adopt_workspace_changes:
-                raise TaskRunnerError(
-                    "workspace_changed_before_validation_repair",
-                    requiredAction="restore_validation_snapshot_before_repair",
-                    alternateAction="retry_with_adopt_workspace_changes",
-                    runType=TASK_VALIDATION_RUN_TYPE,
-                    runId=last_run_id,
-                    batchId=batch_id,
-                    failedValidationTaskId=validation.get("failedValidationTaskId"),
-                    failedTaskId=validation.get("failedValidationTaskId"),
-                    failedCommandId=validation.get("failedCommandId"),
-                    errorCategory="workspace_changed",
-                    diagnosticPaths=changed_files,
-                    repairOwnerTaskIds=repair_owner_task_ids,
-                    evidenceIds=validation.get("evidenceIds", []),
-                    batchSnapshotSha256=validation.get("batchSnapshotSha256"),
-                    allowedCommands=TASK_VALIDATION_FAILED_COMMANDS,
-                )
-            if not _paths_within_requested_workspaces(changed_files, validation_run):
-                raise TaskRunnerError(
-                    "adopt_workspace_changes_out_of_scope",
-                    requiredAction="isolate_repair_changes_and_retry",
-                    runType=TASK_VALIDATION_RUN_TYPE,
-                    runId=last_run_id,
-                    batchId=batch_id,
-                    taskId=task_id,
-                    changedFiles=changed_files,
-                    requestedCodeWorkspaces=actual_requested,
-                )
-            adopted_file_changes, adopted_transient_files = (
-                _partition_transient_validation_changes(
-                    validation_run,
-                    file_changes,
-                    final_repositories,
-                )
+        if current_snapshot != expected_snapshot:
+            failed_repository_state = _failed_compile_repository_state(
+                feature_dir,
+                feature,
+                batch_id,
+                batch_compile.get("commandId"),
+                expected_snapshot,
             )
-        repair_attempt = int(task.get("validationRepairAttempts", 0)) + 1
+            if failed_repository_state is None:
+                raise TaskRunnerError(
+                    "workspace_changed_before_batch_compile_repair",
+                    requiredAction="restore_failed_compile_snapshot",
+                    expectedWorkspaceSnapshotSha256=expected_snapshot,
+                    currentWorkspaceSnapshotSha256=current_snapshot,
+                    snapshotRecoveryAvailable=False,
+                )
+            adopted_file_changes = _repository_state_file_changes(
+                failed_repository_state,
+                current_repository_state,
+            )
+            if not adopted_file_changes:
+                raise TaskRunnerError(
+                    "workspace_changed_before_batch_compile_repair",
+                    requiredAction="restore_failed_compile_snapshot",
+                    expectedWorkspaceSnapshotSha256=expected_snapshot,
+                    currentWorkspaceSnapshotSha256=current_snapshot,
+                    snapshotRecoveryAvailable=True,
+                )
+            changed_files = _changed_files(adopted_file_changes)
+            test_asset_changes = sorted({
+                path
+                for change in adopted_file_changes
+                for path in (change.get("path"), change.get("fromPath"))
+                if isinstance(path, str)
+                and _is_transient_validation_path(path.split(":", 1)[-1])
+            })
+            if test_asset_changes:
+                raise TaskRunnerError(
+                    "code_stage_test_changes_forbidden",
+                    requiredAction="restore_test_changes_and_retry_start_batch_compile_repair",
+                    testFiles=test_asset_changes,
+                )
+            scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
+            if not _paths_within_workspace_contexts(changed_files, scope_workspaces):
+                raise TaskRunnerError(
+                    "out_of_scope_changes_detected:" + ",".join(changed_files),
+                    requiredAction="restore_out_of_scope_changes_and_retry_start_batch_compile_repair",
+                    changedFiles=changed_files,
+                    requestedCodeWorkspaces=actual_workspaces,
+                )
+
+        repair_attempt = attempts + 1
         repair_context = {
-            "parentFailedValidationRunId": last_run_id,
-            "parentValidationSnapshotSha256": validation_run.get("batchSnapshotSha256"),
-            "adoptedRepositoryStateSha256": _repository_state_sha256(current_repository_state),
-            "validationRepairAttempt": repair_attempt,
-            "adoptedWorkspaceChanges": bool(adopted_file_changes or adopted_transient_files),
-            "adoptedChangedFiles": sorted({
-                *_changed_files(adopted_file_changes),
-                *adopted_transient_files,
-            }),
-            "adoptedFileChanges": adopted_file_changes,
-            "adoptedTransientValidationFiles": adopted_transient_files,
+            "batchCompileRepair": True,
+            "batchCompileRepairAttempt": repair_attempt,
+            "parentBatchCompileCommandId": batch_compile.get("commandId"),
+            "parentBatchCompileWorkspaceSnapshotSha256": expected_snapshot,
+            "failureCategory": batch_compile.get("failureCategory"),
+            "diagnosticPaths": list(batch_compile.get("diagnosticPaths", [])),
         }
-        result = invalidate_deferred_task_validation_for_repair(
-            workspace,
-            feature,
-            batch_id,
-            task_id,
-        )
-        if not result.ok:
-            raise TaskRunnerError("task_validation_repair_plan_binding_failed")
-        return _start_task_unlocked(
+        if adopted_file_changes:
+            repair_context.update(
+                {
+                    "adoptedFileChanges": adopted_file_changes,
+                    "adoptedWorkspaceSnapshotSha256": current_snapshot,
+                    "adoptedPreStartChanges": True,
+                }
+            )
+        state = _start_task_unlocked(
             workspace,
             feature,
             task_id,
             code_workspace,
             repair_context=repair_context,
         )
+        result = begin_batch_compile_repair(workspace, feature, batch_id, task_id)
+        if not result.ok:
+            set_task_execution_status(
+                workspace,
+                feature,
+                task_id,
+                "implemented",
+                expected_task_contract_sha256=task_contract_sha256(task),
+            )
+            state["status"] = "aborted"
+            state["abortReason"] = "batch_compile_repair_plan_binding_failed"
+            _save_run(_run_path(feature_dir, task_id, str(state.get("runId"))), state)
+            raise TaskRunnerError(
+                "batch_compile_repair_plan_binding_failed",
+                planWriterErrors=result.errors or [],
+            )
+        state["batchCompileRepair"] = {
+            "batchId": batch_id,
+            "taskId": task_id,
+            "attempt": repair_attempt,
+            "maxAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+            "adoptedPreStartChanges": bool(adopted_file_changes),
+            "adoptedChangedFiles": _changed_files(adopted_file_changes),
+            "requiredAction": (
+                "finish_implementation_then_retry_batch_compile"
+                if adopted_file_changes
+                else "model_fix_then_finish_implementation"
+            ),
+        }
+        return state
 
 
 def abort_task(
@@ -6328,14 +2813,219 @@ def resume_task(
         return _resume_task_unlocked(workspace, feature, task_id, code_workspace, run_id)
 
 
-def run_project_checks(
+
+
+def _run_batch_compile(
     workspace: Path,
     feature: str,
+    batch_id: str,
     code_workspace: Path | list[Path],
-) -> tuple[bool, list[str]]:
+) -> dict[str, Any]:
+    """
+    在批次完成后执行编译验证（仅编译，不运行测试）。
+
+    返回: {
+        "compileStatus": "passed" | "failed",
+        "commandId": str,
+        "output": str (失败时),
+        "failureCategory": str (失败时)
+    }
+    """
     feature_dir = _feature_dir(workspace, feature)
-    with _task_run_lock(feature_dir):
-        return _run_project_checks_unlocked(workspace, feature, code_workspace)
+    plan_bundle = load_plan_bundle(feature_dir)
+    if not defer_to_test_stages_enabled(plan_bundle.root):
+        raise TaskRunnerError(f"defer_to_test_stages_not_enabled:{batch_id}")
+    batch = plan_bundle.batches.get(batch_id)
+    if not isinstance(batch, dict):
+        raise TaskRunnerError(f"batch_not_found:{batch_id}")
+
+    batch_compile = batch.get("batchCompile")
+    if not isinstance(batch_compile, dict):
+        raise TaskRunnerError(f"batch_compile_not_initialized:{batch_id}")
+    compile_status = batch_compile.get("status")
+    if compile_status == "passed":
+        return {
+            "compileStatus": "passed",
+            "commandId": batch_compile.get("commandId", ""),
+        }
+    if compile_status == "failed":
+        attempts = int(batch_compile.get("repairAttempts", 0))
+        exhausted = attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
+        raise TaskRunnerError(
+            f"batch_compile_repair_required:{batch_id}",
+            requiredAction=(
+                "escalate_batch_compile_repair_exhausted"
+                if exhausted
+                else "start_batch_compile_repair"
+            ),
+            nextActor="main_agent" if exhausted else "model",
+            repairAttempts=attempts,
+            maxRepairAttempts=BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+            repairOwnerTaskIds=batch_compile.get("repairOwnerTaskIds", []),
+            diagnosticPaths=batch_compile.get("diagnosticPaths", []),
+        )
+    if compile_status == "repairing":
+        raise TaskRunnerError(
+            f"batch_compile_repair_in_progress:{batch_id}",
+            requiredAction="finish_implementation",
+            nextActor="model",
+            repairTaskId=batch_compile.get("repairTaskId"),
+            repairAttempts=batch_compile.get("repairAttempts", 0),
+        )
+    if compile_status != "pending":
+        raise TaskRunnerError(f"batch_compile_status_invalid:{batch_id}:{compile_status}")
+
+    # P0: 前置条件 - 检查所有任务是否已经实现
+    batch_tasks = batch.get("tasks", [])
+    all_tasks_implemented = all(
+        normalize_status(task.get("status")) in {"implemented", "done"}
+        for task in batch_tasks
+        if isinstance(task, dict)
+    )
+    if not all_tasks_implemented:
+        incomplete_tasks = [
+            str(task.get("id"))
+            for task in batch_tasks
+            if isinstance(task, dict) and normalize_status(task.get("status")) not in {"implemented", "done"}
+        ]
+        raise TaskRunnerError(
+            f"batch_compile_precondition_failed:{batch_id}",
+            incompleteTasks=incomplete_tasks,
+        )
+    invalid_implementation_bindings = [
+        str(task.get("id"))
+        for task in batch_tasks
+        if isinstance(task, dict)
+        and (
+            not isinstance(task.get("latestImplementationEvidenceId"), str)
+            or task.get("latestImplementationEvidenceId")
+            not in (
+                task.get("implementationEvidenceIds")
+                if isinstance(task.get("implementationEvidenceIds"), list)
+                else []
+            )
+            or not isinstance(task.get("implementationRevision"), int)
+            or isinstance(task.get("implementationRevision"), bool)
+            or int(task.get("implementationRevision", 0)) < 1
+        )
+    ]
+    if invalid_implementation_bindings:
+        raise TaskRunnerError(
+            f"batch_compile_implementation_evidence_missing:{batch_id}",
+            taskIds=invalid_implementation_bindings,
+        )
+
+    requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    if len(requested_workspaces) != 1:
+        raise TaskRunnerError(
+            "batch_compile_requires_single_workspace",
+            batchId=batch_id,
+            requestedCodeWorkspaces=[str(p.resolve()) for p in requested_workspaces],
+        )
+
+    repositories = _resolve_repositories(requested_workspaces)
+    if not repositories:
+        raise TaskRunnerError("no_repositories_resolved")
+    # 查找编译命令
+    batch_validation = batch.get("batchValidation")
+    if not isinstance(batch_validation, dict):
+        raise TaskRunnerError(f"batch_validation_config_missing:{batch_id}")
+
+    commands = batch_validation.get("commands", [])
+    compile_command = next(
+        (
+            cmd
+            for cmd in commands
+            if isinstance(cmd, dict)
+            and cmd.get("kind") == "compile"
+            and cmd.get("required") is True
+        ),
+        None,
+    )
+
+    if not compile_command:
+        raise TaskRunnerError(
+            f"batch_compile_command_not_found:{batch_id}",
+            availableCommands=[cmd.get("kind") for cmd in commands if isinstance(cmd, dict)],
+        )
+    compile_policy_errors = compile_only_command_errors(compile_command)
+    if compile_policy_errors:
+        raise TaskRunnerError(
+            f"batch_compile_command_not_compile_only:{batch_id}",
+            commandId=compile_command.get("id"),
+            policyErrors=compile_policy_errors,
+        )
+
+    command_id = str(compile_command.get("id", ""))
+    try:
+        exit_code, output = _run_validation(
+            compile_command,
+            repositories,
+            batch_id=batch_id,
+            task_id="__batch_compile__",
+        )
+        requested_paths = [str(path.resolve()) for path in requested_workspaces]
+        workspace_state = _repository_state(repositories)
+        workspace_snapshot_sha256 = _repository_state_sha256(workspace_state)
+        implementation_evidence_by_task = {
+            str(task.get("id")): str(task.get("latestImplementationEvidenceId"))
+            for task in batch_tasks
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        }
+        implementation_revision_by_task = {
+            str(task.get("id")): int(task.get("implementationRevision", 0))
+            for task in batch_tasks
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        }
+        if exit_code == 0:
+            return {
+                "compileStatus": "passed",
+                "commandId": command_id,
+                "requestedCodeWorkspaces": requested_paths,
+                "workspaceSnapshotSha256": workspace_snapshot_sha256,
+                "workspaceState": workspace_state,
+                "implementationEvidenceByTask": implementation_evidence_by_task,
+                "implementationRevisionByTask": implementation_revision_by_task,
+            }
+        diagnostic_paths = _validation_diagnostic_paths(output, compile_command, repositories)
+        fallback_task_id = next(
+            (
+                str(task.get("id"))
+                for task in reversed(batch_tasks)
+                if isinstance(task, dict) and isinstance(task.get("id"), str)
+            ),
+            "",
+        )
+        repair_owner_ids = _validation_repair_owner_task_ids(
+            feature_dir,
+            batch,
+            fallback_task_id,
+            diagnostic_paths,
+        )
+        return {
+            "compileStatus": "failed",
+            "commandId": command_id,
+            "output": output,
+            "failureCategory": (
+                _definitive_compile_failure_category(output, compile_command, repositories)
+                or "compile_error"
+            ),
+            "diagnosticPaths": diagnostic_paths,
+            "repairOwnerTaskIds": repair_owner_ids,
+            "requestedCodeWorkspaces": requested_paths,
+            "workspaceSnapshotSha256": workspace_snapshot_sha256,
+            "workspaceState": workspace_state,
+            "implementationEvidenceByTask": implementation_evidence_by_task,
+            "implementationRevisionByTask": implementation_revision_by_task,
+        }
+    except TaskRunnerError:
+        raise
+    except Exception as exc:
+        raise TaskRunnerError(
+            f"batch_compile_execution_failed:{exc}",
+            batchId=batch_id,
+            commandId=command_id,
+        ) from exc
 
 
 def _activate_batch_unlocked(workspace: Path, feature: str, batch_id: str) -> dict[str, Any]:
@@ -6353,6 +3043,138 @@ def activate_batch(workspace: Path, feature: str, batch_id: str) -> dict[str, An
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
         return _activate_batch_unlocked(workspace, feature, batch_id)
+
+
+def run_batch_compile(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    code_workspace: Path | list[Path],
+) -> dict[str, Any]:
+    """
+    公共 API：在批次完成后执行编译验证。
+
+    返回: {
+        "compileStatus": "passed" | "failed",
+        "commandId": str,
+        "output": str (失败时),
+        "failureCategory": str (失败时)
+    }
+    """
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        compile_result = _run_batch_compile(workspace, feature, batch_id, code_workspace)
+        # 将编译结果持久化到 Plan
+        return _integrate_batch_compile_result(workspace, feature, batch_id, compile_result)
+
+
+def _integrate_batch_compile_result(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    compile_result: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    集成批次编译结果到 PLAN.json。
+
+    返回更新后的状态和下一步动作。
+    """
+    _persist_batch_compile_workspace_state(
+        _feature_dir(workspace, feature),
+        feature,
+        batch_id,
+        compile_result,
+    )
+    try:
+        result = update_batch_compile_status(workspace, feature, batch_id, compile_result)
+    except PlanWriterInputError as exc:
+        raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
+
+    if not result.ok:
+        raise TaskRunnerError(
+            result.error_code,
+            detail=result.detail,
+            path=str(result.path) if result.path else None,
+        )
+
+    compile_status = compile_result.get("compileStatus")
+    if compile_status == "passed":
+        # 编译通过后，将批次中的所有 implemented 任务标记为 done
+        try:
+            mark_result = mark_batch_tasks_done_after_compile(workspace, feature, batch_id)
+            if not mark_result.ok:
+                raise TaskRunnerError(
+                    "mark_batch_tasks_done_after_compile_failed",
+                    planWriterErrors=mark_result.errors or [],
+                )
+        except PlanWriterInputError as exc:
+            raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
+
+        batch_handoff = (
+            mark_result.data.get("batchHandoff")
+            if isinstance(mark_result.data, dict)
+            else None
+        )
+        if isinstance(batch_handoff, dict):
+            continuation = {
+                "action": batch_handoff.get(
+                    "requiredAction",
+                    "stop_and_open_new_conversation",
+                ),
+                "completedBatchId": batch_handoff.get("completedBatchId", batch_id),
+                "nextBatchId": batch_handoff.get("nextBatchId"),
+                "requiresNewConversation": True,
+                "userMessage": batch_handoff.get("userMessage"),
+            }
+            return {
+                "compileStatus": "passed",
+                "requiredAction": continuation["action"],
+                "batchId": batch_id,
+                "batchHandoff": batch_handoff,
+                "stopAfterBatch": True,
+                "requiresNewConversation": True,
+                "userMessage": batch_handoff.get("userMessage"),
+                "continuation": continuation,
+            }
+
+        continuation = _code_session_unlocked(workspace, feature)
+        return {
+            "compileStatus": "passed",
+            "requiredAction": continuation.get("action", "batch_compile_passed"),
+            "batchId": batch_id,
+            "continuation": continuation,
+        }
+    else:
+        refreshed = load_plan_bundle(_feature_dir(workspace, feature))
+        refreshed_batch = refreshed.batches.get(batch_id)
+        batch_compile = (
+            refreshed_batch.get("batchCompile") if isinstance(refreshed_batch, dict) else None
+        )
+        batch_compile = batch_compile if isinstance(batch_compile, dict) else {}
+        attempts = int(batch_compile.get("repairAttempts", 0))
+        exhausted = attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
+        return {
+            "compileStatus": "failed",
+            "requiredAction": (
+                "escalate_batch_compile_repair_exhausted"
+                if exhausted
+                else "start_batch_compile_repair"
+            ),
+            "nextActor": "main_agent" if exhausted else "model",
+            "modelRepairRequired": not exhausted,
+            "batchId": batch_id,
+            "commandId": compile_result.get("commandId"),
+            "output": compile_result.get("output", ""),
+            "failureCategory": compile_result.get("failureCategory", ""),
+            "diagnosticPaths": compile_result.get("diagnosticPaths", []),
+            "repairOwnerTaskIds": compile_result.get("repairOwnerTaskIds", []),
+            "repairAttempts": attempts,
+            "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+            "remainingRepairAttempts": max(
+                BATCH_COMPILE_MAX_REPAIR_ATTEMPTS - attempts,
+                0,
+            ),
+        }
 
 
 def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
@@ -6396,79 +3218,119 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
             raise TaskRunnerError(f"active_batch_execution_lane_invalid:{active_batch_id}")
         batch_plan = bundle.batches.get(active_batch_id)
         batch_tasks = batch_plan.get("tasks", []) if isinstance(batch_plan, dict) else []
-        if deferred_task_validation_enabled(bundle.root):
-            task_validation = batch_plan.get("taskValidation") if isinstance(batch_plan, dict) else None
-            if not isinstance(task_validation, dict):
-                raise TaskRunnerError(f"task_validation_contract_missing:{active_batch_id}")
-            task_validation_status = task_validation.get("status")
-            if task_validation_status == "ready":
+        # Code has one gate: compile the final batch snapshot after all tasks are implemented.
+        if not defer_to_test_stages_enabled(bundle.root):
+            raise TaskRunnerError("unsupported_task_validation_policy")
+        if defer_to_test_stages_enabled(bundle.root):
+            batch_compile = batch_plan.get("batchCompile") if isinstance(batch_plan, dict) else None
+            batch_compile_status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
+
+            # 所有任务 implemented 或 done，且编译状态是 pending
+            all_tasks_ready = bool(batch_tasks) and all(
+                isinstance(task, dict) and normalize_status(task.get("status")) in {"implemented", "done"}
+                for task in batch_tasks
+            )
+
+            if all_tasks_ready and batch_compile_status == "pending":
                 return {
-                    "action": "run_batch_task_validation",
+                    "action": "run_batch_compile",
                     "activeBatchId": active_batch_id,
                     "executionLane": execution_lane,
-                    "taskIds": list(task_validation.get("taskOrder", [])),
+                    "activatedFromHandoff": activated_from_handoff,
+                    "userMessage": f"批次 {active_batch_id} 的所有任务已实现，开始执行批次编译验证。",
+                }
+            elif batch_compile_status == "failed":
+                attempts = int(batch_compile.get("repairAttempts", 0))
+                exhausted = attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
+                return {
+                    "action": (
+                        "batch_compile_repair_exhausted"
+                        if exhausted
+                        else "start_batch_compile_repair"
+                    ),
+                    "requiredAction": (
+                        "escalate_batch_compile_repair_exhausted"
+                        if exhausted
+                        else "start_batch_compile_repair"
+                    ),
+                    "nextActor": "main_agent" if exhausted else "model",
+                    "modelRepairRequired": not exhausted,
+                    "activeBatchId": active_batch_id,
+                    "executionLane": execution_lane,
+                    "compileOutput": batch_compile.get("output", ""),
+                    "failureCategory": batch_compile.get("failureCategory", ""),
+                    "commandId": batch_compile.get("commandId", ""),
+                    "diagnosticPaths": batch_compile.get("diagnosticPaths", []),
+                    "repairOwnerTaskIds": batch_compile.get("repairOwnerTaskIds", []),
+                    "repairAttempts": attempts,
+                    "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+                    "remainingRepairAttempts": max(
+                        BATCH_COMPILE_MAX_REPAIR_ATTEMPTS - attempts,
+                        0,
+                    ),
+                    "allowedRunnerCommands": (
+                        [] if exhausted else ["start-batch-compile-repair"]
+                    ),
                     "activatedFromHandoff": activated_from_handoff,
                     "userMessage": (
-                        f"批次 {active_batch_id} 的实现已全部就绪，"
-                        "启动一个批次级独立验证子代理，按 TASK 顺序执行全部校验。"
+                        f"批次 {active_batch_id} 的编译修复已达到 3 次上限，流程已阻断。"
+                        if exhausted
+                        else (
+                            f"批次 {active_batch_id} 编译失败；必须由模型启动受控修复任务，"
+                            "修复完成并记录新的 implementation evidence 后才能重新编译。"
+                        )
                     ),
                 }
-            if task_validation_status == "running":
-                active_run_id = task_validation.get("activeRunId")
-                if not isinstance(active_run_id, str):
-                    raise TaskRunnerError(f"task_validation_active_run_missing:{active_batch_id}")
-                _, validation_run = _load_task_validation_run(
-                    feature_dir,
-                    active_batch_id,
-                    active_run_id,
+            elif batch_compile_status == "repairing":
+                return {
+                    "action": "continue_batch_compile_repair",
+                    "requiredAction": "model_fix_then_finish_implementation",
+                    "nextActor": "model",
+                    "activeBatchId": active_batch_id,
+                    "executionLane": execution_lane,
+                    "repairTaskId": batch_compile.get("repairTaskId"),
+                    "repairAttempts": batch_compile.get("repairAttempts", 0),
+                    "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+                    "diagnosticPaths": batch_compile.get("diagnosticPaths", []),
+                    "allowedRunnerCommands": ["finish-implementation"],
+                    "activatedFromHandoff": activated_from_handoff,
+                    "userMessage": (
+                        f"模型正在修复批次 {active_batch_id} 的编译问题；"
+                        "完成代码修改后记录 implementation evidence。"
+                    ),
+                }
+            elif batch_compile_status == "passed":
+                # 编译通过，批次完成，检查是否有下一批次
+                next_batch_id = bundle.root.get("nextBatchId")
+                if isinstance(next_batch_id, str):
+                    # 有下一批次，自动激活
+                    _activate_batch_unlocked(workspace, feature, next_batch_id)
+                    try:
+                        bundle = load_plan_bundle(feature_dir)
+                    except ValueError as exc:
+                        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+                    return {
+                        "action": "batch_completed_next_activated",
+                        "completedBatchId": active_batch_id,
+                        "activeBatchId": next_batch_id,
+                        "executionLane": execution_lane,
+                        "activatedFromHandoff": activated_from_handoff,
+                        "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。已自动激活下一批次 {next_batch_id}。",
+                    }
+                else:
+                    return {
+                        "action": "code_done_ready",
+                        "completedBatchId": active_batch_id,
+                        "activatedFromHandoff": activated_from_handoff,
+                        "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。所有批次已完成，功能开发结束。",
+                    }
+            elif batch_compile_status is not None:
+                raise TaskRunnerError(
+                    f"batch_compile_status_invalid:{active_batch_id}:{batch_compile_status}"
                 )
-                return {
-                    "action": "spawn_batch_validation_subagent",
-                    "validationSubagentMode": "resume",
-                    "activeBatchId": active_batch_id,
-                    "executionLane": execution_lane,
-                    "activeRunId": active_run_id,
-                    "currentTaskId": task_validation.get("currentTaskId"),
-                    "validationContext": _task_validation_context(validation_run),
-                    "activatedFromHandoff": activated_from_handoff,
-                    "userMessage": (
-                        f"恢复批次 {active_batch_id} 的批次级独立验证子代理。"
-                    ),
-                }
-            if task_validation_status == "failed":
-                last_run_id = task_validation.get("lastRunId")
-                validation_context = None
-                if isinstance(last_run_id, str):
-                    _, validation_run = _load_task_validation_run(
-                        feature_dir,
-                        active_batch_id,
-                        last_run_id,
-                    )
-                    validation_context = _task_validation_context(validation_run)
-                return {
-                    "action": "fix_or_retry_task_validation",
-                    "runType": TASK_VALIDATION_RUN_TYPE,
-                    "activeBatchId": active_batch_id,
-                    "executionLane": execution_lane,
-                    "failedValidationTaskId": task_validation.get("failedValidationTaskId"),
-                    "failedTaskId": task_validation.get("failedValidationTaskId"),
-                    "failedCommandId": task_validation.get("failedCommandId"),
-                    "errorCategory": task_validation.get("errorCategory"),
-                    "diagnosticPaths": task_validation.get("diagnosticPaths", []),
-                    "repairOwnerTaskIds": task_validation.get("repairOwnerTaskIds", []),
-                    "validationFailures": task_validation.get("validationFailures", []),
-                    "lastRunId": last_run_id,
-                    "evidenceIds": task_validation.get("evidenceIds", []),
-                    "batchSnapshotSha256": task_validation.get("batchSnapshotSha256"),
-                    "allowedCommands": TASK_VALIDATION_FAILED_COMMANDS,
-                    "validationContext": validation_context,
-                    "activatedFromHandoff": activated_from_handoff,
-                    "userMessage": (
-                        f"批次 {active_batch_id} 的 TASK 验证失败；"
-                        "工作区未变化时可重试，修改源码前必须启动 validation repair。"
-                    ),
-                }
-            if task_validation_status in {"pending", "invalidated"}:
+            elif all_tasks_ready:
+                raise TaskRunnerError(f"batch_compile_contract_missing:{active_batch_id}")
+            else:
                 return {
                     "action": "execute_active_batch",
                     "activeBatchId": active_batch_id,
@@ -6477,163 +3339,17 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                     "activatedFromHandoff": activated_from_handoff,
                     "userMessage": f"继续实现批次 {active_batch_id}。",
                 }
-            if not task_validation_terminal(task_validation_status):
-                raise TaskRunnerError(
-                    f"task_validation_status_invalid:{active_batch_id}:{task_validation_status}"
-                )
-        all_tasks_done = bool(batch_tasks) and all(
-            isinstance(task, dict) and normalize_status(task.get("status")) == "done"
-            for task in batch_tasks
-        )
-        batch_validation = batch_plan.get("batchValidation") if isinstance(batch_plan, dict) else None
-        if (
-            all_tasks_done
-            and isinstance(batch_validation, dict)
-            and not batch_validation_terminal(batch_validation.get("status"))
-        ):
-            mode = batch_validation.get("mode", "commands" if batch_validation.get("commands") else None)
-            if mode == "task_covered":
-                if deferred_task_validation_enabled(bundle.root):
-                    task_validation = batch_plan.get("taskValidation")
-                    task_order = (
-                        task_validation.get("taskOrder", [])
-                        if isinstance(task_validation, dict)
-                        else []
-                    )
-                    last_run_id = (
-                        task_validation.get("lastRunId")
-                        if isinstance(task_validation, dict)
-                        else None
-                    )
-                    if not isinstance(last_run_id, str):
-                        raise TaskRunnerError(f"task_validation_last_run_missing:{active_batch_id}")
-                    _, validation_run = _load_task_validation_run(
-                        feature_dir,
-                        active_batch_id,
-                        last_run_id,
-                    )
-                    return {
-                        "action": "spawn_batch_validation_subagent",
-                        "validationSubagentMode": "recover_closure",
-                        "activeBatchId": active_batch_id,
-                        "executionLane": execution_lane,
-                        "activeRunId": last_run_id,
-                        "currentTaskId": task_order[-1] if task_order else None,
-                        "validationContext": _task_validation_context(validation_run),
-                        "activatedFromHandoff": activated_from_handoff,
-                        "userMessage": (
-                            f"批次 {active_batch_id} 的 TASK 验证已通过但收口未绑定；"
-                            "请恢复最后一个 deferred validation run。"
-                        ),
-                    }
-                return {
-                    "action": "recover_task_covered_batch",
-                    "activeBatchId": active_batch_id,
-                    "executionLane": execution_lane,
-                    "batchValidationStatus": batch_validation.get("status"),
-                    "activatedFromHandoff": activated_from_handoff,
-                    "userMessage": (
-                        f"批次 {active_batch_id} 的 TASK 已完成但收口未绑定；"
-                        "请 inspect 并 recover 最后一个 TASK run。"
-                    ),
-                }
-            if deferred_task_validation_enabled(bundle.root):
-                task_validation = batch_plan.get("taskValidation")
-                last_run_id = (
-                    task_validation.get("lastRunId")
-                    if isinstance(task_validation, dict)
-                    else None
-                )
-                if not isinstance(last_run_id, str):
-                    raise TaskRunnerError(f"task_validation_last_run_missing:{active_batch_id}")
-                _, validation_run = _load_task_validation_run(
-                    feature_dir,
-                    active_batch_id,
-                    last_run_id,
-                )
-                validation_context = _task_validation_context(validation_run)
-            else:
-                validation_context = None
-            return {
-                "action": (
-                    "spawn_batch_validation_subagent"
-                    if validation_context is not None
-                    else "run_batch_check"
-                ),
-                **(
-                    {"validationSubagentMode": "batch_check"}
-                    if validation_context is not None
-                    else {}
-                ),
-                "activeBatchId": active_batch_id,
-                "executionLane": execution_lane,
-                "batchValidationStatus": batch_validation.get("status"),
-                "activeRunId": batch_validation.get("activeRunId"),
-                **(
-                    {"validationContext": validation_context}
-                    if validation_context is not None
-                    else {}
-                ),
-                "activatedFromHandoff": activated_from_handoff,
-                "userMessage": f"批次 {active_batch_id} 的 TASK 已完成，开始执行批次级验证。",
-            }
-        return {
-            "action": "execute_active_batch",
-            "activeBatchId": active_batch_id,
-            "executionLane": execution_lane,
-            "taskIds": list(entry.get("taskIds", [])),
-            "activatedFromHandoff": activated_from_handoff,
-            "userMessage": f"开始执行批次 {active_batch_id}。",
-        }
+
 
     unfinished = bundle_unfinished_tasks(bundle)
     if unfinished:
         raise TaskRunnerError("no_active_batch_for_unfinished_tasks:" + ",".join(unfinished))
-    project_commands = bundle.root.get("projectValidationCommands")
-    if isinstance(project_commands, list) and not project_commands:
-        return {
-            "action": "code_done_ready",
-            "activeBatchId": None,
-            "activatedFromHandoff": False,
-            "validationOutcome": (
-                "deferred" if bundle.root.get("deferredValidationIssues") else "passed"
-            ),
-            "deferredValidationIssues": bundle.root.get("deferredValidationIssues", []),
-            "userMessage": (
-                "所有批次已完成；Code 验证延期项交由 UTEST/E2E 继续处理。"
-                if bundle.root.get("deferredValidationIssues")
-                else "所有批次已完成，且没有额外的跨批次项目校验。"
-            ),
-        }
-    if isinstance(bundle.root.get("latestProjectCheckEvidenceId"), str):
-        return {
-            "action": "code_done_ready",
-            "activeBatchId": None,
-            "activatedFromHandoff": False,
-            "validationOutcome": (
-                "deferred" if bundle.root.get("deferredValidationIssues") else "passed"
-            ),
-            "deferredValidationIssues": bundle.root.get("deferredValidationIssues", []),
-            "userMessage": (
-                "所有批次及项目级校验已结束；延期项交由 UTEST/E2E 继续处理。"
-                if bundle.root.get("deferredValidationIssues")
-                else "所有批次及项目级最终校验已完成。"
-            ),
-        }
-    if isinstance(bundle.root.get("projectValidationDisposition"), dict):
-        return {
-            "action": "code_done_ready",
-            "activeBatchId": None,
-            "activatedFromHandoff": False,
-            "validationOutcome": "deferred",
-            "deferredValidationIssues": bundle.root.get("deferredValidationIssues", []),
-            "userMessage": "Code 验证存在已记录的延期项，交由 UTEST/E2E 继续处理。",
-        }
     return {
-        "action": "run_project_check",
+        "action": "code_done_ready",
         "activeBatchId": None,
         "activatedFromHandoff": False,
-        "userMessage": "所有批次已完成，开始执行项目级最终校验。",
+        "validationOutcome": "passed",
+        "userMessage": "所有批次均已通过生产代码编译门禁。",
     }
 
 
@@ -6659,59 +3375,6 @@ def _cmd_start(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
-def _cmd_complete(args: argparse.Namespace) -> int:
-    try:
-        workspace, feature, code_workspace = _resolve(args)
-        success, state = complete_task(
-            workspace,
-            feature,
-            args.task_id,
-            code_workspace,
-            args.run_id,
-            no_code_change_why=args.no_code_change_why,
-            supporting_files=args.supporting_file or [],
-        )
-        batch_handoff = state.get("batchHandoff")
-        batch_handoff = batch_handoff if isinstance(batch_handoff, dict) else None
-        batch_continuation = state.get("batchContinuation")
-        batch_continuation = batch_continuation if isinstance(batch_continuation, dict) else None
-        batch_check = state.get("batchCheck")
-        batch_check = batch_check if isinstance(batch_check, dict) else None
-        return _emit(
-            success,
-            error=None if success else "validation_failed",
-            runId=state.get("runId"),
-            status=state.get("status"),
-            completionMode=state.get("completionMode"),
-            evidenceIds=state.get("evidenceIds", []),
-            completionEvidenceIds=state.get("completionEvidenceIds", []),
-            transientValidationFiles=state.get("transientValidationFiles", []),
-            batchHandoff=batch_handoff,
-            batchContinuation=batch_continuation,
-            stopAfterBatch=bool(batch_handoff),
-            continueCurrentBatch=(
-                bool(batch_continuation.get("continueCurrentBatch")) if batch_continuation else False
-            ),
-            activeBatchId=(
-                batch_continuation.get("activeBatchId")
-                if batch_continuation
-                else batch_check.get("activeBatchId") if batch_check else None
-            ),
-            nextTaskId=batch_continuation.get("nextTaskId") if batch_continuation else None,
-            requiresNewConversation=(
-                bool(batch_handoff.get("requiresNewConversation")) if batch_handoff else False
-            ),
-            requiredAction=(
-                batch_handoff.get("requiredAction")
-                if batch_handoff
-                else batch_continuation.get("requiredAction")
-                if batch_continuation
-                else batch_check.get("requiredAction") if batch_check else None
-            ),
-            userMessage=batch_handoff.get("userMessage") if batch_handoff else None,
-        )
-    except (TaskRunnerError, ValueError) as exc:
-        return _emit_error(exc)
 
 
 def _cmd_finish_implementation(args: argparse.Namespace) -> int:
@@ -6728,8 +3391,8 @@ def _cmd_finish_implementation(args: argparse.Namespace) -> int:
         )
         continuation = state.get("batchContinuation")
         continuation = continuation if isinstance(continuation, dict) else None
-        task_validation = state.get("taskValidation")
-        task_validation = task_validation if isinstance(task_validation, dict) else None
+        batch_compile = state.get("batchCompile")
+        batch_compile = batch_compile if isinstance(batch_compile, dict) else None
         return _emit(
             success,
             runId=state.get("runId"),
@@ -6739,209 +3402,43 @@ def _cmd_finish_implementation(args: argparse.Namespace) -> int:
             changedFiles=state.get("changedFiles", []),
             transientValidationFiles=state.get("transientValidationFiles", []),
             batchContinuation=continuation,
-            taskValidation=task_validation,
+            batchCompile=batch_compile,
             continueCurrentBatch=bool(continuation),
             activeBatchId=(
                 continuation.get("activeBatchId")
                 if continuation
-                else task_validation.get("activeBatchId") if task_validation else None
+                else batch_compile.get("activeBatchId") if batch_compile else None
             ),
             nextTaskId=continuation.get("nextTaskId") if continuation else None,
             requiredAction=(
                 continuation.get("requiredAction")
                 if continuation
-                else task_validation.get("requiredAction") if task_validation else None
+                else batch_compile.get("requiredAction") if batch_compile else None
             ),
         )
     except (TaskRunnerError, ValueError) as exc:
         return _emit_error(exc)
 
 
-def _cmd_start_batch_task_validation(args: argparse.Namespace) -> int:
-    try:
-        workspace, feature, code_workspace = _resolve(args)
-        state = start_batch_task_validation(
-            workspace,
-            feature,
-            args.batch_id,
-            code_workspace,
-        )
-        validation_context = _task_validation_context(state)
-        return _emit(
-            True,
-            action="spawn_batch_validation_subagent",
-            validationSubagentMode="start",
-            runType=TASK_VALIDATION_RUN_TYPE,
-            runId=state.get("runId"),
-            status=state.get("status"),
-            activeBatchId=state.get("batchId"),
-            currentTaskId=state.get("currentTaskId"),
-            taskOrder=state.get("taskOrder", []),
-            completedTaskIds=state.get("completedTaskIds", []),
-            batchSnapshotSha256=state.get("batchSnapshotSha256"),
-            requestedCodeWorkspaces=state.get("requestedCodeWorkspaces", []),
-            validationContext=validation_context,
-            allowedCommands=validation_context.get("allowedCommands", []),
-            requiredAction="spawn_batch_validation_subagent",
-        )
-    except (TaskRunnerError, ValueError) as exc:
-        return _emit_error(exc)
 
 
-def _cmd_validate_batch_task(args: argparse.Namespace) -> int:
+
+
+
+
+def _cmd_start_batch_compile_repair(args: argparse.Namespace) -> int:
     try:
         workspace, feature, code_workspace = _resolve(args)
-        success, state = validate_batch_task(
+        state = start_batch_compile_repair(
             workspace,
             feature,
             args.batch_id,
             args.task_id,
             code_workspace,
-            args.run_id,
-        )
-        batch_check = state.get("batchCheck")
-        batch_check = batch_check if isinstance(batch_check, dict) else None
-        current_task_id = state.get("currentTaskId")
-        validation_context = _task_validation_context(state)
-        next_action = batch_check.get("requiredAction") if batch_check else "run_batch_check"
-        if next_action == "run_batch_check":
-            next_action = "run_batch_check_in_validation_subagent"
-        error_category = state.get("errorCategory")
-        failed = not success
-        return _emit(
-            success,
-            error=None if success else "validation_failed",
-            runType=TASK_VALIDATION_RUN_TYPE,
-            runId=state.get("runId"),
-            status=state.get("status"),
-            activeBatchId=state.get("batchId"),
-            validationOutcome=state.get("validationOutcome"),
-            deferredIssues=state.get("deferredIssues", []),
-            validatedTaskId=args.task_id,
-            currentTaskId=current_task_id,
-            evidenceIds=state.get("evidenceIds", []),
-            batchSnapshotSha256=state.get("batchSnapshotSha256"),
-            failedValidationTaskId=state.get("failedValidationTaskId"),
-            failedTaskId=state.get("failedValidationTaskId"),
-            failedCommandId=state.get("failedCommandId"),
-            errorCategory=error_category,
-            diagnosticPaths=state.get("diagnosticPaths", []),
-            repairOwnerTaskIds=state.get("repairOwnerTaskIds", []),
-            validationFailures=state.get("validationFailures", []),
-            allowedCommands=validation_context.get("allowedCommands", []),
-            mainAgentAllowedRunnerCommands=(
-                ["start-validation-repair"] if failed else []
-            ),
-            nextActor="main_agent" if failed else "validation_subagent",
-            validationSubagentTerminal=failed,
-            repairState=state.get("repairState"),
-            mainAgentRequiredAction=("start_validation_repair" if failed else None),
-            batchCheck=batch_check,
-            validationContext=validation_context,
-            requiredAction=(
-                "handoff_validation_failure_to_main_agent"
-                if failed
-                else "continue_batch_validation_subagent"
-                if isinstance(current_task_id, str)
-                else next_action
-            ),
-        )
-    except TaskRunnerError as exc:
-        exc.details.setdefault("runType", TASK_VALIDATION_RUN_TYPE)
-        exc.details.setdefault("runId", args.run_id)
-        exc.details.setdefault("batchId", args.batch_id)
-        exc.details.setdefault("failedValidationTaskId", args.task_id)
-        exc.details.setdefault("failedTaskId", args.task_id)
-        exc.details.setdefault("failedCommandId", None)
-        exc.details.setdefault("evidenceIds", [])
-        exc.details.setdefault("batchSnapshotSha256", None)
-        # Any runner exception is terminal for the read-only validation subagent.
-        # It must hand control back instead of retrying validation or running batch-check.
-        original_action = exc.details.get("requiredAction")
-        state: dict[str, Any] | None = None
-        try:
-            workspace, feature, _ = _resolve(args)
-            _, state = _load_task_validation_run(
-                _feature_dir(workspace, feature),
-                args.batch_id,
-                args.run_id,
-            )
-        except (TaskRunnerError, ValueError):
-            pass
-
-        error_category = exc.details.get("errorCategory")
-        if isinstance(state, dict) and state.get("status") == "failed":
-            main_action = "start_validation_repair"
-            main_commands = ["start-validation-repair"]
-        elif error_category == "runner_integrity_failure" or "integrity" in str(exc):
-            main_action = "inspect_validation_run_and_reconcile"
-            main_commands: list[str] = []
-        elif isinstance(original_action, str) and original_action:
-            main_action = original_action
-            main_commands = (
-                ["start-validation-repair"]
-                if original_action == "start_validation_repair"
-                else []
-            )
-        else:
-            main_action = "inspect_task_validation_failure"
-            main_commands = []
-
-        context_state = state if isinstance(state, dict) else {
-            "featureId": None,
-            "batchId": args.batch_id,
-            "runId": args.run_id,
-            "taskOrder": [],
-            "currentTaskId": args.task_id,
-            "requestedCodeWorkspaces": [],
-            "batchSnapshotSha256": None,
-            "status": "failed",
-            "executionGroups": [],
-            "maxRepairAttempts": DEFAULT_CODE_VALIDATION_MAX_REPAIR_ATTEMPTS,
-        }
-        details = {
-            "requiredAction": "handoff_validation_failure_to_main_agent",
-            "mainAgentRequiredAction": main_action,
-            "mainAgentAllowedRunnerCommands": main_commands,
-            "nextActor": "main_agent",
-            "validationSubagentTerminal": True,
-            "originalRunnerRequiredAction": original_action,
-            "allowedCommands": [],
-            "validationContext": _terminal_task_validation_handoff_context(
-                context_state,
-                main_agent_action=main_action,
-                main_agent_commands=main_commands,
-            ),
-        }
-        if isinstance(state, dict):
-            details.update({
-                "batchSnapshotSha256": state.get("batchSnapshotSha256"),
-                "evidenceIds": state.get("evidenceIds", []),
-                "repairState": state.get("repairState"),
-            })
-        exc.details.update(details)
-        return _emit_error(exc)
-    except ValueError as exc:
-        return _emit_error(exc)
-
-
-def _cmd_start_validation_repair(args: argparse.Namespace) -> int:
-    try:
-        workspace, feature, code_workspace = _resolve(args)
-        state = start_validation_repair(
-            workspace,
-            feature,
-            args.task_id,
-            code_workspace,
-            adopt_workspace_changes=args.adopt_workspace_changes,
         )
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
         return _emit_error(exc)
-
-
-def _cmd_recover(args: argparse.Namespace) -> int:
-    return _cmd_complete(args)
 
 
 def _cmd_abort(args: argparse.Namespace) -> int:
@@ -6985,51 +3482,8 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
-def _cmd_batch_check(args: argparse.Namespace) -> int:
-    try:
-        workspace, feature, code_workspace = _resolve(args)
-        success, state = run_batch_checks(
-            workspace,
-            feature,
-            args.batch_id,
-            code_workspace,
-            args.run_id,
-        )
-        batch_handoff = state.get("batchHandoff")
-        batch_handoff = batch_handoff if isinstance(batch_handoff, dict) else None
-        return _emit(
-            success,
-            error=None if success else "batch_validation_failed",
-            runId=state.get("runId"),
-            status=state.get("status"),
-            validationOutcome=state.get("validationOutcome"),
-            deferredIssue=state.get("deferredIssue"),
-            evidenceIds=(
-                state.get("attempts", [])[-1].get("evidenceIds", [])
-                if isinstance(state.get("attempts"), list) and state.get("attempts")
-                else []
-            ),
-            allEvidenceIds=state.get("evidenceIds", []),
-            requiredAction=state.get("requiredAction"),
-            affectedTaskIds=state.get("affectedTaskIds", []),
-            batchHandoff=batch_handoff,
-            stopAfterBatch=bool(batch_handoff),
-            requiresNewConversation=(
-                bool(batch_handoff.get("requiresNewConversation")) if batch_handoff else False
-            ),
-            userMessage=batch_handoff.get("userMessage") if batch_handoff else None,
-        )
-    except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
-        return _emit_error(exc)
 
 
-def _cmd_project_check(args: argparse.Namespace) -> int:
-    try:
-        workspace, feature, code_workspace = _resolve(args)
-        success, evidence_ids = run_project_checks(workspace, feature, code_workspace)
-        return _emit(success, error=None if success else "project_validation_failed", evidenceIds=evidence_ids)
-    except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
-        return _emit_error(exc)
 
 
 def _cmd_activate_batch(args: argparse.Namespace) -> int:
@@ -7038,6 +3492,27 @@ def _cmd_activate_batch(args: argparse.Namespace) -> int:
         feature = resolve_feature(args.feature)
         return _emit(True, **activate_batch(workspace, feature, args.batch_id))
     except (TaskRunnerError, ValueError) as exc:
+        return _emit_error(exc)
+
+
+def _cmd_batch_compile(args: argparse.Namespace) -> int:
+    """处理 batch-compile 子命令"""
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        result = run_batch_compile(
+            workspace,
+            feature,
+            args.batch_id,
+            code_workspace,
+        )
+        # P1-6: 根据编译状态返回正确的退出码
+        compile_status = result.get("compileStatus")
+        success = compile_status == "passed"
+        return _emit(
+            success,
+            **result,
+        )
+    except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
         return _emit_error(exc)
 
 
@@ -7051,7 +3526,7 @@ def _cmd_code_session(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run and complete structured code tasks")
+    parser = argparse.ArgumentParser(description="Implement structured code tasks and compile batches")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def common(subparser: argparse.ArgumentParser, *, needs_run: bool = False) -> None:
@@ -7066,32 +3541,16 @@ def main(argv: list[str] | None = None) -> int:
     common(start)
     start.set_defaults(func=_cmd_start)
 
-    complete = subparsers.add_parser("complete")
-    common(complete, needs_run=True)
-    complete.add_argument("--no-code-change-why")
-    complete.add_argument("--supporting-file", action="append")
-    complete.set_defaults(func=_cmd_complete)
-
     finish_implementation_parser = subparsers.add_parser("finish-implementation")
     common(finish_implementation_parser, needs_run=True)
     finish_implementation_parser.add_argument("--no-code-change-why")
     finish_implementation_parser.add_argument("--supporting-file", action="append")
     finish_implementation_parser.set_defaults(func=_cmd_finish_implementation)
 
-    validation_repair = subparsers.add_parser("start-validation-repair")
-    common(validation_repair)
-    validation_repair.add_argument(
-        "--adopt-workspace-changes",
-        action="store_true",
-        help="adopt in-workspace changes made after the failed validation snapshot",
-    )
-    validation_repair.set_defaults(func=_cmd_start_validation_repair)
-
-    recover = subparsers.add_parser("recover")
-    common(recover, needs_run=True)
-    recover.add_argument("--no-code-change-why")
-    recover.add_argument("--supporting-file", action="append")
-    recover.set_defaults(func=_cmd_recover)
+    batch_compile_repair = subparsers.add_parser("start-batch-compile-repair")
+    common(batch_compile_repair)
+    batch_compile_repair.add_argument("--batch-id", required=True)
+    batch_compile_repair.set_defaults(func=_cmd_start_batch_compile_repair)
 
     abort = subparsers.add_parser("abort")
     common(abort, needs_run=True)
@@ -7108,36 +3567,6 @@ def main(argv: list[str] | None = None) -> int:
     inspect.add_argument("--run-id")
     inspect.set_defaults(func=_cmd_inspect)
 
-    batch_check = subparsers.add_parser("batch-check")
-    batch_check.add_argument("--workspace")
-    batch_check.add_argument("--feature")
-    batch_check.add_argument("--batch-id", required=True)
-    batch_check.add_argument("--code-workspace", required=True, action="append")
-    batch_check.add_argument("--run-id")
-    batch_check.set_defaults(func=_cmd_batch_check)
-
-    start_task_validation = subparsers.add_parser("start-batch-task-validation")
-    start_task_validation.add_argument("--workspace")
-    start_task_validation.add_argument("--feature")
-    start_task_validation.add_argument("--batch-id", required=True)
-    start_task_validation.add_argument("--code-workspace", required=True, action="append")
-    start_task_validation.set_defaults(func=_cmd_start_batch_task_validation)
-
-    validate_task = subparsers.add_parser("validate-batch-task")
-    validate_task.add_argument("--workspace")
-    validate_task.add_argument("--feature")
-    validate_task.add_argument("--batch-id", required=True)
-    validate_task.add_argument("--task-id", required=True)
-    validate_task.add_argument("--run-id", required=True)
-    validate_task.add_argument("--code-workspace", required=True, action="append")
-    validate_task.set_defaults(func=_cmd_validate_batch_task)
-
-    project_check = subparsers.add_parser("project-check")
-    project_check.add_argument("--workspace")
-    project_check.add_argument("--feature")
-    project_check.add_argument("--code-workspace", required=True, action="append")
-    project_check.set_defaults(func=_cmd_project_check)
-
     activate = subparsers.add_parser("activate-batch")
     activate.add_argument("--workspace")
     activate.add_argument("--feature")
@@ -7148,6 +3577,13 @@ def main(argv: list[str] | None = None) -> int:
     session.add_argument("--workspace")
     session.add_argument("--feature")
     session.set_defaults(func=_cmd_code_session)
+
+    batch_compile = subparsers.add_parser("batch-compile")
+    batch_compile.add_argument("--workspace")
+    batch_compile.add_argument("--feature")
+    batch_compile.add_argument("--batch-id", required=True)
+    batch_compile.add_argument("--code-workspace", required=True, action="append")
+    batch_compile.set_defaults(func=_cmd_batch_compile)
 
     args = parser.parse_args(argv)
     return args.func(args)

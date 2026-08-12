@@ -22,16 +22,67 @@ from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
     load_and_validate_plan,
     load_plan_bundle,
-    task_covered_command_ids,
     task_set_digest,
     validate_plan_data,
     write_plan_json,
 )
-from hooks.plan_writer import (  # noqa: E402
-    record_batch_validation_attempt,
-    record_project_check_attempt,
-    record_task_attempt,
-)
+
+def refresh_exploration_cache(
+    feature_dir: Path,
+    code: Path,
+    *,
+    task_id: str = "T001",
+    batch_id: str = "B001",
+) -> None:
+    """写入一份 fresh 探索缓存，满足 task_runner start 的探索闸门。
+
+    与 tests/test_task_runner.py 的同名 fixture 保持一致：闸门要求首个 TASK start
+    前已有当前仓库快照对应的缓存，否则返回 code_exploration_not_ready。
+    """
+    from hooks.code_exploration import SCHEMA_VERSION, utc_now
+    from hooks.repository_snapshot import capture_repository_snapshot
+
+    batch = json.loads(
+        (feature_dir / "plans" / batch_id / "plan.json").read_text(encoding="utf-8")
+    )
+    captured_at = utc_now()
+    lane = str(batch.get("executionLane", "backend"))
+    cache_path = feature_dir / "cache" / "code-exploration" / code.name / f"{lane}.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = capture_repository_snapshot(code)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": SCHEMA_VERSION,
+                "featureId": "alpha",
+                "repository": {"id": code.name, "root": str(code.resolve())},
+                "executionLane": lane,
+                "capturedAt": captured_at,
+                "capturedBatchId": str(batch.get("batchId", batch_id)),
+                "capturedTaskId": task_id,
+                "gitSnapshot": snapshot,
+                "findings": {
+                    "moduleMap": [],
+                    "conventions": [],
+                    "integrationPoints": [],
+                    "testEntrypoints": [],
+                    "validationPatterns": [],
+                },
+                "exploredPaths": sorted(snapshot["files"]),
+                "sharedPaths": [],
+                "evidenceCoverage": {
+                    "explainedTaskIds": [],
+                    "completionEvidenceIds": [],
+                    "lastExplainedBatchId": None,
+                    "lastExplainedAt": captured_at,
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def task(
@@ -105,6 +156,12 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
         "taskSetStatus": "finalized",
         "activeBatchId": active,
         "nextBatchId": next_batch,
+        "taskValidationPolicy": {
+            "mode": "defer_to_test_stages",
+            "orchestration": "inline",
+            "codeGate": "batch_compile_only",
+            "maxTestStageRepairAttempts": 3,
+        },
         "batchPolicy": {"maxTasks": 5, "strategy": BATCH_STRATEGY},
         "batches": batches,
         "batchValidationProfiles": {
@@ -123,7 +180,7 @@ def root_plan(*, batches: list[dict], active: str | None = "B001", next_batch: s
                     {
                         "argv": [sys.executable, "-c", "print('frontend build')"],
                         "cwd": ".",
-                        "kind": "build",
+                        "kind": "compile",
                         "required": True,
                     }
                 ]
@@ -171,7 +228,7 @@ def batch_plan(batch_id: str, batch_tasks: list[dict], *, execution_lane: str = 
             "print('frontend build')" if execution_lane == "frontend" else "print('backend compile')",
         ],
         "cwd": ".",
-        "kind": "build" if execution_lane == "frontend" else "compile",
+        "kind": "compile",
         "required": True,
     }
     return {
@@ -236,23 +293,21 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
-    def test_backend_maven_test_does_not_replace_batch_compile_closure(self) -> None:
-        item = task("T001")
-        item["validationCommands"][0].update({
-            "argv": ["mvn", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
-            "kind": "integration_test",
-        })
+    def test_load_plan_bundle_rejects_task_outside_implementation_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "feature"
+            feature_dir.mkdir()
+            write_bundle(feature_dir, [[task("T001")]])
+            root_path = feature_dir / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            root["implementationScope"] = "frontend_only"
+            write_plan_json(root_path, root)
 
-        self.assertEqual(task_covered_command_ids([item]), [])
-
-    def test_frontend_build_task_can_cover_batch_closure(self) -> None:
-        item = task("T001", ui_required=True)
-        item["validationCommands"][0].update({
-            "argv": ["npm", "run", "build"],
-            "kind": "build",
-        })
-
-        self.assertEqual(task_covered_command_ids([item]), ["VAL-T001-01"])
+            with self.assertRaisesRegex(
+                PlanJsonError,
+                "T001\\.implementation_scope_frontend_only_required:frontend_only",
+            ):
+                load_plan_bundle(feature_dir)
 
     def test_batch_and_project_commands_reject_noop_validation(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
@@ -293,23 +348,14 @@ class BatchedPlanContractTest(unittest.TestCase):
 
         self.assertEqual(task_set_digest(root, {"B001": batch}), legacy_digest)
 
-    def test_task_validation_policy_versions_digest_without_changing_legacy_payload(self) -> None:
+    def test_task_validation_policy_is_required_and_bound_to_digest(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])
         batch = batch_plan("B001", [task("T001")])
-        legacy_digest = task_set_digest(root, {"B001": batch})
+        policy_digest = task_set_digest(root, {"B001": batch})
 
-        root["taskValidationPolicy"] = {
-            "mode": "deferred_batch",
-            "orchestration": "single_batch_subagent",
-            "failStrategy": "fail_fast",
-            "maxConcurrency": 1,
-            "agentScope": "task_and_batch_validation_commands",
-        }
-        deferred_digest = task_set_digest(root, {"B001": batch})
-
-        self.assertNotEqual(deferred_digest, legacy_digest)
         root.pop("taskValidationPolicy")
-        self.assertEqual(task_set_digest(root, {"B001": batch}), legacy_digest)
+        self.assertNotEqual(task_set_digest(root, {"B001": batch}), policy_digest)
+        self.assertIn("taskValidationPolicy_missing", validate_plan_data(root))
 
     def test_finalized_plan_requires_batch_validation_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -375,155 +421,6 @@ class BatchedPlanContractTest(unittest.TestCase):
                     "projectValidationCommands[0].duplicates_batch_profile:backend",
                     validate_plan_data(equivalent),
                 )
-
-    def test_batch_validation_pass_creates_handoff_after_tasks_are_done(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            write_bundle(feature_dir, [[task("T001")], [task("T002", deps=["T001"])]] )
-
-            completed = record_task_attempt(
-                workspace,
-                "alpha",
-                "T001",
-                ["ev_0001"],
-                completion_evidence_ids=["ev_0001"],
-                success=True,
-            )
-            validated = record_batch_validation_attempt(
-                workspace,
-                "alpha",
-                "B001",
-                ["ev_0002"],
-                success=True,
-                run_id="batch_run_1",
-            )
-
-            self.assertTrue(completed.ok)
-            self.assertTrue(validated.ok)
-            self.assertEqual(validated.data["batchHandoff"]["completedBatchId"], "B001")
-            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
-            self.assertEqual(batch["status"], "done")
-            self.assertEqual(batch["batchValidation"]["status"], "passed")
-            self.assertEqual(batch["batchValidation"]["latestPassEvidenceIds"], ["ev_0002"])
-            self.assertEqual(root["status"], "awaiting_next_conversation")
-            self.assertIsNone(root["activeBatchId"])
-            self.assertEqual(root["nextBatchId"], "B002")
-            self.assertTrue((feature_dir / "BATCH_HANDOFF.json").is_file())
-
-    def test_batch_validation_retry_rebuilds_missing_handoff(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            write_bundle(feature_dir, [[task("T001")], [task("T002", deps=["T001"])]])
-            record_task_attempt(
-                workspace,
-                "alpha",
-                "T001",
-                ["ev_0001"],
-                completion_evidence_ids=["ev_0001"],
-                success=True,
-            )
-            first = record_batch_validation_attempt(
-                workspace,
-                "alpha",
-                "B001",
-                ["ev_0002"],
-                success=True,
-                run_id="batch_run_1",
-            )
-            handoff_path = feature_dir / "BATCH_HANDOFF.json"
-            self.assertTrue(first.ok)
-            handoff_path.unlink()
-
-            retried = record_batch_validation_attempt(
-                workspace,
-                "alpha",
-                "B001",
-                ["ev_0002"],
-                success=True,
-                run_id="batch_run_1",
-            )
-
-            self.assertTrue(retried.ok)
-            self.assertTrue(retried.changed)
-            self.assertEqual(retried.data["batchHandoff"]["nextBatchId"], "B002")
-            self.assertTrue(handoff_path.is_file())
-
-    def test_batch_validation_failure_keeps_batch_active(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            write_bundle(feature_dir, [[task("T001")]])
-            record_task_attempt(
-                workspace,
-                "alpha",
-                "T001",
-                ["ev_0001"],
-                completion_evidence_ids=["ev_0001"],
-                success=True,
-            )
-
-            validated = record_batch_validation_attempt(
-                workspace,
-                "alpha",
-                "B001",
-                ["ev_0002"],
-                success=False,
-                run_id="batch_run_1",
-            )
-
-            self.assertTrue(validated.ok)
-            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
-            self.assertEqual(batch["batchValidation"]["status"], "failed")
-            self.assertEqual(batch["batchValidation"]["evidenceIds"], ["ev_0002"])
-            self.assertEqual(root["activeBatchId"], "B001")
-            self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
-
-    def test_pending_revalidation_cannot_be_cleared_without_matching_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            write_bundle(feature_dir, [[task("T001")]])
-            first = record_task_attempt(
-                workspace,
-                "alpha",
-                "T001",
-                ["ev_0001"],
-                completion_evidence_ids=["ev_0001"],
-                success=True,
-            )
-            self.assertTrue(first.ok)
-            from hooks.plan_writer import request_batch_revalidation
-
-            reopened = request_batch_revalidation(
-                workspace,
-                "alpha",
-                "B001",
-                ["ev_0002"],
-                affected_task_ids=["T001"],
-                run_id="batch_run_1",
-            )
-            self.assertTrue(reopened.ok)
-
-            forged = record_task_attempt(
-                workspace,
-                "alpha",
-                "T001",
-                ["ev_0003"],
-                completion_evidence_ids=["ev_0003"],
-                success=True,
-            )
-
-            self.assertFalse(forged.ok)
-            self.assertEqual(forged.errors[0]["reason"], "batch_revalidation_metadata_mismatch")
-
     def test_plan_writer_projects_lane_batch_validation_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -569,106 +466,6 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual(root["batchValidationProfiles"]["backend"]["commands"][0]["kind"], "compile")
             self.assertEqual(batch["batchValidation"]["commands"][0]["id"], "BATCH-B001-VAL-001")
             self.assertEqual(batch["batchValidation"]["status"], "pending")
-
-    def test_plan_writer_rejects_backend_task_covered_batch_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            write_plan_state(workspace)
-
-            def writer(*args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [
-                        sys.executable,
-                        str(ROOT / "hooks" / "plan_writer.py"),
-                        *args,
-                        "--workspace",
-                        str(workspace),
-                        "--feature",
-                        "alpha",
-                    ],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-
-            item = task("T001")
-            item["scope"].update({"workspaceRoots": {"default": "."}, "paths": ["src"]})
-            item["validationCommands"][0].update({
-                "argv": ["mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
-                "kind": "integration_test",
-            })
-            self.assertEqual(writer("init").returncode, 0)
-            body = Path(tmp) / "T001.json"
-            body.write_text(json.dumps(item), encoding="utf-8")
-            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
-
-            configured = writer(
-                "set-batch-validation-mode",
-                "--lane",
-                "backend",
-                "--mode",
-                "task_covered",
-            )
-
-            self.assertNotEqual(configured.returncode, 0)
-            self.assertIn("task_covered_frontend_only", configured.stdout + configured.stderr)
-            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
-            self.assertNotEqual(root["batchValidationProfiles"].get("backend", {}).get("mode"), "task_covered")
-            self.assertNotEqual(batch["batchValidation"].get("mode"), "task_covered")
-
-    def test_plan_writer_projects_frontend_task_covered_batch_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            write_plan_state(workspace)
-
-            def writer(*args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [
-                        sys.executable,
-                        str(ROOT / "hooks" / "plan_writer.py"),
-                        *args,
-                        "--workspace",
-                        str(workspace),
-                        "--feature",
-                        "alpha",
-                    ],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-
-            item = task("T001", ui_required=True)
-            item["scope"].update({"workspaceRoots": {"default": "."}, "paths": ["src"]})
-            item["validationCommands"][0].update({
-                "argv": ["npm", "run", "build"],
-                "kind": "build",
-            })
-            self.assertEqual(writer("init").returncode, 0)
-            body = Path(tmp) / "T001.json"
-            body.write_text(json.dumps(item), encoding="utf-8")
-            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
-
-            configured = writer(
-                "set-batch-validation-mode",
-                "--lane",
-                "frontend",
-                "--mode",
-                "task_covered",
-            )
-
-            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
-            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
-            self.assertEqual(root["batchValidationProfiles"]["frontend"]["mode"], "task_covered")
-            self.assertEqual(batch["batchValidation"]["coverageCommandIds"], ["VAL-T001-01"])
-
     def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"
@@ -1204,37 +1001,6 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertIn("dependency_not_in_earlier_batch", updated.stdout + updated.stderr)
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(root["batches"][0]["deps"], [])
-
-    def test_failed_project_check_keeps_root_status_failed_after_batch_projection(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            done_task = task("T001", status="done")
-            write_plan_json(
-                batch_plan_path(feature_dir, "B001"),
-                {
-                    **batch_plan("B001", [done_task]),
-                    "status": "done",
-                    "completedTaskCount": 1,
-                    "completedAt": "2026-07-10T00:00:00Z",
-                },
-            )
-            entry = batch_entry("B001", ["T001"])
-            entry["status"] = "done"
-            write_plan_json(
-                feature_dir / "plan.json",
-                root_plan(batches=[entry], active=None, next_batch=None),
-            )
-
-            result = record_project_check_attempt(workspace, "alpha", ["ev_0001"], success=False)
-
-            self.assertTrue(result.ok, result.errors)
-            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(root["status"], "failed")
-            self.assertIsNone(root["latestProjectCheckEvidenceId"])
-
-
 class EvidenceLayoutContractTest(unittest.TestCase):
     def test_new_evidence_uses_jsonl_and_log_without_json_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1298,352 +1064,29 @@ class EvidenceLayoutContractTest(unittest.TestCase):
 
 
 class BatchRunnerContractTest(unittest.TestCase):
-    def test_incomplete_batch_returns_next_runnable_task(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace = root / "artifacts"
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            (workspace / ".autobizdevops" / "state.json").write_text(
-                json.dumps(
-                    {
-                        "schemaVersion": "autobizdevops.state.v3",
-                        "features": {
-                            "alpha": {
-                                "feature": "alpha",
-                                "checkpoint": "code_in_progress",
-                                "stage": "Code",
-                                "iteration": "1",
-                            }
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            write_bundle(
-                feature_dir,
-                [[task("T001"), task("T002", deps=["T001"]), task("T003", deps=["T002"])]],
-            )
-            code = root / "code"
-            code.mkdir()
-            subprocess.run(["git", "init", "-b", "main"], cwd=code, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=code, check=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=code, check=True)
-            (code / ".git" / "info" / "exclude").write_text(
-                ".cmbdevclaw/large_tool_results/\n", encoding="utf-8"
-            )
-            (code / "existing.txt").write_text("already implemented\n", encoding="utf-8")
-            subprocess.run(["git", "add", "existing.txt"], cwd=code, check=True)
-            subprocess.run(["git", "commit", "-m", "initial"], cwd=code, check=True, capture_output=True)
+    def test_legacy_complete_cli_is_removed(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "task_runner.py"), "complete"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid choice: 'complete'", result.stderr)
 
-            def runner(*args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [sys.executable, str(ROOT / "hooks" / "task_runner.py"), *args],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+    def test_legacy_batch_check_cli_is_removed(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "task_runner.py"), "batch-check"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid choice: 'batch-check'", result.stderr)
 
-            started = runner(
-                "start",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T001",
-                "--code-workspace",
-                str(code),
-            )
-            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-            run_id = json.loads(started.stdout)["runId"]
-
-            completed = runner(
-                "complete",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T001",
-                "--run-id",
-                run_id,
-                "--code-workspace",
-                str(code),
-                "--no-code-change-why",
-                "behavior already exists",
-                "--supporting-file",
-                "existing.txt",
-            )
-
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            payload = json.loads(completed.stdout)
-            self.assertEqual(payload["requiredAction"], "continue_active_batch")
-            self.assertTrue(payload["continueCurrentBatch"])
-            self.assertEqual(payload["activeBatchId"], "B001")
-            self.assertEqual(payload["nextTaskId"], "T002")
-            self.assertFalse(payload["stopAfterBatch"])
-            self.assertIsNone(payload["batchHandoff"])
-
-            next_started = runner(
-                "start",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T002",
-                "--code-workspace",
-                str(code),
-            )
-            self.assertEqual(next_started.returncode, 0, next_started.stdout + next_started.stderr)
-            next_run_id = json.loads(next_started.stdout)["runId"]
-            next_completed = runner(
-                "complete",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T002",
-                "--run-id",
-                next_run_id,
-                "--code-workspace",
-                str(code),
-                "--no-code-change-why",
-                "behavior already exists",
-                "--supporting-file",
-                "existing.txt",
-            )
-
-            self.assertEqual(next_completed.returncode, 0, next_completed.stdout + next_completed.stderr)
-            next_payload = json.loads(next_completed.stdout)
-            self.assertEqual(next_payload["requiredAction"], "continue_active_batch")
-            self.assertTrue(next_payload["continueCurrentBatch"])
-            self.assertEqual(next_payload["activeBatchId"], "B001")
-            self.assertEqual(next_payload["nextTaskId"], "T003")
-            self.assertFalse(next_payload["stopAfterBatch"])
-
-    def test_non_final_batch_requires_new_conversation_activation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace = root / "artifacts"
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            (workspace / ".autobizdevops" / "state.json").write_text(
-                json.dumps(
-                    {
-                        "schemaVersion": "autobizdevops.state.v3",
-                        "features": {
-                            "alpha": {
-                                "feature": "alpha",
-                                "checkpoint": "code_in_progress",
-                                "stage": "Code",
-                                "iteration": "1",
-                            }
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            write_bundle(feature_dir, [[task("T001")], [task("T002", deps=["T001"])]] )
-            code = root / "code"
-            code.mkdir()
-            subprocess.run(["git", "init", "-b", "main"], cwd=code, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=code, check=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=code, check=True)
-            (code / ".git" / "info" / "exclude").write_text(
-                ".cmbdevclaw/large_tool_results/\n", encoding="utf-8"
-            )
-            (code / "existing.txt").write_text("already implemented\n", encoding="utf-8")
-            subprocess.run(["git", "add", "existing.txt"], cwd=code, check=True)
-            subprocess.run(["git", "commit", "-m", "initial"], cwd=code, check=True, capture_output=True)
-
-            def runner(*args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [sys.executable, str(ROOT / "hooks" / "task_runner.py"), *args],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-
-            started = runner(
-                "start",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T001",
-                "--code-workspace",
-                str(code),
-            )
-            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-            run_id = json.loads(started.stdout)["runId"]
-            completed = runner(
-                "complete",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T001",
-                "--run-id",
-                run_id,
-                "--code-workspace",
-                str(code),
-                "--no-code-change-why",
-                "behavior already exists",
-                "--supporting-file",
-                "existing.txt",
-            )
-
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            completed_payload = json.loads(completed.stdout)
-            self.assertFalse(completed_payload["stopAfterBatch"])
-            self.assertFalse(completed_payload["continueCurrentBatch"])
-            self.assertIsNone(completed_payload["nextTaskId"])
-            self.assertFalse(completed_payload["requiresNewConversation"])
-            self.assertEqual(completed_payload["requiredAction"], "run_batch_check")
-
-            checked = runner(
-                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-            checked_payload = json.loads(checked.stdout)
-            self.assertTrue(checked_payload["stopAfterBatch"])
-            self.assertTrue(checked_payload["requiresNewConversation"])
-            self.assertEqual(checked_payload["requiredAction"], "stop_and_open_new_conversation")
-            self.assertEqual(
-                checked_payload["userMessage"],
-                "当前批次 B001 已完成，请打开新的对话继续执行 B002。",
-            )
-            self.assertEqual(checked_payload["batchHandoff"]["nextBatchId"], "B002")
-            self.assertTrue(checked_payload["batchHandoff"]["requiresNewConversation"])
-            self.assertEqual(
-                checked_payload["batchHandoff"]["instruction"],
-                "当前批次 B001 已完成，请打开新的对话继续执行 B002。",
-            )
-            self.assertIn("task_runner.py code-session", checked_payload["batchHandoff"]["activationCommand"])
-            self.assertNotIn("activate-batch", checked_payload["batchHandoff"]["activationCommand"])
-            self.assertNotIn("--batch-id", checked_payload["batchHandoff"]["activationCommand"])
-            self.assertNotIn("Open a new conversation", checked.stdout)
-            root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(root_plan["status"], "awaiting_next_conversation")
-            self.assertIsNone(root_plan["activeBatchId"])
-            self.assertEqual(root_plan["nextBatchId"], "B002")
-            self.assertTrue((feature_dir / "BATCH_HANDOFF.json").is_file())
-
-            blocked = runner(
-                "start",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T002",
-                "--code-workspace",
-                str(code),
-            )
-            self.assertNotEqual(blocked.returncode, 0)
-            self.assertIn("batch_handoff_requires_new_conversation:B002", blocked.stdout)
-
-            activated = runner(
-                "code-session",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-            )
-            self.assertEqual(activated.returncode, 0, activated.stdout + activated.stderr)
-            activated_payload = json.loads(activated.stdout)
-            self.assertEqual(activated_payload["action"], "execute_active_batch")
-            self.assertEqual(activated_payload["activeBatchId"], "B002")
-            self.assertTrue(activated_payload["activatedFromHandoff"])
-            self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
-            activated_root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(activated_root["activeBatchId"], "B002")
-
-    def test_recover_can_finish_run_state_after_batch_handoff_was_written(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workspace = root / "artifacts"
-            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-            feature_dir.mkdir(parents=True)
-            (workspace / ".autobizdevops" / "state.json").write_text(
-                json.dumps({"schemaVersion": "autobizdevops.state.v3", "features": {}}),
-                encoding="utf-8",
-            )
-            write_bundle(feature_dir, [[task("T001")], [task("T002", deps=["T001"])]] )
-            code = root / "code"
-            code.mkdir()
-            subprocess.run(["git", "init", "-b", "main"], cwd=code, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=code, check=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=code, check=True)
-            (code / ".git" / "info" / "exclude").write_text(
-                ".cmbdevclaw/large_tool_results/\n", encoding="utf-8"
-            )
-            (code / "existing.txt").write_text("already implemented\n", encoding="utf-8")
-            subprocess.run(["git", "add", "existing.txt"], cwd=code, check=True)
-            subprocess.run(["git", "commit", "-m", "initial"], cwd=code, check=True, capture_output=True)
-
-            def runner(*args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run(
-                    [sys.executable, str(ROOT / "hooks" / "task_runner.py"), *args],
-                    cwd=ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-
-            started = runner(
-                "start", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-            )
-            run_id = json.loads(started.stdout)["runId"]
-            completed = runner(
-                "complete", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--run-id", run_id, "--code-workspace", str(code),
-                "--no-code-change-why", "already implemented", "--supporting-file", "existing.txt",
-            )
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            run_path = feature_dir / ".task-runs" / "T001" / f"{run_id}.json"
-            run_state = json.loads(run_path.read_text(encoding="utf-8"))
-            run_state["status"] = "evidence_written"
-            run_path.write_text(json.dumps(run_state, indent=2) + "\n", encoding="utf-8")
-
-            recovered = runner(
-                "recover", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--run-id", run_id, "--code-workspace", str(code),
-                "--no-code-change-why", "already implemented", "--supporting-file", "existing.txt",
-            )
-
-            self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
-            self.assertEqual(json.loads(run_path.read_text(encoding="utf-8"))["status"], "done")
-            recovered_payload = json.loads(recovered.stdout)
-            self.assertIsNone(recovered_payload["batchHandoff"])
-            self.assertFalse(recovered_payload["stopAfterBatch"])
-            self.assertFalse(recovered_payload["requiresNewConversation"])
-            self.assertEqual(recovered_payload["requiredAction"], "run_batch_check")
-
-            checked = runner(
-                "batch-check", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-            checked_payload = json.loads(checked.stdout)
-            self.assertEqual(checked_payload["batchHandoff"]["nextBatchId"], "B002")
-            self.assertTrue(checked_payload["stopAfterBatch"])
-            self.assertTrue(checked_payload["requiresNewConversation"])
-            self.assertEqual(checked_payload["requiredAction"], "stop_and_open_new_conversation")
-            self.assertEqual(
-                checked_payload["userMessage"],
-                "当前批次 B001 已完成，请打开新的对话继续执行 B002。",
-            )
-
+    def test_legacy_validation_recovery_cli_is_removed(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "task_runner.py"), "start-batch-task-validation"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid choice: 'start-batch-task-validation'", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

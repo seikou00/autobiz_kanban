@@ -1,18 +1,23 @@
 # AUTODEV-E2E 端到端测试资产生成参考
 
-本文件只服务于 [SKILL.md](../../get-shit-done/SKILL.md) 的 `step5`：把结构化 E2E 用例落成可执行资产。
-
 ## 目标
 
 - 优先复用项目现有的 Playwright 测试结构
 - 只补齐执行目标用例所需的最小资产
-- 产出的资产应能被 `SKILL.md` 的 `step7` 直接执行
 
 本文件不定义用例生成、测试执行或结果判定规则。
 
+## 探索与裁定
+
+- 探索使用 DevClaw 内置有头 Chrome Playwright CLI，确认真实页面、可访问名称、locator、鉴权、数据、console 与 network。
+- snapshot 临时元素引用只在当前探索会话使用，不写入持久化 spec。
+- 裁定在新的浏览器上下文中重放持久化 Playwright spec，浏览器跟随项目 `playwright.config.*`。
+- 认证只通过项目约定的程序化 setup 或明确 `storageState` 建立，不继承探索 cookie、localStorage 或页面状态。
+- 每次裁定记录入口 URL、auth status、实际 project 名称、Playwright 版本、配置哈希与诊断路径。project 名称与配置哈希是权威环境标识；浏览器文字说明只作非权威注解。
+
 ## 输入优先级
 
-1. `step4` 产出的结构化 E2E 用例
+1. 产出的结构化 E2E 用例
 2. 与该 feature 相关的前端页面、路由、弹窗和组件
 3. 与该 feature 相关的 specs 行为契约、Spring Boot controller、DTO、权限规则和 design.md 接口决策
 4. 环境说明、测试账号、seed 数据和依赖服务
@@ -133,6 +138,7 @@ spec 应包含：
 - 关键断言
 - 必要时调用 API fixture 或 DB helper
 - 与场景 ID 或验收标准的映射注释或命名
+- 精确的 caseId 绑定：测试标题包含 `[E2E-<feature>-NNN]`，或 spec tag 使用完整 `@E2E-<feature>-NNN`
 
 尽量把 selector 放进 page object，把 setup / cleanup 放进 fixture。
 
@@ -144,7 +150,7 @@ spec 应包含：
 - 基于真实页面状态的导航和可见性等待
 - 创建数据后的 cleanup
 - 已有能力范围内的 screenshot、trace 或 report 支持
-- 保证稳定执行所需的最小 retry / timeout 调整
+- 复用项目既有 retry / timeout；flaky 进入诊断，不为变绿增加 retry、timeout 或固定 sleep
 
 不要把 `waitForTimeout()` 当作主要同步手段。
 
@@ -174,4 +180,5 @@ spec 应包含：
 - 范围最小且与当前 feature 直接相关
 - config、fixture/helper、page object、spec 分层清晰
 - 能追溯到场景 ID 或验收标准
-- 失败时可诊断，但默认不提交二进制产物
+- caseId 可从 Playwright JSON report 的精确 tag 或固定标题标记定位
+- 失败时可诊断

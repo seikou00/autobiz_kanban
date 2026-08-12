@@ -4,7 +4,7 @@
 
 board_config.json 注册（样例，附件约定）::
 
-    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+    "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
 
 入参：
   · ``--platform`` 是目标平台键（``darwin`` / ``linux`` / ``win32``），用于把输出中的
@@ -15,12 +15,40 @@ board_config.json 注册（样例，附件约定）::
         --selected-deployUnit '[{"deployUnitId":"LF39.18_Outservice","localRepoPath":"/repo/out"}]'
 
   · ``--session-workspace-path`` 是会话工作区目录的路径字符串（可空）；脚本读取该目录下的
-    ``AGENTS.md`` 作为「会话工作区指令」。路径为空 / 该文件缺失 / 全空白 → 不生成该段。
+    ``AGENTS.md`` 作为「会话工作区指令」、``CONTEXT.md`` 作为「领域词汇表」（④）。
+    路径为空 / 对应文件缺失 / 全空白 → 不生成对应段。
+
+  · 当前 workflow 节点通过 ``--plugin-workspace``、``--project``、``--feature``
+    显式定位，并复用 Feature Status 的 ``run.currentNodeId``。``--node-id`` 仅作为本地调试覆盖入口
+    （显式给出时直接用该节点自身策略，绕过下面的 nextAction 解析）。
+    节点、参数、配置或单个字段缺失时分别使用默认值：``agentMode = \"solo\"``、
+    ``toolConfig.task.enabled = true``。
+
+``agentConfig`` 取哪个节点的 ``runtimePolicy``——**跟宿主路由同源**：宿主按当前节点状态的
+``states[nodeStatus].nextAction.slashSkill`` 拉起下一个 skill，运行时策略就取该 skill 所属节点的
+``runtimePolicy``，而不是 ``currentNodeId`` 自身的。这条规则无需区分状态：``not_started`` /
+``in_progress`` / ``archived`` 的 nextAction 恒等于节点自己的 skill，会自然退化回当前节点；只有
+``done`` 指向下一个节点。它修掉的是「会话策略滞后一个节点」——例如 ``prd_done`` 时宿主已经拉起
+``/autodev-specs``（需要 multi + 子代理），而 ``biz.prd`` 是 ``solo`` + 禁 task，会话拿不到子代理。
+
+策略解析必须用该 Feature **编译后**的 workflow（``build_run_context`` 的第二个返回值），基线
+``board_config.json`` 里查不到 profile 与动态阶段插入的节点。反查落空时按三级阶梯降级：
+nextAction 目标节点 → ``currentNodeId`` 自身节点 → 全局默认（``solo`` + task 开启）。
+``needs_fix`` 走第二级：它映射的 ``blocked`` 状态没有任何节点定义，退回 ``needsFixFromCheckpoint``
+定位到的回流目标节点，拿到的正是修复所需能力。
 
 输出（固定形状，注入项目模式系统提示词）::
 
     { "ok": true, "message": "...", "sessionContext": "...",
-      "agentmdLoadStatus": [ {deployUnitId, path, loaded, source, message} ] }
+      "agentmdLoadStatus": [ {deployUnitId, path, loaded, source, message} ],
+      "agentConfig": {
+        "agentMode": "solo",
+        "toolConfig": {"task": {"enabled": true}},
+        "subagentConfig": {
+          "disabledBuiltinSubagents": [],
+          "customSubagentFiles": []
+        }
+      } }
 
 ``sessionContext`` 分段拼接（见 docs/agents-loading-remote-local.md），各层次各用一对
 **裸 XML 风格标签**外包（不再用反引号包成 inline code——那会让标签变字面量、id 不成锚点）：
@@ -37,6 +65,12 @@ board_config.json 注册（样例，附件约定）::
      单元级的 remote/local/缺 摘要。**去重**：若会话工作区的 ``AGENTS.md`` 与某选中单元实际加载的
      本地 ``AGENTS.md`` 是同一文件（按 resolve 比对），则不重复注入——丢掉会话工作区段（连同其
      ``本地工作区`` 状态条目与 ① 表行），由带 deployUnitId 身份的单元段承载该文件。
+  ④ 领域词汇表 ``<DOMAIN_CONTEXT>``：``<sessionWorkspacePath>/CONTEXT.md`` 全文，排在最后作
+     参考层（项目级领域术语与代码锚点，由 specs/plan 阶段回写维护，见
+     skills/references/domain-context.md）。独立于部署单元选择；文件名与 AGENTS.md 不同，
+     不参与 ③ 的同文件去重，也不进 ① 适用范围表（它不是代码库映射）。注入时在
+     ``agentmdLoadStatus`` 中占一条（``deployUnitId`` = ``领域词汇表``、``source:"local"``、
+     ``loaded:true``，排在「本地工作区」之后、各单元之前），不计入单元级 remote/local/缺 摘要。
 
 加载策略按层次不同：
   · 系统级（②）只认 remote：本机不知道用户把系统级文件放在哪，**不走 local 兜底**（否则会拿
@@ -47,6 +81,9 @@ board_config.json 注册（样例，附件约定）::
 
 系统级（②）与命中清单的单元级（③）正文里的 ``{plugin_root}`` 占位符在拼接前替换为
 知识库根目录绝对路径（``<pluginPath>/sys``）。
+
+当前节点 ``runtimePolicy.subagentConfig.customSubagentFiles`` 保存插件内相对路径；返回前直接
+拼接插件根目录绝对路径，并按目标平台规范化路径分隔符。
 
 设计原则：除入参 JSON 非法外，任何情况都返回 ok:true，绝不抛异常中断会话；
 缺清单 / 未匹配单元 / 缺 AGENTS.md 都降级为「少注入一点」并在 message 说明。
@@ -75,6 +112,8 @@ from hooks.agents_repo import (  # noqa: E402
     sys_abspath,
     sys_abs_display,
 )
+from hooks.paths import get_plugin_output_workspace_from_args  # noqa: E402
+from inspect_state import build_run_context  # noqa: E402
 
 PLUGIN_ROOT_PLACEHOLDER = "{plugin_root}"  # md 正文里的占位符，替换为知识库根目录 <pluginPath>/sys
 PLUGIN_ROOT_WIN32_PATH_RE = re.compile(
@@ -84,6 +123,307 @@ PLUGIN_ROOT_WIN32_PATH_RE = re.compile(
 LOCAL_AGENTS_MD = "AGENTS.md"  # local 兜底文件名（§8 #1：直接读用户仓库既有 AGENTS.md）
 
 WORKSPACE_AGENTS_MD = "AGENTS.md"  # 工程级「会话工作区指令」文件名（sessionWorkspacePath 下）
+
+WORKSPACE_CONTEXT_MD = "CONTEXT.md"  # 项目级「领域词汇表」文件名（sessionWorkspacePath 下，④ 层）
+
+BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
+DEFAULT_AGENT_MODE = "solo"
+DEFAULT_TASK_ENABLED = True
+
+
+def _find_workflow_node(value: object, node_id: str) -> Optional[dict]:
+    """在 workflow 的主节点、profile 节点和 dynamic stage 节点中查找 id。"""
+    if isinstance(value, dict):
+        nodes = value.get("nodes")
+        if isinstance(nodes, list):
+            for item in nodes:
+                if isinstance(item, dict) and item.get("id") == node_id:
+                    return item
+        for nested in value.values():
+            found = _find_workflow_node(nested, node_id)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_workflow_node(nested, node_id)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_node_by_skill(value: object, skill: str) -> Optional[dict]:
+    """按 ``skill`` 反查节点，查找范围与 :func:`_find_workflow_node` 一致。
+
+    每层先扫本层 ``nodes`` 再下钻，故主节点表优先于 profile / dynamic stage 里的原始声明。
+    """
+    if isinstance(value, dict):
+        nodes = value.get("nodes")
+        if isinstance(nodes, list):
+            for item in nodes:
+                if isinstance(item, dict) and item.get("skill") == skill:
+                    return item
+        for nested in value.values():
+            found = _find_node_by_skill(nested, skill)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_node_by_skill(nested, skill)
+            if found is not None:
+                return found
+    return None
+
+
+def _state_next_skill(node: dict, node_status: str) -> str:
+    """取节点在该状态下 ``nextAction.slashSkill``——即宿主接下来会拉起的 skill。"""
+    if not node_status:
+        return ""
+    for state in node.get("states", []):
+        if not isinstance(state, dict):
+            continue
+        if state.get("nodeStatus", state.get("id")) != node_status:
+            continue
+        action = state.get("nextAction")
+        skill = action.get("slashSkill") if isinstance(action, dict) else None
+        return skill.strip() if isinstance(skill, str) else ""
+    return ""
+
+
+def _policy_target_node_id(
+    config: object,
+    node_id: str,
+    node_status: str,
+) -> str:
+    """把「当前节点 + 状态」解析成「运行时策略该取哪个节点」。
+
+    与宿主路由同源：走 ``states[nodeStatus].nextAction.slashSkill`` 反查节点，所以 ``*_done`` 会
+    落到下一个节点，其余状态自然退化回当前节点。任一环节落空（节点查不到、无该状态、slashSkill
+    为空、该 skill 无对应节点）都退回 ``node_id``，即保持旧口径。
+    """
+    workflow = config.get("workflow") if isinstance(config, dict) else None
+    if not isinstance(workflow, dict):
+        return node_id
+    node = _find_workflow_node(workflow, node_id)
+    if not isinstance(node, dict):
+        return node_id
+    skill = _state_next_skill(node, node_status)
+    if not skill:
+        return node_id
+    target = _find_node_by_skill(workflow, skill)
+    target_id = target.get("id") if isinstance(target, dict) else None
+    if not isinstance(target_id, str) or not target_id.strip():
+        return node_id
+    return target_id.strip()
+
+
+def _runtime_policy(
+    node_id: Optional[str],
+    *,
+    board_config_path: Optional[Path] = None,
+    config: Optional[dict] = None,
+) -> dict:
+    """读取指定 workflow 节点的 ``runtimePolicy``，并补齐稳定默认值。
+
+    ``config`` 传入已编译的有效配置时直接使用（session context 走这条路，基线配置里查不到
+    profile 与动态阶段插入的节点）；未传入时按 ``board_config_path`` 读基线配置。
+
+    session context 是会话启动链路；节点 id 缺失、配置文件不可用或字段类型错误时
+    都不应阻断会话，而是逐字段回退到 ``solo`` / ``task.enabled=true``。
+    """
+    agent_mode = DEFAULT_AGENT_MODE
+    task_enabled = DEFAULT_TASK_ENABLED
+    subagent_config: dict = {}
+    current_node_id = (node_id or "").strip()
+
+    if current_node_id:
+        if config is None:
+            path = board_config_path or BOARD_CONFIG_PATH
+            try:
+                config = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                config = {}
+
+        workflow = config.get("workflow") if isinstance(config, dict) else None
+        if isinstance(workflow, dict):
+            node = _find_workflow_node(workflow, current_node_id)
+            policy = node.get("runtimePolicy") if isinstance(node, dict) else None
+            if isinstance(policy, dict):
+                configured_agent_mode = policy.get("agentMode")
+                if isinstance(configured_agent_mode, str) and configured_agent_mode.strip():
+                    agent_mode = configured_agent_mode.strip()
+
+                tool_config = policy.get("toolCustomConfig")
+                task_config = tool_config.get("task") if isinstance(tool_config, dict) else None
+                configured_task_enabled = (
+                    task_config.get("enabled") if isinstance(task_config, dict) else None
+                )
+                if isinstance(configured_task_enabled, bool):
+                    task_enabled = configured_task_enabled
+
+                configured_subagents = policy.get("subagentConfig")
+                if isinstance(configured_subagents, dict):
+                    for field in ("disabledBuiltinSubagents", "customSubagentFiles"):
+                        configured_values = configured_subagents.get(field)
+                        if isinstance(configured_values, list) and all(
+                            isinstance(value, str) for value in configured_values
+                        ):
+                            subagent_config[field] = list(configured_values)
+
+    result = {
+        "agentMode": agent_mode,
+        "toolCustomConfig": {
+            "task": {
+                "enabled": task_enabled,
+            }
+        },
+    }
+    if subagent_config:
+        result["subagentConfig"] = subagent_config
+    return result
+
+
+def _run_node_status(run: object, node_id: str) -> str:
+    """从 Feature Status 的 ``run.nodes`` 里取该节点的 ``nodeStatus``。"""
+    nodes = run.get("nodes") if isinstance(run, dict) else None
+    if not isinstance(nodes, list):
+        return ""
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("id") != node_id:
+            continue
+        status = node.get("nodeStatus")
+        return status.strip() if isinstance(status, str) else ""
+    return ""
+
+
+def _session_policy_node(
+    node_id: Optional[str] = None,
+    *,
+    plugin_workspace: Optional[str] = None,
+    project: Optional[str] = None,
+    feature: Optional[str] = None,
+    board_config_path: Optional[Path] = None,
+) -> Tuple[str, Optional[dict]]:
+    """解析运行时策略该取哪个节点，并带回解析所用的有效配置。
+
+    显式 ``--node-id`` 是调试覆盖入口：直接用该节点自身策略，不做 nextAction 解析。否则复用
+    Feature Status 的 ``run.currentNodeId`` 与该节点的 ``nodeStatus``，按
+    :func:`_policy_target_node_id` 解析到宿主接下来实际会拉起的那个节点。
+
+    session context 不应因参数、状态或配置异常中断；任何失败均返回空节点，由 runtime policy
+    使用 ``solo`` / ``task.enabled=true`` 默认值。
+    """
+    explicit = (node_id or "").strip()
+    if explicit:
+        return explicit, None
+
+    try:
+        workspace = get_plugin_output_workspace_from_args(plugin_workspace, project)
+        current_feature = (feature or "").strip()
+        if not current_feature:
+            raise ValueError("--feature 不能为空")
+        path = board_config_path or BOARD_CONFIG_PATH
+        base_config = json.loads(path.read_text(encoding="utf-8"))
+        payload, config = build_run_context(workspace, current_feature, base_config)
+        run = payload.get("run") if isinstance(payload, dict) else None
+        current_node_id = run.get("currentNodeId") if isinstance(run, dict) else None
+    except Exception:
+        return "", None
+
+    if not isinstance(current_node_id, str):
+        return "", None
+    current_node_id = current_node_id.strip()
+    if not current_node_id or current_node_id == "unknown":
+        return "", None
+    node_status = _run_node_status(run, current_node_id)
+    return _policy_target_node_id(config, current_node_id, node_status), config
+
+
+def _session_runtime_policy(
+    node_id: Optional[str] = None,
+    *,
+    plugin_workspace: Optional[str] = None,
+    project: Optional[str] = None,
+    feature: Optional[str] = None,
+    board_config_path: Optional[Path] = None,
+) -> dict:
+    policy_node_id, config = _session_policy_node(
+        node_id,
+        plugin_workspace=plugin_workspace,
+        project=project,
+        feature=feature,
+        board_config_path=board_config_path,
+    )
+    return _runtime_policy(
+        policy_node_id,
+        board_config_path=board_config_path,
+        config=config,
+    )
+
+
+def _prepend_plugin_root_path(
+    value: str,
+    *,
+    plugin_root: Optional[Path] = None,
+    platform: Optional[str] = None,
+) -> str:
+    """在 custom subagent 的插件内相对路径前拼接真实插件根目录。"""
+    root = Path(plugin_root).resolve() if plugin_root is not None else ROOT
+    return display_path_join(root, value, platform=platform)
+
+
+def _agent_config(
+    runtime_policy: dict,
+    *,
+    plugin_root: Optional[Path] = None,
+    platform: Optional[str] = None,
+) -> dict:
+    """将 workflow 的 runtimePolicy 转为 session_context_inject 对外格式。"""
+    tool_custom_config = runtime_policy.get("toolCustomConfig")
+    task_config = (
+        tool_custom_config.get("task") if isinstance(tool_custom_config, dict) else None
+    )
+    task_enabled = task_config.get("enabled") if isinstance(task_config, dict) else None
+    subagent_config = runtime_policy.get("subagentConfig")
+    disabled_builtin_subagents = (
+        subagent_config.get("disabledBuiltinSubagents")
+        if isinstance(subagent_config, dict)
+        else None
+    )
+    custom_subagent_files = (
+        subagent_config.get("customSubagentFiles")
+        if isinstance(subagent_config, dict)
+        else None
+    )
+    expanded_custom_subagent_files = (
+        [
+            _prepend_plugin_root_path(
+                path,
+                plugin_root=plugin_root,
+                platform=platform,
+            )
+            for path in custom_subagent_files
+        ]
+        if isinstance(custom_subagent_files, list)
+        else []
+    )
+    return {
+        "agentMode": runtime_policy.get("agentMode", DEFAULT_AGENT_MODE),
+        "toolConfig": {
+            "task": {
+                "enabled": (
+                    task_enabled if isinstance(task_enabled, bool) else DEFAULT_TASK_ENABLED
+                ),
+            }
+        },
+        "subagentConfig": {
+            "disabledBuiltinSubagents": (
+                disabled_builtin_subagents
+                if isinstance(disabled_builtin_subagents, list)
+                else []
+            ),
+            "customSubagentFiles": expanded_custom_subagent_files,
+        },
+    }
 
 
 def _parse_selected(raw: Optional[str]) -> List[dict]:
@@ -259,6 +599,7 @@ SCOPE_TAG = "SCOPE"   # ① 适用范围
 SYSTEM_TAG = "SYSTEM"     # ② 系统级 AGENTS.md
 UNIT_TAG = "UNIT"    # ③ 单元级：整段只用一对 <UNIT> 外包（工作区指令 + 各单元正文）
 UNIT_SECTION_ANCHOR = "unit-section"  # <UNIT> 标签 id（语义/结构边界）；单元锚点改为各自 ## 标题 slug
+DOMAIN_CONTEXT_TAG = "DOMAIN_CONTEXT"  # ④ 领域词汇表：整段只用一对 <DOMAIN_CONTEXT> 外包
 
 
 def _heading_slug(text: str) -> str:
@@ -333,6 +674,37 @@ def _workspace_binding(session_workspace_path: Optional[str]) -> dict:
     }
 
 
+# 领域词汇表（④）进 agentmdLoadStatus 时的 deployUnitId，与「本地工作区」同为会话级条目。
+DOMAIN_CONTEXT_STATUS_ID = "领域词汇表"
+
+
+def _build_domain_context(session_workspace_path: Optional[str]) -> Optional[str]:
+    """读取 ``<sessionWorkspacePath>/CONTEXT.md`` 作为「领域词汇表」正文（④ 层）。
+
+    路径为空 / 该目录下无 CONTEXT.md / 文件全空白 → 返回 None（不生成该段）。
+    独立于部署单元选择；文件名与 AGENTS.md 不同，不参与单元级同文件去重。
+    """
+    path = (session_workspace_path or "").strip()
+    if not path:
+        return None
+    return _read_nonempty(Path(path) / WORKSPACE_CONTEXT_MD)
+
+
+def _domain_context_status(
+    session_workspace_path: Optional[str], *, platform: Optional[str] = None
+) -> dict:
+    """领域词汇表进 agentmdLoadStatus 的一条。仅在已确认有正文时调用，
+    故 ``loaded:True``、``source:"local"``（词汇表始终读本地文件，无 remote）。"""
+    path = (session_workspace_path or "").strip()
+    return {
+        "deployUnitId": DOMAIN_CONTEXT_STATUS_ID,
+        "path": display_path_join(path, WORKSPACE_CONTEXT_MD, platform=platform) if path else "",
+        "loaded": True,
+        "source": "local",
+        "message": "",
+    }
+
+
 def _attr(text: str) -> str:
     """转义 XML 属性值里的 & < > "，避免 description 等自由文本撑破标签。"""
     return (
@@ -348,8 +720,10 @@ def _compose_prompt(
     system_sections: List[dict],
     workspace_content: Optional[str],
     unit_sections: List[dict],
+    domain_context: Optional[str] = None,
 ) -> str:
-    """① 适用范围（绑定表，deployUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md。
+    """① 适用范围（绑定表，deployUnitId 为锚点链接）→ ② 系统级 AGENTS.md → ③ 各单元 description.md
+    → ④ 领域词汇表。
 
     三个层次各用一对 XML 风格标签外包（``<SCOPE>`` / ``<SYSTEM>`` /
     ``<UNIT>``）；被嵌入 md 自带的 ``#``/``##`` 标题被包在标签内，不再与结构
@@ -364,6 +738,39 @@ def _compose_prompt(
     """
     lines: List[str] = []
     lines.append("# 统一 Agent 指令")
+    lines.append("")
+    lines.append("""## 必须执行的启动协议
+
+1. 判断本次任务涉及哪些 deployUnit（见 <SCOPE> 映射表）。
+2. 用文件读取、搜索或 shell 工具打开对应 <SYSTEM>、<UNIT> 段落的架构、领域、API、编码规范文档，以及 <SCOPE>「代码地址」下的相关代码，不凭包名、记忆路径、相似命名判断。
+3. 任务跨多个 deployUnit 时，各单元规则同时适用，并分别说明验证结果。
+
+本协议按「任务」生效，覆盖需求澄清、需求分析、向用户提问、设计、编码；不得因当前不是代码阶段而跳过。
+
+## 指令反模式
+
+- <SCOPE>、<SYSTEM>、<UNIT> 不表示任何文件已被读取；复述不算读取。
+- 未用工具实际打开前，不得声称已读取，也不得据此开始实质分析、提问或答复。
+- 路径不存在或无法访问时，说明未读取及原因，不得猜测内容。
+
+## 必读门禁
+
+- 不得把“任务”缩义为代码修改。本门禁覆盖需求澄清、需求分析、向用户提问、设计、编码全部环节。
+- 上游文档中标注“必须读取”“先读取”“必读”文件必须逐个通过文件读取、搜索或 shell 工具实际打开，不得只凭内联正文作答。
+- 明确的必读指令高于模型对文件相关性的主观判断；认为某文件与当前问题无关不构成跳过理由。
+- 不得以“当前不是代码阶段”“需求澄清不需要”“先讨论再读”为由推迟必读项。
+- 每个必读文件都要在该阶段首次分析、提问或答复前用工具打开该文件。
+- 未取得工具读取证据前，不得声称已读、不得继续实质分析。
+
+## 指令优先级
+skill 的工作步骤不构成跳过本协议的理由。冲突时按此顺序：当前用户请求 → 本启动协议 → <UNIT> 单元级约束 → <SYSTEM> 系统级约束 → 实际工程中的既有代码行为 → 通用框架或语言默认实践。
+
+## 最终回复清单
+
+- 本轮通过工具实际打开了哪些<SYSTEM><UNIT>索引的文件路径，仅限sys目录（<SYSTEM> 和 <UNIT> 段落所指向的架构/领域知识文档目录，即发布单元对应的知识库文档存放位置。这些文档通常存放在sys/ 的目录结构）下的md文件，未打开的不得列入，不列举代码文件，不列举skills目录下的文件。
+- 影响哪些 deployUnit，修改了哪些文件。
+- 仅Autodev-Code技能阶段执行了哪些验证命令，或为什么跳过。其他技能不用回复验证命令这条规则。
+  """)
     lines.append("")
     # ① 适用范围：绑定表（deployUnitId 锚点链接指向下方 ②/③ 段的 id 属性）。
     # 无绑定（未选任何单元、仅注入工作区指令时）则整段跳过。
@@ -386,6 +793,7 @@ def _compose_prompt(
             lines.append(f"| {ref} | {cell} | {repo} |")
         lines.append("")
         lines.append(f"</{SCOPE_TAG}>")
+
 
     # ② 系统级 AGENTS.md：每段外包 <SYSTEM>（裸标签），id 供 ① 表里无独立 md 的单元回退锚点定位。
     for section in system_sections:
@@ -415,6 +823,15 @@ def _compose_prompt(
         lines.append("")
         lines.append(f"</{UNIT_TAG}>")
 
+    # ④ 领域词汇表：项目级术语与代码锚点，整段只用一对 <DOMAIN_CONTEXT> 外包，排最后作参考层。
+    if domain_context is not None:
+        lines.append("")
+        lines.append(f'<{DOMAIN_CONTEXT_TAG} id="domain-context" scope="项目级领域词汇表">')
+        lines.append("")
+        lines.append(domain_context.strip())
+        lines.append("")
+        lines.append(f"</{DOMAIN_CONTEXT_TAG}>")
+
     return "\n".join(lines)
 
 
@@ -424,27 +841,57 @@ def render(
     plugin_root: Optional[Path] = None,
     session_workspace_path: Optional[str] = None,
     platform: Optional[str] = None,
+    node_id: Optional[str] = None,
+    plugin_workspace: Optional[str] = None,
+    project: Optional[str] = None,
+    feature: Optional[str] = None,
+    board_config_path: Optional[Path] = None,
 ) -> dict:
     """核心逻辑（无 I/O 边界外副作用），便于单测。"""
+    agent_config = _agent_config(
+        _session_runtime_policy(
+            node_id,
+            plugin_workspace=plugin_workspace,
+            project=project,
+            feature=feature,
+            board_config_path=board_config_path,
+        ),
+        plugin_root=plugin_root,
+        platform=platform,
+    )
     # 「会话工作区指令」独立于部署单元选择：先行构建，未选单元也可单独注入。
     workspace_content = _build_workspace_content(session_workspace_path)
+    # 「领域词汇表」（④）同样独立于部署单元选择；文件名与 AGENTS.md 不同，不参与其去重。
+    domain_context = _build_domain_context(session_workspace_path)
 
     if not selected:
-        if workspace_content is None:
+        if workspace_content is None and domain_context is None:
             return {
                 "ok": True,
                 "message": "未选择部署单元，无需注入",
                 "sessionContext": "",
                 "agentmdLoadStatus": [],
+                "agentConfig": agent_config,
             }
-        # 即便未选单元，工作区指令也在适用范围表里占一行映射。
-        bindings = [_workspace_binding(session_workspace_path)]
-        prompt = _compose_prompt(bindings, [], workspace_content, [])
+        # 即便未选单元，工作区指令也在适用范围表里占一行映射；词汇表不进适用范围表（非代码库映射）。
+        bindings = (
+            [_workspace_binding(session_workspace_path)] if workspace_content is not None else []
+        )
+        prompt = _compose_prompt(bindings, [], workspace_content, [], domain_context)
+        parts: List[str] = []
+        session_status: List[dict] = []
+        if workspace_content is not None:
+            parts.append("会话工作区指令")
+            session_status.append(_workspace_status(session_workspace_path, platform=platform))
+        if domain_context is not None:
+            parts.append("领域词汇表")
+            session_status.append(_domain_context_status(session_workspace_path, platform=platform))
         return {
             "ok": True,
-            "message": "未选择部署单元，仅注入会话工作区指令",
+            "message": "未选择部署单元，仅注入" + "、".join(parts),
             "sessionContext": prompt,
-            "agentmdLoadStatus": [_workspace_status(session_workspace_path, platform=platform)],
+            "agentmdLoadStatus": session_status,
+            "agentConfig": agent_config,
         }
 
     # 清单不可用（缺失/非法）时降级：所有单元当作未命中，直接走 local 兜底。
@@ -570,23 +1017,25 @@ def render(
             }
         )
 
-    prompt = _compose_prompt(bindings, system_sections, workspace_content, unit_sections)
+    prompt = _compose_prompt(bindings, system_sections, workspace_content, unit_sections, domain_context)
     remote_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "remote")
     local_n = sum(1 for s in load_status if s["loaded"] and s["source"] == "local")
     miss_n = sum(1 for s in load_status if not s["loaded"])
     message = f"remote {remote_n} / local {local_n} / 缺 {miss_n}"
-    # 工作区指令（若有正文注入）在 agentmdLoadStatus 里占首条；其加载结果不计入上面的
-    # remote/local/缺 单元摘要（那行只反映部署单元），避免把工作区混进单元统计。
-    result_status = (
-        [_workspace_status(session_workspace_path, platform=platform), *load_status]
-        if workspace_content is not None
-        else load_status
-    )
+    # 会话级条目（工作区指令、领域词汇表，若有正文注入）在 agentmdLoadStatus 里排前；其加载
+    # 结果不计入上面的 remote/local/缺 单元摘要（那行只反映部署单元），避免混进单元统计。
+    session_entries: List[dict] = []
+    if workspace_content is not None:
+        session_entries.append(_workspace_status(session_workspace_path, platform=platform))
+    if domain_context is not None:
+        session_entries.append(_domain_context_status(session_workspace_path, platform=platform))
+    result_status = [*session_entries, *load_status]
     return {
         "ok": True,
         "message": message,
         "sessionContext": prompt,
         "agentmdLoadStatus": result_status,
+        "agentConfig": agent_config,
     }
 
 
@@ -608,6 +1057,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="JSON 数组字符串：[{\"deployUnitId\":\"...\",\"localRepoPath\":\"...\"}]",
     )
     parser.add_argument(
+        "--node-id",
+        dest="node_id",
+        default="",
+        help="本地调试覆盖：显式指定 workflow 节点 id；宿主运行时从项目与 Feature 参数自动解析",
+    )
+    parser.add_argument(
+        "--plugin-workspace",
+        dest="plugin_workspace",
+        default="",
+        help="项目集合工作区路径；与 --project 组合定位项目插件目录",
+    )
+    parser.add_argument(
+        "--project",
+        dest="project",
+        default="",
+        help="项目插件目录名",
+    )
+    parser.add_argument(
+        "--feature",
+        dest="feature",
+        default="",
+        help="当前 Feature 标识",
+    )
+    parser.add_argument(
         "--session-workspace-path",
         dest="session_workspace_path",
         default="",
@@ -623,12 +1096,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             "message": str(exc),
             "sessionContext": "",
             "agentmdLoadStatus": [],
+            "agentConfig": _agent_config(
+                _session_runtime_policy(
+                    args.node_id,
+                    plugin_workspace=args.plugin_workspace,
+                    project=args.project,
+                    feature=args.feature,
+                ),
+                platform=args.platform,
+            ),
         }
     else:
         result = render(
             selected,
             session_workspace_path=args.session_workspace_path,
             platform=args.platform,
+            node_id=args.node_id,
+            plugin_workspace=args.plugin_workspace,
+            project=args.project,
+            feature=args.feature,
         )
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
