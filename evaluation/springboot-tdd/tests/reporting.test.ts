@@ -81,6 +81,22 @@ test("rejects infrastructure failures instead of averaging them as task zeros", 
   assert.throws(() => compareResults([control, full]), /不可计分失败.*infrastructure/)
 })
 
+test("scores agent and timeout outcomes instead of cherry-picking completed runs", () => {
+  const control = result("control", 1, true, 100)
+  const agentFailure = {
+    ...result("full-chain", 1, false, 200),
+    failureClass: "agent" as const,
+    error: "Harness stage did not complete"
+  }
+
+  const report = compareResults([control, agentFailure])
+  assert.equal(report.conditions["full-chain"].resolvedRate, 0)
+  assert.equal(report.conditions["full-chain"].failureClasses.agent, 1)
+
+  const timedOut = { ...agentFailure, failureClass: "timeout" as const }
+  assert.doesNotThrow(() => compareResults([control, timedOut]))
+})
+
 test("rejects an incomplete or unbalanced final repeat matrix", () => {
   const balancedTwo = [
     result("control", 1, false, 100),

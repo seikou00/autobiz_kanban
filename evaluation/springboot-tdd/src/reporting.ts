@@ -97,7 +97,10 @@ export function compareResults(results: RunResult[], expectedRepeats?: number): 
   if (results.some((result) => result.schemaVersion !== 2)) {
     throw new EvalError("setup", "结果包含旧版 run schema", "先用 evaluate 重评旧 run，再执行 compare。")
   }
-  const invalidFailures = results.filter((result) => result.failureClass && result.failureClass !== "task")
+  const scorableFailures = new Set(["task", "agent", "timeout"])
+  const invalidFailures = results.filter(
+    (result) => result.failureClass && !scorableFailures.has(result.failureClass)
+  )
   if (invalidFailures.length > 0) {
     throw new EvalError(
       "setup",
