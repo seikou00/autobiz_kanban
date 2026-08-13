@@ -218,7 +218,7 @@ class RenderShapeTest(unittest.TestCase):
 
 class RuntimePolicyTest(unittest.TestCase):
     @staticmethod
-    def _feature_arguments(checkpoint="discuss_in_progress"):
+    def _feature_arguments(checkpoint="prd_in_progress"):
         root = Path(tempfile.mkdtemp()).resolve()
         project = root / "demo"
         project.mkdir()
@@ -253,7 +253,6 @@ class RuntimePolicyTest(unittest.TestCase):
         project, feature, arguments = self._feature_arguments()
         # biz.* 无子代理配置，保持 solo；dev.* 自 e3abd1f 起改为 multi 以配合子代理注入。
         cases = (
-            ("discuss_in_progress", "solo", False),
             ("prd_in_progress", "solo", False),
             ("specs_in_progress", "multi", True),
             ("code_in_progress", "multi", True),
@@ -365,7 +364,7 @@ class RuntimePolicyTest(unittest.TestCase):
         )
 
     def test_explicit_node_id_overrides_project_and_feature_arguments(self):
-        _project, _feature, arguments = self._feature_arguments("discuss_in_progress")
+        _project, _feature, arguments = self._feature_arguments("prd_in_progress")
         policy = render([], node_id="dev.code", **arguments)["agentConfig"]
         self.assertTrue(policy["toolConfig"]["task"]["enabled"])
 
@@ -423,7 +422,7 @@ class RuntimePolicyTest(unittest.TestCase):
         self.assertFalse(payload["agentConfig"]["toolConfig"]["task"]["enabled"])
 
     def test_board_config_disables_task_only_for_configured_early_nodes(self):
-        for node_id in ("biz.discuss", "biz.prd"):
+        for node_id in ("biz.prd",):
             policy = _runtime_policy(node_id)
             self.assertEqual(policy["agentMode"], "solo")
             self.assertFalse(policy["toolCustomConfig"]["task"]["enabled"])
@@ -642,7 +641,7 @@ class RuntimePolicyTest(unittest.TestCase):
     def test_invalid_selected_json_still_returns_runtime_policy(self):
         output = io.StringIO()
         with redirect_stdout(output):
-            exit_code = main(["--node-id", "biz.discuss", "--selected-deployUnit", "not-json"])
+            exit_code = main(["--node-id", "biz.prd", "--selected-deployUnit", "not-json"])
         payload = json.loads(output.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertFalse(payload["ok"])

@@ -1,7 +1,7 @@
 ---
 name: autobiz
 description: Biz 阶段统一入口。负责前置准入校验、流程编排、子技能路由与关键产出物脚本校验。所有 Biz 阶段工作应通过本入口进入。
-version: v1.1.2609
+version: v1.1.08131
 ---
 
 
@@ -9,12 +9,10 @@ version: v1.1.2609
 
 > 本技能是 Biz 阶段的唯一统一入口，负责 workspace 前置准入、流程编排和产出物脚本校验。
 >
-> 下游包含两个子技能：
+> 下游包含一个子技能：
 > - `/autobiz-requirement-discuss` — 需求澄清与讨论收敛
-> - `/autobiz-prd-generate` — 正式 PRD 提炼
 
-
-### 读取 State 快照
+### 读取 State
 
 ```bash
 python "${pluginPath}/read_state_json.py" --feature "${feature}"
@@ -34,13 +32,12 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 | 用户意图 | 当前状态要求 | 路由目标 |
 |---------|------------|---------|
-| 需求澄清、讨论需求、完善需求文档 | 无硬性前置 | `/autobiz-requirement-discuss` |
-| 生成正式 PRD、整理 PRD、PRD 定稿 | `/autobiz-prd-generate` |
+| 需求澄清、讨论需求、完善或生成 PRD | 无硬性前置 | `/autobiz-requirement-discuss` |
 
 **执行顺序约束**：
 
 ```
-/autobiz-requirement-discuss → /autobiz-prd-generate
+/autobiz-requirement-discuss
 ```
 
 下游子技能执行前，必须通过脚本校验上游产出物
@@ -51,10 +48,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 ### 各阶段校验命令
 
 ```bash
-# 需求澄清完成后
-set PYTHONIOENCODING=utf-8 && python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "${feature}"
-
-# PRD 生成完成后
+# PRD 完成后
 set PYTHONIOENCODING=utf-8 && python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 

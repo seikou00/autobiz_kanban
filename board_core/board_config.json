@@ -160,15 +160,12 @@
     ],
     "checkpoints": {
       "initial": [
-        "discuss_in_progress",
         "prd_in_progress",
         "specs_in_progress",
         "plan_in_progress",
         "cicd_in_progress"
       ],
       "transitions": {
-        "discuss_in_progress": ["discuss_done"],
-        "discuss_done": ["prd_in_progress"],
         "prd_in_progress": ["prd_done"],
         "prd_done": ["specs_in_progress"],
         "specs_in_progress": ["specs_done"],
@@ -188,7 +185,6 @@
         "cicd_in_progress": ["cicd_done"],
         "cicd_done": ["archived"],
         "needs_fix": [
-          "discuss_in_progress",
           "prd_in_progress",
           "specs_in_progress",
           "plan_in_progress",
@@ -198,9 +194,7 @@
         "archived": []
       },
       "stageLabels": {
-        "discuss_in_progress": "Biz / 需求澄清",
-        "discuss_done": "Biz / 需求澄清",
-        "prd_in_progress": "Biz / PRD 生成",
+        "prd_in_progress": "Biz / 需求澄清与 PRD",
         "prd_done": "Biz / PRD",
         "specs_in_progress": "Specs",
         "specs_done": "Specs 完成",
@@ -224,8 +218,8 @@
     },
     "nodes": [
       {
-        "id": "biz.discuss",
-        "label": "需求澄清",
+        "id": "biz.prd",
+        "label": "需求澄清与 PRD",
         "group": "Biz",
         "skill": "autobiz-requirement-discuss",
         "order": 10,
@@ -237,52 +231,15 @@
             }
           }
         },
-        "description": "沉淀需求讨论稿 \n 产物：PRD_DISCUSS.md（需求讨论稿：澄清结论、边界与待确认项）",
+        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）",
         "states": [
-          { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清。" } },
-          { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清。" } },
-          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } }
-        ],
-        "checkpoints": ["discuss_in_progress", "discuss_done"],
-        "artifacts": {
-          "inputs": [],
-          "outputs": [
-            { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true }
-          ]
-        },
-        "validators": [],
-        "hookDefinitions": [
-          { "id": "biz-discuss-validate", "label": "需求澄清产物校验", "event": "PostSkillUse", "required": true }
-        ]
-      },
-      {
-        "id": "biz.prd",
-        "label": "PRD 生成",
-        "group": "Biz",
-        "skill": "autobiz-prd-generate",
-        "order": 20,
-        "runtimePolicy": {
-          "agentMode": "solo",
-          "toolCustomConfig": {
-            "task": {
-              "enabled": false
-            }
-          }
-        },
-        "description": "生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）",
-        "states": [
-          { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
-          { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-prd-generate", "userMessage": "请使用 /autobiz-prd-generate 继续推进当前 Feature。", "dialogTips": "当前阶段：PRD 生成。" } },
+          { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清与 PRD。" } },
+          { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清与 PRD。" } },
           { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "通过 /autodev-specs 路由到行为规格；是否需要先将 HTML 转换为项目内前端工程文件？需要则进入 autodev-frontend，并在该节点内按标准 HTML 或绝对定位高保真 HTML 分流；不需要则直接进入 autodev-specs 阶段。" } }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {
-          "inputs": [
-            { "id": "prd_discuss", "label": "需求讨论稿", "artifactType": "file", "path": "PRD_DISCUSS.md", "required": true,
-              "extract": {
-                "degrade": "无讨论稿时先与用户完成需求澄清，再生成 PRD"
-              } }
-          ],
+          "inputs": [],
           "outputs": [
             { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
           ]
@@ -799,7 +756,6 @@
       }
     ],
     "transitions": [
-      { "id": "discuss-to-prd", "from": { "nodeId": "biz.discuss", "state": "done" }, "to": { "nodeId": "biz.prd", "state": "in_progress" } },
       { "id": "prd-to-specs", "from": { "nodeId": "biz.prd", "state": "done" }, "to": { "nodeId": "dev.specs", "state": "in_progress" } },
       { "id": "specs-to-plan", "from": { "nodeId": "dev.specs", "state": "done" }, "to": { "nodeId": "dev.plan", "state": "in_progress" } },
       { "id": "plan-to-code", "from": { "nodeId": "dev.plan", "state": "done" }, "to": { "nodeId": "dev.code", "state": "in_progress" } },

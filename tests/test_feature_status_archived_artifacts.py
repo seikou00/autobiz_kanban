@@ -67,13 +67,7 @@ class ArchivedFeatureStatusTest(unittest.TestCase):
         self.assertEqual(prd_artifact["path"], f"{expected_dir}/PRD.md")
         self.assertEqual(prd_artifact["artifactStatus"], "generated")
         self.assertEqual(prd_artifact["artifactStatusLabel"], "已归档")
-
-        discuss_node = next(node for node in run["nodes"] if node["id"] == "biz.discuss")
-        discuss_artifact = next(
-            artifact for artifact in discuss_node["artifacts"] if artifact["id"] == "prd_discuss"
-        )
-        self.assertEqual(discuss_artifact["artifactStatus"], "missing")
-        self.assertEqual(discuss_artifact["artifactStatusLabel"], "未生成")
+        self.assertNotIn("biz.discuss", {node["id"] for node in run["nodes"]})
 
 
 if __name__ == "__main__":

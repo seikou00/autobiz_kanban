@@ -338,7 +338,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         files = [
             "skills/autobiz/SKILL.md",
             "skills/autobiz/autobiz-requirement-discuss/SKILL.md",
-            "skills/autobiz/autobiz-prd-generate/SKILL.md",
             "skills/autobiz/hooks/biz_validate.py",
         ]
         offenders: list[str] = []
@@ -352,7 +351,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         command_docs = [
             "skills/autobiz/SKILL.md",
             "skills/autobiz/autobiz-requirement-discuss/SKILL.md",
-            "skills/autobiz/autobiz-prd-generate/SKILL.md",
         ]
         missing = [
             relative_path

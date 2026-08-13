@@ -51,6 +51,8 @@ WORKFLOW_RECORD_FIELDS = (
 )
 IGNORED_PRD_ORIGINAL_NAMES = frozenset({".DS_Store", "Thumbs.db"})
 IGNORED_PRD_ORIGINAL_SUFFIXES = frozenset({".tmp", ".swp", ".swo", ".part"})
+RETIRED_ARTIFACT_PATHS = frozenset({"PRD_DISCUSS.md"})
+LEGACY_STAGE_ALIASES = {"biz.discuss": "biz.prd"}
 
 
 def utc_now() -> str:
@@ -63,6 +65,58 @@ def default_status() -> dict[str, Any]:
         "published_artifacts": {},
         "events": {},
     }
+
+
+def _migrate_workflow_record_nodes(record: dict[str, Any]) -> bool:
+    changed = False
+    nodes = record.get("workflowNodes")
+    if isinstance(nodes, list):
+        migrated_nodes: list[Any] = []
+        for node_id in nodes:
+            migrated = LEGACY_STAGE_ALIASES.get(node_id, node_id) if isinstance(node_id, str) else node_id
+            if migrated not in migrated_nodes:
+                migrated_nodes.append(migrated)
+        if migrated_nodes != nodes:
+            record["workflowNodes"] = migrated_nodes
+            changed = True
+
+    skipped = record.get("workflowSkippedNodes")
+    if isinstance(skipped, list):
+        migrated_skipped = [node_id for node_id in skipped if node_id != "biz.discuss"]
+        if migrated_skipped != skipped:
+            record["workflowSkippedNodes"] = migrated_skipped
+            changed = True
+    return changed
+
+
+def migrate_legacy_status(data: dict[str, Any]) -> bool:
+    """Move retryable Biz sync state to the merged biz.prd contract."""
+    changed = False
+    published = data.get("published_artifacts", {})
+    for path in RETIRED_ARTIFACT_PATHS:
+        if path in published:
+            published.pop(path, None)
+            changed = True
+    for artifact in published.values():
+        if not isinstance(artifact, dict):
+            continue
+        stage = artifact.get("stage")
+        if stage in LEGACY_STAGE_ALIASES:
+            artifact["stage"] = LEGACY_STAGE_ALIASES[stage]
+            changed = True
+
+    for event in data.get("events", {}).values():
+        if not isinstance(event, dict) or event.get("status") not in {"pending", "failed"}:
+            continue
+        stage = event.get("source_stage")
+        if stage in LEGACY_STAGE_ALIASES:
+            event["source_stage"] = LEGACY_STAGE_ALIASES[stage]
+            event["source_skill"] = "autobiz-requirement-discuss"
+            changed = True
+        workflow_record = event.get("workflow_record")
+        if isinstance(workflow_record, dict) and _migrate_workflow_record_nodes(workflow_record):
+            changed = True
+    return changed
 
 
 def status_path(feature_dir: Path) -> Path:
@@ -127,6 +181,7 @@ def read_status(feature_dir: Path) -> dict[str, Any]:
         data["published_artifacts"] = {}
     if not isinstance(data.get("events"), dict):
         data["events"] = {}
+    migrated = migrate_legacy_status(data) or migrated
     if migrated:
         atomic_write_json(status_path(feature_dir), data)
     cleanup_legacy_sync_files(feature_dir)
@@ -267,11 +322,6 @@ def snapshot_contract_outputs(
 
 
 CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
-    "PRD_DISCUSS.md": {
-        "category": "requirement_discussion",
-        "lifecycle": "process",
-        "description": "需求讨论稿。",
-    },
     "PRD.md": {
         "category": "requirement",
         "lifecycle": "final",
@@ -499,7 +549,7 @@ def collect_prd_original_artifacts(
                 side_entries.append(
                     catalog_entry(
                         path=relative_path,
-                        stage="biz.discuss",
+                        stage="biz.prd",
                         upload_status="skipped",
                         size=size,
                         status_reason="file_size_exceeds_5mb",
@@ -525,7 +575,7 @@ def collect_prd_original_artifacts(
             side_entries.append(
                 catalog_entry(
                     path=relative_path,
-                    stage="biz.discuss",
+                    stage="biz.prd",
                     upload_status="missing",
                     status_reason="file_not_found",
                 )
@@ -590,7 +640,7 @@ def collect_sidecar_artifacts(
     status: dict[str, Any],
     include_unpublished_missing: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if stage_id == "biz.discuss":
+    if stage_id == "biz.prd":
         return collect_prd_original_artifacts(
             feature_dir,
             project_code=project_code,
@@ -647,7 +697,11 @@ def merge_catalog_entries(entries: Iterable[dict[str, Any]]) -> list[dict[str, A
 def catalog_entries_from_published(feature_dir: Path, status: dict[str, Any]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for relative_path, published in status.get("published_artifacts", {}).items():
-        if not isinstance(relative_path, str) or relative_path == CATALOG_FILE_NAME:
+        if (
+            not isinstance(relative_path, str)
+            or relative_path == CATALOG_FILE_NAME
+            or relative_path in RETIRED_ARTIFACT_PATHS
+        ):
             continue
         if not isinstance(published, dict):
             continue

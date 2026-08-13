@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from board_core.state_store import write_state_records  # noqa: E402
-from skills.autobiz.hooks.biz_validate import validate_discuss, validate_prd  # noqa: E402
+from skills.autobiz.hooks.biz_validate import validate_prd  # noqa: E402
 from tests.test_biz_validate_prd import VALID_PRD  # noqa: E402
 
 
@@ -45,26 +45,15 @@ class BizValidateContractAwareTests(unittest.TestCase):
         write_state_records(workspace, {"alpha": dict(record)})
         return workspace
 
-    def test_custom_chain_without_discuss_passes_prd_without_draft(self) -> None:
-        # biz.prd is selected but biz.discuss is not: PRD_DISCUSS.md was
-        # dropped from the contract, so its absence must not fail validation.
+    def test_custom_chain_with_biz_prd_validates_merged_skill_output(self) -> None:
         workspace = self.make_workspace(CUSTOM_WITH_PRD_NODE, prd_content=VALID_PRD)
         result = validate_prd("alpha", workspace)
         self.assertTrue(result["ok"], result)
         self.assertNotIn("skipped", result)
 
-    def test_custom_chain_without_discuss_skips_discuss_validation(self) -> None:
-        workspace = self.make_workspace(CUSTOM_WITH_PRD_NODE, prd_content=VALID_PRD)
-        result = validate_discuss("alpha", workspace)
-        self.assertTrue(result["ok"], result)
-        self.assertTrue(result.get("skipped"))
-
-    def test_lean_chain_skips_both_validations(self) -> None:
+    def test_lean_chain_skips_prd_validation(self) -> None:
         workspace = self.make_workspace(LEAN_RECORD)
-        discuss = validate_discuss("alpha", workspace)
         prd = validate_prd("alpha", workspace)
-        self.assertTrue(discuss["ok"], discuss)
-        self.assertTrue(discuss.get("skipped"))
         self.assertTrue(prd["ok"], prd)
         self.assertTrue(prd.get("skipped"))
 

@@ -11,6 +11,7 @@ from hooks.init_workspace import create_feature, init_workspace
 from hooks.route_checkpoint import resolve_route
 from inspect_state import _load_board_config, project_mode, run_mode
 from read_state_json import _build_payload, _read_feature_checkpoint
+from board_core.state_store import check_or_fix_state_sync, load_state_json_records
 
 
 def _legacy_custom_record(feature: str) -> dict:
@@ -145,6 +146,39 @@ class LegacyCustomCompatibilityTest(unittest.TestCase):
         self.assertIn("fresh-standard", payload["features"])
         self.assertIn("broken-other", payload["features"])
         self.assertEqual(payload["features"]["broken-other"]["checkpoint"], "missing_checkpoint")
+
+    def test_fresh_standard_feature_starts_at_prd_in_progress(self) -> None:
+        create_feature(self.project, "fresh-prd")
+
+        records, errors, exists = load_state_json_records(self.project)
+
+        self.assertTrue(exists)
+        self.assertEqual(errors, [])
+        self.assertEqual(records["fresh-prd"]["checkpoint"], "prd_in_progress")
+        self.assertEqual(records["fresh-prd"]["stage"], "Biz / 需求澄清与 PRD")
+
+    def test_discuss_checkpoint_and_custom_node_are_migrated_to_biz_prd(self) -> None:
+        legacy = {
+            "feature": "legacy-discuss",
+            "owner": "tester",
+            "checkpoint": "discuss_done",
+            "stage": "Biz / 需求澄清",
+            "iteration": "1",
+            "updated_at": "2026-08-12 12:00:00",
+            "workflowTemplate": "custom",
+            "workflowNodes": ["biz.discuss", "biz.prd", "dev.code", "ops.archive"],
+            "workflowSkippedNodes": ["biz.discuss"],
+        }
+        _write_state_json(self.project, {"legacy-discuss": legacy})
+
+        result = check_or_fix_state_sync(self.project, fix=True)
+
+        self.assertTrue(result.ok, result.errors)
+        record = result.records["legacy-discuss"]
+        self.assertEqual(record["checkpoint"], "prd_in_progress")
+        self.assertEqual(record["stage"], "Biz / 需求澄清与 PRD")
+        self.assertEqual(record["workflowNodes"], ["biz.prd", "dev.code", "ops.archive"])
+        self.assertNotIn("workflowSkippedNodes", record)
 
     def test_new_custom_feature_is_rejected(self) -> None:
         stderr = io.StringIO()

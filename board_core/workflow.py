@@ -54,7 +54,7 @@ ARTIFACT_TYPES = {
 def extract_checkpoint_suffix(checkpoint: str) -> str | None:
     """Return the state suffix portion of a checkpoint.
 
-    e.g. 'discuss_in_progress' → 'in_progress'
+    e.g. 'prd_in_progress' → 'in_progress'
          'verify_done'         → 'done'
          'needs_fix'           → 'needs_fix'
          'archived'            → 'archived'

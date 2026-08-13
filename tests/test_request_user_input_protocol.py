@@ -10,7 +10,7 @@ PROTOCOL = SKILLS / "references" / "ask-user-question.md"
 DISCUSS_SKILL = SKILLS / "autobiz" / "autobiz-requirement-discuss" / "SKILL.md"
 PLAN_SKILL = SKILLS / "autodev" / "autodev-plan" / "SKILL.md"
 SPECS_SKILL = SKILLS / "autodev" / "autodev-specs" / "SKILL.md"
-PRD_SKILL = SKILLS / "autobiz" / "autobiz-prd-generate" / "SKILL.md"
+PRD_SKILL = DISCUSS_SKILL
 
 # plan 的裁定门是三处里被绕过后逐条补厚的那一处，prd/specs 按它对齐。
 #

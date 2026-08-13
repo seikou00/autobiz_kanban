@@ -99,13 +99,12 @@ VALID_PRD = FORMAL_PREFIX + """## 用户故事
 
 
 class BizValidatePrdTests(unittest.TestCase):
-    def make_workspace(self, prd_content: str, discuss_content: str = DISCUSS_WITH_HISTORY) -> Path:
+    def make_workspace(self, prd_content: str) -> Path:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         workspace = Path(tempdir.name)
         feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
         feature_dir.mkdir(parents=True)
-        (feature_dir / "PRD_DISCUSS.md").write_text(discuss_content, encoding="utf-8")
         (feature_dir / "PRD.md").write_text(prd_content, encoding="utf-8")
         write_state_records(workspace, {"alpha": sample_record("prd_done")})
         return workspace
@@ -186,7 +185,7 @@ class BizValidatePrdTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
 
-    def test_accepts_discuss_pending_and_dependency_sections_filtered_from_prd(self) -> None:
+    def test_accepts_prd_without_pending_and_dependency_sections(self) -> None:
         workspace = self.make_workspace(VALID_PRD)
 
         result = validate_prd("alpha", workspace)
@@ -194,14 +193,6 @@ class BizValidatePrdTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertNotIn("待确认事项", VALID_PRD)
         self.assertNotIn("外部依赖", VALID_PRD)
-
-    def test_accepts_discuss_without_h1(self) -> None:
-        discuss_without_h1 = DISCUSS_WITH_HISTORY.replace("# 需求讨论稿\n\n", "", 1)
-        workspace = self.make_workspace(VALID_PRD, discuss_without_h1)
-
-        result = validate_prd("alpha", workspace)
-
-        self.assertTrue(result["ok"], result)
 
     def test_rejects_prd_without_formal_title(self) -> None:
         workspace = self.make_workspace(VALID_PRD.replace("# 需求正式稿", "# 需求讨论稿", 1))
@@ -211,7 +202,7 @@ class BizValidatePrdTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("# 需求正式稿", "\n".join(result["errors"]))
 
-    def test_accepts_prd_body_different_from_discuss_content(self) -> None:
+    def test_accepts_prd_with_preserved_source_intro(self) -> None:
         prd_with_intro = VALID_PRD.replace(
             "# 需求正式稿\n\n## 需求摘要",
             f"# 需求正式稿\n\n{DISCUSS_DRAFT_INTRO}\n\n## 需求摘要",
@@ -275,7 +266,7 @@ class BizValidatePrdTests(unittest.TestCase):
         prd_without_suffix_sections = prd_without_suffix_sections.replace(f"\n{DISCUSS_DRAFT_INTRO}\n\n", "\n")
         prd_without_suffix_sections = prd_without_suffix_sections.replace("## 待确认事项\n\n- 待确认上线窗口。\n\n", "")
         prd_without_suffix_sections = prd_without_suffix_sections.replace("## 外部依赖\n\n- 风控系统提供异常标记字段。\n\n", "")
-        workspace = self.make_workspace(prd_without_suffix_sections, discuss_with_section_names)
+        workspace = self.make_workspace(prd_without_suffix_sections)
 
         result = validate_prd("alpha", workspace)
 
@@ -288,15 +279,6 @@ class BizValidatePrdTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn("不应包含讨论记录标题", "\n".join(result["errors"]))
-
-    def test_accepts_discuss_without_discussion_record_heading(self) -> None:
-        discuss_without_history = DISCUSS_WITH_HISTORY.replace("## 历次讨论记录", "## 沟通纪要")
-        workspace = self.make_workspace(VALID_PRD, discuss_without_history)
-
-        result = validate_prd("alpha", workspace)
-
-        self.assertTrue(result["ok"], result)
-
 
 if __name__ == "__main__":
     unittest.main()

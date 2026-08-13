@@ -1,17 +1,14 @@
 ---
 name: autobiz-requirement-discuss
-description: Biz 阶段需求澄清技能。
-version: v1.2.08041
+description: Biz 阶段需求澄清与正式 PRD 生成技能。
+version: v1.2.08131
 ---
 
-# /autobiz-requirement-discuss — Biz 阶段需求澄清技能
-
-> 本技能专注需求澄清与讨论收敛，不直接输出正式 PRD。
+# /autobiz-requirement-discuss — Biz 阶段需求澄清与 PRD 生成
 
 ## 产物协议
 
-- 产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`
-- 除非用户明确要求只停在讨论阶段，否则本技能应在收敛后结束。
+- 产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
 
 ## 准备工作
 
@@ -27,11 +24,11 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 开始需求澄清时必须用脚本写入开始态：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_in_progress
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
 ```
 ### 缓存检测与清理
 
-用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 已存在时，先删除该文件再走完整流程。
+用户明确要求"重新 DISCUSS""重新讨论""重新分析""重新梳理需求"，且 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 已存在时，先删除该文件再走完整流程。
 
 ### 实现范围选择
 
@@ -50,7 +47,7 @@ python "${pluginPath}/hooks/implementation_scope.py" set \
   --source user_confirmed
 ```
 
-同时在 `PRD_DISCUSS.md` 写入 `## 当前实现范围`。被剥离的交付内容记录到 Feature 目录的 `SCOPE_SPLIT.md`，不得作为本轮实现范围继续传播。
+同时在 `PRD.md` 写入 `## 当前实现范围`。被剥离的交付内容记录到 Feature 目录的 `SCOPE_SPLIT.md`，不得作为本轮实现范围继续传播。
 
 
 ## 缺失产物处理
@@ -75,6 +72,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 > - 问题清单展示与用户确认
 > - 对话式引导与需求内容调整
 > - 迭代回检直到收敛
+> - 待确认裁定与正式稿收敛
 > - 更新状态与校验
 
 
@@ -95,8 +93,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - 必须先完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd-formatter.md` 。
 - 按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd_module.md` 的模板格式重写需求文档。
 - **关键** ：根据 `prd-formatter.md`进行格式化。
-- 写入`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。
-- **关键** ：以原需求文档为基准，核对生成的 `PRD_DISCUSS.md` 是否遗漏功能说明；逐项检查功能清单、功能详情、字段/表格行、规则、链接、文案、状态、外部协作规则和验收项。发现遗漏、弱化或错位时，先更新 `PRD_DISCUSS.md`，再重新核对。
+- 写入`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`。
+- **关键** ：以原需求文档为基准，核对生成的 `PRD.md` 是否遗漏功能说明；逐项检查功能清单、功能详情、字段/表格行、规则、链接、文案、状态、外部协作规则和验收项。发现遗漏、弱化或错位时，先更新 `PRD.md`，再重新核对。
 
 ### 需求分析
 
@@ -146,9 +144,9 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 **禁止假设用户确认需求没有问题**： 需求已经很清楚所以跳过问题确认是**错误推理**。即使没有问题清单，也必须告知用户"需求检查完毕，未发现问题，是否确认进入下一阶段？"
 
 
-### 对话式引导并调整 `PRD_DISCUSS.md`
+### 对话式引导并调整 `PRD.md`
 
-对已确认的问题清单（含用户补充项）按 P0→P1→P2 逐项单独对话，结合原始需求文档和用户回复把调整结果沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md`。
+对已确认的问题清单（含用户补充项）按 P0→P1→P2 逐项单独对话，结合原始需求文档和用户回复把调整结果沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`。
 
 **对话流程（每个问题单独执行）：**
 
@@ -166,7 +164,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
     - 若选择预设选项 → 按选项语义继续、暂停或标记为不适用，不得把预设选项当成再次索取自由文本的过渡步骤
     - 若用户通过客户端自动提供的 Other 自由输入补充说明 → 记录补充内容，继续下一问题
     - 若选择「后续补充并继续」→ 标记为待确认并继续其他问题，同一轮不得再次追问该内容
-5. **记录完整对话**：将每个问题的对话内容（问题、选项、用户选择、补充内容）记录到 PRD_DISCUSS.md
+5. **记录完整对话**：将每个问题的对话内容（问题、选项、用户选择、补充内容）记录到 PRD.md
 6. **处理新增文件**：若用户在回答中提供文件，按“讨论过程中新增资料的处理”执行；其中，在角色选择前端时用户提供的每个 HTML 文件位置，均视为讨论补充资料，必须登记文件名称、原始文档绝对路径和“前端页面/交互分析”的用途。
 
 **示例对话流程：**
@@ -197,7 +195,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 #### 讨论沉淀生成
 
-`PRD_DISCUSS.md` 是固定文件名，每轮增量更新。必须包含：
+`PRD.md` 是固定文件名，每轮增量更新。必须包含：
 
 1. **需求摘要【核心】**：完整需求内容
 2. **当前已确认结论**
@@ -209,12 +207,11 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 #### 写作要求
 
-- 讨论稿可以保留"待确认""候选方案""暂定结论"这类中间状态，但每次新增或修改都要标明哪些已确认、哪些仍待确认
-- 若用户指定"只先讨论，不输出正式 PRD"，可以停留在本文件；否则提示用户运行 `/autobiz-prd-generate`
+- 收敛过程中可以保留"待确认""候选方案""暂定结论"这类中间状态，但每次新增或修改都要标明哪些已确认、哪些仍待确认
 
 ### 迭代直到收敛
 
-将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都要向用户展示检查结果，由用户判断是否可以终止循环。
+将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都要向用户展示检查结果，由用户判断是否可以终止循环。
 
 #### 迭代终止条件
 
@@ -225,10 +222,34 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - 所有 P0 / P1 已处理完毕，只剩可接受的 P2 建议
 - 连续两次检查没有新增实质问题
 
+### 待确认问题裁定门
+
+- 范围：`PRD.md` 的 `待确认事项` / `待确认项` 章节中每个实质条目，以及每一处 `【待确认】`；同一决策去重后逐条裁定。章节正文仅为「无」时直接移除该空章节。
+- 展示：裁定前展示 `待确认内容 / 所在上下文 / 当前建议 / 备选 / 影响`。
+- 协议：先读取 `${pluginPath}/skills/references/ask-user-question.md`，再用 `request_user_input` 逐项提问，每轮最多 3 项；`id` 用条目内容的简短 snake_case 概括。不设置 `autoResolutionMs`。
+- 选项：每条给 2–3 个互斥选项，只使用「按当前建议确认 (Recommended)」「采纳备选：<方案>」「需要调整」；信息缺口型条目还可使用「暂停，拿到材料后继续」。
+- 信息缺口型条目在 `question` 中提示用户通过「其他」粘贴具体内容。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口，不得以任何措辞重新引入。探索期的延后模板在裁定阶段禁止使用。
+- 回写：立即将具体结论写入对应需求正文；无对应位置时写入「当前已确认结论」。用户裁定本期不做时，在对应需求标注「本期不做」或「二期」。声称拥有 ≠ 提供；仅声称稍后提供时追问一次，仍未提供则重新裁定为移除依赖或暂停。
+- 消解：具体结论已落盘，原待确认条目和标记已移除，才算完成。禁止自行消解；展示不等于裁定。凡选中后条目仍处于待确认状态的选项都是非法选项，延后判定按语义不按字面。
+- 自由回复：用户直接提供实质结论时，吸收并更新当前条目，不重复弹出相同选择。
+- 消解自查：不得残留待确认章节、`【待确认】`、TBD、待补充、待提供、后续确认或「以实际接口为准」「开发阶段补充」等延后占位。
+
+全部条目裁定并回写前，禁止更新 `prd_done` 或运行完成校验。
+
+### 正式稿收敛
+
+- 第一行改为 `# 需求正式稿`。
+- 将所有已确认结论合并进对应需求正文。
+- 移除已完成回写的过程性问题清单、待确认章节与历次讨论记录；保留「讨论补充资料」。
+- 确保包含 `用户故事`、`验收口径`、`验收标准`、`关键约束` 四个正式章节。
+- 四个章节只写入可从正文或用户确认内容追溯的信息；信息不足时继续澄清。
+- 用户故事描述角色、目标和业务价值；验收口径拆分用户、工程和回归视角；验收标准覆盖关键输入、处理、输出、边界和异常路径；关键约束覆盖已明确的权限、数据、状态、时间和组织约束。
+- 不改写、概括、合并或重新编号原始需求中的功能、表格、字段、规则、链接、文案、状态、外部协作要求和验收项。
+
 ### 更新状态
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_done
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
 ```
 
 
@@ -237,13 +258,13 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint discuss_done
 Skill 完成后，必须运行脚本校验：
 
 ```bash
-python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "${feature}"
+python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 
 脚本通过即视为以下清单已完成：
 
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD_DISCUSS.md` — 已存在，保留完整收敛过程，含上面「讨论沉淀生成」七节
-- Feature checkpoint 为 `discuss_done`
-- 所有 P0 / P1 问题已处理完毕（或已和用户确认接受风险）
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` — 已存在并满足正式稿结构
+- Feature checkpoint 为 `prd_done`
+- 所有 P0 / P1 与待确认项已完成裁定并回写
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

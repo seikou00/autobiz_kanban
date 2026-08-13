@@ -34,6 +34,13 @@ STATE_RELATIVE_PATH = Path(".autobizdevops") / "STATE.md"
 STATE_JSON_RELATIVE_PATH = Path(".autobizdevops") / "state.json"
 STATE_COLUMNS = ("Feature", "负责人", "checkpoint", "阶段", "迭代", "最后更新")
 EMPTY_CELL = "—"
+LEGACY_CHECKPOINT_ALIASES = {
+    "discuss_in_progress": "prd_in_progress",
+    "discuss_done": "prd_in_progress",
+}
+LEGACY_WORKFLOW_NODE_ALIASES = {
+    "biz.discuss": "biz.prd",
+}
 
 BOARD_CONFIG = load_board_config(BOARD_CONFIG_PATH)
 WORKFLOW_CONTRACTS = load_workflow_contracts(BOARD_CONFIG_PATH)
@@ -91,6 +98,23 @@ def _split_table_cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
+def _migrate_workflow_nodes(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    migrated: list[Any] = []
+    for item in value:
+        normalized = LEGACY_WORKFLOW_NODE_ALIASES.get(item, item) if isinstance(item, str) else item
+        if normalized not in migrated:
+            migrated.append(normalized)
+    return migrated
+
+
+def _migrate_skipped_nodes(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    return [item for item in value if item != "biz.discuss"]
+
+
 def _contracts_for_record(workspace: Path | None, record: dict):
     workflow_profile = record.get("workflowProfile", BASE_WORKFLOW_PROFILE)
     workflow_template = record.get("workflowTemplate", BASE_WORKFLOW_TEMPLATE)
@@ -138,8 +162,11 @@ def _normalize_record(
     except WorkflowCompileError as exc:
         errors.append(f"{context}: Feature '{feature}' 的 workflowDecisions 无效: {exc}")
         return None
+    raw_workflow_nodes = _migrate_workflow_nodes(raw_record.get("workflowNodes"))
     try:
-        workflow_skipped = normalize_workflow_skipped_nodes(raw_record.get("workflowSkippedNodes"))
+        workflow_skipped = normalize_workflow_skipped_nodes(
+            _migrate_skipped_nodes(raw_record.get("workflowSkippedNodes"))
+        )
     except WorkflowCompileError as exc:
         errors.append(f"{context}: Feature '{feature}' 的 workflowSkippedNodes 无效: {exc}")
         return None
@@ -147,7 +174,7 @@ def _normalize_record(
         "workflowProfile": workflow_profile,
         "workflowDecisions": workflow_decisions,
         "workflowTemplate": workflow_template,
-        "workflowNodes": raw_record.get("workflowNodes"),
+        "workflowNodes": raw_workflow_nodes,
         "workflowSkippedNodes": list(workflow_skipped),
     }
     try:
@@ -156,12 +183,17 @@ def _normalize_record(
         errors.append(f"{context}: Feature '{feature}' 的 workflow 配置无效: {exc}")
         return None
 
-    checkpoint = _clean(raw_record.get("checkpoint"))
+    raw_checkpoint = _clean(raw_record.get("checkpoint"))
+    checkpoint = LEGACY_CHECKPOINT_ALIASES.get(raw_checkpoint, raw_checkpoint)
     if checkpoint not in contracts.known_checkpoints:
         errors.append(f"{context}: Feature '{feature}' 使用了未知 checkpoint: {checkpoint or '未设置'}")
         return None
 
-    stage = _clean(raw_record.get("stage"), contracts.stage_labels.get(checkpoint, ""))
+    stage = (
+        contracts.stage_labels.get(checkpoint, "")
+        if checkpoint != raw_checkpoint
+        else _clean(raw_record.get("stage"), contracts.stage_labels.get(checkpoint, ""))
+    )
     record: StateRecord = {
         "feature": feature,
         "owner": _clean(raw_record.get("owner"), EMPTY_CELL),
@@ -174,7 +206,8 @@ def _normalize_record(
         "workflowTemplate": workflow_template,
     }
     if checkpoint == "needs_fix":
-        needs_fix_from = _clean(raw_record.get("needsFixFromCheckpoint"))
+        raw_needs_fix_from = _clean(raw_record.get("needsFixFromCheckpoint"))
+        needs_fix_from = LEGACY_CHECKPOINT_ALIASES.get(raw_needs_fix_from, raw_needs_fix_from)
         if needs_fix_from:
             source_idx, _ = find_current_node(list(contracts.nodes), needs_fix_from)
             if source_idx < 0:
@@ -185,7 +218,7 @@ def _normalize_record(
                 return None
             record["needsFixFromCheckpoint"] = needs_fix_from
     if workflow_template_uses_nodes(BOARD_CONFIG, workflow_template):
-        record["workflowNodes"] = [str(item).strip() for item in raw_record.get("workflowNodes", [])]
+        record["workflowNodes"] = [str(item).strip() for item in (raw_workflow_nodes or [])]
         # Legacy workflowExternalized is intentionally not carried over: inputs
         # whose producer is absent are dropped by the compiler instead.
     if workflow_skipped:

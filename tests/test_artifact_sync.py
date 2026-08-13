@@ -18,7 +18,6 @@ from hooks import artifact_sync, artifact_sync_execute_hook, sync_artifacts  # n
 
 
 EXPECTED_OUTPUT_METADATA = {
-    "PRD_DISCUSS.md": ("requirement_discussion", "process"),
     "PRD.md": ("requirement", "final"),
     "proposal.md": ("behavior_proposal", "final"),
     "specs/**/*.md": ("behavior_spec", "final"),
@@ -101,7 +100,7 @@ class ArtifactCatalogContractTest(unittest.TestCase):
 
         original_entry = artifact_sync.catalog_entry(
             path="prd_original/source.docx",
-            stage="biz.discuss",
+            stage="biz.prd",
             upload_status="skipped",
             size=artifact_sync.MAX_FILE_SIZE + 1,
             status_reason="file_size_exceeds_5mb",
@@ -131,7 +130,7 @@ class ArtifactCatalogContractTest(unittest.TestCase):
                 status=artifact_sync.default_status(),
                 current_stage="biz.prd",
                 current_artifacts=[artifact],
-                current_missing=["PRD_DISCUSS.md"],
+                current_missing=[],
                 side_entries=[],
                 project_code="P001",
             )
@@ -146,8 +145,7 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             by_path = {item["path"]: item for item in payload["artifacts"]}
             self.assertEqual(by_path["PRD.md"]["upload_status"], "uploaded")
             self.assertEqual(by_path["PRD.md"]["source"], "workflow")
-            self.assertEqual(by_path["PRD_DISCUSS.md"]["upload_status"], "missing")
-            self.assertEqual(by_path["PRD_DISCUSS.md"]["status_reason"], "file_not_found")
+            self.assertNotIn("PRD_DISCUSS.md", by_path)
             for entry in payload["artifacts"]:
                 self.assertTrue(
                     {
@@ -242,6 +240,123 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             self.assertEqual(catalog_entries["design.md"]["category"], "technical_design")
             self.assertEqual(catalog_entries["PLAN.md"]["category"], "implementation_plan")
             self.assertEqual(catalog_entries["plan.json"]["category"], "implementation_plan")
+
+    def test_prd_done_uploads_prd_and_original_materials_from_biz_prd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            original_dir = feature_dir / "prd_original"
+            original_dir.mkdir(parents=True)
+            (feature_dir / "PRD.md").write_text("# 需求正式稿\n", encoding="utf-8")
+            (original_dir / "source.docx").write_bytes(b"source")
+            state_path = workspace / ".autobizdevops" / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "autobizdevops.state.v3",
+                        "features": {
+                            "alpha": {
+                                "feature": "alpha",
+                                "owner": "tester",
+                                "checkpoint": "prd_done",
+                                "stage": "Biz / PRD",
+                                "iteration": "1",
+                                "updated_at": "2026-08-13 12:00:00",
+                                "workflowProfile": "standard",
+                                "workflowDecisions": {},
+                                "workflowTemplate": "standard",
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            resolved_dir, event_ids = artifact_sync.prepare_checkpoint_sync_events(
+                workspace=workspace,
+                feature="alpha",
+                old_checkpoint="prd_in_progress",
+                new_checkpoint="prd_done",
+                project_code="P001",
+            )
+
+            self.assertEqual(resolved_dir, feature_dir)
+            self.assertEqual(len(event_ids), 1)
+            event = artifact_sync.read_status(feature_dir)["events"][event_ids[0]]
+            self.assertEqual(event["source_stage"], "biz.prd")
+            self.assertEqual(event["source_skill"], "autobiz-requirement-discuss")
+            self.assertEqual(
+                [item["path"] for item in event["artifacts"]],
+                ["PRD.md", "prd_original/source.docx", artifact_sync.CATALOG_FILE_NAME],
+            )
+
+            catalog = json.loads((feature_dir / artifact_sync.CATALOG_FILE_NAME).read_text(encoding="utf-8"))
+            by_path = {item["path"]: item for item in catalog["artifacts"]}
+            self.assertEqual(by_path["PRD.md"]["stage"], "biz.prd")
+            self.assertEqual(by_path["prd_original/source.docx"]["stage"], "biz.prd")
+
+    def test_read_status_migrates_retryable_discuss_events_and_retires_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp)
+            (feature_dir / "PRD.md").write_text("# 需求正式稿\n", encoding="utf-8")
+            status = {
+                "version": 1,
+                "published_artifacts": {
+                    "PRD_DISCUSS.md": {"stage": "biz.discuss"},
+                    "prd_original/source.docx": {"stage": "biz.discuss"},
+                },
+                "events": {
+                    "pending-old": {
+                        "status": "pending",
+                        "feature": "alpha",
+                        "source_stage": "biz.discuss",
+                        "source_skill": "autobiz-requirement-discuss",
+                        "workflow_record": {
+                            "workflowTemplate": "custom",
+                            "workflowNodes": ["biz.discuss", "biz.prd", "dev.code", "ops.archive"],
+                            "workflowSkippedNodes": ["biz.discuss"],
+                        },
+                    },
+                    "success-old": {
+                        "status": "success",
+                        "source_stage": "biz.discuss",
+                    },
+                },
+            }
+            (feature_dir / artifact_sync.STATUS_FILE_NAME).write_text(
+                json.dumps(status, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            migrated = artifact_sync.read_status(feature_dir)
+
+            self.assertNotIn("PRD_DISCUSS.md", migrated["published_artifacts"])
+            self.assertEqual(
+                migrated["published_artifacts"]["prd_original/source.docx"]["stage"],
+                "biz.prd",
+            )
+            pending = migrated["events"]["pending-old"]
+            self.assertEqual(pending["source_stage"], "biz.prd")
+            self.assertEqual(pending["source_skill"], "autobiz-requirement-discuss")
+            self.assertEqual(
+                pending["workflow_record"]["workflowNodes"],
+                ["biz.prd", "dev.code", "ops.archive"],
+            )
+            self.assertEqual(pending["workflow_record"]["workflowSkippedNodes"], [])
+            self.assertEqual(migrated["events"]["success-old"]["source_stage"], "biz.discuss")
+
+            artifacts, missing = artifact_sync.refresh_event_snapshot(
+                workspace=feature_dir,
+                feature_dir=feature_dir,
+                project_code="P001",
+                event=pending,
+            )
+            self.assertEqual(missing, [])
+            self.assertEqual(
+                [item["path"] for item in artifacts],
+                ["PRD.md", artifact_sync.CATALOG_FILE_NAME],
+            )
 
 
 class ArtifactUploadPreflightTest(unittest.TestCase):

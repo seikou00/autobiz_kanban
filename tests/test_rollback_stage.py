@@ -139,13 +139,13 @@ class RollbackStageTest(unittest.TestCase):
         self.assertFalse(detail_design.exists())
 
     def test_rejects_first_or_not_yet_reached_stage_without_mutation(self) -> None:
-        marker = self.feature_dir / "PRD_DISCUSS.md"
+        marker = self.feature_dir / "PRD.md"
         marker.write_text("keep\n", encoding="utf-8")
 
         first = prepare_stage_rollback(
             workspace=self.project,
             feature=self.feature,
-            stage="biz.discuss",
+            stage="biz.prd",
         )
         future = prepare_stage_rollback(
             workspace=self.project,
@@ -159,7 +159,7 @@ class RollbackStageTest(unittest.TestCase):
         self.assertIn("尚未到达", future.errors[0])
         self.assertTrue(marker.exists())
         records, _, _ = load_state_json_records(self.project)
-        self.assertEqual(records[self.feature]["checkpoint"], "discuss_in_progress")
+        self.assertEqual(records[self.feature]["checkpoint"], "prd_in_progress")
 
     def test_archived_feature_is_restored_to_active_directory(self) -> None:
         self._set_checkpoint("archived", iteration="1")
@@ -181,8 +181,8 @@ class RollbackStageTest(unittest.TestCase):
         self.assertEqual(records[self.feature]["checkpoint"], "cicd_done")
 
     def test_cli_dry_run_does_not_delete_or_update(self) -> None:
-        self._set_checkpoint("prd_done")
-        artifact = self.feature_dir / "PRD.md"
+        self._set_checkpoint("specs_in_progress")
+        artifact = self.feature_dir / "proposal.md"
         artifact.write_text("keep for dry run\n", encoding="utf-8")
         stdout = io.StringIO()
         env = {
@@ -192,26 +192,26 @@ class RollbackStageTest(unittest.TestCase):
         }
 
         with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(stdout):
-            exit_code = main(["--stage", "biz.prd", "--feature", self.feature, "--dry-run", "--json"])
+            exit_code = main(["--stage", "dev.specs", "--feature", self.feature, "--dry-run", "--json"])
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["newCheckpoint"], "discuss_done")
+        self.assertEqual(payload["newCheckpoint"], "prd_done")
         self.assertEqual(payload["deletedArtifacts"], [])
-        self.assertEqual(payload["plannedArtifacts"], ["PRD.md"])
+        self.assertEqual(payload["plannedArtifacts"], ["proposal.md"])
         self.assertTrue(artifact.exists())
         records, _, _ = load_state_json_records(self.project)
-        self.assertEqual(records[self.feature]["checkpoint"], "prd_done")
+        self.assertEqual(records[self.feature]["checkpoint"], "specs_in_progress")
 
     def test_state_write_failure_restores_artifact_and_checkpoint(self) -> None:
-        self._set_checkpoint("prd_done")
-        artifact = self.feature_dir / "PRD.md"
+        self._set_checkpoint("specs_in_progress")
+        artifact = self.feature_dir / "proposal.md"
         artifact.write_text("restore me\n", encoding="utf-8")
         plan = prepare_stage_rollback(
             workspace=self.project,
             feature=self.feature,
-            stage="biz.prd",
+            stage="dev.specs",
         )
         real_writer = write_state_records
         calls = 0
@@ -231,7 +231,7 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue(artifact.exists())
         self.assertEqual(artifact.read_text(encoding="utf-8"), "restore me\n")
         records, _, _ = load_state_json_records(self.project)
-        self.assertEqual(records[self.feature]["checkpoint"], "prd_done")
+        self.assertEqual(records[self.feature]["checkpoint"], "specs_in_progress")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@
 """
 autobiz 统一校验脚本
 用法:
-    python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" discuss --feature "<slug>"
     python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "<slug>"
 """
 
@@ -32,8 +31,7 @@ from board_core.contracts import BoardConfigError, SkillContract, load_record_wo
 from board_core.state_store import check_or_fix_state_sync
 from hooks.implementation_scope import load_scope, scope_path
 
-# 正式稿标题/禁用标题/必需段落的单一事实源在 prd_rules.py，
-# 搬运脚本 prd_transplant.py 与本校验脚本共用同一份规则。
+# 正式稿标题、禁用标题和必需段落的单一事实源在 prd_rules.py。
 from prd_rules import (  # noqa: F401  （re-export，供外部按原名引用）
     DISCUSSION_SECTION_TITLES,
     FORBIDDEN_PRD_SECTION_TITLES,
@@ -144,42 +142,6 @@ def _ok(message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     return result
 
 
-def validate_discuss(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
-    feature_dir = resolve_feature_dir(feature, workspace)
-    if not feature_dir:
-        return _fail(f"未找到 feature 目录: feature={feature}, 请确认 .autobizdevops/features/ 下存在对应目录")
-
-    slug = feature_dir.name
-    record, contracts, errors = _resolve_feature_context(slug, workspace)
-    if errors:
-        return _fail("discuss 阶段产出物校验未通过", {"feature": slug, "errors": errors})
-
-    contract = _skill_contract_or_none(contracts, "autobiz-requirement-discuss")
-    if contract is None:
-        return _ok(
-            "discuss 校验跳过：需求澄清节点不在当前工作流链中",
-            {"feature": slug, "skipped": True},
-        )
-
-    discuss_md = exact_file(feature_dir, "PRD_DISCUSS.md")
-    if "PRD_DISCUSS.md" in contract.required_outputs:
-        if discuss_md is None:
-            errors.append(f"PRD_DISCUSS.md 不存在: {feature_dir / 'PRD_DISCUSS.md'}")
-        else:
-            content = discuss_md.read_text(encoding="utf-8")
-            required_sections = ["需求摘要", "已确认结论", "问题清单", "待确认事项", "假设与风险"]
-            missing = [s for s in required_sections if s not in content]
-            if missing:
-                errors.append(f"PRD_DISCUSS.md 缺少必要章节: {', '.join(missing)}")
-            errors.extend(_implementation_scope_errors(feature_dir, content))
-
-    _check_done_checkpoint(record, contract, errors)
-
-    if errors:
-        return _fail("discuss 阶段产出物校验未通过", {"feature": slug, "errors": errors})
-    return _ok("discuss 阶段产出物校验通过", {"feature": slug})
-
-
 def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     feature_dir = resolve_feature_dir(feature, workspace)
     if not feature_dir:
@@ -190,19 +152,14 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     if errors:
         return _fail("prd 阶段产出物校验未通过", {"feature": slug, "errors": errors})
 
-    contract = _skill_contract_or_none(contracts, "autobiz-prd-generate")
+    contract = _skill_contract_or_none(contracts, "autobiz-requirement-discuss")
     if contract is None:
         return _ok(
             "prd 校验跳过：PRD 生成节点不在当前工作流链中",
             {"feature": slug, "skipped": True},
         )
 
-    discuss_md = exact_file(feature_dir, "PRD_DISCUSS.md")
     prd_md = exact_file(feature_dir, "PRD.md")
-    # 讨论稿存在性只在它仍属于本 Feature 契约的必需输入时检查；
-    # custom 链未选 biz.discuss 时该输入已从 bundle 中移除。
-    if "PRD_DISCUSS.md" in contract.required_inputs and discuss_md is None:
-        errors.append(f"PRD_DISCUSS.md 不存在: {feature_dir / 'PRD_DISCUSS.md'}")
 
     if prd_md is None:
         errors.append(f"PRD.md 不存在: {feature_dir / 'PRD.md'}")
@@ -262,7 +219,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="autobiz 统一校验脚本")
     parser.add_argument(
         "stage",
-        choices=["discuss", "prd"],
+        choices=["prd"],
         help="校验阶段",
     )
     parser.add_argument("--feature", "-f", default=None, help="feature slug（如不传则自动检测）")
@@ -275,9 +232,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"biz_validate.py 校验失败: {exc}", file=sys.stderr)
         return 1
 
-    if args.stage == "discuss":
-        result = validate_discuss(args.feature, workspace)
-    elif args.stage == "prd":
+    if args.stage == "prd":
         result = validate_prd(args.feature, workspace)
     else:
         result = _fail("未知 stage")

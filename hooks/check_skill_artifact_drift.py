@@ -293,7 +293,7 @@ def check_contracts_for_drift(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check SKILL.md artifact drift for Biz/Dev/Ops node skills")
     parser.add_argument("--repo-root", default=str(ROOT), help="plugin repository root")
-    parser.add_argument("--skill", help="check a single node skill, e.g. autodev-plan / autobiz-prd-generate")
+    parser.add_argument("--skill", help="check a single node skill, e.g. autodev-plan / autobiz-requirement-discuss")
     parser.add_argument(
         "--profile",
         default="standard",
