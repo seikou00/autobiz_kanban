@@ -322,11 +322,6 @@ CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
         "lifecycle": "evidence",
         "description": "需求实现评审报告。",
     },
-    "REVIEW_FINDINGS.json": {
-        "category": "review_findings",
-        "lifecycle": "evidence",
-        "description": "结构化评审发现。",
-    },
     "UNIT_TEST_REPORT.md": {
         "category": "unit_test_report",
         "lifecycle": "evidence",

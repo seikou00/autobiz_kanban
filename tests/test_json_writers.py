@@ -3049,37 +3049,16 @@ class JsonWriterTests(unittest.TestCase):
                 "--step-json",
                 '{"action":"open","expected":"ok","verification":{"type":"ui","details":"visible"}}',
             )
-            review = _run(
-                "review_findings_writer.py",
-                "add-finding",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T001",
-                "--spec-ref",
-                "specs/cap/spec.md#SCN-001",
-                "--evidence-id",
-                "ev_0002",
-                "--severity",
-                "info",
-                "--message",
-                "ok",
-            )
             verify = _run("verify_decision_writer.py", "init", "--workspace", str(workspace), "--feature", "alpha", "--from-specs")
 
             self.assertEqual(unit.returncode, 0, unit.stdout + unit.stderr)
             self.assertEqual(e2e.returncode, 0, e2e.stdout + e2e.stderr)
-            self.assertEqual(review.returncode, 0, review.stdout + review.stderr)
             self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
 
             e2e_data = json.loads((feature_dir / "E2E_RESULT.json").read_text(encoding="utf-8"))
-            review_data = json.loads((feature_dir / "REVIEW_FINDINGS.json").read_text(encoding="utf-8"))
             verify_data = json.loads((feature_dir / "VERIFY_DECISION.json").read_text(encoding="utf-8"))
 
             self.assertEqual(e2e_data["cases"][0]["caseId"], "E2E-alpha-001")
-            self.assertEqual(review_data["findings"][0]["message"], "ok")
             self.assertEqual(verify_data["nextCheckpoint"], "needs_fix")
             self.assertNotIn("uiSummary", verify_data)
 
@@ -3113,27 +3092,10 @@ class JsonWriterTests(unittest.TestCase):
                 "--execution-mode",
                 "browser",
             )
-            review = _run(
-                "review_findings_writer.py",
-                "add-finding",
-                "--workspace",
-                str(workspace),
-                "--feature",
-                "alpha",
-                "--task-id",
-                "T001",
-                "--severity",
-                "info",
-                "--message",
-                "ok",
-            )
-
             self.assertNotEqual(unit.returncode, 0)
             self.assertIn("missing_unit_target_trace_args", unit.stdout)
             self.assertNotEqual(e2e.returncode, 0)
             self.assertIn("required", e2e.stderr)
-            self.assertNotEqual(review.returncode, 0)
-            self.assertIn("missing_review_finding_args", review.stdout)
 
 
 if __name__ == "__main__":

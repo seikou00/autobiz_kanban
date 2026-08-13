@@ -29,7 +29,6 @@ EXPECTED_OUTPUT_METADATA = {
     "evidence/EVIDENCE.jsonl": ("evidence_stream", "evidence"),
     "cache/code-exploration/**/*.json": ("artifact", "process"),
     "REQUIREMENTS_EVAL.md": ("review_report", "evidence"),
-    "REVIEW_FINDINGS.json": ("review_findings", "evidence"),
     "UNIT_TEST_REPORT.md": ("unit_test_report", "evidence"),
     "UNIT_TEST_RESULT.json": ("unit_test_result", "evidence"),
     "test-output.log": ("log", "log"),

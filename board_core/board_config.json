@@ -494,11 +494,10 @@
               } }
           ],
           "outputs": [
-            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": false },
-            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true }
+            { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
           ]
         },
-        "validators": ["review_findings_json"]
+        "validators": ["requirements_eval_verdict"]
       },
       {
         "id": "dev.utest",
@@ -554,10 +553,6 @@
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": false,
               "extract": {
                 "degrade": "缺失时跳过，不影响机器流程"
-              } },
-            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
-              "extract": {
-                "degrade": "无 REVIEW_FINDINGS.json 时回到 review 阶段补齐结构化评审结果"
               } }
           ],
           "outputs": [
@@ -624,10 +619,6 @@
               "extract": {
                 "degrade": "缺失时跳过，不影响机器流程"
               } },
-            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
-              "extract": {
-                "degrade": "无 REVIEW_FINDINGS.json 时回到 review 阶段补齐结构化评审结果"
-              } },
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": false,
               "extract": {
                 "degrade": "缺失时跳过，不影响机器流程"
@@ -688,10 +679,6 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
                 "degrade": "缺失时先补齐证据流，不能给出完整通过结论"
-              } },
-            { "id": "review_findings_json", "label": "结构化评审发现", "artifactType": "json", "path": "REVIEW_FINDINGS.json", "required": true,
-              "extract": {
-                "degrade": "缺失时回到 review 阶段补齐结构化评审结果"
               } },
             { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": false,
               "extract": {

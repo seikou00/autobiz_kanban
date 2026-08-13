@@ -1,7 +1,7 @@
 ---
 name: autodev-e2e
 description: E2E 验证单个 Autodev feature 的真实用户主链路。用于 autodev-utest 完成后进入 E2E 阶段，或从 e2e_in_progress 恢复执行；以 Playwright Test 可信执行、质量扫描、Evidence 和结构化结果裁定 e2e_done 或 needs_fix。
-version: v1.2.0811
+version: v1.2.0813
 ---
 
 # /autodev-e2e - 端到端测试
@@ -30,7 +30,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
 ```
 
-读取 `specs/**/*.md`、`design.md`、`plan.json`、batch plan、`REVIEW_FINDINGS.json`、单测结果和项目 Playwright 配置。`deferredValidationIssues[]` 映射到具体用例或明确的 manual/missing 结论。
+读取 `specs/**/*.md`、`design.md`、`plan.json`、batch plan、单测结果和项目 Playwright 配置。`deferredValidationIssues[]` 映射到具体用例或明确的 manual/missing 结论。
 
 恢复时读取全部 E2E 机器产物和 `e2e-diagnostics/**/**/*.pending.json`。旧格式 `E2E_RESULT.json` 或纯文本 `e2e-run.log` 只读保留，列出需重新执行的用例；旧产物不能形成新 PASS。存在 pending 时执行：
 
