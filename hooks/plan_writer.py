@@ -904,11 +904,13 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
             errors.append({
                 "reason": "implementation_scope_frontend_task_forbidden",
                 "detail": f"scope=backend_only;task={task_id}",
+                "repairSuggestion": f"当前实现范围为 backend_only，但任务 {task_id} 标记为需要前端（uiRequired=true）。请将该任务的 uiRequired 改为 false，或修改 scope.md 中的实现范围"
             })
         elif implementation_scope == "frontend_only" and not ui_required:
             errors.append({
                 "reason": "implementation_scope_backend_task_forbidden",
                 "detail": f"scope=frontend_only;task={task_id}",
+                "repairSuggestion": f"当前实现范围为 frontend_only，但任务 {task_id} 标记为后端任务（uiRequired=false）。请将该任务的 uiRequired 改为 true，或修改 scope.md 中的实现范围"
             })
         errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
     if errors:
@@ -923,9 +925,14 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
     expected, covered = _scenario_coverage(feature_dir, _task_groups(data))
     missing = sorted(expected - covered)
     if missing:
+        missing_count = len(missing)
+        missing_preview = ', '.join(missing[:10])
+        if missing_count > 10:
+            missing_preview += f" ...还有 {missing_count - 10} 个"
         return [{
             "reason": "missing_plan_scenario_coverage",
             "detail": f"return_to_scenario_matrix;ids={','.join(missing)}",
+            "repairSuggestion": f"有 {missing_count} 个场景未被任务覆盖：{missing_preview}。请在 task-groups.json 中添加或调整任务的 mergedScenarioRefs，确保所有场景都被覆盖"
         }]
     return []
 

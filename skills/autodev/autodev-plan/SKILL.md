@@ -322,7 +322,19 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${fe
 python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
-`preflight-task-groups` 会先把每个 `apiIds` 与当前已确认 design 对照，不存在的 ID 当场返回 `repairTarget=task_group` 和 `designMutationAllowed=false`。`set-draft-task-detail` 对 `dataIds` / `decisionIds` / `designRefs` 执行同样的存在性门禁；Draft 创建时锁定 design 摘要，之后 design 内容变化会返回 `confirmed_design_changed_after_draft_created`，当前 Plan 不得继续。`preflight-task-draft` 会重新校验单 task 引用、workspace/manifest、验证命令、测试目标冲突，以及跨 task Scenario 覆盖、DAG、backend/frontend 顺序、Batch 投影和 Design 双向覆盖。失败时必须读取返回值中的 `validation.issues`、`validation.invalidTaskIds`；每条 issue 都包含 `taskIds`、`field`、`currentValue`、`repairTarget` 等定位信息。未知或漏覆盖的 Design ID 只能按 `repairTarget=task_detail` 或 `repairTarget=task_group` 修 Plan，禁止修改 design 迎合 Task。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复，不能借删除缓存绕过设计确认。finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
+**预检与修复**：
+
+`preflight-task-groups` 和 `preflight-task-draft` 会校验设计引用、任务结构、场景覆盖、workspace/manifest、验证命令、DAG、backend/frontend 顺序、Batch 投影和 Design 双向覆盖。Draft 创建时锁定 design 摘要，之后 design 内容变化会返回 `confirmed_design_changed_after_draft_created`，当前 Plan 不得继续。
+
+失败时读取返回 JSON 的 `validation.issues` 和 `validation.invalidTaskIds`，每条 issue 包含：
+- `reason`: 错误类型（机器可读）
+- `repairSuggestion`: 具体修复步骤（中文，直接可执行）
+- `repairTarget`: 修复层级（`design_revision` / `task_group` / `task_detail` / `draft_integrity`）
+
+按照 `repairSuggestion` 中的指导执行修复，不要根据编号、标题或数量自行猜测。`repairTarget=design_revision` 表示必须修改 design.md，禁止修改 Plan 来迎合设计。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复。
+
+finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
+
 
 除 `executionMode=external_dependency` 外，每个 task detail 必须包含非空 `validationCommands`，writer 会据此生成 `validationTestPlan`/`testIntent`。合法 kind、命令禁令与意图字段以 `add-task-contract` 输出为唯一事实源；不得生成 `create_in_code`、测试文件目标或 Code 阶段测试执行计划。不得通过 validator 失败来探索 schema。
 
@@ -437,14 +449,13 @@ UI 任务规则：
 - 必须按 DAG 拓扑序编号：当前 task 的 `deps` 只能指向更早的 task。若分组预检报告依赖错误，只修候选表，不补 task detail。
 - `preflight-task-groups` 成功后只运行一次 `prepare-task-draft`，并且必须带真实的 `--code-workspace`。缺少 workspace 时必须先确定业务代码目录，不得创建无 workspace 的 Draft；不得创建独立 `Txxx.json`，不得在每写 5 个 task 后提前 finalize。
 - 不得通过完整 task 的内容校验失败来探索如何拆分；拆分必须在覆盖矩阵、候选任务分组表和 `preflight-task-groups` 阶段完成。
-- 如果预检返回 `oversized_plan_task_must_split`，回分组表把该候选标为 `需拆分` 并重新切分；如果返回 `missing_plan_task_split_rationale` 或 `invalid_plan_task_split_rationale`，回分组表核对完整路径 SCN、验证闭环和 rationale，不反复试错正式产物。
-- 每次预检失败都必须先完整读取返回 JSON 的 `validation.invalidTaskIds` 与 `validation.issues`；每条 issue 的 `taskIds`、`field`、`diagnostics.violations`、缺失/多余引用和阈值是唯一修复依据。不得只看第一条 `errors`，不得根据 SCN 编号连续性、标题相似度或 API 数量猜测应移动哪些 Scenario；若要拆分，必须回到覆盖矩阵按用户动作、公开 seam 和验证边界重新分组。
-- 如果预检返回 `missing_plan_scenario_coverage`，必须回 Scenario 覆盖矩阵定位遗漏并重新分组。不得把缺失 Scenario 添加到标题相近、已有 API 或同一页面的 task，除非重新证明它们共享同一公开 seam 和验证闭环。
+- 预检失败时读取 `validation.issues`，按每条 issue 的 `repairSuggestion` 执行修复。不要根据 SCN 编号连续性、标题相似度或 API 数量自行猜测应移动哪些 Scenario；若要拆分，必须回到覆盖矩阵按用户动作、公开 seam 和验证边界重新分组。
 - 每个 `set-draft-task-detail` 成功后该 task 才进入 ready；失败不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
 - 分组 digest 变化时运行 `rebuild-task-draft`；writer 保留分组投影未变化的 ready task，重置其余 task。不得修改 group 后继续向旧 Draft 写详情。
 - 全部 task ready 后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。若预检失败，先按 `validation.issues` 定位并修复 Draft，再重新预检，不删除 Draft。
 - 对 finalized 计划不原地解封、不直接编辑 JSON（不得绕过 Draft lock 修改正式 Bundle）。先运行 `diagnose-plan-repair`：未开始执行且 Draft 完整时，运行 `reopen-finalized-draft --reason <reason>` 进入可修复状态；修复后使用 `finalize-task-draft --force` 重新物化并重算 `taskSetDigest`、`taskContractSha256ByTask`。若已开始执行，禁止覆盖正式计划并转入计划修订；只有 Draft 缺失或不可校验时才清理并全量重建。
 - `validate --structure` 会复核已生成 bundle 的结构、完整性摘要和 Task 粒度，但不替代完整 Scenario 覆盖预检或 `dev.plan` 阶段门禁。
+
 
 finalize 成功后，必须为每个实际使用的 lane 添加一条 required 编译命令，批次统一使用 `mode=commands`：
 

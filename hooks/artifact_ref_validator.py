@@ -37,7 +37,7 @@ def design_marker_value(text: str, marker: str) -> bool | None:
     return None
 
 
-def _contract_error(reason: str, detail: str = "") -> dict[str, Any]:
+def _contract_error(reason: str, detail: str = "", suggestion: str = "") -> dict[str, Any]:
     issue: dict[str, Any] = {
         "reason": reason,
         "repairTarget": "design_revision",
@@ -45,6 +45,8 @@ def _contract_error(reason: str, detail: str = "") -> dict[str, Any]:
     }
     if detail:
         issue["detail"] = detail
+    if suggestion:
+        issue["repairSuggestion"] = suggestion
     return issue
 
 
@@ -59,12 +61,19 @@ def load_design_contract(base: Path) -> tuple[dict[str, Any], list[dict[str, Any
         "noSql": False,
     }
     if not path.is_file() or path.stat().st_size <= 0:
-        return empty, [_contract_error("missing_design")]
+        return empty, [_contract_error(
+            "missing_design",
+            suggestion="需要先创建 design.md 文件，包含 API Decisions 和 Data Decisions 表格"
+        )]
     try:
         raw = path.read_bytes()
         text = raw.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        return empty, [_contract_error("invalid_design_contract", f"error={exc}")]
+        return empty, [_contract_error(
+            "invalid_design_contract",
+            detail=f"error={exc}",
+            suggestion="检查 design.md 文件编码是否为 UTF-8，文件是否损坏"
+        )]
 
     api_ids = DESIGN_API_DEF_RE.findall(text)
     data_ids = DESIGN_DATA_DEF_RE.findall(text)
@@ -76,27 +85,56 @@ def load_design_contract(base: Path) -> tuple[dict[str, Any], list[dict[str, Any
         (decision_ids, "duplicate_design_decision_id"),
     ):
         if len(ids) != len(set(ids)):
-            errors.append(_contract_error(reason))
+            duplicates = [id_ for id_ in set(ids) if ids.count(id_) > 1]
+            errors.append(_contract_error(
+                reason,
+                detail=f"duplicates={','.join(duplicates)}",
+                suggestion=f"在 design.md 中删除重复的 ID 定义：{', '.join(duplicates)}"
+            ))
 
     no_http_api = design_marker_value(text, "x-auto-no-http-api")
     no_sql = design_marker_value(text, "x-auto-no-sql")
     if no_http_api is None:
-        errors.append(_contract_error("missing_design_api_marker"))
+        errors.append(_contract_error(
+            "missing_design_api_marker",
+            suggestion="在 design.md 中添加 API 标记行：`- x-auto-no-http-api: false` 或 `true`"
+        ))
     if no_sql is None:
-        errors.append(_contract_error("missing_design_data_marker"))
+        errors.append(_contract_error(
+            "missing_design_data_marker",
+            suggestion="在 design.md 中添加数据标记行：`- x-auto-no-sql: false` 或 `true`"
+        ))
     if no_http_api is True and api_ids:
         errors.append(_contract_error(
             "design_api_marker_conflicts_with_definitions",
             "x-auto-no-http-api=true cannot coexist with API Decisions rows",
+            suggestion=f"将 x-auto-no-http-api 改为 false，或删除 API Decisions 表格中的 {len(api_ids)} 行定义"
         ))
     if no_sql is True and data_ids:
         errors.append(_contract_error(
             "design_data_marker_conflicts_with_definitions",
             "x-auto-no-sql=true cannot coexist with Data Decisions rows",
+            suggestion=f"将 x-auto-no-sql 改为 false，或删除 Data Decisions 表格中的 {len(data_ids)} 行定义"
         ))
-    pending_count = len(PENDING_CELL_RE.findall(text))
+    pending_matches = PENDING_CELL_RE.findall(text)
+    pending_count = len(pending_matches)
     if pending_count:
-        errors.append(_contract_error("design_has_pending_cells", f"count={pending_count}"))
+        # 提取待确认项所在的行号和上下文
+        lines = text.splitlines()
+        pending_locations = []
+        for i, line in enumerate(lines, 1):
+            if PENDING_CELL_RE.search(line):
+                pending_locations.append(f"第 {i} 行")
+                if len(pending_locations) >= 5:  # 最多展示前5个位置
+                    pending_locations.append(f"...还有 {pending_count - 5} 处")
+                    break
+
+        location_info = "，位置：" + "、".join(pending_locations) if pending_locations else ""
+        errors.append(_contract_error(
+            "design_has_pending_cells",
+            f"count={pending_count}",
+            suggestion=f"design.md 中有 {pending_count} 个单元格包含「待确认」或「读码差异」{location_info}。请逐条与用户确认后，将单元格内容改为具体值并标记为「已确认」"
+        ))
 
     return {
         "sha256": hashlib.sha256(raw).hexdigest(),
@@ -130,6 +168,7 @@ def _unknown_design_id_issue(
     kind: str,
     repair_target: str,
 ) -> dict[str, Any]:
+    kind_label = {"API": "接口", "DATA": "数据", "D": "决策"}.get(kind, kind)
     return {
         "reason": f"unknown_plan_json_{kind.lower()}_ref",
         "detail": f"task={task_id};id={value};design_is_source_of_truth;repair_plan_not_design",
@@ -138,6 +177,7 @@ def _unknown_design_id_issue(
         "currentValue": value,
         "repairTarget": repair_target,
         "designMutationAllowed": False,
+        "repairSuggestion": f"任务 {task_id} 引用了 design.md 中不存在的{kind_label} ID：{value}。请在 task-groups.json 或任务详情中删除该引用，或先在 design.md 的对应表格中添加该 ID 定义"
     }
 
 
@@ -164,6 +204,7 @@ def validate_task_group_design_contract(
                     "currentValue": api_id,
                     "repairTarget": "task_group",
                     "designMutationAllowed": False,
+                    "repairSuggestion": f"design.md 标记了 x-auto-no-http-api=true（无 HTTP API），但任务 {task_id} 引用了 API ID：{api_id}。请删除任务的 apiIds 引用，或将 design.md 中的 x-auto-no-http-api 改为 false"
                 })
             elif api_id not in known:
                 errors.append(_unknown_design_id_issue(
