@@ -121,7 +121,7 @@ __pycache__/
 .agents
 .codex
 AGENTS.md
-
+outputs/
 # CMBDevClaw benchmark runtime artifacts
 /evaluation/springboot-tdd/node_modules/
 /evaluation/springboot-tdd/reports/
