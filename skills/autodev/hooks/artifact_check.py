@@ -204,6 +204,23 @@ def validate_no_template_guidance(
 
 
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
+REVIEW_VERDICTS = {"PASS", "PASS_WITH_WARNINGS", "FAIL", "DEGRADED"}
+REVIEW_BLOCKER_SEVERITY = "blocker"
+# REQUIREMENTS_EVAL.md 的 `## Verdict` 段：到下一个同级标题为止
+REQUIREMENTS_EVAL_VERDICT_SECTION = re.compile(
+    r"^##\s+Verdict\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+# `## Blockers` 段。标题必须独占一行：`## Blockers / Warnings` 这类合并写法不匹配，
+# 否则 warning 会被当成 blocker。
+REQUIREMENTS_EVAL_BLOCKERS_SECTION = re.compile(
+    r"^##\s+Blockers?\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+REVIEW_VERDICT_TOKEN = re.compile(r"[A-Za-z_]+")
+REVIEW_BLOCKER_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?P<text>.*\S)[ \t]*$", re.MULTILINE)
+# Blockers 段里等同于「没有 blocker」的写法。词边界让 `无法保存订单` 这类真条目不被误吞。
+REVIEW_BLOCKER_EMPTY = re.compile(r"^(?:none|n/?a|null|nil|-+|无|没有|暂无|不适用)\b", re.IGNORECASE)
 
 
 def spec_files(ctx: HookContext) -> list[Path]:
@@ -1198,6 +1215,77 @@ def _check_verify_scenario_decisions(
     return failures
 
 
+def requirements_eval_verdict(text: str) -> str | None:
+    """取 REQUIREMENTS_EVAL.md `## Verdict` 段的结论。
+
+    段内第一行非空文本必须只落在一个已知 verdict 上；模板占位行
+    （``PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED``）判不出结论，返回 None。
+    """
+    section = REQUIREMENTS_EVAL_VERDICT_SECTION.search(text)
+    if section is None:
+        return None
+    for line in section.group("body").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        tokens = (token.upper() for token in REVIEW_VERDICT_TOKEN.findall(stripped))
+        unique = sorted({token for token in tokens if token in REVIEW_VERDICTS})
+        return unique[0] if len(unique) == 1 else None
+    return None
+
+
+def requirements_eval_has_blockers(text: str) -> bool:
+    """REQUIREMENTS_EVAL.md 的 `## Blockers` 段是否列了 none 以外的条目。"""
+    section = REQUIREMENTS_EVAL_BLOCKERS_SECTION.search(text)
+    if section is None:
+        return False
+    for match in REVIEW_BLOCKER_ITEM.finditer(section.group("body")):
+        item = match.group("text").strip().strip("`*_ ").strip()
+        if item and not REVIEW_BLOCKER_EMPTY.match(item):
+            return True
+    return False
+
+
+def _check_review_blocker_verdict(ctx: HookContext, verdict: object, blocker_ids: list[str]) -> int:
+    """blocker 与 PASS 类结论不得并存。
+
+    blocker 意味着完成声明不成立；此时把结论写成 PASS / PASS_WITH_WARNINGS 就是让
+    review 在没收敛的情况下关阶段，下游 utest / e2e 会带着未消解的阻塞项继续跑。
+    两个结论口径都要一致：REVIEW_FINDINGS.json 的 verdict，以及 reviewer 交给下游的
+    REQUIREMENTS_EVAL.md `## Verdict`。
+    """
+    eval_path = ctx.file("REQUIREMENTS_EVAL.md")
+    eval_text = read_text(eval_path) if is_nonempty(eval_path) else ""
+    markdown_blockers = requirements_eval_has_blockers(eval_text)
+    if not blocker_ids and not markdown_blockers:
+        return 0
+
+    sources = []
+    if blocker_ids:
+        sources.append("REVIEW_FINDINGS.json:" + ",".join(blocker_ids))
+    if markdown_blockers:
+        sources.append("REQUIREMENTS_EVAL.md#Blockers")
+    detail = " blockers=" + ";".join(sources)
+
+    failures = 0
+    if isinstance(verdict, str) and verdict.upper() in TERMINAL_PASS:
+        failures += fail_line(
+            ctx,
+            "blocker_with_pass_review_findings_verdict",
+            f"{detail} verdict={verdict}",
+            target="REVIEW_FINDINGS.json",
+        )
+    eval_verdict = requirements_eval_verdict(eval_text)
+    if eval_verdict in TERMINAL_PASS:
+        failures += fail_line(
+            ctx,
+            "blocker_with_pass_requirements_eval_verdict",
+            f"{detail} verdict={eval_verdict}",
+            target="REQUIREMENTS_EVAL.md",
+        )
+    return failures
+
+
 def validate_review_findings_json(ctx: HookContext) -> int:
     data, failures = load_json_artifact(
         ctx,
@@ -1209,7 +1297,7 @@ def validate_review_findings_json(ctx: HookContext) -> int:
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_review_findings_version")
     verdict = data.get("verdict")
-    if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "DEGRADED"}:
+    if not isinstance(verdict, str) or verdict.upper() not in REVIEW_VERDICTS:
         failures += fail_line(ctx, "invalid_review_findings_verdict")
     elif ctx.requires_artifact("REVIEW_FINDINGS.json") and verdict.upper() not in TERMINAL_PASS:
         failures += fail_line(ctx, "non_terminal_review_findings_verdict")
@@ -1217,6 +1305,7 @@ def validate_review_findings_json(ctx: HookContext) -> int:
     if not isinstance(findings, list):
         return failures + fail_line(ctx, "invalid_review_findings_items")
     severities = {"blocker", "high", "medium", "low", "info", "minor", "important"}
+    blocker_ids: list[str] = []
     for index, finding in enumerate(findings):
         context = f"findings[{index}]"
         if not isinstance(finding, dict):
@@ -1227,12 +1316,15 @@ def validate_review_findings_json(ctx: HookContext) -> int:
         severity = finding.get("severity")
         if not isinstance(severity, str) or severity.strip().lower() not in severities:
             failures += fail_line(ctx, "invalid_review_finding_severity", f" item={context}")
+        elif severity.strip().lower() == REVIEW_BLOCKER_SEVERITY:
+            identifier = finding.get("id")
+            blocker_ids.append(identifier.strip() if isinstance(identifier, str) and identifier.strip() else context)
         _, _, trace_failures = _check_trace_refs(ctx, finding, context=context, require_task=True, require_evidence=True)
         failures += trace_failures
         suggested = finding.get("suggestedCheckpoint")
         if suggested is not None and (not isinstance(suggested, str) or not suggested.strip()):
             failures += fail_line(ctx, "invalid_json_field", f" item={context} field=suggestedCheckpoint")
-    return failures
+    return failures + _check_review_blocker_verdict(ctx, verdict, blocker_ids)
 
 
 def validate_unit_test_result_json(ctx: HookContext) -> int:
