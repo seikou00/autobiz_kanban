@@ -27,8 +27,10 @@ def _sha256_file(file_path: Path) -> str:
     """Calculate SHA256 hash of a file."""
     hasher = hashlib.sha256()
     with open(file_path, "rb") as f:
-        while chunk := f.read(8192):
+        chunk = f.read(8192)
+        while chunk:
             hasher.update(chunk)
+            chunk = f.read(8192)
     return hasher.hexdigest()
 
 

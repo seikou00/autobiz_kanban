@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-if str(ROOT := Path(__file__).resolve().parents[1]) not in sys.path:
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tests.test_plan_json_and_evidence import valid_plan, write_test_plan  # noqa: E402

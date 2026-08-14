@@ -125,7 +125,8 @@ def _normalized_merged_scenario_refs(task: dict[str, Any]) -> set[str] | None:
         scenario_ids = SCN_SUBSTRING.findall(anchor)
         if not path_part.strip() or len(scenario_ids) != 1 or anchor.strip() != scenario_ids[0]:
             return None
-        normalized.add(f"{path_part.strip().replace('\\', '/')}#{scenario_ids[0]}")
+        normalized_path = path_part.strip().replace("\\", "/")
+        normalized.add(f"{normalized_path}#{scenario_ids[0]}")
     return normalized
 
 

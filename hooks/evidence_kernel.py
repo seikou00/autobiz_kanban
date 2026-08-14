@@ -192,7 +192,7 @@ def check_record_artifacts(target_feature_dir: Path, record: dict[str, Any]) -> 
     return errors
 
 
-class FileLock(AbstractContextManager["FileLock"]):
+class FileLock(AbstractContextManager):
     """Cross-platform exclusive lock backed by one local file."""
 
     def __init__(self, path: Path) -> None:

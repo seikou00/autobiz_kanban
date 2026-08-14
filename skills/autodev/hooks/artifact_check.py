@@ -905,22 +905,24 @@ def _plan_ui_task_ids(ctx: HookContext) -> set[str]:
 
 def _known_evidence_ids(ctx: HookContext) -> set[str]:
     try:
-        return {
-            evidence_id
-            for record in read_records(stream_path(ctx.feature_dir))
-            if isinstance((evidence_id := record.get("evidenceId")), str)
-        }
+        evidence_ids = set()
+        for record in read_records(stream_path(ctx.feature_dir)):
+            evidence_id = record.get("evidenceId")
+            if isinstance(evidence_id, str):
+                evidence_ids.add(evidence_id)
+        return evidence_ids
     except EvidenceStoreError:
         return set()
 
 
 def _evidence_records_by_id(ctx: HookContext) -> dict[str, dict]:
     try:
-        return {
-            evidence_id: record
-            for record in read_records(stream_path(ctx.feature_dir))
-            if isinstance((evidence_id := record.get("evidenceId")), str)
-        }
+        records_by_id = {}
+        for record in read_records(stream_path(ctx.feature_dir)):
+            evidence_id = record.get("evidenceId")
+            if isinstance(evidence_id, str):
+                records_by_id[evidence_id] = record
+        return records_by_id
     except EvidenceStoreError:
         return {}
 
@@ -3039,9 +3041,11 @@ def validate_plan_finished_tasks(ctx: HookContext) -> int:
     for error in errors:
         failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
     if data is not None:
-        if unfinished := unfinished_tasks(data):
+        unfinished = unfinished_tasks(data)
+        if unfinished:
             failures += fail_line(ctx, "plan_json_has_pending_tasks", f" tasks={','.join(unfinished)}")
-        if failed := failed_tasks(data):
+        failed = failed_tasks(data)
+        if failed:
             failures += fail_line(ctx, "plan_json_has_failed_tasks", f" tasks={','.join(failed)}")
         failures += _validate_plan_json_traceability(ctx, data)
     return failures

@@ -9,8 +9,9 @@
 import argparse
 import sys
 import time
-
-import requests
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 
 POLL_INTERVAL = 30  # 轮询间隔（秒）
@@ -37,17 +38,19 @@ def get_build_status(pipeline_code: str, pipeline_num: str) -> str:
     Returns:
         str: 构建状态
     """
-    url = f"{API_BASE_URL}?pipelineCode={pipeline_code}&pipelineNum={pipeline_num}"
+    query = urlencode({"pipelineCode": pipeline_code, "pipelineNum": pipeline_num})
+    url = f"{API_BASE_URL}?{query}"
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        with urlopen(url, timeout=10) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            body = response.read().decode(charset, errors="replace").strip()
 
-        if not response.text or response.text.strip() == "":
+        if not body:
             return "获取状态失败: 空响应"
 
-        return response.text.strip()
+        return body
 
-    except requests.exceptions.RequestException as e:
+    except (HTTPError, URLError, OSError) as e:
         print(f"请求接口异常: {str(e)}", file=sys.stderr)
         sys.exit(1)
 

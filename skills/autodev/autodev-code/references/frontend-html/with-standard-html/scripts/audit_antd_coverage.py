@@ -77,6 +77,13 @@ def should_skip(path: Path) -> bool:
     return any(part in SKIP_DIRS for part in path.parts)
 
 
+def relative_to_or_self(path: Path, root: Path) -> Path:
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return path
+
+
 def iter_source_files(root: Path):
     if root.is_file():
         if root.suffix in SOURCE_SUFFIXES:
@@ -141,7 +148,7 @@ def main() -> int:
         print("| File | Line | Candidate | Recommendation | Source |")
         print("| --- | ---: | --- | --- | --- |")
         for path, line_no, candidate, reason, source in findings:
-            rel = path.relative_to(root) if root.is_dir() and path.is_relative_to(root) else path
+            rel = relative_to_or_self(path, root) if root.is_dir() else path
             escaped = source.replace("|", "\\|")
             print(f"| `{rel}` | {line_no} | `{candidate}` | {reason} | `{escaped}` |")
         return 1
@@ -152,7 +159,7 @@ def main() -> int:
 
     print("Ant Design coverage audit found possible missed conversions:")
     for path, line_no, candidate, reason, source in findings:
-        rel = path.relative_to(root) if root.is_dir() and path.is_relative_to(root) else path
+        rel = relative_to_or_self(path, root) if root.is_dir() else path
         print(f"{rel}:{line_no}: {candidate} - {reason}")
         print(f"  {source}")
     print("\nResolve each finding by converting it to Ant Design or adding an `antd-audit-ignore` comment with a reason.")

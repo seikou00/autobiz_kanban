@@ -444,6 +444,15 @@ def component_source_rank(source: str) -> int:
     }.get(source, 3)
 
 
+def display_path_relative_to(path: Path, root: Path | None) -> str:
+    if root is None:
+        return str(path)
+    try:
+        return str(path.relative_to(root))
+    except (ValueError, TypeError):
+        return str(path)
+
+
 def collect_component_doc_entries(
     doc_path: Path,
     source: str,
@@ -474,10 +483,7 @@ def collect_component_doc_entries(
         if new_rank < current_rank:
             entry["sourceType"] = source
             entry["sourceRank"] = new_rank
-        try:
-            display_path = str(doc_path.relative_to(project_root)) if project_root and doc_path.is_relative_to(project_root) else str(doc_path)
-        except ValueError:
-            display_path = str(doc_path)
+        display_path = display_path_relative_to(doc_path, project_root)
         entry["paths"].append(display_path)
         entry["usageCount"] = max(entry.get("usageCount", 0), 1)
 
@@ -2651,10 +2657,7 @@ def scan_project_components(project_root: Path | None) -> list[dict[str, Any]]:
             if new_rank < current_rank:
                 entry["sourceType"] = source
                 entry["sourceRank"] = new_rank
-            try:
-                display_path = str(path.relative_to(project_root)) if project_root and path.is_relative_to(project_root) else str(path.relative_to(skill_root))
-            except ValueError:
-                display_path = str(path)
+            display_path = display_path_relative_to(path, project_root or skill_root)
             entry["paths"].append(display_path)
     src = project_root / "src" if project_root else None
     if src and src.exists():

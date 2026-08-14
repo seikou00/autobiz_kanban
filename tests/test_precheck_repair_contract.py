@@ -167,16 +167,23 @@ class DynamicReasonsInSyncTest(unittest.TestCase):
     def _string_literals(self, path: Path, key: str) -> set[str]:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         found: set[str] = set()
+
+        def string_value(node):
+            value = getattr(node, "value", None)
+            if isinstance(value, str):
+                return value
+            legacy_value = getattr(node, "s", None)
+            if isinstance(legacy_value, str):
+                return legacy_value
+            return None
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Dict):
                 for k, v in zip(node.keys, node.values):
-                    if (
-                        isinstance(k, ast.Constant)
-                        and k.value == key
-                        and isinstance(v, ast.Constant)
-                        and isinstance(v.value, str)
-                    ):
-                        found.add(v.value)
+                    if string_value(k) == key:
+                        value = string_value(v)
+                        if value is not None:
+                            found.add(value)
         return found
 
     def test_plan_granularity_reasons_are_registered(self) -> None:
