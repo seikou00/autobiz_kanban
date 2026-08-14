@@ -57,6 +57,7 @@ from hooks.plan_json import (  # noqa: E402
 )
 from hooks.code_task_context import resolve_task_refs  # noqa: E402
 from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
+from hooks.utest_plan_contract import validate_result_against_plan  # noqa: E402
 
 E2E_ID = re.compile(r"\bE2E-[A-Za-z0-9_-]+-\d{3}\b")
 REQ_ID = re.compile(r"\bREQ-\d{3}\b")
@@ -1281,6 +1282,13 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
     )
     if data is None:
         return failures
+    for reason in validate_result_against_plan(ctx.feature_dir, data):
+        failures += fail_line(
+            ctx,
+            reason,
+            target="UNIT_TEST_RESULT.json",
+            repair="恢复 plan 生成的 targets，并由测试 Evidence 自动派生 result、coverage 与 verdict。",
+        )
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_unit_test_result_version")
     verdict = data.get("verdict")

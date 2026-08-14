@@ -280,7 +280,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             skill,
         )
         self.assertIn(
-            "`run_utest_command.py --cwd` 只表示 `<BUSINESS_REPO>` 内的相对执行目录",
+            "仓库根目录与执行目录只使用环境检查器返回值，不作为模型填写的脚本参数",
             skill,
         )
         self.assertIn("每次需要当前状态或 checkpoint 时重新运行该脚本", skill)

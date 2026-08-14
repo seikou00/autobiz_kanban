@@ -6,6 +6,7 @@ from __future__ import print_function
 import contextlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,7 @@ if str(ROOT) not in sys.path:
 from hooks.inspect_test_environment import (  # noqa: E402
     TestEnvironmentError,
     inspect_environment,
+    inspect_feature_environments,
     main,
 )
 
@@ -31,6 +33,47 @@ class InspectTestEnvironmentTest(unittest.TestCase):
 
     def _package(self, root, data):
         (root / "package.json").write_text(json.dumps(data), encoding="utf-8")
+
+    def _feature(self, workspace, repo, modules=None, workspace_ref=None):
+        (workspace / ".autobizdevops").mkdir(parents=True, exist_ok=True)
+        (workspace / ".autobizdevops" / "state.json").write_text("{}\n", encoding="utf-8")
+        feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+        batch_path = feature_dir / "plans" / "B001" / "plan.json"
+        batch_path.parent.mkdir(parents=True, exist_ok=True)
+        workspace_ref = workspace_ref or repo.name
+        task = {
+            "id": "T001",
+            "title": "module tests",
+            "goal": "verify module behavior",
+            "implementationPoints": ["module behavior"],
+            "nonGoals": [],
+            "validationBoundary": "module API",
+            "workspaceRef": workspace_ref,
+            "scope": {"modules": list(modules or []), "workspaceRoots": {workspace_ref: "."}},
+            "specRefs": ["specs/cap/spec.md#REQ-001"],
+            "acceptanceCriteria": [{"id": "AC-T001-01", "text": "module works"}],
+            "validationCommands": [{"repo": workspace_ref, "cwd": "."}],
+        }
+        batch_path.write_text(
+            json.dumps({"batchId": "B001", "executionLane": "backend", "tasks": [task]}),
+            encoding="utf-8",
+        )
+        (feature_dir / "plan.json").write_text(
+            json.dumps({"batches": [{"id": "B001", "path": "plans/B001/plan.json"}]}),
+            encoding="utf-8",
+        )
+        cache_path = feature_dir / "cache" / "code-exploration" / repo.name / "backend.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": "autodev.code-exploration.v1",
+                    "repository": {"id": repo.name, "root": str(repo)},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return feature_dir
 
     def test_spring_maven_ready(self):
         root = self._root()
@@ -221,17 +264,110 @@ class InspectTestEnvironmentTest(unittest.TestCase):
 
     def test_cli_accepts_json_flag(self):
         root = self._root()
-        (root / "pom.xml").write_text(
+        workspace = root / "output"
+        repo = root / "spring-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "pom.xml").write_text(
             "<artifactId>spring-boot-starter-test</artifactId>", encoding="utf-8"
         )
+        self._feature(workspace, repo)
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             exit_code = main(
-                ["--framework", "spring-boot-3", "--workspace", str(root), "--json"]
+                ["--workspace", str(workspace), "--feature", "alpha", "--json"]
             )
 
         self.assertEqual(0, exit_code)
         self.assertEqual("ready", json.loads(stdout.getvalue())["status"])
+
+    def test_feature_inspector_uses_scope_module_instead_of_aggregator_root(self):
+        root = self._root()
+        workspace = root / "output"
+        repo = root / "ruoyi-vue-pro"
+        module = repo / "yudao-module-mkt"
+        module.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "pom.xml").write_text(
+            "<project><packaging>pom</packaging><modules><module>yudao-module-mkt</module></modules></project>",
+            encoding="utf-8",
+        )
+        (module / "pom.xml").write_text(
+            "<dependency><artifactId>spring-boot-starter-test</artifactId></dependency>",
+            encoding="utf-8",
+        )
+        self._feature(workspace, repo, modules=["yudao-module-mkt"])
+
+        result = inspect_feature_environments(workspace, "alpha")
+
+        self.assertEqual("ready", result["status"])
+        self.assertEqual(str(module.resolve()), result["targets"][0]["projectRoot"])
+        self.assertEqual(["pom.xml"], result["targets"][0]["manifests"])
+
+    def test_missing_workspace_binding_is_not_reported_as_contract_gap(self):
+        root = self._root()
+        workspace = root / "output"
+        repo = root / "missing-repo"
+        repo.mkdir()
+        self._feature(workspace, repo)
+        cache = (
+            workspace
+            / ".autobizdevops"
+            / "features"
+            / "alpha"
+            / "cache"
+            / "code-exploration"
+            / repo.name
+            / "backend.json"
+        )
+        cache.unlink()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(["--workspace", str(workspace), "--feature", "alpha"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(2, exit_code)
+        self.assertEqual("workspace_binding_missing", payload["status"])
+        self.assertEqual("utest_workspace_binding", payload["owner"])
+
+    def test_missing_scope_module_is_contract_gap_with_task_repair(self):
+        root = self._root()
+        workspace = root / "output"
+        repo = root / "ruoyi-vue-pro"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "pom.xml").write_text("<project/>", encoding="utf-8")
+        self._feature(workspace, repo, modules=["missing-module"])
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(["--workspace", str(workspace), "--feature", "alpha"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(2, exit_code)
+        self.assertEqual("contract_gap", payload["status"])
+        self.assertIn("T001", payload["errors"][0])
+        self.assertIn("scope.modules", payload["errors"][0])
+
+    def test_invalid_plan_location_is_contract_gap_not_environment_failure(self):
+        root = self._root()
+        workspace = root / "output"
+        repo = root / "ruoyi-vue-pro"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        feature_dir = self._feature(workspace, repo)
+        batch_path = feature_dir / "plans" / "B001" / "plan.json"
+        batch = json.loads(batch_path.read_text(encoding="utf-8"))
+        batch["tasks"][0]["validationCommands"][0]["cwd"] = "../outside"
+        batch_path.write_text(json.dumps(batch), encoding="utf-8")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(["--workspace", str(workspace), "--feature", "alpha"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(2, exit_code)
+        self.assertEqual("contract_gap", payload["status"])
+        self.assertEqual("repair_plan_task_location", payload["requiredAction"])
 
 
 if __name__ == "__main__":

@@ -556,7 +556,7 @@
               } }
           ],
           "outputs": [
-            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": false },
+            { "id": "unit_test_report", "label": "单元测试报告", "artifactType": "file", "path": "UNIT_TEST_REPORT.md", "required": true },
             { "id": "unit_test_result_json", "label": "结构化单测结果", "artifactType": "json", "path": "UNIT_TEST_RESULT.json", "required": true },
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": true },
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }

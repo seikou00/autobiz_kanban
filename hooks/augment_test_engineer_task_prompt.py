@@ -6,11 +6,23 @@ from __future__ import print_function
 
 import json
 import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from hooks.utest_assignment_router import (  # noqa: E402
+    UTestAssignmentError,
+    validate_assignment_prompt_payload,
+)
 
 
 PREFIX = "[utest-task-prompt-augment]"
 TARGET_SUBAGENT_TYPE = "test-engineer-autodev"
 APPEND_MARKER = "autodev-utest-assignment"
+ASSIGNMENT_MARKER = "<UTEST_ASSIGNMENT>"
 APPEND_INSTRUCTION = """
 
 <{marker}>
@@ -19,15 +31,16 @@ APPEND_INSTRUCTION = """
 
 - This is post-implementation testing: `post_implementation=true`, `tdd_rebuild=false`. Preserve existing production implementation; do not apply the role's TDD deletion rule.
 - Read `<AGENTS_INSTRUCTIONS>`, then resolve the assignment's `<SCOPE>`, `<SYSTEM>`, and `<UNIT>` references through tools before editing. `<SCOPE>` owns the deploy-unit and repository boundary; system/unit documents own framework constraints.
-- Treat `executionLane` and `workspaceRef` from the Batch/task assignment as authoritative. Work only in the assigned workspace and do not combine backend and frontend lanes.
-- Test content and boundary come from the plan fields carried in the assignment: assert `testIntent.behavior` plus the `acceptanceCriteria` named in `covers`, stay inside `validationBoundary`, and run the `validationCommands` entry each `commandId` points at. Read a spec or design anchor only when those fields leave the assertion undetermined; do not re-derive targets from specs and do not substitute self-authored commands. A missing or dangling `validationTestPlan` entry is a blocking `contract_gap`.
+- Treat the supplied `<UTEST_ASSIGNMENT>` block as the complete testing context. Use `implementationPoints` as the required testing focus, exclude every `nonGoals` item, and use `validationLocations` only to confirm the assigned repo/cwd. `batchPlanPath` is traceability evidence; do not open plan.json to fetch, reconstruct, summarize, or replace fields.
+- Treat `executionLane` and `workspaceRef` in that block as authoritative. Work only in the assigned workspace and do not combine backend and frontend lanes.
+- Do not author or pass repository paths or cwd values to UTest scripts. Use repository/module paths returned by the environment inspector for file access; the runner resolves and validates its execution directory from the current binding and task.
 - Resolve `framework` only from actually opened `<SYSTEM>`/`<UNIT>` documents. Resolve `runner` and package manager only from real manifests, lock files, and test config. A conflict is a blocking `contract_gap`; when the constraint is absent, fall back to repository facts and add a warning.
-- You may edit only tests, fixtures, mocks, test helpers, test-environment configuration, dependency manifests, and the matching lock file. Do not edit production source.
+- You may edit tests, fixtures, mocks, test helpers, test-environment configuration, dependency manifests, the matching lock file, and the minimum current-feature production source inside this assignment when a trusted failing test proves a `source_bug`.
 - Route pure functions to `unit`, hooks/composables to `logic`, stores to `state`, components to `component`, and router/page/API adapters to `integration`. Real-browser, multi-page, or real-network coverage is an E2E handoff, not an implementation target.
-- Classify every unresolved failure as exactly one of `test_bug`, `source_bug`, `contract_gap`, `environment`, `flaky`, or `unknown`. Repair `test_bug` within the write boundary. Return a `source_fix_request` for `source_bug`; do not patch production source.
+- Classify every unresolved failure as exactly one of `test_bug`, `source_bug`, `contract_gap`, `environment`, `flaky`, or `unknown`. Repair `test_bug` within the write boundary. A `source_bug` requires a machine-validated attestation bound to a FAIL target, non-zero Evidence, runner-resolved current task digest, generated UTest command ID, and real AC coverage; static observation and exit 0 are invalid. Apply the minimum in-assignment production fix and rerun the same command. Return `source_fix_request` only when the validated fix crosses the assignment boundary.
 - Run tests and retain fresh command results. Existing Jest/Vitest runners must be reused. Missing supported test environments may be initialized only after the environment profile is reported by the inspector.
 
-Return exactly these top-level fields in the final structured result: `status`, `assignment`, `constraint_files`, `lane`, `framework`, `runner`, `environment_initialization`, `test_targets`, `command_results`, `evidence_ids`, `failure_classification`, `source_fix_request`, `e2e_handoff`, `warnings`.
+Return exactly these top-level fields in the final structured result: `status`, `assignment`, `constraint_files`, `lane`, `framework`, `runner`, `environment_initialization`, `test_targets`, `command_results`, `evidence_ids`, `failure_classification`, `source_bug_attestation`, `source_fix_request`, `e2e_handoff`, `warnings`.
 
 </{marker}>""".format(marker=APPEND_MARKER)
 
@@ -57,6 +70,40 @@ def is_target_subagent(tool_input):
     return subagent_type.strip().lower() == TARGET_SUBAGENT_TYPE.lower()
 
 
+def validate_assignment_block(description, stream):
+    start = description.find(ASSIGNMENT_MARKER)
+    close_marker = "</UTEST_ASSIGNMENT>"
+    end = description.find(close_marker, start + len(ASSIGNMENT_MARKER))
+    if start < 0 or end < 0:
+        print(
+            "{} incomplete UTEST_ASSIGNMENT block. 修复：使用 router 输出的 promptContent 原文。".format(
+                PREFIX
+            ),
+            file=stream,
+        )
+        return False
+    raw_payload = description[start + len(ASSIGNMENT_MARKER) : end].strip()
+    try:
+        payload = json.loads(raw_payload)
+    except (TypeError, ValueError) as exc:
+        print(
+            "{} invalid UTEST_ASSIGNMENT JSON: {}. 修复：不要改写 router promptContent。".format(
+                PREFIX, exc
+            ),
+            file=stream,
+        )
+        return False
+    try:
+        validate_assignment_prompt_payload(payload)
+    except (UTestAssignmentError, TypeError, ValueError, OSError) as exc:
+        print(
+            "{} invalid UTEST_ASSIGNMENT: {}".format(PREFIX, exc),
+            file=stream,
+        )
+        return False
+    return True
+
+
 def build_updated_input(payload, stream):
     tool_input = get_tool_input(payload)
     if not is_target_subagent(tool_input):
@@ -72,9 +119,22 @@ def build_updated_input(payload, stream):
     if not isinstance(description, str) or not description.strip():
         print(
             "{} description missing; pass the UTest assignment in "
-            "tool_input.description".format(PREFIX),
+            "tool_input.description. 修复：传入 router 生成的最小 promptContent。".format(PREFIX),
             file=stream,
         )
+        return None
+
+    if ASSIGNMENT_MARKER not in description:
+        print(
+            "{} description missing {}; refusing an unbound summary. "
+            "修复：运行 utest_assignment_router.py，并把 assignment.promptContent 原样放入 description。".format(
+                PREFIX, ASSIGNMENT_MARKER
+            ),
+            file=stream,
+        )
+        return None
+
+    if not validate_assignment_block(description, stream):
         return None
 
     if APPEND_MARKER in description:
@@ -108,7 +168,7 @@ def main():
     if not raw_input.strip():
         print(
             "{} empty stdin; verify CMBDevClaw passes the PreToolUse task "
-            "payload to command hooks".format(PREFIX),
+            "payload to command hooks. 修复：把 task payload 作为 JSON 写入 stdin。".format(PREFIX),
             file=sys.stderr,
         )
         return 0
@@ -117,16 +177,18 @@ def main():
         payload = json.loads(raw_input)
     except (TypeError, ValueError) as error:
         print(
-            "{} invalid JSON: {}. Repair: capture the raw PreToolUse payload "
-            "and update the parser".format(PREFIX, error),
+            "{} invalid JSON: {}. 修复：捕获原始 PreToolUse payload 并修正 JSON。".format(
+                PREFIX, error
+            ),
             file=sys.stderr,
         )
         return 0
 
     if not isinstance(payload, dict):
         print(
-            "{} payload is not an object. Repair: pass one JSON object from "
-            "PreToolUse".format(PREFIX),
+            "{} payload is not an object. 修复：从 PreToolUse 传入单个 JSON object。".format(
+                PREFIX
+            ),
             file=sys.stderr,
         )
         return 0

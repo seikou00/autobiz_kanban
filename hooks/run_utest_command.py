@@ -19,10 +19,22 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence  # noqa: E402
 from hooks.json_writer_common import resolve_feature, resolve_workspace, shell_join  # noqa: E402
-from hooks.unit_test_result_writer import record_execution  # noqa: E402
+from hooks.unit_test_result_writer import ensure_plan_result, record_execution  # noqa: E402
+from hooks.utest_plan_contract import (  # noqa: E402
+    UTestPlanContractError,
+    command_executes_tests,
+    resolve_plan_target,
+)
+from hooks.utest_workspace_binding import (  # noqa: E402
+    UTestWorkspaceBindingError,
+    path_within,
+    resolve_task_workspace,
+    select_task_execution_target,
+)
 
 
 UT_ID_RE = re.compile(r"^UT-\d{3,}$")
+TASK_ID_RE = re.compile(r"^T\d{3}$")
 MODES = ("setup", "test")
 
 
@@ -33,45 +45,9 @@ class UTestCommandError(Exception):
 class RepairArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise UTestCommandError(
-            "命令参数无效：{}。修复：运行 `{} --help`，并在 `--` 后传入 argv。".format(
-                message, self.prog
-            )
+            "命令参数无效：{}。修复：运行 `${{pluginPath}}/hooks/run_utest_command.py --help`，"
+            "不要传 repo/cwd/framework，并在 `--` 后传入 argv。".format(message)
         )
-
-
-def _within(path, root):
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def resolve_command_cwd(code_workspace, cwd=None):
-    root = Path(code_workspace).expanduser().resolve()
-    if not root.is_dir():
-        raise UTestCommandError(
-            "code-workspace 不存在或不是目录：{}。修复：传入 workspaceRef 对应仓库根目录。".format(
-                root
-            )
-        )
-    requested = Path(cwd).expanduser() if cwd else root
-    if not requested.is_absolute():
-        requested = root / requested
-    resolved = requested.resolve()
-    if not resolved.is_dir():
-        raise UTestCommandError(
-            "cwd 不存在或不是目录：{}。修复：传入 code-workspace 内的现有目录。".format(
-                resolved
-            )
-        )
-    if not _within(resolved, root):
-        raise UTestCommandError(
-            "cwd 越出分配仓库：{}。修复：把 --cwd 限制在 {} 内。".format(
-                resolved, root
-            )
-        )
-    return root, resolved
 
 
 def _validate_argv(argv):
@@ -84,6 +60,38 @@ def _validate_argv(argv):
             "argv 必须是非空字符串数组。修复：不要传 shell 命令字符串或空参数。"
         )
     return list(argv)
+
+
+def _validate_test_files(code_workspace, test_files):
+    if not isinstance(test_files, list) or not test_files:
+        raise UTestCommandError(
+            "test 模式需要 --test-file。修复：先生成测试文件，再为每个文件传一个仓库根相对路径。"
+        )
+    root = Path(code_workspace).expanduser().resolve()
+    result = []
+    for raw_path in test_files:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise UTestCommandError(
+                "--test-file 包含空值。修复：传入仓库根相对的现有测试文件。"
+            )
+        requested = Path(raw_path)
+        if requested.is_absolute() or ".." in requested.parts:
+            raise UTestCommandError(
+                "--test-file 必须是仓库根相对路径：{}。修复：移除绝对路径或 ..。".format(
+                    raw_path
+                )
+            )
+        resolved = (root / requested).resolve()
+        if not path_within(resolved, root) or not resolved.is_file():
+            raise UTestCommandError(
+                "--test-file 不存在或越出分配仓库：{}。修复：先落地测试文件再执行。".format(
+                    raw_path
+                )
+            )
+        relative = resolved.relative_to(root).as_posix()
+        if relative not in result:
+            result.append(relative)
+    return result
 
 
 def _run(argv, cwd, timeout):
@@ -163,14 +171,15 @@ def execute_utest_command(
     *,
     workspace,
     feature,
-    code_workspace,
-    argv,
+    argv=None,
     kind=None,
     mode=None,
-    cwd=None,
     target_id=None,
     task_id=None,
-    spec_refs=None,
+    command_id=None,
+    task_digest=None,
+    test_files=None,
+    environment_target_id=None,
     timeout=600,
 ):
     selected_kind = kind or mode
@@ -182,28 +191,91 @@ def execute_utest_command(
         raise UTestCommandError(
             "timeout 必须是正整数。修复：传入大于 0 的秒数。"
         )
-    command_argv = _validate_argv(argv)
     artifact_workspace = resolve_workspace(workspace)
     resolved_feature = resolve_feature(feature)
-    _, command_cwd = resolve_command_cwd(code_workspace, cwd)
+    feature_dir = artifact_workspace / ".autobizdevops" / "features" / resolved_feature
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise UTestCommandError(
+            "{} 模式需要 --task-id。修复：传入 assignment 中的 TASK ID。".format(selected_kind)
+        )
+    if not TASK_ID_RE.fullmatch(task_id):
+        raise UTestCommandError(
+            "--task-id 无效：{}。修复：传入 plan 中 TASK 的 id 原值，形如 T001；"
+            "批次名、阶段名或其他自拟标签不是 TASK ID。".format(task_id)
+        )
+    try:
+        _, authority = resolve_plan_target(feature_dir, task_id, command_id)
+        workspace_context = resolve_task_workspace(
+            artifact_workspace,
+            resolved_feature,
+            task_id,
+            environment_target_id,
+        )
+    except (UTestPlanContractError, UTestWorkspaceBindingError) as exc:
+        raise UTestCommandError(str(exc))
+    if authority["taskDigest"] != workspace_context["taskDigest"]:
+        raise UTestCommandError(
+            "workspace context 与当前 plan 的 taskDigest 不一致。修复：停止复用旧绑定并重新路由。"
+        )
+    if task_digest is not None and task_digest != authority["taskDigest"]:
+        raise UTestCommandError(
+            "调用方 taskDigest 与当前 plan 不一致。修复：停止复用旧 assignment 并重新路由。"
+        )
+    command_argv = _validate_argv(argv)
     if selected_kind == "test":
         if target_id is not None and (
-            not isinstance(target_id, str) or not UT_ID_RE.match(target_id)
+            not isinstance(target_id, str) or not UT_ID_RE.fullmatch(target_id)
         ):
             raise UTestCommandError(
                 "--target-id 无效。修复：省略该参数自动分配，或使用 UT-001 形式的稳定 ID。"
             )
-        if not isinstance(task_id, str) or not task_id.strip():
-            raise UTestCommandError(
-                "test 模式需要 --task-id。修复：传入 assignment 中的 TASK ID。"
+        try:
+            test_files = _validate_test_files(
+                workspace_context["binding"]["root"], test_files
             )
-        if not isinstance(spec_refs, list) or not spec_refs:
+            execution_target = select_task_execution_target(workspace_context, test_files)
+        except UTestWorkspaceBindingError as exc:
+            raise UTestCommandError(str(exc))
+        if target_id is not None and target_id != authority["targetId"]:
             raise UTestCommandError(
-                "test 模式需要 --spec-ref。修复：至少传入一个 SCOPE/spec 行为引用。"
+                "--target-id 与当前 TASK 不一致：{} != {}。"
+                "修复：省略该参数或使用 router 展开的稳定 targetId。".format(
+                    target_id, authority["targetId"]
+                )
             )
+        command_argv = _validate_argv(argv)
+        if not command_executes_tests({"argv": command_argv}):
+            raise UTestCommandError(
+                "test 模式 argv 不会执行测试用例。修复：先生成测试，再传入真实的精确测试命令；"
+                "不要使用 plan.validationCommands 的编译或 test-compile argv。"
+            )
+        authority = dict(authority)
+        authority["argv"] = list(command_argv)
+        authority["cwd"] = execution_target["planLocation"]["cwd"]
+        authority["repo"] = execution_target["planLocation"]["repo"]
+        authority["executionCwd"] = execution_target["executionCwd"]
+        authority["environmentTargetId"] = execution_target["environmentTargetId"]
+        authority["testFiles"] = list(test_files)
+        target_id = authority["targetId"]
+        command_id = authority["commandId"]
+        spec_refs = list(authority["specRefs"])
+        try:
+            ensure_plan_result(artifact_workspace, resolved_feature, create=True)
+        except (UTestPlanContractError, ValueError, OSError) as exc:
+            raise UTestCommandError(
+                "UNIT_TEST_RESULT 目标初始化/重跑绑定失败：{}。"
+                "修复：保持当前 plan，不要复用 digest 不一致的 target。".format(exc)
+            )
+    else:
+        try:
+            execution_target = select_task_execution_target(workspace_context)
+        except UTestWorkspaceBindingError as exc:
+            raise UTestCommandError(str(exc))
+
+    code_workspace = Path(execution_target["repositoryRoot"])
+    command_cwd = Path(execution_target["executionRoot"])
 
     command = shell_join(command_argv)
-    feature_dir = artifact_workspace / ".autobizdevops" / "features" / resolved_feature
     log_path = feature_dir / "test-output.log"
     exit_code, stdout, stderr, blocked = _run(command_argv, command_cwd, timeout)
     _append_log(
@@ -227,6 +299,14 @@ def execute_utest_command(
         "logPath": str(log_path),
         "evidenceId": None,
         "targetId": target_id,
+        "taskId": task_id,
+        "commandId": command_id,
+        "taskDigest": authority["taskDigest"],
+        "covers": list(authority["covers"]) if selected_kind == "test" else [],
+        "workspaceRef": workspace_context["workspaceRef"],
+        "repositoryRoot": str(code_workspace),
+        "executionCwd": execution_target["executionCwd"],
+        "environmentTargetId": execution_target["environmentTargetId"],
     }
     if selected_kind == "setup":
         return response
@@ -240,14 +320,25 @@ def execute_utest_command(
         "nodeId": "dev.utest",
         "skill": "autodev-utest",
         "taskId": task_id,
+        "taskDigest": authority["taskDigest"],
         "action": "validation",
         "specRefs": list(spec_refs),
+        "covers": list(authority["covers"]),
         "designRefs": [],
-        "changedFiles": [],
+        "changedFiles": list(authority["testFiles"]),
         "validation": {
             "command": command,
+            "commandId": authority["commandId"],
+            "argv": list(authority["argv"]),
+            "cwd": authority["cwd"],
+            "executionCwd": authority["executionCwd"],
+            "environmentTargetId": authority["environmentTargetId"],
+            "repo": authority["repo"],
+            "required": authority["required"],
+            "covers": list(authority["covers"]),
             "exitCode": exit_code,
             "result": evidence_result,
+            "testFiles": list(authority["testFiles"]),
         },
     }
     try:
@@ -265,7 +356,10 @@ def execute_utest_command(
             resolved_feature,
             target_id=target_id,
             task_id=task_id,
+            command_id=authority["commandId"],
+            task_digest=authority["taskDigest"],
             spec_refs=list(spec_refs),
+            covers=list(authority["covers"]),
             evidence_id=evidence_id,
             result=unit_result,
             command=command,
@@ -304,11 +398,12 @@ def main(argv=None):
     parser.add_argument("--kind", "--mode", dest="kind", choices=MODES)
     parser.add_argument("--workspace")
     parser.add_argument("--feature")
-    parser.add_argument("--code-workspace")
-    parser.add_argument("--cwd")
     parser.add_argument("--target-id", "--ut-id", dest="target_id")
     parser.add_argument("--task-id")
-    parser.add_argument("--spec-ref", action="append")
+    parser.add_argument("--command-id")
+    parser.add_argument("--task-digest")
+    parser.add_argument("--test-file", action="append")
+    parser.add_argument("--environment-target-id")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--argv-json", "--command-json", dest="argv_json")
     parser.add_argument("command_argv", nargs=argparse.REMAINDER)
@@ -320,7 +415,7 @@ def main(argv=None):
                 ("--kind", args.kind),
                 ("--workspace", args.workspace),
                 ("--feature", args.feature),
-                ("--code-workspace", args.code_workspace),
+                ("--task-id", args.task_id),
             )
             if not value
         ]
@@ -337,21 +432,21 @@ def main(argv=None):
             raise UTestCommandError(
                 "不能同时传 --argv-json 与尾随 argv。修复：只保留一种 argv 输入。"
             )
-        command_argv = (
-            _parse_argv_json(args.argv_json)
-            if args.argv_json
-            else _validate_argv(trailing_argv)
-        )
+        if args.argv_json:
+            command_argv = _parse_argv_json(args.argv_json)
+        else:
+            command_argv = _validate_argv(trailing_argv)
         result = execute_utest_command(
             workspace=args.workspace,
             feature=args.feature,
-            code_workspace=args.code_workspace,
             argv=command_argv,
             kind=args.kind,
-            cwd=args.cwd,
             target_id=args.target_id,
             task_id=args.task_id,
-            spec_refs=args.spec_ref,
+            command_id=args.command_id,
+            task_digest=args.task_digest,
+            test_files=args.test_file,
+            environment_target_id=args.environment_target_id,
             timeout=args.timeout,
         )
     except UTestCommandError as exc:
