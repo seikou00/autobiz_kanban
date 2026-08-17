@@ -455,7 +455,7 @@
           },
           "subagentConfig": {
             "disabledBuiltinSubagents": [],
-            "customSubagentFiles": []
+            "customSubagentFiles": ["agents/reviewer.md"]
           }
         },
         "order": 60,
