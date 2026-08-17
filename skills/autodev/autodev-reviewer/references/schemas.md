@@ -148,6 +148,12 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 
 一句话说明本次实现与需求覆盖结论。
 
+## Review Baseline
+
+| Requirement | 预期形态 | 基准来源 |
+|---|---|---|
+| specs/[capability]/spec.md / Requirement / Scenario | 新增 / 修改 / 移除 / 无代码改动 | `specs/...` / `design.md` / `PLAN.md` |
+
 ## Evidence
 
 - Completion proposal: `.autobizdevops/features/{slug}/completion-proposal.json`
@@ -195,6 +201,7 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 
 - `REQUIREMENTS_EVAL.md` 必须落盘到 `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`。
 - `Review Mode` 必须与启动 prompt 的 `Review execution mode` 一致；`inline_main_agent` 不得表述为独立子代理审查。
+- `Review Baseline` 在读取源码与运行 git 命令之前写出，每行的 `预期形态` 只能取 `新增`、`修改`、`移除`、`无代码改动`。形态为 `移除` 的条目，`Requirement Coverage` 不得因「未找到实现」记 missing。
 - 不新增 `VERIFY_REPORT.md` 等后置文件门禁；没有额外 PRD 引用时不要求读取 PRD.md。
 - verdict 必须能追溯到 completion proposal、proposal.md、specs、design.md、可选 PRD、shell/git 输出和实际文件内容。
 - 跨仓库任务中，verdict 必须能追溯到每个 affected repository 的 shell/git 输出和实际文件内容。

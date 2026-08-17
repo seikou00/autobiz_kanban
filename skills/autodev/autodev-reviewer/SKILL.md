@@ -1,7 +1,7 @@
 ---
 name: autodev-reviewer
 description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，用 task 工具指定 `reviewer-autodev` 角色核验真实仓库状态，由该角色落盘 REQUIREMENTS_EVAL.md，主 agent 按 verdict 走修复复审闭环。
-version: v1.4.0814
+version: v1.5.0814
 ---
 
 ## 缺失产物处理

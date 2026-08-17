@@ -214,6 +214,12 @@ REQUIREMENTS_EVAL_BLOCKERS_SECTION = re.compile(
     r"^##\s+Blockers?\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
 )
+REQUIREMENTS_EVAL_BASELINE_SECTION = re.compile(
+    r"^##\s+Review Baseline\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+REVIEW_BASELINE_SHAPES = ("新增", "修改", "移除", "无代码改动")
+REVIEW_BASELINE_PLACEHOLDER = re.compile(r"\[capability\]|预期形态")
 REVIEW_VERDICT_TOKEN = re.compile(r"[A-Za-z_]+")
 REVIEW_BLOCKER_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?P<text>.*\S)[ \t]*$", re.MULTILINE)
 REVIEW_BLOCKER_EMPTY = re.compile(r"^(?:none|n/?a|null|nil|-+|无|没有|暂无|不适用)\b", re.IGNORECASE)
@@ -1225,6 +1231,22 @@ def requirements_eval_verdict(text: str) -> str | None:
     return None
 
 
+def requirements_eval_baseline_rows(text: str) -> int:
+    """数出 `## Review Baseline` 中标注了预期形态的真实条目（模板占位行不计）。"""
+    section = REQUIREMENTS_EVAL_BASELINE_SECTION.search(text)
+    if section is None:
+        return 0
+    rows = 0
+    for line in section.group("body").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or REVIEW_BASELINE_PLACEHOLDER.search(stripped):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) >= 2 and any(shape in cells[1] for shape in REVIEW_BASELINE_SHAPES):
+            rows += 1
+    return rows
+
+
 def requirements_eval_has_blockers(text: str) -> bool:
     section = REQUIREMENTS_EVAL_BLOCKERS_SECTION.search(text)
     if section is None:
@@ -1262,6 +1284,16 @@ def validate_requirements_eval_verdict(ctx: HookContext) -> int:
             f" verdict={verdict}",
             target="REQUIREMENTS_EVAL.md",
             repair="完成 blocker 修复并重新 review，只有 PASS 或 PASS_WITH_WARNINGS 可以结束阶段。",
+        )
+    if requirements_eval_baseline_rows(text) == 0:
+        return fail_line(
+            ctx,
+            "missing_requirements_eval_baseline",
+            target="REQUIREMENTS_EVAL.md",
+            repair=(
+                "在 `## Review Baseline` 段逐条写出本次要交付的行为，"
+                "每行第二列取 新增、修改、移除 或 无代码改动；保留模板占位行不算。"
+            ),
         )
     if requirements_eval_has_blockers(text):
         return fail_line(
