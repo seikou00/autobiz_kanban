@@ -1,0 +1,4 @@
+interface:
+  display_name: "AutobizDevOps Rollback"
+  short_description: "安全回退 Feature、清理产物并重置 Code 状态"
+  default_prompt: "Use $autobizdevops-rollback to preview and safely roll back the current Feature to a workflow stage."
