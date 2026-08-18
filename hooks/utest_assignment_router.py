@@ -15,6 +15,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
+from hooks.utest_plan_contract import (  # noqa: E402
+    UTestPlanContractError,
+    assignment_task,
+    load_utest_plan,
+)
 
 
 PREFERRED_LANES = ("backend", "frontend")
@@ -33,119 +38,127 @@ class RepairArgumentParser(argparse.ArgumentParser):
         )
 
 
-def _read_object(path):
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise UTestAssignmentError(
-            "无法读取计划 {}：{}。修复：确认根/Batch plan 路径存在且可读。".format(path, exc)
-        )
-    except ValueError as exc:
-        raise UTestAssignmentError(
-            "计划不是合法 JSON {}：{}。修复：回到 /autodev-plan 重新生成。".format(path, exc)
-        )
-    if not isinstance(data, dict):
-        raise UTestAssignmentError(
-            "计划顶层不是 object：{}。修复：回到 /autodev-plan 重新生成。".format(path)
-        )
-    return data
+def _prompt_task(task):
+    """Project only the plan facts the test engineer needs in its prompt."""
+    return {
+        "id": task["id"],
+        "implementationPoints": list(task["implementationPoints"]),
+        "nonGoals": list(task["nonGoals"]),
+        "validationLocations": list(task["validationLocations"]),
+    }
 
 
-def _batch_path(feature_dir, raw_path):
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise UTestAssignmentError(
-            "root plan batch.path 缺失。修复：为每个 Batch 写入相对 plan.json 路径。"
-        )
-    requested = Path(raw_path)
-    if requested.is_absolute():
-        raise UTestAssignmentError(
-            "Batch plan path 不能是绝对路径：{}。修复：使用 feature 目录内相对路径。".format(raw_path)
-        )
-    resolved = (feature_dir / requested).resolve()
-    try:
-        resolved.relative_to(feature_dir.resolve())
-    except ValueError:
-        raise UTestAssignmentError(
-            "Batch plan path 越界：{}。修复：使用 feature 目录内相对路径。".format(raw_path)
-        )
-    return resolved
+def assignment_prompt_payload(assignment):
+    """Build the minimal, mechanically rendered subagent context."""
+    return {
+        "batchPlanPath": assignment["planPath"],
+        "batchId": assignment["batchId"],
+        "executionLane": assignment["executionLane"],
+        "workspaceRef": assignment["workspaceRef"],
+        "tasks": [_prompt_task(task) for task in assignment["tasks"]],
+    }
 
 
-def _batch_assignments(feature_dir, entry, root_index):
-    batch_path = _batch_path(feature_dir, entry.get("path"))
-    batch = _read_object(batch_path)
-    batch_id = batch.get("batchId") or entry.get("id") or entry.get("batchId")
-    lane = batch.get("executionLane")
-    if not isinstance(batch_id, str) or not batch_id.strip():
-        raise UTestAssignmentError(
-            "第 {} 个 Batch 缺少 batchId。修复：回到 /autodev-plan 补齐。".format(root_index + 1)
-        )
-    if not isinstance(lane, str) or not lane.strip():
-        raise UTestAssignmentError(
-            "{} 缺少 executionLane。修复：回到 /autodev-plan 写入稳定 lane。".format(batch_id)
-        )
-    tasks = batch.get("tasks")
-    if not isinstance(tasks, list) or not tasks:
-        raise UTestAssignmentError(
-            "{} tasks 为空。修复：回到 /autodev-plan 生成可执行任务。".format(batch_id)
-        )
+def render_assignment_prompt(assignment):
+    """Render the minimal, plan-derived content handed to the test engineer."""
+    payload = assignment_prompt_payload(assignment)
+    return "<UTEST_ASSIGNMENT>\n{}\n</UTEST_ASSIGNMENT>".format(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False)
+    )
 
-    groups = []
-    by_workspace = {}
-    for task_index, task in enumerate(tasks):
-        if not isinstance(task, dict):
-            raise UTestAssignmentError(
-                "{} tasks[{}] 不是 object。修复：回到 /autodev-plan 重新生成。".format(
-                    batch_id, task_index
-                )
+
+def _plan_for_batch_path(batch_plan_path):
+    if not isinstance(batch_plan_path, str) or not batch_plan_path.strip():
+        raise UTestAssignmentError(
+            "batchPlanPath 缺失。修复：重新运行 router，原样使用 promptContent。"
+        )
+    requested = Path(batch_plan_path).expanduser()
+    path = requested.resolve()
+    if not requested.is_absolute() or not path.is_file():
+        raise UTestAssignmentError(
+            "batchPlanPath 不是现有绝对文件：{}。修复：重新运行 router，原样使用 promptContent。".format(
+                batch_plan_path
             )
-        task_id = task.get("id")
-        workspace_ref = task.get("workspaceRef")
-        if not isinstance(task_id, str) or not task_id.strip():
-            raise UTestAssignmentError(
-                "{} tasks[{}] 缺少 id。修复：回到 /autodev-plan 补齐 TASK ID。".format(
-                    batch_id, task_index
-                )
-            )
-        if not isinstance(workspace_ref, str) or not workspace_ref.strip():
-            raise UTestAssignmentError(
-                "{} {} 缺少 workspaceRef。修复：回到 /autodev-plan 绑定声明的代码仓库。".format(
-                    batch_id, task_id
-                )
-            )
-        assignment = by_workspace.get(workspace_ref)
-        if assignment is None:
-            assignment = {
-                "batchId": batch_id,
-                "executionLane": lane,
-                "workspaceRef": workspace_ref,
-                "taskIds": [],
-                "planPath": batch_path.relative_to(feature_dir).as_posix(),
-                "rootOrder": root_index,
-            }
-            by_workspace[workspace_ref] = assignment
-            groups.append(assignment)
-        assignment["taskIds"].append(task_id)
-    return groups
+        )
+    for feature_dir in path.parents:
+        root_plan = feature_dir / "plan.json"
+        if not root_plan.is_file() or root_plan.resolve() == path:
+            continue
+        try:
+            plan = load_utest_plan(feature_dir)
+        except UTestPlanContractError:
+            continue
+        for batch in plan["batches"]:
+            candidate = (plan["featureDir"] / batch["planPath"]).resolve()
+            if candidate == path:
+                return plan, batch
+    raise UTestAssignmentError(
+        "batchPlanPath 不属于可验证的 Feature plan：{}。修复：重新运行 router，原样使用 promptContent。".format(
+            path
+        )
+    )
+
+
+def validate_assignment_prompt_payload(payload):
+    """Verify a prompt payload against its authoritative Batch plan."""
+    if not isinstance(payload, dict):
+        raise UTestAssignmentError(
+            "UTEST_ASSIGNMENT 顶层不是 object。修复：重新运行 router，原样使用 promptContent。"
+        )
+    plan, batch = _plan_for_batch_path(payload.get("batchPlanPath"))
+    workspace_ref = payload.get("workspaceRef")
+    matching_tasks = [
+        assignment_task(task)
+        for task in batch["tasks"]
+        if task["workspaceRef"] == workspace_ref
+    ]
+    if not matching_tasks:
+        raise UTestAssignmentError(
+            "UTEST_ASSIGNMENT workspaceRef 不属于该 Batch。修复：重新运行 router，原样使用 promptContent。"
+        )
+    expected = assignment_prompt_payload(
+        {
+            "planPath": str((plan["featureDir"] / batch["planPath"]).resolve()),
+            "batchId": batch["batchId"],
+            "executionLane": batch["executionLane"],
+            "workspaceRef": workspace_ref,
+            "tasks": matching_tasks,
+        }
+    )
+    if payload != expected:
+        raise UTestAssignmentError(
+            "UTEST_ASSIGNMENT 与当前 Batch plan 不一致。修复：丢弃人工转述，重新运行 router 并原样使用 promptContent。"
+        )
+    return expected
 
 
 def build_assignments(feature_dir):
-    target = Path(feature_dir).expanduser().resolve()
-    root_plan = _read_object(target / "plan.json")
-    batches = root_plan.get("batches")
-    if not isinstance(batches, list):
-        raise UTestAssignmentError(
-            "root plan.batches 不是数组。修复：回到 /autodev-plan 生成 Batch 根索引。"
-        )
+    try:
+        plan = load_utest_plan(feature_dir)
+    except UTestPlanContractError as exc:
+        raise UTestAssignmentError(str(exc))
     assignments = []
-    for root_index, entry in enumerate(batches):
-        if not isinstance(entry, dict):
-            raise UTestAssignmentError(
-                "root plan.batches[{}] 不是 object。修复：回到 /autodev-plan 重新生成。".format(
-                    root_index
-                )
-            )
-        assignments.extend(_batch_assignments(target, entry, root_index))
+    for batch in plan["batches"]:
+        groups = []
+        by_workspace = {}
+        for task in batch["tasks"]:
+            workspace_ref = task["workspaceRef"]
+            assignment = by_workspace.get(workspace_ref)
+            if assignment is None:
+                assignment = {
+                    "batchId": batch["batchId"],
+                    "executionLane": batch["executionLane"],
+                    "workspaceRef": workspace_ref,
+                    "taskIds": [],
+                    "tasks": [],
+                    "planPath": str((plan["featureDir"] / batch["planPath"]).resolve()),
+                    "rootOrder": batch["rootOrder"],
+                }
+                by_workspace[workspace_ref] = assignment
+                groups.append(assignment)
+            assignment["taskIds"].append(task["id"])
+            assignment["tasks"].append(assignment_task(task))
+        assignments.extend(groups)
 
     lane_rank = {lane: index for index, lane in enumerate(PREFERRED_LANES)}
     assignments.sort(
@@ -156,6 +169,8 @@ def build_assignments(feature_dir):
     )
     for assignment in assignments:
         assignment.pop("rootOrder", None)
+        assignment["promptContent"] = render_assignment_prompt(assignment)
+        assignment.pop("tasks", None)
     return assignments
 
 

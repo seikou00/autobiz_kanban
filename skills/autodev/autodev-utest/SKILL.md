@@ -1,12 +1,12 @@
 ---
 name: autodev-utest
 description: "Dev 阶段单元测试协调、生成、执行与单测驱动最小修复技能。"
-version: v1.2.08121
+version: v1.2.08143
 ---
 
 ## 插件脚本执行
 
-调用 `${pluginPath}` 下的脚本时，execute/shell 工具请求省略 `cwd` 字段。`${pluginWorkspace}/${projectDir}` 只作为产物路径或脚本的 `--workspace` 参数；`run_utest_command.py --cwd` 只表示 `<BUSINESS_REPO>` 内的相对执行目录。
+调用 `${pluginPath}` 下的脚本时，execute/shell 工具请求省略 `cwd` 字段。`${pluginWorkspace}/${projectDir}` 只作为产物路径或脚本的 `--workspace` 参数。仓库根目录与执行目录只使用环境检查器返回值，不作为模型填写的脚本参数。
 
 ## 缺失产物处理
 
@@ -18,7 +18,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "
 
 ## 阶段定位
 
-Plan 已把每个 TASK 的测试边界和测试内容固化进 plan.json，Code 只实现生产代码、不创建测试。本阶段按 plan.json 展开 UT target，生成或补齐单测，运行真实命令，归因失败，生成 `UNIT_TEST_REPORT.md` 与 `UNIT_TEST_RESULT.json`；不从 `proposal.md`、`specs/**/*.md`、`design.md` 重新推导测试目标。
+Plan 已固化每个 TASK 的实现范围，Code 只实现生产代码、不创建测试。本阶段使用路由脚本生成的 assignment 内容，生成或补齐单测，运行真实测试命令，归因失败，生成 `UNIT_TEST_REPORT.md` 与 `UNIT_TEST_RESULT.json`。
 
 调用脚本读取当前 Feature 状态：
 
@@ -28,31 +28,23 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 每次需要当前状态或 checkpoint 时重新运行该脚本，不得直接读取 `.autobizdevops/state.json`、`.autobizdevops/STATE.md`、`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`。
 
-## 参数
-
-| 参数 | 默认 | 说明 |
-|------|------|------|
-| `--mode auto` | 是 | 测试工程师修复测试自身问题；生产缺陷由主协调器按门槛修复 |
-| `--mode test` | 否 | 只修改测试与测试环境 |
-| `--mode code` | 否 | 主协调器只在已有失败测试锚定下修当前 feature 生产代码 |
-| `--no-fix` | 否 | 只生成、运行、记录 |
-| `--max-fix N` | `3` | 单个生产根因最多修复尝试次数 |
-
 ## 输入与产物
 
-```text
-FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}
+测试 assignment 只通过以下脚本生成：
+
+```bash
+python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
-测试内容与边界的事实源只有 plan：
+每个 assignment 的 `promptContent` 只包含 Batch plan 的绝对路径，以及 TASK `id`、`implementationPoints`、`nonGoals` 和从 `validationCommands` 提取的 `validationLocations.repo/cwd`。派发时原样使用；不得自行打开 plan 补取、转述或拼接 TASK 字段。Plan 命令的 argv 不作为测试命令。
 
-- 根 `plan.json`：`batches[]`、`taskValidationPolicy`、`deferredValidationIssues[]`。
-- `plans/Bxxx/plan.json`：`executionLane`，以及每个 TASK 的 `id`、`workspaceRef`、`validationBoundary`、`nonGoals`、`acceptanceCriteria[]`、`validationCommands[]`（`id`、`kind`、`argv`、`cwd`、`repo`、`required`、`covers`）、`validationTestPlan[]`（`commandId`、`assetType`、`executionStage`、`covers`、`testIntent.behavior`、`testIntent.acceptanceCriteria`）。
+code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前逐个 Batch 读取并列出：`batchCompile`（`status`、`failureCategory`、`lastFailure`、`repairAttempts` / `maxRepairAttempts`）、`batchValidation.status` 与 `deferredIssues[]`、TASK `blockers[]`、根 `deferredValidationIssues[]`。它们是本阶段必须修复的入场缺陷，与 UT target 并列进入修复队列。
+
+判定现状以本轮重跑该命令的结果为准，不以字段快照为准：`status=passed` 的条目里 `lastFailure` 只是修复过程记录，重跑通过即不再是缺陷；`status` 非 `passed` 或存在未清空的 `blockers` / `deferredIssues` 时，先重跑确认复现，再按失败分类修复。未经重跑不得直接依据字段动生产代码。
 
 其余输入只用于定位与执行，不用于重新推导测试目标：
 
-- `<AGENTS_INSTRUCTIONS>` 中的 `<SCOPE>`、`<SYSTEM>`、`<UNIT>` 引用及其真实文档，决定仓库边界与 framework 约束。
-- TASK `specRefs` / `designRefs` 指向的锚点：只有 `testIntent.behavior` 与 `acceptanceCriteria` 不足以确定断言时才定点读取该锚点，不通读 specs/design。
+- 根据系统约束引用，仓库边界与 framework 约束。
 - 当前 feature 源码、已有测试、构建清单、锁文件和测试配置。
 - `${pluginPath}/skills/autodev/autodev-utest/reference/test-engineer-task-protocol.md`。
 
@@ -63,12 +55,15 @@ FEATURE_DIR = ${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
 - validation Evidence
 
-测试工程师只允许修改：
+测试工程师可修改：
 
 - 测试源码、fixture、mock、测试辅助代码。
 - 测试环境配置、依赖 manifest 与对应的单一锁文件。
+- 当前 feature 的生产源码，限失败测试锚定的最小范围。
 
-测试工程师不得修改生产源码。生产缺陷返回 `source_fix_request`。
+修复超出 assignment 的仓库或 TASK 边界时返回 `source_fix_request`，不跨边界改动。
+
+`UNIT_TEST_RESULT.json`、`evidence/EVIDENCE.jsonl`、`evidence/EVIDENCE.index.json` 只由 `run_utest_command.py` 与 `unit_test_result_writer.py` 写入。不得用编辑、`sed`、截断或重写修改它们，不得删除已写入的 target 与 evidence 行。校验不通过时按 `requiredAction` 修正对应 plan、assignment 或测试命令后重跑。
 
 ## 执行主体与派发顺序
 
@@ -78,13 +73,15 @@ task 工具可用时，主协调器必须使用 `test-engineer-autodev`：
 python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
-1. 按根 `plan.json.batches[]` 原顺序建立 `(executionLane, workspaceRef)` assignment，并保留各 lane 内的 Batch 顺序。
+1. 使用 router 返回的 assignment 顺序。
 2. 先串行执行全部 backend assignments，再串行执行全部 frontend assignments；其他 lane 排在其后。
 3. 一次只派发一个 assignment；收到完整返回后再派发下一个，不并发跨 Batch 或跨仓库测试。
-4. prompt 包含 SCOPE/SYSTEM/UNIT 引用、Batch/TASK ID、lane、workspace、解析后的仓库路径、允许写入边界、`post_implementation=true`、`tdd_rebuild=false`、失败分类和固定返回字段，以及本 assignment 每个 TASK 的 `validationBoundary`、`acceptanceCriteria`、`validationCommands` 和 `validationTestPlan` 原文；不得只给 TASK 标题让子代理自行推导测试内容。
-5. 收集 `status`、`assignment`、`constraint_files`、`lane`、`framework`、`runner`、`environment_initialization`、`test_targets`、`command_results`、`evidence_ids`、`failure_classification`、`source_fix_request`、`e2e_handoff`、`warnings`。
+4. task description 以 router 返回的 `promptContent` 原文开头，再附加 SCOPE/SYSTEM/UNIT 引用、环境检查器原样返回的仓库与模块路径、允许写入边界、失败分类和固定返回字段；不得附加 plan TASK JSON。
+5. 收集 `status`、`assignment`、`constraint_files`、`lane`、`framework`、`runner`、`environment_initialization`、`test_targets`、`command_results`、`evidence_ids`、`failure_classification`、`source_bug_attestation`、`source_fix_request`、`e2e_handoff`、`warnings`。
 
 task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/workspace 顺序执行下述检查、参考渲染、命令记录、归因和报告流程。
+
+进入工作流程前先输出本轮走哪条分支。
 
 ## 约束与环境
 
@@ -95,11 +92,19 @@ task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/
 - 已有 Jest/Vitest：原样复用。
 - Next/Nuxt 或其他栈：仅复用既有 runner；没有 runner 时为 `environment` 阻断。
 
-对每个 assignment 运行只读检查：
+一次检查当前 Feature 的全部 assignment：
 
 ```bash
-python "${pluginPath}/hooks/inspect_test_environment.py" --framework <spring|vue|react> --workspace "<BUSINESS_REPO>" --json
+python "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
+
+检查器调用 workspace binding 解析器，根据当前 plan 与已验证的 Code 产物自动保存仓库绑定，再用 `scope.modules` 定位测试模块；模型不得填写 repo、仓库地址、framework 或 cwd，不得直接编辑 `.autobizdevops/workspace-bindings.json`。`workspace_binding_missing` 分类为 `environment`；`workspace_binding_ambiguous` 时向用户展示 `candidates`，用户选定后只传回该候选的 ID：
+
+```bash
+python "${pluginPath}/hooks/utest_workspace_binding.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --workspace-ref "<RETURNED_WORKSPACE_REF>" --select-candidate "<USER_SELECTED_CANDIDATE_ID>" --json
+```
+
+不得由模型选择 candidate，也不得把候选路径改写成参数。`contract_gap` 只用于 plan 的 `workspaceRef`、`scope.modules` 与 `validationCommands.repo/cwd` 不一致。
 
 `status=init_required` 时读取并应用：
 
@@ -107,7 +112,7 @@ python "${pluginPath}/hooks/inspect_test_environment.py" --framework <spring|vue
 ${pluginPath}/skills/autodev/autodev-utest/reference/test-environment-profiles.md
 ```
 
-环境初始化只修改测试配置、manifest 与对应锁文件。初始化命令使用 `--kind setup`，随后重新运行 inspector。`conflict` / `unsupported` 不做猜测性初始化；网络或安装授权被拒绝时分类为 `environment` 并阻断。
+环境初始化只修改测试配置、manifest 与对应锁文件。按 profile 完成改动后用 `--kind setup` 执行安装或校验命令，再重新运行 inspector 并输出返回的 `status`；`status` 未变为 `ready` 前不进入测试生成与执行，不得用一条自拟的 `--kind setup` 命令通过环境检查。`conflict` / `unsupported` 不做猜测性初始化；网络或安装授权被拒绝时分类为 `environment` 并阻断。
 
 ## 测试域路由
 
@@ -143,30 +148,33 @@ python "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
 ```
 
-### 展开 plan 的测试计划
+### 展开 assignment 的测试计划
 
-UT target 由 plan 展开，不做二次推导：assignment 内每个 TASK 的每条 `validationTestPlan[]` 展开成一个 UT target，`commandId` 指向该 TASK `validationCommands[]` 中要执行的命令。
+每个 TASK 建立一个 UT target，测试重点逐条取该 TASK 的 `implementationPoints`，`nonGoals` 不生成测试；`validationLocations` 只确认 repo/cwd。
 
 ```markdown
-| ID | Task | Command | Behavior | Boundary | Covers | Priority | Status |
-|----|------|---------|----------|----------|--------|----------|--------|
-| UT-001 | B001/T003 | VAL-T003-001 | testIntent.behavior 原文 | validationBoundary | AC-001,AC-002 | P0 | planned |
+| ID | Task | Test Focus | Priority | Status |
+|----|------|------------|----------|--------|
+| UT-001 | B001/T003 | implementationPoints 原文 | P0 | planned |
 ```
 
-- `Behavior` 取 `testIntent.behavior`，`Boundary` 取 TASK `validationBoundary`，`Covers` 取该条 `covers` 指向的 `acceptanceCriteria`。
-- `assetType=unit_test`、`integration_test`：本阶段生成并执行。`kind` 为 `build`/`compile`/`typecheck` 的前端命令是工程门禁，按原 argv 执行并记 Evidence，不写测试文件。
-- `assetType=e2e_test`，以及需要真实浏览器、多页面导航或真实网络链路的目标：只写入 `e2e_handoff`，本阶段不生成、不执行。
-- `required=true` 记 P0，`required=false` 记 P1。plan 契约保证 required 命令覆盖全部 `acceptanceCriteria`，因此 P0 全通过即 AC 全覆盖。
+- `implementationPoints` 是必须覆盖的测试重点，`nonGoals` 不生成测试。
+- 需要真实浏览器、多页面导航或真实网络链路的重点只写入 `e2e_handoff`。
+- 每个 TASK 的 target 为 P0；AC 与 spec 覆盖由 runner 从当前 plan 绑定。
 - `deferredValidationIssues[]`：`scope=task` 且能映射到单元边界的并入对应 TASK 的 UT target；batch/project 项进入扩大验证。
 - plan 之外的补充测试记 P2，并写明补充理由；不得用它替代任何 plan 目标。
-- TASK 缺 `validationCommands`、`validationTestPlan` 为空或 `commandId` 悬空：`contract_gap` 阻断并回流 `/autodev-plan`，不得自拟测试目标顶替。
+- `promptContent` 缺 Batch plan 绝对路径、`implementationPoints`、`nonGoals` 或有效 `validationLocations` 时记 `contract_gap`。
+
+完整表输出后才进入生成测试与执行。
 
 ### 生成测试
+
+每个 UT target 都先落地测试文件，再执行为该测试生成的精确命令；没有落地测试文件的 target 不执行、不记 PASS。
 
 每个 UT target：
 
 1. 读取同仓库最邻近的 2 至 3 个测试，匹配 runner、命名和 setup/teardown。
-2. 断言只覆盖 `testIntent.behavior` 与 `covers` 指向的 `acceptanceCriteria`；不覆盖 `nonGoals`，不为凑数扩展计划外行为。行为细节不足时才按该 TASK `specRefs` / `designRefs` 定点读取锚点。
+2. 断言覆盖 `implementationPoints`，不覆盖 `nonGoals`。
 3. 在公开 seam 上写一个行为目标；按 `${pluginPath}/skills/references/test-quality.md` 选择 mock 边界。
 4. 后实现测试使用 `post_implementation=true`、`tdd_rebuild=false`；首次即通过记 `characterization_pass`，不得删除现有生产实现制造 red。
 5. 测试自身错误由测试工程师修复并重跑同一精确目标。
@@ -176,40 +184,51 @@ UT target 由 plan 展开，不做二次推导：assignment 内每个 TASK 的�
 setup 命令：
 
 ```bash
-python "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --code-workspace "<BUSINESS_REPO>" --cwd "<RELATIVE_CWD>" -- <argv...>
+python "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" -- <argv...>
 ```
 
-test 命令；首次执行可省略 `--target-id` 自动分配，重跑必须复用返回的 ID：
+一个 TASK 有多个环境目标时，按检查器返回的 `environmentTargetId` 分别增加 `--environment-target-id "<ENVIRONMENT_TARGET_ID>"`。
+
+test 命令提交 assignment 绑定、生成的测试文件与真实测试 argv：
 
 ```bash
-python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --code-workspace "<BUSINESS_REPO>" --cwd "<RELATIVE_CWD>" --target-id "<UT_ID>" --task-id "<TASK_ID>" --spec-ref "<SPEC_REF>" -- <argv...>
+python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <TEST_ARGV...>
 ```
 
-`argv`、`--cwd` 与仓库取该 UT target 对应 `validationCommands` 条目的 `argv`、`cwd`、`repo`，`--task-id` 取 TASK `id`，`--spec-ref` 取 TASK `specRefs`；plan 命令跑不通时按失败分类处理，不得改写成自拟命令。执行器必须接收 argv，不接收 shell 命令字符串；cwd 不得越出分配仓库。完整输出追加到 `test-output.log`。test 执行追加 `autodev-utest` validation Evidence，并创建或更新同一 UT target；重跑保留历史 evidence IDs。
+`--task-id` 取 `promptContent`。`<TEST_ARGV...>` 根据真实 manifest、测试配置与新建测试文件生成，必须实际执行测试。runner 根据当前 plan、绑定、TASK 与测试文件自动选择仓库和模块目录，生成稳定 digest、commandId/targetId，并校验位置、specRefs 与全部 AC。完整输出追加到 `test-output.log`；重跑保留历史 evidence IDs。
 
 ### 失败分类与修复
 
 | 类型 | 处置 |
 |------|------|
 | `test_bug` | 测试工程师只修测试、fixture、mock、辅助代码或测试环境配置，重跑原命令 |
-| `source_bug` | 返回 `source_fix_request`，测试工程师不改生产源码 |
+| `source_bug` | 在失败测试锚定下做最小生产修复并重跑原命令；超出 assignment 边界时返回 `source_fix_request` |
 | `contract_gap` | 阻断并回流约束/计划 |
 | `environment` | 记录环境与复现命令；只应用受支持 initProfile |
 | `flaky` | 记录多次重跑结果与根因 |
 | `unknown` | 停止，不猜修 |
 
-主协调器收到 `source_fix_request` 后：
+任何生产修复或 `source_fix_request` 前，先校验失败锚点：
 
-1. 确认失败测试稳定复现并映射该 TASK 的 `acceptanceCriteria` 与 `validationBoundary`。
+```bash
+python "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --command-id "<GENERATED_COMMAND_ID>" --target-id "<UT_ID>" --task-digest "<RUNNER_RETURNED_TASK_DIGEST>" --evidence-id "<EVIDENCE_ID>"
+```
+
+静态观察、未执行测试或 exit 0 不得分类为 `source_bug`。
+
+1. 确认失败测试稳定复现，并通过 source-bug validator 校验当前 plan 覆盖。
 2. 排除测试、命令与环境问题。
-3. 在 `--mode auto|code` 且未超过 `--max-fix` 时做最小生产修复；`--mode test` 或 `--no-fix` 不修生产代码。
-4. 重新派发原 Batch/lane/workspace assignment，复用 UT target 并追加新 Evidence。
+3. 只改让该失败测试通过所必需的最小范围。
 
-达到 `--max-fix` 仍失败，保留 `unit_test_in_progress` 并记录阻断。
+主协调器收到 `source_fix_request` 后按同样三步处理，再重新派发原 Batch/lane/workspace assignment，复用 UT target 并追加新 Evidence。
+
+同一个生产根因最多修复 3 次；仍失败时保留 `unit_test_in_progress` 并记录阻断。
 
 ### 扩大验证
 
-所有 P0/P1 精确目标通过后，按 assignment 顺序重跑修改过的测试文件、受影响模块轻量测试，以及项目约定的编译/测试编译命令。扩大验证失败必须归因，不得用精确测试通过覆盖失败。
+所有 P0/P1 精确目标通过后，按 assignment 顺序重跑修改过的测试文件、受影响模块轻量测试，以及项目约定的编译/测试编译命令。
+
+扩大验证命令用 `--kind setup` 执行，不带 `--target-id`、`--task-id`、`--spec-ref`，不产生 UT target；命令、退出码与结论写入 `UNIT_TEST_REPORT.md` 的 `Execution Summary`，完整输出在 `test-output.log`。扩大验证失败必须归因，不得用精确测试通过覆盖失败。
 
 ### 生成结果与报告
 
@@ -219,7 +238,6 @@ python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${plu
 # Unit Test Report
 
 - **Feature:** {slug}
-- **Mode:** auto / test / code / no-fix
 - **Generated At:** YYYY-MM-DD HH:MM:SS
 - **Verdict:** PASS / PASS_WITH_WARNINGS / FAIL / BLOCKED
 - **Test Log:** test-output.log
@@ -235,20 +253,19 @@ python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${plu
 
 `Coverage Matrix` 按 UT target 映射 `covers` 的 `acceptanceCriteria` 与 Evidence，scenario 级覆盖由 writer 从 Evidence 派生，不手工填；`Fix Attempts` 记录分类、修改文件、假设、命令和结果；`Handoff` 汇总 `e2e_handoff`、人工确认项和阻断。
 
-由 writer 派生 coverage、设置 verdict 并校验稳定 JSON 契约：
+报告落盘后，由 writer 从当前 TASK 契约与 Evidence 派生 coverage、target result 和 verdict，并校验稳定 JSON 契约：
 
 ```bash
-python "${pluginPath}/hooks/unit_test_result_writer.py" derive-scenario-coverage --feature "${feature}"
-python "${pluginPath}/hooks/unit_test_result_writer.py" set-verdict --feature "${feature}" <PASS|PASS_WITH_WARNINGS|FAIL|BLOCKED>
-python "${pluginPath}/hooks/unit_test_result_writer.py" validate --feature "${feature}" --structure --gate
+python "${pluginPath}/hooks/unit_test_result_writer.py" derive-scenario-coverage --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
+python "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --structure --gate
 ```
 
 ## 分支决策
 
 推进 `unit_test_done`：
 
-- 全部 required 命令对应的 P0 目标 PASS。
-- P1 PASS，或有明确原因并标记 `PASS_WITH_WARNINGS`。
+- 全部 P0 UT target PASS。
+- 入场缺陷已全部清零，每项都有重跑通过的 Evidence。
 - 报告、日志、结果 JSON、Evidence 完整且 writer 校验通过。
 - 源码修复均有失败测试锚点和重跑通过 Evidence。
 - 扩大验证已执行并记录。
@@ -258,6 +275,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 ```
 
 存在 FAIL、BLOCKED、未归因失败、`contract_gap` 或超过修复次数时保持 `unit_test_in_progress`。
+
+缺陷在本阶段修完，不留给下游。只有两种未修复的合法退出：`environment` 记录环境与复现命令后阻断，`contract_gap` 回流 `/autodev-plan`。`test_bug`、`source_bug`、`flaky` 和入场缺陷都不属于这两类。
 
 ## 质量规则
 
@@ -271,14 +290,16 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 
 ## 输出清单
 
-- [ ] 已读取 SCOPE/SYSTEM/UNIT、根/Batch 计划和工程事实。
+- [ ] 已读取 SCOPE/SYSTEM/UNIT、router 最小 `promptContent` 和工程事实。
 - [ ] 已写入 `unit_test_in_progress`。
-- [ ] 已按 `validationTestPlan` 展开 UT target，覆盖全部 required 命令，`e2e_test` 已转 `e2e_handoff`。
+- [ ] 已声明执行主体分支。
+- [ ] 已列出 code 阶段遗留的入场缺陷，并全部重跑清零。
+- [ ] 已输出完整 UT target 表，覆盖全部 TASK 测试重点；浏览器目标已转 `e2e_handoff`。
 - [ ] 已按 Batch、lane、workspace 串行完成 assignment。
-- [ ] 已检查/初始化测试环境并渲染专项参考。
-- [ ] 已生成测试并通过 runner 记录命令、日志、Evidence 与 UT target。
-- [ ] 失败已分类，测试自修与 `source_fix_request` 已闭环。
-- [ ] 已执行扩大验证并生成报告。
+- [ ] 已检查测试环境，inspector 返回 `ready`。
+- [ ] 每个 UT target 均已落地测试文件，并通过 runner 记录命令、日志、Evidence 与 target。
+- [ ] 失败已分类，修复与 `source_fix_request` 已闭环。
+- [ ] 已执行扩大验证并生成 `UNIT_TEST_REPORT.md`。
 - [ ] 已派生 coverage、设置 verdict、校验 `UNIT_TEST_RESULT.json`。
 - [ ] 成功时已推进 `unit_test_done`。
 

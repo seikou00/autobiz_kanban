@@ -11,6 +11,19 @@ import sys
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from hooks.json_writer_common import WriterError, resolve_feature, resolve_workspace  # noqa: E402
+from hooks.utest_plan_contract import UTestPlanContractError, load_utest_plan  # noqa: E402
+from hooks.utest_workspace_binding import (  # noqa: E402
+    UTestWorkspaceBindingError,
+    path_within,
+    resolve_task_workspace,
+)
+
+
 SPRING_FRAMEWORKS = ("spring", "spring-boot-2", "spring-boot-3")
 FRONTEND_FRAMEWORKS = ("vue", "vue3", "react")
 SUPPORTED_FRAMEWORKS = SPRING_FRAMEWORKS + FRONTEND_FRAMEWORKS
@@ -38,7 +51,7 @@ class TestEnvironmentError(Exception):
 class RepairArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise TestEnvironmentError(
-            "命令参数无效：{}。修复：运行 `{} --help`，传入 --framework 和现有 --workspace。".format(
+            "命令参数无效：{}。修复：运行 `{} --help`，只传入产物 workspace 与 feature。".format(
                 message, self.prog
             )
         )
@@ -112,7 +125,7 @@ def _inspect_spring(root, framework):
         return result
     if not pom.is_file() and not present_gradle:
         result["errors"].append(
-            "未发现 pom.xml 或 build.gradle(.kts)。修复：把 --workspace 指向 Spring Maven/Gradle 仓库。"
+            "自动定位的模块未发现 pom.xml 或 build.gradle(.kts)。修复：在 /autodev-plan 修正 scope.modules。"
         )
         return result
 
@@ -246,7 +259,7 @@ def _inspect_frontend(root, framework):
     package_path = root / "package.json"
     if not package_path.is_file():
         result["errors"].append(
-            "未发现 package.json。修复：把 --workspace 指向 Vue3/React 项目根目录。"
+            "自动定位的模块未发现 package.json。修复：在 /autodev-plan 修正 scope.modules。"
         )
         return result
 
@@ -358,13 +371,13 @@ def inspect_environment(workspace, framework):
     normalized = str(framework or "").strip().lower()
     if not root.is_dir():
         raise TestEnvironmentError(
-            "workspace 不存在或不是目录：{}。修复：传入 assignment 的真实仓库根目录。".format(
+            "自动解析的 projectRoot 不存在或不是目录：{}。修复：重新运行 workspace binding 解析，并检查 plan 的 scope.modules。".format(
                 root
             )
         )
     if not normalized:
         raise TestEnvironmentError(
-            "framework 不能为空。修复：从系统约束传入 spring-boot-2、spring-boot-3、vue3 或 react。"
+            "framework 自动识别结果为空。修复：确认解析后的模块包含真实构建清单。"
         )
     if normalized in SPRING_FRAMEWORKS:
         return _inspect_spring(root, normalized)
@@ -381,21 +394,172 @@ def inspect_environment(workspace, framework):
     return result
 
 
+def _detected_framework(root):
+    root = Path(root)
+    if (root / "pom.xml").is_file() or (root / "build.gradle").is_file() or (
+        root / "build.gradle.kts"
+    ).is_file():
+        return "spring"
+    package_path = root / "package.json"
+    if package_path.is_file():
+        package = _read_package_json(package_path)
+        dependencies = _dependency_names(package)
+        if "vue" in dependencies:
+            return "vue3"
+        if "react" in dependencies:
+            return "react"
+    return None
+
+
+def _nearest_project_root(execution_root, repository_root):
+    current = Path(execution_root).resolve()
+    repository_root = Path(repository_root).resolve()
+    while path_within(current, repository_root):
+        if any(
+            (current / name).is_file()
+            for name in ("pom.xml", "build.gradle", "build.gradle.kts", "package.json")
+        ):
+            return current
+        if current == repository_root:
+            break
+        current = current.parent
+    return Path(execution_root).resolve()
+
+
+def _status_for_targets(targets):
+    statuses = [item.get("status") for item in targets]
+    for value in ("conflict", "unsupported", "init_required"):
+        if value in statuses:
+            return value
+    return "ready" if statuses and all(value == "ready" for value in statuses) else "unsupported"
+
+
+def inspect_feature_environments(workspace, feature, task_ids=None):
+    artifact_workspace = resolve_workspace(workspace)
+    feature = resolve_feature(feature)
+    feature_dir = artifact_workspace / ".autobizdevops" / "features" / feature
+    try:
+        plan = load_utest_plan(feature_dir)
+    except UTestPlanContractError as exc:
+        raise UTestWorkspaceBindingError(
+            "contract_gap",
+            str(exc),
+            "repair_plan_task_location",
+        )
+    requested = set(task_ids or [])
+    known_task_ids = [
+        task["id"]
+        for batch in plan["batches"]
+        for task in batch["tasks"]
+    ]
+    unknown = sorted(requested - set(known_task_ids))
+    if unknown:
+        raise TestEnvironmentError(
+            "TASK 不属于当前 plan：{}。修复：省略 --task-id 检查全部任务，或使用 router 本轮返回的 TASK ID。".format(
+                ", ".join(unknown)
+            )
+        )
+    selected_task_ids = [task_id for task_id in known_task_ids if not requested or task_id in requested]
+    inspected = {}
+    task_targets = []
+    bindings = {}
+    for task_id in selected_task_ids:
+        context = resolve_task_workspace(artifact_workspace, feature, task_id)
+        bindings[context["workspaceRef"]] = context["binding"]
+        for target in context["targets"]:
+            execution_root = Path(target["executionRoot"])
+            repository_root = Path(target["repositoryRoot"])
+            project_root = _nearest_project_root(execution_root, repository_root)
+            framework = _detected_framework(project_root)
+            if framework is None:
+                inspection = _base_result("unknown")
+                inspection["errors"].append(
+                    "{} 未发现受支持的测试工程清单。修复：在 /autodev-plan 修正 scope.modules，或补齐该模块真实使用的构建清单。".format(
+                        task_id
+                    )
+                )
+            else:
+                inspection = inspect_environment(project_root, framework)
+            key = (str(project_root), framework or "unknown")
+            shared = inspected.get(key)
+            if shared is None:
+                shared = dict(target)
+                shared.update(inspection)
+                shared["projectRoot"] = str(project_root)
+                shared["taskIds"] = []
+                inspected[key] = shared
+            if task_id not in shared["taskIds"]:
+                shared["taskIds"].append(task_id)
+            task_targets.append(
+                {
+                    "taskId": task_id,
+                    "environmentTargetId": target["environmentTargetId"],
+                    "projectRoot": str(project_root),
+                }
+            )
+    targets = list(inspected.values())
+    targets.sort(key=lambda item: (item["projectRoot"], item["framework"]))
+    warnings = []
+    errors = []
+    for target in targets:
+        warnings.extend(target.get("warnings", []))
+        errors.extend(target.get("errors", []))
+    return {
+        "status": _status_for_targets(targets),
+        "bindings": bindings,
+        "targets": targets,
+        "taskTargets": task_targets,
+        "warnings": warnings,
+        "errors": errors,
+    }
+
+
 def main(argv=None):
-    parser = RepairArgumentParser(description="只读检查单测环境")
-    parser.add_argument("--framework")
-    parser.add_argument("--workspace", "--code-workspace", dest="workspace")
+    parser = RepairArgumentParser(description="按当前 plan 自动定位并只读检查单测环境")
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--feature", required=True)
+    parser.add_argument("--task-id", action="append")
     parser.add_argument("--json", action="store_true", help="输出稳定 JSON（默认格式）")
     try:
         args = parser.parse_args(argv)
-        if not args.framework or not args.workspace:
-            raise TestEnvironmentError(
-                "缺少 --framework 或 --workspace。修复：从 assignment 传入系统框架与 workspaceRef 对应仓库。"
-            )
-        result = inspect_environment(args.workspace, args.framework)
+        result = inspect_feature_environments(args.workspace, args.feature, args.task_id)
+    except UTestWorkspaceBindingError as exc:
+        print(json.dumps(exc.payload(), ensure_ascii=False, indent=2, sort_keys=False))
+        return 2
     except TestEnvironmentError as exc:
-        print("inspect_test_environment_failed: {}".format(exc), file=sys.stderr)
-        return 1
+        print(
+            json.dumps(
+                {
+                    "status": "environment_inspection_failed",
+                    "owner": "inspect_test_environment",
+                    "requiredAction": "repair_environment_inspection_input",
+                    "errors": [str(exc)],
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=False,
+            )
+        )
+        return 2
+    except (WriterError, ValueError, OSError) as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "environment_inspection_failed",
+                    "owner": "inspect_test_environment",
+                    "requiredAction": "repair_environment_inspection_artifacts",
+                    "errors": [
+                        "环境检查失败：{}。修复：检查产物 workspace、Feature 和 workspace binding 后重试。".format(
+                            exc
+                        )
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=False,
+            )
+        )
+        return 2
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=False))
     return 0
 

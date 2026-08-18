@@ -128,7 +128,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self._assert_markdown_views_are_optional(
             {
                 "PLAN.md": "plan.json",
-                "REQUIREMENTS_EVAL.md": "REVIEW_FINDINGS.json",
                 "UNIT_TEST_REPORT.md": "UNIT_TEST_RESULT.json",
                 "E2E_REPORT.md": "E2E_RESULT.json",
                 "VERIFY_REPORT.md": "VERIFY_DECISION.json",
@@ -137,7 +136,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
 
     def test_machine_stages_do_not_use_markdown_report_validators(self) -> None:
         legacy_markdown_validators = {
-            "requirements_eval_verdict",
             "unit_test_report_contract",
             "e2e_report_contract",
             "verify_report_contract",
@@ -282,7 +280,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             skill,
         )
         self.assertIn(
-            "`run_utest_command.py --cwd` 只表示 `<BUSINESS_REPO>` 内的相对执行目录",
+            "仓库根目录与执行目录只使用环境检查器返回值，不作为模型填写的脚本参数",
             skill,
         )
         self.assertIn("每次需要当前状态或 checkpoint 时重新运行该脚本", skill)
