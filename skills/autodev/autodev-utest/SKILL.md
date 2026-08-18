@@ -26,7 +26,7 @@ Plan 已固化每个 TASK 的实现范围，Code 只实现生产代码、不创�
 python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-每次需要当前状态或 checkpoint 时重新运行该脚本，不得直接读取 `.autobizdevops/state.json`、`.autobizdevops/STATE.md`、`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`。
+每次需要当前状态或 checkpoint 时重新运行该脚本，不得直接读取 `state.json`、`STATE.md`、`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`。
 
 ## 输入与产物
 
@@ -55,7 +55,7 @@ code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
 - validation Evidence
 
-测试工程师可修改：
+可修改：
 
 - 测试源码、fixture、mock、测试辅助代码。
 - 测试环境配置、依赖 manifest 与对应的单一锁文件。
@@ -63,7 +63,7 @@ code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前
 
 修复超出 assignment 的仓库或 TASK 边界时返回 `source_fix_request`，不跨边界改动。
 
-`UNIT_TEST_RESULT.json`、`evidence/EVIDENCE.jsonl`、`evidence/EVIDENCE.index.json` 只由 `run_utest_command.py` 与 `unit_test_result_writer.py` 写入。不得用编辑、`sed`、截断或重写修改它们，不得删除已写入的 target 与 evidence 行。校验不通过时按 `requiredAction` 修正对应 plan、assignment 或测试命令后重跑。
+`UNIT_TEST_RESULT.json`、`evidence/EVIDENCE.jsonl`、`evidence/EVIDENCE.index.json`不得用编辑、`sed`、截断或重写修改它们，不得删除已写入的 target 与 evidence 行。校验不通过时按 `requiredAction` 修正对应 plan、assignment 或测试命令后重跑。
 
 ## 执行主体与派发顺序
 
@@ -76,8 +76,7 @@ python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWor
 1. 使用 router 返回的 assignment 顺序。
 2. 先串行执行全部 backend assignments，再串行执行全部 frontend assignments；其他 lane 排在其后。
 3. 一次只派发一个 assignment；收到完整返回后再派发下一个，不并发跨 Batch 或跨仓库测试。
-4. task description 以 router 返回的 `promptContent` 原文开头，再附加 SCOPE/SYSTEM/UNIT 引用、环境检查器原样返回的仓库与模块路径、允许写入边界、失败分类和固定返回字段；不得附加 plan TASK JSON。
-5. 收集 `status`、`assignment`、`constraint_files`、`lane`、`framework`、`runner`、`environment_initialization`、`test_targets`、`command_results`、`evidence_ids`、`failure_classification`、`source_bug_attestation`、`source_fix_request`、`e2e_handoff`、`warnings`。
+4. task description 以 router 返回的 `promptContent` 原文开头，再附加 SCOPE/SYSTEM/UNIT 引用、环境检查器原样返回的仓库路径、允许写入边界、失败分类和固定返回字段；不得附加 plan TASK JSON。
 
 task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/workspace 顺序执行下述检查、参考渲染、命令记录、归因和报告流程。
 
@@ -98,13 +97,13 @@ task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/
 python "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
-检查器调用 workspace binding 解析器，根据当前 plan 与已验证的 Code 产物自动保存仓库绑定，再用 `scope.modules` 定位测试模块；模型不得填写 repo、仓库地址、framework 或 cwd，不得直接编辑 `.autobizdevops/workspace-bindings.json`。`workspace_binding_missing` 分类为 `environment`；`workspace_binding_ambiguous` 时向用户展示 `candidates`，用户选定后只传回该候选的 ID：
+检查器调用 workspace binding 解析器，根据当前 plan 与已验证的 Code 产物自动保存仓库绑定，再用 `validationCommands.cwd` 定位构建根目录；模型不得填写 repo、仓库地址、framework 或 cwd，不得直接编辑 `.autobizdevops/workspace-bindings.json`。`workspace_binding_missing` 分类为 `environment`；`workspace_binding_ambiguous` 时向用户展示 `candidates`，用户选定后只传回该候选的 ID：
 
 ```bash
 python "${pluginPath}/hooks/utest_workspace_binding.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --workspace-ref "<RETURNED_WORKSPACE_REF>" --select-candidate "<USER_SELECTED_CANDIDATE_ID>" --json
 ```
 
-不得由模型选择 candidate，也不得把候选路径改写成参数。`contract_gap` 只用于 plan 的 `workspaceRef`、`scope.modules` 与 `validationCommands.repo/cwd` 不一致。
+不得由模型选择 candidate，也不得把候选路径改写成参数。`contract_gap` 只用于 plan 的 `workspaceRef` 与 `validationCommands.repo/cwd` 不一致。
 
 `status=init_required` 时读取并应用：
 
@@ -150,7 +149,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_prog
 
 ### 展开 assignment 的测试计划
 
-每个 TASK 建立一个 UT target，测试重点逐条取该 TASK 的 `implementationPoints`，`nonGoals` 不生成测试；`validationLocations` 只确认 repo/cwd。
+每个 TASK 建立一个 UT target，`validationLocations` 只确认 repo/cwd。
 
 ```markdown
 | ID | Task | Test Focus | Priority | Status |
@@ -187,15 +186,13 @@ setup 命令：
 python "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" -- <argv...>
 ```
 
-一个 TASK 有多个环境目标时，按检查器返回的 `environmentTargetId` 分别增加 `--environment-target-id "<ENVIRONMENT_TARGET_ID>"`。
-
 test 命令提交 assignment 绑定、生成的测试文件与真实测试 argv：
 
 ```bash
 python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <TEST_ARGV...>
 ```
 
-`--task-id` 取 `promptContent`。`<TEST_ARGV...>` 根据真实 manifest、测试配置与新建测试文件生成，必须实际执行测试。runner 根据当前 plan、绑定、TASK 与测试文件自动选择仓库和模块目录，生成稳定 digest、commandId/targetId，并校验位置、specRefs 与全部 AC。完整输出追加到 `test-output.log`；重跑保留历史 evidence IDs。
+`--task-id` 取 `promptContent`。`<TEST_ARGV...>` 根据真实 manifest、测试配置与新建测试文件生成，必须实际执行测试。runner 根据当前 plan、绑定、TASK 与测试文件自动选择仓库和构建目录，生成稳定 digest、commandId/targetId，并校验位置、specRefs 与全部 AC。完整输出追加到 `test-output.log`；重跑保留历史 evidence IDs。
 
 ### 失败分类与修复
 
