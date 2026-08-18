@@ -2199,6 +2199,26 @@ class JsonWriterTests(unittest.TestCase):
             _write_specs(feature_dir)
             _write_design(feature_dir)
             _write_plan(feature_dir, include_second=False)
+            (feature_dir / "UI_CONTEXT.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "featureId": "alpha",
+                        "uiRequired": False,
+                        "decisionStatus": "locked",
+                        "decisionSource": "default_false",
+                        "confirmedAtCheckpoint": "prd_done",
+                        "lockedAtCheckpoint": "specs_done",
+                        "notApplicableReason": "纯后端能力",
+                        "pages": [],
+                        "interactions": [],
+                        "visualSources": [],
+                        "capabilities": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
 
             result = validate_stage(workspace=workspace, feature="alpha", stage="dev.plan")
             output = io.StringIO()
@@ -3078,7 +3098,7 @@ class JsonWriterTests(unittest.TestCase):
 
             self.assertEqual(e2e_data["cases"][0]["caseId"], "E2E-alpha-001")
             self.assertEqual(verify_data["nextCheckpoint"], "needs_fix")
-            self.assertNotIn("uiSummary", verify_data)
+            self.assertIn("uiSummary", verify_data)
 
     def test_result_writers_reject_missing_trace_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

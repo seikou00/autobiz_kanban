@@ -313,6 +313,76 @@ _DESIGN: Dict[str, Repair] = {
 # --------------------------------------------------------------------------
 
 _PLAN: Dict[str, Repair] = {
+    "missing_json_artifact": Repair(
+        artifact="{target}",
+        problem="必需的 JSON 事实源缺失：{target}",
+        action="按当前阶段 writer 契约生成该 JSON；UI_CONTEXT.json 使用 hooks/ui_context_writer.py，计划使用 hooks/plan_writer.py。",
+    ),
+    "invalid_ui_context_json": Repair(
+        artifact="UI_CONTEXT.json",
+        problem="UI_CONTEXT.json 不满足 UI 事实源契约：{target}",
+        action="使用 hooks/ui_context_writer.py 修正 UI 范围、页面、交互和视觉源，不要绕过 UI validator。",
+    ),
+    "plan_ui_task_when_feature_not_ui": Repair(
+        artifact="plan.json",
+        problem="{target} 标记为 UI 任务，但 UI_CONTEXT.json 声明当前 Feature 不需要 UI",
+        action="以 UI_CONTEXT.json 为事实源：确认需要 UI 时先回上游修正并锁定 UI_CONTEXT；否则移除任务 UI 标记后重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "plan_ui_refs_when_feature_not_ui": Repair(
+        artifact="plan.json",
+        problem="{target} 在非 UI Feature 中携带 uiRefs",
+        action="移除非 UI 任务的 uiRefs 后用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "plan_ui_refs_for_non_ui_task": Repair(
+        artifact="plan.json",
+        problem="{target} 未标记为 UI 任务却携带 uiRefs",
+        action="根据 UI_CONTEXT.json 决定该任务是否为 UI 任务；统一 uiRequired 与 uiRefs 后重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "plan_ui_task_missing_uiRefs": Repair(
+        artifact="plan.json",
+        problem="{target} 是 UI 任务但缺少 uiRefs",
+        action="从 UI_CONTEXT.json 投影 pageRefs、interactionRefs、visualSourceRefs 和 frontendRoute，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "invalid_plan_ui_refs": Repair(
+        artifact="plan.json",
+        problem="{target} 的 UI 引用字段不是字符串数组",
+        action="按 UI_CONTEXT.json 中的稳定 ID 重建 uiRefs；不要手工猜测页面、交互或视觉源 ID。" + PLAN_NO_HAND_EDIT,
+    ),
+    "missing_plan_ui_refs": Repair(
+        artifact="plan.json",
+        problem="{target} 缺少必需的页面或交互引用",
+        action="从 UI_CONTEXT.json 补齐对应 PAGE/UIX 引用后重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "unknown_plan_ui_ref": Repair(
+        artifact="plan.json",
+        problem="{target} 引用了 UI_CONTEXT.json 中不存在的 ID",
+        action="核对 UI_CONTEXT.json 中的 PAGE/UIX/VIS ID，改为现有稳定 ID后重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "invalid_plan_ui_frontend_route": Repair(
+        artifact="plan.json",
+        problem="{target} 的 frontendRoute 非法",
+        action="用 frontend route resolver 基于 UI_CONTEXT.json 解析合法路线后重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "plan_ui_visual_source_projection_mismatch": Repair(
+        artifact="plan.json",
+        problem="{target} 的视觉源投影与 UI_CONTEXT.json capability 不一致",
+        action="从 capability.visualSourceRefs 原样投影到任务 uiRefs，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "plan_ui_route_without_visual_source": Repair(
+        artifact="plan.json",
+        problem="{target} 没有视觉源却选择了 HTML 前端路线",
+        action="没有 VIS 输入时使用 spec-driven-ui；有 HTML/设计输入时先将其登记到 UI_CONTEXT.json，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "plan_ui_frontend_route_mismatch": Repair(
+        artifact="plan.json",
+        problem="{target} 的 frontendRoute 与视觉源类型不一致",
+        action="使用 frontend route resolver 按 VIS 类型重新解析路线，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "plan_ui_required_without_ui_task": Repair(
+        artifact="plan.json",
+        problem="UI_CONTEXT.json 要求 UI，但计划中没有 UI 实现任务",
+        action="为 UI_CONTEXT.json 中的 UI capability 建立至少一个 UI 任务并投影 uiRefs，再重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
     "missing_plan_json": Repair(
         artifact="plan.json",
         problem="plan.json 不存在或为空{target}",

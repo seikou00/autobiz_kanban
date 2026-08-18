@@ -19,6 +19,7 @@ from hooks import artifact_sync, artifact_sync_execute_hook, sync_artifacts  # n
 
 EXPECTED_OUTPUT_METADATA = {
     "PRD.md": ("requirement", "final"),
+    "UI_CONTEXT.json": ("ui_context", "final"),
     "proposal.md": ("behavior_proposal", "final"),
     "specs/**/*.md": ("behavior_spec", "final"),
     "design.md": ("technical_design", "process"),
@@ -299,6 +300,26 @@ class ArtifactCatalogContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp)
             (feature_dir / "PRD.md").write_text("# 需求正式稿\n", encoding="utf-8")
+            (feature_dir / "UI_CONTEXT.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "featureId": "alpha",
+                        "uiRequired": False,
+                        "decisionStatus": "locked",
+                        "decisionSource": "default_false",
+                        "confirmedAtCheckpoint": "prd_done",
+                        "lockedAtCheckpoint": "specs_done",
+                        "notApplicableReason": "纯后端能力",
+                        "pages": [],
+                        "interactions": [],
+                        "visualSources": [],
+                        "capabilities": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
             status = {
                 "version": 1,
                 "published_artifacts": {
@@ -354,7 +375,7 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             self.assertEqual(missing, [])
             self.assertEqual(
                 [item["path"] for item in artifacts],
-                ["PRD.md", artifact_sync.CATALOG_FILE_NAME],
+                ["PRD.md", "UI_CONTEXT.json", artifact_sync.CATALOG_FILE_NAME],
             )
 
 

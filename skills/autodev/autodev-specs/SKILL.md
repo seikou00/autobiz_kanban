@@ -36,6 +36,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 读取输入:
 - 与当前 feature 相关的现有代码、接口、数据模型、测试、配置
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UI_CONTEXT.json`（缺失时必须按目标分支 UI 协议生成；不得从 Markdown 关键词临时推断 UI 范围）
 
 输出产物：
 
@@ -45,6 +46,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 同步维护（非阶段产物）：
 
 - 会话工作区 `CONTEXT.md`（领域词汇表）：术语对齐后当场回写，协议见 `${pluginPath}/skills/references/domain-context.md`
+- Feature 的 `UI_CONTEXT.json`：只通过 `${pluginPath}/hooks/ui_context_writer.py` 更新并在 specs 完成时锁定
 
 禁止写入：
 
@@ -157,6 +159,11 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 规则：
 
 - 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
+- `UI_CONTEXT.json` 是 UI 范围机器事实源；生成或修改它必须使用 `${pluginPath}/hooks/ui_context_writer.py`，不得直接整份写入或编辑。调试只使用 `validate` / `show --summary`。
+- `uiRequired=true` 时，UI 行为应形成独立 capability，并在 `UI_CONTEXT.json.capabilities[]` 回链对应 `REQ-xxx` 与 `SCN-xxx`；必须至少有一个 UI capability。
+- 每个 UI capability 按自身需求决定是否有高保真输入：有则绑定真实 `VIS-xxx`；无则明确写 `visualSourceRefs=[]`，不得为普通 UI 行为伪造高保真引用。
+- `uiRequired=false` 时不生成 UI capability，并在 `UI_CONTEXT.json.notApplicableReason` 说明原因。
+- specs 完成时将 `UI_CONTEXT.json.decisionStatus` 固化为 `locked`，`lockedAtCheckpoint` 写 `specs_done`。
 - **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability；禁止单方面少生成。产物契约预检的 `capability_spec_correspondence` 双向判定这条，无需在回复中自行输出对照表。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
 - Requirement 使用 `### Requirement [REQ-NNN]: <标题>`（NNN 三位；按文档顺序递增，允许跳号；改标题不改 ID；删除后 ID 不复用；ID 在同一 feature 内全局唯一，跨 spec 文件也不得重号）。
@@ -197,6 +204,7 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature 
 ## 完成条件
 
 - 「输入与输出」列出的两个产物都已生成，`specs/` 下至少存在一个 `spec.md`。
+- `UI_CONTEXT.json` 已生成或更新，格式符合 `skills/autobiz/references/ui-context.md`；`decisionStatus=locked`，UI capability 的 `specRefs` 可解析。
 - 产物契约预检通过。能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
 - specs 只描述行为契约，不包含实现任务。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。

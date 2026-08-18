@@ -331,7 +331,7 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 - `repairSuggestion`: 具体修复步骤（中文，直接可执行）
 - `repairTarget`: 修复层级（`design_revision` / `task_group` / `task_detail` / `draft_integrity`）
 
-按照 `repairSuggestion` 中的指导执行修复，不要根据编号、标题或数量自行猜测。`repairTarget=design_revision` 表示必须修改 design.md，禁止修改 Plan 来迎合设计。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复。
+按照 `repairSuggestion` 中的指导执行修复，不要根据编号、标题或数量自行猜测。`repairTarget=design_revision` 表示必须修改 design.md，禁止修改 Plan 来迎合设计；`repairTarget=task_group` 只修候选分组，`repairTarget=task_detail` 只修对应任务详情。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复。
 
 finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
 
@@ -374,11 +374,15 @@ finalize 会重跑同一校验并通过事务一次写入正式根计划、全�
 
 UI 任务规则：
 - `uiRequired` 是 task 顶层 bool 字段，不在 `uiRefs` 内部，每个 task 必须显式写。`uiRefs` 只包含 `pageRefs`、`interactionRefs`、`visualSourceRefs`、`frontendRoute`。
-- `uiRequired=true` 时，按本 Feature 内页面与交互出现顺序自行分配 `PAGE-001`、`UIX-001` 等 ID，同一页面在多个 task 中复用同一 ID；`visualSourceRefs` 写空数组，`frontendRoute` 写 `spec-driven-ui`。
+- Plan 开始前必须读取并校验 `UI_CONTEXT.json`；页面、交互和视觉来源 ID 只能来自该 JSON，不得在 Markdown 或 Plan 阶段临时分配 `PAGE/UIX/VIS` ID。
+- `uiRequired=true` 时，`uiRefs.pageRefs`、`interactionRefs`、`visualSourceRefs` 必须逐项投影自 `UI_CONTEXT.json`，并保留 `frontendRoute` 的机器判定；同一页面或交互在多个 task 中复用同一 ID。
+- 不得按本 Feature 内页面与交互出现顺序自行分配 PAGE/UIX；不得无条件把 `visualSourceRefs` 写空数组或把 `frontendRoute` 写 `spec-driven-ui`，这些值必须来自 UI_CONTEXT 投影与路由解析。
 - `uiRequired` 不是 `true` 的任务必须显式写 `uiRequired:false`，且不得带非空 `uiRefs`；纯后端支撑任务只保留业务/设计/验证依据。
-- 仅配置后端菜单、权限或菜单数据且不修改前端页面/路由实现的任务保持 `uiRequired:false`，不得为通过分组预检虚构 PAGE/UIX。真正修改前端菜单路由或页面入口时才标记 `uiRequired:true`。
+- 如果 UI_CONTEXT 标记 `uiRequired=true` 但当前能力还没有可引用的 UI capability，禁止猜测或虚构 UI task，应回到 Specs 补齐 UI capability。
+- 仅配置后端菜单、权限或菜单数据且不修改前端页面/路由实现的任务保持 `uiRequired:false`，不得为通过分组预检虚构 UI 引用。真正修改前端页面、交互或路由入口时才标记 `uiRequired:true`。
+- 不得为通过分组预检虚构 PAGE/UIX；缺失引用时必须回到 UI_CONTEXT/Specs 修正事实源。
 - UI task 的 `scope.pages` 必须与 `uiRefs.pageRefs` 集合一致；非 UI task 的 `scope.pages` 必须为空数组。
-- `uiRefs.frontendRoute` 取值为 `none`、`spec-driven-ui`、`absolute-html`、`standard-html` 或 `missing-html`。HTML 设计稿转前端由 `frontend_before_specs` profile 的 `/autodev-frontend` 节点负责，不在 Plan 阶段分流。
+- `uiRefs.frontendRoute` 取值为 `none`、`spec-driven-ui`、`absolute-html`、`standard-html` 或 `missing-html`，由 UI_CONTEXT 的视觉来源和路由解析结果决定；HTML 设计稿转换在 `/autodev-code` 的 frontend route 内完成，不再依赖独立的 `frontend_before_specs` profile 或 `/autodev-frontend` 节点。
 
 ### Plan Task 拆分算法（生成 plan.json 前必走）
 
@@ -447,9 +451,9 @@ UI 任务规则：
 
 - 最终候选任务分组表必须覆盖全部 Scenario，并按 `backend`、`frontend` 两个区段排序。writer 一次创建全部 Draft Batch；不得把剩余 task 延迟到 Code 阶段。Batch 只能包含同一 lane 且同一 `workspaceRef` 的 TASK：前后端绝不共用 Batch，同为 backend/frontend 但仓库不同也必须拆成不同 Batch。
 - 必须按 DAG 拓扑序编号：当前 task 的 `deps` 只能指向更早的 task。若分组预检报告依赖错误，只修候选表，不补 task detail。
-- `preflight-task-groups` 成功后只运行一次 `prepare-task-draft`，并且必须带真实的 `--code-workspace`。缺少 workspace 时必须先确定业务代码目录，不得创建无 workspace 的 Draft；不得创建独立 `Txxx.json`，不得在每写 5 个 task 后提前 finalize。
+- `preflight-task-groups` 成功后只运行一次 `prepare-task-draft`，并且必须带真实的 `--code-workspace`。缺少 workspace 时必须先确定业务代码目录，不得创建无 workspace 的 Draft；不得创建独立 `Txxx.json`，不得在每写 5 个 task 后提前 finalize。遇到 `missing_plan_task_split_rationale` 或 `invalid_plan_task_split_rationale` 时，回 Scenario 覆盖矩阵定位遗漏并重新分组。
 - 不得通过完整 task 的内容校验失败来探索如何拆分；拆分必须在覆盖矩阵、候选任务分组表和 `preflight-task-groups` 阶段完成。
-- 预检失败时读取 `validation.issues`，按每条 issue 的 `repairSuggestion` 执行修复。不要根据 SCN 编号连续性、标题相似度或 API 数量自行猜测应移动哪些 Scenario；若要拆分，必须回到覆盖矩阵按用户动作、公开 seam 和验证边界重新分组。
+- 预检失败时读取 `validation.issues`，按每条 issue 的 `repairSuggestion` 执行修复。不要根据 SCN 编号连续性、标题相似度或 API 数量自行猜测应移动哪些 Scenario；不得把缺失 Scenario 添加到标题相近的任务；若要拆分，必须回到覆盖矩阵定位遗漏并重新分组。
 - 每个 `set-draft-task-detail` 成功后该 task 才进入 ready；失败不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
 - 分组 digest 变化时运行 `rebuild-task-draft`；writer 保留分组投影未变化的 ready task，重置其余 task。不得修改 group 后继续向旧 Draft 写详情。
 - 全部 task ready 后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。若预检失败，先按 `validation.issues` 定位并修复 Draft，再重新预检，不删除 Draft。

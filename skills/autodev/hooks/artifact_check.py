@@ -58,12 +58,31 @@ from hooks.plan_json import (  # noqa: E402
 from hooks.code_task_context import resolve_task_refs  # noqa: E402
 from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
 from hooks.utest_plan_contract import validate_result_against_plan  # noqa: E402
+from hooks.resolve_frontend_html_route import (  # noqa: E402
+    FrontendRouteError,
+    ROUTE_ABSOLUTE,
+    ROUTE_MISSING,
+    ROUTE_NONE,
+    ROUTE_SPEC_DRIVEN,
+    ROUTE_STANDARD,
+    evidence_path as frontend_evidence_path,
+    read_json as read_frontend_json,
+    resolve_frontend_route,
+)
+from hooks.ui_context import (  # noqa: E402
+    UIContextError,
+    load_ui_context,
+    ui_context_indexes,
+    ui_context_path,
+    validate_ui_context_data,
+)
 
 E2E_ID = re.compile(r"\bE2E-[A-Za-z0-9_-]+-\d{3}\b")
 REQ_ID = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
 TASK_ID = re.compile(r"\bT\d{3}\b")
 EVIDENCE_ID = re.compile(r"\bev_\d{4}\b")
+FRONTEND_REVIEW_PASS = {"passed", "has-suggestions", "skipped-by-user"}
 SPEC_REQUIREMENT_DEF_RE = re.compile(r"^###\s+Requirement\s+\[(REQ-\d{3})\]:\s+.+$", re.MULTILINE)
 SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
 # 带 REQ-/SCN- 记号的标题行；与上面两个正则的差集就是索引器看不见的写法
@@ -1892,6 +1911,188 @@ def validate_fix_request_json(ctx: HookContext) -> int:
     return failures
 
 
+def validate_ui_context_json(ctx: HookContext) -> int:
+    data, failures = load_json_artifact(
+        ctx,
+        "UI_CONTEXT.json",
+        required=ctx.requires_artifact("UI_CONTEXT.json"),
+    )
+    if data is None:
+        return failures
+    spec_ids, spec_failures = collect_spec_definition_index(ctx)
+    failures += spec_failures
+    for error in validate_ui_context_data(
+        data,
+        feature_id=ctx.slug,
+        # PRD creates the confirmed UI scope before spec IDs exist; specs/plan
+        # stages still require the context to be locked and reference-resolved.
+        require_locked=ctx.requires_artifact("UI_CONTEXT.json")
+        and ctx.skill != "autobiz-requirement-discuss",
+        defined_requirements=spec_ids["REQ"],
+        defined_scenarios=spec_ids["SCN"],
+    ):
+        failures += fail_line(ctx, "invalid_ui_context_json", f" detail={error}")
+    return failures
+
+
+def _load_ui_context_for_projection(ctx: HookContext) -> tuple[dict | None, int]:
+    try:
+        data = load_ui_context(ctx.feature_dir)
+    except UIContextError as exc:
+        return None, fail_line(ctx, "invalid_ui_context_json", f" detail={exc}")
+    if data is None:
+        if ctx.requires_artifact("UI_CONTEXT.json"):
+            return None, fail_line(ctx, "missing_json_artifact", " file=UI_CONTEXT.json")
+        info(ctx, "ui_context_not_in_contract_degrade")
+        return None, 0
+    return data, 0
+
+
+def _visual_source_expected_frontend_route(source: dict) -> str | None:
+    route = source.get("route")
+    if isinstance(route, str) and route in {
+        ROUTE_SPEC_DRIVEN,
+        ROUTE_ABSOLUTE,
+        ROUTE_STANDARD,
+        ROUTE_MISSING,
+    }:
+        return route
+    source_type = source.get("type")
+    if source_type == "high_fidelity_html":
+        return ROUTE_ABSOLUTE
+    if source_type == "standard_html":
+        return ROUTE_STANDARD
+    return None
+
+
+def validate_plan_ui_projection(ctx: HookContext) -> int:
+    ui_data, failures = _load_ui_context_for_projection(ctx)
+    if ui_data is None:
+        return failures
+    indexes = ui_context_indexes(ui_data)
+    visual_sources_by_id = {
+        item["sourceId"]: item
+        for item in ui_data.get("visualSources", [])
+        if isinstance(item, dict) and isinstance(item.get("sourceId"), str)
+    }
+    capabilities = [
+        item
+        for item in ui_data.get("capabilities", [])
+        if isinstance(item, dict) and item.get("uiRequired") is not False
+    ]
+
+    plan_data, errors = load_and_validate_plan(plan_json_path(ctx.feature_dir))
+    if errors or plan_data is None:
+        return failures
+
+    raw_tasks = plan_data.get("tasks")
+    if not isinstance(raw_tasks, list):
+        return failures
+
+    feature_ui_required = ui_data.get("uiRequired") is True
+    ui_task_count = 0
+    for index, task in enumerate(raw_tasks):
+        if not isinstance(task, dict):
+            continue
+        task_id = task.get("id") if isinstance(task.get("id"), str) else f"tasks[{index}]"
+        task_ui_required = task.get("uiRequired") is True
+        ui_refs = task.get("uiRefs")
+
+        if not feature_ui_required:
+            if task_ui_required:
+                failures += fail_line(ctx, "plan_ui_task_when_feature_not_ui", f" task={task_id}")
+            if isinstance(ui_refs, dict) and ui_refs:
+                failures += fail_line(ctx, "plan_ui_refs_when_feature_not_ui", f" task={task_id}")
+            continue
+
+        if not task_ui_required:
+            if isinstance(ui_refs, dict) and ui_refs:
+                failures += fail_line(ctx, "plan_ui_refs_for_non_ui_task", f" task={task_id}")
+            continue
+
+        if task_ui_required:
+            ui_task_count += 1
+            if not isinstance(ui_refs, dict):
+                failures += fail_line(ctx, "plan_ui_task_missing_uiRefs", f" task={task_id}")
+                continue
+            for field, known in (
+                ("pageRefs", indexes["page"]),
+                ("interactionRefs", indexes["interaction"]),
+                ("visualSourceRefs", indexes["visualSource"]),
+            ):
+                refs = _string_list_value(ui_refs.get(field))
+                if refs is None:
+                    failures += fail_line(ctx, "invalid_plan_ui_refs", f" task={task_id} field={field}")
+                    continue
+                if field in {"pageRefs", "interactionRefs"} and not refs:
+                    failures += fail_line(ctx, "missing_plan_ui_refs", f" task={task_id} field={field}")
+                for ref in refs:
+                    if ref not in known:
+                        failures += fail_line(ctx, "unknown_plan_ui_ref", f" task={task_id} field={field} ref={ref}")
+            frontend_route = ui_refs.get("frontendRoute")
+            if not isinstance(frontend_route, str) or frontend_route not in {
+                ROUTE_NONE,
+                ROUTE_SPEC_DRIVEN,
+                ROUTE_ABSOLUTE,
+                ROUTE_STANDARD,
+                ROUTE_MISSING,
+            }:
+                failures += fail_line(ctx, "invalid_plan_ui_frontend_route", f" task={task_id}")
+                continue
+            visual_refs = _string_list_value(ui_refs.get("visualSourceRefs")) or []
+            task_spec_refs = set(_string_list_value(task.get("specRefs")) or [])
+            matching_capabilities = [
+                capability
+                for capability in capabilities
+                if task_spec_refs.intersection(_string_list_value(capability.get("specRefs")) or [])
+            ]
+            if matching_capabilities and any(
+                "visualSourceRefs" in capability for capability in matching_capabilities
+            ):
+                expected_visual_refs = {
+                    ref
+                    for capability in matching_capabilities
+                    for ref in (_string_list_value(capability.get("visualSourceRefs")) or [])
+                }
+                if set(visual_refs) != expected_visual_refs:
+                    failures += fail_line(
+                        ctx,
+                        "plan_ui_visual_source_projection_mismatch",
+                        (
+                            f" task={task_id} expected={','.join(sorted(expected_visual_refs)) or 'none'}"
+                            f" actual={','.join(sorted(visual_refs)) or 'none'}"
+                        ),
+                    )
+                if not expected_visual_refs and frontend_route != ROUTE_SPEC_DRIVEN:
+                    failures += fail_line(
+                        ctx,
+                        "plan_ui_route_without_visual_source",
+                        f" task={task_id} expected={ROUTE_SPEC_DRIVEN} actual={frontend_route}",
+                    )
+            for visual_ref in visual_refs:
+                visual_source = visual_sources_by_id.get(visual_ref)
+                if visual_source is None:
+                    continue
+                expected_route = _visual_source_expected_frontend_route(visual_source)
+                if expected_route is not None and frontend_route != expected_route:
+                    failures += fail_line(
+                        ctx,
+                        "plan_ui_frontend_route_mismatch",
+                        f" task={task_id} visualSource={visual_ref} expected={expected_route} actual={frontend_route}",
+                    )
+
+    if feature_ui_required and ui_task_count == 0:
+        failures += fail_line(ctx, "plan_ui_required_without_ui_task")
+    return failures
+
+
+def _boolean_marker_value(text: str, marker: str) -> bool | None:
+    match = re.search(rf"{re.escape(marker)}\W*:\W*(true|false)\b", text, re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).lower() == "true"
+
+
 def _artifact_issue_target(issue: dict, fallback: str) -> str:
     task_ids = issue.get("taskIds")
     task_id = ""
@@ -2174,6 +2375,7 @@ def validate_plan_json_contract(ctx: HookContext) -> int:
                 target=f"plan={plan_scope!r} feature={implementation_scope!r}",
             )
     failures += _validate_plan_json_traceability(ctx, data)
+    failures += validate_plan_ui_projection(ctx)
     return failures
 
 
@@ -2192,6 +2394,29 @@ def validate_plan_task_detail_schema(ctx: HookContext) -> int:
     return failures
 
 
+def validate_plan_finished_tasks(ctx: HookContext) -> int:
+    plan_json = ctx.file("plan.json")
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        if is_nonempty(ctx.file("PLAN.md")):
+            return fail_line(ctx, "missing_plan_json", " detail=PLAN.md_present_but_not_machine_source")
+        info(ctx, "plan_json_not_in_contract_degrade")
+        return 0
+
+    data, errors = load_and_validate_plan(plan_json, require_all_done=True)
+    failures = 0
+    for error in errors:
+        failures += fail_line(ctx, "invalid_plan_json", f" detail={error}")
+    if data is not None:
+        unfinished = unfinished_tasks(data)
+        if unfinished:
+            failures += fail_line(ctx, "plan_json_has_pending_tasks", f" tasks={','.join(unfinished)}")
+        failed = failed_tasks(data)
+        if failed:
+            failures += fail_line(ctx, "plan_json_has_failed_tasks", f" tasks={','.join(failed)}")
+        failures += _validate_plan_json_traceability(ctx, data)
+    return failures
+
+
 def validate_code_done_gate(ctx: HookContext) -> int:
     if not ctx.requires_artifact("evidence/EVIDENCE.jsonl"):
         info(ctx, "code_done_gate_not_in_contract_degrade")
@@ -2199,6 +2424,86 @@ def validate_code_done_gate(ctx: HookContext) -> int:
     failures = 0
     for error in check_code_done(ctx.feature_dir):
         failures += fail_line(ctx, "invalid_code_done_gate", f" detail={error}")
+    return failures
+
+
+def validate_frontend_route_gate(ctx: HookContext) -> int:
+    try:
+        ui_context = load_ui_context(ctx.feature_dir)
+    except UIContextError as exc:
+        return fail_line(ctx, "invalid_ui_context_json", f" detail={exc}")
+    if isinstance(ui_context, dict) and ui_context.get("uiRequired") is False:
+        return 0
+
+    evidence_file = frontend_evidence_path(ctx.root, ctx.slug)
+    evidence = read_frontend_json(evidence_file)
+
+    if not evidence:
+        try:
+            resolved = resolve_frontend_route(ctx.root, ctx.slug, write_evidence=False)
+        except FrontendRouteError as exc:
+            return fail_line(ctx, "invalid_frontend_route_source", f" detail={exc}")
+        if resolved.get("triggered"):
+            return fail_line(
+                ctx,
+                "missing_frontend_route_evidence",
+                f" route={resolved.get('route')} evidence={evidence_file}",
+            )
+        return 0
+
+    route = evidence.get("route")
+    if route == ROUTE_NONE and evidence.get("triggered") is not True:
+        return 0
+    if route == ROUTE_SPEC_DRIVEN:
+        review_status = evidence.get("reviewStatus")
+        if review_status not in FRONTEND_REVIEW_PASS:
+            return fail_line(
+                ctx,
+                "frontend_review_not_passed_or_skipped",
+                f" reviewStatus={review_status!r} evidence={evidence_file}",
+            )
+        return 0
+    if route == ROUTE_MISSING and evidence.get("source") == "UI_CONTEXT.json":
+        review_status = evidence.get("reviewStatus")
+        if review_status not in FRONTEND_REVIEW_PASS:
+            return fail_line(
+                ctx,
+                "frontend_review_not_passed_or_skipped",
+                f" reviewStatus={review_status!r} evidence={evidence_file}",
+            )
+        return 0
+    if route == ROUTE_MISSING:
+        return fail_line(ctx, "frontend_html_source_missing", f" evidence={evidence_file}")
+    if route not in {ROUTE_ABSOLUTE, ROUTE_STANDARD}:
+        return fail_line(ctx, "invalid_frontend_route", f" route={route!r} evidence={evidence_file}")
+
+    failures = 0
+    required_flags = (
+        "routeSkillRead",
+        "routeSkillReadComplete",
+        "routeTodosCreated",
+        "routeTodosCompleted",
+        "parserRead",
+    )
+    for flag in required_flags:
+        if evidence.get(flag) is not True:
+            failures += fail_line(ctx, f"frontend_route_{flag}_missing", f" evidence={evidence_file}")
+
+    review_status = evidence.get("reviewStatus")
+    if review_status not in FRONTEND_REVIEW_PASS:
+        failures += fail_line(
+            ctx,
+            "frontend_review_not_passed_or_skipped",
+            f" reviewStatus={review_status!r} evidence={evidence_file}",
+        )
+    route_run_id = evidence.get("routeRunId")
+    review_route_run_id = evidence.get("reviewRouteRunId")
+    if isinstance(route_run_id, str) and route_run_id.strip() and review_route_run_id != route_run_id:
+        failures += fail_line(
+            ctx,
+            "frontend_review_route_run_mismatch",
+            f" routeRunId={route_run_id!r} reviewRouteRunId={review_route_run_id!r} evidence={evidence_file}",
+        )
     return failures
 
 
@@ -2308,6 +2613,7 @@ VALIDATORS = {
     "proposal_contract": validate_proposal_contract,
     "specs_contract": validate_specs_contract,
     "capability_spec_correspondence": validate_capability_spec_correspondence,
+    "ui_context_json": validate_ui_context_json,
     "design_contract": validate_design_contract,
     "plan_json_contract": validate_plan_json_contract,
     "plan_json_initial_tasks": validate_plan_json_initial_tasks,
@@ -2315,6 +2621,9 @@ VALIDATORS = {
     "plan_scenario_coverage": validate_plan_scenario_coverage,
     "plan_ref_resolution": validate_plan_ref_resolution,
     "plan_task_detail_schema": validate_plan_task_detail_schema,
+    "plan_ui_projection": validate_plan_ui_projection,
+    "plan_finished_tasks": validate_plan_finished_tasks,
+    "frontend_route_gate": validate_frontend_route_gate,
     "evidence_detail_quality": validate_evidence_detail_quality,
     "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,

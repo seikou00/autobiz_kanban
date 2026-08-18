@@ -97,6 +97,26 @@ class NeedsFixStateTest(unittest.TestCase):
         (self.feature_dir / "proposal.md").write_text("# proposal\n", encoding="utf-8")
         (self.feature_dir / "design.md").write_text("# design\n\n- D-001: 决策\n", encoding="utf-8")
         (self.feature_dir / "VERIFY_REPORT.md").write_text("verify failed\n", encoding="utf-8")
+        (self.feature_dir / "UI_CONTEXT.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "featureId": self.feature,
+                    "uiRequired": False,
+                    "decisionStatus": "locked",
+                    "decisionSource": "default_false",
+                    "confirmedAtCheckpoint": "prd_done",
+                    "lockedAtCheckpoint": "specs_done",
+                    "notApplicableReason": "纯后端能力",
+                    "pages": [],
+                    "interactions": [],
+                    "visualSources": [],
+                    "capabilities": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
         record = append_evidence(
             self.feature_dir,

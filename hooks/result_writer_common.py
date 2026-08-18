@@ -159,3 +159,47 @@ def coverage_decision_sets(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
         "manualVerificationRefs": manual,
         "missingScenarioRefs": missing,
     }
+
+
+def ui_summary_from_coverage(feature_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    path = feature_dir / "UI_CONTEXT.json"
+    ui_required = False
+    ui_scenarios: set[str] = set()
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            data = {}
+        if isinstance(data, dict):
+            ui_required = data.get("uiRequired") is True
+            caps = data.get("capabilities")
+            if isinstance(caps, list):
+                for cap in caps:
+                    if isinstance(cap, dict) and cap.get("uiRequired") is not False:
+                        refs = cap.get("specRefs")
+                        if isinstance(refs, list):
+                            ui_scenarios.update(SCN_ID_RE.findall(" ".join(str(ref) for ref in refs if isinstance(ref, str))))
+    summary = {
+        "uiRequired": ui_required,
+        "passedUiScenarioRefs": [],
+        "failedUiScenarioRefs": [],
+        "manualUiScenarioRefs": [],
+        "missingUiScenarioRefs": [],
+        "notApplicableScenarioRefs": [],
+    }
+    for row in rows:
+        scenario = row.get("scenarioRef")
+        verdict = str(row.get("verdict", "")).lower()
+        if not isinstance(scenario, str):
+            continue
+        if not ui_required or scenario not in ui_scenarios:
+            summary["notApplicableScenarioRefs"].append(scenario)
+        elif verdict == "pass":
+            summary["passedUiScenarioRefs"].append(scenario)
+        elif verdict == "fail":
+            summary["failedUiScenarioRefs"].append(scenario)
+        elif verdict == "manual":
+            summary["manualUiScenarioRefs"].append(scenario)
+        else:
+            summary["missingUiScenarioRefs"].append(scenario)
+    return summary

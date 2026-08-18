@@ -179,7 +179,13 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         self.assertIn("e2e-diagnostics/**/*", by_path)
         self.assertFalse(by_path["e2e-diagnostics/**/*"]["required"])
         self.assertEqual(
-            ["e2e_result_json", "e2e_cases_contract", "fix_request_json", "evidence_integrity"],
+            [
+                "ui_context_json",
+                "e2e_result_json",
+                "e2e_cases_contract",
+                "fix_request_json",
+                "evidence_integrity",
+            ],
             nodes[0]["validators"],
         )
 

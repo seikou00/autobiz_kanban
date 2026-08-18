@@ -79,31 +79,6 @@
       "standard": {
         "label": "不需要，进入 autodev-specs",
         "description": "不先转换 HTML 设计稿，直接进入 autodev-specs。"
-      },
-      "frontend_before_specs": {
-        "label": "需要，进入 HTML 转前端",
-        "description": "先将 HTML 转换为项目内前端工程文件；在 autodev-frontend 内部按标准 HTML 或绝对定位高保真 HTML 分流，再进入后续阶段。",
-        "nodes": [
-          {
-            "id": "dev.frontend",
-            "phase": "Dev",
-            "label": "前端实现",
-            "skill": "autodev-frontend",
-            "insertBefore": "dev.specs",
-            "checkpointPrefix": "frontend",
-            "description": "基于 PRD 与 HTML 进行前端实现，并在 autodev-frontend 内部按标准 HTML 或绝对定位高保真 HTML 分流 \n 产物：项目内前端工程文件（无独立文档产物）",
-            "artifacts": {
-              "inputs": [
-                { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
-                  "extract": {
-                    "degrade": "无 PRD 时基于用户提供的 HTML 与描述实现，并记录验收基准缺失"
-                  } }
-              ],
-              "outputs": []
-            },
-            "validators": []
-          }
-        ]
       }
     },
     "dynamicStages": [
@@ -231,20 +206,21 @@
             }
           }
         },
-        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）",
+        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）、UI_CONTEXT.json（UI 范围机器事实源）",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清与 PRD。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清与 PRD。" } },
-          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "通过 /autodev-specs 路由到行为规格；是否需要先将 HTML 转换为项目内前端工程文件？需要则进入 autodev-frontend，并在该节点内按标准 HTML 或绝对定位高保真 HTML 分流；不需要则直接进入 autodev-specs 阶段。" } }
+          { "nodeStatus": "done", "label": "已完成", "nextAction": { "slashSkill": "autodev-specs", "userMessage": "请使用 /autodev-specs 继续推进当前 Feature。", "dialogTips": "通过 /autodev-specs 路由到行为规格；UI 范围以 UI_CONTEXT.json 为机器事实源，前端实现后续在 /autodev-code 内部按 FRONTEND_ROUTE.json 分流。" } }
         ],
         "checkpoints": ["prd_in_progress", "prd_done"],
         "artifacts": {
           "inputs": [],
           "outputs": [
-            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
+            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true }
           ]
         },
-        "validators": [],
+        "validators": ["ui_context_json"],
         "hookDefinitions": [
           { "id": "biz-prd-validate", "label": "PRD 产物校验", "event": "PostSkillUse", "required": true }
         ]
@@ -279,14 +255,19 @@
             { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
               "extract": {
                 "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
+              } },
+            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时，本阶段必须基于用户已确认范围生成并锁定，不能从 PRD 正文临时推导"
               } }
           ],
           "outputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true }
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true }
           ]
         },
-        "validators": ["proposal_contract", "specs_contract", "capability_spec_correspondence"]
+        "validators": ["proposal_contract", "specs_contract", "capability_spec_correspondence", "ui_context_json"]
       },
       {
         "id": "dev.plan",
@@ -322,6 +303,10 @@
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
                 "degrade": "无 specs 时与用户确认行为预期后再设计，未确认行为全部记为待确认风险"
+              } },
+            { "id": "ui_context_json", "label": "UI范围", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 任务"
               } }
           ],
           "outputs": [
@@ -330,7 +315,7 @@
             { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true }
           ]
         },
-        "validators": ["design_contract", "plan_json_contract", "plan_json_initial_tasks", "plan_ref_resolution", "plan_task_granularity", "plan_scenario_coverage"]
+        "validators": ["design_contract", "ui_context_json", "plan_json_contract", "plan_json_initial_tasks", "plan_ref_resolution", "plan_task_granularity", "plan_scenario_coverage"]
       },
       {
         "id": "dev.code",
@@ -382,6 +367,10 @@
             { "id": "detail_design_optional", "label": "详细设计参考", "artifactType": "file", "path": "DETAIL_DESIGN.md", "required": false,
               "extract": {
                 "degrade": "无 DETAIL_DESIGN 时按 design.md 与 PLAN.md 的任务执行包直接实现"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时先询问用户是否需要生成前端代码，再回到 /autodev-specs 或 /autodev-plan 补齐"
               } }
           ],
           "outputs": [
@@ -395,7 +384,7 @@
               } }
           ]
         },
-        "validators": ["plan_json_contract", "plan_task_detail_schema", "plan_ref_resolution", "evidence_detail_quality", "code_done_gate", "evidence_integrity"],
+        "validators": ["ui_context_json", "plan_json_contract", "plan_task_detail_schema", "plan_ref_resolution", "frontend_route_gate", "evidence_detail_quality", "code_done_gate", "evidence_integrity"],
         "guards": ["code_compile"]
       },
       {
@@ -448,13 +437,17 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true,
               "extract": {
                 "degrade": "缺失时回到 code 阶段补齐证据流，不能用 Markdown 报告替代"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 范围"
               } }
           ],
           "outputs": [
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": true }
           ]
         },
-        "validators": ["requirements_eval_verdict"]
+        "validators": ["ui_context_json", "requirements_eval_verdict"]
       },
       {
         "id": "dev.utest",
@@ -510,6 +503,10 @@
             { "id": "requirements_eval", "label": "需求实现评审报告", "artifactType": "file", "path": "REQUIREMENTS_EVAL.md", "required": false,
               "extract": {
                 "degrade": "缺失时跳过，不影响机器流程"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 范围"
               } }
           ],
           "outputs": [
@@ -519,7 +516,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["unit_test_result_json", "evidence_integrity"]
+        "validators": ["ui_context_json", "unit_test_result_json", "evidence_integrity"]
       },
       {
         "id": "dev.e2e",
@@ -587,6 +584,10 @@
             { "id": "test_output", "label": "测试输出日志", "artifactType": "file", "path": "test-output.log", "required": false,
               "extract": {
                 "degrade": "缺失时跳过"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 测试范围"
               } }
           ],
           "outputs": [
@@ -600,7 +601,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["e2e_result_json", "e2e_cases_contract", "fix_request_json", "evidence_integrity"]
+        "validators": ["ui_context_json", "e2e_result_json", "e2e_cases_contract", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "dev.verify",
@@ -668,6 +669,10 @@
             { "id": "fix_request_json", "label": "结构化修复回流请求", "artifactType": "json", "path": "FIX_REQUEST.json", "required": false,
               "extract": {
                 "degrade": "缺失时 verify 根据本阶段裁决重新生成"
+              } },
+            { "id": "ui_context_json", "label": "UI范围机器事实源", "artifactType": "json", "path": "UI_CONTEXT.json", "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 或 /autodev-plan 补齐，不能从 Markdown 推导 UI 验收范围"
               } }
           ],
           "outputs": [
@@ -677,7 +682,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["verify_decision_json", "fix_request_json", "evidence_integrity"]
+        "validators": ["ui_context_json", "verify_decision_json", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "ops.cicd",

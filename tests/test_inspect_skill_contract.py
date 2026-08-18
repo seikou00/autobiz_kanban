@@ -53,7 +53,7 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertEqual(contract.node_id, "biz.prd")
         self.assertEqual(contract.checkpoints, ("prd_in_progress", "prd_done"))
         self.assertEqual(contract.required_inputs, ())
-        self.assertEqual(contract.required_outputs, ("PRD.md",))
+        self.assertEqual(contract.required_outputs, ("PRD.md", "UI_CONTEXT.json"))
         self.assertEqual(extra_missing, ())
         self.assertEqual(self._plain("autobiz-requirement-discuss", feature), "")
 
@@ -65,7 +65,7 @@ class InspectSkillContractPlainTest(unittest.TestCase):
 
         self.assertIn("PRD.md", output)
         self.assertIn("无 PRD 时基于用户描述直接澄清行为契约", output)
-        self.assertNotIn("UI_CONTEXT.json", output)
+        self.assertIn("UI_CONTEXT.json", output)
 
     def test_plain_lean_archive_reports_nothing_to_handle(self) -> None:
         # ops.archive's only input is produced by ops.cicd, which lean drops from
