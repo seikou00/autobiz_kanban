@@ -69,7 +69,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 > - 保存原始材料快照
 > - 需求内容格式改造
 > - 需求分析
-> - 问题清单展示与用户确认
+> - 问题清单展示与逐项裁定
 > - 对话式引导与需求内容调整
 > - 迭代回检直到收敛
 > - 待确认裁定与正式稿收敛
@@ -101,7 +101,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - 严格按 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/analysis-guide.md` 的评估规则检查，生成问题清单。
 - 仅输出有问题、有遗漏、不明确的事项；无问题则不制造问题。
 
-### 问题清单展示与用户确认
+### 问题清单展示与逐项裁定
 
 ####  优先级分级
 
@@ -126,22 +126,11 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - 「领域依据」填该条问题所依据的系统提示词 `<SYSTEM>`、`<UNIT>` 段落点名文档的文件名与原文约束（如 `core-entities.md — 用户关联实体: 角色/部门/岗位`），与既有实体、流程、约束无关的纯规范类问题填「通用」。
 - 整张表的「领域依据」全为「通用」时，说明未结合本系统既有实体、流程与约束检查，重做需求分析。
 
-#### 询问用户是否需要补充
+#### 处理问题清单
 
-展示问题清单后，按共享 `ask-user-question.md` 协议使用 `request_user_input` 询问用户：
-
-问题清单已生成，是否开始逐项讨论？如需补充其他问题，请直接在客户端自动提供的「其他」中填写问题内容。
-- **选项1**：确认讨论当前问题清单 (Recommended)
-- **选项2**：暂不开始逐项讨论
-
-**处理逻辑**：
-- 若用户选择「确认讨论当前问题清单」→ 直接进入 Step 5 逐项确认
-- 若选择「暂不开始逐项讨论」→ 保留当前问题清单和进度，本轮暂停，不追问补充内容
-- 若用户通过客户端自动提供的 Other /「其他」填写问题 → 直接记录补充内容，合并到问题清单再进入 Step 5，不得再次询问“请补充说明”
-
-【关键约束 - 必须先展示问题清单后并等待确认】
-
-**禁止假设用户确认需求没有问题**： 需求已经很清楚所以跳过问题确认是**错误推理**。即使没有问题清单，也必须告知用户"需求检查完毕，未发现问题，是否确认进入下一阶段？"
+- 存在实质问题时，先完整展示问题清单，再直接按 P0 → P1 → P2 对第一批最多 3 项发起裁定。不先追问“是否开始讨论”。
+- 用户在逐项裁定的 Other /「其他」中补充新问题时，直接记录并合并到问题清单，不得再次询问“请补充说明”。
+- 无实质问题时，告知用户“需求检查完毕，未发现问题”，然后直接进入正式稿收敛，不询问是否进入下一阶段。
 
 
 ### 对话式引导并调整 `PRD.md`
@@ -211,7 +200,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 
 ### 迭代直到收敛
 
-将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都要向用户展示检查结果，由用户判断是否可以终止循环。
+将 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` 与 `analysis-guide.md` 反复对照检查原问题是否已解决、是否引入新问题或新歧义；仍存在 P0 / P1 时回到『需求分析』重来一轮。每轮都向用户展示检查结果；命中下方终止条件时自动收敛，只对仍会改变行为或范围的实质问题请用户裁定。
 
 #### 迭代终止条件
 

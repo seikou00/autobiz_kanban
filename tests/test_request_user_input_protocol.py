@@ -6,8 +6,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
+ROOT_SKILL = SKILLS / "SKILL.md"
 PROTOCOL = SKILLS / "references" / "ask-user-question.md"
 DISCUSS_SKILL = SKILLS / "autobiz" / "autobiz-requirement-discuss" / "SKILL.md"
+AUTODEV_SKILL = SKILLS / "autodev" / "SKILL.md"
 PLAN_SKILL = SKILLS / "autodev" / "autodev-plan" / "SKILL.md"
 SPECS_SKILL = SKILLS / "autodev" / "autodev-specs" / "SKILL.md"
 PRD_SKILL = DISCUSS_SKILL
@@ -72,7 +74,7 @@ class RequestUserInputProtocolTest(unittest.TestCase):
         content = DISCUSS_SKILL.read_text(encoding="utf-8")
 
         for required_rule in (
-            "如需补充其他问题，请直接在客户端自动提供的「其他」中填写问题内容",
+            "Other /「其他」中补充新问题",
             "不得再次询问“请补充说明”",
             "不得生成「现在提供」「提供路径」「补充说明」等空动作选项",
             "自由文本补充类问题仍必须提供至少 2 个预设选项",
@@ -82,6 +84,26 @@ class RequestUserInputProtocolTest(unittest.TestCase):
 
         self.assertNotIn("**选项2**：补充其他问题", content)
         self.assertNotIn("引导用户补充说明", content)
+
+    def test_internal_phase_transitions_do_not_require_confirmation(self) -> None:
+        root_skill = ROOT_SKILL.read_text(encoding="utf-8")
+        protocol = PROTOCOL.read_text(encoding="utf-8")
+        autodev = AUTODEV_SKILL.read_text(encoding="utf-8")
+        plan = PLAN_SKILL.read_text(encoding="utf-8")
+        discuss = DISCUSS_SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("`biz -> dev -> ops` 按状态自动续跑", root_skill)
+        self.assertIn("只是结束探索、切换内部阶段", protocol)
+        self.assertIn("合法出口立即按 `recommendedNextSkill` 继续", autodev)
+        self.assertIn("不询问“是否结束探索”或“是否继续”", plan)
+        self.assertIn("完整 Dev 工作流已路由到本节点时，视为已包含写入意图", plan)
+        self.assertIn("不先追问“是否开始讨论”", discuss)
+        self.assertIn("不询问是否进入下一阶段", discuss)
+        self.assertIn("确认设计，进入 PLAN 生成 (Recommended)", plan)
+
+        self.assertNotIn("是否结束探索并进入 Plan 生成？", protocol)
+        self.assertNotIn("必须询问用户是否结束探索", plan)
+        self.assertNotIn("确认讨论当前问题清单", discuss)
 
     def test_plan_adjudication_gate_forbids_placeholder_options(self) -> None:
         content = PLAN_SKILL.read_text(encoding="utf-8")
