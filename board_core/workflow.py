@@ -15,6 +15,7 @@ NODE_INTERNAL_FIELDS = {
     "artifacts",
     "validators",
     "guards",
+    "rollback",
     "_dynamic",
     "_nextActionOverride",
 }

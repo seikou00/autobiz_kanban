@@ -330,7 +330,10 @@
             { "id": "plan_json", "label": "计划机器结构化内容", "artifactType": "json", "path": "plan.json", "required": true }
           ]
         },
-        "validators": ["design_contract", "plan_json_contract", "plan_json_initial_tasks", "plan_ref_resolution", "plan_task_granularity", "plan_scenario_coverage"]
+        "validators": ["design_contract", "plan_json_contract", "plan_json_initial_tasks", "plan_ref_resolution", "plan_task_granularity", "plan_scenario_coverage"],
+        "rollback": {
+          "archive": ["plans"]
+        }
       },
       {
         "id": "dev.code",
@@ -396,7 +399,10 @@
           ]
         },
         "validators": ["plan_json_contract", "plan_task_detail_schema", "plan_ref_resolution", "evidence_detail_quality", "code_done_gate", "evidence_integrity"],
-        "guards": ["code_compile"]
+        "guards": ["code_compile"],
+        "rollback": {
+          "archive": [".task-runs", "BATCH_HANDOFF.json", "evidence/EVIDENCE.index.json"]
+        }
       },
       {
         "id": "dev.review",

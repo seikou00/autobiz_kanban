@@ -44,7 +44,17 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 
 ### Code 会话入口
 
-每次进入 Code 阶段或在新对话恢复 Code 时，最先执行：
+首次为当前 Feature 启动 Code Session 前，如果还没有基线，先对计划声明的每个生产代码 workspace 执行一次独立回退脚本的基线捕获；同一 Session 后续批次不得重复捕获：
+```bash
+python "${pluginPath}/hooks/rollback_stage.py" \
+  --capture-code-session \
+  --feature "${feature}" \
+  --code-workspace "<plan 中声明的生产代码 workspace>" \
+  --json
+```
+该命令只保存 Code 开始前的 Git 可见文件快照，不修改业务仓库；已有 active 基线时脚本会复用它。
+
+完成上述一次性基线检查后，每次进入 Code 阶段或在新对话恢复 Code 时，执行：
 ```bash
 python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 ```
