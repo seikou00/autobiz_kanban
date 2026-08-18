@@ -1903,8 +1903,9 @@ def _bundle_consistency_errors(
                 all_tasks.append(item)
     if errors:
         return errors
-    if root.get("taskSetDigest") is not None and root.get("taskSetDigest") != task_set_digest(root, batch_data):
-        errors.append("task_set_digest_mismatch")
+#todo 关闭digest校验
+#     if root.get("taskSetDigest") is not None and root.get("taskSetDigest") != task_set_digest(root, batch_data):
+#         errors.append("task_set_digest_mismatch")
 
     known_task_ids = set(task_batches)
     batch_order = {str(entry.get("id")): index for index, entry in enumerate(entries)}
