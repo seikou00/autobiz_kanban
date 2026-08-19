@@ -11,7 +11,7 @@
         },
         {
           "type": "command",
-          "command": "python3 hooks/augment_test_engineer_task_prompt.py",
+          "command": "python hooks/augment_test_engineer_task_prompt.py",
           "timeout": 30,
           "persistAfterInterrupt": true
         }

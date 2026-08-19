@@ -51,6 +51,7 @@ from hooks.plan_writer import (  # noqa: E402
     begin_batch_compile_repair,
     mark_batch_tasks_done_after_compile,
     record_task_implementation,
+    reset_batch_compile_for_revalidation,
     set_task_execution_status,
     update_batch_compile_status,
 )
@@ -697,9 +698,17 @@ def _start_task_unlocked(
     code_workspace: Path | list[Path],
     *,
     repair_context: dict[str, Any] | None = None,
+    require_active_batch: bool = True,
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
-    plan, batch_id, task = _load_plan_and_task(feature_dir, task_id)
+    plan, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=require_active_batch)
+
+    # Check if this is a task repair
+    is_task_repair = (
+        isinstance(repair_context, dict)
+        and repair_context.get("taskRepair") is True
+    )
+
     if defer_to_test_stages_enabled(plan.root):
         batch = plan.batches.get(batch_id)
         batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
@@ -720,7 +729,7 @@ def _start_task_unlocked(
                 requiredAction="continue_batch_compile_repair",
                 repairTaskId=batch_compile.get("repairTaskId"),
             )
-        if normalize_status(task.get("status")) == "implemented" and not is_compile_repair:
+        if normalize_status(task.get("status")) == "implemented" and not is_compile_repair and not is_task_repair:
             raise TaskRunnerError(
                 f"task_implementation_already_ready:{task_id}",
                 requiredAction="run_batch_compile",
@@ -730,7 +739,9 @@ def _start_task_unlocked(
     unfinished = _unfinished_dependencies(plan, task)
     if unfinished:
         raise TaskRunnerError("unfinished_task_dependencies:" + ",".join(unfinished))
-    if normalize_status(task.get("status")) == "done":
+
+    # Allow task repair to restart "done" or "implemented" tasks
+    if normalize_status(task.get("status")) == "done" and not is_task_repair:
         raise TaskRunnerError(f"task_already_done:{task_id}")
     requested_workspaces = (
         [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
@@ -1702,6 +1713,7 @@ def _implementation_record(
     supporting_files: list[str],
     no_change_why: str | None,
     repair_context: dict[str, Any] | None,
+    prior_evidence_id: str | None = None,
 ) -> dict[str, Any]:
     changed_files = _changed_files(file_changes)
     no_code_change = completion_mode == "verified_existing"
@@ -1730,6 +1742,8 @@ def _implementation_record(
     }
     if isinstance(repair_context, dict):
         record["repairContext"] = dict(repair_context)
+    if isinstance(prior_evidence_id, str):
+        record["priorEvidenceId"] = prior_evidence_id
     return record
 
 
@@ -1742,6 +1756,7 @@ def _finish_implementation_unlocked(
     *,
     no_code_change_why: str | None,
     supporting_files: list[str],
+    repair_mode: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
@@ -1968,6 +1983,23 @@ def _finish_implementation_unlocked(
     if isinstance(existing, dict) and isinstance(existing.get("evidenceId"), str):
         evidence_id = str(existing["evidenceId"])
     else:
+        # 在 repair_mode 下，找到之前的 implementation 证据作为 priorEvidenceId
+        prior_evidence_id = None
+        if repair_mode:
+            prior_impl_record = next(
+                (
+                    record
+                    for record in reversed(list(read_records(stream_path(feature_dir))))
+                    if record.get("action") == "implementation"
+                    and record.get("taskId") == task_id
+                    and record.get("runId") != run_id
+                    and isinstance(record.get("evidenceId"), str)
+                ),
+                None,
+            )
+            if isinstance(prior_impl_record, dict):
+                prior_evidence_id = str(prior_impl_record.get("evidenceId"))
+
         try:
             evidence = append_evidence(
                 feature_dir,
@@ -1981,6 +2013,7 @@ def _finish_implementation_unlocked(
                     supporting_files=normalized_supporting,
                     no_change_why=no_code_change_why,
                     repair_context=repair_context,
+                    prior_evidence_id=prior_evidence_id,
                 ),
             )
         except EvidenceStoreError as exc:
@@ -1995,6 +2028,22 @@ def _finish_implementation_unlocked(
     )
     if not result.ok:
         raise TaskRunnerError("implementation_plan_binding_failed")
+
+    # Check if this is a repair of a "done" task - restore status to "done"
+    repair_context = state.get("repairContext")
+    original_status = repair_context.get("originalStatus") if isinstance(repair_context, dict) else None
+    if repair_mode and original_status == "done":
+        # Update the task status back to "done" in the plan
+        result = set_task_execution_status(
+            workspace,
+            feature,
+            task_id,
+            "done",
+            expected_task_contract_sha256=str(state.get("taskContractSha256", "")),
+        )
+        if not result.ok:
+            raise TaskRunnerError("failed_to_restore_done_status")
+
     state.update({
         "status": "implemented",
         "success": True,
@@ -2580,6 +2629,7 @@ def finish_implementation(
     *,
     no_code_change_why: str | None,
     supporting_files: list[str],
+    repair_mode: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
@@ -2591,6 +2641,7 @@ def finish_implementation(
             run_id,
             no_code_change_why=no_code_change_why,
             supporting_files=supporting_files,
+            repair_mode=repair_mode,
         )
 
 
@@ -2598,6 +2649,63 @@ def finish_implementation(
 
 
 
+
+
+def start_task_repair(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    code_workspace: Path | list[Path],
+    prior_evidence_id: str,
+) -> dict[str, Any]:
+    """Start a task run to repair a failed validation with prior evidence context."""
+
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        # Load plan and task
+        bundle, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
+
+        # Verify task status (allow both implemented and done)
+        task_status = normalize_status(task.get("status"))
+        if task_status not in {"implemented", "done"}:
+            raise TaskRunnerError(
+                f"task_repair_requires_implemented_or_done_status:{task_id}",
+                currentStatus=task_status,
+            )
+
+        # Verify prior evidence exists
+        latest_impl_evidence = str(task.get("latestImplementationEvidenceId", ""))
+        if latest_impl_evidence != prior_evidence_id:
+            raise TaskRunnerError(
+                f"task_repair_prior_evidence_mismatch:{task_id}",
+                expectedEvidenceId=prior_evidence_id,
+                actualEvidenceId=latest_impl_evidence,
+            )
+
+        # Create repair context with original status preserved
+        repair_context = {
+            "taskRepair": True,
+            "priorEvidenceId": prior_evidence_id,
+            "originalStatus": task_status,
+        }
+
+        # Start task with repair context - this will handle status correctly
+        state = _start_task_unlocked(
+            workspace,
+            feature,
+            task_id,
+            code_workspace,
+            repair_context=repair_context,
+            require_active_batch=False,
+        )
+
+        # Add repair metadata to returned state
+        state["repairMode"] = True
+        state["priorEvidenceId"] = prior_evidence_id
+        state["originalTaskStatus"] = task_status
+        state["repairContext"] = repair_context
+
+        return state
 
 
 def start_batch_compile_repair(
@@ -2820,9 +2928,14 @@ def _run_batch_compile(
     feature: str,
     batch_id: str,
     code_workspace: Path | list[Path],
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     """
     在批次完成后执行编译验证（仅编译，不运行测试）。
+
+    参数:
+        force: 如果为 True，即使批次已通过也强制重新编译
 
     返回: {
         "compileStatus": "passed" | "failed",
@@ -2842,12 +2955,33 @@ def _run_batch_compile(
     batch_compile = batch.get("batchCompile")
     if not isinstance(batch_compile, dict):
         raise TaskRunnerError(f"batch_compile_not_initialized:{batch_id}")
+
+    # 获取当前编译状态
     compile_status = batch_compile.get("status")
+
+    if force and compile_status == "passed":
+        try:
+            reset_result = reset_batch_compile_for_revalidation(workspace, feature, batch_id)
+        except PlanWriterInputError as exc:
+            raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
+        if not reset_result.ok:
+            raise TaskRunnerError(
+                "batch_compile_revalidation_reset_failed",
+                planWriterErrors=reset_result.errors or [],
+            )
+        plan_bundle = load_plan_bundle(feature_dir)
+        batch = plan_bundle.batches.get(batch_id)
+        batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
+        if not isinstance(batch_compile, dict):
+            raise TaskRunnerError(f"batch_compile_not_initialized:{batch_id}")
+        compile_status = batch_compile.get("status")
+
     if compile_status == "passed":
         return {
             "compileStatus": "passed",
             "commandId": batch_compile.get("commandId", ""),
         }
+
     if compile_status == "failed":
         attempts = int(batch_compile.get("repairAttempts", 0))
         exhausted = attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
@@ -3066,6 +3200,45 @@ def run_batch_compile(
         compile_result = _run_batch_compile(workspace, feature, batch_id, code_workspace)
         # 将编译结果持久化到 Plan
         return _integrate_batch_compile_result(workspace, feature, batch_id, compile_result)
+
+
+def revalidate_batch_compile(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    code_workspace: Path | list[Path],
+) -> dict[str, Any]:
+    """
+    重新验证批次编译，用于修复后的验证。
+
+    强制重新执行编译，即使批次之前已通过。
+
+    返回: {
+        "compileStatus": "passed" | "failed",
+        "commandId": str,
+        "output": str (失败时),
+        "failureCategory": str (失败时),
+        "wasRevalidation": True
+    }
+    """
+    feature_dir = _feature_dir(workspace, feature)
+    with _task_run_lock(feature_dir):
+        # 强制重新运行编译，并通过 plan_writer 重置已通过的编译门禁。
+        compile_result = _run_batch_compile(workspace, feature, batch_id, code_workspace, force=True)
+
+        # 如果编译通过，重置 repairAttempts
+        if compile_result.get("compileStatus") == "passed":
+            compile_result["repairAttempts"] = 0
+
+        # 标记这是重新验证
+        compile_result["wasRevalidation"] = True
+
+        # 集成结果到 Plan
+        integration_result = _integrate_batch_compile_result(
+            workspace, feature, batch_id, compile_result
+        )
+        integration_result["wasRevalidation"] = True
+        return integration_result
 
 
 def _integrate_batch_compile_result(
@@ -3388,6 +3561,7 @@ def _cmd_finish_implementation(args: argparse.Namespace) -> int:
             args.run_id,
             no_code_change_why=args.no_code_change_why,
             supporting_files=args.supporting_file or [],
+            repair_mode=getattr(args, 'repair_mode', False),
         )
         continuation = state.get("batchContinuation")
         continuation = continuation if isinstance(continuation, dict) else None
@@ -3435,6 +3609,22 @@ def _cmd_start_batch_compile_repair(args: argparse.Namespace) -> int:
             args.batch_id,
             args.task_id,
             code_workspace,
+        )
+        return _emit(True, **state)
+    except (TaskRunnerError, ValueError) as exc:
+        return _emit_error(exc)
+
+
+def _cmd_start_task_repair(args: argparse.Namespace) -> int:
+    """处理 start-task-repair 子命令"""
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        state = start_task_repair(
+            workspace,
+            feature,
+            args.task_id,
+            code_workspace,
+            args.prior_evidence_id,
         )
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
@@ -3505,7 +3695,28 @@ def _cmd_batch_compile(args: argparse.Namespace) -> int:
             args.batch_id,
             code_workspace,
         )
-        # P1-6: 根据编译状态返回正确的退出码
+        # 根据编译状态返回正确的退出码
+        compile_status = result.get("compileStatus")
+        success = compile_status == "passed"
+        return _emit(
+            success,
+            **result,
+        )
+    except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
+        return _emit_error(exc)
+
+
+def _cmd_revalidate_batch_compile(args: argparse.Namespace) -> int:
+    """处理 revalidate-batch-compile 子命令"""
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        result = revalidate_batch_compile(
+            workspace,
+            feature,
+            args.batch_id,
+            code_workspace,
+        )
+        # 根据编译状态返回正确的退出码
         compile_status = result.get("compileStatus")
         success = compile_status == "passed"
         return _emit(
@@ -3545,12 +3756,18 @@ def main(argv: list[str] | None = None) -> int:
     common(finish_implementation_parser, needs_run=True)
     finish_implementation_parser.add_argument("--no-code-change-why")
     finish_implementation_parser.add_argument("--supporting-file", action="append")
+    finish_implementation_parser.add_argument("--repair-mode", action="store_true")
     finish_implementation_parser.set_defaults(func=_cmd_finish_implementation)
 
     batch_compile_repair = subparsers.add_parser("start-batch-compile-repair")
     common(batch_compile_repair)
     batch_compile_repair.add_argument("--batch-id", required=True)
     batch_compile_repair.set_defaults(func=_cmd_start_batch_compile_repair)
+
+    task_repair = subparsers.add_parser("start-task-repair")
+    common(task_repair)
+    task_repair.add_argument("--prior-evidence-id", required=True)
+    task_repair.set_defaults(func=_cmd_start_task_repair)
 
     abort = subparsers.add_parser("abort")
     common(abort, needs_run=True)
@@ -3584,6 +3801,13 @@ def main(argv: list[str] | None = None) -> int:
     batch_compile.add_argument("--batch-id", required=True)
     batch_compile.add_argument("--code-workspace", required=True, action="append")
     batch_compile.set_defaults(func=_cmd_batch_compile)
+
+    revalidate_batch_compile = subparsers.add_parser("revalidate-batch-compile")
+    revalidate_batch_compile.add_argument("--workspace")
+    revalidate_batch_compile.add_argument("--feature")
+    revalidate_batch_compile.add_argument("--batch-id", required=True)
+    revalidate_batch_compile.add_argument("--code-workspace", required=True, action="append")
+    revalidate_batch_compile.set_defaults(func=_cmd_revalidate_batch_compile)
 
     args = parser.parse_args(argv)
     return args.func(args)
