@@ -179,6 +179,72 @@ python "${pluginPath}/hooks/task_runner.py" start-batch-compile-repair --feature
 
 不得让用户手工修改，不得自行执行 `mvn compile`、前端 build/typecheck 或其他旁路编译，也不得在 repair 中创建/修改测试或执行测试命令。每批最多 3 次编译 repair；达到上限后按 `escalate_batch_compile_repair_exhausted` 阻断，不得开启第 4 次或绕过状态。
 
+### 单任务修复协议
+
+当某个已完成的 TASK 需要修复时（例如回检发现问题），使用单任务修复流程。
+
+#### 通过 Claw 对话触发修复
+
+用户可以直接在对话中说明需要修复的任务，例如：
+
+```
+"我发现 T001 的实现有问题，需要修复一下"
+"T002 执行得不对，帮我重新修复"
+```
+
+收到修复请求后，你应该：
+
+1. **查看任务状态**：先读取 PLAN.md 或调用 `code-session` 确认任务状态
+2. **获取 evidence ID**：从计划中获取该任务的 `latestImplementationEvidenceId`
+3. **启动修复**：调用 `start-task-repair` 命令
+4. **修改代码**：根据问题描述修改相关代码
+5. **完成修复**：调用 `finish-implementation --repair-mode`
+6. **如需重新验证批次**：调用 `revalidate-batch-compile`
+
+示例对话流程：
+
+```
+用户: "T001 的用户登录逻辑有问题，验证码校验不正确"
+
+助手:
+1. 先查看 T001 的状态...
+2. 从计划中获取 latestImplementationEvidenceId: "ev-20240101-..."
+3. 启动任务修复...
+4. [修改代码]
+5. 完成修复并记录新的 evidence
+6. 修复完成！新的 evidence ID: "ev-20240101-..."
+```
+
+#### 命令行执行
+
+如果需要手动执行，使用以下命令：
+
+```bash
+# 1. 启动任务修复
+python "${pluginPath}/hooks/task_runner.py" start-task-repair --feature "${feature}" --task-id "<TASK_ID>" --prior-evidence-id "<PRIOR_EVIDENCE_ID>" --code-workspace "<BUSINESS_REPO>"
+```
+
+`--prior-evidence-id` 是该 TASK 的 `latestImplementationEvidenceId`（可从 PLAN.json 或 PLAN.md 中查看）。
+
+```bash
+# 2. 修复完成后
+python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --repair-mode
+```
+
+这会生成新的 implementation evidence，保留 `priorEvidenceId` 引用链，并自动更新计划中该 TASK 的 evidence 指针。
+
+**重要**：支持修复 status = "implemented" 或 "done" 的任务。修复后，如果原状态是 "done"，会自动恢复为 "done" 状态。
+
+### 批次重新验证
+
+当批次的所有 TASK 都已修复完成，需要重新验证整批编译：
+
+```bash
+python "${pluginPath}/hooks/task_runner.py" revalidate-batch-compile --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
+```
+
+此命令与 `batch-compile` 类似，但用于修复场景，会检查所有 TASK 的最新 evidence 并重新执行编译验证。
+
 ### 回检与交接
 
 本节完整协议由脚本渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。

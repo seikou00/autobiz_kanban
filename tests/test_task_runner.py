@@ -474,6 +474,65 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_revalidate_batch_compile_reruns_a_passed_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, code = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+
+            compile_counter = root / "compile-count.txt"
+            compile_script = (
+                "from pathlib import Path; "
+                f"counter = Path({str(compile_counter)!r}); "
+                "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1'); "
+                "print('batch compile')"
+            )
+            batch = _read_batch(feature_dir)
+            batch["batchValidation"]["commands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                compile_script,
+            ]
+            _write_batch(feature_dir, batch)
+            root_plan_path = feature_dir / "plan.json"
+            root_plan = json.loads(root_plan_path.read_text(encoding="utf-8"))
+            root_plan["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                compile_script,
+            ]
+            root_plan_path.write_text(
+                json.dumps(root_plan, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            first_compile = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertEqual(first_compile.returncode, 0, first_compile.stdout + first_compile.stderr)
+            self.assertEqual(compile_counter.read_text(encoding="utf-8"), "1")
+
+            revalidated = _run(
+                "revalidate-batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertEqual(revalidated.returncode, 0, revalidated.stdout + revalidated.stderr)
+            self.assertTrue(json.loads(revalidated.stdout)["wasRevalidation"])
+            self.assertEqual(compile_counter.read_text(encoding="utf-8"), "2")
+            revalidated_batch = _read_batch(feature_dir)
+            self.assertEqual(revalidated_batch["batchCompile"]["status"], "passed")
+            self.assertEqual(revalidated_batch["batchCompile"]["repairAttempts"], 0)
+
     def test_batch_compile_pass_stops_for_new_conversation_before_next_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))

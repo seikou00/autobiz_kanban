@@ -4534,6 +4534,53 @@ def update_batch_compile_status(
         return _write(workspace, feature, data)
 
 
+def reset_batch_compile_for_revalidation(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+) -> WriterResult:
+    """Reset a passed batch compile gate before running a fresh compile."""
+
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        if not defer_to_test_stages_enabled(data):
+            return fail("defer_to_test_stages_not_enabled", batch_id, path=_path(workspace, feature))
+
+        batch_plans = data.get("_batchPlans")
+        batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+        if not isinstance(batch_plan, dict):
+            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
+
+        batch_compile = batch_plan.get("batchCompile")
+        if not isinstance(batch_compile, dict):
+            return fail("batch_compile_not_initialized", batch_id, path=_path(workspace, feature))
+        if batch_compile.get("status") != "passed":
+            return fail(
+                "batch_compile_revalidation_requires_passed",
+                f"batch={batch_id};status={batch_compile.get('status')}",
+                path=_path(workspace, feature),
+            )
+
+        batch_compile.update(
+            {
+                "status": "pending",
+                "commandId": None,
+                "output": None,
+                "failureCategory": None,
+                "diagnosticPaths": [],
+                "repairOwnerTaskIds": [],
+                "repairTaskId": None,
+                "repairAttempts": 0,
+                "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
+                "requestedCodeWorkspaces": [],
+                "workspaceSnapshotSha256": None,
+                "implementationEvidenceByTask": {},
+                "implementationRevisionByTask": {},
+            }
+        )
+        return _write(workspace, feature, data)
+
+
 def begin_batch_compile_repair(
     workspace: Path,
     feature: str,
@@ -4750,6 +4797,40 @@ def mark_batch_tasks_done_after_compile(
 
 
 
+
+
+def update_task_evidence_only(
+    workspace: Path,
+    feature: str,
+    task_id: str,
+    evidence_id: str,
+    *,
+    expected_task_contract_sha256: str,
+) -> WriterResult:
+    """仅更新任务的 evidence 记录，不改变 status 和其他状态。用于 repair 模式追加新证据。"""
+
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        task = _find_task(data, task_id)
+        if task_contract_sha256(task) != expected_task_contract_sha256:
+            return fail("task_contract_changed_after_start", task_id, path=_path(workspace, feature))
+
+        # 只更新 evidenceIds 和 implementationEvidenceIds，不改变其他状态
+        task["evidenceIds"] = _append_unique(
+            task.get("evidenceIds") if isinstance(task.get("evidenceIds"), list) else [],
+            [evidence_id],
+        )
+        task["implementationEvidenceIds"] = _append_unique(
+            task.get("implementationEvidenceIds")
+            if isinstance(task.get("implementationEvidenceIds"), list)
+            else [],
+            [evidence_id],
+        )
+        # 不更新 latestImplementationEvidenceId，保持原有的
+        # 不更新 implementationRevision
+        # 不改变 status
+
+        return _write(workspace, feature, data)
 
 
 def activate_batch(workspace: Path, feature: str, batch_id: str) -> WriterResult:
