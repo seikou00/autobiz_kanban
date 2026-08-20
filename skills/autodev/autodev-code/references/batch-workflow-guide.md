@@ -88,11 +88,15 @@ Workflow 自动在以下情况启用：
 
 ```bash
 # 1. 判断是否使用 workflow
-python "${pluginPath}/hooks/workflow_launcher.py" --feature "${feature}" --json
+python "${pluginPath}/hooks/workflow_launcher.py" \
+  --feature "${feature}" \
+  --plugin-path "${pluginPath}" \
+  --workspace "${pluginWorkspace}/${projectDir}" \
+  --json
 
 # 2. 根据返回的 useWorkflow 决定执行路径
 # - useWorkflow: true → 启动 workflow
-# - useWorkflow: false → 使用原有串行流程
+# - useWorkflow: false → 仅单 Batch 使用 `code-session`；多 Batch 校验失败必须回流 Plan
 ```
 
 ### 方式 2: 手动启动
@@ -105,6 +109,7 @@ python "${pluginPath}/hooks/workflow_launcher.py" --feature "${feature}" --json
 # args: {
 #   feature: "feat-xxx",
 #   pluginPath: "...",
+#   artifactWorkspace: "${pluginWorkspace}/${projectDir}",
 #   codeWorkspaces: {
 #     "backend-api": "/repo/services/api",
 #     "frontend-app": "/repo/apps/web"
@@ -206,7 +211,7 @@ yarn typecheck   # 类型检查
 
 ### 冲突预防与自动解决
 
-Plan 启用 `parallelPolicy` 后，每个 Task 必须声明 `touches`：`code` 表示普通实现文件，`shared` 表示入口/装配等共享文件，`proto` 表示协议与桩代码，`database` 表示迁移/Schema，`configuration` 表示运行时或部署配置。
+Plan 默认开启 `parallelPolicy`，每个 Task 必须声明 `touches`：`code` 表示普通实现文件，`shared` 表示入口/装配等共享文件，`proto` 表示协议与桩代码，`database` 表示迁移/Schema，`configuration` 表示运行时或部署配置。
 
 - 普通 `code` touches 重叠只产生 planner warning，应该回到 task-planner 拆分隔离；执行仍可并行。
 - `shared` 只能由单个 integration Batch 在收口阶段修改，并等待同仓库普通 Batch 完成。
@@ -339,7 +344,11 @@ B003: 等待 B001 合并后启动
 
 **排查**：
 ```bash
-python hooks/workflow_launcher.py --feature "feat-xxx" --json
+python hooks/workflow_launcher.py \
+  --feature "feat-xxx" \
+  --plugin-path "/path/to/plugin" \
+  --workspace "/path/to/artifacts/project" \
+  --json
 ```
 
 **可能原因**：

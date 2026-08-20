@@ -40,6 +40,7 @@ echo "检查是否需要使用 Workflow 并行执行..."
 launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
   --feature "${feature}" \
   --plugin-path "${pluginPath}" \
+  --workspace "${pluginWorkspace}/${projectDir}" \
   --json)
 
 useWorkflow=$(echo "$launcher_result" | jq -r '.useWorkflow')
@@ -50,7 +51,11 @@ if [ "$useWorkflow" = "true" ]; then
 
   # 使用 Workflow 工具启动并行执行
   # scriptPath: workflows/code-batched-execution.workflow.js
-  # args: { feature: "${feature}", pluginPath: "${pluginPath}" }
+  # args: {
+  #   feature: "${feature}",
+  #   pluginPath: "${pluginPath}",
+  #   artifactWorkspace: "${pluginWorkspace}/${projectDir}"
+  # }
 
   # 等待 Workflow 完成...
 
@@ -185,7 +190,11 @@ fi
 python tests/test_code_workflow_integration.py
 
 # 测试单个组件
-python hooks/workflow_launcher.py --feature "test-feat" --json
+python hooks/workflow_launcher.py \
+  --feature "test-feat" \
+  --plugin-path "/path/to/plugin" \
+  --workspace "/path/to/artifacts/project" \
+  --json
 python hooks/worktree_manager.py --json list --repo .
 python hooks/batch_merger.py --json detect-conflicts --batches '[...]'
 ```

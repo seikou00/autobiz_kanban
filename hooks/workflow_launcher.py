@@ -17,13 +17,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.json_writer_common import feature_dir  # noqa: E402
+from hooks.json_writer_common import feature_dir, resolve_workspace  # noqa: E402
 from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E402
 from hooks.parallel_runtime import batch_workspace_ref, plan_digest  # noqa: E402
 from hooks.plan_json import BATCH_ID_RE, load_plan_bundle, plan_json_path  # noqa: E402
 
 
-def analyze_batches(feature: str, plugin_path: Path | None = None) -> dict:
+def analyze_batches(
+    feature: str,
+    plugin_path: Path | None = None,
+    workspace: Path | None = None,
+) -> dict:
     """分析 feature 的 batch 结构，决定执行策略。
 
     Returns:
@@ -37,11 +41,9 @@ def analyze_batches(feature: str, plugin_path: Path | None = None) -> dict:
         }
     """
     try:
-        if plugin_path is None:
-            plugin_path = ROOT
-
-        workspace = plugin_path
-        feat_dir = feature_dir(workspace, feature)
+        script_root = (plugin_path or ROOT).expanduser().resolve()
+        artifact_workspace = resolve_workspace(workspace)
+        feat_dir = feature_dir(artifact_workspace, feature)
         plan_path = plan_json_path(feat_dir)
 
         if not plan_path.exists():
@@ -106,7 +108,7 @@ def analyze_batches(feature: str, plugin_path: Path | None = None) -> dict:
                 "reason": "single_batch_use_serial"
             }
 
-        validation = validate_plan_for_parallel(workspace, feature)
+        validation = validate_plan_for_parallel(artifact_workspace, feature)
         if not validation.get("canParallel"):
             return {
                 "useWorkflow": False,
@@ -120,7 +122,7 @@ def analyze_batches(feature: str, plugin_path: Path | None = None) -> dict:
             }
 
         # 多 Batch：启用 Workflow
-        workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+        workflow_script = script_root / "workflows" / "code-batched-execution.workflow.js"
 
         return {
             "useWorkflow": True,
@@ -128,6 +130,7 @@ def analyze_batches(feature: str, plugin_path: Path | None = None) -> dict:
             "batchCount": batch_count,
             "batches": valid_batches,
             "workflowScript": str(workflow_script),
+            "artifactWorkspace": str(artifact_workspace),
             "reason": f"multiple_batches_use_workflow:{batch_count}",
             "planDigest": plan_digest(bundle),
             "validation": validation,
@@ -147,13 +150,18 @@ def analyze_batches(feature: str, plugin_path: Path | None = None) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="判断是否使用 Workflow 并行执行 Code Batch")
     parser.add_argument("--feature", required=True, help="Feature ID")
-    parser.add_argument("--plugin-path", help="Plugin 路径（默认为当前项目根目录）")
+    parser.add_argument("--plugin-path", help="插件源码路径（用于加载 hooks/workflows，默认为当前项目根目录）")
+    parser.add_argument(
+        "--workspace",
+        help="产物 workspace（包含 .autobizdevops/state.json）；默认由 PLUGIN_WORKSPACE/PROJECT_DIR 推导",
+    )
     parser.add_argument("--json", action="store_true", help="输出 JSON 格式")
 
     args = parser.parse_args()
 
     plugin_path = Path(args.plugin_path) if args.plugin_path else None
-    result = analyze_batches(args.feature, plugin_path)
+    workspace = Path(args.workspace) if args.workspace else None
+    result = analyze_batches(args.feature, plugin_path, workspace)
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

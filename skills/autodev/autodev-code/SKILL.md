@@ -354,11 +354,17 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 
 ```bash
 launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
-  --feature "${feature}" --plugin-path "${pluginPath}" --json)
+  --feature "${feature}" \
+  --plugin-path "${pluginPath}" \
+  --workspace "${pluginWorkspace}/${projectDir}" \
+  --json)
 useWorkflow=$(printf '%s' "$launcher_result" | jq -r '.useWorkflow')
+artifactWorkspace=$(printf '%s' "$launcher_result" | jq -r '.artifactWorkspace // empty')
 ```
 
 只有 `useWorkflow=true` 且校验结果为 `parallel_plan_valid` 才能启动 `workflows/code-batched-execution.workflow.js`。多个待执行 Batch 返回 `useWorkflow=false` 时表示 Plan 不可并行，必须回流 `/autodev-plan` 修复 `deps`、`touches` 或 workspace 契约，禁止继续使用串行流程；只有单 Batch 可使用 `code-session`。
+
+启动 Workflow 时必须同时传入 `pluginPath` 和 launcher 返回的 `artifactWorkspace`：前者只用于加载插件脚本，后者用于 `plan.json`、scheduler manifest、合并和最终验证。
 
 并行实现阶段使用 `isolation: "worktree"`，并且必须遵守：
 

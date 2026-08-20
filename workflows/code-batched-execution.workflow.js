@@ -53,6 +53,7 @@ const VERIFICATION_SCHEMA = {
 phase("准备");
 const feature = args.feature;
 const pluginPath = args.pluginPath || process.env.PLUGIN_PATH;
+const artifactWorkspace = args.artifactWorkspace;
 const maxParallel = Number.isInteger(args.maxParallel) && args.maxParallel > 0
   ? args.maxParallel
   : MAX_PARALLEL_BATCHES;
@@ -60,8 +61,8 @@ const timeoutPerBatch = Number.isInteger(args.timeoutPerBatch) && args.timeoutPe
   ? args.timeoutPerBatch
   : 3600;
 const codeWorkspaces = args.codeWorkspaces || (args.codeWorkspace ? { default: args.codeWorkspace } : null);
-if (!feature || !pluginPath || !codeWorkspaces || typeof codeWorkspaces !== "object") {
-  return { error: "missing_feature_plugin_path_or_code_workspaces" };
+if (!feature || !pluginPath || !artifactWorkspace || !codeWorkspaces || typeof codeWorkspaces !== "object") {
+  return { error: "missing_feature_plugin_path_artifact_workspace_or_code_workspaces" };
 }
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
   .map(([workspaceRef, path]) => `--code-workspace "${workspaceRef}=${path}"`)
@@ -70,8 +71,8 @@ const codeWorkspaceArgs = Object.entries(codeWorkspaces)
 // The launcher has already performed this validation.  The preparation agent
 // creates the durable manifest and is required to fail closed on drift.
 const preparation = await agent(
-  `准备并行 Code run。Feature=${feature}，workspace=${pluginPath}。` +
-  `执行 python hooks/parallel_batch_scheduler.py create --workspace "${pluginPath}" --feature "${feature}" ` +
+  `准备并行 Code run。Feature=${feature}，插件路径=${pluginPath}，产物 workspace=${artifactWorkspace}。` +
+  `执行 python "${pluginPath}/hooks/parallel_batch_scheduler.py" create --workspace "${artifactWorkspace}" --feature "${feature}" ` +
   `--max-parallel ${maxParallel} --timeout-seconds ${timeoutPerBatch} ${codeWorkspaceArgs}。` +
   `返回 runId、readyBatches、scheduledGroups、batchWorkspaces；不要修改业务文件。`,
   { label: "parallel-run-prepare", phase: "准备", schema: { type: "object" } }
@@ -97,12 +98,12 @@ while (scheduledGroups.length) {
   const executions = scheduledGroups.map(([batchId]) => ({ batchId, runId }));
   const waveResults = await pipeline(executions, async execution => {
     return agent(
-      `执行唯一 Batch ${execution.batchId}。Feature=${feature}，runId=${execution.runId}，artifact workspace=${pluginPath}。` +
+      `执行唯一 Batch ${execution.batchId}。Feature=${feature}，runId=${execution.runId}，插件路径=${pluginPath}，artifact workspace=${artifactWorkspace}。` +
       `从 manifest.batchWorkspaces 读取该 batch 的 workspaceRef、组件根目录和业务仓库，禁止选择其他仓库。\n` +
       `先获取 lease，再创建并行 worktree。在 worktree 中执行本 batch 的 task_runner start、finish-implementation、batch-compile，` +
       `所有调用携带 --parallel-run-id ${execution.runId} 和 lease token。\n` +
-      `batch-compile 成功会自动回写 ready_to_merge；随后调用 hooks/worktree_manager.py seal 提交该 worktree。` +
-      `失败时调用 scheduler mark-batch failed；最后用 batch_lease_manager.py release --final-status ready_to_merge 释放 lease。` +
+      `batch-compile 成功会自动回写 ready_to_merge；随后调用 "${pluginPath}/hooks/worktree_manager.py" seal 提交该 worktree。` +
+      `失败时调用 "${pluginPath}/hooks/parallel_batch_scheduler.py" mark-batch failed；最后用 "${pluginPath}/hooks/batch_lease_manager.py" release --final-status ready_to_merge 释放 lease。` +
       `不要修改主工作区、不要解决冲突、不要删除 worktree。`,
       { label: `batch-${execution.batchId}`, phase: "并行实现", schema: BATCH_EXECUTION_SCHEMA }
     );
@@ -115,7 +116,7 @@ while (scheduledGroups.length) {
 
   phase("顺序合并");
   const mergeResult = await agent(
-    `只执行确定性合并，不进行人工改写。执行 python hooks/batch_merger.py --workspace "${pluginPath}" ` +
+    `只执行确定性合并，不进行人工改写。执行 python "${pluginPath}/hooks/batch_merger.py" --workspace "${artifactWorkspace}" ` +
     `--feature "${feature}" --run-id "${runId}"。合并器必须从 manifest 对每个 batch 选择绑定的 Git 根。` +
     `主工作区变化、planDigest 漂移或 Git 冲突时立即停止；禁止 --ours、--theirs 和手动编辑冲突文件。`,
     { label: "merge-batches", phase: "顺序合并", schema: MERGE_RESULT_SCHEMA }
@@ -131,7 +132,7 @@ while (scheduledGroups.length) {
       `同时阅读该 Batch 与冲突来源 Batch 的 goal、touches、implementation Evidence 和提交 diff。` +
       `只解决 Git 标记的冲突文件及实现所必需的适配；禁止使用 git checkout --ours/--theirs、git merge -s ours、--no-verify、删除一侧变更或直接改主工作区。` +
       `按两个 Batch 的业务目标保留兼容行为，解决后运行该 Batch 的 required compile 命令。` +
-      `然后执行 python hooks/parallel_conflict_resolver.py complete --workspace "${pluginPath}" --feature "${feature}" --run-id "${runId}" --batch-id "${item.batchId}"，` +
+      `然后执行 python "${pluginPath}/hooks/parallel_conflict_resolver.py" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${item.batchId}"，` +
       `返回冲突文件、解决理由、验证输出摘要和 resolutionCommitSha。`,
       { label: `resolve-conflict-${item.batchId}`, phase: "顺序合并", schema: { type: "object" } }
     ));
@@ -142,7 +143,7 @@ while (scheduledGroups.length) {
         return { error: "conflict_resolution_failed", runId, mergeResult, resolutionResults, batchResults };
       }
       const mergedResolution = await agent(
-        `执行 python hooks/parallel_conflict_resolver.py merge --workspace "${pluginPath}" --feature "${feature}" --run-id "${runId}" --batch-id "${item.batchId}"。` +
+        `执行 python "${pluginPath}/hooks/parallel_conflict_resolver.py" merge --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${item.batchId}"。` +
         `只允许把已完成并已验证的 resolution 分支合并到对应 repositoryRef 的 Git 根。`,
         { label: `merge-resolution-${item.batchId}`, phase: "顺序合并", schema: MERGE_RESULT_SCHEMA }
       );
@@ -157,7 +158,7 @@ while (scheduledGroups.length) {
   }
 
   const resumed = await agent(
-    `执行 python hooks/parallel_batch_scheduler.py resume --workspace "${pluginPath}" --feature "${feature}" --run-id "${runId}"，返回 scheduledGroups 和 status。`,
+    `执行 python "${pluginPath}/hooks/parallel_batch_scheduler.py" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"，返回 scheduledGroups 和 status。`,
     { label: "schedule-next-wave", phase: "准备", schema: { type: "object" } }
   );
   scheduledGroups = resumed?.scheduledGroups || [];
@@ -168,7 +169,7 @@ while (scheduledGroups.length) {
 
 phase("最终验证");
 const verification = await agent(
-  `执行 python hooks/parallel_final_verify.py --workspace "${pluginPath}" --feature "${feature}" ` +
+  `执行 python "${pluginPath}/hooks/parallel_final_verify.py" --workspace "${artifactWorkspace}" --feature "${feature}" ` +
   `--run-id "${runId}"。它会在 manifest 绑定的每个仓库中执行对应组件的编译门禁；不运行 UTest，失败必须阻断 run。`,
   { label: "verify-merged", phase: "最终验证", schema: VERIFICATION_SCHEMA }
 );

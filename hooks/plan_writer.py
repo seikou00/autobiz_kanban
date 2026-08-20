@@ -219,6 +219,11 @@ DEFAULT_TASK_VALIDATION_POLICY = {
     "codeGate": "batch_compile_only",
     "maxTestStageRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
 }
+DEFAULT_PARALLEL_POLICY = {
+    "enabled": True,
+    "has_pb_change": False,
+    "global_change_confirmations": {},
+}
 DRAFT_BUNDLE_COMMANDS = {
     "prepare-task-draft",
     "import-task-directory",
@@ -484,11 +489,7 @@ def _initial(feature: str) -> dict[str, Any]:
         "nextBatchId": None,
         "batchPolicy": {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY},
         "taskValidationPolicy": copy.deepcopy(DEFAULT_TASK_VALIDATION_POLICY),
-        "parallelPolicy": {
-            "enabled": False,
-            "has_pb_change": False,
-            "global_change_confirmations": {},
-        },
+        "parallelPolicy": copy.deepcopy(DEFAULT_PARALLEL_POLICY),
         "batches": [],
         "batchValidationProfiles": {},
         "projectValidationCommands": [],
@@ -523,11 +524,7 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     data.setdefault("activeBatchId", None)
     data.setdefault("nextBatchId", None)
     data.setdefault("batchPolicy", {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY})
-    data.setdefault("parallelPolicy", {
-        "enabled": False,
-        "has_pb_change": False,
-        "global_change_confirmations": {},
-    })
+    data.setdefault("parallelPolicy", copy.deepcopy(DEFAULT_PARALLEL_POLICY))
     data.setdefault("batches", [])
     data.setdefault("batchValidationProfiles", {})
     data.setdefault("projectValidationCommands", [])
@@ -1132,7 +1129,10 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     for task in tasks_view:
         task_id = str(task.get("id", ""))
         task_stage, stage_errors, _ = task_execution_stage(task)
-        if stage_errors and parallel_enabled:
+        # Draft skeletons intentionally have no touches until their detail is
+        # supplied.  Defer only that incomplete-draft state; malformed
+        # declarations are rejected immediately.
+        if stage_errors and parallel_enabled and task.get("touches") not in (None, []):
             raise PlanWriterInputError("invalid_task_touches", task_id)
         task_stage = task_stage or "parallel"
         batch_id = assignments.get(task_id)
@@ -1378,7 +1378,11 @@ def _write(
         return WriterResult(ok=False, path=path, errors=errors)
     root, batch_plans = _project_batches(data)
     if batch_plans:
-        errors = validate_plan_bundle_data(root, batch_plans)
+        errors = validate_plan_bundle_data(
+            root,
+            batch_plans,
+            require_parallel_touches=data.get("taskSetStatus") == "finalized",
+        )
         if errors:
             return WriterResult(ok=False, path=path, errors=[{"reason": error} for error in errors])
     changed = False

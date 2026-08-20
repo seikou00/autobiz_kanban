@@ -745,6 +745,8 @@ def validate_plan_data(
         else:
             if not isinstance(parallel_policy.get("enabled"), bool):
                 errors.append("parallelPolicy.enabled_must_be_bool")
+            elif parallel_policy.get("enabled") is not True and data.get("taskSetStatus") == "finalized":
+                errors.append("parallelPolicy.enabled_must_be_true")
             if parallel_policy.get("enabled") is True:
                 if not isinstance(parallel_policy.get("has_pb_change"), bool):
                     errors.append("parallelPolicy.has_pb_change_must_be_bool")
@@ -2058,6 +2060,7 @@ def validate_plan_bundle_data(
     require_initial_status: bool = False,
     require_all_done: bool = False,
     require_backend_compile: bool = False,
+    require_parallel_touches: bool = True,
 ) -> list[str]:
     errors = validate_plan_data(
         root,
@@ -2076,7 +2079,7 @@ def validate_plan_bundle_data(
     if scope_errors:
         return scope_errors
     parallel_policy = root.get("parallelPolicy")
-    if isinstance(parallel_policy, dict) and parallel_policy.get("enabled") is True:
+    if require_parallel_touches and isinstance(parallel_policy, dict) and parallel_policy.get("enabled") is True:
         for batch_id, batch in batch_data.items():
             for task in tasks(batch):
                 if not isinstance(task, dict):

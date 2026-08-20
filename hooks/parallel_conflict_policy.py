@@ -105,9 +105,8 @@ def analyze_parallel_conflict_policy(
 ) -> dict[str, Any]:
     """Return policy edges, stages, warnings and validation errors.
 
-    The policy is enabled only for plans that explicitly opt in.  This keeps
-    established feature artifacts backward compatible while new planner output
-    gains a strict, machine-verifiable contract.
+    New plans enable this contract by default; the scheduler uses the declared
+    dependency DAG and this contract to validate every parallel run.
     """
     raw_policy = bundle.root.get("parallelPolicy")
     if not isinstance(raw_policy, dict) or raw_policy.get("enabled") is not True:

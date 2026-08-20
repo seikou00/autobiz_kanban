@@ -99,6 +99,8 @@ Task 通过 `touches=[{path,kind}]` 声明文件触点。普通 `code` 重叠只
 
 **功能**：分析 feature 的 batch 结构，决定使用串行还是并行。
 
+路径边界：`--plugin-path` 只定位插件内的 hooks/workflow；`--workspace` 必须是包含 `.autobizdevops/state.json` 的产物目录。业务代码目录不传给 launcher，而是在启动 Workflow 时通过 `codeWorkspaces` 按 `workspaceRef` 传入。
+
 **判断逻辑**：
 ```python
 if batch_count == 0:
@@ -111,7 +113,11 @@ else:
 
 **使用方式**：
 ```bash
-python hooks/workflow_launcher.py --feature "feat-user-auth" --json
+python hooks/workflow_launcher.py \
+  --feature "feat-user-auth" \
+  --plugin-path "/path/to/plugin" \
+  --workspace "/path/to/artifacts/project" \
+  --json
 ```
 
 **输出示例**：
@@ -272,7 +278,7 @@ const batchResults = await pipeline(
 1. /autodev-code 入口
    ↓
 2. 判断执行模式
-   python workflow_launcher.py --feature "feat-xxx"
+   python workflow_launcher.py --feature "feat-xxx" --plugin-path "/path/to/plugin" --workspace "/path/to/artifacts/project"
    ↓
    ├─ useWorkflow: false → 串行流程（原有）
    └─ useWorkflow: true  → 启动 workflow
@@ -427,6 +433,8 @@ git worktree remove .worktrees/feat-user-auth-B003 --force
 launcher_result = subprocess.run([
     "python", f"{pluginPath}/hooks/workflow_launcher.py",
     "--feature", feature,
+    "--plugin-path", pluginPath,
+    "--workspace", artifactWorkspace,
     "--json"
 ], capture_output=True, text=True)
 
@@ -438,7 +446,9 @@ if launcher_result.returncode == 0:
         # (使用 Workflow 工具)
         workflow_args = {
             "feature": feature,
-            "pluginPath": pluginPath
+            "pluginPath": pluginPath,
+            "artifactWorkspace": artifactWorkspace,
+            "codeWorkspaces": codeWorkspaces,
         }
         # Workflow 工具调用...
         return
@@ -516,14 +526,14 @@ Code Workflow 集成测试
 **场景 1：单 Batch**
 ```bash
 # 预期：使用串行流程
-python hooks/workflow_launcher.py --feature "feat-single-batch" --json
+python hooks/workflow_launcher.py --feature "feat-single-batch" --plugin-path "/path/to/plugin" --workspace "/path/to/artifacts/project" --json
 # 输出: {"useWorkflow": false, "reason": "single_batch_use_serial"}
 ```
 
 **场景 2：多 Batch**
 ```bash
 # 预期：启用 workflow
-python hooks/workflow_launcher.py --feature "feat-multi-batch" --json
+python hooks/workflow_launcher.py --feature "feat-multi-batch" --plugin-path "/path/to/plugin" --workspace "/path/to/artifacts/project" --json
 # 输出: {"useWorkflow": true, "batchCount": 3}
 ```
 
@@ -578,7 +588,7 @@ python hooks/batch_merger.py sequential-merge \
 **问题 1：Workflow 未启动**
 ```bash
 # 检查判断逻辑
-python hooks/workflow_launcher.py --feature "feat-xxx" --json
+python hooks/workflow_launcher.py --feature "feat-xxx" --plugin-path "/path/to/plugin" --workspace "/path/to/artifacts/project" --json
 
 # 查看 batch 状态
 cat .autobizdevops/features/feat-xxx/plan.json | jq '.batches'

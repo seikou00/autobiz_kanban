@@ -468,7 +468,11 @@ if parallel_run_id:
 **建议**: 在 SKILL.md 中添加明确的入口逻辑
 ```bash
 # 检查是否使用 Workflow
-launcher=$(python hooks/workflow_launcher.py --feature "$feature" --json)
+launcher=$(python hooks/workflow_launcher.py \
+  --feature "$feature" \
+  --plugin-path "$pluginPath" \
+  --workspace "$artifactWorkspace" \
+  --json)
 useWorkflow=$(echo "$launcher" | jq -r '.useWorkflow')
 
 if [ "$useWorkflow" = "true" ]; then

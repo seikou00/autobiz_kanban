@@ -322,7 +322,7 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${fe
 python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
-正式 Bundle 发布后，在进入 Code 前启用并行冲突策略。普通多 Batch Feature 即使没有 Proto/DB/配置变更也必须显式声明 `false`；这会要求每个 task 都有 `touches`。缺失或非法时 `/autodev-code` 必须阻断并回流 Plan 修复，禁止安全回退为串行。存在协议、迁移或全局配置时，先拆出专属 Batch 并确认其 owner，再写入策略：
+Plan 默认开启 `parallelPolicy`。正式 Bundle 发布后，多个无未完成依赖的 Batch 会由 scheduler 并行执行；每个 task 都必须声明 `touches`，缺失或非法时 `/autodev-code` 必须阻断并回流 Plan 修复，禁止安全回退为串行。存在协议、迁移或全局配置时，先拆出专属 Batch 并确认其 owner，再补充策略：
 
 ```bash
 # 无 Proto/DB/配置全局变更

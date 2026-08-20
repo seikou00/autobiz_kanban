@@ -39,10 +39,22 @@ tests/
 
 ## 🚀 快速开始
 
-### 1. 判断是否使用 Workflow
+### 1. 三类目录边界
+
+- `pluginPath`：插件源码目录，只用于加载 `hooks/` 和 `workflows/`。
+- `artifactWorkspace`：产物目录，必须包含 `.autobizdevops/state.json`，存放 Feature 的 `plan.json`、运行状态和 manifest。
+- `codeWorkspaces`：业务代码 Git 仓库或组件目录，调度器据此创建 worktree 并合并代码。
+
+这三个目录必须分别传入，不能用插件目录代替产物目录，也不能用产物目录代替业务代码目录。
+
+### 2. 判断是否使用 Workflow
 
 ```bash
-python hooks/workflow_launcher.py --feature "feat-xxx" --json
+python hooks/workflow_launcher.py \
+  --feature "feat-xxx" \
+  --plugin-path "/path/to/autobiz_kanban" \
+  --workspace "/path/to/artifacts/project" \
+  --json
 ```
 
 **输出示例**：
@@ -56,11 +68,12 @@ python hooks/workflow_launcher.py --feature "feat-xxx" --json
     {"id": "B002", "lane": "frontend", "taskCount": 3},
     {"id": "B003", "lane": "backend", "taskCount": 2}
   ],
-  "workflowScript": "workflows/code-batched-execution.workflow.js"
+  "workflowScript": "workflows/code-batched-execution.workflow.js",
+  "artifactWorkspace": "/path/to/artifacts/project"
 }
 ```
 
-### 2. 启动 Workflow（多 Batch、多仓库）
+### 3. 启动 Workflow（多 Batch、多仓库）
 
 在 `/autodev-code` 技能中调用 Workflow 工具：
 
@@ -70,6 +83,7 @@ scriptPath: "workflows/code-batched-execution.workflow.js"
 args: {
   feature: "feat-xxx",
   pluginPath: "/path/to/autobiz_kanban",
+  artifactWorkspace: "/path/to/artifacts/project",
   codeWorkspaces: {
     "backend-api": "/repo/services/api",
     "frontend-app": "/repo/apps/web"
@@ -77,7 +91,7 @@ args: {
 }
 ```
 
-### 3. 单 Batch 自动降级
+### 4. 单 Batch 自动降级
 
 当只有 1 个 batch 时，自动使用原有串行流程，无需修改。
 
@@ -141,8 +155,12 @@ args: {
 
 ### Workflow Launcher
 ```bash
-# 判断是否使用 workflow
-python hooks/workflow_launcher.py --feature "feat-xxx" --json
+# 判断是否使用 workflow；--workspace 是产物目录，不是插件目录或代码目录
+python hooks/workflow_launcher.py \
+  --feature "feat-xxx" \
+  --plugin-path "/path/to/plugin" \
+  --workspace "/path/to/artifacts/project" \
+  --json
 ```
 
 ### Worktree Manager
@@ -188,7 +206,10 @@ python hooks/batch_merger.py --json sequential-merge \
 ```bash
 # 判断执行模式
 launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
-  --feature "${feature}" --json)
+  --feature "${feature}" \
+  --plugin-path "${pluginPath}" \
+  --workspace "${pluginWorkspace}/${projectDir}" \
+  --json)
 
 useWorkflow=$(echo "$launcher_result" | jq -r '.useWorkflow')
 
