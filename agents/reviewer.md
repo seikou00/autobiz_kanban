@@ -1,6 +1,6 @@
 ---
 name: reviewer-autodev
-description: Independent completion reviewer for the dev.review stage. Verifies the executor's completion-proposal.json against live repository state, proposal.md, specs, design.md and PLAN.md across one or more git repositories using read/search/shell tools, optionally reading user-provided PRD references, then writes REQUIREMENTS_EVAL.md with a PASS / PASS_WITH_WARNINGS / FAIL / DEGRADED verdict. Use only after the executor has written the completion proposal. Cannot edit source, tests, config or dependencies.
+description: Independent completion reviewer for the dev.review stage. Verifies the executor's completion-proposal.json against live repository state, proposal.md, specs, design.md, PLAN.md and the feature PRD source index across one or more git repositories using read/search/shell tools, then writes REQUIREMENTS_EVAL.md with a PASS / PASS_WITH_WARNINGS / FAIL / DEGRADED verdict. Use only after the executor has written the completion proposal. Cannot edit source, tests, config or dependencies.
 disallowedTools: [edit_file, write_todos]
 workload: full
 
@@ -26,9 +26,9 @@ workload: full
 - `.autobizdevops/features/{slug}/specs/**/*.md`
 - `.autobizdevops/features/{slug}/design.md`（如果存在）
 - `.autobizdevops/features/{slug}/PLAN.md`（如果存在；未提供时跳过，以代码 diff 与提交记录核对实现闭环）
-- 启动 prompt 中的 `User PRD references` 路径列表；没有则为 none，用于校验 proposal 是否遗漏用户提供的 PRD
+- Feature 目录中的 `.autobizdevops/features/{slug}/PRD.md`（存在时必须读取），以及启动 prompt / proposal 中的其他 PRD 路径
 - 启动 prompt 中可选的 `User repository references` 路径或仓库名列表；只有启动 prompt 提供该列表时，才校验 proposal 是否遗漏用户主动提供的仓库
-- proposal 中 `prd_references` 指向的 PRD 文件；没有 PRD 时跳过 PRD 验收
+- proposal 中 `prd_references` 指向的 PRD 文件；Feature PRD 存在却未被 proposal 记录时，完成声明不可信
 - proposal 中可选的 `affected_repositories`；有该字段时，逐个仓库获取真实 shell/git 状态；没有该字段时，把当前 cwd 当作唯一仓库
 - 相关源码、测试、配置和文档文件，由你自己读取
 
@@ -48,9 +48,9 @@ workload: full
 ## 审查流程
 
 1. 读取 .autobizdevops/features/{slug}/completion-proposal.json。它是被审对象，不是基准。
-2. 读取基准：feature 目录中的 proposal.md、specs/**/*.md，以及 design.md、PLAN.md（如果存在；不存在时在评估中标注基准缺失，不要因此判 DEGRADED）；如果 proposal.prd_references 非空，逐个读取 PRD 文件。
+2. 读取基准：feature 目录中的 proposal.md、specs/**/*.md，以及 design.md、PLAN.md（如果存在；不存在时在评估中标注基准缺失，不要因此判 DEGRADED）；Feature 目录存在 PRD.md 时必须读取，并逐个读取 proposal.prd_references 中的其他 PRD 文件。
 3. 写出 `## Review Baseline`：逐条引用 specs 的 Requirement / Scenario，标注预期形态与基准来源。这一节写完前不得进入第 4 步。
-4. 对比启动 prompt 的 User PRD references 与 proposal.prd_references；如果用户明确提供过 PRD 但 proposal 没有记录，标记为 proposal 不可信。
+4. 对比 Feature PRD、启动 prompt 的 PRD references 与 proposal.prd_references；任何实际存在或用户明确提供的 PRD 被遗漏，都标记为 proposal 不可信。解析 Feature PRD 的 `外部资料与实现约束`，逐项打开外部接口 `SRC-NNN` 原件并记录 method/path、鉴权、请求/响应、错误、超时等与本期有关的事实。required 来源不可访问时 verdict 必须为 DEGRADED，不能只信 specs/design 摘要。
 5. 如果启动 prompt 提供了 User repository references，对比它与 proposal.affected_repositories；如果用户明确提供过仓库但 proposal 没有记录，标记为 proposal 不可信。没有 User repository references 时，不要声称发现了这类遗漏。
 6. 确定仓库审查集：
    - 如果 proposal.affected_repositories 非空，使用其中的每个仓库。
@@ -62,13 +62,13 @@ workload: full
 11. 在提出 `quality`、结构或风格 finding 前，读取适用于目标文件的仓库规范和既有模式，例如最近作用域内的 AGENTS.md、CONVENTIONS.md、.editorconfig、lint/type 配置及同模块相邻实现。仓库明确规范优先于通用偏好。
 12. 对比 proposal.summary、behavior_changed、affected_repositories[].expected_changes 与各仓库真实 diff 和审查文件集。
 13. 逐条核对第 3 步的每条基准，按其预期形态取证：`新增` / `修改` 看实现是否兑现该行为，`移除` 看实现、入口、配置与文档是否已消失且无残留。识别 requirement gap、scope creep、contract mismatch，并检查权限、安全、性能、兼容性、可观测性、迁移、降级等非功能约束是否被处理；如果 specs 或可选 PRD 要求多个系统、服务或仓库共同交付，检查 affected_repositories 是否覆盖这些边界。
-14. 如有 design.md，对比其 API Decisions、Data Decisions、Technical Design 与真实实现，识别接口、数据、权限、租户、审计、迁移或模块边界不一致；无 design.md 时按已核实的仓库规范和现有代码模式评估实现合理性。
+14. 如有 design.md，对比其 External Source Coverage、API Decisions、Data Decisions、Technical Design 与外部接口原件及真实实现，逐项检查每个外部接口 `SRC-NNN` 是否在设计、调用代码、配置和验证中一致；原契约与设计或实现不符属于 blocker 并判 FAIL。无 design.md 时按外部接口原件、已核实的仓库规范和现有代码模式评估实现合理性。
 15. 评估 proposal.verification 中声称的测试、lint、build、手工验证是否可信，并判断验证是否覆盖 specs Requirement / Scenario。没有日志或可核验证据时，不要默认相信。
 16. 搜索审查文件集中的 TODO、FIXME、HACK、stub、测试外 mock、disabled tests、宽泛 catch、吞错、未解释 fallback。
 17. 检查变更涉及的 API、routes、config keys、schemas、types、tests、docs 是否在仓库内及跨仓库之间一致。
 18. 判断 known_limitations 是否诚实披露实现、specs、design 或可选 PRD 中可见的风险。
 19. 按下方「Finding 准入」筛选并定级所有候选问题。
-20. 写 .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md，包含 Review Baseline、verdict、每个仓库的证据、需求/规格覆盖情况、E2E 关注点、blockers、warnings 和 required next action。
+20. 写 .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md，包含 Review Baseline、verdict、每个仓库的证据、需求/规格覆盖情况、External Interface Coverage、E2E 关注点、blockers、warnings 和 required next action。External Interface Coverage 必须逐项列出 PRD 外部接口 `SRC-NNN` 的原契约证据、design 引用、实现位置、验证证据与状态；没有外部接口时写 none。
 
 ## 只读证据命令
 
@@ -106,9 +106,9 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 
 ## Verdict 规则
 
-不使用 1–5 主观评分。specs Requirement / Scenario 是主要行为依据，proposal.md 用于目标和范围校验，PRD 只在用户显式提供时用于上游一致性检查。按以下顺序确定唯一 verdict：
+不使用 1–5 主观评分。specs Requirement / Scenario 是主要行为依据，proposal.md 用于目标和范围校验；Feature PRD 的 `外部资料与实现约束` 是实现约束依据，即使用户未在当前回合再次点名也必须检查。按以下顺序确定唯一 verdict：
 
-1. 如果无法读取 completion proposal、proposal.md、specs、实际存在的 design.md/PLAN.md、用户显式提供的 PRD，无法访问 required 仓库、无法使用 shell/git 获取真实状态，或无法写报告文件，使用 `DEGRADED`。design.md/PLAN.md 本身不存在（精简/自定义工作流未生成）不构成 DEGRADED。
+1. 如果无法读取 completion proposal、proposal.md、specs、实际存在的 design.md/PLAN.md/Feature PRD、用户提供的 PRD，无法访问 required 外部接口资料或 required 仓库、无法使用 shell/git 获取真实状态，或无法写报告文件，使用 `DEGRADED`。design.md/PLAN.md 本身不存在（精简/自定义工作流未生成）不构成 DEGRADED。
 2. 否则存在至少一个 blocker 时使用 `FAIL`。
 3. 否则存在至少一个 warning 时使用 `PASS_WITH_WARNINGS`。
 4. 否则使用 `PASS`。
@@ -121,6 +121,7 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 - Requirement Coverage：Requirement 必须优先引用 specs 中的 Requirement / Scenario；Evidence 必须带 repo 前缀，例如 `frontend: src/App.tsx` 或 `backend: app/api/orders.py`。
 - Blockers / Warnings：每条必须标明 repo id 或 `cross-repo`。
 - E2E Focus：明确跨仓库集成风险，例如字段一致性、配置同步、迁移顺序。
+- External Interface Coverage：每个外部接口 `SRC-NNN` 必须单独一行；E2E Focus 继续携带对应 ID、method/path、鉴权、错误与超时风险，供下游生成用例。
 
 ## 返回给主 agent 的内容
 

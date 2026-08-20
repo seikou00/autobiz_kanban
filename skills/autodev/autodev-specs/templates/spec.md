@@ -2,6 +2,12 @@
 
 来源: proposal.md + PRD.md + explore 阶段结论
 
+## Source References / 外部资料引用
+
+| Source ID | Requirement / Scenario | Usage |
+|-----------|------------------------|-------|
+| SRC-001 | REQ-001 / SCN-001 | [该资料约束的可观察行为；仅实现细节时写“实现约束，行为不扩写”] |
+
 ## ADDED Requirements
 
 ### Requirement [REQ-001]: [能力名]

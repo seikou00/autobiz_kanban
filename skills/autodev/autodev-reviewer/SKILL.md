@@ -1,7 +1,7 @@
 ---
 name: autodev-reviewer
 description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，用 task 工具指定 `reviewer-autodev` 角色核验真实仓库状态，由该角色落盘 REQUIREMENTS_EVAL.md，主 agent 按 verdict 走修复复审闭环。
-version: v1.6.0821
+version: v1.6.08211
 ---
 
 ## 缺失产物处理
@@ -15,7 +15,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --featur
 
 使用此技能来避免执行者自证完成。主 agent 负责写完成声明、按失败审查结论修复问题并重新发起审查；独立 reviewer 只负责用真实仓库状态核验声明并落盘需求评估。
 
-reviewer 没有隐式用户对话上下文。所有可审查上下文必须来自 completion proposal、feature 目录产物（proposal.md、specs/**/*.md、design.md、PLAN.md）、可选 PRD、启动 prompt 和真实 repo 状态。跨仓库任务中，当前 workspace 是协调仓库，业务仓库由 proposal 的 `affected_repositories` 显式列出。
+reviewer 没有隐式用户对话上下文。所有可审查上下文必须来自 completion proposal、feature 目录产物（proposal.md、specs/**/*.md、design.md、PLAN.md、存在时的 PRD.md）、启动 prompt 和真实 repo 状态。跨仓库任务中，当前 workspace 是协调仓库，业务仓库由 proposal 的 `affected_repositories` 显式列出。
 
 ## 严格职责边界
 
@@ -46,7 +46,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval
 
 按 references/schemas.md 创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/completion-proposal.json`，描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。两个输入入口：
 
-- **PRD（可选，不是前置条件）**：用户提供 PRD 路径时（如"参考 .autobizdevops/features/feat-demo/PRD.md 做完成审查"），把路径原样写入 `prd_references`，支持多个；没有则写空数组。不要用自己总结的 PRD 内容替代文件路径，也不要提前判断实现是否满足 PRD——PRD 验收由 reviewer 独立完成。
+- **PRD**：Feature 目录存在 `PRD.md` 时，无论用户是否在当前回合再次点名，都必须自动写入 `prd_references`；用户另外提供的 PRD 路径也逐项原样写入，支持多个。所有路径只记录文件位置与说明，不用主 agent 摘要替代原件。Feature PRD 的 `外部资料与实现约束` 是 reviewer 的强制来源索引，不因 specs 只保留 WHAT 而降级为可选背景；Feature PRD 不存在且用户也未提供时才写空数组。
 - **跨仓库**：跨仓库任务必须写 `affected_repositories`（字段规则和示例见 references/schemas.md），且 `files_changed` 每项带 `repository_id`；单仓库任务省略，reviewer 会把当前 cwd 当作唯一仓库。用户主动输入的仓库必须以 `source: "user_input"` 记录并转写依据到 `source_evidence`。
 
 ### 3. 启动 reviewer 角色
@@ -60,7 +60,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval
 
 - `Feature directory:` `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`。
 - `Review execution mode:` `independent_task` 或 `inline_main_agent`。
-- `User PRD references:` 用户提供的原始 PRD 路径列表；没有则写 none。
+- `PRD references:` completion proposal 中的 Feature PRD 与用户提供 PRD 路径列表；没有则写 none。
 - `User repository references:`（可选）仅当流程需要 reviewer 核对用户主动输入的仓库是否被 proposal 遗漏时附带；否则省略，reviewer 只以 proposal 和真实仓库状态为依据。
 
 reviewer 自己通过工具获取真实仓库状态并直接写 `REQUIREMENTS_EVAL.md`；不要替它预生成 diff snapshot 或规格摘要。

@@ -112,7 +112,7 @@
 
 proposal 规则：
 
-- prd_references 是用户提供的原始 PRD 文件入口。主 agent 只记录路径和简短说明，不要用自己的 PRD 摘要替代文件路径。没有 PRD 时写空数组。
+- prd_references 是原始 PRD 文件入口。Feature 目录存在 PRD.md 时必须自动记录，不依赖用户在当前回合再次点名；用户另外提供的 PRD 也逐项记录。主 agent 只记录路径和简短说明，不要用自己的 PRD 摘要替代文件路径。确实没有 PRD 时才写空数组。
 - contract_references 固定记录 feature 目录中的 proposal.md、specs/**/*.md、design.md、PLAN.md。reviewer 以 specs Requirement / Scenario 作为行为验收主依据，以 design.md 作为接口、数据和技术决策依据。
 - 如果用户明确提供 PRD 路径，主 agent 必须把它写入 prd_references；遗漏用户提供的 PRD 会使完成声明不可信。
 - affected_repositories 是 v1 的扩展字段。跨仓库任务必须填写；单仓库任务可以省略或留空，reviewer 会把当前 cwd 当作唯一仓库。
@@ -180,9 +180,17 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 |---|---|---|---|
 | specs/[capability]/spec.md / Requirement / Scenario | covered / missing / risky / not_applicable | `frontend: src/App.tsx` / `backend: app/api/example.py` / `cross-repo: API contract` | low / medium / high / blocker |
 
+## External Interface Coverage
+
+| Source ID | Source Contract Evidence | Design | Implementation | Verification | Status |
+|---|---|---|---|---|---|
+| SRC-001 | 原件地址/路径、版本与关键契约事实 | design.md#API-001 | `repo: path:line` | 测试/日志/缺失 | covered / mismatch / inaccessible |
+
+没有 PRD 外部接口条目时写 none。`inaccessible` 对 required 来源导向 DEGRADED；`mismatch` 导向 FAIL。
+
 ## E2E Focus
 
-- 下游 E2E 必须验证的用户路径、API、UI 行为或风险点。跨仓库任务中必须标明 API contract、字段一致性、配置同步、迁移顺序等集成风险。
+- 下游 E2E 必须验证的用户路径、API、UI 行为或风险点。外部接口逐项携带 `SRC-NNN`、method/path、鉴权、请求响应、错误与超时风险；跨仓库任务中必须标明 API contract、字段一致性、配置同步、迁移顺序等集成风险。
 - 如果没有可自动化的 E2E 重点，明确写 none，并说明原因。
 
 ## Blockers
@@ -220,13 +228,14 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 - `REQUIREMENTS_EVAL.md` 必须落盘到 `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`。
 - `Review Mode` 必须与启动 prompt 的 `Review execution mode` 一致；`inline_main_agent` 不得表述为独立子代理审查。
 - `Review Baseline` 在读取源码与运行 git 命令之前写出，每行的 `预期形态` 只能取 `新增`、`修改`、`移除`、`无代码改动`。形态为 `移除` 的条目，`Requirement Coverage` 不得因「未找到实现」记 missing。
-- 不新增 `VERIFY_REPORT.md` 等后置文件门禁；没有额外 PRD 引用时不要求读取 PRD.md。
+- 不新增 `VERIFY_REPORT.md` 等后置文件门禁；Feature PRD 存在时必须读取，确实不存在且没有额外 PRD 引用时才跳过。
 - verdict 必须能追溯到 completion proposal、proposal.md、specs、design.md、可选 PRD、shell/git 输出和实际文件内容。
 - 跨仓库任务中，verdict 必须能追溯到每个 affected repository 的 shell/git 输出和实际文件内容。
 - `Review file set` 先取 proposal.files_changed、unstaged、staged、untracked 路径的候选并集，再按与本 feature 的因果关系分成 included / excluded。相关但被 proposal 遗漏的路径进入 `claim_mismatch`；确认无关的既有改动只记录排除理由，不产生 finding。untracked 文件必须用 `--untracked-files=all` 展开并读取完整内容，不能因普通 git diff 为空而忽略。删除文件通过 diff、引用搜索和调用方取证。
 - diff 只用于定位变化。reviewer 必须读取审查文件集中未删除的可读文本文件完整内容，并按需读取调用方、测试、配置和契约上下文。
 - `Repositories Reviewed` 必须列出每个被审查仓库的 id、path、source、git status、changed files、staged files 和 untracked files。required 仓库不可访问、不是 git 仓库或无法获取状态时，verdict 必须为 DEGRADED。
 - `E2E Focus` 是给 `/autodev-e2e` 的交接摘要，不要复制整份 diff 或完整审查报告。
+- PRD 存在外部接口 `SRC-NNN` 时，`External Interface Coverage` 必须逐项出现这些 ID；只在报告其他位置提到不算。required 原件不可访问不能写 PASS，原契约与 design/实现不一致不能写 PASS 类结论。
 - `Requirement Coverage` 的 evidence、`Blockers` 和 `Warnings` 必须标明 repo id 或 `cross-repo`，避免下游无法定位。
 - finding 只允许覆盖本次变化引入或恶化的问题、基准要求但缺失的行为、完成声明不实，或直接使验证/集成/交付不可信的问题；不报告无关的既有缺陷。
 - 每条 finding 必须填写 ID、Severity、Category、Confidence、Location、问题、触发条件、影响、证据和动作。Confidence 只能取 HIGH、MEDIUM、LOW；blocker 必须是 HIGH。缺失实现没有代码位置时，Location 使用 Requirement / Scenario，证据列出已搜索路径或查询。

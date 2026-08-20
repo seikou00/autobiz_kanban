@@ -30,6 +30,7 @@ from board_core.artifact_paths import resolve_exact_relative_path
 from board_core.contracts import BoardConfigError, SkillContract, load_record_workflow_contracts
 from board_core.state_store import check_or_fix_state_sync
 from hooks.implementation_scope import load_scope, scope_path
+from hooks.source_references import has_source_section, validate_source_reference_section
 
 # 正式稿标题、禁用标题和必需段落的单一事实源在 prd_rules.py。
 from prd_rules import (  # noqa: F401  （re-export，供外部按原名引用）
@@ -172,7 +173,7 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
 
         all_headings = iter_headings(content)
         headings = [heading.text for heading in all_headings]
-        # 四段必须是正式章节标题；功能详情里的深层 `###### 验收标准` 不算数
+        # 必备段落必须是正式章节标题；功能详情里的深层 `###### 验收标准` 不算数
         section_headings = [
             heading.text for heading in all_headings
             if heading.level <= FORMAL_SECTION_MAX_LEVEL
@@ -202,6 +203,8 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
                 f"PRD.md 仍含 {PENDING_MARKER}：请逐项获取用户裁定，"
                 "将具体结论写入 PRD.md 对应正文后移除标记"
             )
+        if has_source_section(content):
+            errors.extend(validate_source_reference_section(content))
 
     _check_done_checkpoint(record, contract, errors)
 

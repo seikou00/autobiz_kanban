@@ -322,6 +322,10 @@
             { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true,
               "extract": {
                 "degrade": "无 specs 时与用户确认行为预期后再设计，未确认行为全部记为待确认风险"
+              } },
+            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
+              "extract": {
+                "degrade": "无 PRD 时以 proposal/specs 设计；存在 PRD 时必须读取外部资料与实现约束并逐项消费 SRC-NNN，外部接口资料不可访问时不得宣称设计信息充分"
               } }
           ],
           "outputs": [
@@ -370,9 +374,9 @@
               "extract": {
                 "degrade": "无 specs 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
               } },
-            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
+            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时，以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
+                "degrade": "无 PRD 时，以已有产物理解需求;存在 PRD 时必须读取外部资料与实现约束，并按当前 TASK 涉及的 SRC-NNN 打开原资料后实现"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
@@ -439,9 +443,9 @@
               "extract": {
                 "degrade": "无 specs 时对照 proposal 与用户确认的行为预期评审，并在报告中标注基准缺失"
               } },
-            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
+            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时直接跳过"
+                "degrade": "无 PRD 时直接跳过；存在 PRD 时 reviewer 必须读取外部资料与实现约束，并在报告中逐项核对外部接口 SRC-NNN"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
@@ -562,9 +566,9 @@
               "extract": {
                 "degrade": "无 specs 时与用户确认主链路预期后生成用例"
               } },
-            { "id": "prd_optional", "label": "PRD参考", "artifactType": "file", "path": "PRD.md", "required": false,
+            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时直接跳过"
+                "degrade": "无 PRD 时直接跳过；存在 PRD 时 E2E 必须读取外部资料与实现约束，并为每个外部接口 SRC-NNN 生成用例或明确阻断结论"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {

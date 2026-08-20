@@ -161,6 +161,42 @@ class RequirementsEvalGateTest(unittest.TestCase):
         self.assertGreater(failures, 0)
         self.assertIn("missing_warning_for_pass_with_warnings_verdict", output)
 
+    def test_requires_external_interface_coverage_for_feature_prd(self) -> None:
+        (self.feature_dir / "PRD.md").write_text(
+            """# 需求正式稿
+
+## 外部资料与实现约束
+
+| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
+|---|---|---|---|---|---|---|
+| SRC-001 | 外部接口 | 支付 API | https://example.test/openapi | REQ-001 | Specs、Plan、Code、Reviewer、E2E | 可访问 |
+""",
+            encoding="utf-8",
+        )
+
+        failures, output = self.validate(eval_report("PASS"))
+        self.assertGreater(failures, 0)
+        self.assertIn("missing_requirements_eval_external_interface_section", output)
+
+        incomplete_report = eval_report("PASS") + """## External Interface Coverage
+
+| Source ID | Source Contract Evidence | Design | Implementation | Verification | Status |
+|---|---|---|---|---|---|
+| SRC-001 | POST /payments | API-001 | src/payment.py | 无 | covered |
+"""
+        failures, output = self.validate(incomplete_report)
+        self.assertGreater(failures, 0)
+        self.assertIn("incomplete_requirements_eval_external_interface_coverage", output)
+
+        report = eval_report("PASS") + """## External Interface Coverage
+
+| Source ID | Source Contract Evidence | Design | Implementation | Verification | Status |
+|---|---|---|---|---|---|
+| SRC-001 | POST /payments | API-001 | src/payment.py | gateway integration test | covered |
+"""
+        failures, output = self.validate(report)
+        self.assertEqual(failures, 0, output)
+
 
 if __name__ == "__main__":
     unittest.main()

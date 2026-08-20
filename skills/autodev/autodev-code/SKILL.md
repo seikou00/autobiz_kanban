@@ -1,12 +1,14 @@
 ---
 name: autodev-code
 description: 进行代码实现。
-version: v1.7.08041
+version: v1.7.08211
 ---
 
 # /autodev-code — 代码执行
 
 进入 Code 前读取 Feature 的 `IMPLEMENTATION_SCOPE.json`。`backend_only` 只执行 backend task，`frontend_only` 只执行 frontend task；如果计划中存在相反 lane 的任务，停止并回到 `/autodev-plan` 修复，不得通过手工修改 `uiRequired` 绕过范围门禁。
+
+存在 `PRD.md` 时读取 `外部资料与实现约束`。从当前 TASK 的 `resolvedSpecRefs` / `resolvedDesignRefs` 提取相关 `SRC-NNN`，逐项打开 PRD 登记的原始地址/路径后再编码；不得用 specs/design 的摘要替代外部接口原契约。资料不可访问、版本不明或与 design 冲突时停止当前 TASK 并回流 `/autodev-plan`，不得猜测 method/path、鉴权、请求响应、错误或超时约定。
 
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 

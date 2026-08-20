@@ -95,6 +95,10 @@ VALID_PRD = FORMAL_PREFIX + """## 用户故事
 | 类别 | 约束 | 来源/原因 |
 |------|------|-----------|
 | 数据 | 异常标记由后端字段提供 | 假设与风险 |
+
+## 外部资料与实现约束
+
+无
 """
 
 
@@ -259,6 +263,7 @@ class BizValidatePrdTests(unittest.TestCase):
             "## 验收口径\n\n正式稿正文里的同名章节也算有效章节。\n\n"
             "## 验收标准\n\n正式稿正文里的同名章节也算有效章节。\n\n"
             "## 关键约束\n\n正式稿正文里的同名章节也算有效章节。\n\n"
+            "## 外部资料与实现约束\n\n无\n\n"
             "## 假设与风险",
         )
         prd_without_suffix_sections = discuss_with_section_names.split("## 历次讨论记录", 1)[0]
@@ -271,6 +276,54 @@ class BizValidatePrdTests(unittest.TestCase):
         result = validate_prd("alpha", workspace)
 
         self.assertTrue(result["ok"], result)
+
+    def test_accepts_external_interface_source_with_full_stage_contract(self) -> None:
+        source_table = """## 外部资料与实现约束
+
+| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- |
+| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | REQ-001 支付提交 | Specs、Plan、Code、Reviewer、E2E | 可访问 |
+"""
+        workspace = self.make_workspace(
+            VALID_PRD.replace("## 外部资料与实现约束\n\n无", source_table.rstrip())
+        )
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertTrue(result["ok"], result)
+
+    def test_rejects_external_interface_source_without_downstream_stages(self) -> None:
+        source_table = """## 外部资料与实现约束
+
+| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- |
+| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | REQ-001 支付提交 | Specs、Plan | 可访问 |
+"""
+        workspace = self.make_workspace(
+            VALID_PRD.replace("## 外部资料与实现约束\n\n无", source_table.rstrip())
+        )
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("Code、Reviewer、E2E", "\n".join(result["errors"]))
+
+    def test_rejects_duplicate_external_source_ids(self) -> None:
+        source_table = """## 外部资料与实现约束
+
+| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- |
+| SRC-001 | 原型 | 列表原型 | /tmp/list.html | REQ-001 | Specs、Plan | 可访问 |
+| SRC-001 | 数据字典 | 付款字典 | /tmp/dict.xlsx | REQ-002 | Specs、Plan | 可访问 |
+"""
+        workspace = self.make_workspace(
+            VALID_PRD.replace("## 外部资料与实现约束\n\n无", source_table.rstrip())
+        )
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("外部资料 ID 重复", "\n".join(result["errors"]))
 
     def test_rejects_prd_with_discussion_record_heading(self) -> None:
         workspace = self.make_workspace(VALID_PRD + "\n## 历次讨论记录\n\n- 不应进入正式 PRD。\n")

@@ -180,6 +180,24 @@ _SPECS: Dict[str, Repair] = {
             "`[REQ-NNN]` / `[SCN-NNN]` 是 ID 语法不算槽位，Markdown 链接也不算。"
         ),
     ),
+    "spec_source_reference_missing": Repair(
+        artifact="specs/**/spec.md",
+        problem="PRD 外部资料索引中的这些来源未被任何 spec 保留：{target}",
+        action=(
+            "在相关 spec 的 `## Source References / 外部资料引用` 表补齐 SRC-NNN 与 REQ/SCN 映射；"
+            "会改变外部可观察行为的约束还必须写入 Requirement/Scenario，纯实现约束注明不扩写行为。"
+        ),
+    ),
+    "spec_source_reference_unknown": Repair(
+        artifact="specs/**/spec.md",
+        problem="spec 引用了 PRD 外部资料索引中不存在的来源：{target}",
+        action="修正或移除这些 SRC-NNN；确有新资料时先回 PRD 登记稳定 ID，再重新生成 specs。",
+    ),
+    "spec_source_reference_incomplete": Repair(
+        artifact="specs/**/spec.md",
+        problem="这些来源引用缺少 Requirement/Scenario 映射或 Usage：{target}",
+        action="在 Source References 表补齐每个 SRC-NNN 对应的 REQ/SCN 和实际用途；只写来源 ID 不算跨阶段传递。",
+    ),
     "duplicate_spec_id_across_specs": Repair(
         artifact="specs/**/spec.md",
         problem="{target} 在多个 spec 中重复定义：{files}",
@@ -289,6 +307,32 @@ _DESIGN: Dict[str, Repair] = {
             "或把该单元格改成实际存在的编号／「无」。只认该节内的定义，写在 proposal 别处不算。"
             "技术决策用 Design Coverage 列的 D-NNN，不要写进 Decision 列。"
         ),
+    ),
+    "design_source_reference_missing": Repair(
+        artifact="design.md",
+        problem="design.md 的 External Source Coverage 未覆盖 PRD 来源：{target}",
+        action="逐项打开 PRD 登记的原始地址/路径，在 External Source Coverage 补齐设计覆盖与消费证据；资料不可访问时停止 Plan，不得假装已消费。",
+    ),
+    "design_source_reference_unknown": Repair(
+        artifact="design.md",
+        problem="design.md 的 External Source Coverage 引用了 PRD 未定义的来源：{target}",
+        action="修正或移除这些 SRC-NNN；新资料必须先回 PRD 登记稳定 ID，不能由 design 私自创建来源编号。",
+    ),
+    "design_external_interface_api_reference_missing": Repair(
+        artifact="design.md",
+        problem="这些 PRD 外部接口来源没有关联到 API Decisions：{target}",
+        action="在 API Decisions 的 Source Refs 列关联对应 SRC-NNN，并按原接口资料核对 method/path、鉴权、请求响应、错误和超时。",
+    ),
+    "design_source_consumption_evidence_missing": Repair(
+        artifact="design.md",
+        problem="这些来源只有 ID，没有完整的关联需求、设计覆盖或原件消费证据：{target}",
+        action="打开每个 SRC-NNN 原件，在 External Source Coverage 补齐关联 REQ/SCN、API/DATA/D 设计项与可核对的地址/版本/契约事实。",
+    ),
+    "design_source_consumption_blocked": Repair(
+        artifact="design.md",
+        problem="这些来源仍处于阻断或不可访问状态：{target}",
+        action="停止 Plan；取得可访问原件或由用户移除该实现依赖后，重新完成 External Source Coverage。",
+        route=ROUTE_ASK_USER,
     ),
     "duplicate_design_api_id": Repair(
         artifact="design.md",

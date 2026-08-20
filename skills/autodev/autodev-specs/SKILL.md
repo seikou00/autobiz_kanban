@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.10.08051
+version: v1.10.08211
 ---
 
 ## 缺失产物处理
@@ -35,6 +35,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 ## 输入与输出
 
 读取输入:
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`，重点读取 `外部资料与实现约束`；逐项打开其中会约束实现或验收的地址/路径，而不是只读取 PRD 对链接的概括
 - 与当前 feature 相关的现有代码、接口、数据模型、测试、配置
 
 输出产物：
@@ -69,6 +70,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 探索时必须：
 
 - 从上游需求输入提取目标、用户角色、主流程、验收标准、非目标。
+- 从 PRD 的 `外部资料与实现约束` 提取全部 `SRC-NNN`。资料可访问时读取原件并核对约束；资料不可访问、状态受限或内容与 PRD 冲突且会影响行为时，列入信息缺口并停止收敛，禁止因 specs 只写 WHAT 而跳过。
 - 阅读现有代码，识别已有接口、数据模型、权限、租户、审计、错误体、分页、状态流、配置和测试风格。
 - **只探索源码，不碰编译/生成产物**：`target/`、`build/`、`out/`、`bin/`、`*.class`、`*.jar/war/ear`、`__pycache__/`、`*.pyc`，以及一切 `.gitignore` 命中的路径，都不是事实源，不得据其识别接口/数据模型/约定——它们由源码再生成。扫描优先 `git ls-files <pattern>` 找文件、`git grep <regex>` 搜内容：只走已跟踪源码，自动排除上述产物；不要用裸 `find`/`grep` 做全库扫描。例外：某生成物本身就是问题对象时可读，但须标注「生成物」并回溯到其生成器/源码。
 - 将上游需求改写为外部可观察行为，不要把实现猜测写成需求。
@@ -159,6 +161,8 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 - 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
 - **列入即生成**：`Capabilities` 中每一项（正文"无"除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，唯一合法做法是回到 proposal 将其移除或并入其他 capability；禁止单方面少生成。产物契约预检的 `capability_spec_correspondence` 双向判定这条，无需在回复中自行输出对照表。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
+- 每个 PRD `SRC-NNN` 必须至少出现在一个 spec 的 `Source References / 外部资料引用` 表中，且只能引用 PRD 已定义的 ID。会改变外部可观察行为的接口约束必须落入对应 Requirement/Scenario；纯实现约束可只写 `Usage=实现约束，行为不扩写`，但不得丢失引用。PRD 无来源项时该节正文写“无”。
+- 外部接口资料至少核对 method/path、鉴权、请求/响应、错误和超时中与本期有关的内容；资料与用户已确认行为矛盾时回流澄清，不得自行选择一个版本。
 - Requirement 使用 `### Requirement [REQ-NNN]: <标题>`（NNN 三位；按文档顺序递增，允许跳号；改标题不改 ID；删除后 ID 不复用；ID 在同一 feature 内全局唯一，跨 spec 文件也不得重号）。
 - Scenario 使用四级标题 `#### Scenario [SCN-NNN]: <标题>`，必须写在所属 Requirement 标题之下；写在首个 Requirement 之前或操作段标题正下方即不归属任何 Requirement。
 - 每个 Requirement 至少一个 Scenario；REMOVED Requirement 也必须用 Scenario 描述旧入口被触发时的期望响应。

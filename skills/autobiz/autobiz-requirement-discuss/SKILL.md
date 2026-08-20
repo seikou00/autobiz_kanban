@@ -1,7 +1,7 @@
 ---
 name: autobiz-requirement-discuss
 description: Biz 阶段需求澄清与正式 PRD 生成技能。
-version: v1.2.08131
+version: v1.2.08211
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清与 PRD 生成
@@ -95,6 +95,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - **关键** ：根据 `prd-formatter.md`进行格式化。
 - 写入`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`。
 - **关键** ：以原需求文档为基准，核对生成的 `PRD.md` 是否遗漏功能说明；逐项检查功能清单、功能详情、字段/表格行、规则、链接、文案、状态、外部协作规则和验收项。发现遗漏、弱化或错位时，先更新 `PRD.md`，再重新核对。
+- 从原需求、初始上传与讨论补充资料中提取会约束实现或验收的外部接口文档、原型、数据字典、协议和附件，在 `## 外部资料与实现约束` 建立索引。每项分配稳定 `SRC-NNN`，后续增量只追加，禁止重编号或复用已删除 ID；没有此类资料时正文写“无”。
+- `类型=外部接口` 或 `第三方接口` 的条目必须保留可访问的地址/路径、约束范围与当前状态，`必读阶段` 固定覆盖 `Specs、Plan、Code、Reviewer、E2E`。链接本身不是充分摘要，接口方法、路径、鉴权、请求/响应结构、错误与超时等已知约束仍须写入对应 FR 或验收标准。
 
 ### 需求分析
 
@@ -193,6 +195,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 5. **假设与风险**
 6. **历次讨论记录**：按时间记录
 7. **讨论补充资料**：讨论过程中新增文件的名称、绝对路径和用途；前端角色下用户提供的 HTML 文件逐项登记，用途填“前端页面/交互分析”。初始上传的原始需求文档不入本清单（快照在 `prd_original`）；无新增文件时保留空清单说明
+8. **外部资料与实现约束**：只登记会约束实现或验收的资料，以稳定 `SRC-NNN` 建立跨阶段引用；它与“讨论补充资料”的过程记录用途不同，不得互相替代
 
 #### 写作要求
 
@@ -222,6 +225,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - 消解：具体结论已落盘，原待确认条目和标记已移除，才算完成。禁止自行消解；展示不等于裁定。凡选中后条目仍处于待确认状态的选项都是非法选项，延后判定按语义不按字面。
 - 自由回复：用户直接提供实质结论时，吸收并更新当前条目，不重复弹出相同选择。
 - 消解自查：不得残留待确认章节、`【待确认】`、TBD、待补充、待提供、后续确认或「以实际接口为准」「开发阶段补充」等延后占位。
+- 来源自查：逐项确认 `SRC-NNN` 的名称、地址/路径、约束范围、必读阶段与状态完整；外部接口资料无法访问或契约仍不明确时，按信息缺口处理，禁止以“后续阶段读取”代替本阶段收敛。
 
 全部条目裁定并回写前，禁止更新 `prd_done` 或运行完成校验。
 
@@ -255,5 +259,6 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${fea
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` — 已存在并满足正式稿结构
 - Feature checkpoint 为 `prd_done`
 - 所有 P0 / P1 与待确认项已完成裁定并回写
+- 所有实现承重资料均已进入 `外部资料与实现约束`，外部接口项已声明 `Specs、Plan、Code、Reviewer、E2E` 全阶段必读
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

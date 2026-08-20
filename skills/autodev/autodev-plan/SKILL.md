@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.9.08051
+version: v1.9.08211
 ---
 
 ## 缺失产物处理
@@ -83,7 +83,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-- 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。
+- 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。存在 `PRD.md` 时必须解析 `外部资料与实现约束`，并逐项打开本期 `SRC-NNN` 指向的原始地址/路径；不能因为 proposal/specs 已淡化实现细节，就把这些资料当作可选背景。
 - 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，用户只要求调研、澄清或方案比较时，只把它们作为上下文讨论，不自动改写；当前请求已包含 Plan 生成/更新，或完整 Dev 工作流已路由到本节点时，视为已包含写入意图。
 
@@ -93,6 +93,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 | ---------------------------- | ------------------------------------------------------------ |
 | 需求目标、范围、非目标变化   | 回到 `proposal.md`，或在 `design.md` 记录影响与风险           |
 | 新增或变化的外部可观察行为   | 回到 `specs/**/*.md`，不得只写入 `design.md`                  |
+| PRD 中 `SRC-NNN` 外部资料约束 | `design.md` 的 External Source Coverage；外部接口同时进入 API Decisions |
 | 新增或变化的 HTTP 行为       | `design.md` 的 API Decisions；无 API 写 `x-auto-no-http-api: true` |
 | 数据表/字段/索引/迁移需求    | `design.md` 的 Data Decisions；无数据变更写 `x-auto-no-sql: true` |
 | 技术方案、模块边界、集成点   | `design.md` 的 Technical Design                              |
@@ -192,12 +193,14 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 按 `${pluginPath}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
-- **Context / 输入上下文**：引用 proposal 和 specs，说明当前代码现状和约束。
+- **Context / 输入上下文**：引用 proposal、PRD 外部资料索引和 specs，说明当前代码现状和约束。
+- **External Source Coverage / 外部资料覆盖**：逐项列出 PRD 定义的全部 `SRC-NNN`、关联 REQ/SCN、设计覆盖和消费证据。消费证据必须证明已打开原件（地址/路径、版本或关键契约事实），只复述 PRD 不算；外部接口资料不可访问时状态写“阻断”，不得继续宣称设计信息充分。不得引用 PRD 未定义的 `SRC-NNN`。
 - **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。`Decision` 列填 proposal `## Decision Log` 里对应的 `DEC-NNN`——那是 specs 阶段为该 Requirement 定下的取舍及其否决项，实现遇阻要偏离时先看这里有没有权衡过；该 Requirement 无此类决策时写「无」。技术决策是 `Design Coverage` 列的 `D-NNN`，不要混进 `Decision` 列。`design_contract` 判定引用的 `DEC-NNN` 在 proposal 中真实存在。
 - **API Decisions / 接口决策**：
   - 不再生成独立接口契约文件。
   - 如本轮不涉及 HTTP/API，必须写 `x-auto-no-http-api: true` 并说明原因。
   - 如涉及 HTTP/API，用结构化表格记录 Method、Path/Entry、Request、Response、Errors、Auth/Tenant/Audit、Status。
+  - PRD 外部接口条目必须在 `Source Refs` 关联对应 `SRC-NNN`，并与原接口资料逐项核对；不能只根据 specs 的行为摘要补接口契约。
   - 不得把未确认的鉴权、租户、审计字段写成硬约束；必须标为待确认。
 - **Data Decisions / 数据决策**：
   - 不再生成独立 SQL 设计文件。
@@ -208,7 +211,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 - **Risks / Open Questions**：所有未确认业务语义、技术假设、兼容风险必须落在这里。
 
 完成条件：
-- [ ] design.md 包含 Context、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
+- [ ] design.md 包含 Context、External Source Coverage、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
+- [ ] PRD 每个 `SRC-NNN` 都有消费证据；外部接口同时关联到 API Decisions
 - [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
 - [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
 - [ ] 未确认项没有进入硬约束，已标注为待确认
@@ -382,7 +386,7 @@ UI 任务规则：
 
 1. 确认本轮实现范围
    - 先按 Source Bundle 与当前 `implementationScope`（如存在）确认本轮 specs 分母；`backend_only` 时不要把已剥离的 UI 场景、页面或交互放进 task 覆盖矩阵，`frontend_only` 时不要把已剥离的后端 API/数据实现放进当前 task。
-   - 只从当前实现范围内的 `specs/**/*.md` 与 `design.md` 提取任务依据；不要从被剥离范围、PRD 余量或 Markdown 关键词反推额外任务。
+   - 只从当前实现范围内的 `specs/**/*.md` 与 `design.md` 提取任务依据；不要从被剥离范围、PRD 余量或 Markdown 关键词反推额外任务。PRD 的 `SRC-NNN` 不扩大范围，但它是已入范围 Requirement/Scenario 的强制实现约束，必须通过 specs/design 引用被任务消费。
 
 2. 建立 Scenario 覆盖矩阵
    - 写 task 前，必须在对话中输出覆盖矩阵，不得只在脑内跳过。矩阵列：`SCN / REQ / 用户动作或系统触发 / 可观察结果 / API / Data / Page / UIX / 验证命令或公开 seam / 风险或依赖`。

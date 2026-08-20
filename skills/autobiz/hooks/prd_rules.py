@@ -10,7 +10,13 @@ from typing import Iterable, List, Sequence, Union
 
 
 FORMAL_PRD_TITLE = "# 需求正式稿"
-REQUIRED_PRD_SECTIONS = ("用户故事", "验收口径", "验收标准", "关键约束")
+REQUIRED_PRD_SECTIONS = (
+    "用户故事",
+    "验收口径",
+    "验收标准",
+    "关键约束",
+    "外部资料与实现约束",
+)
 FORMAL_SECTION_MAX_LEVEL = 3
 DISCUSSION_SECTION_TITLES = ("历次讨论记录", "讨论记录")
 PENDING_SECTION_TITLES = ("待确认事项", "待确认项")
