@@ -250,7 +250,7 @@ flowchart TB
 | ------------------------------------------------------------- | ------------------------------------------- | --------------------------------------------- |
 | `workflow()` / `subworkflow()` / `phase()`                    | 组织 AutoBiz 主流程、Biz/Dev/Ops 和阶段边界 | 固定 Definition 版本并记录阶段状态            |
 | `agent()` / `activity()`                                      | 执行分析、生成、代码、测试和评审            | 以稳定 `stepKey` 记录输入摘要、结果和 attempt |
-| `parallel()` / `pipeline()`                                   | 表达 Lane 并行、Batch 串行和依赖等待        | 记录分支状态，Join 前完成冲突和完整性校验     |
+| `parallel()` / `pipeline()`                                   | 表达就绪 Batch 并行、依赖等待和调度波次      | 记录分支状态，Join 前完成冲突和完整性校验     |
 | `human.ask()` / `human.approve()` / `human.provideMaterial()` | 需求澄清、方案决策、审批和材料补充          | 创建可恢复 Human Step，答案写入 Journal       |
 | `signal.wait()`                                               | 等待 CI/CD 等外部系统                       | 持久化订阅、Signal 幂等键和最后查询状态       |
 | `artifact.read/write()` / `validate()`                        | 访问阶段产物并执行 Gate                     | 记录 Artifact hash、Validator 版本和结果      |
@@ -469,7 +469,7 @@ flowchart TD
 
 ## 7. Code 并行与批次执行流程
 
-Code 阶段遵循 `plan.json` 的执行契约：不同 Lane 在 workspace 隔离成立时并行，同一 Lane 内的 Batch 串行，Batch 内 Task 按 DAG 和 Task Runner 约束执行。
+Code 阶段遵循 `plan.json` 的执行契约：Batch 以真实 `deps` 构成 DAG，所有无未完成依赖的 Batch 在隔离 workspace 中并行；依赖 Batch 合并完成后重新调度下游 Batch。Batch 内 Task 按 DAG 和 Task Runner 约束执行。
 
 ```mermaid
 flowchart TD
@@ -1496,7 +1496,7 @@ autobiz test regression \
 | **Signal**       | 外部系统的异步回调通知                    | CI/CD 完成通知                                |
 | **Fix Request**  | 验证失败后生成的结构化修复建议            | 指向目标 Stage 和失败原因                     |
 | **Lane**         | Code 阶段的并行执行单元                   | `frontend-lane`, `backend-lane`               |
-| **Batch**        | Lane 内串行执行的任务批次                 | `B001`, `B002`                                |
+| **Batch**        | 按真实依赖 DAG 调度的任务批次               | `B001`, `B002`                                |
 | **Task**         | 最小执行单元，对应一个具体的代码实现目标  | `T003: 实现登录表单组件`                      |
 | **Validator**    | 校验 Artifact 或 Stage 完成条件的检查器   | `PrdValidator`, `PlanGranularityValidator`    |
 | **Template**     | Workflow 的预定义模式                     | `standard`, `lean`                            |
@@ -1687,7 +1687,7 @@ Artifact 与 Evidence 提供跨阶段可审计事实
 | ------------------------------------------------------------- | ------------------------------------------- | --------------------------------------------- |
 | `workflow()` / `subworkflow()` / `phase()`                    | 组织 AutoBiz 主流程、Biz/Dev/Ops 和阶段边界 | 固定 Definition 版本并记录阶段状态            |
 | `agent()` / `activity()`                                      | 执行分析、生成、代码、测试和评审            | 以稳定 `stepKey` 记录输入摘要、结果和 attempt |
-| `parallel()` / `pipeline()`                                   | 表达 Lane 并行、Batch 串行和依赖等待        | 记录分支状态，Join 前完成冲突和完整性校验     |
+| `parallel()` / `pipeline()`                                   | 表达就绪 Batch 并行、依赖等待和调度波次      | 记录分支状态，Join 前完成冲突和完整性校验     |
 | `human.ask()` / `human.approve()` / `human.provideMaterial()` | 需求澄清、方案决策、审批和材料补充          | 创建可恢复 Human Step，答案写入 Journal       |
 | `signal.wait()`                                               | 等待 CI/CD 等外部系统                       | 持久化订阅、Signal 幂等键和最后查询状态       |
 | `artifact.read/write()` / `validate()`                        | 访问阶段产物并执行 Gate                     | 记录 Artifact hash、Validator 版本和结果      |
@@ -1906,7 +1906,7 @@ flowchart TD
 
 ## 7. Code 并行与批次执行流程
 
-Code 阶段遵循 `plan.json` 的执行契约：不同 Lane 在 workspace 隔离成立时并行，同一 Lane 内的 Batch 串行，Batch 内 Task 按 DAG 和 Task Runner 约束执行。
+Code 阶段遵循 `plan.json` 的执行契约：Batch 以真实 `deps` 构成 DAG，所有无未完成依赖的 Batch 在隔离 workspace 中并行；依赖 Batch 合并完成后重新调度下游 Batch。Batch 内 Task 按 DAG 和 Task Runner 约束执行。
 
 ```mermaid
 flowchart TD
@@ -2933,7 +2933,7 @@ autobiz test regression \
 | **Signal**       | 外部系统的异步回调通知                    | CI/CD 完成通知                                |
 | **Fix Request**  | 验证失败后生成的结构化修复建议            | 指向目标 Stage 和失败原因                     |
 | **Lane**         | Code 阶段的并行执行单元                   | `frontend-lane`, `backend-lane`               |
-| **Batch**        | Lane 内串行执行的任务批次                 | `B001`, `B002`                                |
+| **Batch**        | 按真实依赖 DAG 调度的任务批次               | `B001`, `B002`                                |
 | **Task**         | 最小执行单元，对应一个具体的代码实现目标  | `T003: 实现登录表单组件`                      |
 | **Validator**    | 校验 Artifact 或 Stage 完成条件的检查器   | `PrdValidator`, `PlanGranularityValidator`    |
 | **Template**     | Workflow 的预定义模式                     | `standard`, `lean`                            |

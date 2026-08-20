@@ -29,7 +29,7 @@ def analyze_batches(feature: str, plugin_path: Path | None = None) -> dict:
     Returns:
         {
             "useWorkflow": bool,
-            "strategy": "serial" | "parallel",
+            "strategy": "serial" | "parallel" | "blocked",
             "batchCount": int,
             "batches": [{"id": "B001", "lane": "backend", "taskCount": 3}],
             "workflowScript": str | None,
@@ -110,11 +110,12 @@ def analyze_batches(feature: str, plugin_path: Path | None = None) -> dict:
         if not validation.get("canParallel"):
             return {
                 "useWorkflow": False,
-                "strategy": "serial",
+                "strategy": "blocked",
                 "batchCount": batch_count,
                 "batches": valid_batches,
                 "workflowScript": None,
                 "reason": f"parallel_plan_invalid:{validation.get('reason')}",
+                "requiresPlanRepair": True,
                 "validation": validation,
             }
 
@@ -164,7 +165,8 @@ def main() -> int:
             for batch in result["batches"]:
                 print(f"  - {batch['id']} ({batch['lane']}): {batch['taskCount']} 个任务")
         else:
-            print(f"✗ 使用串行执行模式")
+            mode = "计划修复" if result["strategy"] == "blocked" else "串行执行模式"
+            print(f"✗ {mode}")
             print(f"  原因: {result['reason']}")
             if result['batches']:
                 print(f"  Batch: {result['batches'][0]['id']}")

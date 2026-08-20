@@ -322,7 +322,7 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${fe
 python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
-正式 Bundle 发布后，在进入 Code 前启用并行冲突策略。普通多 Batch Feature 即使没有 Proto/DB/配置变更也必须显式声明 `false`；这会要求每个 task 都有 `touches`，缺失或非法时 `/autodev-code` 安全回退到串行。存在协议、迁移或全局配置时，先拆出专属 Batch 并确认其 owner，再写入策略：
+正式 Bundle 发布后，在进入 Code 前启用并行冲突策略。普通多 Batch Feature 即使没有 Proto/DB/配置变更也必须显式声明 `false`；这会要求每个 task 都有 `touches`。缺失或非法时 `/autodev-code` 必须阻断并回流 Plan 修复，禁止安全回退为串行。存在协议、迁移或全局配置时，先拆出专属 Batch 并确认其 owner，再写入策略：
 
 ```bash
 # 无 Proto/DB/配置全局变更
@@ -372,7 +372,7 @@ finalize 会重跑同一校验并通过事务一次写入正式根计划、全�
 - `validationCommands[].cwd` 保持 Git 根相对路径，必须等于或位于该 TASK 的 workspace root 下；省略时 writer 自动补 repo 与 workspace root。多仓库计划中每个 TASK validation command 的 `repo` 必须等于该 TASK 唯一 `workspaceRef`；project command 按实际执行仓库填写。所有 evidence 文件仍属于 feature 产物目录。
 - 顶层 `batchValidationProfiles` 统一使用 `mode=commands`，每个实际使用的 lane 必须配置一条 `kind=compile` 的 required 命令；backend 可使用 `mvn compile`，frontend 可使用 `npm run build`、`pnpm typecheck` 或等价的不执行测试的编译命令。TASK 的 `validationCommands` 不在 Code 阶段运行。
 - 顶层 `projectValidationCommands` 只承载可选的跨 lane、跨批次或全项目集成检查，按 `argv + cwd + repo` 归一化后不得与任何 batch profile 命令重复，也不能替代 TASK 的 AC 覆盖。没有这种检查时保持空数组，Code 可直接进入完成门禁。
-- Plan 阶段所有任务初始状态为 `todo`，evidence 相关字段为空或 null，这些运行字段只由 task runner 更新。Plan 初始激活 `B001`；非末批完成后根状态会成为 `awaiting_next_conversation`，Code 必须停止当前对话，新对话通过 `task_runner.py code-session` 检查并自动激活下一批。
+- Plan 阶段所有任务初始状态为 `todo`，evidence 相关字段为空或 null，这些运行字段只由 task runner 更新。单 Batch Plan 可初始激活 `B001`；多 Batch Plan 由并行 scheduler 从零入度 Batch 集合启动，不写人为 batch handoff。依赖 Batch 必须等其 `deps` 全部合并后才进入下一调度波次。
 - 每个任务必须追溯到真实 specs 与已确认 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的 ID。四个字段在结构上可以存在但取空数组；任务不涉及对应设计项时必须写 `[]`，禁止为了过校验强行编造或按 Task 编号续写 `API-*` / `DATA-*` / `D-*`。模板中的 API/Data/Decision ID 都是占位示例，生成前必须替换为 Design 中真实 ID；不要为了过校验强行编造，未涉及时使用空数组 `[]`。如果 `design.md` 中存在 API/Data/D 决策，则这些设计项必须被至少一个真正相关的任务覆盖；覆盖缺失时把已有 ID 绑定到正确任务，禁止向 design 新增 ID 迎合 Plan。只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
 - `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
 - `validationCommands` 是 task 级测试意图契约，必须窄、快、可追溯；不能确定真实文件时不要凭空填写 `expectedFiles`。Code 阶段不运行 TASK 验证；`executionMode=external_dependency` 仍由后续阶段处理。
@@ -458,7 +458,7 @@ UI 任务规则：
    - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
 
 7. 生成 DAG 与覆盖检查
-   - Batch 按 `B001 -> B002` 的计划顺序串行执行；同一 Batch 的 TASK 由单一队列逐个完成生产实现，全部成为 `implemented` 后统一编译一次。依赖仍只表达真实业务前置关系，不要为了 Batch 串行额外伪造跨 Batch 依赖；Batch 内没有真实依赖的 TASK 也不启动并行 run。
+   - Batch 以真实跨 Batch `deps` 构成 DAG；没有未完成依赖的 Batch 必须可并行调度，不得按 `B001 -> B002` 编号、lane、仓库或文件写集伪造串行关系。仅当下游 Task 确实需要上游 Batch 产出的 API、协议、Schema、共享装配或业务行为时才写跨 Batch 依赖。每个就绪 Batch 由独立 subagent 在 worktree 执行；上游 Batch 编译通过并合并后，scheduler 立即重新计算就绪集合并启动其下游 subagent。同一 Batch 的 TASK 仍由单一队列逐个完成生产实现，全部成为 `implemented` 后统一编译一次。
    - 任务数不是首要目标：8-15 个清晰 vertical slice 优于 5 个巨型 capability task。超过 15 个任务时才检查是否把代码步骤误拆成任务；禁止为了压低任务数合并独立场景。
    - specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 

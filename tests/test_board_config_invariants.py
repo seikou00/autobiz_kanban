@@ -603,14 +603,13 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
             "task_runner.py\" code-session",
-            "每次进入 Code 阶段或在新对话恢复 Code 时",
+            "只有恰好一个未完成 Batch 时",
             "execute_active_batch",
             "run_batch_compile",
             "start_batch_compile_repair",
             "continue_batch_compile_repair",
+            "start_parallel_batch_workflow",
             "code_done_ready",
-            "stop_and_open_new_conversation",
-            "不得在同一对话再次调用 `code-session`",
             "协议层约束",
             "explorationCaches",
             "full_bounded_explore",
@@ -745,7 +744,8 @@ class BoardConfigInvariantsTest(unittest.TestCase):
 
     def test_plan_skill_points_batch_resume_to_code_session(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("task_runner.py code-session", content)
+        self.assertIn("并行 scheduler", content)
+        self.assertIn("依赖 Batch 必须等其 `deps` 全部合并", content)
         self.assertNotIn("task_runner.py activate-batch", content)
 
     def _assert_markdown_views_are_optional(self, pairs: dict[str, str]) -> None:

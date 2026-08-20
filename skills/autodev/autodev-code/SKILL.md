@@ -141,20 +141,20 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 ```
 该命令只保存 Code 开始前的 Git 可见文件快照，不修改业务仓库；已有 active 基线时脚本会复用它。
 
-完成上述一次性基线检查后，每次进入 Code 阶段或在新对话恢复 Code 时，执行：
+完成上述一次性基线检查后，先读取根 Plan 的未完成 Batch 数量。只有恰好一个未完成 Batch 时，才执行：
 ```bash
 python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 ```
 
-若根计划处于 `awaiting_next_conversation`，它会校验并消费 `BATCH_HANDOFF.json`，自动激活 `nextBatchId`，无需用户提供 batch ID。必须严格按返回的 `action` 分支：
+若根计划处于历史遗留的 `awaiting_next_conversation`，该入口直接返回 `start_parallel_batch_workflow`；不会消费 handoff 或自动激活 `nextBatchId`。多个未完成 Batch 同样不得用它逐个推进 Batch。必须严格按返回的 `action` 分支：
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_compile`：执行一次 `batch-compile`，不得先执行任何 TASK 测试命令。
 - `start_batch_compile_repair` / `continue_batch_compile_repair`：按 runner 返回的 `repairOwnerTaskIds` 由模型修复生产代码，最多 3 次，不得要求用户手工修改。
-- `stop_and_open_new_conversation`：当前批次已完成；向用户显示 runner 返回的 `userMessage` 并立即结束当前对话，不得继续读取、探索或启动下一批次。
+- `start_parallel_batch_workflow`：立即按下方 Workflow 并行执行模式创建 scheduler run；不得选择一个 `activeBatchId` 后串行执行。
 - `code_done_ready`：所有批次均已通过生产代码编译门禁，继续 Code 完成门禁。
 
-入口返回失败、活动批次缺失或 handoff 不一致时必须停止，不得猜测 batch ID、直接编辑计划或绕过入口启动 Task。`code-session` 只允许在 Code 会话入口调用；收到批次完成的 `stop_and_open_new_conversation` 后，不得在同一对话再次调用 `code-session`。
+入口返回失败、活动批次缺失或旧 handoff 状态时必须停止，不得猜测 batch ID、直接编辑计划或绕过入口启动 Task。`code-session` 只允许在单 Batch Code 会话入口调用。
 
 ### 建立执行上下文与任务队列
 
@@ -255,7 +255,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 
 `batch-compile` 是 Code 阶段唯一构建命令，只编译生产代码，不运行 TASK 测试，也不创建测试资产。长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
 
-- 返回 `compileStatus=passed` 后，runner 将本批 `implemented` TASK 标记为 `done` 并返回下一步。非末批返回 `requiredAction=stop_and_open_new_conversation`、`stopAfterBatch=true` 和 `BATCH_HANDOFF.json`，当前对话必须立即停止；末批才按 `continuation` 进入 `code_done_ready`。不再进入旧验证流程。
+- 返回 `compileStatus=passed` 后，runner 将本批 `implemented` TASK 标记为 `done`。并行 run 回写 `ready_to_merge`，由 scheduler 在合并后释放下游 Batch；单 Batch 直接返回 `code_done_ready`。不再生成或消费 `BATCH_HANDOFF.json`。
 - 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码。推荐先执行下列命令建立 repair run，再修改代码：
 
 ```bash
@@ -358,7 +358,7 @@ launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
 useWorkflow=$(printf '%s' "$launcher_result" | jq -r '.useWorkflow')
 ```
 
-只有 `useWorkflow=true` 且校验结果为 `parallel_plan_valid` 才能启动 `workflows/code-batched-execution.workflow.js`；否则继续使用本技能的串行流程。
+只有 `useWorkflow=true` 且校验结果为 `parallel_plan_valid` 才能启动 `workflows/code-batched-execution.workflow.js`。多个待执行 Batch 返回 `useWorkflow=false` 时表示 Plan 不可并行，必须回流 `/autodev-plan` 修复 `deps`、`touches` 或 workspace 契约，禁止继续使用串行流程；只有单 Batch 可使用 `code-session`。
 
 并行实现阶段使用 `isolation: "worktree"`，并且必须遵守：
 
@@ -381,6 +381,6 @@ useWorkflow=$(printf '%s' "$launcher_result" | jq -r '.useWorkflow')
 
 - 队列所有任务「完成」，且都有 `action=implementation` evidence；任务级 evidence 继续记录真实生产文件变更，测试意图保留在 `validationTestPlan[].testIntent` 供 UTest/E2E 阶段消费。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与任务 implementation evidence 完整性和哈希校验通过；每个 Batch 的 `batchCompile` 状态绑定最新 implementation evidence 与 revision，没有新生成的 `ev_XXXX.json` sidecar。
-- 每批 `batchCompile.status=passed`，且 `commandId` 绑定该批 required compile command 与最终 implementation digest；`BATCH_HANDOFF.json` 仅属于串行兼容流程，并行模式不生成、不消费。
+- 每批 `batchCompile.status=passed`，且 `commandId` 绑定该批 required compile command 与最终 implementation digest；Batch 之间只通过 scheduler manifest 的依赖状态推进，不生成或消费 `BATCH_HANDOFF.json`。
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

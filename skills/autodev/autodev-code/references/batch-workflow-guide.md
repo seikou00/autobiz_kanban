@@ -75,9 +75,10 @@ Workflow 自动在以下情况启用：
 - Feature 包含 **2 个或更多** 待执行的 batch
 - 各 batch 状态为 `todo` 或 `in_progress`
 
-✗ **不启用**（使用串行模式）：
-- 只有 1 个 batch
+✗ **不启用**：
+- 只有 1 个 batch（使用单 Batch `code-session`）
 - 所有 batch 都已完成（`done` 或 `failed`）
+- 多 Batch 计划校验失败（必须回流 Plan 修复，禁止降级串行）
 
 ## 使用方式
 
@@ -250,7 +251,7 @@ Plan 启用 `parallelPolicy` 后，每个 Task 必须声明 `touches`：`code` �
 
 ## 性能优势
 
-### 串行模式（传统）
+### 有依赖时的 DAG 波次
 
 ```
 B001: 10 分钟
@@ -266,10 +267,10 @@ B003: 12 分钟
 
 ```
 B001: 10 分钟  ┐
-B002: 8 分钟   ├─ 并行执行
-B003: 12 分钟  ┘
+B002: 8 分钟   ├─ 无依赖 Batch 并行执行
+B003: 等待 B001 合并后启动
   ↓
-合并: 3 分钟
+依赖满足后重新调度
 ────────────────
 总计: ~15 分钟
 ```
@@ -334,7 +335,7 @@ B003: 12 分钟  ┘
 
 ### 问题 1: Workflow 未启动
 
-**症状**：即使有多个 batch，仍使用串行模式
+**症状**：即使有多个 batch，仍未启动 Workflow
 
 **排查**：
 ```bash
@@ -343,7 +344,8 @@ python hooks/workflow_launcher.py --feature "feat-xxx" --json
 
 **可能原因**：
 - Batch 状态都是 `done` 或 `failed`
-- Plan.json 格式错误
+- Plan.json 格式错误，或并行契约缺失
+- 计划存在非法/缺失的 `deps`、`touches` 或 workspace 绑定
 
 ### 问题 2: Worktree 创建失败
 

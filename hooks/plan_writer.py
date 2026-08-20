@@ -260,10 +260,6 @@ def _md_path(workspace: Path, feature: str) -> Path:
     return artifact_path(workspace, feature, PLAN_MD_FILE)
 
 
-def _handoff_path(workspace: Path, feature: str) -> Path:
-    return artifact_path(workspace, feature, "BATCH_HANDOFF.json")
-
-
 def _plan_write_transaction_path(workspace: Path, feature: str) -> Path:
     return artifact_path(workspace, feature, PLAN_WRITE_TRANSACTION_FILE)
 
@@ -1321,8 +1317,6 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     unfinished = [entry["id"] for entry in root_entries if entry["status"] != "done"]
     if not root_entries:
         root.update({"status": "todo", "activeBatchId": None, "nextBatchId": None})
-    elif root.get("status") == "awaiting_next_conversation":
-        root["activeBatchId"] = None
     elif not unfinished:
         if data.get("status") == "failed":
             root["status"] = "failed"
@@ -1339,6 +1333,19 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             root["status"] = "done" if project_ready else "in_progress"
         root["activeBatchId"] = None
         root["nextBatchId"] = None
+    elif len(unfinished) > 1:
+        # Multi-Batch execution is selected from the dependency DAG, not the
+        # presentation order of Batch IDs.
+        root["activeBatchId"] = None
+        root["nextBatchId"] = None
+        if data.get("status") == "failed" or any(entry["status"] == "failed" for entry in root_entries):
+            root["status"] = "failed"
+        elif data.get("status") == "in_progress" or any(entry["status"] == "in_progress" for entry in root_entries):
+            root["status"] = "in_progress"
+        else:
+            root["status"] = "todo"
+    elif root.get("status") == "awaiting_next_conversation":
+        root["activeBatchId"] = None
     else:
         active = root.get("activeBatchId")
         if active not in unfinished:
@@ -2224,7 +2231,6 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 plans_dir.rmdir()
             except OSError:
                 pass
-        unlink_if_exists(_handoff_path(workspace, feature))
     return render_result(with_result_data(_write(workspace, feature, _initial(feature), allow_empty=True), reset=bool(args.force)))
 
 
@@ -4733,61 +4739,6 @@ def begin_batch_compile_repair(
         return _write(workspace, feature, data)
 
 
-def _build_compile_batch_handoff(
-    workspace: Path,
-    feature: str,
-    batch_id: str,
-    batch_tasks: list[dict[str, Any]],
-    batch_compile: dict[str, Any],
-    next_entry: dict[str, Any],
-) -> dict[str, Any]:
-    next_batch_id = str(next_entry.get("id"))
-    user_message = (
-        f"当前批次 {batch_id} 已通过生产代码编译门禁。"
-        f"请打开新的对话继续执行 {next_batch_id}。"
-    )
-    return {
-        "version": 1,
-        "featureId": feature,
-        "completedBatchId": batch_id,
-        "nextBatchId": next_batch_id,
-        "completedTaskIds": [str(task.get("id")) for task in batch_tasks],
-        "implementationEvidenceIds": [
-            evidence_id
-            for task in batch_tasks
-            for evidence_id in task.get("implementationEvidenceIds", [])
-            if isinstance(evidence_id, str)
-        ],
-        "batchCompile": {
-            field: copy.deepcopy(batch_compile.get(field))
-            for field in (
-                "status",
-                "commandId",
-                "workspaceSnapshotSha256",
-                "implementationEvidenceByTask",
-                "implementationRevisionByTask",
-            )
-        },
-        "nextBatch": {
-            "title": str(next_entry.get("title", "")),
-            "taskIds": list(next_entry.get("taskIds", [])),
-            "specRoots": list(next_entry.get("specRoots", [])),
-            "deps": list(next_entry.get("deps", [])),
-            "executionLane": next_entry.get("executionLane"),
-        },
-        "status": "awaiting_next_conversation",
-        "requiredAction": "stop_and_open_new_conversation",
-        "requiresNewConversation": True,
-        "userMessage": user_message,
-        "createdAt": _utc_now(),
-        "activationCommand": (
-            f"python hooks/task_runner.py code-session --workspace {workspace} "
-            f"--feature {feature}"
-        ),
-        "instruction": user_message,
-    }
-
-
 def mark_batch_tasks_done_after_compile(
     workspace: Path,
     feature: str,
@@ -4851,36 +4802,16 @@ def mark_batch_tasks_done_after_compile(
             batch_index = ordered_ids.index(batch_id)
         except ValueError:
             return fail("batch_not_found", batch_id, path=_path(workspace, feature))
-        next_entry = entries[batch_index + 1] if batch_index + 1 < len(entries) else None
-        handoff: dict[str, Any] | None = None
-        if isinstance(next_entry, dict) and not parallel:
-            next_batch_id = str(next_entry.get("id"))
-            data["status"] = "awaiting_next_conversation"
-            data["activeBatchId"] = None
-            data["nextBatchId"] = next_batch_id
-            handoff = _build_compile_batch_handoff(
-                workspace,
-                feature,
-                batch_id,
-                [task for task in tasks if task.get("id") in task_ids],
-                batch_compile,
-                next_entry,
-            )
-
-        if parallel:
-            data["status"] = "in_progress"
-            data["activeBatchId"] = None
-            data["nextBatchId"] = None
+        # Batch completion is a local state transition.  The scheduler owns
+        # cross-batch progression; never emit a handoff that turns a DAG into
+        # an implicit B001 -> B002 conversation chain.
+        data["status"] = "in_progress"
+        data["activeBatchId"] = None
+        data["nextBatchId"] = None
         result = _write(workspace, feature, data)
         if not result.ok:
             return result
-        if handoff is None:
-            unlink_if_exists(_handoff_path(workspace, feature))
-            return result
-        handoff_changed = atomic_write_json(_handoff_path(workspace, feature), handoff)
-        if handoff_changed and not result.changed:
-            result = WriterResult(ok=True, path=result.path, changed=True)
-        return with_result_data(result, batchHandoff=handoff)
+        return result
 
 
 
@@ -4941,32 +4872,6 @@ def update_task_evidence_only(
         # 不改变 status
 
         return _write(workspace, feature, data)
-
-
-def activate_batch(workspace: Path, feature: str, batch_id: str) -> WriterResult:
-    with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
-        if data.get("status") != "awaiting_next_conversation":
-            return fail("feature_not_awaiting_next_conversation", str(data.get("status")), path=_path(workspace, feature))
-        if data.get("nextBatchId") != batch_id:
-            return fail("batch_activation_mismatch", f"expected={data.get('nextBatchId')} actual={batch_id}", path=_path(workspace, feature))
-        entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
-        entry = next((item for item in entries if item.get("id") == batch_id), None)
-        if entry is None:
-            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
-        by_id = {str(item.get("id")): item for item in entries}
-        unfinished = [dep for dep in entry.get("deps", []) if by_id.get(dep, {}).get("status") != "done"]
-        if unfinished:
-            return fail("batch_dependencies_not_done", ",".join(unfinished), path=_path(workspace, feature))
-        ordered = [str(item.get("id")) for item in entries]
-        index = ordered.index(batch_id)
-        data["status"] = "in_progress"
-        data["activeBatchId"] = batch_id
-        data["nextBatchId"] = ordered[index + 1] if index + 1 < len(ordered) else None
-        result = _write(workspace, feature, data)
-        if result.ok:
-            unlink_if_exists(_handoff_path(workspace, feature))
-        return with_result_data(result, activeBatchId=batch_id, nextBatchId=data.get("nextBatchId"))
 
 
 def _cmd_add_blocker(args: argparse.Namespace) -> int:

@@ -91,10 +91,22 @@ def validate_plan_for_parallel(workspace: Path, feature: str) -> dict[str, Any]:
     try:
         bundle = load_plan_bundle(feature_dir(workspace, feature))
     except ValueError as exc:
-        return {"canParallel": False, "fallbackToSerial": True, "reason": f"invalid_plan:{exc}", "errors": [str(exc)]}
+        return {
+            "canParallel": False,
+            "fallbackToSerial": False,
+            "requiresPlanRepair": True,
+            "reason": f"invalid_plan:{exc}",
+            "errors": [str(exc)],
+        }
     errors = parallel_plan_errors(bundle)
     if errors:
-        return {"canParallel": False, "fallbackToSerial": True, "reason": errors[0], "errors": errors}
+        return {
+            "canParallel": False,
+            "fallbackToSerial": False,
+            "requiresPlanRepair": True,
+            "reason": errors[0],
+            "errors": errors,
+        }
     entries = [item for item in bundle.root.get("batches", []) if isinstance(item, dict) and item.get("status") not in {"done", "failed"}]
     if len(entries) < 2:
         return {"canParallel": False, "fallbackToSerial": True, "reason": "fewer_than_two_pending_batches", "errors": []}

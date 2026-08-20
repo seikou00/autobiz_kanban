@@ -93,7 +93,7 @@ manifest 会冻结每个仓库的 `requestedPath`、`gitRoot`、`baseSha`、`bas
 
 ### 冲突策略
 
-Task 通过 `touches=[{path,kind}]` 声明文件触点。普通 `code` 重叠只作事前 warning；`shared`、`proto`、`database`、`configuration` 分别收敛到唯一的 integration、proto 或 global-change Batch。策略分析器会自动生成跨 Batch 依赖并在策略不完整时回退串行。Git 冲突不采用 ours/theirs：`batch_merger.py` 预检失败后创建 resolution Worktree，Agent 在其中基于双方目标和 diff 解决冲突、执行 compile、提交 resolution commit，`parallel_conflict_resolver.py` 再把该 commit 合并回对应仓库并记录审计信息。
+Task 通过 `touches=[{path,kind}]` 声明文件触点。普通 `code` 重叠只作事前 warning；`shared`、`proto`、`database`、`configuration` 分别收敛到唯一的 integration、proto 或 global-change Batch。策略分析器会自动生成跨 Batch 依赖；策略不完整时多 Batch 直接阻断并回流 Plan 修复，不能退回串行。Git 冲突不采用 ours/theirs：`batch_merger.py` 预检失败后创建 resolution Worktree，Agent 在其中基于双方目标和 diff 解决冲突、执行 compile、提交 resolution commit，`parallel_conflict_resolver.py` 再把该 commit 合并回对应仓库并记录审计信息。
 
 ### 3.1 workflow_launcher.py - 执行模式判断
 

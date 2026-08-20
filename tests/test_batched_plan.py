@@ -681,8 +681,8 @@ class BatchedPlanContractTest(unittest.TestCase):
             self.assertEqual([entry["id"] for entry in root["batches"]], ["B001", "B002"])
             self.assertEqual(len(first["tasks"]), 5)
             self.assertEqual(len(second["tasks"]), 1)
-            self.assertEqual(root["activeBatchId"], "B001")
-            self.assertEqual(root["nextBatchId"], "B002")
+            self.assertIsNone(root["activeBatchId"])
+            self.assertIsNone(root["nextBatchId"])
 
     def test_plan_writer_starts_frontend_task_in_new_batch_for_same_capability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -453,7 +453,8 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
 
     root_path = feature_dir / "plan.json"
     root = json.loads(root_path.read_text(encoding="utf-8"))
-    root["nextBatchId"] = "B002"
+    root["activeBatchId"] = None
+    root["nextBatchId"] = None
     root["batches"].append(
         {
             "id": "B002",
@@ -533,49 +534,33 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(revalidated_batch["batchCompile"]["status"], "passed")
             self.assertEqual(revalidated_batch["batchCompile"]["repairAttempts"], 0)
 
-    def test_batch_compile_pass_stops_for_new_conversation_before_next_batch(self) -> None:
+    def test_multiple_batches_require_parallel_workflow_instead_of_code_session_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             _configure_defer_to_test_stages(feature_dir)
             _add_second_compile_only_batch(feature_dir)
-            started = _start(workspace, code)
-            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
-            (code / "compile-fixed.txt").write_text("compile ready\n", encoding="utf-8")
-            finished = _run(
-                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
-                "--task-id", "T001", "--code-workspace", str(code),
-                "--run-id", started["runId"],
-            )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-
-            compiled = _run(
-                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
-                "--batch-id", "B001", "--code-workspace", str(code),
-            )
-
-            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
-            payload = json.loads(compiled.stdout)
-            self.assertEqual(payload["requiredAction"], "stop_and_open_new_conversation")
-            self.assertTrue(payload["stopAfterBatch"])
-            self.assertTrue(payload["requiresNewConversation"])
-            self.assertEqual(payload["batchHandoff"]["completedBatchId"], "B001")
-            self.assertEqual(payload["batchHandoff"]["nextBatchId"], "B002")
-            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(root["status"], "awaiting_next_conversation")
-            self.assertIsNone(root["activeBatchId"])
-            self.assertEqual(root["nextBatchId"], "B002")
-            handoff_path = feature_dir / "BATCH_HANDOFF.json"
-            self.assertTrue(handoff_path.is_file())
-
-            resumed = _run(
+            session = _run(
                 "code-session", "--workspace", str(workspace), "--feature", "alpha",
             )
-            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
-            resumed_payload = json.loads(resumed.stdout)
-            self.assertEqual(resumed_payload["action"], "execute_active_batch")
-            self.assertEqual(resumed_payload["activeBatchId"], "B002")
-            self.assertTrue(resumed_payload["activatedFromHandoff"])
-            self.assertFalse(handoff_path.exists())
+            self.assertEqual(session.returncode, 0, session.stdout + session.stderr)
+            session_payload = json.loads(session.stdout)
+            self.assertEqual(session_payload["action"], "start_parallel_batch_workflow")
+            self.assertEqual(session_payload["batchIds"], ["B001", "B002"])
+
+            direct_start = _run(
+                "start", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+            )
+            self.assertNotEqual(direct_start.returncode, 0)
+            direct_payload = json.loads(direct_start.stdout)
+            self.assertEqual(direct_payload["error"], "multi_batch_requires_parallel_workflow")
+            self.assertEqual(direct_payload["requiredAction"], "start_parallel_batch_workflow")
+
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(root["status"], "todo")
+            self.assertIsNone(root["activeBatchId"])
+            self.assertIsNone(root["nextBatchId"])
+            self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
 
     def test_batch_compile_failure_requires_model_repair_and_new_implementation_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1744,12 +1729,7 @@ class TaskRunnerTest(unittest.TestCase):
             run_paths = list((feature_dir / ".task-runs" / "T001").glob("*.json"))
             self.assertEqual(len(run_paths), 1)
     def test_code_session_rejects_missing_invalid_and_mismatched_handoff(self) -> None:
-        cases = [
-            ("missing", None, "batch_handoff_missing:B002"),
-            ("invalid", "{", "batch_handoff_invalid:B002"),
-            ("mismatch", json.dumps({"nextBatchId": "B003"}), "batch_handoff_mismatch:B002"),
-        ]
-        for label, handoff_content, expected_error in cases:
+        for label, handoff_content in (("missing", None), ("invalid", "{"), ("mismatch", json.dumps({"nextBatchId": "B003"}))):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp)
                 feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
@@ -1764,8 +1744,8 @@ class TaskRunnerTest(unittest.TestCase):
                 )
 
                 with patch.object(task_runner_module, "load_plan_bundle", return_value=bundle):
-                    with self.assertRaisesRegex(task_runner_module.TaskRunnerError, expected_error):
-                        task_runner_module.code_session(workspace, "alpha")
+                    result = task_runner_module.code_session(workspace, "alpha")
+                    self.assertEqual(result["action"], "start_parallel_batch_workflow")
     def test_task_start_rejects_multiple_requested_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -50,7 +50,6 @@ from hooks.plan_json import (  # noqa: E402
 )
 from hooks.plan_writer import (  # noqa: E402
     PlanWriterInputError,
-    activate_batch as activate_plan_batch,
     begin_batch_compile_repair,
     mark_batch_tasks_done_after_compile,
     record_task_implementation,
@@ -216,12 +215,43 @@ def _load_plan_and_task(
         batch_id, task = find_task(bundle, task_id)
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
-    if require_active_batch and bundle.root.get("status") == "awaiting_next_conversation":
-        raise TaskRunnerError(f"batch_handoff_requires_new_conversation:{bundle.root.get('nextBatchId')}")
+    if require_active_batch and len(_unfinished_batch_ids(bundle)) > 1:
+        raise TaskRunnerError(
+            "multi_batch_requires_parallel_workflow",
+            requiredAction="start_parallel_batch_workflow",
+            batchIds=_unfinished_batch_ids(bundle),
+        )
     active_batch = bundle.root.get("activeBatchId")
     if require_active_batch and active_batch != batch_id:
         raise TaskRunnerError(f"task_not_in_active_batch:{task_id}:active={active_batch}:taskBatch={batch_id}")
     return bundle, batch_id, task
+
+
+def _unfinished_batch_ids(bundle: PlanBundle) -> list[str]:
+    return [
+        str(entry.get("id"))
+        for entry in bundle.root.get("batches", [])
+        if isinstance(entry, dict)
+        and isinstance(entry.get("id"), str)
+        and normalize_status(entry.get("status")) not in {"done", "failed"}
+    ]
+
+
+def _require_parallel_workflow_for_multi_batch(
+    bundle: PlanBundle,
+    *,
+    parallel_run_id: str | None,
+) -> None:
+    """Prevent the legacy one-active-batch runner from serializing a DAG."""
+    if parallel_run_id is not None:
+        return
+    batch_ids = _unfinished_batch_ids(bundle)
+    if len(batch_ids) > 1:
+        raise TaskRunnerError(
+            "multi_batch_requires_parallel_workflow",
+            requiredAction="start_parallel_batch_workflow",
+            batchIds=batch_ids,
+        )
 
 
 def _unfinished_dependencies(plan: PlanBundle, task: dict[str, Any]) -> list[str]:
@@ -751,6 +781,7 @@ def _start_task_unlocked(
         task_id,
         require_active_batch=require_active_batch and parallel_run_id is None,
     )
+    _require_parallel_workflow_for_multi_batch(plan, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
 
     # Check if this is a task repair
@@ -3284,23 +3315,6 @@ def _run_batch_compile(
         ) from exc
 
 
-def _activate_batch_unlocked(workspace: Path, feature: str, batch_id: str) -> dict[str, Any]:
-    result = activate_plan_batch(workspace, feature, batch_id)
-    if not result.ok:
-        errors = result.errors or []
-        detail = ";".join(
-            f"{item.get('reason')}:{item.get('detail', '')}" for item in errors
-        )
-        raise TaskRunnerError(detail or "batch_activation_failed")
-    return dict(result.data or {})
-
-
-def activate_batch(workspace: Path, feature: str, batch_id: str) -> dict[str, Any]:
-    feature_dir = _feature_dir(workspace, feature)
-    with _task_run_lock(feature_dir):
-        return _activate_batch_unlocked(workspace, feature, batch_id)
-
-
 def run_batch_compile(
     workspace: Path,
     feature: str,
@@ -3320,6 +3334,11 @@ def run_batch_compile(
         "failureCategory": str (失败时)
     }
     """
+    try:
+        bundle = load_plan_bundle(_feature_dir(workspace, feature))
+    except ValueError as exc:
+        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
     # Compilation is intentionally outside the feature metadata lock: a lease
     # serializes a batch, while independent worktrees may compile concurrently.
@@ -3357,6 +3376,11 @@ def revalidate_batch_compile(
         "wasRevalidation": True
     }
     """
+    try:
+        bundle = load_plan_bundle(_feature_dir(workspace, feature))
+    except ValueError as exc:
+        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
     # 强制重新运行编译，并通过 plan_writer 重置已通过的编译门禁。
     compile_result = _run_batch_compile(workspace, feature, batch_id, code_workspace, force=True)
@@ -3427,33 +3451,6 @@ def _integrate_batch_compile_result(
         except PlanWriterInputError as exc:
             raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
 
-        batch_handoff = (
-            mark_result.data.get("batchHandoff")
-            if isinstance(mark_result.data, dict)
-            else None
-        )
-        if isinstance(batch_handoff, dict):
-            continuation = {
-                "action": batch_handoff.get(
-                    "requiredAction",
-                    "stop_and_open_new_conversation",
-                ),
-                "completedBatchId": batch_handoff.get("completedBatchId", batch_id),
-                "nextBatchId": batch_handoff.get("nextBatchId"),
-                "requiresNewConversation": True,
-                "userMessage": batch_handoff.get("userMessage"),
-            }
-            return {
-                "compileStatus": "passed",
-                "requiredAction": continuation["action"],
-                "batchId": batch_id,
-                "batchHandoff": batch_handoff,
-                "stopAfterBatch": True,
-                "requiresNewConversation": True,
-                "userMessage": batch_handoff.get("userMessage"),
-                "continuation": continuation,
-            }
-
         if parallel_run_id is not None:
             mark_parallel_batch(
                 workspace,
@@ -3469,12 +3466,11 @@ def _integrate_batch_compile_result(
                 "batchId": batch_id,
                 "parallelRunId": parallel_run_id,
             }
-        continuation = _code_session_unlocked(workspace, feature)
         return {
             "compileStatus": "passed",
-            "requiredAction": continuation.get("action", "batch_compile_passed"),
+            "requiredAction": "code_done_ready",
             "batchId": batch_id,
-            "continuation": continuation,
+            "continuation": {"action": "code_done_ready", "completedBatchId": batch_id},
         }
     else:
         if parallel_run_id is not None:
@@ -3526,26 +3522,24 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
 
-    activated_from_handoff = False
+    pending_batch_ids = _unfinished_batch_ids(bundle)
+    if len(pending_batch_ids) > 1:
+        return {
+            "action": "start_parallel_batch_workflow",
+            "requiredAction": "start_parallel_batch_workflow",
+            "batchIds": pending_batch_ids,
+            "userMessage": "检测到多个未完成 Batch；请通过并行调度工作流按依赖 DAG 执行。",
+        }
+
     if bundle.root.get("status") == "awaiting_next_conversation":
-        next_batch_id = bundle.root.get("nextBatchId")
-        if not isinstance(next_batch_id, str):
-            raise TaskRunnerError("batch_handoff_missing_next_batch")
-        handoff_path = feature_dir / "BATCH_HANDOFF.json"
-        if not handoff_path.is_file():
-            raise TaskRunnerError(f"batch_handoff_missing:{next_batch_id}")
-        try:
-            handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise TaskRunnerError(f"batch_handoff_invalid:{next_batch_id}") from exc
-        if not isinstance(handoff, dict) or handoff.get("nextBatchId") != next_batch_id:
-            raise TaskRunnerError(f"batch_handoff_mismatch:{next_batch_id}")
-        _activate_batch_unlocked(workspace, feature, next_batch_id)
-        activated_from_handoff = True
-        try:
-            bundle = load_plan_bundle(feature_dir)
-        except ValueError as exc:
-            raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+        return {
+            "action": "start_parallel_batch_workflow",
+            "requiredAction": "start_parallel_batch_workflow",
+            "batchIds": pending_batch_ids,
+            "userMessage": "旧版 Batch handoff 已停用；请通过并行调度工作流按依赖 DAG 恢复。",
+        }
+
+    activated_from_handoff = False
 
     active_batch_id = bundle.root.get("activeBatchId")
     if isinstance(active_batch_id, str):
@@ -3642,30 +3636,12 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                     ),
                 }
             elif batch_compile_status == "passed":
-                # 编译通过，批次完成，检查是否有下一批次
-                next_batch_id = bundle.root.get("nextBatchId")
-                if isinstance(next_batch_id, str):
-                    # 有下一批次，自动激活
-                    _activate_batch_unlocked(workspace, feature, next_batch_id)
-                    try:
-                        bundle = load_plan_bundle(feature_dir)
-                    except ValueError as exc:
-                        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
-                    return {
-                        "action": "batch_completed_next_activated",
-                        "completedBatchId": active_batch_id,
-                        "activeBatchId": next_batch_id,
-                        "executionLane": execution_lane,
-                        "activatedFromHandoff": activated_from_handoff,
-                        "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。已自动激活下一批次 {next_batch_id}。",
-                    }
-                else:
-                    return {
-                        "action": "code_done_ready",
-                        "completedBatchId": active_batch_id,
-                        "activatedFromHandoff": activated_from_handoff,
-                        "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。所有批次已完成，功能开发结束。",
-                    }
+                return {
+                    "action": "code_done_ready",
+                    "completedBatchId": active_batch_id,
+                    "activatedFromHandoff": activated_from_handoff,
+                    "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。所有批次已完成，功能开发结束。",
+                }
             elif batch_compile_status is not None:
                 raise TaskRunnerError(
                     f"batch_compile_status_invalid:{active_batch_id}:{batch_compile_status}"
@@ -3858,15 +3834,6 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
 
 
-def _cmd_activate_batch(args: argparse.Namespace) -> int:
-    try:
-        workspace = resolve_workspace(args.workspace)
-        feature = resolve_feature(args.feature)
-        return _emit(True, **activate_batch(workspace, feature, args.batch_id))
-    except (TaskRunnerError, ValueError) as exc:
-        return _emit_error(exc)
-
-
 def _cmd_batch_compile(args: argparse.Namespace) -> int:
     """处理 batch-compile 子命令"""
     try:
@@ -3971,12 +3938,6 @@ def main(argv: list[str] | None = None) -> int:
     common(inspect)
     inspect.add_argument("--run-id")
     inspect.set_defaults(func=_cmd_inspect)
-
-    activate = subparsers.add_parser("activate-batch")
-    activate.add_argument("--workspace")
-    activate.add_argument("--feature")
-    activate.add_argument("--batch-id", required=True)
-    activate.set_defaults(func=_cmd_activate_batch)
 
     session = subparsers.add_parser("code-session")
     session.add_argument("--workspace")

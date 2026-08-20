@@ -13,7 +13,7 @@ from hooks.batch_merger import merge_run, sequential_merge_batches
 from hooks.parallel_conflict_resolver import complete_resolution, merge_resolution
 from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import acquire_lease, load_manifest, plan_digest, reclaim_lease, release_lease, resource_groups
-from hooks.parallel_batch_scheduler import create_run, mark_batch, validate_plan_for_parallel
+from hooks.parallel_batch_scheduler import create_run, mark_batch, schedule, validate_plan_for_parallel
 from hooks.plan_json import PlanBundle
 from hooks.plan_json import task_set_digest
 from hooks.worktree_manager import create_parallel_worktree, seal_parallel_batch
@@ -337,6 +337,8 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(merge_run(workspace, "alpha", run_id)["success"])
             first_merge_head = _git(repo, "rev-parse", "HEAD")
             self.assertEqual(load_manifest(workspace, "alpha", run_id)["repositories"]["default"]["headSha"], first_merge_head)
+            next_wave = schedule(workspace, "alpha", run_id)
+            self.assertEqual(next_wave["scheduledGroups"], [["B002"]])
 
             second_lease = acquire_lease(workspace, "alpha", run_id, "B002")
             second_tree = create_parallel_worktree(workspace, "alpha", run_id, "B002", None, second_lease["ownerToken"])
