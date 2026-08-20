@@ -25,14 +25,31 @@ python "${pluginPath}/hooks/rollback_stage.py" \
   --dry-run --json
 ```
 
-把 dry-run 返回的当前/目标 checkpoint、清理产物、Code task 重置清单、源码影响和阻断错误展示给用户。未获得明确确认前不得调用 `--apply`。
+首次 dry-run 不传 `--state-mode`。脚本会返回 `stateOptions`、`plannedArtifacts`，并标记 `confirmationRequired=true`；此时不会选定新 checkpoint。必须把可用状态选项和清理清单展示给用户，并明确询问：
 
-确认后执行：
+- `target_in_progress`：回退到用户指定目标阶段的 `in_progress` 状态。
+- `previous_done`：回退到目标阶段前一个有效阶段的 `done` 状态。
+
+用户必须明确选择其中一个可用模式。首个有效阶段没有 `previous_done`，只能选择 `target_in_progress`；没有 `*_in_progress` checkpoint 的归档类节点只会显示 `previous_done`。无论选择哪个状态模式，清理范围始终相同：目标阶段及其后续阶段的产物都会清理。
+
+收到用户选择后，使用相同模式重跑 dry-run，展示已选的当前/目标 checkpoint、清理产物、Code task 重置清单、源码影响和阻断错误。未获得对该状态选择和回退执行的明确确认前不得调用 `--apply`：
 
 ```bash
 python "${pluginPath}/hooks/rollback_stage.py" \
   --feature "${feature}" \
   --to-stage "<node-id-or-stage-alias>" \
+  --state-mode target_in_progress \
+  --code-source keep \
+  --dry-run --json
+```
+
+确认后以相同的 `--state-mode` 执行：
+
+```bash
+python "${pluginPath}/hooks/rollback_stage.py" \
+  --feature "${feature}" \
+  --to-stage "<node-id-or-stage-alias>" \
+  --state-mode target_in_progress \
   --code-source keep \
   --apply --json
 ```
@@ -75,8 +92,8 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 
 ## 安全边界
 
-- `--dry-run` 和 `--apply` 必须二选一；脚本默认不写入。
-- 目标阶段必须已到达，首个有效阶段不能回退，跳过节点不能作为目标。
+- `--dry-run` 和 `--apply` 必须二选一；脚本默认不写入。`--apply` 必须显式传入 `--state-mode`，不能沿用隐式默认状态。
+- 目标阶段必须已到达，跳过节点不能作为目标；首个有效阶段可以回退到自身的 `in_progress`，但不能回退到不存在的前置 `done`。
 - 同一 Feature 的 Code Session 基线捕获和回退由 Feature 锁串行化，不允许并发写入 `active.json`。
 - 状态只能由 `rollback_stage.py` 写入；不得手工编辑 `state.json`、`STATE.md` 或 `plan.json`。
 - 回退事务、失败恢复和归档记录位于 `.autobizdevops/rollback/`；不要删除 history 以外的业务仓库文件。
