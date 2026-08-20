@@ -43,6 +43,43 @@ class ReviewerHandoffContractTest(unittest.TestCase):
         self.assertIn("independent_task | inline_main_agent", schema)
         self.assertIn("inline_main_agent` 不得表述为独立子代理审查", schema)
 
+    def test_reviewer_reads_complete_review_scope_including_untracked_files(self) -> None:
+        prompt = REVIEWER_AGENT.read_text(encoding="utf-8")
+        schema = REVIEWER_SCHEMA.read_text(encoding="utf-8")
+
+        for contract in (
+            "proposal.files_changed",
+            "git status --short",
+            "--untracked-files=all",
+            "git diff --cached --name-only",
+            "untracked 文件没有 diff，必须直接读取完整内容",
+            "excluded paths",
+            "AGENTS.md",
+            "仓库明确规范优先于通用偏好",
+        ):
+            self.assertIn(contract, prompt)
+        self.assertIn("Review file set", schema)
+        self.assertIn("Untracked Files", schema)
+
+    def test_findings_require_evidence_and_verdict_is_deterministic(self) -> None:
+        prompt = REVIEWER_AGENT.read_text(encoding="utf-8")
+        schema = REVIEWER_SCHEMA.read_text(encoding="utf-8")
+
+        for contract in (
+            "Finding 准入",
+            "requirement_gap",
+            "confidence",
+            "触发条件",
+            "blocker 必须为 `HIGH`",
+            "不使用 1–5 主观评分",
+            "否则存在至少一个 blocker 时使用 `FAIL`",
+            "否则存在至少一个 warning 时使用 `PASS_WITH_WARNINGS`",
+        ):
+            self.assertIn(contract, prompt)
+        self.assertNotIn("claim_accuracy: 1-5", prompt)
+        for field in ("Severity:", "Category:", "Confidence:", "Location:", "触发条件:"):
+            self.assertIn(field, schema)
+
 
 class ReviewerRoleIsResolvableTest(unittest.TestCase):
     """reviewer 角色必须走 agents/ 约定，且在 dev.review 会话里可被宿主解析。"""

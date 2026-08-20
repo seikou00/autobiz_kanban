@@ -56,16 +56,19 @@ workload: full
    - 如果 proposal.affected_repositories 非空，使用其中的每个仓库。
    - 如果 proposal.affected_repositories 为空或不存在，把当前 cwd 当作唯一仓库，执行旧单仓库审查。
 7. 对每个仓库解析 path，确认可访问且是 git 仓库。required 仓库不可访问、不是 git 仓库、或无法获取 git 状态时，verdict 必须是 DEGRADED。
-8. 按下方「只读证据命令」在每个仓库中获取真实 changed files、staged files、diff 内容和最近提交。
-9. 对比 proposal.files_changed 与真实 git status / git diff --name-only / git diff --cached --name-only。跨仓库任务中，files_changed 每项必须能通过 repository_id 映射到 affected_repositories[].id。
-10. 对比 proposal.summary、behavior_changed、affected_repositories[].expected_changes 与各仓库真实 diff。
-11. 逐条核对第 3 步的每条基准，按其预期形态取证：`新增` / `修改` 看 diff 是否兑现该行为，`移除` 看实现、入口、配置与文档是否已消失且无残留。识别 requirement gap、scope creep、contract mismatch，并检查权限、安全、性能、兼容性、可观测性、迁移、降级等非功能约束是否被处理；如果 specs 或可选 PRD 要求多个系统、服务或仓库共同交付，检查 affected_repositories 是否覆盖这些边界。
-12. 如有 design.md，对比其 API Decisions、Data Decisions、Technical Design 与真实 diff，识别接口、数据、权限、租户、审计、迁移或模块边界不一致；无 design.md 时按现有代码模式评估实现合理性。
-13. 评估 proposal.verification 中声称的测试、lint、build、手工验证是否可信，并判断验证是否覆盖 specs Requirement / Scenario。没有日志或可核验证据时，不要默认相信。
-14. 搜索 changed files 中的 TODO、FIXME、HACK、stub、测试外 mock、disabled tests、宽泛 catch、吞错、未解释 fallback。
-15. 检查变更涉及的 API、routes、config keys、schemas、types、tests、docs 是否在仓库内及跨仓库之间一致。
-16. 判断 known_limitations 是否诚实披露 diff、specs、design 或可选 PRD 中可见的风险。
-17. 写 .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md，包含 Review Baseline、verdict、每个仓库的证据、需求/规格覆盖情况、E2E 关注点、blockers、warnings 和 required next action。
+8. 按下方「只读证据命令」在每个仓库中获取真实 changed files、staged files、untracked files、diff 内容和最近提交。
+9. 为每个仓库建立候选文件集：取 proposal.files_changed、`git status --short --untracked-files=all`、`git diff --name-only`、`git diff --cached --name-only` 所得路径的并集。跨仓库任务中，files_changed 每项必须能通过 repository_id 映射到 affected_repositories[].id。对集合差异先判断与本 feature 的关系：相关但被 proposal 遗漏的路径记录 `claim_mismatch`；确认无关的既有改动列为 excluded paths 并说明理由，不据此产生 finding。审查文件集由 proposal 声明路径和所有与基准或声称行为相关的真实变化组成。
+10. diff 只用于定位变化，不足以代替上下文。完整读取审查文件集中每个未删除的可读文本文件；untracked 文件没有 diff，必须直接读取完整内容。删除文件通过 diff、引用搜索和调用方核对；按需继续读取相关调用方、测试、配置与契约文件，确认控制流、错误处理和跨文件一致性。
+11. 在提出 `quality`、结构或风格 finding 前，读取适用于目标文件的仓库规范和既有模式，例如最近作用域内的 AGENTS.md、CONVENTIONS.md、.editorconfig、lint/type 配置及同模块相邻实现。仓库明确规范优先于通用偏好。
+12. 对比 proposal.summary、behavior_changed、affected_repositories[].expected_changes 与各仓库真实 diff 和审查文件集。
+13. 逐条核对第 3 步的每条基准，按其预期形态取证：`新增` / `修改` 看实现是否兑现该行为，`移除` 看实现、入口、配置与文档是否已消失且无残留。识别 requirement gap、scope creep、contract mismatch，并检查权限、安全、性能、兼容性、可观测性、迁移、降级等非功能约束是否被处理；如果 specs 或可选 PRD 要求多个系统、服务或仓库共同交付，检查 affected_repositories 是否覆盖这些边界。
+14. 如有 design.md，对比其 API Decisions、Data Decisions、Technical Design 与真实实现，识别接口、数据、权限、租户、审计、迁移或模块边界不一致；无 design.md 时按已核实的仓库规范和现有代码模式评估实现合理性。
+15. 评估 proposal.verification 中声称的测试、lint、build、手工验证是否可信，并判断验证是否覆盖 specs Requirement / Scenario。没有日志或可核验证据时，不要默认相信。
+16. 搜索审查文件集中的 TODO、FIXME、HACK、stub、测试外 mock、disabled tests、宽泛 catch、吞错、未解释 fallback。
+17. 检查变更涉及的 API、routes、config keys、schemas、types、tests、docs 是否在仓库内及跨仓库之间一致。
+18. 判断 known_limitations 是否诚实披露实现、specs、design 或可选 PRD 中可见的风险。
+19. 按下方「Finding 准入」筛选并定级所有候选问题。
+20. 写 .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md，包含 Review Baseline、verdict、每个仓库的证据、需求/规格覆盖情况、E2E 关注点、blockers、warnings 和 required next action。
 
 ## 只读证据命令
 
@@ -73,7 +76,7 @@ workload: full
 
 ```bash
 pwd
-git status --short
+git status --short --untracked-files=all
 git diff --name-only
 git diff --binary
 git diff --cached --name-only
@@ -89,16 +92,26 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 
 禁止运行会修改工作区、依赖、缓存、构建产物或远端状态的命令，例如 git add、git commit、git push、git checkout、git reset、rm、mv、cp、npm install。
 
-## 评分
+## Finding 准入
 
-- claim_accuracy: 1-5
-- evidence_quality: 1-5
-- spec_alignment: 1-5；以 specs Requirement / Scenario 为主要行为依据，proposal.md 用于目标和范围校验；PRD 只在用户显式提供时用于上游一致性检查
-- code_reality: 1-5
-- risk_honesty: 1-5
-- consistency: 1-5
+只报告与本次完成声明存在因果关系的问题：由本次变化引入或恶化、基准要求的行为缺失、完成声明与真实状态不符，或问题直接使声称的验证、集成或交付不可信。不要把无关的既有缺陷扩入本次 review；`requirement_gap` 即使没有对应 changed line 仍在范围内。
 
-任何非 null 分数低于 3 都是 FAIL。只有 proposal 准确、证据可信、且不存在 blocker 时才能 PASS。只有非阻塞问题不影响完成声明可信度时，才使用 PASS_WITH_WARNINGS。如果无法读取 completion proposal、proposal.md、specs，无法读取实际存在的 design.md/PLAN.md，无法读取用户显式提供的 PRD，无法访问 required 仓库，无法使用 shell/git 获取真实状态，或无法写报告文件，使用 DEGRADED；design.md/PLAN.md 本身不存在（精简/自定义工作流未生成）不构成 DEGRADED。
+每条 finding 必须包含 severity、category、confidence、location、问题、触发条件、影响、证据和下一动作：
+
+- `confidence` 只能是 `HIGH`、`MEDIUM`、`LOW`。blocker 必须为 `HIGH`，并有可复现路径、直接代码/契约证据或明确缺失证据；无法核实的判断降为 warning，不得写成确定性 blocker。
+- `location` 优先使用 `repo_id: path:line`。跨仓库契约问题使用 `cross-repo` 并列出双方位置；缺失实现使用对应 Requirement / Scenario，并列出已搜索的路径或查询。
+- 触发条件必须说明会出现问题的输入、环境、状态或调用路径；不要用没有现实触发路径的假设性边缘情况制造 finding。
+- 风格和结构问题只有违反已读取的仓库规范，或对正确性、可维护性产生具体影响时才报告。性能问题只有存在具体热路径、无界数据、N+1、阻塞 I/O 或其他可解释影响时才升级。
+- 优先级依次是需求/声明一致性，正确性、安全与数据风险，跨系统契约和迁移，验证可信度，最后才是维护性。文字保持事实化、简洁且可执行，不写无助于处置的表扬或泛泛建议。
+
+## Verdict 规则
+
+不使用 1–5 主观评分。specs Requirement / Scenario 是主要行为依据，proposal.md 用于目标和范围校验，PRD 只在用户显式提供时用于上游一致性检查。按以下顺序确定唯一 verdict：
+
+1. 如果无法读取 completion proposal、proposal.md、specs、实际存在的 design.md/PLAN.md、用户显式提供的 PRD，无法访问 required 仓库、无法使用 shell/git 获取真实状态，或无法写报告文件，使用 `DEGRADED`。design.md/PLAN.md 本身不存在（精简/自定义工作流未生成）不构成 DEGRADED。
+2. 否则存在至少一个 blocker 时使用 `FAIL`。
+3. 否则存在至少一个 warning 时使用 `PASS_WITH_WARNINGS`。
+4. 否则使用 `PASS`。
 
 ## 跨仓库报告要求
 

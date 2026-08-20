@@ -157,17 +157,20 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 ## Evidence
 
 - Completion proposal: `.autobizdevops/features/{slug}/completion-proposal.json`
-- Git status: `git status --short`（跨仓库任务中逐仓库列出）
+- Git status: `git status --short --untracked-files=all`（跨仓库任务中逐仓库列出）
 - Git diff: `git diff --name-only` / `git diff --binary`（跨仓库任务中逐仓库列出）
+- Review file set: candidate paths、included paths、excluded paths（含排除理由），以及 proposal 与真实变化的相关差异
+- Context read: 已读取完整内容的审查文件，以及按需读取的调用方、测试、配置和契约文件
+- Repository conventions: 实际适用的 AGENTS.md、CONVENTIONS.md、.editorconfig、lint/type 配置或 none
 - PRD references: 用户显式提供的 PRD 路径（没有 PRD 时写 none）
 - Contract references: `proposal.md`, `specs/**/*.md`, `design.md`, `PLAN.md`
 - Verification evidence: proposal 中声明的测试、lint、build 或手工验证证据
 
 ## Repositories Reviewed
 
-| Repository | Path | Source | Git Status | Changed Files |
-|---|---|---|---|---|
-| frontend | `../frontend` | user_input | clean / dirty / staged / unavailable | `src/example.ts` |
+| Repository | Path | Source | Git Status | Changed Files | Staged Files | Untracked Files |
+|---|---|---|---|---|---|---|
+| frontend | `../frontend` | user_input | clean / dirty / staged / unavailable | `src/example.ts` | none | `src/new.ts` |
 
 单仓库旧流程没有 affected_repositories 时，可以写 none 或写 current repository。
 
@@ -197,6 +200,21 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 - DEGRADED: 停止并等待用户下一步指令；不要把独立审查未成立伪装成 PASS。
 ```
 
+非空 finding 使用以下形状；用真实内容替换占位说明，且删除对应的 `- none`：
+
+```
+- ID: B-001 | W-001
+  Severity: blocker | important | minor
+  Category: spec_mismatch
+  Confidence: HIGH | MEDIUM | LOW
+  Location: `backend: src/example.ts:42` | `cross-repo: frontend + backend` | `specs/example/spec.md / SCN-001`
+  问题: 说明真实缺陷、缺失行为或非阻塞风险。
+  触发条件: 说明会触发问题的输入、环境、状态或调用路径；不确定时明确缺少的证据。
+  影响: 说明对完成声明或剩余风险的影响。
+  证据: 引用代码、契约、git、搜索范围或验证证据。
+  必须动作 | 建议动作: 给出可验证的处置结果，不替 executor 实现。
+```
+
 规则：
 
 - `REQUIREMENTS_EVAL.md` 必须落盘到 `.autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md`。
@@ -205,9 +223,15 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 - 不新增 `VERIFY_REPORT.md` 等后置文件门禁；没有额外 PRD 引用时不要求读取 PRD.md。
 - verdict 必须能追溯到 completion proposal、proposal.md、specs、design.md、可选 PRD、shell/git 输出和实际文件内容。
 - 跨仓库任务中，verdict 必须能追溯到每个 affected repository 的 shell/git 输出和实际文件内容。
-- `Repositories Reviewed` 必须列出每个被审查仓库的 id、path、source、git status、changed files。required 仓库不可访问、不是 git 仓库或无法获取状态时，verdict 必须为 DEGRADED。
+- `Review file set` 先取 proposal.files_changed、unstaged、staged、untracked 路径的候选并集，再按与本 feature 的因果关系分成 included / excluded。相关但被 proposal 遗漏的路径进入 `claim_mismatch`；确认无关的既有改动只记录排除理由，不产生 finding。untracked 文件必须用 `--untracked-files=all` 展开并读取完整内容，不能因普通 git diff 为空而忽略。删除文件通过 diff、引用搜索和调用方取证。
+- diff 只用于定位变化。reviewer 必须读取审查文件集中未删除的可读文本文件完整内容，并按需读取调用方、测试、配置和契约上下文。
+- `Repositories Reviewed` 必须列出每个被审查仓库的 id、path、source、git status、changed files、staged files 和 untracked files。required 仓库不可访问、不是 git 仓库或无法获取状态时，verdict 必须为 DEGRADED。
 - `E2E Focus` 是给 `/autodev-e2e` 的交接摘要，不要复制整份 diff 或完整审查报告。
 - `Requirement Coverage` 的 evidence、`Blockers` 和 `Warnings` 必须标明 repo id 或 `cross-repo`，避免下游无法定位。
+- finding 只允许覆盖本次变化引入或恶化的问题、基准要求但缺失的行为、完成声明不实，或直接使验证/集成/交付不可信的问题；不报告无关的既有缺陷。
+- 每条 finding 必须填写 ID、Severity、Category、Confidence、Location、问题、触发条件、影响、证据和动作。Confidence 只能取 HIGH、MEDIUM、LOW；blocker 必须是 HIGH。缺失实现没有代码位置时，Location 使用 Requirement / Scenario，证据列出已搜索路径或查询。
+- 风格、结构和 `quality` finding 必须以实际适用的仓库规范或具体影响为依据；不要把通用偏好写成问题。性能 finding 必须有具体热路径、无界数据或可解释影响。
+- verdict 不使用 1–5 主观评分：必要输入、仓库、shell/git 或写报告能力不可用为 DEGRADED；否则有 blocker 为 FAIL；否则有 warning 为 PASS_WITH_WARNINGS；否则为 PASS。
 - 如果 verdict 是 FAIL，Required Next Action 必须列出需要修复后重新 review 的 blockers 或 must fix 项。
 - 如果 verdict 是 DEGRADED，Required Next Action 必须说明停止并等待用户，不得引导 agent 立即修复。
 

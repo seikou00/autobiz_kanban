@@ -1,7 +1,7 @@
 ---
 name: autodev-reviewer
 description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，用 task 工具指定 `reviewer-autodev` 角色核验真实仓库状态，由该角色落盘 REQUIREMENTS_EVAL.md，主 agent 按 verdict 走修复复审闭环。
-version: v1.5.0814
+version: v1.6.0821
 ---
 
 ## 缺失产物处理
@@ -24,7 +24,7 @@ reviewer 没有隐式用户对话上下文。所有可审查上下文必须来�
 | 主 agent / Executor | 写 completion-proposal.json；启动 reviewer；FAIL 时修复 blockers 并重新 review；最后摘要 verdict | 在同一回合同时执行 reviewer 与 executor 角色；替 reviewer 改评估；未经重新 review 就宣称完成 |
 | `reviewer-autodev`  | 通过 shell/git/read/search 独立核验 proposal；只允许写 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md` | 修改源码、测试、配置、依赖、锁文件；运行任何写操作命令；修复问题 |
 
-reviewer 的只读命令白名单、禁止清单、审查流程和评分标准由 `reviewer-autodev` 角色自带，主 agent 不重复下发。如果 reviewer 无法用 shell/git 获取真实状态、无法访问 required 仓库或无法写报告文件，本次 review 不成立，verdict 记 `DEGRADED`。平台禁用 task 工具时允许主 agent 内联执行 reviewer 角色，但必须显式记录 `inline_main_agent` 模式并通过用户确认把 reviewer 与 executor 分隔到不同回合；不得把该模式包装成独立 review。
+reviewer 的只读命令白名单、禁止清单、审查流程、finding 准入和 verdict 规则由 `reviewer-autodev` 角色自带，主 agent 不重复下发。如果 reviewer 无法用 shell/git 获取真实状态、无法访问 required 仓库或无法写报告文件，本次 review 不成立，verdict 记 `DEGRADED`。平台禁用 task 工具时允许主 agent 内联执行 reviewer 角色，但必须显式记录 `inline_main_agent` 模式并通过用户确认把 reviewer 与 executor 分隔到不同回合；不得把该模式包装成独立 review。
 
 ## 执行步骤
 
@@ -56,7 +56,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval
 - **`independent_task`**：task 工具可用时，使用 task 工具指定 `reviewer-autodev` 角色。reviewer 返回后，主 agent 在同一回合继续执行第 4 步。
 - **`inline_main_agent`**：task 工具被平台禁用或不可用时，主 agent 读取 `${pluginPath}/agents/reviewer.md`，按其审查流程切换为 source-read-only reviewer 角色内联完成审查。`REQUIREMENTS_EVAL.md` 落盘后必须停止当前回合，明确告知用户本次为主 agent 内联 review，并请用户确认是否切回 executor 角色继续。未获得确认前，不得在同一回合读取 verdict 分支、修复问题或推进 checkpoint。
 
-审查流程、只读边界和评分标准由角色自带，task prompt 不要粘贴角色指令，只附带：
+审查流程、只读边界、finding 准入和 verdict 规则由角色自带，task prompt 不要粘贴角色指令，只附带：
 
 - `Feature directory:` `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`。
 - `Review execution mode:` `independent_task` 或 `inline_main_agent`。

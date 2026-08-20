@@ -214,6 +214,10 @@ REQUIREMENTS_EVAL_BLOCKERS_SECTION = re.compile(
     r"^##\s+Blockers?\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
 )
+REQUIREMENTS_EVAL_WARNINGS_SECTION = re.compile(
+    r"^##\s+Warnings?\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
 REQUIREMENTS_EVAL_BASELINE_SECTION = re.compile(
     r"^##\s+Review Baseline\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
@@ -1247,8 +1251,8 @@ def requirements_eval_baseline_rows(text: str) -> int:
     return rows
 
 
-def requirements_eval_has_blockers(text: str) -> bool:
-    section = REQUIREMENTS_EVAL_BLOCKERS_SECTION.search(text)
+def _requirements_eval_section_has_items(text: str, section_pattern: re.Pattern[str]) -> bool:
+    section = section_pattern.search(text)
     if section is None:
         return False
     for match in REVIEW_BLOCKER_ITEM.finditer(section.group("body")):
@@ -1256,6 +1260,14 @@ def requirements_eval_has_blockers(text: str) -> bool:
         if item and not REVIEW_BLOCKER_EMPTY.match(item):
             return True
     return False
+
+
+def requirements_eval_has_blockers(text: str) -> bool:
+    return _requirements_eval_section_has_items(text, REQUIREMENTS_EVAL_BLOCKERS_SECTION)
+
+
+def requirements_eval_has_warnings(text: str) -> bool:
+    return _requirements_eval_section_has_items(text, REQUIREMENTS_EVAL_WARNINGS_SECTION)
 
 
 def validate_requirements_eval_verdict(ctx: HookContext) -> int:
@@ -1302,6 +1314,21 @@ def validate_requirements_eval_verdict(ctx: HookContext) -> int:
             f" verdict={verdict}",
             target="REQUIREMENTS_EVAL.md",
             repair="Blockers 段仍有条目时将 verdict 记为 FAIL；修复并复审后再写 PASS 类结论。",
+        )
+    has_warnings = requirements_eval_has_warnings(text)
+    if verdict == "PASS" and has_warnings:
+        return fail_line(
+            ctx,
+            "warning_with_plain_pass_requirements_eval_verdict",
+            target="REQUIREMENTS_EVAL.md",
+            repair="Warnings 段仍有条目时将 verdict 记为 PASS_WITH_WARNINGS。",
+        )
+    if verdict == "PASS_WITH_WARNINGS" and not has_warnings:
+        return fail_line(
+            ctx,
+            "missing_warning_for_pass_with_warnings_verdict",
+            target="REQUIREMENTS_EVAL.md",
+            repair="没有真实 warning 时将 verdict 记为 PASS；否则在 Warnings 段写出可定位的非阻塞 finding。",
         )
     return 0
 
