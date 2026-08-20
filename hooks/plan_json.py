@@ -91,6 +91,8 @@ BATCH_VALIDATION_STATUSES = {
 }
 BATCH_COMPILE_STATUSES = {"pending", "repairing", "failed", "passed"}
 BATCH_COMPILE_MAX_REPAIR_ATTEMPTS = 3
+PARALLEL_EXECUTION_STAGES = {"parallel", "proto", "global", "integration"}
+PARALLEL_TOUCH_KINDS = {"code", "shared", "proto", "database", "configuration"}
 VALIDATION_DEFERRAL_REASONS = {
     "environment_failure",
     "repair_attempts_exhausted",
@@ -736,6 +738,26 @@ def validate_plan_data(
             errors.append(f"plan_json_batchPolicy_strategy_must_be:{BATCH_STRATEGY}")
     _validate_task_validation_policy(errors, data)
 
+    parallel_policy = data.get("parallelPolicy")
+    if parallel_policy is not None:
+        if not isinstance(parallel_policy, dict):
+            errors.append("parallelPolicy_must_be_object")
+        else:
+            if not isinstance(parallel_policy.get("enabled"), bool):
+                errors.append("parallelPolicy.enabled_must_be_bool")
+            if parallel_policy.get("enabled") is True:
+                if not isinstance(parallel_policy.get("has_pb_change"), bool):
+                    errors.append("parallelPolicy.has_pb_change_must_be_bool")
+                confirmations = parallel_policy.get("global_change_confirmations", {})
+                if not isinstance(confirmations, dict):
+                    errors.append("parallelPolicy.global_change_confirmations_must_be_object")
+                else:
+                    for kind, record in confirmations.items():
+                        if kind not in {"database", "configuration"}:
+                            errors.append(f"parallelPolicy.global_change_confirmation_kind_invalid:{kind}")
+                        elif not isinstance(record, dict) or record.get("confirmed") is not True:
+                            errors.append(f"parallelPolicy.global_change_confirmation_invalid:{kind}")
+
     raw_batches = data.get("batches")
     batch_ids: list[str] = []
     if not isinstance(raw_batches, list) or not raw_batches:
@@ -760,6 +782,17 @@ def validate_plan_data(
                 errors.append(f"{batch_id}.title_missing")
             if entry.get("executionLane") not in EXECUTION_LANES:
                 errors.append(f"{batch_id}.executionLane_invalid")
+            workspace_ref = entry.get("workspaceRef")
+            if workspace_ref is not None and (
+                not isinstance(workspace_ref, str) or not workspace_ref.strip()
+            ):
+                errors.append(f"{batch_id}.workspaceRef_invalid")
+            if "canParallelInSameLane" in entry and not isinstance(entry.get("canParallelInSameLane"), bool):
+                errors.append(f"{batch_id}.canParallelInSameLane_invalid")
+            if "canParallelInSameRepository" in entry and not isinstance(entry.get("canParallelInSameRepository"), bool):
+                errors.append(f"{batch_id}.canParallelInSameRepository_invalid")
+            if "executionStage" in entry and entry.get("executionStage") not in PARALLEL_EXECUTION_STAGES:
+                errors.append(f"{batch_id}.executionStage_invalid")
             _validate_string_list(errors, entry, batch_id, "specRoots", required=True)
             _validate_string_list(errors, entry, batch_id, "deps", required=False, item_re=BATCH_ID_RE)
             _validate_string_list(errors, entry, batch_id, "taskIds", required=True, item_re=TASK_ID_RE)
@@ -1946,6 +1979,15 @@ def _bundle_consistency_errors(
             errors.append(f"{batch_id}.mixed_execution_lanes")
         elif task_lanes and batch_lane not in task_lanes:
             errors.append(f"{batch_id}.executionLane_task_mismatch")
+        task_workspace_refs = {
+            item.get("workspaceRef")
+            for item in tasks(data)
+            if isinstance(item.get("workspaceRef"), str) and item.get("workspaceRef")
+        }
+        if len(task_workspace_refs) > 1:
+            errors.append(f"{batch_id}.workspaceRef_ambiguous")
+        elif entry.get("workspaceRef") is not None and entry.get("workspaceRef") not in task_workspace_refs:
+            errors.append(f"{batch_id}.workspaceRef_projection_mismatch")
         profiles = root.get("batchValidationProfiles")
         profile = profiles.get(str(batch_lane)) if isinstance(profiles, dict) else None
         validation = data.get("batchValidation")
@@ -2033,6 +2075,33 @@ def validate_plan_bundle_data(
     ])
     if scope_errors:
         return scope_errors
+    parallel_policy = root.get("parallelPolicy")
+    if isinstance(parallel_policy, dict) and parallel_policy.get("enabled") is True:
+        for batch_id, batch in batch_data.items():
+            for task in tasks(batch):
+                if not isinstance(task, dict):
+                    continue
+                touches = task.get("touches")
+                if not isinstance(touches, list) or not touches:
+                    errors.append(f"{task.get('id', batch_id)}.touches_missing")
+                    continue
+                seen: set[tuple[str, str]] = set()
+                for index, touch in enumerate(touches):
+                    context = f"{task.get('id', batch_id)}.touches[{index}]"
+                    if not isinstance(touch, dict):
+                        errors.append(f"{context}_must_be_object")
+                        continue
+                    path = normalize_repository_relative_path(touch.get("path"))
+                    kind = touch.get("kind", "code")
+                    if path is None or path == ".":
+                        errors.append(f"{context}.path_invalid")
+                    if kind not in PARALLEL_TOUCH_KINDS:
+                        errors.append(f"{context}.kind_invalid")
+                    if isinstance(path, str) and isinstance(kind, str):
+                        key = (path, kind)
+                        if key in seen:
+                            errors.append(f"{context}.duplicate")
+                        seen.add(key)
     return _bundle_consistency_errors(
         root,
         batch_data,

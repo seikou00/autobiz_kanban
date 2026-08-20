@@ -348,6 +348,27 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.code --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 ```
+## Workflow 并行执行模式
+
+当 Code 阶段存在两个或更多合法待执行 Batch 时，先调用 `hooks/workflow_launcher.py`：
+
+```bash
+launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
+  --feature "${feature}" --plugin-path "${pluginPath}" --json)
+useWorkflow=$(printf '%s' "$launcher_result" | jq -r '.useWorkflow')
+```
+
+只有 `useWorkflow=true` 且校验结果为 `parallel_plan_valid` 才能启动 `workflows/code-batched-execution.workflow.js`；否则继续使用本技能的串行流程。
+
+并行实现阶段使用 `isolation: "worktree"`，并且必须遵守：
+
+- 通过 `parallel_batch_scheduler.py create` 创建一个固定 `runId`，并为每个 `workspaceRef` 传入 `--code-workspace <workspaceRef>=<path>`。调度器会冻结每个仓库的 Git 根、初始基线 SHA 与组件根目录，并维护仅由本 run 回并推进的受控 `headSha`；后继依赖 Batch 从该仓库的受控 HEAD 创建 Worktree。单仓库仅在 Plan 只有一个 `workspaceRef` 时可传裸路径。
+- 每个 Batch 先用 `batch_lease_manager.py acquire` 获取 lease；全部 `task_runner.py` 调用携带 `--parallel-run-id` 与 `--lease-token`。
+- 并行模式的唯一状态源是 `.parallel-runs/<runId>/manifest.json`，不读取或写入 `BATCH_HANDOFF.json`。
+- 合并只能调用 `hooks/batch_merger.py`，它按 Batch 的 `workspaceRef` 合并回对应仓库。普通 `code` touches 的重叠由 planner 预警；真实 Git 冲突会创建独立 resolution Worktree。resolution Agent 必须阅读双方 Batch 的 goal/touches/Evidence/diff，只修改冲突文件及必要适配，运行该 Batch required compile，并调用 `hooks/parallel_conflict_resolver.py complete` 提交 resolution commit；禁止 `ours`、`theirs`、`git merge -s ours`、`--no-verify`、删除一侧变更或直接修改主工作区。只有完成验证的 resolution commit 才能由 resolver 回并。
+- 使用 `parallel_batch_scheduler.py resume`、`parallel_batch_lifecycle.py monitor` 和 `batch_lease_manager.py reclaim` 恢复；成功后使用 `parallel_batch_lifecycle.py cleanup` 清理 worktree。
+- 所有无依赖的 Batch 都可以在各自 Worktree 中并行，包括同仓库同组件以及跨仓库 Batch；`maxParallel` 只限制同时运行的数量，不按写集、Lane 或仓库提前串行化。写入冲突在按仓库回并时由 Git 检测并阻断，禁止 `ours`、`theirs` 或静默继续；跨仓库依赖必须由 Batch `deps` 表达。
+
 ## 写入边界
 
 允许：与当前任务需求闭环直接相关的生产代码和生产配置；能追溯到任务依据与队列的新增生产文件。测试目录和测试资产在 Code 阶段禁止写入。
@@ -360,6 +381,6 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 
 - 队列所有任务「完成」，且都有 `action=implementation` evidence；任务级 evidence 继续记录真实生产文件变更，测试意图保留在 `validationTestPlan[].testIntent` 供 UTest/E2E 阶段消费。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与任务 implementation evidence 完整性和哈希校验通过；每个 Batch 的 `batchCompile` 状态绑定最新 implementation evidence 与 revision，没有新生成的 `ev_XXXX.json` sidecar。
-- 每批 `batchCompile.status=passed`，且 `commandId` 绑定该批 required compile command 与最终 implementation digest；非末批之后才停止当前对话并生成 `BATCH_HANDOFF.json`。
+- 每批 `batchCompile.status=passed`，且 `commandId` 绑定该批 required compile command 与最终 implementation digest；`BATCH_HANDOFF.json` 仅属于串行兼容流程，并行模式不生成、不消费。
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。
