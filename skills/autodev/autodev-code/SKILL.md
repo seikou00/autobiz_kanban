@@ -361,9 +361,9 @@ launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
 
 launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> 绝对业务代码仓库` 映射，并返回 `codeWorkspaces` 与 `executionIsolation=plugin_managed_git_worktrees`。不得把 `artifactWorkspace` 当作代码仓库路径，也不得要求所有业务仓库属于同一 Git checkout。旧 Plan 没有该字段时，只能显式补传映射，例如 `--code-workspace "RouYi=/absolute/path/to/RouYi"`；无法解析映射时必须阻断并回流 Plan，不得猜路径。
 
-只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`、`requiredAction=start_fixed_workflow` 且校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid` 时，才使用 launcher 返回的 `workflowScript` 启动固定 Workflow。launcher 会把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/`，并返回 `workflowScriptSource`、`workflowScriptSha256` 与可直接透传的 `workflowArgs`；不得再次使用插件目录下的外部 `scriptPath`。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排或改写 workflow。
+只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`、`requiredAction=start_fixed_workflow` 且校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid` 时，才使用 launcher 返回的固定脚本内容启动 Workflow。launcher 会把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/` 作为审计副本，并返回 `workflowScriptContent`、`workflowScriptSha256`、`workflowScriptSource` 与可直接透传的 `workflowArgs`；`workflowScript` / `workflowScriptPath` 仅是审计路径，不得传给平台做 `scriptPath`。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排或改写 workflow。
 
-调用平台 `workflow` 的唯一允许形式是 `scriptPath=launcher.workflowScript` 且 `args=JSON.stringify(launcher.workflowArgs)`。禁止传入 `script`、禁止自行拼接 JavaScript、禁止增删 phase、禁止从 launcher 输出以外重建参数；若平台不接受该 `scriptPath`，必须停止并报告，不能降级为内联 workflow 或共享工作区执行。
+调用平台 `workflow` 的唯一允许形式是 `script=launcher.workflowScriptContent` 且 `args=JSON.stringify(launcher.workflowArgs)`。禁止自行拼接 JavaScript、禁止增删 phase、禁止从 launcher 输出以外重建参数。使用内联脚本是为了让平台把固定脚本持久化到当前对话 workspace；不得把 artifact workspace、业务仓库或插件目录的绝对路径作为平台 `scriptPath`。
 
 启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace` 和以逻辑 `workspaceRef` 为 key 的 `codeWorkspaces`。Workflow 可以从任意中性会话/产物工作区发起；插件按 `workspaceRef` 在 `<business-git-root>/.worktrees/` 创建 linked worktree。禁止使用平台 `isolation: "worktree"`，也禁止把对话 Workspace、artifactWorkspace 或主业务 checkout 当作 Batch 代码目录。
 

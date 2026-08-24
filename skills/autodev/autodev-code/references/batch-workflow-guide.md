@@ -17,13 +17,13 @@ python "${pluginPath}/hooks/workflow_launcher.py" \
   --json
 ```
 
-Start the returned `workflowScript` only when all of these are true. The
+Start the returned fixed script content only when all of these are true. The
 launcher copies the fixed plugin script into
-`artifactWorkspace/.cmbdevclaw/workflows/` because the Workflow host rejects a
-script path outside its workspace. `workflowScriptSource` and
-`workflowScriptSha256` are audit fields; do not replace the returned runtime
-script with the external source path. `workflowArgs` is the complete argument
-object for the Workflow call; do not reconstruct it.
+`artifactWorkspace/.cmbdevclaw/workflows/` as an audit copy and returns
+`workflowScriptContent` plus `workflowScriptSha256`. `workflowScriptSource`,
+`workflowScript`, and `workflowScriptPath` are audit fields; do not pass those
+paths to the Workflow host. `workflowArgs` is the complete argument object for
+the Workflow call; do not reconstruct it.
 
 - `useWorkflow=true`
 - `executionMode=fixed`
@@ -43,14 +43,16 @@ The Workflow tool invocation is fixed too:
 
 ```javascript
 workflow({
-  scriptPath: launcher.workflowScript,
+  script: launcher.workflowScriptContent,
   args: JSON.stringify(launcher.workflowArgs)
 })
 ```
 
-Never pass an inline `script`, even if a prior Workflow failed. An inline
-replacement has no fixed DAG contract and may silently execute in a shared
-workspace instead of plugin-managed worktrees.
+Do not pass `scriptPath` for the artifact or plugin path. The inline content is
+the unchanged repository-owned fixed script; the host persists it under the
+current conversation workspace and then applies its normal workflow controls.
+When resuming an existing run, pass only `resumeFromRunId` and do not resolve the
+artifact path again.
 
 The Workflow host workspace is not a business-repository contract. Each
 `workspaceRef` can point to a different Git checkout; the plugin creates its

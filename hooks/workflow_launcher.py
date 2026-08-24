@@ -141,7 +141,7 @@ def resolve_code_workspace_contract(
 
 
 def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[str, str]:
-    """Copy the fixed script into the workspace accepted by the Workflow host."""
+    """Materialize an audit copy and return the inline source for the host."""
     target_root = Path(artifact_workspace).expanduser().resolve()
     if not target_root.is_dir():
         raise ValueError(f"workflow_artifact_workspace_missing:{target_root}")
@@ -150,6 +150,10 @@ def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[s
     except OSError as exc:
         raise ValueError(f"fixed_workflow_script_unreadable:{source}:{exc}") from exc
     digest = hashlib.sha256(source_bytes).hexdigest()
+    try:
+        source_text = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"fixed_workflow_script_not_utf8:{source}:{exc}") from exc
     target = target_root / WORKFLOW_RUNTIME_RELATIVE_PATH
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +165,7 @@ def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[s
         "workflowScript": str(target),
         "workflowScriptSource": str(source),
         "workflowScriptSha256": digest,
+        "workflowScriptContent": source_text,
     }
 
 

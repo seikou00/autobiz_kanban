@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import subprocess
 import unittest
@@ -83,6 +84,11 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertEqual(result["workflowScript"], str(runtime_script.resolve()))
         self.assertEqual(result["workflowScriptPath"], str(runtime_script.resolve()))
         self.assertEqual(result["workflowScriptSource"], str(script.resolve()))
+        self.assertEqual(result["workflowScriptContent"], "export const meta = {};")
+        self.assertEqual(
+            result["workflowScriptSha256"],
+            hashlib.sha256(b"export const meta = {};").hexdigest(),
+        )
         self.assertEqual(result["codeWorkspaces"], {
             "api": str(code_workspace.resolve()),
             "web": str(web_workspace.resolve()),
