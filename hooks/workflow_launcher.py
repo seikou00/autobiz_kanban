@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""判断是否启用 Workflow 并行执行 Code 阶段的多个 Batch。
+"""Select the fixed, plan-aware Code batch workflow.
 
-单 Batch 使用原有串行流程；多 Batch 启用 Workflow。
+The workflow control plane is deliberately repository-owned and static. The
+model implements individual tasks inside isolated worktrees, but it does not
+generate the DAG scheduler or merge sequence.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,25 +25,152 @@ from hooks.json_writer_common import feature_dir, resolve_workspace  # noqa: E40
 from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E402
 from hooks.parallel_runtime import batch_workspace_ref, plan_digest  # noqa: E402
 from hooks.plan_json import BATCH_ID_RE, load_plan_bundle, plan_json_path  # noqa: E402
+from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root  # noqa: E402
+
+
+WORKFLOW_SCRIPT_NAME = "code-batched-execution.workflow.js"
+WORKFLOW_RUNTIME_RELATIVE_PATH = ".cmbdevclaw/workflows/" + WORKFLOW_SCRIPT_NAME
+DEFAULT_WORKFLOW_MAX_PARALLEL = 4
+DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 3600
+
+
+def _plan_workspace_refs(bundle: Any) -> set[str]:
+    refs: set[str] = set()
+    for entry in bundle.root.get("batches", []) if isinstance(bundle.root, dict) else []:
+        if not isinstance(entry, dict):
+            continue
+        ref = entry.get("workspaceRef")
+        batch = bundle.batches.get(str(entry.get("id", "")), {})
+        ref = ref or batch_workspace_ref(batch)
+        if isinstance(ref, str) and ref.strip():
+            refs.add(ref.strip())
+    return refs
+
+
+def _workspace_contract_values(
+    code_workspaces: Mapping[str, str] | list[str] | None,
+) -> tuple[dict[str, str], str]:
+    """Resolve the Plan workspace refs to real code repositories."""
+    raw_values: Mapping[str, str] | list[str] | None = code_workspaces
+    if raw_values is None:
+        raise ValueError("code_workspace_mapping_missing:plan.json:codeWorkspaces")
+
+    mapping: dict[str, str] = {}
+    bare: list[str] = []
+    if isinstance(raw_values, dict):
+        items = list(raw_values.items())
+    elif isinstance(raw_values, list):
+        items = []
+        for value in raw_values:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("code_workspace_mapping_invalid:empty_value")
+            key, separator, path = value.partition("=")
+            if separator:
+                items.append((key, path))
+            else:
+                bare.append(value)
+    else:
+        raise ValueError("code_workspace_mapping_invalid:expected_object_or_array")
+
+    # The caller attaches the expected refs after parsing; keeping this helper
+    # independent makes its path validation reusable by CLI and lock inputs.
+    for key, value in items:
+        if not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip():
+            raise ValueError("code_workspace_mapping_invalid:key_or_path_empty")
+        if key in mapping:
+            raise ValueError(f"code_workspace_mapping_duplicate:{key}")
+        mapping[key.strip()] = value.strip()
+    if bare:
+        if len(bare) != 1:
+            raise ValueError("code_workspace_mapping_required_named_refs")
+        mapping["__bare__"] = bare[0]
+
+    resolved: dict[str, str] = {}
+    for key, raw_path in mapping.items():
+        requested = Path(raw_path).expanduser().resolve(strict=False)
+        if not requested.is_dir():
+            raise ValueError(f"code_workspace_path_missing:{key}:{requested}")
+        try:
+            git_root = resolve_git_root(requested)
+        except RepositorySnapshotError as exc:
+            raise ValueError(f"code_workspace_not_git_repository:{key}:{requested}") from exc
+        ref = git_root.name if key == "__bare__" else key
+        if ref in resolved:
+            raise ValueError(f"code_workspace_duplicate_repository:{ref}")
+        resolved[ref] = str(requested)
+
+    return resolved, "cli"
+
+
+def resolve_code_workspace_contract(
+    bundle: Any,
+    artifact_workspace: Path,
+    feature: str,
+    code_workspaces: Mapping[str, str] | list[str] | None = None,
+) -> dict[str, Any]:
+    refs = _plan_workspace_refs(bundle)
+    source = "cli"
+    resolved_values = code_workspaces
+    if resolved_values is None:
+        plan_has_contract = isinstance(bundle.root, dict) and "codeWorkspaces" in bundle.root
+        plan_values = bundle.root.get("codeWorkspaces") if isinstance(bundle.root, dict) else None
+        if plan_has_contract:
+            resolved_values = plan_values if isinstance(plan_values, (dict, list)) else {}
+            source = "plan_json"
+    mapping, parsed_source = _workspace_contract_values(resolved_values)
+    if source == "plan_json":
+        parsed_source = source
+    if not refs:
+        raise ValueError("code_workspace_refs_missing_from_plan")
+    missing = sorted(refs - set(mapping))
+    unexpected = sorted(set(mapping) - refs)
+    if missing:
+        raise ValueError("code_workspace_mapping_missing_refs:" + ",".join(missing))
+    if unexpected:
+        raise ValueError("code_workspace_mapping_unknown_refs:" + ",".join(unexpected))
+    if parsed_source == "plan_json":
+        contract_path = artifact_workspace / ".autobizdevops" / "features" / feature / "plan.json"
+    else:
+        contract_path = None
+    return {
+        "codeWorkspaces": mapping,
+        "executionIsolation": "plugin_managed_git_worktrees",
+        "codeWorkspaceSource": parsed_source,
+        "workspaceContractPath": str(contract_path) if contract_path else None,
+    }
+
+
+def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[str, str]:
+    """Copy the fixed script into the workspace accepted by the Workflow host."""
+    target_root = Path(artifact_workspace).expanduser().resolve()
+    if not target_root.is_dir():
+        raise ValueError(f"workflow_artifact_workspace_missing:{target_root}")
+    try:
+        source_bytes = source.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"fixed_workflow_script_unreadable:{source}:{exc}") from exc
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    target = target_root / WORKFLOW_RUNTIME_RELATIVE_PATH
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            target.write_bytes(source_bytes)
+    except OSError as exc:
+        raise ValueError(f"fixed_workflow_runtime_copy_failed:{target}:{exc}") from exc
+    return {
+        "workflowScript": str(target),
+        "workflowScriptSource": str(source),
+        "workflowScriptSha256": digest,
+    }
 
 
 def analyze_batches(
     feature: str,
     plugin_path: Path | None = None,
     workspace: Path | None = None,
+    code_workspaces: Mapping[str, str] | list[str] | None = None,
 ) -> dict:
-    """分析 feature 的 batch 结构，决定执行策略。
-
-    Returns:
-        {
-            "useWorkflow": bool,
-            "strategy": "serial" | "parallel" | "blocked",
-            "batchCount": int,
-            "batches": [{"id": "B001", "lane": "backend", "taskCount": 3}],
-            "workflowScript": str | None,
-            "reason": str
-        }
-    """
+    """Return the fixed workflow entrypoint for every valid pending Batch."""
     try:
         script_root = (plugin_path or ROOT).expanduser().resolve()
         artifact_workspace = resolve_workspace(workspace)
@@ -49,31 +180,27 @@ def analyze_batches(
         if not plan_path.exists():
             return {
                 "useWorkflow": False,
-                "strategy": "serial",
+                "strategy": "blocked",
                 "batchCount": 0,
                 "batches": [],
                 "workflowScript": None,
-                "reason": "plan_not_found"
+                "reason": "plan_not_found",
+                "requiresPlanRepair": True,
+                "canStartWorkflow": False,
+                "requiredAction": "repair_plan",
             }
 
         bundle = load_plan_bundle(feat_dir)
-        plan = bundle.root
-        batch_entries = [e for e in plan.get("batches", []) if isinstance(e, dict)]
-
-        # 过滤出有效的 batch
-        valid_batches = []
+        batch_entries = [entry for entry in bundle.root.get("batches", []) if isinstance(entry, dict)]
+        valid_batches: list[dict] = []
         for entry in batch_entries:
             batch_id = str(entry.get("id", ""))
             if not BATCH_ID_RE.fullmatch(batch_id):
                 continue
-
-            status = entry.get("status", "").lower()
+            status = str(entry.get("status", "")).lower()
             if status in {"done", "failed"}:
-                continue  # 跳过已完成或失败的 batch
-
+                continue
             batch_plan = bundle.batches.get(batch_id, {})
-            task_count = len([t for t in batch_plan.get("tasks", []) if isinstance(t, dict)])
-
             valid_batches.append({
                 "id": batch_id,
                 "lane": entry.get("executionLane", entry.get("lane", "unknown")),
@@ -82,30 +209,20 @@ def analyze_batches(
                 "executionStage": entry.get("executionStage", "parallel"),
                 "deps": list(entry.get("deps", [])),
                 "status": status,
-                "taskCount": task_count
+                "taskCount": len([task for task in batch_plan.get("tasks", []) if isinstance(task, dict)]),
             })
 
-        batch_count = len(valid_batches)
-
-        # 决策逻辑
-        if batch_count == 0:
+        if not valid_batches:
             return {
                 "useWorkflow": False,
-                "strategy": "serial",
+                "strategy": "complete",
                 "batchCount": 0,
                 "batches": [],
                 "workflowScript": None,
-                "reason": "no_pending_batches"
-            }
-
-        if batch_count == 1:
-            return {
-                "useWorkflow": False,
-                "strategy": "serial",
-                "batchCount": 1,
-                "batches": valid_batches,
-                "workflowScript": None,
-                "reason": "single_batch_use_serial"
+                "workflowScriptPath": None,
+                "reason": "no_pending_batches",
+                "canStartWorkflow": False,
+                "requiredAction": "code_done_ready",
             }
 
         validation = validate_plan_for_parallel(artifact_workspace, feature)
@@ -113,74 +230,128 @@ def analyze_batches(
             return {
                 "useWorkflow": False,
                 "strategy": "blocked",
-                "batchCount": batch_count,
+                "batchCount": len(valid_batches),
                 "batches": valid_batches,
                 "workflowScript": None,
                 "reason": f"parallel_plan_invalid:{validation.get('reason')}",
                 "requiresPlanRepair": True,
+                "canStartWorkflow": False,
+                "requiredAction": "repair_plan",
                 "validation": validation,
             }
 
-        # 多 Batch：启用 Workflow
         workflow_script = script_root / "workflows" / "code-batched-execution.workflow.js"
+        if not workflow_script.is_file():
+            return {
+                "useWorkflow": False,
+                "strategy": "blocked",
+                "batchCount": len(valid_batches),
+                "batches": valid_batches,
+                "workflowScript": None,
+                "reason": "fixed_workflow_script_not_found",
+                "canStartWorkflow": False,
+                "requiredAction": "restore_fixed_workflow_script",
+                "validation": validation,
+            }
 
+        try:
+            workspace_contract = resolve_code_workspace_contract(
+                bundle,
+                artifact_workspace,
+                feature,
+                code_workspaces,
+            )
+        except ValueError as exc:
+            return {
+                "useWorkflow": False,
+                "strategy": "blocked",
+                "batchCount": len(valid_batches),
+                "batches": valid_batches,
+                "artifactWorkspace": str(artifact_workspace),
+                "workflowScript": str(workflow_script),
+                "reason": str(exc),
+                "requiresPlanRepair": False,
+                "canStartWorkflow": False,
+                "requiredAction": "provide_code_workspace_mapping",
+                "validation": validation,
+            }
+
+        runtime_script = materialize_workflow_script(
+            workflow_script,
+            str(artifact_workspace),
+        )
         return {
             "useWorkflow": True,
-            "strategy": "parallel",
-            "batchCount": batch_count,
+            "strategy": "fixed",
+            "executionMode": "fixed",
+            "batchCount": len(valid_batches),
             "batches": valid_batches,
-            "workflowScript": str(workflow_script),
             "artifactWorkspace": str(artifact_workspace),
-            "reason": f"multiple_batches_use_workflow:{batch_count}",
+            **runtime_script,
+            "workflowScriptPath": runtime_script["workflowScript"],
+            "codeWorkspaces": workspace_contract["codeWorkspaces"],
+            "executionIsolation": workspace_contract["executionIsolation"],
+            # This is the complete payload for the platform workflow call.
+            # Returning it avoids models reconstructing a workflow or guessing
+            # a code workspace from the artifact directory.
+            "workflowArgs": {
+                "feature": feature,
+                "pluginPath": str(script_root),
+                "artifactWorkspace": str(artifact_workspace),
+                "codeWorkspaces": workspace_contract["codeWorkspaces"],
+                "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+                "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+            },
+            "codeWorkspaceSource": workspace_contract["codeWorkspaceSource"],
+            "workspaceContractPath": workspace_contract["workspaceContractPath"],
+            "reason": f"fixed_workflow_for_pending_batches:{len(valid_batches)}",
             "planDigest": plan_digest(bundle),
+            "canStartWorkflow": True,
+            "requiredAction": "start_fixed_workflow",
             "validation": validation,
         }
-
-    except Exception as e:
+    except Exception as exc:
         return {
             "useWorkflow": False,
-            "strategy": "serial",
+            "strategy": "blocked",
             "batchCount": 0,
             "batches": [],
             "workflowScript": None,
-            "reason": f"error:{str(e)}"
+            "reason": f"launcher_error:{type(exc).__name__}:{exc}",
+            "requiresPlanRepair": False,
+            "canStartWorkflow": False,
+            "requiredAction": "stop_on_launcher_error",
         }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="判断是否使用 Workflow 并行执行 Code Batch")
+    parser = argparse.ArgumentParser(description="Choose the fixed Code batch workflow")
     parser.add_argument("--feature", required=True, help="Feature ID")
-    parser.add_argument("--plugin-path", help="插件源码路径（用于加载 hooks/workflows，默认为当前项目根目录）")
+    parser.add_argument("--plugin-path", help="Plugin source path; defaults to this repository")
+    parser.add_argument("--workspace", help="Artifact workspace containing .autobizdevops/state.json")
     parser.add_argument(
-        "--workspace",
-        help="产物 workspace（包含 .autobizdevops/state.json）；默认由 PLUGIN_WORKSPACE/PROJECT_DIR 推导",
+        "--code-workspace",
+        action="append",
+        help="Optional workspaceRef=/absolute/code/repository mapping; repeat for multiple repositories",
     )
-    parser.add_argument("--json", action="store_true", help="输出 JSON 格式")
-
+    parser.add_argument("--json", action="store_true", help="Emit JSON")
     args = parser.parse_args()
 
-    plugin_path = Path(args.plugin_path) if args.plugin_path else None
-    workspace = Path(args.workspace) if args.workspace else None
-    result = analyze_batches(args.feature, plugin_path, workspace)
-
+    result = analyze_batches(
+        args.feature,
+        Path(args.plugin_path) if args.plugin_path else None,
+        Path(args.workspace) if args.workspace else None,
+        args.code_workspace,
+    )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result["useWorkflow"]:
+        print(f"fixed workflow: {result['workflowScript']}")
+        print(f"pending batches: {result['batchCount']}")
     else:
-        if result["useWorkflow"]:
-            print(f"✓ 检测到 {result['batchCount']} 个待执行 Batch")
-            print(f"  策略: 使用 Workflow 并行执行")
-            print(f"  脚本: {result['workflowScript']}")
-            for batch in result["batches"]:
-                print(f"  - {batch['id']} ({batch['lane']}): {batch['taskCount']} 个任务")
-        else:
-            mode = "计划修复" if result["strategy"] == "blocked" else "串行执行模式"
-            print(f"✗ {mode}")
-            print(f"  原因: {result['reason']}")
-            if result['batches']:
-                print(f"  Batch: {result['batches'][0]['id']}")
-
+        print(f"workflow unavailable: {result['reason']}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

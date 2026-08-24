@@ -198,12 +198,6 @@ def sync_feature_status(root: dict[str, Any], batch_data: dict[str, dict[str, An
     elif any_in_progress and current_feature_status == "todo":
         root["status"] = "in_progress"
         changes["status"] = f"{current_feature_status} -> in_progress"
-    elif not any_in_progress and not all_done and active_batch is None and next_batch:
-        # 有待办批次但没有进行中的，可能需要标记为 awaiting_next_conversation
-        if current_feature_status == "in_progress":
-            root["status"] = "awaiting_next_conversation"
-            changes["status"] = f"{current_feature_status} -> awaiting_next_conversation"
-
     return changes
 
 

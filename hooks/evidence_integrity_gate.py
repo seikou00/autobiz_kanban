@@ -199,9 +199,6 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
 def check_code_done(target_feature_dir: Path) -> list[str]:
     errors = check_integrity(target_feature_dir, require_index=True)
     plan_path = plan_json_path(target_feature_dir)
-    if (target_feature_dir / "BATCH_HANDOFF.json").exists():
-        errors.append("unresolved_batch_handoff")
-
     if not errors:
         errors.extend(check_plan_evidence_refs(target_feature_dir))
 

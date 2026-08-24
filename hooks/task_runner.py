@@ -58,7 +58,10 @@ from hooks.plan_writer import (  # noqa: E402
     update_batch_compile_status,
 )
 from hooks.parallel_runtime import check_lease, load_manifest  # noqa: E402
-from hooks.parallel_batch_scheduler import mark_batch as mark_parallel_batch  # noqa: E402
+from hooks.parallel_batch_scheduler import (  # noqa: E402
+    assert_batch_worktree_isolated,
+    mark_batch as mark_parallel_batch,
+)
 from hooks.repository_snapshot import (  # noqa: E402
     RepositoryMap,
     RepositorySnapshotError,
@@ -172,6 +175,7 @@ def _assert_parallel_context(
     parallel_run_id: str | None,
     batch_id: str,
     lease_token: str | None,
+    code_workspace: Path | list[Path] | None = None,
 ) -> None:
     if parallel_run_id is None:
         return
@@ -186,6 +190,13 @@ def _assert_parallel_context(
         raise TaskRunnerError(f"parallel_batch_not_found:{batch_id}")
     if not check_lease(workspace, feature, parallel_run_id, batch_id, lease_token):
         raise TaskRunnerError(f"parallel_batch_lease_invalid:{batch_id}")
+    if code_workspace is not None:
+        requested = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+        if len(requested) == 1:
+            try:
+                assert_batch_worktree_isolated(manifest, batch_id, requested[0])
+            except ValueError as exc:
+                raise TaskRunnerError(str(exc), batchId=batch_id) from exc
 
 
 def _active_parallel_batch_runs(feature_dir: Path, parallel_run_id: str, batch_id: str) -> list[str]:
@@ -282,9 +293,20 @@ def _git_root(code_workspace: Path) -> Path:
         raise TaskRunnerError(str(exc)) from exc
 
 
-def _resolve_repositories(code_workspaces: Path | list[Path]) -> RepositoryMap:
+def _resolve_repositories(
+    code_workspaces: Path | list[Path],
+    workspace_ref: str | None = None,
+) -> RepositoryMap:
     try:
-        return resolve_repositories(code_workspaces)
+        repositories = resolve_repositories(code_workspaces)
+        # Native Dynamic Workflow worktrees have temporary directory names,
+        # while the plan addresses the repository by its logical workspaceRef.
+        # Keep the logical key for the task-run contract when one repository is
+        # explicitly supplied by the workflow.
+        if workspace_ref and len(repositories) == 1 and workspace_ref not in repositories:
+            root = next(iter(repositories.values()))
+            return {workspace_ref: root}
+        return repositories
     except RepositorySnapshotError as exc:
         raise TaskRunnerError(str(exc)) from exc
 
@@ -347,7 +369,10 @@ def _scope_workspaces(
                     requestedCodeWorkspaces=[str(previous), str(requested)],
                 )
             continue
-        repository_id = root.name
+        repository_id = next(
+            (key for key, repository_root in repositories.items() if repository_root == root),
+            root.name,
+        )
         if repositories.get(repository_id) != root:
             raise TaskRunnerError(f"task_run_repository_snapshot_missing:{repository_id}")
         try:
@@ -774,6 +799,7 @@ def _start_task_unlocked(
     require_active_batch: bool = True,
     parallel_run_id: str | None = None,
     lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(
@@ -782,7 +808,7 @@ def _start_task_unlocked(
         require_active_batch=require_active_batch and parallel_run_id is None,
     )
     _require_parallel_workflow_for_multi_batch(plan, parallel_run_id=parallel_run_id)
-    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
+    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
 
     # Check if this is a task repair
     is_task_repair = (
@@ -834,7 +860,7 @@ def _start_task_unlocked(
             workspaceRef=task.get("workspaceRef"),
             requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
         )
-    repositories = _resolve_repositories(requested_workspaces)
+    repositories = _resolve_repositories(requested_workspaces, workspace_ref)
     _assert_runtime_artifacts_ignored(repositories)
     scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
     workspace_roots = task_workspace_roots(task)
@@ -1847,10 +1873,11 @@ def _finish_implementation_unlocked(
     repair_mode: bool = False,
     parallel_run_id: str | None = None,
     lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     feature_dir = _feature_dir(workspace, feature)
     plan, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=False)
-    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
+    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
     execution_mode = task_execution_mode(task)
     if not defer_to_test_stages_enabled(plan.root):
         raise TaskRunnerError(
@@ -1872,7 +1899,7 @@ def _finish_implementation_unlocked(
             workspaceRef=task.get("workspaceRef"),
             requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
         )
-    repositories = _resolve_repositories(requested_workspaces)
+    repositories = _resolve_repositories(requested_workspaces, workspace_ref)
     _assert_repositories_match(state, repositories)
     _assert_requested_workspaces_match(state, requested_workspaces, repositories)
     if state.get("status") == "implemented":
@@ -2735,6 +2762,7 @@ def start_task(
     *,
     parallel_run_id: str | None = None,
     lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
@@ -2745,6 +2773,7 @@ def start_task(
             code_workspace,
             parallel_run_id=parallel_run_id,
             lease_token=lease_token,
+            workspace_ref=workspace_ref,
         )
 
 
@@ -2762,6 +2791,7 @@ def finish_implementation(
     repair_mode: bool = False,
     parallel_run_id: str | None = None,
     lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
@@ -2776,6 +2806,7 @@ def finish_implementation(
             repair_mode=repair_mode,
             parallel_run_id=parallel_run_id,
             lease_token=lease_token,
+            workspace_ref=workspace_ref,
         )
 
 
@@ -2794,6 +2825,7 @@ def start_task_repair(
     *,
     parallel_run_id: str | None = None,
     lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     """Start a task run to repair a failed validation with prior evidence context."""
 
@@ -2801,7 +2833,7 @@ def start_task_repair(
     with _task_run_lock(feature_dir):
         # Load plan and task
         bundle, batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=parallel_run_id is None)
-        _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
+        _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
 
         # Verify task status (allow both implemented and done)
         task_status = normalize_status(task.get("status"))
@@ -2837,6 +2869,7 @@ def start_task_repair(
             require_active_batch=False,
             parallel_run_id=parallel_run_id,
             lease_token=lease_token,
+            workspace_ref=workspace_ref,
         )
 
         # Add repair metadata to returned state
@@ -2857,13 +2890,14 @@ def start_batch_compile_repair(
     *,
     parallel_run_id: str | None = None,
     lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     """Start a model-owned task run that repairs a failed batch compile."""
 
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
         bundle, actual_batch_id, task = _load_plan_and_task(feature_dir, task_id, require_active_batch=parallel_run_id is None)
-        _assert_parallel_context(workspace, feature, parallel_run_id, actual_batch_id, lease_token)
+        _assert_parallel_context(workspace, feature, parallel_run_id, actual_batch_id, lease_token, code_workspace)
         if actual_batch_id != batch_id:
             raise TaskRunnerError(
                 f"batch_compile_repair_task_batch_mismatch:{task_id}",
@@ -2915,7 +2949,7 @@ def start_batch_compile_repair(
                 expectedRequestedCodeWorkspaces=expected_workspaces,
                 requestedCodeWorkspaces=actual_workspaces,
             )
-        repositories = _resolve_repositories(requested_workspaces)
+        repositories = _resolve_repositories(requested_workspaces, workspace_ref)
         current_repository_state = _repository_state(repositories)
         current_snapshot = _repository_state_sha256(current_repository_state)
         expected_snapshot = batch_compile.get("workspaceSnapshotSha256")
@@ -2999,6 +3033,7 @@ def start_batch_compile_repair(
             repair_context=repair_context,
             parallel_run_id=parallel_run_id,
             lease_token=lease_token,
+            workspace_ref=workspace_ref,
         )
         result = begin_batch_compile_repair(
             workspace,
@@ -3083,6 +3118,7 @@ def _run_batch_compile(
     code_workspace: Path | list[Path],
     *,
     force: bool = False,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     """
     在批次完成后执行编译验证（仅编译，不运行测试）。
@@ -3210,7 +3246,7 @@ def _run_batch_compile(
             requestedCodeWorkspaces=[str(p.resolve()) for p in requested_workspaces],
         )
 
-    repositories = _resolve_repositories(requested_workspaces)
+    repositories = _resolve_repositories(requested_workspaces, workspace_ref)
     if not repositories:
         raise TaskRunnerError("no_repositories_resolved")
     # 查找编译命令
@@ -3323,6 +3359,7 @@ def run_batch_compile(
     *,
     parallel_run_id: str | None = None,
     lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     """
     公共 API：在批次完成后执行编译验证。
@@ -3339,12 +3376,18 @@ def run_batch_compile(
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
     _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
-    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
+    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
     # Compilation is intentionally outside the feature metadata lock: a lease
     # serializes a batch, while independent worktrees may compile concurrently.
-    compile_result = _run_batch_compile(workspace, feature, batch_id, code_workspace)
+    compile_result = _run_batch_compile(
+        workspace,
+        feature,
+        batch_id,
+        code_workspace,
+        workspace_ref=workspace_ref,
+    )
     with _task_run_lock(_feature_dir(workspace, feature)):
-        _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
+        _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
         return _integrate_batch_compile_result(
             workspace,
             feature,
@@ -3362,6 +3405,7 @@ def revalidate_batch_compile(
     *,
     parallel_run_id: str | None = None,
     lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     """
     重新验证批次编译，用于修复后的验证。
@@ -3381,9 +3425,16 @@ def revalidate_batch_compile(
     except ValueError as exc:
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
     _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
-    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
+    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
     # 强制重新运行编译，并通过 plan_writer 重置已通过的编译门禁。
-    compile_result = _run_batch_compile(workspace, feature, batch_id, code_workspace, force=True)
+    compile_result = _run_batch_compile(
+        workspace,
+        feature,
+        batch_id,
+        code_workspace,
+        force=True,
+        workspace_ref=workspace_ref,
+    )
 
     # 如果编译通过，重置 repairAttempts
     if compile_result.get("compileStatus") == "passed":
@@ -3393,7 +3444,7 @@ def revalidate_batch_compile(
     compile_result["wasRevalidation"] = True
 
     with _task_run_lock(_feature_dir(workspace, feature)):
-        _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token)
+        _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
         # 集成结果到 Plan
         integration_result = _integrate_batch_compile_result(
             workspace, feature, batch_id, compile_result, parallel_run_id=parallel_run_id
@@ -3531,16 +3582,6 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
             "userMessage": "检测到多个未完成 Batch；请通过并行调度工作流按依赖 DAG 执行。",
         }
 
-    if bundle.root.get("status") == "awaiting_next_conversation":
-        return {
-            "action": "start_parallel_batch_workflow",
-            "requiredAction": "start_parallel_batch_workflow",
-            "batchIds": pending_batch_ids,
-            "userMessage": "旧版 Batch handoff 已停用；请通过并行调度工作流按依赖 DAG 恢复。",
-        }
-
-    activated_from_handoff = False
-
     active_batch_id = bundle.root.get("activeBatchId")
     if isinstance(active_batch_id, str):
         entry = next(
@@ -3572,7 +3613,6 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                     "action": "run_batch_compile",
                     "activeBatchId": active_batch_id,
                     "executionLane": execution_lane,
-                    "activatedFromHandoff": activated_from_handoff,
                     "userMessage": f"批次 {active_batch_id} 的所有任务已实现，开始执行批次编译验证。",
                 }
             elif batch_compile_status == "failed":
@@ -3607,7 +3647,6 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                     "allowedRunnerCommands": (
                         [] if exhausted else ["start-batch-compile-repair"]
                     ),
-                    "activatedFromHandoff": activated_from_handoff,
                     "userMessage": (
                         f"批次 {active_batch_id} 的编译修复已达到 3 次上限，流程已阻断。"
                         if exhausted
@@ -3629,7 +3668,6 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                     "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
                     "diagnosticPaths": batch_compile.get("diagnosticPaths", []),
                     "allowedRunnerCommands": ["finish-implementation"],
-                    "activatedFromHandoff": activated_from_handoff,
                     "userMessage": (
                         f"模型正在修复批次 {active_batch_id} 的编译问题；"
                         "完成代码修改后记录 implementation evidence。"
@@ -3639,7 +3677,6 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                 return {
                     "action": "code_done_ready",
                     "completedBatchId": active_batch_id,
-                    "activatedFromHandoff": activated_from_handoff,
                     "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。所有批次已完成，功能开发结束。",
                 }
             elif batch_compile_status is not None:
@@ -3654,7 +3691,6 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
                     "activeBatchId": active_batch_id,
                     "executionLane": execution_lane,
                     "taskIds": list(entry.get("taskIds", [])),
-                    "activatedFromHandoff": activated_from_handoff,
                     "userMessage": f"继续实现批次 {active_batch_id}。",
                 }
 
@@ -3665,7 +3701,6 @@ def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
     return {
         "action": "code_done_ready",
         "activeBatchId": None,
-        "activatedFromHandoff": False,
         "validationOutcome": "passed",
         "userMessage": "所有批次均已通过生产代码编译门禁。",
     }
@@ -3694,6 +3729,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
             code_workspace,
             parallel_run_id=args.parallel_run_id,
             lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
         )
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
@@ -3716,6 +3752,7 @@ def _cmd_finish_implementation(args: argparse.Namespace) -> int:
             repair_mode=getattr(args, 'repair_mode', False),
             parallel_run_id=args.parallel_run_id,
             lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
         )
         continuation = state.get("batchContinuation")
         continuation = continuation if isinstance(continuation, dict) else None
@@ -3765,6 +3802,7 @@ def _cmd_start_batch_compile_repair(args: argparse.Namespace) -> int:
             code_workspace,
             parallel_run_id=args.parallel_run_id,
             lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
         )
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
@@ -3783,6 +3821,7 @@ def _cmd_start_task_repair(args: argparse.Namespace) -> int:
             args.prior_evidence_id,
             parallel_run_id=args.parallel_run_id,
             lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
         )
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
@@ -3845,6 +3884,7 @@ def _cmd_batch_compile(args: argparse.Namespace) -> int:
             code_workspace,
             parallel_run_id=args.parallel_run_id,
             lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
         )
         # 根据编译状态返回正确的退出码
         compile_status = result.get("compileStatus")
@@ -3868,6 +3908,7 @@ def _cmd_revalidate_batch_compile(args: argparse.Namespace) -> int:
             code_workspace,
             parallel_run_id=args.parallel_run_id,
             lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
         )
         # 根据编译状态返回正确的退出码
         compile_status = result.get("compileStatus")
@@ -3900,6 +3941,7 @@ def main(argv: list[str] | None = None) -> int:
         subparser.add_argument("--code-workspace", required=True, action="append")
         subparser.add_argument("--parallel-run-id")
         subparser.add_argument("--lease-token")
+        subparser.add_argument("--workspace-ref")
         if needs_run:
             subparser.add_argument("--run-id", required=True)
 
@@ -3951,6 +3993,7 @@ def main(argv: list[str] | None = None) -> int:
     batch_compile.add_argument("--code-workspace", required=True, action="append")
     batch_compile.add_argument("--parallel-run-id")
     batch_compile.add_argument("--lease-token")
+    batch_compile.add_argument("--workspace-ref")
     batch_compile.set_defaults(func=_cmd_batch_compile)
 
     revalidate_batch_compile = subparsers.add_parser("revalidate-batch-compile")
@@ -3960,6 +4003,7 @@ def main(argv: list[str] | None = None) -> int:
     revalidate_batch_compile.add_argument("--code-workspace", required=True, action="append")
     revalidate_batch_compile.add_argument("--parallel-run-id")
     revalidate_batch_compile.add_argument("--lease-token")
+    revalidate_batch_compile.add_argument("--workspace-ref")
     revalidate_batch_compile.set_defaults(func=_cmd_revalidate_batch_compile)
 
     args = parser.parse_args(argv)

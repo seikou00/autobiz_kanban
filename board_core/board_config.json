@@ -763,7 +763,6 @@
         "rollback": {
           "archive": [
             ".task-runs",
-            "BATCH_HANDOFF.json",
             "evidence/EVIDENCE.index.json",
             "FRONTEND_ROUTE.json"
           ]

@@ -7,8 +7,13 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import append_event, load_manifest, plan_digest, run_dir, run_lock, save_manifest
@@ -58,7 +63,7 @@ def _commands(bundle: Any) -> list[tuple[str, dict[str, Any]]]:
     return result
 
 
-def verify_final(workspace: Path, feature: str, run_id: str, repo_path: Path | None = None) -> dict[str, Any]:
+def verify_final(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         repositories = manifest.get("repositories", {})
@@ -68,8 +73,6 @@ def verify_final(workspace: Path, feature: str, run_id: str, repo_path: Path | N
             if not isinstance(repository, dict) or not isinstance(repository.get("gitRoot"), str):
                 raise ValueError(f"parallel_final_verify_repository_invalid:{ref}")
             root = Path(repository["gitRoot"])
-            if repo_path is not None and len(repositories) == 1 and root != repo_path.resolve():
-                raise ValueError(f"parallel_final_verify_repository_binding_mismatch:{ref}")
             dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True)
             if dirty.returncode != 0:
                 raise ValueError(f"parallel_final_verify_repository_invalid:{ref}")
@@ -150,10 +153,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace")
     parser.add_argument("--feature", required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--repo-path", help="旧单仓库校验参数；默认从 manifest 读取全部仓库")
     args = parser.parse_args(argv)
     try:
-        result = verify_final(resolve_workspace(args.workspace), resolve_feature(args.feature), args.run_id, Path(args.repo_path) if args.repo_path else None)
+        result = verify_final(resolve_workspace(args.workspace), resolve_feature(args.feature), args.run_id)
         print(json.dumps({"ok": result["passed"], **result}, ensure_ascii=False, indent=2))
         return 0 if result["passed"] else 1
     except (ValueError, OSError) as exc:

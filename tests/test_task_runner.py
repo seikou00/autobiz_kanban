@@ -11,7 +11,6 @@ import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -534,7 +533,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(revalidated_batch["batchCompile"]["status"], "passed")
             self.assertEqual(revalidated_batch["batchCompile"]["repairAttempts"], 0)
 
-    def test_multiple_batches_require_parallel_workflow_instead_of_code_session_handoff(self) -> None:
+    def test_multiple_batches_require_parallel_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             _configure_defer_to_test_stages(feature_dir)
@@ -560,7 +559,6 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(root["status"], "todo")
             self.assertIsNone(root["activeBatchId"])
             self.assertIsNone(root["nextBatchId"])
-            self.assertFalse((feature_dir / "BATCH_HANDOFF.json").exists())
 
     def test_batch_compile_failure_requires_model_repair_and_new_implementation_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1728,24 +1726,6 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertIn("pom.xml", payload["criticalHits"])
             run_paths = list((feature_dir / ".task-runs" / "T001").glob("*.json"))
             self.assertEqual(len(run_paths), 1)
-    def test_code_session_rejects_missing_invalid_and_mismatched_handoff(self) -> None:
-        for label, handoff_content in (("missing", None), ("invalid", "{"), ("mismatch", json.dumps({"nextBatchId": "B003"}))):
-            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
-                workspace = Path(tmp)
-                feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
-                feature_dir.mkdir(parents=True)
-                if handoff_content is not None:
-                    (feature_dir / "BATCH_HANDOFF.json").write_text(handoff_content, encoding="utf-8")
-                bundle = SimpleNamespace(
-                    root={
-                        "status": "awaiting_next_conversation",
-                        "nextBatchId": "B002",
-                    }
-                )
-
-                with patch.object(task_runner_module, "load_plan_bundle", return_value=bundle):
-                    result = task_runner_module.code_session(workspace, "alpha")
-                    self.assertEqual(result["action"], "start_parallel_batch_workflow")
     def test_task_start_rejects_multiple_requested_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

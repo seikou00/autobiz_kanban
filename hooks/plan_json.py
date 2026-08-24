@@ -79,7 +79,7 @@ BATCH_STRATEGY = "spec_capability_execution_lane_topological"
 EXECUTION_LANES = {"backend", "frontend"}
 IMPLEMENTATION_SCOPES = {"full_stack", "backend_only", "frontend_only"}
 TASK_SET_STATUSES = {"collecting", "finalized"}
-FEATURE_STATUSES = {"todo", "in_progress", "awaiting_next_conversation", "failed", "done"}
+FEATURE_STATUSES = {"todo", "in_progress", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
 BATCH_VALIDATION_STATUSES = {
     "pending",
@@ -92,7 +92,6 @@ BATCH_VALIDATION_STATUSES = {
 BATCH_COMPILE_STATUSES = {"pending", "repairing", "failed", "passed"}
 BATCH_COMPILE_MAX_REPAIR_ATTEMPTS = 3
 PARALLEL_EXECUTION_STAGES = {"parallel", "proto", "global", "integration"}
-PARALLEL_TOUCH_KINDS = {"code", "shared", "proto", "database", "configuration"}
 VALIDATION_DEFERRAL_REASONS = {
     "environment_failure",
     "repair_attempts_exhausted",
@@ -242,6 +241,34 @@ def normalize_repository_relative_path(value: Any) -> str | None:
     return posix_path.as_posix()
 
 
+def _validate_code_workspace_bindings(
+    errors: list[str],
+    data: dict[str, Any],
+    batch_workspace_refs: set[str],
+) -> None:
+    """Validate the top-level runtime mapping without touching the filesystem."""
+    raw = data.get("codeWorkspaces")
+    if raw is None:
+        return  # Backward-compatible read of Plans created before this contract.
+    if not isinstance(raw, dict) or not raw:
+        errors.append("plan_json_codeWorkspaces_must_be_non_empty_object")
+        return
+    for repository, path in raw.items():
+        if not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository):
+            errors.append(f"plan_json_codeWorkspaces_repository_invalid:{repository}")
+        if not isinstance(path, str) or not path.strip():
+            errors.append(f"plan_json_codeWorkspaces_path_missing:{repository}")
+            continue
+        if not (Path(path).expanduser().is_absolute() or PureWindowsPath(path).is_absolute()):
+            errors.append(f"plan_json_codeWorkspaces_path_must_be_absolute:{repository}")
+    missing = sorted(batch_workspace_refs - set(raw))
+    unexpected = sorted(set(raw) - batch_workspace_refs)
+    if missing:
+        errors.append("plan_json_codeWorkspaces_missing_refs:" + ",".join(missing))
+    if unexpected:
+        errors.append("plan_json_codeWorkspaces_unknown_refs:" + ",".join(unexpected))
+
+
 def task_workspace_roots(task: dict[str, Any]) -> dict[str, str]:
     scope = task.get("scope")
     raw_roots = scope.get("workspaceRoots") if isinstance(scope, dict) else None
@@ -374,6 +401,11 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
             "taskValidationPolicy": root.get("taskValidationPolicy"),
             "entries": entries,
         }
+    if root.get("codeWorkspaces") is not None:
+        if isinstance(payload, dict):
+            payload["codeWorkspaces"] = root.get("codeWorkspaces")
+        else:
+            payload = {"codeWorkspaces": root.get("codeWorkspaces"), "entries": payload}
     content = json.dumps(
         payload,
         ensure_ascii=False,
@@ -738,28 +770,6 @@ def validate_plan_data(
             errors.append(f"plan_json_batchPolicy_strategy_must_be:{BATCH_STRATEGY}")
     _validate_task_validation_policy(errors, data)
 
-    parallel_policy = data.get("parallelPolicy")
-    if parallel_policy is not None:
-        if not isinstance(parallel_policy, dict):
-            errors.append("parallelPolicy_must_be_object")
-        else:
-            if not isinstance(parallel_policy.get("enabled"), bool):
-                errors.append("parallelPolicy.enabled_must_be_bool")
-            elif parallel_policy.get("enabled") is not True and data.get("taskSetStatus") == "finalized":
-                errors.append("parallelPolicy.enabled_must_be_true")
-            if parallel_policy.get("enabled") is True:
-                if not isinstance(parallel_policy.get("has_pb_change"), bool):
-                    errors.append("parallelPolicy.has_pb_change_must_be_bool")
-                confirmations = parallel_policy.get("global_change_confirmations", {})
-                if not isinstance(confirmations, dict):
-                    errors.append("parallelPolicy.global_change_confirmations_must_be_object")
-                else:
-                    for kind, record in confirmations.items():
-                        if kind not in {"database", "configuration"}:
-                            errors.append(f"parallelPolicy.global_change_confirmation_kind_invalid:{kind}")
-                        elif not isinstance(record, dict) or record.get("confirmed") is not True:
-                            errors.append(f"parallelPolicy.global_change_confirmation_invalid:{kind}")
-
     raw_batches = data.get("batches")
     batch_ids: list[str] = []
     if not isinstance(raw_batches, list) or not raw_batches:
@@ -789,10 +799,6 @@ def validate_plan_data(
                 not isinstance(workspace_ref, str) or not workspace_ref.strip()
             ):
                 errors.append(f"{batch_id}.workspaceRef_invalid")
-            if "canParallelInSameLane" in entry and not isinstance(entry.get("canParallelInSameLane"), bool):
-                errors.append(f"{batch_id}.canParallelInSameLane_invalid")
-            if "canParallelInSameRepository" in entry and not isinstance(entry.get("canParallelInSameRepository"), bool):
-                errors.append(f"{batch_id}.canParallelInSameRepository_invalid")
             if "executionStage" in entry and entry.get("executionStage") not in PARALLEL_EXECUTION_STAGES:
                 errors.append(f"{batch_id}.executionStage_invalid")
             _validate_string_list(errors, entry, batch_id, "specRoots", required=True)
@@ -811,6 +817,14 @@ def validate_plan_data(
         for entry in raw_batches or []
         if isinstance(entry, dict) and entry.get("executionLane") in EXECUTION_LANES
     }
+    batch_workspace_refs = {
+        str(entry.get("workspaceRef"))
+        for entry in raw_batches or []
+        if isinstance(entry, dict)
+        and isinstance(entry.get("workspaceRef"), str)
+        and entry.get("workspaceRef")
+    }
+    _validate_code_workspace_bindings(errors, data, batch_workspace_refs)
     _validate_batch_profiles(
         errors,
         data,
@@ -2035,11 +2049,6 @@ def _bundle_consistency_errors(
     active = root.get("activeBatchId")
     next_batch = root.get("nextBatchId")
     status = root.get("status")
-    if status == "awaiting_next_conversation":
-        if active is not None:
-            errors.append("awaiting_next_conversation_has_active_batch")
-        if next_batch is None:
-            errors.append("awaiting_next_conversation_missing_next_batch")
     if status == "done" and (active is not None or next_batch is not None):
         errors.append("done_plan_has_pending_batch_pointer")
     if isinstance(active, str):
@@ -2060,7 +2069,6 @@ def validate_plan_bundle_data(
     require_initial_status: bool = False,
     require_all_done: bool = False,
     require_backend_compile: bool = False,
-    require_parallel_touches: bool = True,
 ) -> list[str]:
     errors = validate_plan_data(
         root,
@@ -2078,40 +2086,14 @@ def validate_plan_bundle_data(
     ])
     if scope_errors:
         return scope_errors
-    parallel_policy = root.get("parallelPolicy")
-    if require_parallel_touches and isinstance(parallel_policy, dict) and parallel_policy.get("enabled") is True:
-        for batch_id, batch in batch_data.items():
-            for task in tasks(batch):
-                if not isinstance(task, dict):
-                    continue
-                touches = task.get("touches")
-                if not isinstance(touches, list) or not touches:
-                    errors.append(f"{task.get('id', batch_id)}.touches_missing")
-                    continue
-                seen: set[tuple[str, str]] = set()
-                for index, touch in enumerate(touches):
-                    context = f"{task.get('id', batch_id)}.touches[{index}]"
-                    if not isinstance(touch, dict):
-                        errors.append(f"{context}_must_be_object")
-                        continue
-                    path = normalize_repository_relative_path(touch.get("path"))
-                    kind = touch.get("kind", "code")
-                    if path is None or path == ".":
-                        errors.append(f"{context}.path_invalid")
-                    if kind not in PARALLEL_TOUCH_KINDS:
-                        errors.append(f"{context}.kind_invalid")
-                    if isinstance(path, str) and isinstance(kind, str):
-                        key = (path, kind)
-                        if key in seen:
-                            errors.append(f"{context}.duplicate")
-                        seen.add(key)
-    return _bundle_consistency_errors(
+    errors.extend(_bundle_consistency_errors(
         root,
         batch_data,
         require_initial_status=require_initial_status,
         require_all_done=require_all_done,
         require_backend_compile=(require_backend_compile or require_all_done),
-    )
+    ))
+    return sorted(set(errors))
 
 
 def load_plan_bundle(

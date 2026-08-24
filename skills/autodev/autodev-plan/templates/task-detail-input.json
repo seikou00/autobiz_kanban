@@ -31,11 +31,5 @@
     }
   ],
   "expectedFiles": [],
-  "touches": [
-    {
-      "path": "[repository-relative production file]",
-      "kind": "code"
-    }
-  ],
   "blockers": []
 }

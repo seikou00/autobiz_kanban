@@ -141,12 +141,9 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 ```
 该命令只保存 Code 开始前的 Git 可见文件快照，不修改业务仓库；已有 active 基线时脚本会复用它。
 
-完成上述一次性基线检查后，先读取根 Plan 的未完成 Batch 数量。只有恰好一个未完成 Batch 时，才执行：
-```bash
-python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
-```
+完成上述一次性基线检查后，读取根 Plan 的未完成 Batch 数量，并统一进入固定 Workflow 入口。不得让模型生成或改写 workflow 脚本。
 
-若根计划处于历史遗留的 `awaiting_next_conversation`，该入口直接返回 `start_parallel_batch_workflow`；不会消费 handoff 或自动激活 `nextBatchId`。多个未完成 Batch 同样不得用它逐个推进 Batch。必须严格按返回的 `action` 分支：
+多个未完成 Batch 必须统一通过并行调度工作流按依赖 DAG 执行，不得选择一个 `activeBatchId` 后串行推进。必须严格按返回的 `action` 分支：
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_compile`：执行一次 `batch-compile`，不得先执行任何 TASK 测试命令。
@@ -154,7 +151,7 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 - `start_parallel_batch_workflow`：立即按下方 Workflow 并行执行模式创建 scheduler run；不得选择一个 `activeBatchId` 后串行执行。
 - `code_done_ready`：所有批次均已通过生产代码编译门禁，继续 Code 完成门禁。
 
-入口返回失败、活动批次缺失或旧 handoff 状态时必须停止，不得猜测 batch ID、直接编辑计划或绕过入口启动 Task。`code-session` 只允许在单 Batch Code 会话入口调用。
+入口返回失败或活动批次缺失时必须停止，不得猜测 batch ID、直接编辑计划或绕过入口启动 Task。旧的串行 Code 会话不再作为执行路径。
 
 ### 建立执行上下文与任务队列
 
@@ -255,7 +252,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 
 `batch-compile` 是 Code 阶段唯一构建命令，只编译生产代码，不运行 TASK 测试，也不创建测试资产。长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
 
-- 返回 `compileStatus=passed` 后，runner 将本批 `implemented` TASK 标记为 `done`。并行 run 回写 `ready_to_merge`，由 scheduler 在合并后释放下游 Batch；单 Batch 直接返回 `code_done_ready`。不再生成或消费 `BATCH_HANDOFF.json`。
+- 返回 `compileStatus=passed` 后，runner 将本批 `implemented` TASK 标记为 `done`。Workflow run 回写 `ready_to_merge`，由 scheduler 在合并后释放下游 Batch。
 - 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码。推荐先执行下列命令建立 repair run，再修改代码：
 
 ```bash
@@ -350,7 +347,9 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 ```
 ## Workflow 并行执行模式
 
-当 Code 阶段存在两个或更多合法待执行 Batch 时，先调用 `hooks/workflow_launcher.py`：
+当 Code 阶段存在合法待执行 Batch 时，只启动仓库固定的 `workflows/code-batched-execution.workflow.js`。Workflow 从中性会话/产物工作区启动，插件为每个 Batch 在其业务仓库内创建并管理 linked Git worktree；不得生成、持久化、校验或以内联脚本替换 workflow 控制流。
+
+先调用 launcher：
 
 ```bash
 launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
@@ -358,22 +357,24 @@ launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
   --plugin-path "${pluginPath}" \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --json)
-useWorkflow=$(printf '%s' "$launcher_result" | jq -r '.useWorkflow')
-artifactWorkspace=$(printf '%s' "$launcher_result" | jq -r '.artifactWorkspace // empty')
 ```
 
-只有 `useWorkflow=true` 且校验结果为 `parallel_plan_valid` 才能启动 `workflows/code-batched-execution.workflow.js`。多个待执行 Batch 返回 `useWorkflow=false` 时表示 Plan 不可并行，必须回流 `/autodev-plan` 修复 `deps`、`touches` 或 workspace 契约，禁止继续使用串行流程；只有单 Batch 可使用 `code-session`。
+launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> 绝对业务代码仓库` 映射，并返回 `codeWorkspaces` 与 `executionIsolation=plugin_managed_git_worktrees`。不得把 `artifactWorkspace` 当作代码仓库路径，也不得要求所有业务仓库属于同一 Git checkout。旧 Plan 没有该字段时，只能显式补传映射，例如 `--code-workspace "RouYi=/absolute/path/to/RouYi"`；无法解析映射时必须阻断并回流 Plan，不得猜路径。
 
-启动 Workflow 时必须同时传入 `pluginPath` 和 launcher 返回的 `artifactWorkspace`：前者只用于加载插件脚本，后者用于 `plan.json`、scheduler manifest、合并和最终验证。
+只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`、`requiredAction=start_fixed_workflow` 且校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid` 时，才使用 launcher 返回的 `workflowScript` 启动固定 Workflow。launcher 会把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/`，并返回 `workflowScriptSource`、`workflowScriptSha256` 与可直接透传的 `workflowArgs`；不得再次使用插件目录下的外部 `scriptPath`。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排或改写 workflow。
 
-并行实现阶段使用 `isolation: "worktree"`，并且必须遵守：
+调用平台 `workflow` 的唯一允许形式是 `scriptPath=launcher.workflowScript` 且 `args=JSON.stringify(launcher.workflowArgs)`。禁止传入 `script`、禁止自行拼接 JavaScript、禁止增删 phase、禁止从 launcher 输出以外重建参数；若平台不接受该 `scriptPath`，必须停止并报告，不能降级为内联 workflow 或共享工作区执行。
 
-- 通过 `parallel_batch_scheduler.py create` 创建一个固定 `runId`，并为每个 `workspaceRef` 传入 `--code-workspace <workspaceRef>=<path>`。调度器会冻结每个仓库的 Git 根、初始基线 SHA 与组件根目录，并维护仅由本 run 回并推进的受控 `headSha`；后继依赖 Batch 从该仓库的受控 HEAD 创建 Worktree。单仓库仅在 Plan 只有一个 `workspaceRef` 时可传裸路径。
-- 每个 Batch 先用 `batch_lease_manager.py acquire` 获取 lease；全部 `task_runner.py` 调用携带 `--parallel-run-id` 与 `--lease-token`。
-- 并行模式的唯一状态源是 `.parallel-runs/<runId>/manifest.json`，不读取或写入 `BATCH_HANDOFF.json`。
-- 合并只能调用 `hooks/batch_merger.py`，它按 Batch 的 `workspaceRef` 合并回对应仓库。普通 `code` touches 的重叠由 planner 预警；真实 Git 冲突会创建独立 resolution Worktree。resolution Agent 必须阅读双方 Batch 的 goal/touches/Evidence/diff，只修改冲突文件及必要适配，运行该 Batch required compile，并调用 `hooks/parallel_conflict_resolver.py complete` 提交 resolution commit；禁止 `ours`、`theirs`、`git merge -s ours`、`--no-verify`、删除一侧变更或直接修改主工作区。只有完成验证的 resolution commit 才能由 resolver 回并。
-- 使用 `parallel_batch_scheduler.py resume`、`parallel_batch_lifecycle.py monitor` 和 `batch_lease_manager.py reclaim` 恢复；成功后使用 `parallel_batch_lifecycle.py cleanup` 清理 worktree。
-- 所有无依赖的 Batch 都可以在各自 Worktree 中并行，包括同仓库同组件以及跨仓库 Batch；`maxParallel` 只限制同时运行的数量，不按写集、Lane 或仓库提前串行化。写入冲突在按仓库回并时由 Git 检测并阻断，禁止 `ours`、`theirs` 或静默继续；跨仓库依赖必须由 Batch `deps` 表达。
+启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace` 和以逻辑 `workspaceRef` 为 key 的 `codeWorkspaces`。Workflow 可以从任意中性会话/产物工作区发起；插件按 `workspaceRef` 在 `<business-git-root>/.worktrees/` 创建 linked worktree。禁止使用平台 `isolation: "worktree"`，也禁止把对话 Workspace、artifactWorkspace 或主业务 checkout 当作 Batch 代码目录。
+
+固定脚本按以下顺序执行：
+
+- scheduler 先只选择依赖已经 `merged` 的 pending Batch；因此初始波次就是所有无依赖 Batch。
+- 同一波次受 `maxParallel` 限制并行执行；即使多个 Batch 指向同一个 `workspaceRef` / Git 仓库，插件也必须为每个 Batch 在该仓库 `.worktrees/` 下创建独立 linked worktree。每个 Batch 获取 lease、在插件分配的 worktree 内完成 TASK、batch compile，并由 `worktree_manager.py seal` 提交及标记 `ready_to_merge`。仓库重叠只在合并阶段由真实 Git 冲突决定是否阻断。
+- 该波次全部完成后，shared workflow owner 立即运行 `batch_merger.py --conflict-mode native-rebase`。只有 commit 已真正合并为 `merged`，才调用 scheduler `resume` 计算下一波次；下游 Batch 不会读取未合并改动。
+- 不具备并行条件的 Batch 自然在下一波次串行执行。所有 Batch 合并后才执行 `parallel_final_verify.py`。若固定 Workflow 无法启动，必须停止并报告，禁止手工顺序执行 Batch 或在共享工作区继续写代码。
+
+并行模式的唯一状态源是 `.parallel-runs/<runId>/manifest.json`。真实 Git 冲突必须保持 fail-closed，禁止 `ours`、`theirs`、`git merge -s ours`、`--no-verify`、删除一侧变更或直接修改主工作区。恢复使用 `parallel_batch_scheduler.py resume`、`parallel_batch_lifecycle.py monitor` 与 `batch_lease_manager.py reclaim`；成功后使用 `parallel_batch_lifecycle.py cleanup`。
 
 ## 写入边界
 
@@ -387,6 +388,6 @@ artifactWorkspace=$(printf '%s' "$launcher_result" | jq -r '.artifactWorkspace /
 
 - 队列所有任务「完成」，且都有 `action=implementation` evidence；任务级 evidence 继续记录真实生产文件变更，测试意图保留在 `validationTestPlan[].testIntent` 供 UTest/E2E 阶段消费。
 - `evidence/EVIDENCE.jsonl`、`EVIDENCE.index.json` 与任务 implementation evidence 完整性和哈希校验通过；每个 Batch 的 `batchCompile` 状态绑定最新 implementation evidence 与 revision，没有新生成的 `ev_XXXX.json` sidecar。
-- 每批 `batchCompile.status=passed`，且 `commandId` 绑定该批 required compile command 与最终 implementation digest；Batch 之间只通过 scheduler manifest 的依赖状态推进，不生成或消费 `BATCH_HANDOFF.json`。
+- 每批 `batchCompile.status=passed`，且 `commandId` 绑定该批 required compile command 与最终 implementation digest；Batch 之间只通过 scheduler manifest 的依赖状态推进。
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

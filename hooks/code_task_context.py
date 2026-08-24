@@ -363,8 +363,20 @@ def build_context(
     active_batch_id = data.get("activeBatchId")
     if not isinstance(active_batch_id, str):
         next_batch_id = data.get("nextBatchId")
-        reason = "batch_handoff_required" if data.get("status") == "awaiting_next_conversation" else "no_active_batch"
-        return fail(reason, str(next_batch_id or ""), path=plan_path)
+        # Parallel Code runs intentionally leave the activeBatchId
+        # pointer empty.  Resolve the task's owning unfinished batch locally
+        # instead of forcing a serial pointer into the root Plan.
+        candidates = [
+            str(item.get("id"))
+            for item in data.get("batches", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and item.get("status") not in {"done", "failed"}
+            and task_id in (item.get("taskIds") or [])
+        ]
+        if len(candidates) != 1:
+            return fail("no_active_batch", str(next_batch_id or ""), path=plan_path)
+        active_batch_id = candidates[0]
     active_entry = next(
         (item for item in data.get("batches", []) if isinstance(item, dict) and item.get("id") == active_batch_id),
         None,

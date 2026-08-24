@@ -305,7 +305,7 @@ python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feat
 
 每个候选分组应显式选择 `executionMode=code|verified_existing|external_dependency`，缺省仅兼容为 `code`。`verified_existing` 表示本 Feature 内已有实现，只允许复用现存可执行验证目标；`external_dependency` 表示行为与验证均由 Feature 外的系统或仓库负责，必须同时写 `externalDependency.system/owner/trackingRefs`，不得配置本地验证命令或待创建测试。外部依赖不是本地 no-code 实现，也不得借创建占位测试把它伪装成已验证。
 
-按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 必须提供 `touches`：每项为仓库相对 `path` 与 `kind=code|shared|proto|database|configuration`。普通业务文件用 `code`；共享入口（例如 `main.go`、应用装配、路由注册）用 `shared`；`.proto` 用 `proto`；迁移/Schema 用 `database`；部署、运行时和构建配置用 `configuration`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、touches、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样；批量修复在任一 patch 不合法时整体不落盘：
+按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样；批量修复在任一 patch 不合法时整体不落盘：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
@@ -322,20 +322,7 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${fe
 python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
-Plan 默认开启 `parallelPolicy`。正式 Bundle 发布后，多个无未完成依赖的 Batch 会由 scheduler 并行执行；每个 task 都必须声明 `touches`，缺失或非法时 `/autodev-code` 必须阻断并回流 Plan 修复，禁止安全回退为串行。存在协议、迁移或全局配置时，先拆出专属 Batch 并确认其 owner，再补充策略：
-
-```bash
-# 无 Proto/DB/配置全局变更
-python "${pluginPath}/hooks/plan_writer.py" set-parallel-policy \
-  --feature "${feature}" --has-pb-change false
-
-# 有 Proto 变更，并且 B003 统一落地数据库迁移
-python "${pluginPath}/hooks/plan_writer.py" set-parallel-policy \
-  --feature "${feature}" --has-pb-change true \
-  --confirm-global database=B003
-```
-
-策略语义：`proto` Batch 由 proto-engineer 前置执行并生成桩代码；所有消费协议的普通 Batch 自动依赖它。`database` / `configuration` 只允许同一 Git 根内一个 global-change Batch，必须先确认后才可运行；普通 Batch 自动依赖它。`shared` 只允许一个 integration Batch，并自动等待该仓库普通 Batch 完成后统一修改。普通 `code` touches 若重叠会输出 planner warning，必须在任务拆分阶段隔离，不能用 Git 冲突作为常规协作方式。
+正式 Bundle 发布后，多个无未完成依赖的 Batch 会由 scheduler 并行执行。Plan 只声明任务、仓库和依赖；Code 阶段以任务 Git 快照、实际 diff 和回并结果为事实，合并阶段由 Git 检测真实冲突。
 
 **预检与修复**：
 

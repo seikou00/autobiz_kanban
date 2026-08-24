@@ -73,7 +73,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 
 Code 回退不支持批次级目标。只要清理范围包含 `dev.code`，就一次性回退整个 Code Session 到 Code 开始前：
 
-- 清理 Code 及其后续阶段产物、evidence index、handoff 和 `.task-runs`；运行时数据会归档到 rollback history。
+- 清理 Code 及其后续阶段产物、evidence index 和 `.task-runs`；运行时数据会归档到 rollback history。
 - 重置全部 Code task、implementation/completion evidence 引用、批次编译状态和 active batch；保留任务契约、依赖和验收标准。
 - 默认 `--code-source keep`，不修改业务 Git 仓库，只报告源码变化。
 - 只有用户明确确认且存在基线时才使用 `--code-source restore`。源码恢复前会校验当前 hash 是否仍等于该 Feature 的最终 Code 快照；不一致时阻断，不覆盖外部修改。

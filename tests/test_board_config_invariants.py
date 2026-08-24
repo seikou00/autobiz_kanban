@@ -602,8 +602,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_code_skill_requires_compile_only_batch_session_actions(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "task_runner.py\" code-session",
-            "只有恰好一个未完成 Batch 时",
             "execute_active_batch",
             "run_batch_compile",
             "start_batch_compile_repair",

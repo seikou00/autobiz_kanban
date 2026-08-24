@@ -1,5 +1,8 @@
 # Code 阶段 Workflow 并行化实施总结
 
+> 历史总结。本文不代表当前实现；当前执行入口是
+> `workflows/code-batched-execution.workflow.js`。
+
 ## 实施完成 ✅
 
 所有核心组件已创建并通过测试，可以开始使用。
@@ -10,7 +13,6 @@
 ```
 hooks/
 ├── workflow_launcher.py       ✅ 判断执行模式（串行/并行）
-├── worktree_manager.py        ✅ Worktree 生命周期管理
 └── batch_merger.py            ✅ 冲突检测与合并策略
 ```
 
@@ -163,38 +165,12 @@ python hooks/workflow_launcher.py \
   --json
 ```
 
-### Worktree Manager
-```bash
-# 创建 worktree
-python hooks/worktree_manager.py --json create \
-  --repo /path/to/repo \
-  --name feat-xxx-B001
-
-# 列出 worktrees
-python hooks/worktree_manager.py --json list \
-  --repo /path/to/repo
-
-# 删除 worktree
-python hooks/worktree_manager.py --json remove \
-  --repo /path/to/repo \
-  --name feat-xxx-B001 \
-  --force
-```
-
 ### Batch Merger
 ```bash
-# 检测冲突
-python hooks/batch_merger.py --json detect-conflicts \
-  --batches '[
-    {"id":"B001","changedFiles":["src/a.py","src/b.py"]},
-    {"id":"B002","changedFiles":["src/b.py","src/c.py"]}
-  ]'
-
-# 顺序合并
-python hooks/batch_merger.py --json sequential-merge \
-  --repo /path/to/repo \
-  --worktrees "feat-xxx-B001,feat-xxx-B002" \
-  --batch-ids "B001,B002"
+# 原生合并
+python hooks/batch_merger.py --json merge \
+  --workspace <artifact-workspace> --feature <feature> --run-id <run-id> \
+  --conflict-mode native-rebase
 ```
 
 ## 🎯 下一步行动

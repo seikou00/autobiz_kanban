@@ -1,5 +1,8 @@
 # AutoBiz 接入 Dynamic Workflow 设计方案
 
+> 历史设计，Dynamic Workflow 与模型生成脚本均已退役。当前执行入口是
+> `workflows/code-batched-execution.workflow.js`，不得按本文命令操作。
+
 > 文档用途：架构评审、平台能力建设评审、项目汇报  
 > 方案范围：将 AutoBiz 的 Biz、Dev、Ops 全流程直接接入 Dynamic Workflow 运行时  
 > 设计基线：一个 Feature 的一次迭代对应一个长期运行的 Dynamic Workflow Run  

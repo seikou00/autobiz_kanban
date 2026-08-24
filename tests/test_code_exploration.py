@@ -830,6 +830,36 @@ class CodeTaskContextCacheTest(unittest.TestCase):
             self.assertTrue(result.ok, result.errors)
             self.assertEqual(result.data["explorationCaches"][0]["status"], "missing")
 
+    def test_context_resolves_parallel_task_without_active_batch_pointer(self) -> None:
+        from hooks.code_task_context import build_context
+        from tests.test_task_runner import _add_second_compile_only_batch, _workspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp), exploration_ready=False)
+            _add_second_compile_only_batch(feature_dir)
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "### Requirement [REQ-001]: capability\n"
+                "#### Scenario [SCN-001]: observable behavior\n",
+                encoding="utf-8",
+            )
+            plan_path = feature_dir / "plan.json"
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan["activeBatchId"] = None
+            plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            result = build_context(
+                workspace=workspace,
+                feature="alpha",
+                task_id="T001",
+                code_workspaces=[repo],
+            )
+
+            self.assertTrue(result.ok, result.errors)
+            self.assertEqual(result.data["batchId"], "B001")
+            self.assertEqual(result.data["taskId"], "T001")
+
     def test_context_returns_missing_cache_policy_for_business_repository(self) -> None:
         from hooks.code_task_context import build_context
         from tests.test_task_runner import _workspace

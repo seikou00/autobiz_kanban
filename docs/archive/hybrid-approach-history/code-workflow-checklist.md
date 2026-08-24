@@ -1,16 +1,17 @@
 # Code Workflow 实施清单
 
+> 历史清单。本文列出的 generated workflow、旧 resolver 与插件自管 worktree
+> 均不可执行；当前执行入口是 `workflows/code-batched-execution.workflow.js`。
+
 ## ✅ 已完成项
 
 ### 核心组件
 - [x] `hooks/workflow_launcher.py` - 执行模式判断器
-- [x] `hooks/worktree_manager.py` - Worktree 管理器
 - [x] `hooks/batch_merger.py` - 批次合并器
 - [x] `hooks/parallel_runtime.py` - Manifest、依赖、Lease、幂等 Resume
 - [x] `hooks/parallel_batch_scheduler.py` - 多仓库调度与状态机
 - [x] `hooks/parallel_batch_lifecycle.py` - 监控、外部修改检测、清理、回滚
-- [x] `hooks/parallel_conflict_policy.py` - touches 分析与特殊变更收口
-- [x] `hooks/parallel_conflict_resolver.py` - 隔离 Worktree 冲突解决与验证
+- [x] 平台原生 `isolation: "worktree"` - Batch 与冲突 resolution 隔离
 - [x] `workflows/code-batched-execution.workflow.js` - 主编排脚本
 
 ### 文档
@@ -195,8 +196,8 @@ python hooks/workflow_launcher.py \
   --plugin-path "/path/to/plugin" \
   --workspace "/path/to/artifacts/project" \
   --json
-python hooks/worktree_manager.py --json list --repo .
-python hooks/batch_merger.py --json detect-conflicts --batches '[...]'
+git worktree list
+python hooks/batch_merger.py --json merge --workspace <artifact-workspace> --feature <feature> --run-id <run-id> --conflict-mode native-rebase
 ```
 
 ### 清理 Worktrees

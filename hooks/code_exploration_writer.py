@@ -112,8 +112,19 @@ def _bundle_for_task(feature_dir: Path, task_id: str):
     batch_id = bundle.task_batches.get(task_id)
     if not isinstance(batch_id, str):
         raise CodeExplorationError(f"task_not_found:{task_id}")
-    if bundle.root.get("activeBatchId") != batch_id:
+    active_batch = bundle.root.get("activeBatchId")
+    if active_batch is not None and active_batch != batch_id:
         raise CodeExplorationError(f"task_not_in_active_batch:{task_id}")
+    if active_batch is None:
+        parallel_candidates = [
+            str(entry.get("id"))
+            for entry in bundle.root.get("batches", [])
+            if isinstance(entry, dict)
+            and entry.get("status") not in {"done", "failed"}
+            and task_id in (entry.get("taskIds") or [])
+        ]
+        if len(parallel_candidates) != 1:
+            raise CodeExplorationError(f"task_not_in_active_batch:{task_id}")
     batch = bundle.batches.get(batch_id)
     lane = batch.get("executionLane") if isinstance(batch, dict) else None
     if lane not in EXECUTION_LANES:

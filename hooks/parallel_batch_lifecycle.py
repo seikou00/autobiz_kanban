@@ -6,10 +6,15 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace
 from hooks.parallel_runtime import (
@@ -23,7 +28,7 @@ from hooks.parallel_runtime import (
     run_lock,
     save_manifest,
 )
-from hooks.worktree_manager import remove_worktree
+from hooks.worktree_manager import remove_parallel_worktree
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -60,35 +65,55 @@ def reclaim_stale_leases(workspace: Path, feature: str, run_id: str, *, force: b
     return reclaimed
 
 
-def cleanup_run(workspace: Path, feature: str, run_id: str, *, repo_path: Path | None = None, force: bool = False) -> dict[str, Any]:
+def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = False) -> dict[str, Any]:
+    """Remove worktrees created by this plugin after a terminal run.
+
+    Worktree removal happens outside the manifest lock because ``git worktree
+    remove`` can invoke repository hooks and because the manager records its
+    own audit event.  The terminal-state check and final manifest update remain
+    serialized by the run lock.
+    """
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
-        if manifest.get("status") not in {"succeeded", "failed", "blocked", "cancelled"} and not force:
+        if manifest.get("status") not in {"succeeded", "failed", "blocked", "cancelled", "rolled_back"} and not force:
             raise ValueError("parallel_run_not_terminal")
-        removed: list[str] = []
-        errors: list[str] = []
-        for item in manifest.get("batches", {}).values():
-            if not isinstance(item, dict) or not item.get("worktreePath"):
-                continue
-            ref = str(item.get("repositoryRef") or item.get("workspaceRef") or "")
-            repository = manifest.get("repositories", {}).get(ref)
-            root = Path(repository["gitRoot"]) if isinstance(repository, dict) and isinstance(repository.get("gitRoot"), str) else repo_path
-            if root is None:
-                errors.append(f"parallel_repository_binding_missing:{ref}")
-                continue
-            result = remove_worktree(root, Path(str(item["worktreePath"])).name, force=force)
-            if result.get("success"):
-                removed.append(str(item["worktreePath"]))
-            elif result.get("error"):
-                errors.append(str(result["error"]))
-        manifest["cleanup"] = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "removedWorktrees": removed, "errors": errors}
+        targets = [
+            (batch_id, str(item.get("worktreePath")), str(item.get("status") or ""))
+            for batch_id, item in manifest.get("batches", {}).items()
+            if isinstance(item, dict) and isinstance(item.get("worktreePath"), str) and item.get("worktreePath")
+        ]
+
+    removed: list[str] = []
+    errors: list[str] = []
+    for batch_id, path, status in targets:
+        result = remove_parallel_worktree(
+            workspace,
+            feature,
+            run_id,
+            batch_id,
+            # A cancelled/failed delivery is intentionally discarded by
+            # terminal cleanup, including its unmerged temporary branch.
+            force=force or status != "merged",
+        )
+        if result.get("success"):
+            removed.append(path)
+        else:
+            errors.append(f"{batch_id}:{result.get('error', 'worktree_remove_failed')}")
+
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        manifest["cleanup"] = {
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "removedWorktrees": removed,
+            "errors": errors,
+        }
         manifest["status"] = "cleaned" if not errors else "cleanup_failed"
         save_manifest(workspace, feature, run_id, manifest)
-        append_event(workspace, feature, run_id, "run_cleaned", removed=removed, errors=errors)
+        append_event(workspace, feature, run_id, "run_cleaned", removedWorktrees=removed, errors=errors)
         return {"runId": run_id, "status": manifest["status"], "removedWorktrees": removed, "errors": errors}
 
 
-def rollback_run(workspace: Path, feature: str, run_id: str, repo_path: Path | None = None, *, mode: str = "partial", confirm: bool = False) -> dict[str, Any]:
+def rollback_run(workspace: Path, feature: str, run_id: str, *, mode: str = "partial", confirm: bool = False) -> dict[str, Any]:
     if mode not in {"full", "partial"}:
         raise ValueError("rollback_mode_invalid")
     if mode == "full" and not confirm:
@@ -102,9 +127,9 @@ def rollback_run(workspace: Path, feature: str, run_id: str, repo_path: Path | N
                 if isinstance(item, dict) and isinstance(item.get("mergeCommitSha"), str):
                     ref = str(item.get("repositoryRef") or item.get("workspaceRef") or "")
                     repository = manifest.get("repositories", {}).get(ref)
-                    root = Path(repository["gitRoot"]) if isinstance(repository, dict) and isinstance(repository.get("gitRoot"), str) else repo_path
-                    if root is None:
+                    if not isinstance(repository, dict) or not isinstance(repository.get("gitRoot"), str):
                         raise ValueError(f"parallel_repository_binding_missing:{ref}")
+                    root = Path(repository["gitRoot"])
                     key = str(root.resolve())
                     record = commits_by_repository.setdefault(key, {"root": root, "refs": [], "commits": []})
                     record["refs"].append(ref)
@@ -162,8 +187,8 @@ def monitor_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
     return {"runId": run_id, "status": manifest.get("status"), "counts": counts, "activeWorkers": counts.get("running", 0) + counts.get("leased", 0), "timeline": timeline, "updatedAt": manifest.get("updatedAt"), "nowEpoch": now}
 
 
-def auto_cleanup_old_runs(workspace: Path, feature: str, *, repo_path: Path | None = None, keep_days: int = 7) -> list[dict[str, Any]]:
-    """Remove worktrees for old successful runs; failed runs remain diagnostic data."""
+def auto_cleanup_old_runs(workspace: Path, feature: str, *, keep_days: int = 7) -> list[dict[str, Any]]:
+    """Clean old successful runs and their plugin-managed worktrees."""
     cutoff = time.time() - max(0, keep_days) * 24 * 60 * 60
     cleaned: list[dict[str, Any]] = []
     for manifest in list_runs(workspace, feature):
@@ -175,7 +200,7 @@ def auto_cleanup_old_runs(workspace: Path, feature: str, *, repo_path: Path | No
             continue
         if created > cutoff:
             continue
-        cleaned.append(cleanup_run(workspace, feature, str(manifest["runId"]), repo_path=repo_path))
+        cleaned.append(cleanup_run(workspace, feature, str(manifest["runId"])))
     return cleaned
 
 
@@ -188,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--feature", required=True)
         if name not in {"external-changes", "auto-cleanup"}:
             p.add_argument("--run-id", required=True)
-        if name in {"cleanup", "rollback", "external-changes", "auto-cleanup"}:
+        if name == "external-changes":
             p.add_argument("--repo-path")
         if name in {"cleanup", "reclaim-leases"}:
             p.add_argument("--force", action="store_true")
@@ -208,11 +233,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "reclaim-leases":
             result = {"reclaimed": reclaim_stale_leases(workspace, feature, args.run_id, force=args.force)}
         elif args.command == "cleanup":
-            result = cleanup_run(workspace, feature, args.run_id, repo_path=Path(args.repo_path) if args.repo_path else None, force=args.force)
+            result = cleanup_run(workspace, feature, args.run_id, force=args.force)
         elif args.command == "rollback":
-            result = rollback_run(workspace, feature, args.run_id, Path(args.repo_path) if args.repo_path else None, mode=args.mode, confirm=args.confirm)
+            result = rollback_run(workspace, feature, args.run_id, mode=args.mode, confirm=args.confirm)
         elif args.command == "auto-cleanup":
-            result = {"cleaned": auto_cleanup_old_runs(workspace, feature, repo_path=Path(args.repo_path) if args.repo_path else None, keep_days=args.keep_days)}
+            result = {"cleaned": auto_cleanup_old_runs(workspace, feature, keep_days=args.keep_days)}
         else:
             if not args.repo_path:
                 raise ValueError("repo_path_required_for_external_changes")

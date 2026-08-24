@@ -1,5 +1,8 @@
 # Code 阶段 Workflow 并行化完整实现方案
 
+> 历史实施方案。模型生成 workflow 已退役；当前执行入口是
+> `workflows/code-batched-execution.workflow.js`，不得按本文命令操作。
+
 ## 一、方案概述
 
 ### 1.1 目标
@@ -61,7 +64,6 @@
 autobiz_kanban/
 ├── hooks/
 │   ├── workflow_launcher.py          # 判断是否启用 workflow
-│   ├── worktree_manager.py           # Worktree 生命周期管理
 │   ├── batch_merger.py               # Batch 合并策略
 │   └── task_runner.py                # 现有任务执行器（无需修改）
 ├── workflows/
@@ -87,13 +89,13 @@ python hooks/parallel_batch_scheduler.py create \
   --code-workspace frontend-app=/repo/apps/web
 ```
 
-manifest 会冻结每个仓库的 `requestedPath`、`gitRoot`、`baseSha`、`baseBranch`，并维护只由本 run 合并推进的 `headSha`；每个 Batch 记录 `repositoryRef`、`componentRoots` 和 `gitRoot`。后继 Batch 从该仓库受控的 `headSha` 创建 Worktree，因此能看到已合并依赖；外部提交或未提交修改会被阻断。Worktree、seal、合并、清理、回滚和最终编译均按该绑定执行。
+manifest 会冻结每个仓库的 `requestedPath`、`gitRoot`、`baseSha`、`baseBranch`，并维护只由本 run 合并推进的 `headSha`；每个 Batch 记录 `repositoryRef`、`componentRoots` 和 `gitRoot`。首次创建 run 时，调度器会确保仓库已初始化 Git，并补齐运行期产物的忽略规则；对于 unborn HEAD 或已有未提交修改，调度器会把当前可见工作树保存为带 feature 标识的 bootstrap baseline，不要求用户预先手工提交。平台随后创建原生 Worktree，Batch 完成后由 workflow owner 记录 commit 并执行合并；插件不负责创建、seal 或删除 Worktree。
 
 所有无依赖的 Batch 都在独立 Worktree 中并行执行，仓库、组件、Lane 和写集都不构成执行锁；`maxParallel` 只限制全局并发数。合并阶段按 `repositoryRef` 分组并在每个 Git 根内按依赖拓扑顺序回并，Git 冲突在此阶段检测并阻断。跨仓库依赖必须通过 `deps` 表达，不能依赖文件路径推断。
 
 ### 冲突策略
 
-Task 通过 `touches=[{path,kind}]` 声明文件触点。普通 `code` 重叠只作事前 warning；`shared`、`proto`、`database`、`configuration` 分别收敛到唯一的 integration、proto 或 global-change Batch。策略分析器会自动生成跨 Batch 依赖；策略不完整时多 Batch 直接阻断并回流 Plan 修复，不能退回串行。Git 冲突不采用 ours/theirs：`batch_merger.py` 预检失败后创建 resolution Worktree，Agent 在其中基于双方目标和 diff 解决冲突、执行 compile、提交 resolution commit，`parallel_conflict_resolver.py` 再把该 commit 合并回对应仓库并记录审计信息。
+Plan 只声明任务、仓库和依赖。Code 阶段以 Git 快照和 implementation Evidence 记录实际写集，合并阶段以真实 diff 检测冲突。Git 冲突不采用 ours/theirs：共享 workflow owner 负责 native-rebase，冲突后由平台重新启动 `isolation: "worktree"` resolution Agent；插件不创建或删除平台 worktree。
 
 ### 3.1 workflow_launcher.py - 执行模式判断
 
@@ -135,100 +137,20 @@ python hooks/workflow_launcher.py \
 }
 ```
 
-### 3.2 worktree_manager.py - Worktree 管理
-
-**功能**：创建、列出、删除 Git worktree。
-
-**命令**：
-
-1. **创建 worktree**：
-```bash
-python hooks/worktree_manager.py create \
-  --repo /path/to/repo \
-  --name feat-user-auth-B001 \
-  --json
-```
-
-输出：
-```json
-{
-  "success": true,
-  "worktreePath": "/path/to/repo/.worktrees/feat-user-auth-B001",
-  "branchName": "worktree/feat-user-auth-B001"
-}
-```
-
-2. **列出 worktrees**：
-```bash
-python hooks/worktree_manager.py list --repo /path/to/repo --json
-```
-
-3. **删除 worktree**：
-```bash
-python hooks/worktree_manager.py remove \
-  --repo /path/to/repo \
-  --name feat-user-auth-B001 \
-  --force \
-  --json
-```
-
-**关键特性**：
-- 自动验证 `.worktrees/` 在 `.gitignore` 中
-- 支持强制删除（即使有未提交的变更）
-- 自动清理关联的分支
-
 ### 3.3 batch_merger.py - 合并策略
 
-**功能**：检测冲突、合并 worktree、顺序合并多个 batch。
+**功能**：由共享 workflow owner 对平台原生 worktree 执行 native-rebase 合并。
 
-**命令**：
-
-1. **检测冲突**：
+**命令**：由共享 workflow owner 调用 scheduler manifest 绑定的 native worktree：
 ```bash
-python hooks/batch_merger.py detect-conflicts \
-  --batches '[
-    {"id":"B001","changedFiles":["src/a.py","src/b.py"]},
-    {"id":"B002","changedFiles":["src/b.py","src/c.py"]}
-  ]' \
-  --json
-```
-
-输出：
-```json
-{
-  "conflicts": [
-    {"file": "src/b.py", "batches": ["B001", "B002"]}
-  ]
-}
-```
-
-2. **顺序合并**：
-```bash
-python hooks/batch_merger.py sequential-merge \
-  --repo /path/to/repo \
-  --worktrees "feat-auth-B001,feat-auth-B002,feat-auth-B003" \
-  --batch-ids "B001,B002,B003" \
-  --json
-```
-
-输出：
-```json
-{
-  "success": true,
-  "merged": [
-    {"batchId": "B001", "commitSha": "abc123", "filesChanged": 5},
-    {"batchId": "B002", "commitSha": "def456", "filesChanged": 3},
-    {"batchId": "B003", "commitSha": "ghi789", "filesChanged": 4}
-  ],
-  "failed": [],
-  "totalConflicts": 0
-}
+python hooks/batch_merger.py --feature <feature> --workspace <artifact-workspace> \
+  --run-id <run-id> --conflict-mode native-rebase --json
 ```
 
 **合并策略**：
 - 使用 `git merge --no-ff` 合并 worktree 分支
 - 每次合并后立即提交
-- 如果有冲突，手动解决后继续
+- 如果 native-rebase 冲突，保持原平台 worktree 干净并启动新的平台原生 resolution Agent
 - 支持部分失败（已成功的不回滚）
 
 ### 3.4 code-batched-execution.workflow.js - 主 Workflow
@@ -237,9 +159,9 @@ python hooks/batch_merger.py sequential-merge \
 
 ```javascript
 phases: [
-  { title: "准备", detail: "读取 plan，分析 batch 依赖，创建 worktree" },
+  { title: "准备", detail: "读取 plan，分析 batch 依赖" },
   { title: "并行实现", detail: "每个 batch 在独立 worktree 中执行" },
-  { title: "冲突检测", detail: "检测 batch 间的文件冲突" },
+  { title: "冲突处理", detail: "平台原生 resolution worktree 处理 Git 冲突" },
   { title: "顺序合并", detail: "按依赖顺序合并 batch 到主分支" },
   { title: "最终验证", detail: "验证合并后的完整代码" }
 ]
@@ -574,13 +496,10 @@ git log worktree/feat-xxx-B001 --oneline -5
 git diff HEAD worktree/feat-xxx-B001
 ```
 
-**手动触发合并**：
+**手动触发原生合并**：
 ```bash
-python hooks/batch_merger.py sequential-merge \
-  --repo <repo> \
-  --worktrees "feat-xxx-B001,feat-xxx-B002" \
-  --batch-ids "B001,B002" \
-  --json
+python hooks/batch_merger.py --feature <feature> --workspace <artifact-workspace> \
+  --run-id <run-id> --conflict-mode native-rebase --json
 ```
 
 ### 7.3 常见问题排查
@@ -695,7 +614,6 @@ const MAX_PARALLEL_BATCHES = 4;  // 根据机器性能调整
 autobiz_kanban/
 ├── hooks/
 │   ├── workflow_launcher.py          ✅ 已创建
-│   ├── worktree_manager.py           ✅ 已创建
 │   └── batch_merger.py               ✅ 已创建
 ├── workflows/
 │   └── code-batched-execution.workflow.js  ✅ 已创建

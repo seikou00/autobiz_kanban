@@ -693,9 +693,10 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(root["taskSetStatus"], "finalized")
+            self.assertEqual(root["codeWorkspaces"], {"default": str(ROOT.resolve())})
             self.assertTrue((feature_dir / "PLAN.md").is_file())
 
-    def test_plan_writer_defaults_parallel_policy_to_enabled(self) -> None:
+    def test_plan_writer_does_not_add_parallel_touch_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))
             initialized = _run(
@@ -703,27 +704,8 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
             plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(
-                plan["parallelPolicy"],
-                {"enabled": True, "has_pb_change": False, "global_change_confirmations": {}},
-            )
-
-            disabled_flag = _run(
-                "plan_writer.py", "set-parallel-policy", "--workspace", str(workspace),
-                "--feature", "alpha", "--enabled", "false", "--has-pb-change", "false",
-            )
-            self.assertNotEqual(disabled_flag.returncode, 0)
-            self.assertIn("--enabled", disabled_flag.stderr)
-
-            plan["taskSetStatus"] = "finalized"
-            plan["parallelPolicy"]["enabled"] = False
-            (feature_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
-            rejected = _run(
-                "plan_writer.py", "validate", "--workspace", str(workspace),
-                "--feature", "alpha", "--structure",
-            )
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("parallelPolicy.enabled_must_be_true", rejected.stdout)
+            self.assertNotIn("parallelPolicy", plan)
+            self.assertNotIn("touches", json.dumps(plan, ensure_ascii=False))
 
     def test_plan_writer_external_dependency_has_no_local_validation_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

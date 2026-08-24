@@ -67,7 +67,6 @@ from hooks.plan_json import (  # noqa: E402
     validate_plan_bundle_data,
     validate_task_collection,
 )
-from hooks.parallel_conflict_policy import task_execution_stage  # noqa: E402
 from hooks.plan_granularity import (  # noqa: E402
     PLAN_TASK_MATRIX_MAX_SCENARIOS,
     PLAN_TASK_MAX_SCENARIOS,
@@ -146,7 +145,6 @@ DRAFT_DETAIL_FIELDS = {
     "decisionIds",
     "validationCommands",
     "expectedFiles",
-    "touches",
     "blockers",
 }
 DRAFT_REQUIRED_DETAIL_FIELDS = {
@@ -189,8 +187,6 @@ PLANNING_MUTATION_COMMANDS = {
     "update-task",
     "set-task-detail",
     "set-scope",
-    "set-touches",
-    "set-parallel-policy",
     "set-ui-required",
     "set-ui-refs",
     "add-spec-ref",
@@ -218,11 +214,6 @@ DEFAULT_TASK_VALIDATION_POLICY = {
     "orchestration": "inline",
     "codeGate": "batch_compile_only",
     "maxTestStageRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
-}
-DEFAULT_PARALLEL_POLICY = {
-    "enabled": True,
-    "has_pb_change": False,
-    "global_change_confirmations": {},
 }
 DRAFT_BUNDLE_COMMANDS = {
     "prepare-task-draft",
@@ -489,7 +480,6 @@ def _initial(feature: str) -> dict[str, Any]:
         "nextBatchId": None,
         "batchPolicy": {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY},
         "taskValidationPolicy": copy.deepcopy(DEFAULT_TASK_VALIDATION_POLICY),
-        "parallelPolicy": copy.deepcopy(DEFAULT_PARALLEL_POLICY),
         "batches": [],
         "batchValidationProfiles": {},
         "projectValidationCommands": [],
@@ -524,7 +514,6 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     data.setdefault("activeBatchId", None)
     data.setdefault("nextBatchId", None)
     data.setdefault("batchPolicy", {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY})
-    data.setdefault("parallelPolicy", copy.deepcopy(DEFAULT_PARALLEL_POLICY))
     data.setdefault("batches", [])
     data.setdefault("batchValidationProfiles", {})
     data.setdefault("projectValidationCommands", [])
@@ -1118,23 +1107,11 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         for entry in data.get("batches", [])
         if isinstance(entry, dict) and isinstance(entry.get("id"), str)
     }
-    prior_entries = {
-        str(entry.get("id")): entry
-        for entry in data.get("batches", [])
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-    }
     used_ids = set(existing_ids)
-    parallel_policy = data.get("parallelPolicy")
-    parallel_enabled = isinstance(parallel_policy, dict) and parallel_policy.get("enabled") is True
     for task in tasks_view:
+        task.pop("touches", None)
         task_id = str(task.get("id", ""))
-        task_stage, stage_errors, _ = task_execution_stage(task)
-        # Draft skeletons intentionally have no touches until their detail is
-        # supplied.  Defer only that incomplete-draft state; malformed
-        # declarations are rejected immediately.
-        if stage_errors and parallel_enabled and task.get("touches") not in (None, []):
-            raise PlanWriterInputError("invalid_task_touches", task_id)
-        task_stage = task_stage or "parallel"
+        task_stage = "parallel"
         batch_id = assignments.get(task_id)
         if batch_id is None:
             primary = _primary_spec_root(task)
@@ -1177,7 +1154,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     root = {
         key: value
         for key, value in data.items()
-        if key not in {"tasks", "_batchAssignments", "_batchPlans"}
+        if key not in {"tasks", "_batchAssignments", "_batchPlans", "parallelPolicy"}
     }
     root["batchPolicy"] = {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY}
     root_entries: list[dict[str, Any]] = []
@@ -1245,13 +1222,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         }
         batch_compile = previous.get("batchCompile") if isinstance(previous.get("batchCompile"), dict) else None
         status = _batch_status(batch_tasks, batch_validation, batch_compile)
-        stages = {
-            stage
-            for task in batch_tasks
-            for stage, _errors, _touches in [task_execution_stage(task)]
-            if stage is not None
-        }
-        execution_stage = next(iter(stages)) if len(stages) == 1 else "parallel"
+        execution_stage = "parallel"
         task_ids_list = [str(task.get("id")) for task in batch_tasks]
         projected[batch_id] = {
             "featureId": root.get("featureId"),
@@ -1276,7 +1247,6 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             for dep in task.get("deps", [])
             if isinstance(dep, str) and dep in task_to_batch and task_to_batch[dep] != batch_id
         }
-        prior_entry = prior_entries.get(batch_id, {})
         workspace_ref = workspace_contract[0][0] if len(workspace_contract) == 1 else None
         root_entries.append(
             {
@@ -1287,8 +1257,6 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                 "executionLane": execution_lane,
                 "executionStage": execution_stage,
                 **({"workspaceRef": workspace_ref} if workspace_ref else {}),
-                **({"canParallelInSameLane": True} if prior_entry.get("canParallelInSameLane") is True else {}),
-                **({"canParallelInSameRepository": True} if prior_entry.get("canParallelInSameRepository") is True else {}),
                 "deps": sorted(cross_deps),
                 "taskIds": [str(task.get("id")) for task in batch_tasks],
                 "status": status,
@@ -1344,8 +1312,6 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             root["status"] = "in_progress"
         else:
             root["status"] = "todo"
-    elif root.get("status") == "awaiting_next_conversation":
-        root["activeBatchId"] = None
     else:
         active = root.get("activeBatchId")
         if active not in unfinished:
@@ -1381,7 +1347,6 @@ def _write(
         errors = validate_plan_bundle_data(
             root,
             batch_plans,
-            require_parallel_touches=data.get("taskSetStatus") == "finalized",
         )
         if errors:
             return WriterResult(ok=False, path=path, errors=[{"reason": error} for error in errors])
@@ -1600,7 +1565,6 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         "decisionIds": [],
         "validationCommands": [],
         "expectedFiles": [],
-        "touches": [],
         "evidenceIds": [],
         "implementationEvidenceIds": [],
         "latestImplementationEvidenceId": None,
@@ -2101,6 +2065,7 @@ def _workspace_roots_from_values(values: list[str] | None) -> dict[str, str]:
 
 
 def _normalize_task(task: dict[str, Any], task_id: str) -> None:
+    task.pop("touches", None)
     task.setdefault("executionMode", "code")
     scenario_refs = [
         ref for ref in task.get("specRefs", []) if isinstance(ref, str) and "SCN-" in ref
@@ -2199,7 +2164,6 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
         "decisionIds": _split_values(args.decision_id),
         "validationCommands": [{"command": command} for command in _split_values(args.validation_command)],
         "expectedFiles": _split_values(args.expected_file),
-        "touches": _parse_touches(args.touch),
         "evidenceIds": [],
         "blockers": [],
     }
@@ -2316,6 +2280,7 @@ def _normalize_task_body(
 ) -> dict[str, Any]:
     task = dict(task)
     task.pop("matrixExceptionExample", None)
+    task.pop("touches", None)
     body_id = task.get("id")
     if body_id is not None and not isinstance(body_id, str):
         raise ValueError("task body 的 id 必须是字符串")
@@ -2343,7 +2308,6 @@ def _normalize_task_body(
     task.setdefault("decisionIds", [])
     task.setdefault("validationCommands", [])
     task.setdefault("expectedFiles", [])
-    task.setdefault("touches", [])
     task["evidenceIds"] = []
     task["implementationEvidenceIds"] = []
     task["latestImplementationEvidenceId"] = None
@@ -2484,6 +2448,21 @@ def _code_workspace_contexts(values: list[str] | None) -> list[dict[str, Any]]:
         })
         seen.add(key)
     return contexts
+
+
+def _code_workspace_bindings(
+    contexts: list[dict[str, Any]],
+    workspace_refs: set[str] | None = None,
+) -> dict[str, str]:
+    """Project Plan-time repository paths into the root Plan contract."""
+    refs = workspace_refs or set()
+    if len(contexts) == 1 and refs == {"default"}:
+        return {"default": str(contexts[0]["requestedPath"])}
+    return {
+        str(context["repo"]): str(context["requestedPath"])
+        for context in contexts
+        if isinstance(context.get("repo"), str) and isinstance(context.get("requestedPath"), Path)
+    }
 
 
 def _context_for_workspace_root(
@@ -2852,6 +2831,10 @@ def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
     if persistent_lock_errors:
         return render_result(WriterResult(ok=False, path=group_file, errors=persistent_lock_errors))
     data["implementationScope"] = implementation_scope
+    data["codeWorkspaces"] = _code_workspace_bindings(
+        workspace_contexts,
+        {str(group.get("workspaceRef")) for group in _task_groups(group_data)},
+    )
     data["tasks"] = [
         _draft_task_skeleton(
             group,
@@ -2921,6 +2904,7 @@ def _cmd_import_task_directory(args: argparse.Namespace) -> int:
             path=_draft_plan_path(workspace, feature),
             errors=persistent_lock_errors,
         ))
+    workspace_contexts = _code_workspace_contexts(args.code_workspace)
     code_workspaces = [
         str(Path(value).expanduser().resolve()) for value in args.code_workspace or []
     ]
@@ -2937,6 +2921,10 @@ def _cmd_import_task_directory(args: argparse.Namespace) -> int:
         "createdAt": _utc_now(),
         "importedFromTaskDirectory": str(Path(args.task_dir).expanduser().resolve()),
     }
+    data["codeWorkspaces"] = _code_workspace_bindings(
+        workspace_contexts,
+        {str(task.get("workspaceRef")) for task in _tasks(data) if isinstance(task.get("workspaceRef"), str)},
+    )
     result = _write_draft_bundle(workspace, feature, data, lock)
     return render_result(with_result_data(result, importedTaskIds=task_ids, draft=_draft_summary(lock, data)))
 
@@ -3506,6 +3494,10 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
             errors=[{"reason": error} for error in scope_errors],
         ))
     data["implementationScope"] = implementation_scope
+    data["codeWorkspaces"] = _code_workspace_bindings(
+        workspace_contexts,
+        {str(group.get("workspaceRef")) for group in _task_groups(group_data)},
+    )
     data["tasks"] = tasks
     data["taskSetStatus"] = "collecting"
     lock = {
@@ -4099,39 +4091,6 @@ def _cmd_set_scope(args: argparse.Namespace) -> int:
             scope[field] = _split_values(source)
     if task.get("uiRequired") is True and isinstance(task.get("uiRefs"), dict):
         task["uiRefs"]["pageRefs"] = list(scope.get("pages", []))
-    return render_result(_write(workspace, feature, data))
-
-
-def _parse_touches(values: list[str] | None) -> list[dict[str, str]]:
-    touches: list[dict[str, str]] = []
-    for raw in values or []:
-        path, separator, kind = raw.rpartition("=")
-        if not separator or not path.strip() or not kind.strip():
-            raise PlanWriterInputError("touch_invalid", raw)
-        touches.append({"path": path.strip(), "kind": kind.strip()})
-    return touches
-
-
-def _cmd_set_touches(args: argparse.Namespace) -> int:
-    workspace, feature = _resolve(args)
-    data = _load(workspace, feature)
-    _find_task(data, args.task_id)["touches"] = _parse_touches(args.touch)
-    return render_result(_write(workspace, feature, data))
-
-
-def _cmd_set_parallel_policy(args: argparse.Namespace) -> int:
-    workspace, feature = _resolve(args)
-    data = _load(workspace, feature)
-    policy = data.setdefault("parallelPolicy", {})
-    policy["enabled"] = True
-    policy["has_pb_change"] = args.has_pb_change == "true"
-    confirmations: dict[str, dict[str, Any]] = {}
-    for raw in args.confirm_global or []:
-        kind, separator, batch_id = raw.partition("=")
-        if kind not in {"database", "configuration"} or not separator or not batch_id:
-            raise PlanWriterInputError("global_change_confirmation_invalid", raw)
-        confirmations[kind] = {"confirmed": True, "batchId": batch_id}
-    policy["global_change_confirmations"] = confirmations
     return render_result(_write(workspace, feature, data))
 
 
@@ -4807,8 +4766,7 @@ def mark_batch_tasks_done_after_compile(
         except ValueError:
             return fail("batch_not_found", batch_id, path=_path(workspace, feature))
         # Batch completion is a local state transition.  The scheduler owns
-        # cross-batch progression; never emit a handoff that turns a DAG into
-        # an implicit B001 -> B002 conversation chain.
+        # Cross-batch progression belongs to the scheduler, not the Plan writer.
         data["status"] = "in_progress"
         data["activeBatchId"] = None
         data["nextBatchId"] = None
@@ -4944,11 +4902,24 @@ def _render_plan_md(data: dict[str, Any]) -> str:
         "来源: plan.json",
         "状态: 待执行",
         "",
+        "## 代码仓库映射",
+        "",
+        "| workspaceRef | 代码仓库路径 |",
+        "| ------------ | ------------ |",
+    ]
+    code_workspaces = data.get("codeWorkspaces")
+    if isinstance(code_workspaces, dict) and code_workspaces:
+        for workspace_ref, code_workspace in sorted(code_workspaces.items()):
+            lines.append(f"| {workspace_ref} | {code_workspace} |")
+    else:
+        lines.append("| - | 未登记，Code 阶段禁止猜测路径 |")
+    lines.extend([
+        "",
         "## 任务总览",
         "",
         "| Task ID | 任务 | 执行模式 | 依赖 | 状态 |",
         "| ------- | ---- | -------- | ---- | ---- |",
-    ]
+    ])
     for task in _tasks(data):
         lines.append(
             f"| {task.get('id', '')} | {task.get('title', '')} | {task_execution_mode(task)} | {_fmt(task.get('deps'))} | {task.get('status', '')} |"
@@ -5107,7 +5078,6 @@ def _add_task_fields(parser: argparse.ArgumentParser, *, require_title: bool = T
     parser.add_argument("--decision-id", action="append")
     parser.add_argument("--validation-command", action="append")
     parser.add_argument("--expected-file", action="append")
-    parser.add_argument("--touch", action="append", help="path=kind")
     parser.add_argument("--split-rationale")
 
 
@@ -5266,17 +5236,6 @@ def main(argv: list[str] | None = None) -> int:
     scope.add_argument("--data-object", action="append")
     scope.add_argument("--scope-path", action="append")
     scope.set_defaults(func=_cmd_set_scope)
-
-    touches = sub.add_parser("set-touches")
-    _task_selector(touches)
-    touches.add_argument("--touch", action="append", required=True, help="path=kind")
-    touches.set_defaults(func=_cmd_set_touches)
-
-    parallel_policy = sub.add_parser("set-parallel-policy")
-    _common(parallel_policy)
-    parallel_policy.add_argument("--has-pb-change", choices=("true", "false"), required=True)
-    parallel_policy.add_argument("--confirm-global", action="append", help="database=B001 or configuration=B001")
-    parallel_policy.set_defaults(func=_cmd_set_parallel_policy)
 
     ui_required = sub.add_parser("set-ui-required")
     _task_selector(ui_required)

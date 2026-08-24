@@ -22,12 +22,22 @@ from typing import Any, Iterator
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, feature_dir
 from hooks.plan_json import BATCH_ID_RE, PlanBundle, load_plan_bundle, normalize_status
-from hooks.parallel_conflict_policy import analyze_parallel_conflict_policy
 
 
 RUN_SCHEMA_VERSION = 1
 DEFAULT_TTL_SECONDS = 15 * 60
 HEARTBEAT_SECONDS = 30
+
+_PLAN_MUTABLE_KEYS = {
+    "status", "activeBatchId", "nextBatchId", "startedAt", "completedAt",
+    "updatedAt", "createdAt", "evidenceIds", "completionEvidenceIds",
+    "implementationEvidenceIds", "validationEvidenceIds", "latestImplementationEvidenceId",
+    "latestPassEvidenceId", "latestPassEvidenceIds", "implementationRevision",
+    "taskSetDigest", "completedTaskCount", "batchCompile",
+    "projectCheckEvidenceIds", "latestProjectCheckEvidenceId",
+    "projectValidationDisposition", "projectValidationFailedRunIds",
+    "activeRunId", "repairAttempts", "repairTaskId", "repairStartedAt",
+}
 
 
 def utc_now() -> str:
@@ -71,26 +81,99 @@ def plan_digest(bundle: PlanBundle) -> str:
     # Runtime-only fields are deliberately excluded. Business contract fields
     # remain included, so changing goals, dependencies, scopes or validation
     # commands invalidates an active run instead of silently drifting it.
-    mutable_keys = {
-        "status", "activeBatchId", "nextBatchId", "startedAt", "completedAt",
-        "updatedAt", "createdAt", "evidenceIds", "completionEvidenceIds",
-        "implementationEvidenceIds", "validationEvidenceIds", "latestImplementationEvidenceId",
-        "latestPassEvidenceId", "latestPassEvidenceIds", "implementationRevision",
-        "taskSetDigest", "completedTaskCount", "batchCompile",
-        "projectCheckEvidenceIds", "latestProjectCheckEvidenceId",
-        "projectValidationDisposition", "projectValidationFailedRunIds",
-        "activeRunId", "repairAttempts", "repairTaskId", "repairStartedAt",
-    }
-
-    def stable(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: stable(item) for key, item in sorted(value.items()) if key not in mutable_keys}
-        if isinstance(value, list):
-            return [stable(item) for item in value]
-        return value
-
-    payload = {"root": stable(bundle.root), "batches": stable(bundle.batches)}
+    payload = {"root": _stable_plan_value(bundle.root), "batches": _stable_plan_value(bundle.batches)}
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _stable_plan_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _stable_plan_value(item)
+            for key, item in sorted(value.items())
+            if key not in _PLAN_MUTABLE_KEYS
+        }
+    if isinstance(value, list):
+        return [_stable_plan_value(item) for item in value]
+    return value
+
+
+def plan_contract_snapshot(bundle: PlanBundle) -> dict[str, Any]:
+    """Return a compact, user-facing contract snapshot for drift diagnostics."""
+    root_entries = [item for item in bundle.root.get("batches", []) if isinstance(item, dict)]
+    batches: dict[str, dict[str, Any]] = {}
+    for entry in root_entries:
+        batch_id = str(entry.get("id", ""))
+        if not batch_id:
+            continue
+        batch = bundle.batches.get(batch_id, {})
+        contract = _stable_plan_value(batch)
+        contract_hash = hashlib.sha256(
+            json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        batches[batch_id] = {
+            "batchId": batch_id,
+            "dependencies": sorted(str(dep) for dep in entry.get("deps", []) if isinstance(dep, str)),
+            "workspaceRef": batch_workspace_ref(batch),
+            "componentRoots": list(batch_component_roots(batch)),
+            "writeSet": list(batch_write_set(batch)),
+            "taskIds": sorted(
+                str(task.get("id"))
+                for task in batch.get("tasks", [])
+                if isinstance(task, dict) and task.get("id")
+            ),
+            "contractHash": contract_hash,
+        }
+    return {"schemaVersion": 1, "batchIds": sorted(batches), "batches": batches}
+
+
+def plan_drift_details(expected: Any, bundle: PlanBundle) -> dict[str, Any]:
+    """Describe contract changes without exposing full task/prompt contents."""
+    current = plan_contract_snapshot(bundle)
+    expected_batches = expected.get("batches", {}) if isinstance(expected, dict) else {}
+    if not isinstance(expected_batches, dict):
+        expected_batches = {}
+    current_batches = current["batches"]
+    added = sorted(set(current_batches) - set(expected_batches))
+    removed = sorted(set(expected_batches) - set(current_batches))
+    modified = sorted(
+        batch_id
+        for batch_id in set(current_batches) & set(expected_batches)
+        if current_batches[batch_id].get("contractHash") != expected_batches[batch_id].get("contractHash")
+    )
+    dependency_changes = []
+    workspace_changes = []
+    write_set_changes = []
+    for batch_id in sorted(set(current_batches) & set(expected_batches)):
+        before = expected_batches[batch_id]
+        after = current_batches[batch_id]
+        if before.get("dependencies", []) != after.get("dependencies", []):
+            dependency_changes.append({
+                "batchId": batch_id,
+                "expected": before.get("dependencies", []),
+                "current": after.get("dependencies", []),
+            })
+        if before.get("workspaceRef") != after.get("workspaceRef"):
+            workspace_changes.append({
+                "batchId": batch_id,
+                "expected": before.get("workspaceRef"),
+                "current": after.get("workspaceRef"),
+            })
+        if before.get("writeSet", []) != after.get("writeSet", []):
+            write_set_changes.append({
+                "batchId": batch_id,
+                "expected": before.get("writeSet", []),
+                "current": after.get("writeSet", []),
+            })
+    return {
+        "addedBatches": added,
+        "removedBatches": removed,
+        "modifiedBatches": modified,
+        "dependencyChanges": dependency_changes,
+        "workspaceChanges": workspace_changes,
+        "writeSetChanges": write_set_changes,
+        "currentContract": current,
+        "action": "restore_original_plan_or_create_new_run",
+    }
 
 
 def batch_workspace_ref(batch: dict[str, Any]) -> str | None:
@@ -186,8 +269,6 @@ def parallel_plan_errors(bundle: PlanBundle) -> list[str]:
 
     for node in graph:
         visit(node, [])
-    policy = analyze_parallel_conflict_policy(bundle)
-    errors.extend(policy["errors"])
     return sorted(set(errors))
 
 
@@ -215,12 +296,6 @@ def create_manifest(
     missing = sorted(ref for ref in refs if isinstance(ref, str) and ref not in repositories)
     if missing:
         raise ValueError("parallel_repository_binding_missing:" + ",".join(missing))
-    policy = analyze_parallel_conflict_policy(
-        bundle,
-        repository_roots={ref: str(binding["gitRoot"]) for ref, binding in repositories.items() if isinstance(binding.get("gitRoot"), str)},
-    )
-    if policy["errors"]:
-        raise ValueError("parallel_conflict_policy_invalid:" + ";".join(policy["errors"]))
     root = runs_root(workspace, feature)
     root.mkdir(parents=True, exist_ok=True)
     with FileLock(root / ".run-id.lock"):
@@ -234,25 +309,31 @@ def create_manifest(
     for entry in bundle.root.get("batches", []):
         batch_id = str(entry["id"])
         batch = bundle.batches[batch_id]
+        task_ids = [
+            str(task_id)
+            for task_id in batch.get("taskIds", [])
+            if isinstance(task_id, str) and task_id.strip()
+        ]
+        if not task_ids:
+            task_ids = [
+                str(task.get("id"))
+                for task in batch.get("tasks", [])
+                if isinstance(task, dict) and isinstance(task.get("id"), str) and task.get("id").strip()
+            ]
         entries[batch_id] = {
             "batchId": batch_id,
+            # Persist the Plan-owned task contract in the durable run. The
+            # workflow must consume these IDs from the scheduler response; it
+            # must not rediscover or invent them from the artifact workspace.
+            "taskIds": task_ids,
             "executionLane": entry.get("executionLane"),
-            "canParallelInSameLane": bool(entry.get("canParallelInSameLane", False)),
-            "canParallelInSameRepository": bool(entry.get("canParallelInSameRepository", False)),
             "workspaceRef": batch_workspace_ref(batch),
             "componentRoots": list(batch_component_roots(batch)),
             "repositoryRef": batch_workspace_ref(batch),
             "gitRoot": repositories[str(batch_workspace_ref(batch))]["gitRoot"],
             "writeSet": list(batch_write_set(batch)),
-            "touches": policy["touches"].get(batch_id, []),
-            "executionStage": policy["stages"].get(batch_id, "parallel"),
-            "executionOwner": (
-                "proto-engineer" if policy["stages"].get(batch_id) == "proto"
-                else "global-change-engineer" if policy["stages"].get(batch_id) == "global"
-                else "integration-agent" if policy["stages"].get(batch_id) == "integration"
-                else "batch-engineer"
-            ),
-            "dependencies": sorted(set(list(entry.get("deps", [])) + policy["dependencies"].get(batch_id, []))),
+            "executionStage": entry.get("executionStage", "parallel"),
+            "dependencies": sorted(set(entry.get("deps", []))),
             "status": "merged" if normalize_status(entry.get("status")) == "done" else "failed" if normalize_status(entry.get("status")) == "failed" else "pending",
             "lease": None,
             "worktreePath": None,
@@ -274,12 +355,9 @@ def create_manifest(
         "baseSha": None,
         "repositories": repositories,
         "planDigest": plan_digest(bundle),
+        "planContract": plan_contract_snapshot(bundle),
         "maxParallel": max(1, int(max_parallel)),
         "timeoutPerBatch": max(1, int(timeout_seconds)),
-        "conflictPolicy": {
-            "enabled": policy["enabled"],
-            "warnings": policy["warnings"],
-        },
         "batches": entries,
         "costs": {"totalTimeSeconds": 0, "estimatedTokens": 0, "batchCosts": {}},
     }
@@ -297,7 +375,24 @@ def load_manifest(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
         raise ValueError(f"parallel_manifest_invalid:{run_id}") from exc
     if not isinstance(data, dict) or data.get("runId") != run_id:
         raise ValueError(f"parallel_manifest_invalid:{run_id}")
-    return data
+    return _strip_legacy_parallel_flags(data)
+
+
+def _strip_legacy_parallel_flags(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Ignore obsolete hint flags from manifests created before worktree DAGs.
+
+    Native worktree isolation has made same-lane and same-repository overlap
+    schedulable. These values never governed the scheduler, but old `false`
+    values made diagnostics imply serialization.
+    """
+    batches = manifest.get("batches")
+    if not isinstance(batches, dict):
+        return manifest
+    for batch in batches.values():
+        if isinstance(batch, dict):
+            batch.pop("canParallelInSameLane", None)
+            batch.pop("canParallelInSameRepository", None)
+    return manifest
 
 
 def save_manifest(workspace: Path, feature: str, run_id: str, manifest: dict[str, Any]) -> None:
@@ -474,6 +569,31 @@ def ready_batches(manifest: dict[str, Any]) -> list[str]:
     return sorted(ready)
 
 
+def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
+    """Return sealed Batch results that may be merged in this barrier.
+
+    A Batch becomes eligible only after its own compile/seal step and after
+    every dependency has already reached ``merged`` with a merge commit.
+    This keeps dependency release tied to an actual merge, not an agent result.
+    """
+    batches = manifest.get("batches", {})
+    result: list[str] = []
+    for batch_id, item in batches.items():
+        if not isinstance(item, dict) or item.get("status") != "ready_to_merge":
+            continue
+        if not item.get("commitSha"):
+            continue
+        dependencies = item.get("dependencies", [])
+        if all(
+            isinstance(batches.get(dep), dict)
+            and batches[dep].get("status") == "merged"
+            and batches[dep].get("mergeCommitSha")
+            for dep in dependencies
+        ):
+            result.append(str(batch_id))
+    return sorted(result)
+
+
 def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None) -> list[list[str]]:
     """Return independently schedulable batches.
 
@@ -495,7 +615,7 @@ def list_runs(workspace: Path, feature: str) -> list[dict[str, Any]]:
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, dict):
-            result.append(data)
+            result.append(_strip_legacy_parallel_flags(data))
     return result
 
 

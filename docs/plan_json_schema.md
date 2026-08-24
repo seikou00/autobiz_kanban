@@ -276,7 +276,6 @@
 |----|------|
 | `todo` | 待开始 |
 | `in_progress` | 进行中 |
-| `awaiting_next_conversation` | 等待下次对话 |
 | `failed` | 失败 |
 | `done` | 已完成 |
 
@@ -638,7 +637,6 @@
 |----|------|
 | `todo` | 待开始 |
 | `in_progress` | 进行中 |
-| `awaiting_next_conversation` | 等待下次对话 |
 | `failed` | 失败 |
 | `done` | 已完成 |
 

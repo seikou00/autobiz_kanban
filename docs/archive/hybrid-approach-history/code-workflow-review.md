@@ -1,4 +1,7 @@
-# Code Workflow 并行化实现 - 代码检视报告
+# Code Workflow 并行化实现 - 历史检视报告
+
+> 本文只保留历史分析。插件自管 worktree/resolution 与 generated workflow
+> 实现均已删除；当前执行路径是 `workflows/code-batched-execution.workflow.js`。
 
 **检视日期**: 2026-08-19
 **检视范围**: 并行 Code 执行的核心实现

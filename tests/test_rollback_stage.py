@@ -448,7 +448,6 @@ class RollbackStageTest(unittest.TestCase):
         task_runs = self.feature_dir / ".task-runs" / "T001"
         task_runs.mkdir(parents=True)
         (task_runs / "run.json").write_text("{}\n", encoding="utf-8")
-        (self.feature_dir / "BATCH_HANDOFF.json").write_text("{}\n", encoding="utf-8")
         evidence = self.feature_dir / "evidence"
         evidence.mkdir()
         (evidence / "EVIDENCE.index.json").write_text("{}\n", encoding="utf-8")
@@ -467,7 +466,6 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue(result.ok, result.errors)
 
         self.assertFalse((self.feature_dir / ".task-runs").exists())
-        self.assertFalse((self.feature_dir / "BATCH_HANDOFF.json").exists())
         self.assertFalse((evidence / "EVIDENCE.index.json").exists())
         self.assertFalse(stale_batch.exists())
         history = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id
