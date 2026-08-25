@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Rollback a feature to the done checkpoint before a workflow stage."""
+"""Rollback a feature to a selected workflow stage state."""
 
 from __future__ import annotations
 
@@ -67,6 +67,12 @@ from hooks.state_checkpoint import append_checkpoint_hook_logs, safe_feature_slu
 
 NON_FILESYSTEM_ARTIFACT_TYPES = frozenset({"external", "virtual"})
 ROLLBACK_ROOT = Path(".autobizdevops") / "rollback"
+ROLLBACK_STATE_TARGET_IN_PROGRESS = "target_in_progress"
+ROLLBACK_STATE_PREVIOUS_DONE = "previous_done"
+ROLLBACK_STATE_MODES = (
+    ROLLBACK_STATE_TARGET_IN_PROGRESS,
+    ROLLBACK_STATE_PREVIOUS_DONE,
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +81,11 @@ class RollbackPlan:
     workspace: Path
     feature: str
     requested_stage: str
+    # The CLI requires this choice explicitly. The library default keeps
+    # existing Python callers compatible with the historical previous-done
+    # behavior.
+    state_mode: str = ROLLBACK_STATE_PREVIOUS_DONE
+    state_options: tuple[dict[str, str], ...] = ()
     target_node_id: str | None = None
     previous_node_id: str | None = None
     old_checkpoint: str | None = None
@@ -594,6 +605,53 @@ def _done_checkpoint(node: dict) -> str | None:
     )
 
 
+def _in_progress_checkpoint(node: dict) -> str | None:
+    return next(
+        (
+            checkpoint
+            for checkpoint in node.get("checkpoints", [])
+            if isinstance(checkpoint, str) and checkpoint.endswith("_in_progress")
+        ),
+        None,
+    )
+
+
+def _rollback_state_options(
+    target_node: dict,
+    previous_node: dict | None,
+) -> tuple[dict[str, str], ...]:
+    """Return the valid explicit state choices for a target stage.
+
+    Artifact deletion is deliberately independent from this choice: both
+    modes remove the target stage and all subsequent stage artifacts.
+    """
+
+    options: list[dict[str, str]] = []
+    target_checkpoint = _in_progress_checkpoint(target_node)
+    target_node_id = str(target_node.get("id", ""))
+    if target_checkpoint is not None:
+        options.append(
+            {
+                "mode": ROLLBACK_STATE_TARGET_IN_PROGRESS,
+                "checkpoint": target_checkpoint,
+                "description": f"回退至目标阶段 {target_node_id} 的 in_progress 状态",
+            }
+        )
+
+    if previous_node is not None:
+        previous_checkpoint = _done_checkpoint(previous_node)
+        previous_node_id = str(previous_node.get("id", ""))
+        if previous_checkpoint is not None:
+            options.append(
+                {
+                    "mode": ROLLBACK_STATE_PREVIOUS_DONE,
+                    "checkpoint": previous_checkpoint,
+                    "description": f"回退至前置阶段 {previous_node_id} 的 done 状态",
+                }
+            )
+    return tuple(options)
+
+
 def _archive_feature_dir(workspace: Path, feature: str, iteration: object) -> Path | None:
     archive_dir = get_features_archive_dir(workspace)
     iteration_text = str(iteration or "").strip()
@@ -746,11 +804,13 @@ def prepare_stage_rollback(
     stage: str,
     updated_at: str | None = None,
     code_source: str = "keep",
+    state_mode: str = ROLLBACK_STATE_PREVIOUS_DONE,
     rollback_id: str | None = None,
 ) -> RollbackPlan:
     workspace = workspace.resolve()
     feature = feature.strip()
     stage = stage.strip()
+    state_mode = state_mode.strip()
     if not feature:
         return _failed_plan(workspace=workspace, feature=feature, stage=stage, errors=["feature 不能为空"])
     if not safe_feature_slug(feature):
@@ -768,6 +828,17 @@ def prepare_stage_rollback(
             feature=feature,
             stage=stage,
             errors=[f"code_source 必须是 keep 或 restore: {code_source}"],
+        )
+    if state_mode not in ROLLBACK_STATE_MODES:
+        return _failed_plan(
+            workspace=workspace,
+            feature=feature,
+            stage=stage,
+            errors=[
+                "state_mode 必须是 "
+                f"{ROLLBACK_STATE_TARGET_IN_PROGRESS} 或 {ROLLBACK_STATE_PREVIOUS_DONE}: {state_mode}"
+            ],
+            state_mode=state_mode,
         )
 
     state_result = load_state_json_records_result(workspace)
@@ -845,16 +916,6 @@ def prepare_stage_rollback(
         for index, node in enumerate(active_nodes)
     }
     target_index = active_index[target_node_id]
-    if target_index == 0:
-        return _failed_plan(
-            workspace=workspace,
-            feature=feature,
-            stage=stage,
-            errors=[f"阶段 {target_node_id} 是首个有效阶段，没有可回退的前置 done checkpoint"],
-            target_node_id=target_node_id,
-            old_checkpoint=record.get("checkpoint"),
-            raw_records=state_result.raw_records,
-        )
 
     current_index, current_node_id = find_effective_current_node(
         nodes,
@@ -886,20 +947,37 @@ def prepare_stage_rollback(
             raw_records=state_result.raw_records,
         )
 
-    previous_node = active_nodes[target_index - 1]
-    previous_node_id = str(previous_node.get("id", ""))
-    new_checkpoint = _done_checkpoint(previous_node)
-    if new_checkpoint is None:
+    previous_node = active_nodes[target_index - 1] if target_index > 0 else None
+    previous_node_id = (
+        str(previous_node.get("id", "")) if previous_node is not None else None
+    )
+    state_options = _rollback_state_options(target_node, previous_node)
+    option_by_mode = {option["mode"]: option for option in state_options}
+    selected_option = option_by_mode.get(state_mode)
+    if selected_option is None:
+        available = ", ".join(option["mode"] for option in state_options) or "无"
+        reason = (
+            f"阶段 {target_node_id} 不支持 state_mode={state_mode}；"
+            f"可选值: {available}"
+        )
+        if state_mode == ROLLBACK_STATE_PREVIOUS_DONE and target_index == 0:
+            reason = (
+                f"阶段 {target_node_id} 是首个有效阶段，不能回退到前置 done；"
+                f"请确认使用 {ROLLBACK_STATE_TARGET_IN_PROGRESS}"
+            )
         return _failed_plan(
             workspace=workspace,
             feature=feature,
             stage=stage,
-            errors=[f"前置阶段 {previous_node_id} 没有 done checkpoint"],
+            errors=[reason],
+            state_mode=state_mode,
+            state_options=state_options,
             target_node_id=target_node_id,
             previous_node_id=previous_node_id,
             old_checkpoint=record.get("checkpoint"),
             raw_records=state_result.raw_records,
         )
+    new_checkpoint = selected_option["checkpoint"]
 
     feature_dir, feature_dir_errors = _resolve_feature_dir(workspace, feature, record)
     if feature_dir_errors or feature_dir is None:
@@ -1041,6 +1119,8 @@ def prepare_stage_rollback(
         workspace=workspace,
         feature=feature,
         requested_stage=stage,
+        state_mode=state_mode,
+        state_options=state_options,
         target_node_id=target_node_id,
         previous_node_id=previous_node_id,
         old_checkpoint=str(record.get("checkpoint", "")),
@@ -1356,6 +1436,7 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
             "rollbackId": plan.rollback_id,
             "feature": plan.feature,
             "targetStage": plan.target_node_id,
+            "stateMode": plan.state_mode,
             "oldCheckpoint": plan.old_checkpoint,
             "newCheckpoint": plan.new_checkpoint,
             "status": "prepared",
@@ -1411,6 +1492,7 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
                 "rollbackId": plan.rollback_id,
                 "feature": plan.feature,
                 "targetStage": plan.target_node_id,
+                "stateMode": plan.state_mode,
                 "oldCheckpoint": plan.old_checkpoint,
                 "newCheckpoint": plan.new_checkpoint,
                 "status": "committed",
@@ -1470,6 +1552,8 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
                 "version": 1,
                 "rollbackId": plan.rollback_id,
                 "feature": plan.feature,
+                "targetStage": plan.target_node_id,
+                "stateMode": plan.state_mode,
                 "status": "recovered",
                 "error": error_text,
                 "recovery": recovery_summary,
@@ -1503,7 +1587,7 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
         exit_code=0,
         message=(
             f"{plan.old_checkpoint} -> {plan.new_checkpoint}: "
-            f"rollback {plan.target_node_id}; deleted={len(deleted)}"
+            f"rollback {plan.target_node_id}; state_mode={plan.state_mode}; deleted={len(deleted)}"
         ),
         workflow_profiles={plan.feature: plan.workflow_profile},
         workflow_decisions={plan.feature: plan.workflow_decisions},
@@ -1521,6 +1605,7 @@ def _result_payload(
     result: RollbackResult,
     *,
     dry_run: bool,
+    confirmation_required: bool = False,
 ) -> dict[str, Any]:
     plan = result.plan
     planned_artifacts = (
@@ -1537,8 +1622,11 @@ def _result_payload(
         "requestedStage": plan.requested_stage,
         "targetNodeId": plan.target_node_id,
         "previousNodeId": plan.previous_node_id,
+        "stateMode": None if confirmation_required else plan.state_mode,
+        "stateOptions": list(plan.state_options),
+        "confirmationRequired": confirmation_required,
         "oldCheckpoint": plan.old_checkpoint,
-        "newCheckpoint": plan.new_checkpoint,
+        "newCheckpoint": None if confirmation_required else plan.new_checkpoint,
         "dryRun": dry_run,
         "plannedArtifacts": planned_artifacts,
         "deletedArtifacts": list(result.deleted_artifacts),
@@ -1598,6 +1686,14 @@ def main(argv: list[str] | None = None) -> int:
         choices=("keep", "restore"),
         default="keep",
         help="回退范围包含 Code 时是否恢复业务源码，默认 keep",
+    )
+    parser.add_argument(
+        "--state-mode",
+        choices=ROLLBACK_STATE_MODES,
+        help=(
+            "确认回退后的状态：target_in_progress=目标阶段 in_progress；"
+            "previous_done=前一阶段 done。必须在 --apply 前明确指定"
+        ),
     )
     parser.add_argument(
         "--keep-history",
@@ -1688,29 +1784,72 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("回退操作必须提供 --to-stage/--stage")
     if not args.dry_run and not args.apply:
         parser.error("回退执行必须显式提供 --dry-run 或 --apply")
+    if args.apply and args.state_mode is None:
+        payload = {
+            "ok": False,
+            "feature": feature,
+            "requestedStage": stage,
+            "confirmationRequired": True,
+            "errors": [
+                "必须先确认回退后的状态；请使用 --state-mode target_in_progress "
+                "或 --state-mode previous_done"
+            ],
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"阶段回退失败: {payload['errors'][0]}", file=sys.stderr)
+        return 1
 
+    preview_without_confirmation = args.dry_run and args.state_mode is None
+    requested_state_mode = args.state_mode or ROLLBACK_STATE_TARGET_IN_PROGRESS
     plan = prepare_stage_rollback(
         workspace=workspace,
         feature=feature,
         stage=stage,
         code_source=args.code_source,
+        state_mode=requested_state_mode,
     )
+    # ops.archive has no *_in_progress checkpoint. Build its preview from the
+    # other valid mode, but do not expose it as a user-confirmed selection.
+    if preview_without_confirmation and not plan.ok:
+        plan = prepare_stage_rollback(
+            workspace=workspace,
+            feature=feature,
+            stage=stage,
+            code_source=args.code_source,
+            state_mode=ROLLBACK_STATE_PREVIOUS_DONE,
+        )
     if args.dry_run or not plan.ok:
         result = RollbackResult(ok=plan.ok, plan=plan, errors=plan.errors)
     else:
         result = execute_stage_rollback(plan)
 
     if args.json:
-        print(json.dumps(_result_payload(result, dry_run=args.dry_run), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                _result_payload(
+                    result,
+                    dry_run=args.dry_run,
+                    confirmation_required=preview_without_confirmation,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     elif not result.ok:
         print("阶段回退失败:", file=sys.stderr)
         for error in result.errors or plan.errors:
             print(f"  - {error}", file=sys.stderr)
     elif args.dry_run:
+        checkpoint = "待确认" if preview_without_confirmation else plan.new_checkpoint
         print(
             f"DRY_RUN stage rollback: feature={feature} stage={plan.target_node_id} "
-            f"checkpoint={plan.old_checkpoint}->{plan.new_checkpoint}"
+            f"checkpoint={plan.old_checkpoint}->{checkpoint}"
         )
+        if preview_without_confirmation:
+            for option in plan.state_options:
+                print(f"  - state-mode {option['mode']}: {option['description']}")
         for path in plan.artifact_paths:
             print(f"  - {path.relative_to(plan.feature_dir).as_posix()}")
     else:
