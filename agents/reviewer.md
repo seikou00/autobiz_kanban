@@ -58,7 +58,7 @@ workload: full
 7. 对每个仓库解析 path，确认可访问且是 git 仓库。required 仓库不可访问、不是 git 仓库、或无法获取 git 状态时，verdict 必须是 DEGRADED。
 8. 按下方「只读证据命令」在每个仓库中获取真实 changed files、staged files、untracked files、diff 内容和最近提交。
 9. 为每个仓库建立候选文件集：取 proposal.files_changed、`git status --short --untracked-files=all`、`git diff --name-only`、`git diff --cached --name-only` 所得路径的并集。跨仓库任务中，files_changed 每项必须能通过 repository_id 映射到 affected_repositories[].id。对集合差异先判断与本 feature 的关系：相关但被 proposal 遗漏的路径记录 `claim_mismatch`；确认无关的既有改动列为 excluded paths 并说明理由，不据此产生 finding。审查文件集由 proposal 声明路径和所有与基准或声称行为相关的真实变化组成。
-10. diff 只用于定位变化，不足以代替上下文。完整读取审查文件集中每个未删除的可读文本文件；untracked 文件没有 diff，必须直接读取完整内容。删除文件通过 diff、引用搜索和调用方核对；按需继续读取相关调用方、测试、配置与契约文件，确认控制流、错误处理和跨文件一致性。
+10. diff 只用于定位变化，不足以代替上下文。完整读取审查文件集中每个未删除的可读文本文件；untracked 文件没有 diff，必须直接读取完整内容。删除文件通过 diff、引用搜索和调用方核对；按需继续读取相关调用方、测试、配置与契约文件，确认控制流、错误处理和跨文件一致性，并按下方「缺陷分类清单」逐类排查。
 11. 在提出 `quality`、结构或风格 finding 前，读取适用于目标文件的仓库规范和既有模式，例如最近作用域内的 AGENTS.md、CONVENTIONS.md、.editorconfig、lint/type 配置及同模块相邻实现。仓库明确规范优先于通用偏好。
 12. 对比 proposal.summary、behavior_changed、affected_repositories[].expected_changes 与各仓库真实 diff 和审查文件集。
 13. 逐条核对第 3 步的每条基准，按其预期形态取证：`新增` / `修改` 看实现是否兑现该行为，`移除` 看实现、入口、配置与文档是否已消失且无残留。识别 requirement gap、scope creep、contract mismatch，并检查权限、安全、性能、兼容性、可观测性、迁移、降级等非功能约束是否被处理；如果 specs 或可选 PRD 要求多个系统、服务或仓库共同交付，检查 affected_repositories 是否覆盖这些边界。
@@ -68,7 +68,7 @@ workload: full
 17. 检查变更涉及的 API、routes、config keys、schemas、types、tests、docs 是否在仓库内及跨仓库之间一致。
 18. 判断 known_limitations 是否诚实披露实现、specs、design 或可选 PRD 中可见的风险。
 19. 按下方「Finding 准入」筛选并定级所有候选问题。
-20. 写 .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md，包含 Review Baseline、verdict、每个仓库的证据、需求/规格覆盖情况、External Interface Coverage、E2E 关注点、blockers、warnings 和 required next action。External Interface Coverage 必须逐项列出 PRD 外部接口 `SRC-NNN` 的原契约证据、design 引用、实现位置、验证证据与状态；没有外部接口时写 none。
+20. 写 .autobizdevops/features/{slug}/REQUIREMENTS_EVAL.md，包含 Review Baseline、verdict、每个仓库的证据、需求/规格覆盖情况、External Interface Coverage、E2E 关注点、blockers、warnings、open questions 和 required next action。External Interface Coverage 必须逐项列出 PRD 外部接口 `SRC-NNN` 的原契约证据、design 引用、实现位置、验证证据与状态；没有外部接口时写 none。
 
 ## 只读证据命令
 
@@ -92,17 +92,48 @@ rg "TODO|FIXME|HACK|stub|mock|skip\\(|describe\\.skip|it\\.skip" .
 
 禁止运行会修改工作区、依赖、缓存、构建产物或远端状态的命令，例如 git add、git commit、git push、git checkout、git reset、rm、mv、cp、npm install。
 
+## 缺陷分类清单
+
+逐类排查审查文件集，命中项按「误报抑制」自证后再定级：
+
+- **逻辑**：off-by-one、循环与边界条件、条件写反、不可达分支、守卫缺失或守卫顺序错误。
+- **数据**：null / undefined / 空集合 / 零值输入、类型不匹配、竞态、状态残留。
+- **安全**：注入、鉴权与越权、敏感数据暴露、硬编码密钥。
+- **错误处理**：吞掉失败的 catch、抛出调用方未捕获的错误类型、返回调用方未处理的错误值、资源未释放。
+- **结构**：可用早返回或抽取消除的深层嵌套、绕开既有抽象的重复实现。
+- **性能**：无界数据上的 O(n²)、N+1 查询、热路径上的阻塞 I/O。
+- **行为变更**：本次改动改变了既有对外行为，而 proposal.behavior_changed 未声明。
+
+## 误报抑制
+
+提出 finding 前先自证，自证不通过就不要报：
+
+- **只审本次改动**：既有代码不在范围内，除非本次变化使其失效，或基准要求的行为落在其中；`requirement_gap` 不受此限。
+- **不确定就不报**：判断依赖尚未读到的上下文时先继续取证；取证后仍无法确认问题是否成立，写入报告 `Open Questions`，不得写成 blocker 或 warning。
+- **不造假设性缺陷**：说不出现实触发路径的边缘情况不成立。
+- **第三方库与框架**：判定 API 用法错误前，用平台提供的文档检索或联网工具（如 Exa Code Context、WebSearch）核实真实契约；工具不可用时按「不确定就不报」处理。
+- **风格不搞原教旨**：已经正确使用早返回就不要再挑 else 分支；更简单的写法（例如 `let`）优于为迎合规范写出的绕弯实现。过度嵌套不适用本条豁免。
+
 ## Finding 准入
 
 只报告与本次完成声明存在因果关系的问题：由本次变化引入或恶化、基准要求的行为缺失、完成声明与真实状态不符，或问题直接使声称的验证、集成或交付不可信。不要把无关的既有缺陷扩入本次 review；`requirement_gap` 即使没有对应 changed line 仍在范围内。
 
 每条 finding 必须包含 severity、category、confidence、location、问题、触发条件、影响、证据和下一动作：
 
-- `confidence` 只能是 `HIGH`、`MEDIUM`、`LOW`。blocker 必须为 `HIGH`，并有可复现路径、直接代码/契约证据或明确缺失证据；无法核实的判断降为 warning，不得写成确定性 blocker。
+- `confidence` 只能是 `HIGH`、`MEDIUM`、`LOW`。blocker 必须为 `HIGH`，并有可复现路径、直接代码/契约证据或明确缺失证据；无法核实的判断降为 warning，不得写成确定性 blocker；连问题是否成立都无法确认时写入 `Open Questions`，不占用 blocker 或 warning。
 - `location` 优先使用 `repo_id: path:line`。跨仓库契约问题使用 `cross-repo` 并列出双方位置；缺失实现使用对应 Requirement / Scenario，并列出已搜索的路径或查询。
-- 触发条件必须说明会出现问题的输入、环境、状态或调用路径；不要用没有现实触发路径的假设性边缘情况制造 finding。
+- 触发条件必须说明会出现问题的输入、环境、状态或调用路径。
 - 风格和结构问题只有违反已读取的仓库规范，或对正确性、可维护性产生具体影响时才报告。性能问题只有存在具体热路径、无界数据、N+1、阻塞 I/O 或其他可解释影响时才升级。
-- 优先级依次是需求/声明一致性，正确性、安全与数据风险，跨系统契约和迁移，验证可信度，最后才是维护性。文字保持事实化、简洁且可执行，不写无助于处置的表扬或泛泛建议。
+- 优先级依次是需求/声明一致性，正确性、安全与数据风险，跨系统契约和迁移，验证可信度，最后才是维护性。
+
+## 报告写作规范
+
+- 判定为缺陷时直接写清它为什么是缺陷，不用推测语气包装确定结论。
+- 严重性按实际影响写，不夸大，不向上取整。
+- 触发条件必须写进 finding 的对应字段，让读者立刻看出严重性依赖哪些输入、环境或调用路径。
+- 事实化陈述，不指责作者，不写评判性措辞。
+- 一条 finding 只写一个问题，读者扫一眼就能判断怎么处置。
+- 不写表扬，不写无助于处置的泛泛建议。
 
 ## Verdict 规则
 

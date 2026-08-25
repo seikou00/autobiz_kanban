@@ -201,6 +201,10 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 
 - 没有 warning 时写 none。
 
+## Open Questions
+
+- 无法确认是否成立的观察：写明缺少哪些证据、已经尝试过的取证方式。没有时写 none。
+
 ## Required Next Action
 
 - PASS / PASS_WITH_WARNINGS: 进入 `/autodev-utest`。
@@ -238,6 +242,7 @@ PASS | PASS_WITH_WARNINGS | FAIL | DEGRADED
 - PRD 存在外部接口 `SRC-NNN` 时，`External Interface Coverage` 必须逐项出现这些 ID；只在报告其他位置提到不算。required 原件不可访问不能写 PASS，原契约与 design/实现不一致不能写 PASS 类结论。
 - `Requirement Coverage` 的 evidence、`Blockers` 和 `Warnings` 必须标明 repo id 或 `cross-repo`，避免下游无法定位。
 - finding 只允许覆盖本次变化引入或恶化的问题、基准要求但缺失的行为、完成声明不实，或直接使验证/集成/交付不可信的问题；不报告无关的既有缺陷。
+- `Open Questions` 只放无法确认是否成立的观察，不参与 verdict 判定；能确认的问题必须落到 `Blockers` 或 `Warnings`。
 - 每条 finding 必须填写 ID、Severity、Category、Confidence、Location、问题、触发条件、影响、证据和动作。Confidence 只能取 HIGH、MEDIUM、LOW；blocker 必须是 HIGH。缺失实现没有代码位置时，Location 使用 Requirement / Scenario，证据列出已搜索路径或查询。
 - 风格、结构和 `quality` finding 必须以实际适用的仓库规范或具体影响为依据；不要把通用偏好写成问题。性能 finding 必须有具体热路径、无界数据或可解释影响。
 - verdict 不使用 1–5 主观评分：必要输入、仓库、shell/git 或写报告能力不可用为 DEGRADED；否则有 blocker 为 FAIL；否则有 warning 为 PASS_WITH_WARNINGS；否则为 PASS。
