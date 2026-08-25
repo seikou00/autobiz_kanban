@@ -451,6 +451,13 @@ class RollbackStageTest(unittest.TestCase):
         evidence = self.feature_dir / "evidence"
         evidence.mkdir()
         (evidence / "EVIDENCE.index.json").write_text("{}\n", encoding="utf-8")
+        (evidence / "EVIDENCE.jsonl").write_text("{}\n", encoding="utf-8")
+        exploration = self.feature_dir / "cache" / "code-exploration" / "business-repo"
+        exploration.mkdir(parents=True)
+        (exploration / "backend.json").write_text("{}\n", encoding="utf-8")
+        parallel_run = self.feature_dir / ".parallel-runs" / "cw-test-001"
+        parallel_run.mkdir(parents=True)
+        (parallel_run / "manifest.json").write_text("{}\n", encoding="utf-8")
 
         plan = prepare_stage_rollback(
             workspace=self.project,
@@ -466,10 +473,15 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue(result.ok, result.errors)
 
         self.assertFalse((self.feature_dir / ".task-runs").exists())
-        self.assertFalse((evidence / "EVIDENCE.index.json").exists())
+        self.assertFalse((self.feature_dir / "evidence").exists())
+        self.assertFalse((self.feature_dir / "cache" / "code-exploration").exists())
+        self.assertFalse((self.feature_dir / ".parallel-runs").exists())
         self.assertFalse(stale_batch.exists())
         history = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id
         self.assertTrue((history / "artifacts" / ".task-runs" / "T001" / "run.json").is_file())
+        self.assertTrue((history / "artifacts" / "evidence" / "EVIDENCE.jsonl").is_file())
+        self.assertTrue((history / "artifacts" / "cache" / "code-exploration" / "business-repo" / "backend.json").is_file())
+        self.assertTrue((history / "artifacts" / ".parallel-runs" / "cw-test-001" / "manifest.json").is_file())
         self.assertTrue((history / "plan" / "plans" / "B999" / "plan.json").is_file())
         self.assertTrue((history / "state-before.json").is_file())
         self.assertTrue((history / "state-after.json").is_file())

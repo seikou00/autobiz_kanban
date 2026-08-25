@@ -73,10 +73,24 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 
 Code 回退不支持批次级目标。只要清理范围包含 `dev.code`，就一次性回退整个 Code Session 到 Code 开始前：
 
-- 清理 Code 及其后续阶段产物、evidence index 和 `.task-runs`；运行时数据会归档到 rollback history。
+- 清理 Code 及其后续阶段产物、完整 `evidence/`、`cache/code-exploration/`、`.task-runs/` 和 `.parallel-runs/`；这些 Feature 目录内的运行时数据会归档到 rollback history，不能只删除 `EVIDENCE.index.json` 而遗留证据流。
+- `.parallel-runs/` 下的调度 manifest、lease、错误 run 目录（例如只有 `.lock` 没有 `manifest.json` 的目录）都属于同一 Code Session 的运行态，回退后不得继续保留或被下一次 `ensure` 复用。
+- 回退成功后检查业务仓库的 `.cmbdevclaw/workflows/`、平台动态 worktree 注册和孤立 worktree 记录；没有活动 Workflow 时，清理失败 Workflow journal/toolstream、执行 `git worktree prune`，并移除已确认不再注册的孤立 Batch worktree。不得删除仍被活动 Workflow 或 Git worktree registry 引用的目录。
 - 重置全部 Code task、implementation/completion evidence 引用、批次编译状态和 active batch；保留任务契约、依赖和验收标准。
 - 默认 `--code-source keep`，不修改业务 Git 仓库，只报告源码变化。
 - 只有用户明确确认且存在基线时才使用 `--code-source restore`。源码恢复前会校验当前 hash 是否仍等于该 Feature 的最终 Code 快照；不一致时阻断，不覆盖外部修改。
+
+Code 回退后的运行态复核至少应确认：
+
+```bash
+test ! -e "${FEATURE_DIR}/.parallel-runs"
+test ! -e "${FEATURE_DIR}/.task-runs"
+test ! -e "${FEATURE_DIR}/cache/code-exploration"
+test ! -e "${FEATURE_DIR}/evidence"
+git -C "<business-repository>" worktree list --porcelain
+```
+
+平台 Workflow 目录位于业务仓库的 `.cmbdevclaw/workflows/`，不属于 Feature 产物归档范围。只有确认没有活动 Workflow 后才可删除其中失败 run 的 journal、JSON、toolstream 和 `.bak` 文件；清理动作必须使用显式 runId/path，不能递归删除业务仓库或整个 worktree 根目录。
 
 Code 开始前必须用同一个独立脚本捕获一次整个 Session 基线：
 

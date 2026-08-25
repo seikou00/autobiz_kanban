@@ -762,8 +762,10 @@
         ],
         "rollback": {
           "archive": [
+            ".parallel-runs",
             ".task-runs",
-            "evidence/EVIDENCE.index.json",
+            "cache/code-exploration",
+            "evidence",
             "FRONTEND_ROUTE.json"
           ]
         }
