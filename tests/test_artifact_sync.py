@@ -22,6 +22,7 @@ EXPECTED_OUTPUT_METADATA = {
     "source-context.json": ("requirement_source", "final"),
     "proposal.md": ("behavior_proposal", "final"),
     "specs/**/*.md": ("behavior_spec", "final"),
+    "SPECS_REVIEW.md": ("review_report", "evidence"),
     "design.md": ("technical_design", "process"),
     "PLAN.md": ("implementation_plan", "process"),
     "plan.json": ("implementation_plan", "final"),

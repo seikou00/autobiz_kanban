@@ -12,7 +12,34 @@
 <!-- section: 前提与角色 | stages: dev.specs -->
 ## 前提与角色
 
-使用 task 工具，指定 `critic-autodev` 角色，对比 `PRD.md` 与 `proposal.md`、`specs/**/*.md` 进行严格审查：spec 是否已完全覆盖需求范围，是否有违反需求的地方。
+使用 task 工具，指定 `critic-autodev` 角色，对比上游需求与本阶段产物进行严格审查：spec 是否已完全覆盖需求范围，是否有违反需求的地方。
+
+启动时必须在 task prompt 中写全下面两份清单。任缺一项，回检就只覆盖模型当时想到的部分——遗漏不会以失败的形式出现，只会以「没提」的形式消失。
+
+### 输入材料清单
+
+| 材料 | 用途 | 缺失时 |
+|------|------|--------|
+| `PRD.md` | 需求来源，逐功能点核对覆盖 | 说明无 PRD，改以用户确认的行为描述为准 |
+| `proposal.md` | Capabilities 分组、Decision Log、Open Questions | 缺失即阻断，先回本阶段生成 |
+| `specs/**/*.md` | 全部行为契约，逐 REQ/SCN 核对 | 缺失即阻断 |
+| `IMPLEMENTATION_SCOPE.json` | 本轮实现范围 | 按兼容规则视为 `full_stack`，在结论中注明 |
+| `source-context.json` 与 `sources/SRC-NNN/` | 外部资料要求与快照 | 无外部资料时跳过 |
+| `**Existing:**` 断言指向的源码路径 | 核对 New 组是否真的没有存量入口 | 断言为 `none` 时改为自行搜索该能力的入口 |
+
+### 必查项
+
+五项逐项给结论，不合并、不省略。这五项与 `SPECS_REVIEW.md` 的 `## Review Baseline` 一一对应，每项的结论只能取 `通过` / `发现问题` / `不适用`，且必须附证据。
+
+| 必查项 | 查什么 | 证据形态 |
+|--------|--------|----------|
+| 需求覆盖 | PRD 每个功能点是否都有 REQ/SCN 承接，有无遗漏或与 PRD 矛盾的行为 | 功能点与 REQ/SCN 的对应，或缺口所在 |
+| 实现范围符合性 | 逐条 Scenario 是否落在 `IMPLEMENTATION_SCOPE.json` 声明的范围内。`backend_only` 下描述页面布局、点击、展开折叠、下拉、输入框、前端路由跳转的 Scenario 都是越界 | 越界的 `file:SCN-NNN` 与其表述 |
+| 操作分类与代码事实 | `New Capabilities` 每项的 `**Existing:** none` 是否属实——实际去代码库搜该能力的入口。找得到就是分类错，应为 Modified | 搜到的 `路径#符号`，或搜索方式与无结果 |
+| 上游资料引用 | 每个 `SRC-NNN` 是否被 spec 保留，`targets` 含 `spec` 的要求是否落进 Requirement/Scenario | SRC 编号与落位的 REQ/SCN |
+| 待确认项消解 | `Open Questions` 各行是否真由用户裁定，有无自行写成 `已确认`，有无 TBD/待补充/「以实际文档为准」残留 | 行 ID 与其消解依据 |
+
+预检已经机械判定的东西不在这里重复：ID 格式与唯一性、章节齐全、能力双向对应、`**Existing:**` 字段是否存在，都由「产物契约预检」负责。本节查的是那些字段说的**是不是真的**。
 
 <!-- section: 前提与角色 | stages: dev.plan -->
 ## 前提与角色
@@ -131,6 +158,18 @@
 - 每条结论都必须落到一个 `分类`，不允许留空或自造取值。
 - 无结论时写：`【回检结论】本轮回检无结论`。
 
+<!-- section: 结论落盘 | stages: dev.specs -->
+## 结论落盘
+
+回复中的结论块只是给用户看的即时视图，不是产物。同一份内容必须同时写进 `SPECS_REVIEW.md`，否则本阶段的回检等于没发生过——`specs_review_verdict` 判定它，缺失或不合格时 `specs_done` 写不进去。
+
+按 `autodev-specs` 技能 `templates/specs-review.md` 的形状输出，四节都必填：
+
+- `## Verdict`：`PASS` / `PASS_WITH_WARNINGS` / `FAIL` / `DEGRADED` 取一。只有 `PASS` 与 `PASS_WITH_WARNINGS` 能推进。
+- `## Review Baseline`：上面「必查项」五项各一行，结论取 `通过` / `发现问题` / `不适用`，证据列必填。某项标了 `发现问题`，`## Findings` 就必须有对应条目。
+- `## Findings`：每条结论一行，`Critical` / `Major` 必须有分类与处置。本轮无结论时正文写「无」。
+- `## Unresolved`：仍待用户裁定、尚未拿到答复的条目；有条目就不能推进 `specs_done`。裁定完成后把该条移出本节，并在 Findings 的处置列写下裁定结果——不得自行裁定后直接清空。
+
 <!-- section: 分类取值 | stages: dev.specs -->
 本阶段 `分类` 允许取值：`产物可修` | `需用户裁定` | `回流上游` | `仅列出` | `结论不成立`。
 
@@ -158,7 +197,7 @@
 <!-- section: 收口 | stages: dev.specs -->
 ## 收口
 
-改完重跑「产物契约预检（机器校验）」；仍有未裁定的「需用户裁定」条目时不推进 `specs_done`。
+改完先写 `SPECS_REVIEW.md`，再重跑「产物契约预检（机器校验）」——预检此时才会连同回检结论一起判定。仍有未裁定的「需用户裁定」条目时不推进 `specs_done`。
 
 <!-- section: 收口 | stages: dev.plan -->
 ## 收口

@@ -373,6 +373,11 @@ CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
         "lifecycle": "process",
         "description": "详细设计文档。",
     },
+    "SPECS_REVIEW.md": {
+        "category": "review_report",
+        "lifecycle": "evidence",
+        "description": "行为规格回检结论。",
+    },
     "REQUIREMENTS_EVAL.md": {
         "category": "review_report",
         "lifecycle": "evidence",

@@ -50,6 +50,7 @@ IN_SCOPE_VALIDATORS = (
     "validate_proposal_contract",
     "validate_specs_contract",
     "validate_capability_spec_correspondence",
+    "validate_specs_review_verdict",
     "validate_design_contract",
     "validate_plan_json_contract",
     "validate_plan_json_initial_tasks",

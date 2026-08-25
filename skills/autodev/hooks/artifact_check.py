@@ -230,7 +230,8 @@ def validate_no_template_guidance(
 
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
 REVIEW_VERDICTS = {"PASS", "PASS_WITH_WARNINGS", "FAIL", "DEGRADED"}
-REQUIREMENTS_EVAL_VERDICT_SECTION = re.compile(
+# `## Verdict` 段：REQUIREMENTS_EVAL.md 与 SPECS_REVIEW.md 共用同一形状
+REVIEW_VERDICT_SECTION = re.compile(
     r"^##\s+Verdict\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
 )
@@ -1590,8 +1591,9 @@ def _check_verify_scenario_decisions(
     return failures
 
 
-def requirements_eval_verdict(text: str) -> str | None:
-    section = REQUIREMENTS_EVAL_VERDICT_SECTION.search(text)
+def review_verdict(text: str) -> str | None:
+    """`## Verdict` 段首个非空行上的唯一合法结论；含糊或多值时返回 None。"""
+    section = REVIEW_VERDICT_SECTION.search(text)
     if section is None:
         return None
     for line in section.group("body").splitlines():
@@ -1602,6 +1604,10 @@ def requirements_eval_verdict(text: str) -> str | None:
         unique = sorted({token for token in tokens if token in REVIEW_VERDICTS})
         return unique[0] if len(unique) == 1 else None
     return None
+
+
+def requirements_eval_verdict(text: str) -> str | None:
+    return review_verdict(text)
 
 
 def requirements_eval_baseline_rows(text: str) -> int:
@@ -1637,6 +1643,199 @@ def requirements_eval_has_blockers(text: str) -> bool:
 
 def requirements_eval_has_warnings(text: str) -> bool:
     return _requirements_eval_section_has_items(text, REQUIREMENTS_EVAL_WARNINGS_SECTION)
+
+
+SPECS_REVIEW_BASELINE_SECTION = re.compile(
+    r"^##\s+Review Baseline\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+SPECS_REVIEW_FINDINGS_SECTION = re.compile(
+    r"^##\s+Findings\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+SPECS_REVIEW_UNRESOLVED_SECTION = re.compile(
+    r"^##\s+Unresolved\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+# 必查项闭集。与 skills/references/review-protocol.md 的 dev.specs 必查项一一对应：
+# 协议定义要查什么，本表让「查过了」成为可校验的事实而不是一句自述。
+SPECS_REVIEW_BASELINE_ITEMS = (
+    "需求覆盖",
+    "实现范围符合性",
+    "操作分类与代码事实",
+    "上游资料引用",
+    "待确认项消解",
+)
+SPECS_REVIEW_BASELINE_RESULTS = ("通过", "发现问题", "不适用")
+# dev.specs 的分类取值，同样取自协议的分类表。
+SPECS_REVIEW_CATEGORIES = ("产物可修", "需用户裁定", "回流上游", "仅列出", "结论不成立")
+# 必须带分类与处置的严重度；Minor / Open Questions 不强制。
+SPECS_REVIEW_SCORED_SEVERITIES = ("critical", "major")
+
+
+def _markdown_table_rows(body: str) -> list[list[str]]:
+    """管道表的数据行，跳过表头分隔行与仍带模板槽位的示例行。
+
+    槽位判定走 ``placeholder_residue`` 而不是裸的方括号匹配：证据列本来就会
+    引用 ``[SCN-012]`` 或写 Markdown 链接，用粗判据会把真实行当模板行丢掉，
+    然后以「必查项缺失」的形式报一个不存在的问题。
+    """
+    rows: list[list[str]] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells or all(set(cell) <= set("-: ") for cell in cells):
+            continue
+        if any(placeholder_residue(cell) for cell in cells):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _specs_review_cell_is_empty(cell: str) -> bool:
+    return not cell or bool(placeholder_residue(cell))
+
+
+def specs_review_baseline(text: str) -> dict[str, list[str]]:
+    """必查项 -> 该行的全部单元格。表头行本身不会命中闭集，自然被丢掉。"""
+    section = SPECS_REVIEW_BASELINE_SECTION.search(text)
+    if section is None:
+        return {}
+    baseline: dict[str, list[str]] = {}
+    for cells in _markdown_table_rows(section.group("body")):
+        for item in SPECS_REVIEW_BASELINE_ITEMS:
+            if cells[0] == item:
+                baseline[item] = cells
+    return baseline
+
+
+def specs_review_findings(text: str) -> list[list[str]]:
+    """Findings 表的数据行；`| ID | 来源 | 原文严重度 | 结论 | 证据 | 分类 | 处置 |`。"""
+    section = SPECS_REVIEW_FINDINGS_SECTION.search(text)
+    if section is None:
+        return []
+    return [
+        cells
+        for cells in _markdown_table_rows(section.group("body"))
+        if cells and cells[0].upper().startswith("F-")
+    ]
+
+
+def specs_review_has_unresolved(text: str) -> bool:
+    return _requirements_eval_section_has_items(text, SPECS_REVIEW_UNRESOLVED_SECTION)
+
+
+def validate_specs_review_verdict(ctx: HookContext) -> int:
+    """把 dev.specs 的回检从一段文字义务变成一个可校验产物。
+
+    协议早就要求逐条分类与处置，但它只活在回复里：模型少输出一条、或干脆不
+    输出，`update_checkpoint.py --checkpoint specs_done` 照样成功——没有落盘就
+    没有门。形状照抄 `validate_requirements_eval_verdict`：产物缺失 fail、
+    verdict 非终态 fail、baseline 不全 fail，外加一条交叉校验——必查项报了
+    「发现问题」却一条 Finding 都没有，就是自相矛盾的 PASS。
+    """
+    review_path = ctx.file("SPECS_REVIEW.md")
+    if not is_nonempty(review_path):
+        return fail_line(
+            ctx,
+            "missing_specs_review",
+            target="SPECS_REVIEW.md",
+        )
+
+    text = read_text(review_path)
+    failures = 0
+
+    verdict = review_verdict(text)
+    if verdict is None:
+        failures += fail_line(ctx, "invalid_specs_review_verdict", target="SPECS_REVIEW.md")
+    elif verdict not in TERMINAL_PASS:
+        failures += fail_line(
+            ctx,
+            "non_terminal_specs_review_verdict",
+            f" verdict={verdict}",
+            target="SPECS_REVIEW.md",
+            fields={"verdict": verdict},
+        )
+
+    baseline = specs_review_baseline(text)
+    missing_items = [item for item in SPECS_REVIEW_BASELINE_ITEMS if item not in baseline]
+    if missing_items:
+        failures += fail_line(
+            ctx,
+            "specs_review_baseline_incomplete",
+            f" items={','.join(missing_items)}",
+            target="SPECS_REVIEW.md",
+            fields={"items": "、".join(missing_items)},
+        )
+
+    flagged: list[str] = []
+    for item, cells in baseline.items():
+        result = cells[1] if len(cells) > 1 else ""
+        evidence = cells[2] if len(cells) > 2 else ""
+        if result not in SPECS_REVIEW_BASELINE_RESULTS:
+            failures += fail_line(
+                ctx,
+                "specs_review_baseline_invalid_result",
+                f" item={item} result={result}",
+                target=item,
+                fields={"item": item, "result": result},
+            )
+        elif result == "发现问题":
+            flagged.append(item)
+        if _specs_review_cell_is_empty(evidence):
+            failures += fail_line(
+                ctx,
+                "specs_review_baseline_missing_evidence",
+                f" item={item}",
+                target=item,
+                fields={"item": item},
+            )
+
+    findings = specs_review_findings(text)
+    for cells in findings:
+        finding_id = cells[0]
+        severity = cells[2] if len(cells) > 2 else ""
+        category = cells[5] if len(cells) > 5 else ""
+        disposition = cells[6] if len(cells) > 6 else ""
+        scored = any(word in severity.lower() for word in SPECS_REVIEW_SCORED_SEVERITIES)
+        if category and category not in SPECS_REVIEW_CATEGORIES:
+            failures += fail_line(
+                ctx,
+                "specs_review_finding_invalid_category",
+                f" finding={finding_id} category={category}",
+                target=finding_id,
+                fields={"category": category},
+            )
+        if scored and (
+            _specs_review_cell_is_empty(category) or _specs_review_cell_is_empty(disposition)
+        ):
+            failures += fail_line(
+                ctx,
+                "specs_review_finding_missing_disposition",
+                f" finding={finding_id} severity={severity}",
+                target=finding_id,
+                fields={"severity": severity},
+            )
+
+    if flagged and not findings:
+        failures += fail_line(
+            ctx,
+            "specs_review_baseline_finding_mismatch",
+            f" items={','.join(flagged)}",
+            target="SPECS_REVIEW.md",
+            fields={"items": "、".join(flagged)},
+        )
+
+    if specs_review_has_unresolved(text):
+        failures += fail_line(
+            ctx,
+            "unresolved_specs_review_finding",
+            target="SPECS_REVIEW.md",
+        )
+
+    return failures
 
 
 def validate_requirements_eval_verdict(ctx: HookContext) -> int:
@@ -2895,6 +3094,7 @@ VALIDATORS = {
     "evidence_detail_quality": validate_evidence_detail_quality,
     "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,
+    "specs_review_verdict": validate_specs_review_verdict,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
     "unit_test_result_json": validate_unit_test_result_json,
     "e2e_result_json": validate_e2e_result_json,

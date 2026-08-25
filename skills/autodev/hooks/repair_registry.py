@@ -64,7 +64,8 @@ _ENTRY: Dict[str, Repair] = {
         problem="本阶段的必备产物缺失或为空：{target}",
         action=(
             "先把缺失产物生成出来再重跑预检。proposal.md / specs/<capability>/spec.md 由 "
-            "/autodev-specs 生成；design.md 由 /autodev-plan 生成；plan.json 与 PLAN.md 一律"
+            "/autodev-specs 生成；SPECS_REVIEW.md 是 /autodev-specs 回检段的落盘产物，"
+            "按回检协议跑完回检后写入；design.md 由 /autodev-plan 生成；plan.json 与 PLAN.md 一律"
             "通过 hooks/plan_writer.py 生成，" + PLAN_NO_HAND_EDIT
         ),
     ),
@@ -278,6 +279,79 @@ _SPECS: Dict[str, Repair] = {
             "移到「## MODIFIED Requirements」、补写修改后的完整行为；"
             "或确认 {existing} 与该能力无关，则把这一行改回 `**Existing:** none`。"
         ),
+    ),
+    "missing_specs_review": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 不存在或为空——本阶段回检没有落盘",
+        action=(
+            "先按 hooks/render_review_protocol.py --stage dev.specs 完整跑完回检，"
+            "再把结论写进 SPECS_REVIEW.md，章节为 Verdict / Review Baseline / Findings / Unresolved。"
+            "回检结论只输出在回复里不算数：没有产物就没有门。"
+        ),
+    ),
+    "invalid_specs_review_verdict": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 的 `## Verdict` 段没有唯一结论",
+        action="在独立的 `## Verdict` 段写入唯一结论：PASS、PASS_WITH_WARNINGS、FAIL 或 DEGRADED。",
+    ),
+    "non_terminal_specs_review_verdict": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 的结论是 {verdict}，不是终态",
+        action="按分类表把 blocker 改完并重跑回检；只有 PASS 或 PASS_WITH_WARNINGS 可以推进 specs_done。",
+    ),
+    "specs_review_baseline_incomplete": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 的 `## Review Baseline` 缺这些必查项：{items}",
+        action=(
+            "必查项由回检协议定义，一项都不能省：为缺失的每项补一行 "
+            "`| <必查项> | 通过/发现问题/不适用 | <证据> |`。"
+            "没查过就不要填「通过」——这张表的作用就是让「查过了」变成可核对的事实。"
+        ),
+    ),
+    "specs_review_baseline_invalid_result": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="必查项「{item}」的结论写成了 {result}，不在闭集内",
+        action="把该行第二列改成 `通过`、`发现问题` 或 `不适用` 三者之一，不要自造取值。",
+    ),
+    "specs_review_baseline_missing_evidence": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="必查项「{item}」没有写证据",
+        action=(
+            "为该行第三列补具体证据：file:line、REQ/SCN 编号或产物原文。"
+            "空证据的「通过」是自证，不构成回检。"
+        ),
+    ),
+    "specs_review_finding_missing_disposition": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="回检结论 {target}（严重度 {severity}）缺分类或处置",
+        action=(
+            "Critical / Major 每条都必须落一个分类："
+            "产物可修 / 需用户裁定 / 回流上游 / 仅列出 / 结论不成立，"
+            "并在处置列写清落到哪个产物的哪一条，或不改的依据。"
+        ),
+    ),
+    "specs_review_finding_invalid_category": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="回检结论 {target} 的分类 {category} 不在本阶段闭集内",
+        action="dev.specs 的分类只能取：产物可修 / 需用户裁定 / 回流上游 / 仅列出 / 结论不成立。",
+    ),
+    "specs_review_baseline_finding_mismatch": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="必查项 {items} 标了「发现问题」，Findings 表却一条都没有",
+        action=(
+            "把这些问题逐条写进 `## Findings`（含来源、原文严重度、证据、分类、处置）；"
+            "若复核后认为不成立，把该必查项的结论改回「通过」并在证据列写明依据。"
+        ),
+    ),
+    "unresolved_specs_review_finding": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 的 `## Unresolved` 段仍有未裁定条目",
+        action=(
+            "「需用户裁定」的条目必须按 ask-user-question.md 协议逐条问过用户再落盘；"
+            "裁定后把该条从 Unresolved 移走、在 Findings 的处置列写下裁定结果，本段写「无」。"
+            "不得自行裁定后直接清空。"
+        ),
+        route=ROUTE_ASK_USER,
     ),
 }
 

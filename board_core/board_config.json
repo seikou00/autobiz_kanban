@@ -288,10 +288,11 @@
           ],
           "outputs": [
             { "id": "proposal", "label": "变更提案", "artifactType": "file", "path": "proposal.md", "required": true },
-            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true }
+            { "id": "specs", "label": "行为规格", "artifactType": "file", "path": "specs/**/*.md", "required": true },
+            { "id": "specs_review", "label": "规格回检结论", "artifactType": "file", "path": "SPECS_REVIEW.md", "required": true }
           ]
         },
-        "validators": ["proposal_contract", "specs_contract", "capability_spec_correspondence"]
+        "validators": ["proposal_contract", "specs_contract", "capability_spec_correspondence", "specs_review_verdict"]
       },
       {
         "id": "dev.plan",

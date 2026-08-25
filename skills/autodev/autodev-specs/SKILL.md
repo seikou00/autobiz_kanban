@@ -42,6 +42,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/<capability>/spec.md`
+- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SPECS_REVIEW.md`（回检结论，模板 `${pluginPath}/skills/autodev/autodev-specs/templates/specs-review.md`）
 
 同步维护（非阶段产物）：
 
@@ -64,7 +65,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 进入探索模式。先把需求、现状、隐性约束和行为边界想清楚，再生成 specs。
 
-> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `产物契约预检并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
+> 进入探索前先使用write_todos工具建立一份覆盖宏观流程的任务清单：`探索并生成待确认问题清单` / `逐条裁定待确认问题` / `统一生成 proposal 与 specs` / `回检并写入 SPECS_REVIEW.md` / `产物契约预检并推进 specs_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。
 使用task工具，指定Explore-autodev角色进行探索。
 子代理按下面的要求返回结构化内容供主代理参考。
 探索时必须：
@@ -210,10 +211,11 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature 
 
 ## 完成条件
 
-- 「输入与输出」列出的两个产物都已生成，`specs/` 下至少存在一个 `spec.md`。
-- 产物契约预检通过。能力双向对应、`New Capabilities` 的 `**Existing:**` 断言、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
+- 「输入与输出」列出的三个产物都已生成，`specs/` 下至少存在一个 `spec.md`。
+- 产物契约预检通过。能力双向对应、`New Capabilities` 的 `**Existing:**` 断言、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节、`SPECS_REVIEW.md` 的结论与必查项都由它判定，失败无法写入 specs_done。
 - specs 只描述行为契约，不包含实现任务。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
+- `SPECS_REVIEW.md` 的 `## Unresolved` 段为「无」。
 
 ## 回检与修复
 
@@ -223,7 +225,7 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature 
 python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
 ```
 
-回检导致产物变化时，重跑一次产物契约预检。
+回检结论必须写进 `SPECS_REVIEW.md`——只输出在回复里不算数，`specs_review_verdict` 判定该产物。写完（以及回检导致产物变化时）重跑一次产物契约预检。
 
 产物契约预检与回检修复均通过后推进 checkpoint：
 
