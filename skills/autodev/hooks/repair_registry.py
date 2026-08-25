@@ -163,10 +163,12 @@ _SPECS: Dict[str, Repair] = {
     ),
     "spec_id_out_of_order": Repair(
         artifact="{target}",
-        problem="{target} 中这些 REQ/SCN 编号没有按文档顺序递增：{ids}",
+        problem="{target} 中这些相邻 REQ/SCN 编号出现回退：{pairs}",
         action=(
-            "按文档顺序重排 REQ/SCN 编号，使其数值递增。"
-            "允许跳号（删除后 ID 不复用会留下空档），但后出现的编号不得小于先出现的。"
+            "把每对中后出现的那个编号改成括号里的建议值——建议值已避开本 feature "
+            "全部已用 ID，直接替换即可，不必自行找空号。"
+            "只改报错的这几个标题，其余 ID 不重排；允许跳号（删除后 ID 不复用会留下空档），"
+            "但后出现的编号不得小于先出现的。"
         ),
     ),
     "removed_requirement_missing_field": Repair(

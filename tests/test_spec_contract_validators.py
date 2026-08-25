@@ -488,17 +488,57 @@ class SpecIdIntegrityTest(SpecContractValidatorTestBase):
             [],
         )
         self.assertEqual(
-            out_of_order_ids(
-                "### Requirement [REQ-003]: c\n### Requirement [REQ-002]: b\n"
-            ),
-            ["REQ-002"],
+            [
+                (item.previous, item.current, item.suggested)
+                for item in out_of_order_ids(
+                    "### Requirement [REQ-003]: c\n### Requirement [REQ-002]: b\n"
+                )
+            ],
+            [("REQ-003", "REQ-002", "REQ-004")],
         )
         self.assertEqual(
-            out_of_order_ids(
-                "#### Scenario [SCN-005]: a\n#### Scenario [SCN-002]: b\n"
-            ),
-            ["SCN-002"],
+            [
+                (item.previous, item.current, item.suggested)
+                for item in out_of_order_ids(
+                    "#### Scenario [SCN-005]: a\n#### Scenario [SCN-002]: b\n"
+                )
+            ],
+            [("SCN-005", "SCN-002", "SCN-006")],
         )
+
+    def test_descent_names_the_adjacent_pair(self) -> None:
+        """报错要指出「跟在谁后面」，而不是只报一个孤立的编号。"""
+        descents = out_of_order_ids(
+            "### Requirement [REQ-001]: a\n"
+            "### Requirement [REQ-009]: b\n"
+            "### Requirement [REQ-004]: c\n"
+        )
+        self.assertEqual(len(descents), 1)
+        self.assertEqual(descents[0].previous, "REQ-009")
+        self.assertEqual(descents[0].current, "REQ-004")
+        self.assertIn("REQ-009 -> REQ-004", descents[0].describe())
+
+    def test_suggestion_avoids_ids_taken_elsewhere_in_the_feature(self) -> None:
+        """建议值必须避开别的 spec 已占用的号，否则修完撞 duplicate 检查。
+
+        这正是 trace 里的死循环：本文件内递增 -> 撞 duplicate_spec_id_across_specs
+        -> 再换 -> 再撞。建议值由校验器算，模型不必自己找空号。
+        """
+        descents = out_of_order_ids(
+            "#### Scenario [SCN-138]: a\n#### Scenario [SCN-045]: b\n",
+            {"SCN-139", "SCN-140"},
+        )
+        self.assertEqual(descents[0].suggested, "SCN-141")
+
+    def test_multiple_descents_get_distinct_ascending_suggestions(self) -> None:
+        """同一文件两处回退不能拿到同一个建议值，否则照做就变成重号。"""
+        descents = out_of_order_ids(
+            "### Requirement [REQ-005]: a\n"
+            "### Requirement [REQ-003]: b\n"
+            "### Requirement [REQ-004]: c\n"
+        )
+        suggested = [item.suggested for item in descents]
+        self.assertEqual(suggested, ["REQ-006", "REQ-007"])
 
     def test_out_of_order_id_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -512,7 +552,9 @@ class SpecIdIntegrityTest(SpecContractValidatorTestBase):
             failures, output = self._run(validate_specs_contract, project)
             self.assertGreaterEqual(failures, 1)
             self.assertIn("spec_id_out_of_order", output)
-            self.assertIn("REQ-002", output)
+            # 相邻对与建议编号都要出现在失败行里，模型才不用自己猜。
+            self.assertIn("REQ-003 -> REQ-002", output)
+            self.assertIn("建议改为 REQ-004", output)
 
     def test_scenario_before_any_requirement_is_orphaned(self) -> None:
         self.assertEqual(

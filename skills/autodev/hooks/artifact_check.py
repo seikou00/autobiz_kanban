@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterable, NamedTuple
 
 from common import (
     HookCheckError,
@@ -470,6 +471,14 @@ def validate_specs_contract(ctx: HookContext) -> int:
         return fail_line(ctx, "missing_specs")
 
     failures = _report_implementation_scope_errors(ctx)
+    # Renumbering suggestions have to clear every ID the feature already owns,
+    # not just the ones in the file being repaired -- a file-local suggestion
+    # walks straight into `duplicate_spec_id_across_specs`.
+    taken: set[str] = set()
+    for spec in specs:
+        spec_text = read_text(spec)
+        taken.update(SPEC_REQUIREMENT_DEF_RE.findall(spec_text))
+        taken.update(SPEC_SCENARIO_DEF_RE.findall(spec_text))
     for spec in specs:
         text = read_text(spec)
         rel = spec.relative_to(ctx.feature_dir)
@@ -510,14 +519,16 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 target=str(rel),
                 fields={"scenarios": ",".join(orphans)},
             )
-        disordered = out_of_order_ids(text)
+        disordered = out_of_order_ids(text, taken)
         if disordered:
+            taken.update(descent.suggested for descent in disordered)
+            pairs = "; ".join(descent.describe() for descent in disordered)
             failures += fail_line(
                 ctx,
                 "spec_id_out_of_order",
-                f" file={rel} ids={','.join(disordered)}",
+                f" file={rel} pairs={pairs}",
                 target=str(rel),
-                fields={"ids": ",".join(disordered)},
+                fields={"pairs": pairs},
             )
         missing_fields = removed_requirements_missing_fields(text)
         if missing_fields:
@@ -702,22 +713,67 @@ def malformed_contract_headings(text: str) -> list[str]:
     return malformed
 
 
-def out_of_order_ids(text: str) -> list[str]:
+class SpecIdDescent(NamedTuple):
+    """One descending step, named by both of its ends plus a free replacement.
+
+    Reporting only the offending ID (the old shape) tells the agent a number is
+    wrong but not what it has to clear, so the repair is a guess: renumber, hit
+    ``duplicate_spec_id_across_specs``, renumber again. ``previous`` gives the
+    ID it must exceed and ``suggested`` gives one that is free across the whole
+    feature, which turns the repair into a substitution.
+    """
+
+    previous: str
+    current: str
+    suggested: str
+
+    def describe(self) -> str:
+        return f"{self.previous} -> {self.current}（建议改为 {self.suggested}）"
+
+
+def _next_free_spec_id(prefix: str, floor: int, reserved: set[str]) -> str:
+    """Lowest ``<prefix>-NNN`` above ``floor`` that nothing else in the feature owns."""
+    for number in range(floor + 1, 1000):
+        candidate = f"{prefix}-{number:03d}"
+        if candidate not in reserved:
+            return candidate
+    return f"{prefix}-{min(floor + 1, 999):03d}"
+
+
+def out_of_order_ids(text: str, taken: Iterable[str] = ()) -> list[SpecIdDescent]:
     """REQ/SCN IDs whose number does not exceed every ID before it in the file.
 
     The rule is ascending, not contiguous. "删除后 ID 不复用" guarantees gaps
     (delete REQ-002 and 001/003 remain), so requiring contiguity would fire on
     exactly the state the other rule mandates. Equal numbers are left to the
     duplicate check so one mistake is not reported twice.
+
+    ``taken`` carries the IDs already spoken for elsewhere in the feature so a
+    suggestion cannot collide with another spec file. Each suggestion is also
+    reserved as it is issued, and raises the running ceiling: a file with two
+    descents gets two distinct numbers that ascend once both are applied,
+    rather than the same number twice.
     """
-    violations: list[str] = []
+    reserved = set(taken)
+    reserved.update(SPEC_REQUIREMENT_DEF_RE.findall(text))
+    reserved.update(SPEC_SCENARIO_DEF_RE.findall(text))
+
+    violations: list[SpecIdDescent] = []
     for pattern in (SPEC_REQUIREMENT_DEF_RE, SPEC_SCENARIO_DEF_RE):
         highest = 0
+        previous: str | None = None
         for match in pattern.finditer(text):
-            number = int(match.group(1).rsplit("-", 1)[1])
-            if number < highest:
-                violations.append(match.group(1))
-            highest = max(highest, number)
+            spec_id = match.group(1)
+            prefix, _, digits = spec_id.rpartition("-")
+            number = int(digits)
+            if number < highest and previous is not None:
+                suggested = _next_free_spec_id(prefix, highest, reserved)
+                reserved.add(suggested)
+                highest = max(highest, int(suggested.rpartition("-")[2]))
+                violations.append(SpecIdDescent(previous, spec_id, suggested))
+            else:
+                highest = max(highest, number)
+            previous = spec_id
     return violations
 
 
