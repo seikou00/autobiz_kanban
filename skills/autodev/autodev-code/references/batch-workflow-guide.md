@@ -45,6 +45,10 @@ field, pass an explicit mapping such as
 `--code-workspace "RouYi=/absolute/path/to/RouYi"`; otherwise stop with
 `provide_code_workspace_mapping`.
 
+The Code-session command is `task_runner.py code-session`; there is no
+`hooks/code_session.py`. Any baseline or workspace argument must be the
+absolute business Git root, never a logical workspace name such as `RouYi`.
+
 The Workflow tool invocation is fixed too:
 
 ```javascript
@@ -66,7 +70,27 @@ independent and only stores Feature state.
 
 ## Execution Contract
 
-The fixed script runs a DAG in merge-gated waves:
+The fixed script starts with scheduler `ensure` and then runs a DAG in
+merge-gated waves. `ensure` creates the first durable run or reuses an active
+run only after validating every sealed platform delivery. A `needs_resolution`
+run or a missing sealed worktree remains fail-closed; do not create a new run
+to bypass it.
+
+The reuse validation also blocks a Batch marked `merged` without a non-empty
+`mergeCommitSha`, a dirty source checkout, or a source HEAD that differs from
+the run's recorded HEAD. In each case it returns the original `runId` with a
+blocked result. A Batch is `merged` only when `batch_merger.py` has completed
+the Git integration and written its merge commit; no worker-facing command may
+set this status.
+
+The fixed Workflow passes `--allow-bootstrap` to `ensure`. When the source
+repository has uncommitted business changes, the scheduler automatically creates
+one `autodev: bootstrap <feature> baseline` commit before platform worktrees
+are provisioned. This is the only automatic source-branch commit before Batch
+delivery merges; platform-owned `.cmbdevclaw/**` files are excluded from both
+the dirty check and baseline commit. Direct CLI uses of `ensure` do not enable
+bootstrap by default and return `parallel_code_workspace_bootstrap_required`
+instead of modifying the repository.
 
 1. The scheduler selects pending Batches whose dependencies are all `merged`.
    It does not create a directory. The Workflow starts every selected child
@@ -79,14 +103,19 @@ The fixed script runs a DAG in merge-gated waves:
    its own checkout; any overlap is handled as a real merge conflict at the
    barrier.
 3. Each Batch acquires a lease, implements only its assigned TASKs, runs
-   `batch-compile`, commits its worktree, records `ready_to_merge`, and releases
-   its lease.
+   `batch-compile`, then invokes `worktree_manager.py seal` to commit and
+   persist its delivery SHA. `lease release --final-status ready_to_merge`
+   accepts that status only after the persisted SHA is present; an unsealed
+   compile result cannot enter the merge frontier.
 4. After every Batch in that wave finishes, the shared Workflow owner invokes
    `batch_merger.py --conflict-mode native-rebase`.
 5. Only after that merge succeeds does the script call scheduler `resume` to
    calculate the next wave. A dependent Batch never starts from an unmerged
    upstream result.
-6. Once all Batches are `merged`, `parallel_final_verify.py` runs the final
+6. The merge hook writes `mergeCommitSha` and only then marks the Batch TASKs
+   `done`. A compile-passed delivery remains `implemented` / `ready_to_merge`
+   until this source-branch integration succeeds.
+7. Once all Batches are `merged`, `parallel_final_verify.py` runs the final
    compile gate.
 
 Independent Batches run in parallel, including independent Batches in the same
@@ -111,14 +140,20 @@ Within its platform-assigned worktree, a Batch agent must:
 The Batch agent must not merge, rebase, resolve conflicts, delete worktrees, or
 modify a shared main checkout. It must run with platform `isolation: "worktree"`.
 The shared Workflow owner is the only actor that invokes the merge hook.
+All workflow paths and the feature ID come only from launcher `workflowArgs`;
+literal `undefined` or non-absolute paths are rejected before any Batch agent
+is created. A Batch agent must never compensate by creating a branch or a
+second workflow.
 
 ## Recovery And Failure
 
 The manifest at `.parallel-runs/<runId>/manifest.json` is the only parallel-run
 state.
 
-- Use `parallel_batch_scheduler.py resume` only after a successful merge or to
-  resume a retained run.
+- The fixed Workflow always uses `parallel_batch_scheduler.py ensure` at
+  startup. It reuses an active, valid run rather than creating a second one.
+  Use `parallel_batch_scheduler.py resume` only for an explicitly guided
+  recovery after inspecting the retained run.
 - Use `batch_lease_manager.py reclaim` for an expired lease and
   `parallel_batch_lifecycle.py monitor` to inspect a run.
 - A merge conflict, failed compile, plan digest change, or failed final verify
@@ -127,7 +162,14 @@ state.
 - Successful or explicitly rolled-back terminal runs may be handed to
   `parallel_batch_lifecycle.py cleanup`; it records retained platform
   deliveries but never removes their directories or branches.
+- Platform-owned `.cmbdevclaw/workflows/**` journal, state, and toolstream
+  files are excluded from source-dirt checks. Do not use `git checkout -- .`
+  or `git clean` to remove them: those commands can destroy user work or the
+  Workflow journal needed for recovery.
 - `batch_merger.py` is the integration owner for this workflow. After it has
   merged a Batch, the platform panel may still show the retained delivery for
   Diff/recovery; do not click the platform Merge action a second time. Inspect
   it, then use the platform's discard/cleanup flow when it is no longer needed.
+- Never delete `.parallel-runs/<runId>`, copy files out of an orphaned
+  worktree, or manually merge a Batch branch. Those operations bypass delivery
+  evidence and leave the run unrecoverable.

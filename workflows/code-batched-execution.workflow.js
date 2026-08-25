@@ -3,7 +3,7 @@ export const meta = {
   description: "Fixed DAG execution for Code batches with merge-before-release semantics",
   whenToUse: "由 workflow_launcher.py 在存在合法待执行 Batch 时调用",
   phases: [
-    { title: "准备", detail: "创建 scheduler run 并计算当前可执行 DAG 波次" },
+    { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 波次" },
     { title: "实现", detail: "平台为每个 Batch agent 创建原生 Git worktree，同一波次并行执行" },
     { title: "合并", detail: "每个波次完成后立即确定性合并，才释放下游依赖" },
     { title: "最终验证", detail: "所有 Batch 合并后执行最终编译门禁" }
@@ -25,7 +25,7 @@ const BATCH_RESULT_SCHEMA = {
     commitSha: { type: "string" },
     errorMessage: { type: "string" }
   },
-  required: ["batchId", "status"],
+  required: ["batchId", "status", "compileStatus", "worktreePath", "branchName", "commitSha"],
   additionalProperties: false
 };
 const MERGE_RESULT_SCHEMA = {
@@ -58,7 +58,8 @@ const VERIFICATION_SCHEMA = {
   type: "object",
   properties: {
     passed: { type: "boolean" },
-    commands: { type: "array", items: { type: "object" } }
+    commands: { type: "array", items: { type: "object" } },
+    errorMessage: { type: "string" }
   },
   required: ["passed"],
   additionalProperties: false
@@ -99,6 +100,16 @@ function requireSuccess(value, label) {
   return result;
 }
 
+function usableString(value) {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && !["undefined", "null"].includes(value.trim().toLowerCase());
+}
+
+function absolutePath(value) {
+  return usableString(value) && value.startsWith("/");
+}
+
 const input = unwrap(args);
 const feature = input.feature;
 const pluginPath = input.pluginPath;
@@ -112,8 +123,19 @@ const timeoutPerBatch = Number.isInteger(input.timeoutPerBatch) && input.timeout
   ? input.timeoutPerBatch
   : 3600;
 
-if (!feature || !pluginPath || !artifactWorkspace || !workflowHostGitRoot || !codeWorkspaces || typeof codeWorkspaces !== "object" || Object.keys(codeWorkspaces).length === 0) {
+if (
+  !usableString(feature)
+  || !absolutePath(pluginPath)
+  || !absolutePath(artifactWorkspace)
+  || !absolutePath(workflowHostGitRoot)
+  || !codeWorkspaces
+  || typeof codeWorkspaces !== "object"
+  || Object.keys(codeWorkspaces).length === 0
+) {
   throw new Error("missing_feature_plugin_path_artifact_workspace_workflow_host_or_code_workspaces");
+}
+if (Object.values(codeWorkspaces).some(path => !absolutePath(path))) {
+  throw new Error("invalid_code_workspace_path");
 }
 if (new Set(Object.values(codeWorkspaces)).size !== 1) {
   throw new Error("platform_worktree_multi_repository_requires_split_workflows");
@@ -142,32 +164,40 @@ if (workflowHost.gitRoot !== workflowHostGitRoot) {
 
 phase("准备");
 const prepared = requireSuccess(await agent(
-  `创建固定 Code DAG run。执行：python "${schedulerPath}" create ` +
+  `确保固定 Code DAG run。执行：python "${schedulerPath}" ensure ` +
   `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
   `--max-parallel ${maxParallel} ` +
-  `--timeout-seconds ${timeoutPerBatch} ${codeWorkspaceArgs}。` +
-  `只返回该命令的 JSON 结果，不修改业务文件。`,
+  `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs}。` +
+  `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。` +
+  `必要时允许 scheduler 创建 autodev baseline 提交以供平台创建 worktree；不得修改业务文件内容，` +
+  `且不得把 .cmbdevclaw 平台运行文件纳入提交。只返回该命令的 JSON 结果。`,
   { label: "fixed-workflow-prepare", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
-), "scheduler create");
+), "scheduler ensure");
 
 const runId = prepared.runId;
 let scheduledGroups = prepared.scheduledGroups || [];
+let mergeableBatches = prepared.mergeableBatches || [];
 let batchTaskIds = prepared.batchTaskIds || {};
 let batchWorkspaces = prepared.batchWorkspaces || {};
 const batchResults = [];
 const mergeResults = [];
 let schedulerWaves = 0;
 
-while (scheduledGroups.length > 0) {
+if (!scheduledGroups.length && !mergeableBatches.length && !["verifying", "succeeded"].includes(prepared.status)) {
+  throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: prepared, batchResults, mergeResults }));
+}
+
+while (scheduledGroups.length > 0 || mergeableBatches.length > 0) {
   schedulerWaves += 1;
   if (schedulerWaves > MAX_SCHEDULER_WAVES) {
     throw new Error(JSON.stringify({ error: "parallel_scheduler_wave_limit_exceeded", runId, schedulerWaves, batchResults, mergeResults }));
   }
 
-  phase("实现");
-  const batchIds = scheduledGroups.flat();
-  const waveResults = await parallel(
-    batchIds.map(batchId => () => {
+  if (scheduledGroups.length > 0) {
+    phase("实现");
+    const batchIds = scheduledGroups.flat();
+    const waveResults = await parallel(
+      batchIds.map(batchId => () => {
       const taskIds = Array.isArray(batchTaskIds[batchId]) ? batchTaskIds[batchId] : [];
       if (taskIds.length === 0) throw new Error(`scheduler returned no task IDs for ${batchId}`);
       const batchWorkspace = batchWorkspaces[batchId] || {};
@@ -178,7 +208,7 @@ while (scheduledGroups.length > 0) {
       return agent(
       `在平台分配的原生业务仓库 worktree 中执行 Batch ${batchId}。Feature=${feature}，runId=${runId}，` +
       `artifact workspace=${artifactWorkspace}。严格按以下固定顺序执行：\n` +
-      `1. 本 agent 已通过平台 isolation: "worktree" 获得独立 checkout。执行 pwd、git rev-parse --show-toplevel、git branch --show-current，保存 Git 根为 batchWorktree、分支为 batchBranch。batchWorktree 必须不等于主业务 checkout，且 Git 根必须精确等于 "${codeWorkspaces[batchWorkspaceRef]}"。禁止 git worktree add/remove、git switch、merge、rebase 或操作其他 checkout。\n` +
+      `1. 本 agent 已通过平台 isolation: "worktree" 获得独立 checkout。执行 pwd、git rev-parse --show-toplevel、git branch --show-current，保存 Git 根为 batchWorktree、分支为 batchBranch。batchWorktree 必须不等于主业务 checkout "${codeWorkspaces[batchWorkspaceRef]}"；后续 scheduler 会验证它与该主仓库共享 Git worktree registry。禁止 git worktree add/remove、git switch、merge、rebase 或操作其他 checkout。\n` +
       `2. 执行 python "${leasePath}" acquire --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"，从 JSON 的 lease.ownerToken 保存本 Batch 的 lease token。\n` +
       `3. 用刚才采集的 batchWorktree 和 batchBranch 执行 python "${schedulerPath}" mark-batch --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --status running --worktree-path "<batchWorktree>" --branch-name "<batchBranch>"。业务源码命令只在当前分配 checkout 内执行。\n` +
       `4. Scheduler 已提供本 Batch 的 task IDs：${JSON.stringify(taskIds)}。不要用 read_file 读取 artifact 目录；artifact workspace 不是代码目录。逐个执行这些 TASK：先执行 python "${pluginPath}/hooks/code_task_context.py" --workspace "${artifactWorkspace}" --feature "${feature}" --task-id "<task-id>" --code-workspace "<batchWorktree>"，再用 task_runner.py start、完成实现后用 finish-implementation；所有 task_runner 调用必须带 --workspace "${artifactWorkspace}"、--parallel-run-id "${runId}"、步骤 2 的 lease token、--code-workspace "<batchWorktree>" 和 --workspace-ref "${batchWorkspaceRef}"。不得操作其他 Batch 或任何主业务 checkout。\n` +
@@ -186,7 +216,7 @@ while (scheduledGroups.length > 0) {
       `6. 编译通过后只调用 python "${worktreeManagerPath}" --json seal --artifact-workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --repo "<batchWorktree>" --owner-token "<lease-token>"；从 JSON 保存 commitSha。插件在此命令中提交；不要自行 git add、git commit 或 mark-batch ready_to_merge。\n` +
       `7. 执行 python "${leasePath}" release --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --owner-token "<lease-token>" --final-status ready_to_merge。\n` +
       `返回 {batchId, status:"success", compileStatus:"passed", worktreePath:batchWorktree, branchName:batchBranch, commitSha}。` +
-      `不要 merge、rebase、解决冲突、删除 worktree；所有命令失败立即停止。`,
+      `不得创建任何 workflow、手工创建分支、使用 undefined 路径或 feature、手工 git add/commit；不要 merge、rebase、解决冲突、删除 worktree。任何命令失败立即返回 failed，不得以部分结果继续。`,
       {
         label: `fixed-batch-${batchId}`,
         phase: "实现",
@@ -194,13 +224,14 @@ while (scheduledGroups.length > 0) {
         isolation: "worktree"
       }
       );
-    })
-  );
-  const normalizedWaveResults = waveResults.map(unwrap);
-  batchResults.push(...normalizedWaveResults);
-  const failed = normalizedWaveResults.filter(result => !result || result.status !== "success" || result.compileStatus !== "passed");
-  if (failed.length > 0) {
-    throw new Error(JSON.stringify({ error: "batch_execution_failed", runId, failed, batchResults, mergeResults }));
+      })
+    );
+    const normalizedWaveResults = waveResults.map(unwrap);
+    batchResults.push(...normalizedWaveResults);
+    const failed = normalizedWaveResults.filter(result => !result || result.status !== "success" || result.compileStatus !== "passed");
+    if (failed.length > 0) {
+      throw new Error(JSON.stringify({ error: "batch_execution_failed", runId, failed, batchResults, mergeResults }));
+    }
   }
 
   // This is the release barrier: dependent Batches cannot appear in the next
@@ -223,9 +254,10 @@ while (scheduledGroups.length > 0) {
     { label: `schedule-wave-${schedulerWaves + 1}`, phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
   ), "scheduler resume");
   scheduledGroups = resumed.scheduledGroups || [];
+  mergeableBatches = resumed.mergeableBatches || [];
   batchTaskIds = resumed.batchTaskIds || batchTaskIds;
   batchWorkspaces = resumed.batchWorkspaces || batchWorkspaces;
-  if (!scheduledGroups.length && !["verifying", "succeeded"].includes(resumed.status)) {
+  if (!scheduledGroups.length && !mergeableBatches.length && !["verifying", "succeeded"].includes(resumed.status)) {
     throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: resumed, batchResults, mergeResults }));
   }
 }
@@ -233,7 +265,7 @@ while (scheduledGroups.length > 0) {
 phase("最终验证");
 const verification = requireSuccess(await agent(
   `执行 python "${finalVerifyPath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-  `只执行最终编译门禁；失败必须阻断 run。`,
+  `只执行最终编译门禁；失败必须阻断 run，并将 hook 返回的 error 原样写入 errorMessage。`,
   { label: "verify-merged-batches", phase: "最终验证", schema: VERIFICATION_SCHEMA }
 ), "final verification");
 

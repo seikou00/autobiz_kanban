@@ -11,6 +11,12 @@ from typing import Any, Dict
 
 RepositoryMap = Dict[str, Path]
 REQUIRED_IGNORED_RUNTIME_PATHS = (".cmbdevclaw/large_tool_results/",)
+# Dynamic Workflow owns the complete .cmbdevclaw directory in the host
+# repository. Its journals, sidecars, tool streams, and setup marker are
+# platform runtime state rather than business-source changes.
+PLATFORM_RUNTIME_DIRECTORY = ".cmbdevclaw/"
+WORKFLOW_RUNTIME_DIRECTORY = f"{PLATFORM_RUNTIME_DIRECTORY}workflows/"
+_PLATFORM_RUNTIME_EXCLUDE = f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**"
 
 
 class RepositorySnapshotError(ValueError):
@@ -26,10 +32,34 @@ def _run_text(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def git_status_porcelain(repo: Path) -> subprocess.CompletedProcess[str]:
+    """Return Git status while excluding platform-owned runtime files.
+
+    The exclusion is intentionally narrow.  Any other tracked, untracked, or
+    staged business file remains visible and continues to block a merge.
+    """
+    return _run_text(
+        repo,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        ".",
+        _PLATFORM_RUNTIME_EXCLUDE,
+    )
+
+
 def resolve_git_root(code_workspace: Path) -> Path:
     completed = _run_text(code_workspace, "rev-parse", "--show-toplevel")
     if completed.returncode != 0 or not completed.stdout.strip():
-        raise RepositorySnapshotError(f"code_workspace_not_git_repository:{code_workspace}")
+        # Preserve Git's diagnostic.  Platform worktree failures are otherwise
+        # indistinguishable from a caller passing the artifact directory as a
+        # code workspace, which led workers to attempt unsafe manual fallback.
+        detail = completed.stderr.strip().replace("\n", " ")
+        suffix = f":git_exit={completed.returncode}"
+        if detail:
+            suffix += f":{detail}"
+        raise RepositorySnapshotError(f"code_workspace_not_git_repository:{code_workspace}{suffix}")
     return Path(completed.stdout.strip()).resolve()
 
 
@@ -79,7 +109,18 @@ def hash_file(path: Path) -> str | None:
 
 def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
     completed = subprocess.run(
-        ["git", "-C", str(repo), "ls-files", "-co", "--exclude-standard", "-z"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "ls-files",
+            "-co",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+            _PLATFORM_RUNTIME_EXCLUDE,
+        ],
         capture_output=True,
         check=False,
     )
@@ -97,7 +138,18 @@ def capture_file_snapshot(repo: Path) -> dict[str, str | None]:
 
 def capture_untracked_files(repo: Path) -> list[str]:
     completed = subprocess.run(
-        ["git", "-C", str(repo), "ls-files", "-o", "--exclude-standard", "-z"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "ls-files",
+            "-o",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+            _PLATFORM_RUNTIME_EXCLUDE,
+        ],
         capture_output=True,
         check=False,
     )

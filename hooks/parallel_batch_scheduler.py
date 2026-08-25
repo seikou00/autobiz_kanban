@@ -35,18 +35,25 @@ from hooks.parallel_runtime import (
     save_manifest,
 )
 from hooks.plan_json import load_plan_bundle
-from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root
+from hooks.repository_snapshot import (
+    PLATFORM_RUNTIME_DIRECTORY,
+    RepositorySnapshotError,
+    git_status_porcelain,
+    resolve_git_root,
+)
 _BOOTSTRAP_IGNORE_RULES = (
     ".cmbdevclaw/large_tool_results/",
     ".autobizdevops/features/*/.parallel-runs/",
 )
 
 
-def _ensure_git_root(requested: Path) -> tuple[Path, bool]:
+def _ensure_git_root(requested: Path, *, allow_bootstrap: bool) -> tuple[Path, bool]:
     """Return a Git root, initializing an explicit code directory when needed."""
     try:
         return resolve_git_root(requested), False
     except RepositorySnapshotError:
+        if not allow_bootstrap:
+            raise ValueError(f"parallel_code_workspace_git_repository_required:{requested}")
         if not requested.is_dir():
             raise
         init = subprocess.run(
@@ -91,21 +98,38 @@ def _git_head(git_root: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
 
 
-def _bootstrap_repository(git_root: Path, feature: str, *, initialized: bool, ignore_additions: list[str]) -> dict[str, Any]:
-    """Create an internal baseline commit for unborn or dirty repositories.
+def _unstage_platform_runtime(git_root: Path, *, has_head: bool) -> None:
+    """Keep already-staged platform artifacts out of an automatic baseline."""
+    if has_head:
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", PLATFORM_RUNTIME_DIRECTORY],
+            cwd=git_root,
+            capture_output=True,
+            text=True,
+        )
+        if staged.returncode == 0:
+            return
+        if staged.returncode != 1:
+            raise ValueError(f"parallel_code_workspace_runtime_stage_check_failed:{staged.stderr.strip()}")
+        command = ["git", "restore", "--staged", "--", PLATFORM_RUNTIME_DIRECTORY]
+    else:
+        command = ["git", "rm", "-r", "--cached", "--ignore-unmatch", "--", PLATFORM_RUNTIME_DIRECTORY]
+    result = subprocess.run(command, cwd=git_root, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ValueError(f"parallel_code_workspace_runtime_unstage_failed:{result.stderr.strip()}")
 
-    The commit is deliberately created by the workflow so users do not need to
-    prepare a repository manually.  It contains the current visible working
-    tree after runtime paths have been excluded, and leaves the repository
-    clean for worktree creation and deterministic merging.
-    """
+
+def _bootstrap_repository(
+    git_root: Path,
+    feature: str,
+    *,
+    initialized: bool,
+    ignore_additions: list[str],
+    allow_bootstrap: bool,
+) -> dict[str, Any]:
+    """Optionally create an explicit baseline commit for an unusable source tree."""
     before_head = _git_head(git_root)
-    status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=git_root,
-        capture_output=True,
-        text=True,
-    )
+    status = git_status_porcelain(git_root)
     if status.returncode != 0:
         raise ValueError("parallel_code_workspace_status_unavailable")
     dirty = bool(status.stdout.strip())
@@ -118,8 +142,13 @@ def _bootstrap_repository(git_root: Path, feature: str, *, initialized: bool, ig
             "commitSha": before_head,
         }
 
+    if not allow_bootstrap:
+        reason = "unborn_head" if before_head is None else "dirty_worktree"
+        raise ValueError(f"parallel_code_workspace_bootstrap_required:{reason}:{git_root}")
+
+    _unstage_platform_runtime(git_root, has_head=before_head is not None)
     add = subprocess.run(
-        ["git", "add", "-A"],
+        ["git", "add", "-A", "--", ".", f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**"],
         cwd=git_root,
         capture_output=True,
         text=True,
@@ -163,6 +192,7 @@ def resolve_repository_bindings(
     values: list[str] | None,
     *,
     feature: str = "feature",
+    allow_bootstrap: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Resolve `workspaceRef=/path` arguments into immutable repository bindings."""
     refs = sorted({
@@ -196,7 +226,7 @@ def resolve_repository_bindings(
     for ref in refs:
         requested = parsed[ref]
         try:
-            git_root, initialized = _ensure_git_root(requested)
+            git_root, initialized = _ensure_git_root(requested, allow_bootstrap=allow_bootstrap)
         except (RepositorySnapshotError, ValueError) as exc:
             raise ValueError(f"parallel_code_workspace_invalid:{ref}:{exc}") from exc
         ignore_additions = _ensure_runtime_ignores(git_root)
@@ -205,6 +235,7 @@ def resolve_repository_bindings(
             feature,
             initialized=initialized,
             ignore_additions=ignore_additions,
+            allow_bootstrap=allow_bootstrap,
         )
         head = bootstrap["headSha"]
         branch = subprocess.run(["git", "branch", "--show-current"], cwd=git_root, capture_output=True, text=True)
@@ -361,6 +392,7 @@ def create_run(
     timeout_seconds: int,
     code_workspaces: list[str] | None = None,
     workflow_workspace: Path | None = None,
+    allow_bootstrap: bool = False,
 ) -> dict[str, Any]:
     # Kept as an ignored Python API compatibility parameter for older callers.
     # The CLI and fixed Workflow no longer expose it: platform workspace identity
@@ -372,7 +404,12 @@ def create_run(
     if get_active_run(workspace, feature) is not None:
         raise ValueError("parallel_run_already_active")
     bundle = load_plan_bundle(feature_dir(workspace, feature))
-    repositories = resolve_repository_bindings(bundle, code_workspaces, feature=feature)
+    repositories = resolve_repository_bindings(
+        bundle,
+        code_workspaces,
+        feature=feature,
+        allow_bootstrap=allow_bootstrap,
+    )
     manifest = create_manifest(
         workspace,
         feature,
@@ -390,6 +427,84 @@ def create_run(
     save_manifest(workspace, feature, str(manifest["runId"]), manifest)
     append_event(workspace, feature, str(manifest["runId"]), "run_created", maxParallel=manifest["maxParallel"])
     return schedule(workspace, feature, str(manifest["runId"]))
+
+
+def _sealed_delivery_error(manifest: dict[str, Any], batch_id: str) -> str | None:
+    """Validate a retained platform Worktree before a scheduler run is resumed."""
+    batch = manifest.get("batches", {}).get(batch_id)
+    if not isinstance(batch, dict):
+        return f"parallel_batch_not_found:{batch_id}"
+    commit_sha = batch.get("commitSha")
+    if not isinstance(commit_sha, str) or not commit_sha:
+        return None
+    worktree_path = batch.get("worktreePath")
+    branch_name = batch.get("branchName")
+    if not isinstance(worktree_path, str) or not worktree_path:
+        return f"platform_worktree_delivery_missing:{batch_id}:path"
+    if not isinstance(branch_name, str) or not branch_name:
+        return f"platform_worktree_delivery_missing:{batch_id}:branch"
+    try:
+        assert_batch_worktree_isolated(manifest, batch_id, worktree_path)
+    except ValueError:
+        return f"platform_worktree_delivery_missing:{batch_id}:worktree"
+    worktree = Path(worktree_path)
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if branch.returncode != 0 or branch.stdout.strip() != branch_name:
+        return f"platform_worktree_delivery_missing:{batch_id}:branch"
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if head.returncode != 0 or head.stdout.strip() != commit_sha:
+        return f"platform_worktree_delivery_commit_mismatch:{batch_id}"
+    status = git_status_porcelain(worktree)
+    if status.returncode != 0:
+        return f"platform_worktree_delivery_status_unavailable:{batch_id}"
+    if status.stdout.strip():
+        return f"platform_worktree_delivery_dirty:{batch_id}"
+    return None
+
+
+def _source_repository_errors(manifest: dict[str, Any]) -> list[str]:
+    """Return source-worktree violations before an active run is reused.
+
+    Each repository binding freezes the expected HEAD.  It moves forward only
+    through ``batch_merger.py`` after a real merge.  Direct commits, resets,
+    and shared-checkout changes must stop recovery before another Batch runs
+    against a different base.
+    """
+    errors: list[str] = []
+    repositories = manifest.get("repositories", {})
+    if not isinstance(repositories, dict) or not repositories:
+        return ["parallel_repository_bindings_missing"]
+    for ref, repository in sorted(repositories.items()):
+        if not isinstance(repository, dict) or not isinstance(repository.get("gitRoot"), str):
+            errors.append(f"parallel_repository_binding_invalid:{ref}")
+            continue
+        root = Path(repository["gitRoot"])
+        status = git_status_porcelain(root)
+        if status.returncode != 0:
+            errors.append(f"parallel_repository_status_unavailable:{ref}")
+            continue
+        if status.stdout.strip():
+            errors.append(f"parallel_repository_dirty:{ref}")
+            continue
+        expected_head = repository.get("headSha") or repository.get("baseSha")
+        actual_head = _git_head(root)
+        if not isinstance(expected_head, str) or not expected_head.strip() or not actual_head:
+            errors.append(f"parallel_repository_head_unavailable:{ref}")
+        elif actual_head != expected_head:
+            errors.append(
+                f"parallel_repository_head_changed:{ref}:expected={expected_head}:actual={actual_head}"
+            )
+    return errors
 
 
 def schedule(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
@@ -465,7 +580,11 @@ def schedule(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
 
 
 def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status: str, **details: Any) -> dict[str, Any]:
-    allowed = {"pending", "leased", "running", "compile_failed", "ready_to_merge", "needs_resolution", "merged", "failed", "blocked", "cancelled"}
+    # ``merged`` is written only by batch_merger.py after its Git merge and
+    # plan-state update. Worker-facing status changes may never unlock deps.
+    if status == "merged":
+        raise ValueError(f"parallel_batch_merge_owner_required:{batch_id}")
+    allowed = {"pending", "leased", "running", "compile_failed", "ready_to_merge", "needs_resolution", "failed", "blocked", "cancelled"}
     if status not in allowed:
         raise ValueError(f"parallel_batch_status_invalid:{status}")
     with run_lock(workspace, feature, run_id):
@@ -504,6 +623,8 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
         statuses = [item.get("status") for item in manifest.get("batches", {}).values() if isinstance(item, dict)]
         if statuses and all(item == "merged" for item in statuses):
             manifest["status"] = "succeeded"
+        elif status == "needs_resolution":
+            manifest["status"] = "needs_resolution"
         elif status in {"failed", "blocked"}:
             manifest["status"] = "blocked"
         save_manifest(workspace, feature, run_id, manifest)
@@ -515,17 +636,147 @@ def resume_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
     """Idempotently resume only batches that do not already own a result."""
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
-        if manifest.get("status") in {"succeeded", "cleaned", "rolled_back", "verifying"}:
+        if manifest.get("status") in {"cleaned", "rolled_back"}:
             return {"runId": run_id, "status": manifest.get("status"), "skipped": "terminal_run"}
-        for batch in manifest.get("batches", {}).values():
+        invalid_deliveries: list[str] = []
+        for batch_id, batch in manifest.get("batches", {}).items():
             if not isinstance(batch, dict):
                 continue
-            if batch.get("commitSha") or batch.get("mergeCommitSha"):
-                batch["status"] = "merged" if batch.get("mergeCommitSha") else "ready_to_merge"
+            if batch.get("status") == "merged" and not (
+                isinstance(batch.get("mergeCommitSha"), str) and batch["mergeCommitSha"].strip()
+            ):
+                delivery_error = f"parallel_batch_merge_evidence_required:{batch_id}"
+                batch.update({"status": "blocked", "error": delivery_error})
+                invalid_deliveries.append(delivery_error)
+        invalid_deliveries.extend(_source_repository_errors(manifest))
+        if invalid_deliveries:
+            manifest["status"] = "blocked"
+            save_manifest(workspace, feature, run_id, manifest)
+            append_event(
+                workspace,
+                feature,
+                run_id,
+                "run_resume_blocked_integrity",
+                errors=invalid_deliveries,
+            )
+            return {
+                "runId": run_id,
+                "status": "blocked",
+                "scheduledGroups": [],
+                "mergeableBatches": mergeable_batches(manifest),
+                "recoveryRequired": True,
+                "errors": invalid_deliveries,
+            }
+        if manifest.get("status") in {"succeeded", "verifying"}:
+            return {"runId": run_id, "status": manifest.get("status"), "skipped": "terminal_run"}
+        unresolved = [
+            str(batch_id)
+            for batch_id, batch in manifest.get("batches", {}).items()
+            if isinstance(batch, dict) and batch.get("status") in {"needs_resolution", "conflict"}
+        ]
+        if unresolved:
+            manifest["status"] = "needs_resolution"
+            save_manifest(workspace, feature, run_id, manifest)
+            append_event(
+                workspace,
+                feature,
+                run_id,
+                "run_resume_blocked_needs_resolution",
+                batchIds=unresolved,
+            )
+            return {
+                "runId": run_id,
+                "status": "needs_resolution",
+                "scheduledGroups": [],
+                "mergeableBatches": mergeable_batches(manifest),
+                "recoveryRequired": True,
+                "errors": ["parallel_run_needs_resolution:" + ",".join(unresolved)],
+            }
+        invalid_deliveries = []
+        for batch_id, batch in manifest.get("batches", {}).items():
+            if not isinstance(batch, dict):
+                continue
+            if batch.get("mergeCommitSha"):
+                batch["status"] = "merged"
+                continue
+            if batch.get("commitSha"):
+                delivery_error = _sealed_delivery_error(manifest, str(batch_id))
+                if delivery_error:
+                    batch.update({"status": "blocked", "error": delivery_error})
+                    invalid_deliveries.append(delivery_error)
+                else:
+                    batch["status"] = "ready_to_merge"
+            elif batch.get("status") == "ready_to_merge":
+                # A compile result may enter ready_to_merge before seal.  It
+                # must not be resumed as a merge candidate without a delivery
+                # SHA, otherwise the workflow reports an empty successful
+                # merge and leaves downstream dependencies blocked forever.
+                delivery_error = f"parallel_batch_seal_required:{batch_id}"
+                batch.update({"status": "blocked", "error": delivery_error})
+                invalid_deliveries.append(delivery_error)
+        if invalid_deliveries:
+            manifest["status"] = "blocked"
+            save_manifest(workspace, feature, run_id, manifest)
+            append_event(
+                workspace,
+                feature,
+                run_id,
+                "run_resume_blocked_missing_delivery",
+                errors=invalid_deliveries,
+            )
+            return {
+                "runId": run_id,
+                "status": "blocked",
+                "scheduledGroups": [],
+                "mergeableBatches": mergeable_batches(manifest),
+                "recoveryRequired": True,
+                "errors": invalid_deliveries,
+            }
         manifest["status"] = "running"
         save_manifest(workspace, feature, run_id, manifest)
         append_event(workspace, feature, run_id, "run_resumed")
     return schedule(workspace, feature, run_id)
+
+
+def ensure_run(
+    workspace: Path,
+    feature: str,
+    *,
+    max_parallel: int,
+    timeout_seconds: int,
+    code_workspaces: list[str] | None = None,
+    allow_bootstrap: bool = False,
+) -> dict[str, Any]:
+    """Create one scheduler run or safely resume the existing durable run."""
+    active_run_id = get_active_run(workspace, feature)
+    if active_run_id is None:
+        result = create_run(
+            workspace,
+            feature,
+            max_parallel=max_parallel,
+            timeout_seconds=timeout_seconds,
+            code_workspaces=code_workspaces,
+            allow_bootstrap=allow_bootstrap,
+        )
+        result["reused"] = False
+        return result
+    active_manifest = load_manifest(workspace, feature, active_run_id)
+    if active_manifest.get("status") == "needs_resolution":
+        # A merge conflict is a retained platform delivery, not a stale lock.
+        # Starting another run from a new base would conceal that delivery and
+        # could schedule downstream work against the wrong source state.
+        return {
+            "runId": active_run_id,
+            "status": "needs_resolution",
+            "scheduledGroups": [],
+            "mergeableBatches": mergeable_batches(active_manifest),
+            "reused": True,
+            "recoveryRequired": True,
+            "errors": ["parallel_run_needs_resolution"],
+        }
+    result = resume_run(workspace, feature, active_run_id)
+    result["reused"] = True
+    return result
 
 
 def _emit(ok: bool, **payload: Any) -> int:
@@ -536,16 +787,17 @@ def _emit(ok: bool, **payload: Any) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Schedule parallel Code batch runs")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("validate", "create", "status", "resume", "list"):
+    for name in ("validate", "create", "ensure", "status", "resume", "list"):
         item = subparsers.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
         if name in {"status", "resume"}:
             item.add_argument("--run-id", required=True)
-        if name == "create":
+        if name in {"create", "ensure"}:
             item.add_argument("--max-parallel", type=int, default=4)
             item.add_argument("--timeout-seconds", type=int, default=3600)
             item.add_argument("--code-workspace", action="append", required=True, help="workspaceRef=/path; single-ref runs may pass /path")
+            item.add_argument("--allow-bootstrap", action="store_true", help="explicitly allow Git initialization or a baseline commit for a dirty source repository")
     mark = subparsers.add_parser("mark-batch")
     mark.add_argument("--workspace")
     mark.add_argument("--feature", required=True)
@@ -573,6 +825,19 @@ def main(argv: list[str] | None = None) -> int:
                     max_parallel=args.max_parallel,
                     timeout_seconds=args.timeout_seconds,
                     code_workspaces=args.code_workspace,
+                    allow_bootstrap=args.allow_bootstrap,
+                ),
+            )
+        if args.command == "ensure":
+            return _emit(
+                True,
+                **ensure_run(
+                    workspace,
+                    feature,
+                    max_parallel=args.max_parallel,
+                    timeout_seconds=args.timeout_seconds,
+                    code_workspaces=args.code_workspace,
+                    allow_bootstrap=args.allow_bootstrap,
                 ),
             )
         if args.command == "status":

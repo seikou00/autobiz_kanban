@@ -34,7 +34,8 @@ _PLAN_MUTABLE_KEYS = {
     "updatedAt", "createdAt", "evidenceIds", "completionEvidenceIds",
     "implementationEvidenceIds", "validationEvidenceIds", "latestImplementationEvidenceId",
     "latestPassEvidenceId", "latestPassEvidenceIds", "implementationRevision",
-    "taskSetDigest", "completedTaskCount", "batchCompile",
+    "taskSetDigest", "completedTaskCount", "batchCompile", "mergeCommitSha",
+    "deliveryRunId", "mergedAt",
     "projectCheckEvidenceIds", "latestProjectCheckEvidenceId",
     "projectValidationDisposition", "projectValidationFailedRunIds",
     "activeRunId", "repairAttempts", "repairTaskId", "repairStartedAt",
@@ -310,6 +311,12 @@ def create_manifest(
     for entry in bundle.root.get("batches", []):
         batch_id = str(entry["id"])
         batch = bundle.batches[batch_id]
+        batch_status = normalize_status(entry.get("status"))
+        merged_commit_sha = batch.get("mergeCommitSha")
+        if batch_status == "done" and (
+            not isinstance(merged_commit_sha, str) or not merged_commit_sha.strip()
+        ):
+            raise ValueError(f"parallel_plan_done_without_merge_evidence:{batch_id}")
         task_ids = [
             str(task_id)
             for task_id in batch.get("taskIds", [])
@@ -335,13 +342,13 @@ def create_manifest(
             "writeSet": list(batch_write_set(batch)),
             "executionStage": entry.get("executionStage", "parallel"),
             "dependencies": sorted(set(entry.get("deps", []))),
-            "status": "merged" if normalize_status(entry.get("status")) == "done" else "failed" if normalize_status(entry.get("status")) == "failed" else "pending",
+            "status": "merged" if batch_status == "done" else "failed" if batch_status == "failed" else "pending",
             "lease": None,
             "worktreePath": None,
             "branchName": None,
             "commitSha": None,
             "compileStatus": (batch.get("batchCompile") or {}).get("status", "pending"),
-            "mergeCommitSha": None,
+            "mergeCommitSha": merged_commit_sha if batch_status == "done" else None,
             "startedAt": None,
             "completedAt": None,
             "error": None,
@@ -541,16 +548,31 @@ def renew_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner
 
 
 def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner_token: str, *, final_status: str = "pending") -> None:
-    if not check_lease(workspace, feature, run_id, batch_id, owner_token):
-        raise ValueError(f"parallel_batch_lease_invalid:{batch_id}")
+    if final_status not in {"pending", "failed", "compile_failed", "blocked", "ready_to_merge"}:
+        raise ValueError(f"parallel_batch_release_status_invalid:{final_status}")
+
+    # A worker may only release a delivery as mergeable after `seal` has
+    # persisted a delivery commit.  Without this guard a failed worker could
+    # create a false merge frontier with no commit SHA.
     path = lease_path(workspace, feature, run_id, batch_id)
-    with FileLock(path.with_suffix(".lock")):
-        path.unlink(missing_ok=True)
-    manifest = load_manifest(workspace, feature, run_id)
-    if isinstance(manifest.get("batches", {}).get(batch_id), dict):
-        manifest["batches"][batch_id]["lease"] = None
-        manifest["batches"][batch_id]["status"] = final_status
-    save_manifest(workspace, feature, run_id, manifest)
+    with run_lock(workspace, feature, run_id):
+        with FileLock(path.with_suffix(".lock")):
+            if not check_lease(workspace, feature, run_id, batch_id, owner_token):
+                raise ValueError(f"parallel_batch_lease_invalid:{batch_id}")
+            manifest = load_manifest(workspace, feature, run_id)
+            batch = manifest.get("batches", {}).get(batch_id)
+            if not isinstance(batch, dict):
+                raise ValueError(f"parallel_batch_not_found:{batch_id}")
+            if final_status == "ready_to_merge":
+                if batch.get("status") != "ready_to_merge" or batch.get("compileStatus") != "passed":
+                    raise ValueError(f"parallel_batch_not_ready_to_release:{batch_id}")
+                commit_sha = batch.get("commitSha")
+                if not isinstance(commit_sha, str) or not commit_sha.strip():
+                    raise ValueError(f"parallel_batch_not_sealed:{batch_id}")
+            path.unlink(missing_ok=True)
+            batch["lease"] = None
+            batch["status"] = final_status
+            save_manifest(workspace, feature, run_id, manifest)
     append_event(workspace, feature, run_id, "lease_released", batchId=batch_id, status=final_status)
 
 
@@ -565,7 +587,12 @@ def ready_batches(manifest: dict[str, Any]) -> list[str]:
         if not isinstance(item, dict) or item.get("status") != "pending":
             continue
         deps = item.get("dependencies", [])
-        if all(isinstance(batches.get(dep), dict) and batches[dep].get("status") == "merged" for dep in deps):
+        if all(
+            isinstance(batches.get(dep), dict)
+            and batches[dep].get("status") == "merged"
+            and batches[dep].get("mergeCommitSha")
+            for dep in deps
+        ):
             ready.append(batch_id)
     return sorted(ready)
 
@@ -621,7 +648,11 @@ def list_runs(workspace: Path, feature: str) -> list[dict[str, Any]]:
 
 
 def get_active_run(workspace: Path, feature: str) -> str | None:
-    active = [item for item in list_runs(workspace, feature) if item.get("status") in {"created", "running", "merging", "verifying", "blocked"}]
+    active = [
+        item
+        for item in list_runs(workspace, feature)
+        if item.get("status") in {"created", "running", "merging", "verifying", "blocked", "needs_resolution"}
+    ]
     if len(active) > 1:
         raise ValueError("multiple_parallel_runs_active")
     return str(active[0]["runId"]) if active else None

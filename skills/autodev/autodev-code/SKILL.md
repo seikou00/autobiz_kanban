@@ -143,12 +143,14 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 
 完成上述一次性基线检查后，读取根 Plan 的未完成 Batch 数量，并统一进入固定 Workflow 入口。不得让模型生成或改写 workflow 脚本。
 
+Code 会话入口固定为 `python "${pluginPath}/hooks/task_runner.py" code-session ...` 或下方的 `workflow_launcher.py`；不得调用不存在的 `hooks/code_session.py`。`--code-workspace` 必须是 Plan 的绝对业务 Git 根，逻辑名 `RouYi` 不是可传给基线脚本的路径。
+
 多个未完成 Batch 必须统一通过并行调度工作流按依赖 DAG 执行，不得选择一个 `activeBatchId` 后串行推进。必须严格按返回的 `action` 分支：
 
 - `execute_active_batch`：只加载返回的 `activeBatchId` 对应批次，按下方 Task 协议执行。
 - `run_batch_compile`：执行一次 `batch-compile`，不得先执行任何 TASK 测试命令。
 - `start_batch_compile_repair` / `continue_batch_compile_repair`：按 runner 返回的 `repairOwnerTaskIds` 由模型修复生产代码，最多 3 次，不得要求用户手工修改。
-- `start_parallel_batch_workflow`：立即按下方 Workflow 并行执行模式创建 scheduler run；不得选择一个 `activeBatchId` 后串行执行。
+- `start_parallel_batch_workflow`：立即按下方 Workflow 并行执行模式进入 scheduler `ensure`；它只会创建首个 run，或在交付物完整时复用已有 run，绝不通过新 run 覆盖待合并或待恢复的交付物。不得选择一个 `activeBatchId` 后串行执行。
 - `code_done_ready`：所有批次均已通过生产代码编译门禁，继续 Code 完成门禁。
 
 入口返回失败或活动批次缺失时必须停止，不得猜测 batch ID、直接编辑计划或绕过入口启动 Task。旧的串行 Code 会话不再作为执行路径。
@@ -252,7 +254,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 
 `batch-compile` 是 Code 阶段唯一构建命令，只编译生产代码，不运行 TASK 测试，也不创建测试资产。长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
 
-- 返回 `compileStatus=passed` 后，runner 将本批 `implemented` TASK 标记为 `done`。Workflow run 回写 `ready_to_merge`，由 scheduler 在合并后释放下游 Batch。
+- 返回 `compileStatus=passed` 后，parallel Batch 的 TASK 保持 `implemented`，Workflow 将已提交的 Worktree 标记为 `ready_to_merge`。只有 `batch_merger.py` 已将该 commit 合入源分支并写入 `mergeCommitSha` 后，才将 TASK 和 Batch 标记为 `done`；由 scheduler 在此后释放下游 Batch。非并行 Batch 仍在编译通过后完成。
 - 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码。推荐先执行下列命令建立 repair run，再修改代码：
 
 ```bash
@@ -369,12 +371,15 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 固定脚本按以下顺序执行：
 
-- scheduler 先只选择依赖已经 `merged` 的 pending Batch；因此初始波次就是所有无依赖 Batch。
-- 同一波次受 `maxParallel` 限制并行执行；每个 Batch agent 调用时精确声明 `isolation: "worktree"`，平台从冻结的宿主 Git base 创建独立 checkout。每个 Batch 获取 lease、采集平台分配的路径和分支、完成 TASK、batch compile，并由 `worktree_manager.py seal` 提交及标记 `ready_to_merge`。仓库重叠只在合并阶段由真实 Git 冲突决定是否阻断。
+- Workflow 启动时先执行 scheduler `ensure`：没有活动 run 时创建一个；已有交付物完整的活动 run 时复用同一个 runId；`needs_resolution` 或缺失已密封交付物时 fail-closed 并保留现场。随后 scheduler 只选择依赖已经 `merged` 的 pending Batch；因此初始波次就是所有无依赖 Batch。
+- 同一波次受 `maxParallel` 限制并行执行；每个 Batch agent 调用时精确声明 `isolation: "worktree"`，平台从冻结的宿主 Git base 创建独立 checkout。每个 Batch 获取 lease、采集平台分配的路径和分支、完成 TASK、batch compile，并由 `worktree_manager.py seal` 提交并持久化 delivery `commitSha`；只有随后 `lease release --final-status ready_to_merge` 验证到该 SHA 后才进入合并队列。仓库重叠只在合并阶段由真实 Git 冲突决定是否阻断。
 - 该波次全部完成后，shared workflow owner 立即运行 `batch_merger.py --conflict-mode native-rebase`。只有 commit 已真正合并为 `merged`，才调用 scheduler `resume` 计算下一波次；下游 Batch 不会读取未合并改动。
 - 不具备并行条件的 Batch 自然在下一波次串行执行。所有 Batch 合并后才执行 `parallel_final_verify.py`。若固定 Workflow 无法启动，必须停止并报告，禁止手工顺序执行 Batch 或在共享工作区继续写代码。
+- Workflow 只接受 launcher 返回的完整 `workflowArgs`；`feature`、`pluginPath`、artifact workspace、Workflow host 和每个 code workspace 都必须是非空、非 `undefined` 的绝对路径。任一参数无效时在创建 Batch agent 前阻断，禁止生成临时 workflow 或手工创建分支绕过平台 worktree。
 
-并行模式的唯一调度状态源是 `.parallel-runs/<runId>/manifest.json`；平台 Workflow 面板仍是 Worktree 交付物的所有者。`batch_merger.py` 已经把成功 Batch 合入主分支后，面板条目仍会保留用于 Diff/恢复，不能再次点击平台「合并」造成重复集成；确认无误后按平台面板流程丢弃/清理该交付物。真实 Git 冲突必须保持 fail-closed，禁止 `ours`、`theirs`、`git merge -s ours`、`--no-verify`、删除一侧变更或直接修改主工作区。恢复使用 `parallel_batch_scheduler.py resume`、`parallel_batch_lifecycle.py monitor` 与 `batch_lease_manager.py reclaim`；`parallel_batch_lifecycle.py cleanup` 只记录清理，不删除平台 Worktree。
+并行模式的唯一调度状态源是 `.parallel-runs/<runId>/manifest.json`；平台 Workflow 面板仍是 Worktree 交付物的所有者。`batch_merger.py` 已经把成功 Batch 合入主分支后，面板条目仍会保留用于 Diff/恢复，不能再次点击平台「合并」造成重复集成；确认无误后按平台面板流程丢弃/清理该交付物。平台生成的 `.cmbdevclaw/workflows/**` journal、state 和 toolstream 文件不属于业务改动，合并和基线检查会精确排除它们；不得用 `git checkout -- .` 或 `git clean` 清理工作区。真实 Git 冲突必须保持 fail-closed，禁止 `ours`、`theirs`、`git merge -s ours`、`--no-verify`、删除一侧变更或直接修改主工作区。恢复使用 `parallel_batch_scheduler.py resume`、`parallel_batch_lifecycle.py monitor` 与 `batch_lease_manager.py reclaim`；`parallel_batch_lifecycle.py cleanup` 只记录清理，不删除平台 Worktree。
+
+不得手工删除 `.parallel-runs/<runId>`、复制孤立 worktree 文件、创建 Batch 分支或把 Batch 标成 `merged`。只有 `batch_merger.py` 成功写入 `mergeCommitSha` 后，Batch 才完成并释放下游依赖；`ensure`/`resume` 会对缺失该证据、主仓库脏文件或 HEAD 漂移 fail-closed，并返回原 runId。
 
 ## 写入边界
 

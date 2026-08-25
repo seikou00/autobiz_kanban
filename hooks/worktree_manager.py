@@ -23,7 +23,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.parallel_runtime import append_event, check_lease, load_manifest, run_lock, save_manifest
-from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root
+from hooks.repository_snapshot import (
+    PLATFORM_RUNTIME_DIRECTORY,
+    RepositorySnapshotError,
+    git_status_porcelain,
+    resolve_git_root,
+)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -47,6 +52,25 @@ def _parallel_binding(
     return manifest, batch, repository_ref, Path(repository["gitRoot"]).resolve()
 
 
+def _unstage_platform_runtime(worktree: Path) -> dict[str, Any] | None:
+    """Keep platform workflow journals out of the delivery commit.
+
+    Dynamic Workflow writes its own state under ``.cmbdevclaw`` while the
+    Batch agent runs.  A previous command may already have staged that state,
+    so an exclude pathspec on ``git add`` alone is insufficient.
+    """
+    staged = _git(worktree, "diff", "--cached", "--name-only", "--", PLATFORM_RUNTIME_DIRECTORY)
+    if staged.returncode != 0:
+        return {"success": False, "error": f"parallel_batch_staged_runtime_check_failed:{staged.stderr.strip()}"}
+    paths = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
+    if not paths:
+        return None
+    reset = _git(worktree, "reset", "--", *paths)
+    if reset.returncode != 0:
+        return {"success": False, "error": f"parallel_batch_unstage_runtime_failed:{reset.stderr.strip()}"}
+    return None
+
+
 def seal_parallel_batch(
     artifact_workspace: Path,
     feature: str,
@@ -65,13 +89,19 @@ def seal_parallel_batch(
             return {"success": False, "error": str(exc)}
         if batch.get("status") != "ready_to_merge" or batch.get("compileStatus") != "passed":
             return {"success": False, "error": f"parallel_batch_not_ready_to_seal:{batch_id}"}
+        raw_worktree = batch.get("worktreePath")
+        if not isinstance(raw_worktree, str) or not raw_worktree.strip():
+            return {"success": False, "error": f"parallel_worktree_missing:{batch_id}"}
+        worktree = Path(raw_worktree).resolve()
         try:
-            if repo_path is not None and resolve_git_root(repo_path) != git_root:
+            # ``git rev-parse --show-toplevel`` returns the linked worktree,
+            # not the primary checkout.  Compare the request to the stored
+            # worktree first; assert_batch_worktree_isolated below verifies it
+            # belongs to the primary repository's Git worktree registry.
+            if repo_path is not None and resolve_git_root(repo_path) != worktree:
                 return {"success": False, "error": f"parallel_repository_binding_mismatch:{repository_ref}"}
         except RepositorySnapshotError as exc:
             return {"success": False, "error": f"parallel_repository_binding_mismatch:{repository_ref}:{exc}"}
-
-        worktree = Path(str(batch.get("worktreePath") or "")).resolve()
         try:
             # Keep the isolation rule in one place.  It validates Git's live
             # worktree registry rather than a plugin-owned filesystem layout.
@@ -82,7 +112,10 @@ def seal_parallel_batch(
             return {"success": False, "error": f"parallel_worktree_invalid:{batch_id}"}
         if _git(worktree, "branch", "--show-current").stdout.strip() != batch.get("branchName"):
             return {"success": False, "error": f"parallel_worktree_branch_mismatch:{batch_id}"}
-        status = _git(worktree, "status", "--porcelain")
+        runtime_error = _unstage_platform_runtime(worktree)
+        if runtime_error:
+            return runtime_error
+        status = git_status_porcelain(worktree)
         if status.returncode != 0:
             return {"success": False, "error": f"parallel_worktree_status_failed:{status.stderr.strip()}"}
         changed = [line[3:] for line in status.stdout.splitlines() if len(line) > 3]
@@ -90,10 +123,25 @@ def seal_parallel_batch(
         if forbidden:
             return {"success": False, "error": "parallel_batch_artifact_changes_forbidden", "files": forbidden}
         if changed:
-            staged = _git(worktree, "add", "-A")
+            staged = _git(
+                worktree,
+                "add",
+                "-A",
+                "--",
+                ".",
+                f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
+            )
             if staged.returncode != 0:
                 return {"success": False, "error": f"parallel_batch_stage_failed:{staged.stderr.strip()}"}
-            committed = _git(worktree, "commit", "-m", f"autodev: implement {feature} {batch_id}")
+            committed = _git(
+                worktree,
+                "commit",
+                "-m",
+                f"autodev: implement {feature} {batch_id}",
+                "--",
+                ".",
+                f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
+            )
             if committed.returncode != 0:
                 return {"success": False, "error": f"parallel_batch_commit_failed:{committed.stderr.strip()}"}
         sha = _git(worktree, "rev-parse", "HEAD")

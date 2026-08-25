@@ -21,7 +21,8 @@ from hooks.parallel_runtime import (  # noqa: E402
     run_lock,
     save_manifest,
 )
-from hooks.repository_snapshot import resolve_git_root  # noqa: E402
+from hooks.repository_snapshot import git_status_porcelain, resolve_git_root  # noqa: E402
+from hooks.plan_writer import mark_parallel_batch_tasks_merged  # noqa: E402
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -122,7 +123,10 @@ def _rebase_native_delivery(
 
 
 def _dirty(repo: Path) -> list[str]:
-    return [line for line in _git(repo, "status", "--porcelain").stdout.splitlines() if line]
+    result = git_status_porcelain(repo)
+    if result.returncode != 0:
+        raise ValueError(f"git_status_failed:{repo}")
+    return [line for line in result.stdout.splitlines() if line]
 
 
 def preflight_merge(repo_path: Path, *, base_sha: str | None = None) -> dict[str, Any]:
@@ -193,7 +197,8 @@ def merge_run(
         plan_path = workspace / ".autobizdevops" / "features" / feature
         from hooks.plan_json import load_plan_bundle
         from hooks.parallel_runtime import mergeable_batches, plan_digest, ready_batches
-        if plan_digest(load_plan_bundle(plan_path)) != manifest.get("planDigest"):
+        bundle = load_plan_bundle(plan_path)
+        if plan_digest(bundle) != manifest.get("planDigest"):
             manifest["status"] = "blocked"
             save_manifest(workspace, feature, run_id, manifest)
             return {"success": False, "merged": [], "failed": [{"error": "parallel_plan_digest_changed"}], "totalConflicts": 0}
@@ -225,6 +230,23 @@ def merge_run(
                     return {"success": False, "merged": [], "failed": [{"error": "merge_dependency_cycle_or_unready_dependency"}], "totalConflicts": 0}
                 ids.extend(layer)
                 remaining.difference_update(layer)
+            if not ids:
+                pending = [
+                    str(batch_id)
+                    for batch_id, batch in manifest.get("batches", {}).items()
+                    if isinstance(batch, dict) and batch.get("status") != "merged"
+                ]
+                if pending:
+                    manifest["status"] = "blocked"
+                    save_manifest(workspace, feature, run_id, manifest)
+                    return {
+                        "success": False,
+                        "merged": [],
+                        "failed": [{"error": "parallel_merge_frontier_empty", "pendingBatches": pending}],
+                        "totalConflicts": 0,
+                        "mergeableBatches": [],
+                    }
+                return {"success": True, "merged": [], "failed": [], "totalConflicts": 0}
         unsealed = [bid for bid in ids if not manifest["batches"].get(bid, {}).get("commitSha")]
         if unsealed:
             manifest["status"] = "blocked"
@@ -358,6 +380,37 @@ def merge_run(
                     "conflicts": result.get("conflicts", []),
                 })
                 break
+            plan_batch = bundle.batches.get(batch_id)
+            batch_compile = plan_batch.get("batchCompile") if isinstance(plan_batch, dict) else None
+            if isinstance(batch_compile, dict) and batch_compile.get("status") == "passed":
+                plan_result = mark_parallel_batch_tasks_merged(
+                    workspace,
+                    feature,
+                    batch_id,
+                    merge_commit_sha=str(result.get("commitSha") or ""),
+                    delivery_run_id=run_id,
+                )
+                if not plan_result.ok:
+                    record["headSha"] = result.get("commitSha")
+                    for binding in manifest.get("repositories", {}).values():
+                        if isinstance(binding, dict) and isinstance(binding.get("gitRoot"), str) and str(Path(binding["gitRoot"]).resolve()) == root_key:
+                            binding["headSha"] = result.get("commitSha")
+                    failed.append({
+                        "batchId": batch_id,
+                        "repositoryRef": ref,
+                        "worktree": batch.get("worktreePath"),
+                        "error": "parallel_merge_plan_state_update_failed",
+                        "planWriterErrors": plan_result.errors or [],
+                        "sourceMerged": True,
+                    })
+                    batch.update(
+                        {
+                            "status": "needs_resolution",
+                            "mergeCommitSha": result.get("commitSha"),
+                            "error": "parallel_merge_plan_state_update_failed",
+                        }
+                    )
+                    break
             record["headSha"] = result.get("commitSha")
             for binding in manifest.get("repositories", {}).values():
                 if isinstance(binding, dict) and isinstance(binding.get("gitRoot"), str) and str(Path(binding["gitRoot"]).resolve()) == root_key:
@@ -386,9 +439,9 @@ def merge_run(
             manifest["status"] = "verifying" if all_merged else "running"
         else:
             for item in failed:
-                if item.get("batchId") in manifest.get("batches", {}):
+                if item.get("batchId") in manifest.get("batches", {}) and not item.get("sourceMerged"):
                     manifest["batches"][item["batchId"]].update({"status": "conflict", "error": item.get("error")})
-            manifest["status"] = "blocked"
+            manifest["status"] = "needs_resolution" if any(item.get("sourceMerged") for item in failed) else "blocked"
         save_manifest(workspace, feature, run_id, manifest)
         append_event(workspace, feature, run_id, "merge_completed", result=result)
         result["nextReadyBatches"] = ready_batches(manifest)

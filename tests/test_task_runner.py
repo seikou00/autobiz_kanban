@@ -474,6 +474,41 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_parallel_task_run_lock_only_blocks_unfinished_tasks_in_its_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, _code = _workspace(Path(tmp))
+            run_path = feature_dir / ".task-runs" / "T001" / "run-1.json"
+            run_path.parent.mkdir(parents=True)
+            run_path.write_text(
+                json.dumps(
+                    {
+                        "taskId": "T001",
+                        "runId": "run-1",
+                        "parallelRunId": "parallel-1",
+                        "batchId": "B001",
+                        "status": "in_progress",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                task_runner_module._active_parallel_batch_runs(feature_dir, "parallel-1", "B001"),
+                ["T001:run-1"],
+            )
+            self.assertEqual(
+                task_runner_module._active_parallel_batch_runs(feature_dir, "parallel-1", "B002"),
+                [],
+            )
+
+            state = json.loads(run_path.read_text(encoding="utf-8"))
+            state["status"] = "implemented"
+            run_path.write_text(json.dumps(state), encoding="utf-8")
+            self.assertEqual(
+                task_runner_module._active_parallel_batch_runs(feature_dir, "parallel-1", "B001"),
+                [],
+            )
+
     def test_revalidate_batch_compile_reruns_a_passed_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -662,6 +697,54 @@ class TaskRunnerTest(unittest.TestCase):
                 "B001.batch_compile_implementation_evidence_mismatch",
                 check_code_done(feature_dir),
             )
+
+    def test_parallel_compile_pass_waits_for_merge_before_marking_task_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            evidence_id = json.loads(finished.stdout)["implementationEvidenceId"]
+            compile_result = {
+                "compileStatus": "passed",
+                "commandId": "BATCH-B001-VAL-001",
+                "requestedCodeWorkspaces": [str(code.resolve())],
+                "workspaceSnapshotSha256": "b" * 64,
+                "implementationEvidenceByTask": {"T001": evidence_id},
+                "implementationRevisionByTask": {"T001": 1},
+            }
+            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
+                result = task_runner_module._integrate_batch_compile_result(
+                    workspace,
+                    "alpha",
+                    "B001",
+                    compile_result,
+                    parallel_run_id="cw-test-001",
+                )
+
+            self.assertEqual(result["requiredAction"], "ready_to_merge")
+            mark_parallel.assert_called_once()
+            compiled_batch = _read_batch(feature_dir)
+            self.assertEqual(compiled_batch["batchCompile"]["status"], "passed")
+            self.assertEqual(compiled_batch["tasks"][0]["status"], "implemented")
+
+            merged = plan_writer_module.mark_parallel_batch_tasks_merged(
+                workspace,
+                "alpha",
+                "B001",
+                merge_commit_sha="a" * 40,
+                delivery_run_id="cw-test-001",
+            )
+            self.assertTrue(merged.ok, merged.errors)
+            completed_batch = _read_batch(feature_dir)
+            self.assertEqual(completed_batch["tasks"][0]["status"], "done")
+            self.assertEqual(completed_batch["mergeCommitSha"], "a" * 40)
 
     def test_batch_compile_repair_does_not_adopt_test_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

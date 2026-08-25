@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -303,7 +304,7 @@ def _check_completion(
             for field in ("argv", "cwd", "kind", "required", "repo"):
                 if validation.get(field) != planned.get(field):
                     errors.append(f"{task_id}.validation_command_mismatch:{command_id}:{field}")
-    errors.extend(_check_batch_completion(plan, by_id))
+    errors.extend(_check_batch_completion(plan, by_id, feature_dir=feature_dir))
     return errors
 
 
@@ -316,6 +317,8 @@ def _check_completion(
 def _check_batch_completion(
     plan: dict[str, Any],
     by_id: dict[str, dict[str, Any]],
+    *,
+    feature_dir: Path | None = None,
 ) -> list[str]:
     """Validate the batch compile closure used by Code done gate."""
     errors: list[str] = []
@@ -372,6 +375,38 @@ def _check_batch_completion(
         }
         if compile_result.get("implementationRevisionByTask") != expected_revisions:
             errors.append(f"{batch_id}.batch_compile_implementation_revision_mismatch")
+
+    # Multi-Batch Code is executed exclusively through the fixed DAG workflow.
+    # A compile result is insufficient here: only the merger records the
+    # delivery and transitions the task from implemented to done.  Requiring a
+    # succeeded runtime manifest prevents a manually edited plan from bypassing
+    # the merge and final verification barriers.
+    if len(batch_plans) > 1:
+        run_ids: set[str] = set()
+        for batch_id, batch in batch_plans.items():
+            if not isinstance(batch, dict):
+                continue
+            merge_sha = batch.get("mergeCommitSha")
+            if not isinstance(merge_sha, str) or not merge_sha.strip():
+                errors.append(f"{batch_id}.parallel_merge_commit_missing")
+            run_id = batch.get("deliveryRunId")
+            if not isinstance(run_id, str) or not run_id.strip():
+                errors.append(f"{batch_id}.parallel_delivery_run_missing")
+            else:
+                run_ids.add(run_id)
+        if feature_dir is None:
+            errors.append("parallel_delivery_feature_dir_missing")
+        else:
+            for run_id in sorted(run_ids):
+                manifest_path = feature_dir / ".parallel-runs" / run_id / "manifest.json"
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    errors.append(f"parallel_delivery_manifest_missing:{run_id}")
+                    continue
+                verification = manifest.get("finalVerification") if isinstance(manifest, dict) else None
+                if manifest.get("status") != "succeeded" or not isinstance(verification, dict) or verification.get("passed") is not True:
+                    errors.append(f"parallel_delivery_not_verified:{run_id}")
     return errors
 
 

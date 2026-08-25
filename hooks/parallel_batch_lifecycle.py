@@ -29,6 +29,7 @@ from hooks.parallel_runtime import (
     save_manifest,
 )
 from hooks.worktree_manager import remove_parallel_worktree
+from hooks.repository_snapshot import git_status_porcelain
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -38,7 +39,10 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def detect_external_changes(repo_path: Path, base_sha: str, *, allow_paths: tuple[str, ...] = ()) -> dict[str, Any]:
     """Detect modifications made to the main checkout during a run."""
     head = _git(repo_path, "rev-parse", "HEAD").stdout.strip()
-    status = [line for line in _git(repo_path, "status", "--porcelain").stdout.splitlines() if line]
+    status_result = git_status_porcelain(repo_path)
+    if status_result.returncode != 0:
+        raise ValueError(f"parallel_external_changes_status_unavailable:{repo_path}")
+    status = [line for line in status_result.stdout.splitlines() if line]
     changed = [line[3:] if len(line) > 3 else line for line in status]
     unexpected = [
         path for path in changed

@@ -73,7 +73,23 @@ def test_fixed_workflow_entrypoint():
         print("✗ launcher 未返回固定 workflow 脚本")
         return False
     content = workflow_script.read_text(encoding="utf-8")
-    checks = ["await parallel", "worktree_manager.py", "batch_merger.py", "resume --workspace", "parallel_final_verify.py", "batchTaskIds", "不要用 read_file 读取 artifact 目录"]
+    checks = [
+        "await parallel",
+        "worktree_manager.py",
+        "batch_merger.py",
+        "schedulerPath}\" ensure",
+        "resume --workspace",
+        "isolation: \"worktree\"",
+        "parallel_final_verify.py",
+        "batchTaskIds",
+        "不要用 read_file 读取 artifact 目录",
+        "function usableString",
+        "invalid_code_workspace_path",
+        "不得创建任何 workflow",
+        "required: [\"batchId\", \"status\", \"compileStatus\", \"worktreePath\", \"branchName\", \"commitSha\"]",
+        "parallel_scheduler_stalled",
+        "errorMessage",
+    ]
     missing = [check for check in checks if check not in content]
     if missing:
         print(f"✗ 固定脚本缺少执行协议: {', '.join(missing)}")
@@ -103,6 +119,8 @@ def test_skill_integration():
         ("workflow_launcher.py", "启动器引用"),
         ("platform_dynamic_worktrees", "平台 Worktree 隔离说明"),
         ("isolation: \"worktree\"", "平台隔离阶段说明"),
+        ("不得调用不存在的 `hooks/code_session.py`", "废弃 Code 会话入口保护"),
+        ("mergeCommitSha", "合并证据保护"),
     ]
 
     all_passed = True

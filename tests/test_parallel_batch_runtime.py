@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 
-from hooks.batch_merger import merge_run
+from hooks.batch_merger import merge_run, preflight_merge
 from hooks.parallel_batch_lifecycle import cleanup_run, rollback_run
 from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import (
@@ -18,15 +18,19 @@ from hooks.parallel_runtime import (
     load_manifest,
     plan_digest,
     reclaim_lease,
+    ready_batches,
     release_lease,
     resource_groups,
     run_lock,
     save_manifest,
 )
+from hooks.repository_snapshot import git_status_porcelain
 from hooks.parallel_batch_scheduler import (
     assert_batch_worktree_isolated,
     create_run as _create_run,
+    ensure_run,
     mark_batch,
+    resume_run,
     schedule,
     validate_plan_for_parallel,
 )
@@ -109,6 +113,279 @@ def _seal_native_worktree(
 
 
 class ParallelBatchRuntimeTest(unittest.TestCase):
+    def test_ensure_reuses_existing_scheduler_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+
+            reused = ensure_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+
+            self.assertTrue(reused["reused"])
+            self.assertEqual(reused["runId"], created["runId"])
+            self.assertEqual(reused["scheduledGroups"], [["B001"]])
+
+    def test_ensure_preserves_needs_resolution_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            mark_batch(workspace, "alpha", created["runId"], "B001", "needs_resolution")
+
+            ensured = ensure_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+
+            self.assertEqual(ensured["runId"], created["runId"])
+            self.assertEqual(ensured["status"], "needs_resolution")
+            self.assertTrue(ensured["recoveryRequired"])
+            self.assertEqual(ensured["scheduledGroups"], [])
+
+    def test_ensure_blocks_merged_batch_without_a_merge_commit(self) -> None:
+        """A legacy/corrupt merged flag must never release dependent work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            _add_second_compile_only_batch(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            manifest = load_manifest(workspace, "alpha", created["runId"])
+            manifest["batches"]["B001"].update({"status": "merged", "mergeCommitSha": None})
+            save_manifest(workspace, "alpha", created["runId"], manifest)
+
+            ensured = ensure_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+
+            self.assertTrue(ensured["reused"])
+            self.assertEqual(ensured["runId"], created["runId"])
+            self.assertEqual(ensured["status"], "blocked")
+            self.assertEqual(ensured["scheduledGroups"], [])
+            self.assertIn("parallel_batch_merge_evidence_required:B001", ensured["errors"])
+            self.assertEqual(load_manifest(workspace, "alpha", created["runId"])["batches"]["B001"]["status"], "blocked")
+
+    def test_ensure_blocks_shared_source_head_drift_without_a_second_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            (repo / "external.txt").write_text("outside run\n", encoding="utf-8")
+            task_runner_git(repo, "add", "external.txt")
+            task_runner_git(repo, "commit", "-m", "external source change")
+
+            ensured = ensure_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+
+            self.assertTrue(ensured["reused"])
+            self.assertEqual(ensured["runId"], created["runId"])
+            self.assertEqual(ensured["status"], "blocked")
+            self.assertTrue(any(error.startswith("parallel_repository_head_changed:default:") for error in ensured["errors"]))
+
+    def test_worker_facing_mark_batch_cannot_mark_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+
+            with self.assertRaisesRegex(ValueError, "parallel_batch_merge_owner_required:B001"):
+                mark_batch(workspace, "alpha", created["runId"], "B001", "merged")
+
+    def test_resume_preserves_conflicting_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            manifest = load_manifest(workspace, "alpha", created["runId"])
+            manifest["batches"]["B001"].update({"status": "conflict", "error": "merge_conflict"})
+            save_manifest(workspace, "alpha", created["runId"], manifest)
+
+            resumed = resume_run(workspace, "alpha", created["runId"])
+
+            self.assertEqual(resumed["status"], "needs_resolution")
+            self.assertTrue(resumed["recoveryRequired"])
+            self.assertEqual(resumed["scheduledGroups"], [])
+
+    def test_final_verify_rejects_merged_batch_without_merge_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            manifest = load_manifest(workspace, "alpha", created["runId"])
+            manifest["batches"]["B001"].update({"status": "merged", "mergeCommitSha": None})
+            manifest["status"] = "succeeded"
+            save_manifest(workspace, "alpha", created["runId"], manifest)
+
+            with self.assertRaisesRegex(ValueError, "parallel_final_verify_merge_commit_missing:B001"):
+                verify_final(workspace, "alpha", created["runId"])
+
+    def test_resume_blocks_when_sealed_platform_delivery_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = scheduled["runId"]
+            lease = acquire_lease(workspace, "alpha", run_id, "B001")
+            delivery = _create_native_worktree(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                repo,
+                lease["ownerToken"],
+            )
+            self.assertTrue(delivery["success"], delivery)
+            tree = Path(delivery["worktreePath"])
+            (tree / "delivery.txt").write_text("sealed\n", encoding="utf-8")
+            runtime_file = tree / ".cmbdevclaw" / "workflows" / "batch.journal"
+            runtime_file.parent.mkdir(parents=True)
+            runtime_file.write_text("platform runtime\n", encoding="utf-8")
+            mark_batch(workspace, "alpha", run_id, "B001", "ready_to_merge", compileStatus="passed")
+            sealed = _seal_native_worktree(workspace, "alpha", run_id, "B001", tree, lease["ownerToken"])
+            self.assertTrue(sealed["success"], sealed)
+            committed_files = _git(tree, "show", "--format=", "--name-only", sealed["commitSha"]).splitlines()
+            self.assertIn("delivery.txt", committed_files)
+            self.assertNotIn(".cmbdevclaw/workflows/batch.journal", committed_files)
+            release_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"], final_status="ready_to_merge")
+            subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=repo, check=True)
+
+            resumed = resume_run(workspace, "alpha", run_id)
+
+            self.assertEqual(resumed["status"], "blocked")
+            self.assertTrue(resumed["recoveryRequired"])
+            self.assertIn("platform_worktree_delivery_missing:B001:worktree", resumed["errors"])
+
+    def test_unsealed_batch_cannot_be_released_or_report_an_empty_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _feature_dir, repo = _workspace(Path(tmp))
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = scheduled["runId"]
+            lease = acquire_lease(workspace, "alpha", run_id, "B001")
+            delivery = _create_native_worktree(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                None,
+                lease["ownerToken"],
+            )
+            self.assertTrue(delivery["success"], delivery)
+            mark_batch(workspace, "alpha", run_id, "B001", "ready_to_merge", compileStatus="passed")
+
+            with self.assertRaisesRegex(ValueError, "parallel_batch_not_sealed:B001"):
+                release_lease(
+                    workspace,
+                    "alpha",
+                    run_id,
+                    "B001",
+                    lease["ownerToken"],
+                    final_status="ready_to_merge",
+                )
+            self.assertTrue(check_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"]))
+
+            resumed = resume_run(workspace, "alpha", run_id)
+            self.assertEqual(resumed["status"], "blocked")
+            self.assertIn("parallel_batch_seal_required:B001", resumed["errors"])
+
+            merged = merge_run(workspace, "alpha", run_id)
+            self.assertFalse(merged["success"])
+            self.assertEqual(merged["failed"][0]["error"], "parallel_merge_frontier_empty")
+            self.assertEqual(merged["failed"][0]["pendingBatches"], ["B001"])
+
+    def test_platform_workflow_runtime_files_do_not_dirty_merge_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _feature_dir, repo = _workspace(Path(tmp))
+            runtime_file = repo / ".cmbdevclaw" / "workflows" / "run.journal"
+            runtime_file.parent.mkdir(parents=True)
+            runtime_file.write_text("initial\n", encoding="utf-8")
+            task_runner_git(repo, "add", ".cmbdevclaw/workflows/run.journal")
+            task_runner_git(repo, "commit", "-m", "track runtime fixture")
+            runtime_file.write_text("changed by platform\n", encoding="utf-8")
+
+            self.assertTrue(preflight_merge(repo)["ok"])
+            (repo / "business.txt").write_text("must block\n", encoding="utf-8")
+            preflight = preflight_merge(repo)
+            self.assertFalse(preflight["ok"])
+            self.assertEqual(preflight["error"], "main_worktree_dirty")
+            self.assertEqual(len(preflight["changes"]), 1)
+
     def test_partial_rollback_run_can_be_cleaned(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -301,7 +578,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             for worktree in deliveries:
                 task_runner_git(repo, "worktree", "remove", str(worktree))
 
-    def test_scheduler_bootstraps_dirty_repository_without_manual_commit(self) -> None:
+    def test_scheduler_rejects_dirty_repository_without_explicit_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -309,6 +586,37 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             _add_second_compile_only_batch(feature_dir)
             (repo / "existing.txt").write_text("changed before Code\n", encoding="utf-8")
             (repo / "uncommitted.txt").write_text("preserve this baseline\n", encoding="utf-8")
+            runtime = repo / ".cmbdevclaw" / "setup-state.json"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text("platform runtime\n", encoding="utf-8")
+            task_runner_git(repo, "add", str(runtime.relative_to(repo)))
+
+            before_head = _git(repo, "rev-parse", "HEAD")
+            with self.assertRaisesRegex(ValueError, "parallel_code_workspace_bootstrap_required:dirty_worktree"):
+                create_run(
+                    workspace,
+                    "alpha",
+                    max_parallel=4,
+                    timeout_seconds=60,
+                    code_workspaces=[str(repo)],
+                )
+
+            self.assertEqual(_git(repo, "rev-parse", "HEAD"), before_head)
+            self.assertIn("existing.txt", _git(repo, "status", "--porcelain"))
+            self.assertFalse((feature_dir / ".parallel-runs").exists())
+
+    def test_scheduler_bootstraps_dirty_repository_only_when_explicitly_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            _add_second_compile_only_batch(feature_dir)
+            (repo / "existing.txt").write_text("changed before Code\n", encoding="utf-8")
+            (repo / "uncommitted.txt").write_text("preserve this baseline\n", encoding="utf-8")
+            runtime = repo / ".cmbdevclaw" / "setup-state.json"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text("platform runtime\n", encoding="utf-8")
+            task_runner_git(repo, "add", str(runtime.relative_to(repo)))
 
             scheduled = create_run(
                 workspace,
@@ -316,10 +624,13 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 max_parallel=4,
                 timeout_seconds=60,
                 code_workspaces=[str(repo)],
+                allow_bootstrap=True,
             )
 
-            self.assertTrue(_git(repo, "status", "--porcelain") == "")
+            self.assertEqual(git_status_porcelain(repo).stdout, "")
+            self.assertIn("?? .cmbdevclaw/", _git(repo, "status", "--porcelain"))
             self.assertEqual(_git(repo, "show", "-s", "--format=%s", "HEAD"), "autodev: bootstrap alpha baseline")
+            self.assertNotIn(".cmbdevclaw/setup-state.json", _git(repo, "show", "--format=", "--name-only", "HEAD"))
             manifest = load_manifest(workspace, "alpha", scheduled["runId"])
             bootstrap = manifest["repositories"]["default"]["bootstrap"]
             self.assertTrue(bootstrap["performed"])
@@ -349,6 +660,28 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 "preserve this baseline\n",
             )
 
+    def test_scheduler_ignores_platform_runtime_when_source_is_otherwise_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            runtime = repo / ".cmbdevclaw" / "workflows" / "thread" / "journal"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text("platform runtime\n", encoding="utf-8")
+
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+
+            manifest = load_manifest(workspace, "alpha", scheduled["runId"])
+            additions = manifest["repositories"]["default"]["runtimeIgnoreAdditions"]
+            self.assertNotIn(".cmbdevclaw/workflows/", additions)
+            self.assertEqual(manifest["repositories"]["default"]["bootstrap"]["reason"], None)
+
     def test_scheduler_initializes_unborn_repository_and_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -365,6 +698,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 max_parallel=4,
                 timeout_seconds=60,
                 code_workspaces=[str(repo)],
+                allow_bootstrap=True,
             )
 
             self.assertTrue((repo / ".git").is_dir())
@@ -522,9 +856,17 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(web_tree["success"])
             (Path(api_tree["worktreePath"]) / "api-change.txt").write_text("api\n", encoding="utf-8")
             (Path(web_tree["worktreePath"]) / "web-change.txt").write_text("web\n", encoding="utf-8")
-            for batch_id, repo in (("B001", api), ("B002", web)):
+            deliveries = {"B001": api_tree, "B002": web_tree}
+            for batch_id in ("B001", "B002"):
                 mark_batch(workspace, "alpha", run_id, batch_id, "ready_to_merge", compileStatus="passed")
-                sealed = _seal_native_worktree(workspace, "alpha", run_id, batch_id, repo, leases[batch_id]["ownerToken"])
+                sealed = _seal_native_worktree(
+                    workspace,
+                    "alpha",
+                    run_id,
+                    batch_id,
+                    Path(deliveries[batch_id]["worktreePath"]),
+                    leases[batch_id]["ownerToken"],
+                )
                 self.assertTrue(sealed["success"])
                 release_lease(workspace, "alpha", run_id, batch_id, leases[batch_id]["ownerToken"], final_status="ready_to_merge")
             merged = merge_run(workspace, "alpha", run_id)
@@ -747,6 +1089,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 },
             }
             (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(ready_batches(manifest), [])
             with self.assertRaisesRegex(ValueError, "parallel_batch_dependency_incomplete:B002:B001"):
                 acquire_lease(workspace, feature, run, "B002")
 

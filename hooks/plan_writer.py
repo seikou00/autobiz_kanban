@@ -1237,6 +1237,9 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             "taskIds": task_ids_list,
             "batchValidation": batch_validation,
             **({"batchCompile": previous.get("batchCompile")} if "batchCompile" in previous else {}),
+            **({"mergeCommitSha": previous.get("mergeCommitSha")} if "mergeCommitSha" in previous else {}),
+            **({"deliveryRunId": previous.get("deliveryRunId")} if "deliveryRunId" in previous else {}),
+            **({"mergedAt": previous.get("mergedAt")} if "mergedAt" in previous else {}),
             "startedAt": previous.get("startedAt"),
             "completedAt": previous.get("completedAt") if status == "done" else None,
             "tasks": batch_tasks,
@@ -1260,6 +1263,8 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
                 "deps": sorted(cross_deps),
                 "taskIds": [str(task.get("id")) for task in batch_tasks],
                 "status": status,
+                **({"mergeCommitSha": previous.get("mergeCommitSha")} if "mergeCommitSha" in previous else {}),
+                **({"deliveryRunId": previous.get("deliveryRunId")} if "deliveryRunId" in previous else {}),
             }
         )
     root["batches"] = root_entries
@@ -4774,6 +4779,63 @@ def mark_batch_tasks_done_after_compile(
         if not result.ok:
             return result
         return result
+
+
+def mark_parallel_batch_tasks_merged(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    *,
+    merge_commit_sha: str,
+    delivery_run_id: str,
+) -> WriterResult:
+    """Complete a parallel Batch only after its sealed delivery is merged.
+
+    A successful compile proves the Worktree can build, but it does not prove
+    the source checkout contains the implementation.  The scheduler uses this
+    transition as the only path from ``implemented`` to ``done`` for parallel
+    Batch execution.
+    """
+    if not merge_commit_sha:
+        return fail("parallel_merge_commit_sha_required", batch_id, path=_path(workspace, feature))
+    if not delivery_run_id:
+        return fail("parallel_delivery_run_id_required", batch_id, path=_path(workspace, feature))
+    with _plan_lock(workspace, feature):
+        data = _load(workspace, feature)
+        if not defer_to_test_stages_enabled(data):
+            return fail("defer_to_test_stages_not_enabled", batch_id, path=_path(workspace, feature))
+        batch_plans = data.get("_batchPlans")
+        batch_plan = batch_plans.get(batch_id) if isinstance(batch_plans, dict) else None
+        if not isinstance(batch_plan, dict):
+            return fail("batch_not_found", batch_id, path=_path(workspace, feature))
+        batch_compile = batch_plan.get("batchCompile")
+        if not isinstance(batch_compile, dict) or batch_compile.get("status") != "passed":
+            return fail("batch_compile_not_passed", batch_id, path=_path(workspace, feature))
+        existing_commit = batch_plan.get("mergeCommitSha")
+        if isinstance(existing_commit, str) and existing_commit and existing_commit != merge_commit_sha:
+            return fail("parallel_batch_merge_commit_mismatch", batch_id, path=_path(workspace, feature))
+        task_ids = batch_plan.get("taskIds", [])
+        if not isinstance(task_ids, list):
+            return fail("batch_task_ids_invalid", batch_id, path=_path(workspace, feature))
+        for task in data.get("tasks", []):
+            if not isinstance(task, dict) or task.get("id") not in task_ids:
+                continue
+            status = normalize_status(task.get("status"))
+            if status == "implemented":
+                task["status"] = "done"
+            elif status != "done":
+                return fail(
+                    "parallel_batch_task_not_implemented",
+                    f"batch={batch_id};task={task.get('id')};status={status}",
+                    path=_path(workspace, feature),
+                )
+        batch_plan["mergeCommitSha"] = merge_commit_sha
+        batch_plan["deliveryRunId"] = delivery_run_id
+        batch_plan["mergedAt"] = _utc_now()
+        data["status"] = "in_progress"
+        data["activeBatchId"] = None
+        data["nextBatchId"] = None
+        return _write(workspace, feature, data)
 
 
 

@@ -14,7 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.evidence_integrity_gate import check_code_done, check_integrity, check_plan_evidence_refs  # noqa: E402
+from hooks.evidence_integrity_gate import (  # noqa: E402
+    _check_batch_completion,
+    check_code_done,
+    check_integrity,
+    check_plan_evidence_refs,
+)
 from hooks.evidence_store import (  # noqa: E402
     EvidenceStoreError,
     append_evidence,
@@ -1307,6 +1312,46 @@ class EvidenceStoreTest(unittest.TestCase):
 
 
 class EvidenceGateTest(unittest.TestCase):
+    def test_multi_batch_code_done_requires_merged_verified_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            feature_dir = Path(tmp) / "alpha"
+            feature_dir.mkdir()
+            batch = {
+                "tasks": [],
+                "batchCompile": {
+                    "status": "passed",
+                    "commandId": "BATCH-VAL-001",
+                    "implementationEvidenceByTask": {},
+                    "implementationRevisionByTask": {},
+                },
+                "batchValidation": {
+                    "commands": [{"id": "BATCH-VAL-001", "kind": "compile", "required": True}],
+                },
+            }
+            plan = {
+                "taskValidationPolicy": {
+                    "mode": "defer_to_test_stages",
+                    "orchestration": "inline",
+                    "codeGate": "batch_compile_only",
+                },
+                "_bundleBatches": {"B001": dict(batch), "B002": dict(batch)},
+            }
+
+            errors = _check_batch_completion(plan, {}, feature_dir=feature_dir)
+            self.assertIn("B001.parallel_merge_commit_missing", errors)
+            self.assertIn("B002.parallel_delivery_run_missing", errors)
+
+            for item in plan["_bundleBatches"].values():
+                item["mergeCommitSha"] = "a" * 40
+                item["deliveryRunId"] = "cw-test-001"
+            manifest_path = feature_dir / ".parallel-runs" / "cw-test-001" / "manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps({"status": "succeeded", "finalVerification": {"passed": True}}),
+                encoding="utf-8",
+            )
+            self.assertEqual(_check_batch_completion(plan, {}, feature_dir=feature_dir), [])
+
     def test_code_done_gate_requires_structured_done_plan_and_runner_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "alpha"

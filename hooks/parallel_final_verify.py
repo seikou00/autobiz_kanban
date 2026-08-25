@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_runtime import append_event, load_manifest, plan_digest, run_dir, run_lock, save_manifest
 from hooks.plan_json import load_plan_bundle
+from hooks.repository_snapshot import git_status_porcelain
 from hooks.task_runner import TaskRunnerError, _run_validation
 from hooks.validation_policy import command_policy_errors, compile_only_command_errors
 
@@ -66,6 +67,24 @@ def _commands(bundle: Any) -> list[tuple[str, dict[str, Any]]]:
 def verify_final(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        batches = manifest.get("batches", {})
+        missing_merge_evidence = [
+            batch_id
+            for batch_id, item in batches.items()
+            if isinstance(item, dict)
+            and item.get("status") == "merged"
+            and not (isinstance(item.get("mergeCommitSha"), str) and item["mergeCommitSha"].strip())
+        ]
+        if missing_merge_evidence:
+            raise ValueError(
+                "parallel_final_verify_merge_commit_missing:" + ",".join(sorted(missing_merge_evidence))
+            )
+        incomplete = [
+            batch_id for batch_id, item in batches.items()
+            if not isinstance(item, dict) or item.get("status") != "merged"
+        ]
+        if incomplete:
+            raise ValueError("parallel_final_verify_incomplete_batches:" + ",".join(incomplete))
         repositories = manifest.get("repositories", {})
         if not isinstance(repositories, dict) or not repositories:
             raise ValueError("parallel_final_verify_repository_bindings_missing")
@@ -73,7 +92,7 @@ def verify_final(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
             if not isinstance(repository, dict) or not isinstance(repository.get("gitRoot"), str):
                 raise ValueError(f"parallel_final_verify_repository_invalid:{ref}")
             root = Path(repository["gitRoot"])
-            dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True)
+            dirty = git_status_porcelain(root)
             if dirty.returncode != 0:
                 raise ValueError(f"parallel_final_verify_repository_invalid:{ref}")
             if dirty.stdout.strip():
@@ -85,12 +104,6 @@ def verify_final(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
         bundle = load_plan_bundle(workspace / ".autobizdevops" / "features" / feature)
         if plan_digest(bundle) != manifest.get("planDigest"):
             raise ValueError("parallel_plan_digest_changed")
-        incomplete = [
-            batch_id for batch_id, item in manifest.get("batches", {}).items()
-            if not isinstance(item, dict) or item.get("status") != "merged"
-        ]
-        if incomplete:
-            raise ValueError("parallel_final_verify_incomplete_batches:" + ",".join(incomplete))
         commands = _commands(bundle)
         if not commands:
             raise ValueError("parallel_final_compile_commands_missing")

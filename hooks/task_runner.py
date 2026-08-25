@@ -786,7 +786,7 @@ def _evidence_only_exploration_staleness(exploration: dict[str, Any]) -> bool:
             isinstance(reason, str) and reason.startswith("implementation_evidence_invalid:")
             for reason in stale_reasons
         )
-    )
+        )
 
 
 def _start_task_unlocked(
@@ -2674,6 +2674,10 @@ def _resume_task_unlocked(
     task_id: str,
     code_workspace: Path | list[Path],
     run_id: str,
+    *,
+    parallel_run_id: str | None = None,
+    lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     _, batch_id, task = _load_plan_and_task(feature_dir, task_id)
@@ -2711,14 +2715,34 @@ def _resume_task_unlocked(
         raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
     if state.get("batchId") is not None and state.get("batchId") != batch_id:
         raise TaskRunnerError(f"task_batch_changed_after_start:{task_id}")
+    state_parallel_run_id = state.get("parallelRunId")
+    if state_parallel_run_id is not None and state_parallel_run_id != parallel_run_id:
+        raise TaskRunnerError(
+            f"parallel_task_run_context_mismatch:{task_id}",
+            requiredAction="resume_with_original_parallel_batch_context",
+        )
+    if parallel_run_id is not None:
+        _assert_parallel_context(
+            workspace,
+            feature,
+            parallel_run_id,
+            batch_id,
+            lease_token,
+            code_workspace,
+        )
     requested_workspaces = (
         [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
     )
-    repositories = _resolve_repositories(requested_workspaces)
+    repositories = _resolve_repositories(requested_workspaces, workspace_ref)
     _assert_repositories_match(state, repositories)
     _assert_requested_workspaces_match(state, requested_workspaces, repositories)
     _assert_runtime_artifacts_ignored(repositories)
-    active = _active_feature_runs(feature_dir, exclude=path)
+    active = (
+        _active_parallel_batch_runs(feature_dir, parallel_run_id, batch_id)
+        if parallel_run_id is not None
+        else _active_feature_runs(feature_dir, exclude=path)
+    )
+    active = [item for item in active if item != f"{task_id}:{run_id}"]
     if active:
         active_tasks = sorted({item.partition(":")[0] for item in active})
         if task_id in active_tasks:
@@ -2738,6 +2762,7 @@ def _resume_task_unlocked(
         task_id,
         "in_progress",
         expected_task_contract_sha256=str(state["taskContractSha256"]),
+        parallel=parallel_run_id is not None,
     )
     if not result.ok:
         raise TaskRunnerError("plan_status_update_failed")
@@ -3103,10 +3128,23 @@ def resume_task(
     task_id: str,
     code_workspace: Path | list[Path],
     run_id: str,
+    *,
+    parallel_run_id: str | None = None,
+    lease_token: str | None = None,
+    workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     feature_dir = _feature_dir(workspace, feature)
     with _task_run_lock(feature_dir):
-        return _resume_task_unlocked(workspace, feature, task_id, code_workspace, run_id)
+        return _resume_task_unlocked(
+            workspace,
+            feature,
+            task_id,
+            code_workspace,
+            run_id,
+            parallel_run_id=parallel_run_id,
+            lease_token=lease_token,
+            workspace_ref=workspace_ref,
+        )
 
 
 
@@ -3478,30 +3516,16 @@ def _integrate_batch_compile_result(
         raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
 
     if not result.ok:
+        errors = result.errors or []
+        primary_error = errors[0] if errors else {}
         raise TaskRunnerError(
-            result.error_code,
-            detail=result.detail,
+            str(primary_error.get("reason", "batch_compile_plan_status_update_failed")),
+            detail=primary_error.get("detail"),
             path=str(result.path) if result.path else None,
         )
 
     compile_status = compile_result.get("compileStatus")
     if compile_status == "passed":
-        # 编译通过后，将批次中的所有 implemented 任务标记为 done
-        try:
-            mark_result = mark_batch_tasks_done_after_compile(
-                workspace,
-                feature,
-                batch_id,
-                parallel=parallel_run_id is not None,
-            )
-            if not mark_result.ok:
-                raise TaskRunnerError(
-                    "mark_batch_tasks_done_after_compile_failed",
-                    planWriterErrors=mark_result.errors or [],
-                )
-        except PlanWriterInputError as exc:
-            raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
-
         if parallel_run_id is not None:
             mark_parallel_batch(
                 workspace,
@@ -3517,6 +3541,21 @@ def _integrate_batch_compile_result(
                 "batchId": batch_id,
                 "parallelRunId": parallel_run_id,
             }
+        # A non-parallel Batch has no independent delivery merge barrier.
+        try:
+            mark_result = mark_batch_tasks_done_after_compile(
+                workspace,
+                feature,
+                batch_id,
+                parallel=False,
+            )
+            if not mark_result.ok:
+                raise TaskRunnerError(
+                    "mark_batch_tasks_done_after_compile_failed",
+                    planWriterErrors=mark_result.errors or [],
+                )
+        except PlanWriterInputError as exc:
+            raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
         return {
             "compileStatus": "passed",
             "requiredAction": "code_done_ready",
@@ -3848,7 +3887,16 @@ def _cmd_abort(args: argparse.Namespace) -> int:
 def _cmd_resume(args: argparse.Namespace) -> int:
     try:
         workspace, feature, code_workspace = _resolve(args)
-        state = resume_task(workspace, feature, args.task_id, code_workspace, args.run_id)
+        state = resume_task(
+            workspace,
+            feature,
+            args.task_id,
+            code_workspace,
+            args.run_id,
+            parallel_run_id=args.parallel_run_id,
+            lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
+        )
         return _emit(True, **state)
     except (TaskRunnerError, ValueError) as exc:
         return _emit_error(exc)
