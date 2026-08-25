@@ -36,6 +36,24 @@ class ReviewerHandoffContractTest(unittest.TestCase):
         self.assertIn("通过用户确认把 reviewer 与 executor 分隔到不同回合", skill)
         self.assertIn("未获得确认前", skill)
 
+    def test_reviewer_receives_pre_utest_stage_contract(self) -> None:
+        skill = REVIEWER_SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("Review 位于 Code 之后、UTest/E2E 之前", skill)
+        self.assertIn("不执行这些命令", skill)
+        self.assertIn("不检查目标测试目录或测试文件是否存在", skill)
+        self.assertIn("验证错误、`test_gap`、`requirement_gap` 或 `unfinished_work`", skill)
+        self.assertIn("不形成 blocker、warning 或交给 executor 修复", skill)
+        self.assertIn("completion proposal 声称已执行", skill)
+
+    def test_parent_does_not_repair_invalid_pre_utest_finding(self) -> None:
+        skill = REVIEWER_SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("该 verdict 违反 `Stage contract`", skill)
+        self.assertIn("不修改源码、PLAN 或测试", skill)
+        self.assertIn("重新启动 reviewer 一次", skill)
+        self.assertIn("不记为代码 blocker", skill)
+
     def test_report_discloses_review_execution_mode(self) -> None:
         schema = REVIEWER_SCHEMA.read_text(encoding="utf-8")
 

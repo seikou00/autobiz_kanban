@@ -61,6 +61,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval
 
 - `Feature directory:` `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`。
 - `Review execution mode:` `independent_task` 或 `inline_main_agent`。
+- `Stage contract:` Review 位于 Code 之后、UTest/E2E 之前；PLAN 中 TASK 的 `validationCommands` 与 `validationTestPlan` 是下游生成测试代码时的验证契约。reviewer 不执行这些命令，不检查目标测试目录或测试文件是否存在，不因测试资产尚未生成将其记为验证错误、`test_gap`、`requirement_gap` 或 `unfinished_work`，也不形成 blocker、warning 或交给 executor 修复。只核对验证意图是否完整对应 specs 的 Requirement / Scenario。completion proposal 声称已执行的测试、lint、build 仍必须核验真实证据。
 - `PRD references:` completion proposal 中的 Feature PRD 与用户提供 PRD 路径列表；没有则写 none。
 - `User repository references:`（可选）仅当流程需要 reviewer 核对用户主动输入的仓库是否被 proposal 遗漏时附带；否则省略，reviewer 只以 proposal 和真实仓库状态为依据。
 
@@ -79,6 +80,7 @@ reviewer 自己通过工具获取真实仓库状态并直接写 `REQUIREMENTS_EV
 
 FAIL 修复规则：
 
+- finding 若仅因 PLAN 的测试验证命令当前缺少 UTest/E2E 尚未生成的测试资产而成立，该 verdict 违反 `Stage contract`；不修改源码、PLAN 或测试，携带原 `Stage contract` 重新启动 reviewer 一次。同一结论再次出现时停止，报告 reviewer 契约失败，不记为代码 blocker。
 - 只修复 `REQUIREMENTS_EVAL.md` 中使 verdict 变为 FAIL 的 blockers 或明确 must fix 项。
 - 不要替 reviewer 改写 `REQUIREMENTS_EVAL.md`；修复后必须重新指定 `reviewer-autodev` 角色生成新版评估。
 - 每轮修复后必须更新 `completion-proposal.json`，使 files_changed、behavior_changed、verification、known_limitations 与真实状态一致。
