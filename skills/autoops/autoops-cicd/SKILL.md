@@ -1,7 +1,7 @@
 ---
 name: autoops-cicd
-description: CI/CD 阶段技能。
-version: v1.1.0811
+description: 生成 CI/CD 清单与 PR 描述，使用 DevClaw 提交当前 Feature 代码，并处理流水线构建与阻断。
+version: v1.2.08251
 author: zhangQiuFeng
 ---
 
@@ -33,6 +33,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 - 用户希望生成发布前检查清单
 - 用户希望准备 PR 描述
+- 用户希望使用 DevClaw 提交当前 Feature 代码
 - 用户希望触发或跟踪流水线构建
 - 用户希望整理流水线阻断问题并沉淀到过程文档
 
@@ -70,6 +71,14 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress 
 - **需求文档状态:** 缺失/未提供
 - **影响:** 仅能按当前代码仓库状态生成 CI/CD 清单，后续需人工复核需求一致性
 ```
+
+### 提交代码
+
+1. 用户要求提交代码时，只纳入当前 Feature 的代码与 CI/CD 产物。
+2. 先单独执行 `git add`；成功后再单独执行 `git commit`，不得使用 `&&` 合并两条命令。
+3. `git commit` 会打开 DevClaw 提交卡片。等待用户完成卡片，仅命令成功返回后才视为提交完成。
+4. 用户取消卡片、未选择任务卡片或命令失败时，告知用户改动已暂存但未提交，保持 `cicd_in_progress`，不得自动重试。
+5. `git push`、创建 PR 或合并需用户明确授权。
 
 ### 构建流水线
 
@@ -109,10 +118,9 @@ python "${pluginPath}/skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py"
 
 ### 用户确认后完成阶段
 
-1. 本技能不得执行 git 写命令
-2. 请用户确认 CI/CD 是否完成时，按共享 `ask-user-question.md` 协议发起选择，选项至少包含 `已完成、推进到 cicd_done (Recommended)` / `尚未完成、保持当前状态`；若当前模式不支持 `request_user_input`，必须显式追问：`CI/CD 是否已完成？请回复“已完成”或“未完成”。`
-3. 只有在用户明确回复”已完成”（已执行 / done / ok 等）后，才允许用统一脚本把 checkpoint 推进到 `cicd_done`
-4. 未拿到明确肯定答复前，必须保持 `cicd_in_progress`，不得推进 `cicd_done`
+1. 请用户确认 CI/CD 是否完成时，按共享 `ask-user-question.md` 协议发起选择，选项至少包含 `已完成、推进到 cicd_done (Recommended)` / `尚未完成、保持当前状态`；若当前模式不支持 `request_user_input`，必须显式追问：`CI/CD 是否已完成？请回复“已完成”或“未完成”。`
+2. 只有在用户明确回复”已完成”（已执行 / done / ok 等）后，才允许用统一脚本把 checkpoint 推进到 `cicd_done`
+3. 未拿到明确肯定答复前，必须保持 `cicd_in_progress`，不得推进 `cicd_done`
 
 macOS/Linux:
 
