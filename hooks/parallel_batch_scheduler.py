@@ -36,11 +36,7 @@ from hooks.parallel_runtime import (
 )
 from hooks.plan_json import load_plan_bundle
 from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root
-from hooks.worktree_manager import create_worktree
-
-
 _BOOTSTRAP_IGNORE_RULES = (
-    ".worktrees/",
     ".cmbdevclaw/large_tool_results/",
     ".autobizdevops/features/*/.parallel-runs/",
 )
@@ -247,11 +243,11 @@ def assert_batch_worktree_isolated(
     batch_id: str,
     worktree_path: Path | str,
 ) -> None:
-    """Require the plugin-owned linked worktree assigned to a Batch.
+    """Require the platform-owned linked worktree assigned to a Batch.
 
-    The conversation workspace is deliberately independent of business code.
-    Every writing Batch must therefore run from a linked worktree created by
-    ``worktree_manager.py`` below its own repository's ``.worktrees/`` root.
+    Dynamic Workflow provisions a linked worktree immediately before an
+    ``agent(..., { isolation: "worktree" })`` call starts.  The plugin never
+    derives an ownership path; it verifies Git's own worktree metadata instead.
     """
     batch = manifest.get("batches", {}).get(batch_id)
     if not isinstance(batch, dict):
@@ -280,17 +276,6 @@ def assert_batch_worktree_isolated(
             + json.dumps({**details, "reason": "source_checkout"}, ensure_ascii=False, separators=(",", ":"))
         )
 
-    expected_parent = (source_root / ".worktrees").resolve()
-    if candidate_root.parent != expected_parent:
-        raise ValueError(
-            "parallel_batch_worktree_not_isolated:"
-            + json.dumps(
-                {**details, "reason": "not_plugin_managed", "expectedParent": str(expected_parent)},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
-
     source_common = _git_metadata_path(source_root, "--git-common-dir")
     candidate_common = _git_metadata_path(candidate_root, "--git-common-dir")
     source_git_dir = _git_metadata_path(source_root, "--git-dir")
@@ -305,6 +290,27 @@ def assert_batch_worktree_isolated(
                     "sourceGitCommonDir": str(source_common),
                     "worktreeGitCommonDir": str(candidate_common),
                 },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+
+    listed = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=source_root,
+        capture_output=True,
+        text=True,
+    )
+    registered = {
+        Path(line.removeprefix("worktree ")).resolve()
+        for line in listed.stdout.splitlines()
+        if line.startswith("worktree ")
+    }
+    if listed.returncode != 0 or candidate_root not in registered:
+        raise ValueError(
+            "parallel_batch_worktree_not_isolated:"
+            + json.dumps(
+                {**details, "reason": "not_registered_with_source_repository"},
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -375,83 +381,15 @@ def create_run(
         repositories=repositories,
     )
     manifest["isolation"] = {
-        "mode": "plugin_managed_git_worktrees",
-        "worktreeDirectory": ".worktrees",
+        "mode": "platform_dynamic_worktrees",
+        "owner": "platform",
+        "cleanupOwner": "platform",
         "workspaceRefs": sorted(repositories),
     }
     manifest["status"] = "running"
     save_manifest(workspace, feature, str(manifest["runId"]), manifest)
     append_event(workspace, feature, str(manifest["runId"]), "run_created", maxParallel=manifest["maxParallel"])
     return schedule(workspace, feature, str(manifest["runId"]))
-
-
-def _provision_scheduled_worktrees(
-    workspace: Path,
-    feature: str,
-    run_id: str,
-    manifest: dict[str, Any],
-    selected_groups: list[list[str]],
-) -> None:
-    """Create deterministic Batch worktrees before implementation agents start.
-
-    A workflow agent receives a ready-to-use path, not an instruction to create
-    one itself. This prevents an aborted agent from falling back to the source
-    checkout and makes every selected Batch observable in the manifest before
-    code implementation begins.
-    """
-    for batch_id in (batch_id for group in selected_groups for batch_id in group):
-        batch = manifest.get("batches", {}).get(batch_id)
-        if not isinstance(batch, dict) or batch.get("status") != "pending":
-            continue
-        existing_path = batch.get("worktreePath")
-        existing_branch = batch.get("branchName")
-        if isinstance(existing_path, str) and existing_path and isinstance(existing_branch, str) and existing_branch:
-            try:
-                assert_batch_worktree_isolated(manifest, batch_id, existing_path)
-            except ValueError as exc:
-                raise ValueError(f"parallel_worktree_provision_invalid:{batch_id}:{exc}") from exc
-            continue
-
-        repository_ref = str(batch.get("repositoryRef") or batch.get("workspaceRef") or "")
-        repository = manifest.get("repositories", {}).get(repository_ref)
-        if not isinstance(repository, dict) or not isinstance(repository.get("gitRoot"), str):
-            raise ValueError(f"parallel_repository_binding_missing:{repository_ref}")
-        git_root = Path(repository["gitRoot"]).resolve()
-        expected_head = str(repository.get("headSha") or repository.get("baseSha") or "")
-        if not expected_head:
-            raise ValueError(f"parallel_base_sha_unavailable:{repository_ref}")
-        if _git_head(git_root) != expected_head:
-            raise ValueError(f"parallel_main_head_changed:{repository_ref}")
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=git_root, capture_output=True, text=True)
-        if status.returncode != 0:
-            raise ValueError(f"parallel_repository_unavailable:{repository_ref}")
-        if status.stdout.strip():
-            raise ValueError(f"parallel_main_worktree_dirty:{repository_ref}")
-
-        result = create_worktree(
-            git_root,
-            f"{run_id}-{batch_id}",
-            expected_head,
-            branch_name=f"autodev/{feature}/{run_id}/{repository_ref}/{batch_id}",
-        )
-        if not result.get("success"):
-            raise ValueError(f"parallel_worktree_provision_failed:{batch_id}:{result.get('error', 'unknown')}")
-        batch.update({
-            "worktreePath": result["worktreePath"],
-            "branchName": result["branchName"],
-            "repositoryRef": repository_ref,
-            "gitRoot": str(git_root),
-        })
-        append_event(
-            workspace,
-            feature,
-            run_id,
-            "worktree_provisioned",
-            batchId=batch_id,
-            path=result["worktreePath"],
-            branchName=result["branchName"],
-            owner="scheduler",
-        )
 
 
 def schedule(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
@@ -494,14 +432,6 @@ def schedule(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
                 break
             selected.append(group)
             slots -= 1
-        try:
-            _provision_scheduled_worktrees(workspace, feature, run_id, manifest, selected)
-        except ValueError as exc:
-            manifest["status"] = "blocked"
-            manifest["provisionError"] = str(exc)
-            save_manifest(workspace, feature, run_id, manifest)
-            append_event(workspace, feature, run_id, "worktree_provision_failed", error=str(exc))
-            raise
         manifest["scheduledAt"] = manifest.get("updatedAt")
         save_manifest(workspace, feature, run_id, manifest)
         return {
@@ -552,6 +482,17 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
             if not isinstance(candidate, str) or not candidate.strip():
                 raise ValueError(f"parallel_batch_worktree_path_required:{batch_id}")
             assert_batch_worktree_isolated(manifest, batch_id, candidate)
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=Path(candidate),
+                capture_output=True,
+                text=True,
+            )
+            expected_branch = details.get("branchName") or batch.get("branchName")
+            if not isinstance(expected_branch, str) or not expected_branch.strip():
+                raise ValueError(f"parallel_batch_worktree_branch_required:{batch_id}")
+            if branch.returncode != 0 or branch.stdout.strip() != expected_branch:
+                raise ValueError(f"parallel_batch_worktree_branch_mismatch:{batch_id}")
         batch["status"] = status
         for key in ("worktreePath", "branchName", "commitSha", "compileStatus", "mergeCommitSha", "error"):
             if key in details:

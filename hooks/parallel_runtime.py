@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Durable runtime state for parallel Code batch execution.
 
-The plan remains the business source of truth.  This module only stores the
-state of one scheduler run, its leases, and the Git worktrees it owns.
+The plan remains the business source of truth. This module only stores the
+state of one scheduler run, its leases, and references to platform-owned Git
+worktree deliveries.
 """
 
 from __future__ import annotations

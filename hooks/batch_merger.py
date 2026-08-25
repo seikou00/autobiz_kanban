@@ -70,7 +70,7 @@ def _rebase_native_delivery(
     worktree_name: str,
     target_sha: str,
 ) -> dict[str, Any]:
-    """Rebase a retained plugin-managed worktree before merging it to the source.
+    """Rebase a retained platform-managed worktree before merging it to the source.
 
     This runs from the shared workflow owner, because isolated agents are
     intentionally forbidden from merge/rebase operations by the platform.

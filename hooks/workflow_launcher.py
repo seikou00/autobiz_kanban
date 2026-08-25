@@ -97,7 +97,10 @@ def _workspace_contract_values(
         ref = git_root.name if key == "__bare__" else key
         if ref in resolved:
             raise ValueError(f"code_workspace_duplicate_repository:{ref}")
-        resolved[ref] = str(requested)
+        # Platform worktree isolation starts from the Workflow host's Git
+        # checkout.  Persist the Git root, not a potentially nested module
+        # directory, so the host contract is unambiguous.
+        resolved[ref] = str(git_root)
 
     return resolved, "cli"
 
@@ -132,9 +135,19 @@ def resolve_code_workspace_contract(
         contract_path = artifact_workspace / ".autobizdevops" / "features" / feature / "plan.json"
     else:
         contract_path = None
+    git_roots = sorted(set(mapping.values()))
+    if len(git_roots) != 1:
+        raise ValueError(
+            "platform_worktree_multi_repository_requires_split_workflows:"
+            + ",".join(sorted(mapping))
+        )
     return {
         "codeWorkspaces": mapping,
-        "executionIsolation": "plugin_managed_git_worktrees",
+        "executionIsolation": "platform_dynamic_worktrees",
+        # Dynamic Workflow derives an isolated checkout from its own host
+        # workspace.  The plugin cannot redirect one agent to another Git
+        # repository, so callers must launch this fixed Workflow from here.
+        "workflowHostGitRoot": git_roots[0],
         "codeWorkspaceSource": parsed_source,
         "workspaceContractPath": str(contract_path) if contract_path else None,
     }
@@ -267,6 +280,7 @@ def analyze_batches(
                 code_workspaces,
             )
         except ValueError as exc:
+            multi_repository = str(exc).startswith("platform_worktree_multi_repository_requires_split_workflows:")
             return {
                 "useWorkflow": False,
                 "strategy": "blocked",
@@ -277,7 +291,11 @@ def analyze_batches(
                 "reason": str(exc),
                 "requiresPlanRepair": False,
                 "canStartWorkflow": False,
-                "requiredAction": "provide_code_workspace_mapping",
+                "requiredAction": (
+                    "launch_workflow_per_code_repository"
+                    if multi_repository
+                    else "provide_code_workspace_mapping"
+                ),
                 "validation": validation,
             }
 
@@ -296,6 +314,7 @@ def analyze_batches(
             "workflowScriptPath": runtime_script["workflowScript"],
             "codeWorkspaces": workspace_contract["codeWorkspaces"],
             "executionIsolation": workspace_contract["executionIsolation"],
+            "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
             # This is the complete payload for the platform workflow call.
             # Returning it avoids models reconstructing a workflow or guessing
             # a code workspace from the artifact directory.
@@ -304,6 +323,7 @@ def analyze_batches(
                 "pluginPath": str(script_root),
                 "artifactWorkspace": str(artifact_workspace),
                 "codeWorkspaces": workspace_contract["codeWorkspaces"],
+                "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
                 "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
                 "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
             },

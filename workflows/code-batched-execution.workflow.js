@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: "由 workflow_launcher.py 在存在合法待执行 Batch 时调用",
   phases: [
     { title: "准备", detail: "创建 scheduler run 并计算当前可执行 DAG 波次" },
-    { title: "实现", detail: "插件在各业务仓库创建 linked Git worktree，同一波次并行执行" },
+    { title: "实现", detail: "平台为每个 Batch agent 创建原生 Git worktree，同一波次并行执行" },
     { title: "合并", detail: "每个波次完成后立即确定性合并，才释放下游依赖" },
     { title: "最终验证", detail: "所有 Batch 合并后执行最终编译门禁" }
   ]
@@ -63,6 +63,15 @@ const VERIFICATION_SCHEMA = {
   required: ["passed"],
   additionalProperties: false
 };
+const WORKFLOW_HOST_SCHEMA = {
+  type: "object",
+  properties: {
+    gitRoot: { type: "string" },
+    branchName: { type: "string" }
+  },
+  required: ["gitRoot", "branchName"],
+  additionalProperties: false
+};
 
 function unwrap(value) {
   if (value && typeof value === "object" && typeof value.value === "string") return unwrap(value.value);
@@ -95,6 +104,7 @@ const feature = input.feature;
 const pluginPath = input.pluginPath;
 const artifactWorkspace = input.artifactWorkspace || input.workspace;
 const codeWorkspaces = input.codeWorkspaces || (input.codeWorkspace ? { default: input.codeWorkspace } : null);
+const workflowHostGitRoot = input.workflowHostGitRoot;
 const maxParallel = Number.isInteger(input.maxParallel) && input.maxParallel > 0
   ? input.maxParallel
   : DEFAULT_MAX_PARALLEL;
@@ -102,8 +112,11 @@ const timeoutPerBatch = Number.isInteger(input.timeoutPerBatch) && input.timeout
   ? input.timeoutPerBatch
   : 3600;
 
-if (!feature || !pluginPath || !artifactWorkspace || !codeWorkspaces || typeof codeWorkspaces !== "object" || Object.keys(codeWorkspaces).length === 0) {
-  throw new Error("missing_feature_plugin_path_artifact_workspace_or_code_workspaces");
+if (!feature || !pluginPath || !artifactWorkspace || !workflowHostGitRoot || !codeWorkspaces || typeof codeWorkspaces !== "object" || Object.keys(codeWorkspaces).length === 0) {
+  throw new Error("missing_feature_plugin_path_artifact_workspace_workflow_host_or_code_workspaces");
+}
+if (new Set(Object.values(codeWorkspaces)).size !== 1) {
+  throw new Error("platform_worktree_multi_repository_requires_split_workflows");
 }
 
 const schedulerPath = `${pluginPath}/hooks/parallel_batch_scheduler.py`;
@@ -115,6 +128,17 @@ const finalVerifyPath = `${pluginPath}/hooks/parallel_final_verify.py`;
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
   .map(([workspaceRef, path]) => `--code-workspace "${workspaceRef}=${path}"`)
   .join(" ");
+
+phase("准备");
+const workflowHost = requireSuccess(await agent(
+  `执行 pwd、git rev-parse --show-toplevel 和 git branch --show-current，确认当前 Workflow 宿主工作区的 Git 根。` +
+  `它必须精确等于 "${workflowHostGitRoot}"；否则返回失败，不得创建 scheduler run。` +
+  `只返回 {gitRoot, branchName}。`,
+  { label: "verify-workflow-host", phase: "准备", schema: WORKFLOW_HOST_SCHEMA }
+), "workflow host verification");
+if (workflowHost.gitRoot !== workflowHostGitRoot) {
+  throw new Error(`platform_worktree_host_mismatch:expected=${workflowHostGitRoot}:actual=${workflowHost.gitRoot}`);
+}
 
 phase("准备");
 const prepared = requireSuccess(await agent(
@@ -148,27 +172,26 @@ while (scheduledGroups.length > 0) {
       if (taskIds.length === 0) throw new Error(`scheduler returned no task IDs for ${batchId}`);
       const batchWorkspace = batchWorkspaces[batchId] || {};
       const batchWorkspaceRef = batchWorkspace.workspaceRef;
-      const worktreePath = batchWorkspace.worktreePath;
-      const branchName = batchWorkspace.branchName;
-      if (!batchWorkspaceRef || !codeWorkspaces[batchWorkspaceRef] || !worktreePath || !branchName) {
-        throw new Error(`scheduler did not provision a worktree for ${batchId}`);
+      if (!batchWorkspaceRef || !codeWorkspaces[batchWorkspaceRef]) {
+        throw new Error(`scheduler did not provide a code workspace for ${batchId}`);
       }
       return agent(
-      `在插件管理的业务仓库 worktree 中执行 Batch ${batchId}。Feature=${feature}，runId=${runId}，` +
+      `在平台分配的原生业务仓库 worktree 中执行 Batch ${batchId}。Feature=${feature}，runId=${runId}，` +
       `artifact workspace=${artifactWorkspace}。严格按以下固定顺序执行：\n` +
-      `1. Scheduler 已在实现前为本 Batch 创建 worktree。固定路径为 "${worktreePath}"，固定分支为 "${branchName}"。先确认它是 Git worktree；禁止创建、替换或删除它，也禁止把 pwd、artifact workspace 或主业务 checkout 当作代码目录。\n` +
+      `1. 本 agent 已通过平台 isolation: "worktree" 获得独立 checkout。执行 pwd、git rev-parse --show-toplevel、git branch --show-current，保存 Git 根为 batchWorktree、分支为 batchBranch。batchWorktree 必须不等于主业务 checkout，且 Git 根必须精确等于 "${codeWorkspaces[batchWorkspaceRef]}"。禁止 git worktree add/remove、git switch、merge、rebase 或操作其他 checkout。\n` +
       `2. 执行 python "${leasePath}" acquire --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"，从 JSON 的 lease.ownerToken 保存本 Batch 的 lease token。\n` +
-      `3. 用固定路径执行 python "${schedulerPath}" mark-batch --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --status running --worktree-path "${worktreePath}" --branch-name "${branchName}"。所有 execute 调用保持当前会话 cwd，不要把外部 worktreePath 作为工具 cwd；每条业务仓库命令必须显式使用 cd "${worktreePath}" && ...，确保命令实际在该 worktree 内执行。\n` +
-      `4. Scheduler 已提供本 Batch 的 task IDs：${JSON.stringify(taskIds)}。不要用 read_file 读取 artifact 目录；artifact workspace 不是代码目录。逐个执行这些 TASK：先执行 python "${pluginPath}/hooks/code_task_context.py" --workspace "${artifactWorkspace}" --feature "${feature}" --task-id "<task-id>" --code-workspace "${worktreePath}"，再用 task_runner.py start、完成实现后用 finish-implementation；所有 task_runner 调用必须带 --workspace "${artifactWorkspace}"、--parallel-run-id "${runId}"、步骤 2 的 lease token、--code-workspace "${worktreePath}" 和 --workspace-ref "${batchWorkspaceRef}"。不得操作其他 Batch 或任何主业务 checkout。\n` +
-      `5. 全部 TASK 完成后执行 python "${taskRunnerPath}" batch-compile --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${worktreePath}" --parallel-run-id "${runId}" --lease-token "<lease-token>" --workspace-ref "${batchWorkspaceRef}"。编译失败则释放 lease 为 failed 并返回 failed。\n` +
-      `6. 编译通过后只调用 python "${worktreeManagerPath}" --json seal --artifact-workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --repo "${codeWorkspaces[batchWorkspaceRef]}" --owner-token "<lease-token>"；从 JSON 保存 commitSha。禁止自行 git add、git commit、mark-batch ready_to_merge。\n` +
+      `3. 用刚才采集的 batchWorktree 和 batchBranch 执行 python "${schedulerPath}" mark-batch --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --status running --worktree-path "<batchWorktree>" --branch-name "<batchBranch>"。业务源码命令只在当前分配 checkout 内执行。\n` +
+      `4. Scheduler 已提供本 Batch 的 task IDs：${JSON.stringify(taskIds)}。不要用 read_file 读取 artifact 目录；artifact workspace 不是代码目录。逐个执行这些 TASK：先执行 python "${pluginPath}/hooks/code_task_context.py" --workspace "${artifactWorkspace}" --feature "${feature}" --task-id "<task-id>" --code-workspace "<batchWorktree>"，再用 task_runner.py start、完成实现后用 finish-implementation；所有 task_runner 调用必须带 --workspace "${artifactWorkspace}"、--parallel-run-id "${runId}"、步骤 2 的 lease token、--code-workspace "<batchWorktree>" 和 --workspace-ref "${batchWorkspaceRef}"。不得操作其他 Batch 或任何主业务 checkout。\n` +
+      `5. 全部 TASK 完成后执行 python "${taskRunnerPath}" batch-compile --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "<batchWorktree>" --parallel-run-id "${runId}" --lease-token "<lease-token>" --workspace-ref "${batchWorkspaceRef}"。编译失败则释放 lease 为 failed 并返回 failed。\n` +
+      `6. 编译通过后只调用 python "${worktreeManagerPath}" --json seal --artifact-workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --repo "<batchWorktree>" --owner-token "<lease-token>"；从 JSON 保存 commitSha。插件在此命令中提交；不要自行 git add、git commit 或 mark-batch ready_to_merge。\n` +
       `7. 执行 python "${leasePath}" release --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --owner-token "<lease-token>" --final-status ready_to_merge。\n` +
-      `返回 {batchId, status:"success", compileStatus:"passed", worktreePath, branchName, commitSha}。` +
-      `不要 merge、rebase、解决冲突、删除 worktree；不使用 platform isolation；所有命令失败立即停止。`,
+      `返回 {batchId, status:"success", compileStatus:"passed", worktreePath:batchWorktree, branchName:batchBranch, commitSha}。` +
+      `不要 merge、rebase、解决冲突、删除 worktree；所有命令失败立即停止。`,
       {
         label: `fixed-batch-${batchId}`,
         phase: "实现",
-        schema: BATCH_RESULT_SCHEMA
+        schema: BATCH_RESULT_SCHEMA,
+        isolation: "worktree"
       }
       );
     })

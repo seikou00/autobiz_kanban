@@ -66,12 +66,11 @@ def reclaim_stale_leases(workspace: Path, feature: str, run_id: str, *, force: b
 
 
 def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = False) -> dict[str, Any]:
-    """Remove worktrees created by this plugin after a terminal run.
+    """Close a terminal run without deleting platform-owned worktrees.
 
-    Worktree removal happens outside the manifest lock because ``git worktree
-    remove`` can invoke repository hooks and because the manager records its
-    own audit event.  The terminal-state check and final manifest update remain
-    serialized by the run lock.
+    Dynamic Workflow retains its Worktree deliverables for the platform panel.
+    The plugin only records that ownership and cleanup remain with the
+    platform; it must never call ``git worktree remove`` for those paths.
     """
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
@@ -84,6 +83,7 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
         ]
 
     removed: list[str] = []
+    retained: list[str] = []
     errors: list[str] = []
     for batch_id, path, status in targets:
         result = remove_parallel_worktree(
@@ -96,7 +96,10 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
             force=force or status != "merged",
         )
         if result.get("success"):
-            removed.append(path)
+            if result.get("retained"):
+                retained.append(path)
+            else:
+                removed.append(path)
         else:
             errors.append(f"{batch_id}:{result.get('error', 'worktree_remove_failed')}")
 
@@ -105,12 +108,27 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
         manifest["cleanup"] = {
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "removedWorktrees": removed,
+            "retainedWorktrees": retained,
             "errors": errors,
         }
         manifest["status"] = "cleaned" if not errors else "cleanup_failed"
         save_manifest(workspace, feature, run_id, manifest)
-        append_event(workspace, feature, run_id, "run_cleaned", removedWorktrees=removed, errors=errors)
-        return {"runId": run_id, "status": manifest["status"], "removedWorktrees": removed, "errors": errors}
+        append_event(
+            workspace,
+            feature,
+            run_id,
+            "run_cleaned",
+            removedWorktrees=removed,
+            retainedWorktrees=retained,
+            errors=errors,
+        )
+        return {
+            "runId": run_id,
+            "status": manifest["status"],
+            "removedWorktrees": removed,
+            "retainedWorktrees": retained,
+            "errors": errors,
+        }
 
 
 def rollback_run(workspace: Path, feature: str, run_id: str, *, mode: str = "partial", confirm: bool = False) -> dict[str, Any]:
@@ -188,7 +206,7 @@ def monitor_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
 
 
 def auto_cleanup_old_runs(workspace: Path, feature: str, *, keep_days: int = 7) -> list[dict[str, Any]]:
-    """Clean old successful runs and their plugin-managed worktrees."""
+    """Mark old successful runs cleaned while leaving platform deliveries intact."""
     cutoff = time.time() - max(0, keep_days) * 24 * 60 * 60
     cleaned: list[dict[str, Any]] = []
     for manifest in list_runs(workspace, feature):

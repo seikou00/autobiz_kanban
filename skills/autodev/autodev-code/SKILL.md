@@ -347,7 +347,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 ```
 ## Workflow 并行执行模式
 
-当 Code 阶段存在合法待执行 Batch 时，只启动仓库固定的 `workflows/code-batched-execution.workflow.js`。Workflow 从中性会话/产物工作区启动，插件为每个 Batch 在其业务仓库内创建并管理 linked Git worktree；不得生成、持久化、校验或以内联脚本替换 workflow 控制流。
+当 Code 阶段存在合法待执行 Batch 时，只启动仓库固定的 `workflows/code-batched-execution.workflow.js`。每个可写 Batch 必须通过平台 `agent(..., { isolation: "worktree" })` 获得原生 linked Git worktree；插件只负责调度、契约校验、提交和合并，绝不创建或删除 Batch worktree。不得生成、持久化、校验或以内联脚本替换 workflow 控制流。
 
 先调用 launcher：
 
@@ -359,22 +359,22 @@ launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
   --json)
 ```
 
-launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> 绝对业务代码仓库` 映射，并返回 `codeWorkspaces` 与 `executionIsolation=plugin_managed_git_worktrees`。不得把 `artifactWorkspace` 当作代码仓库路径，也不得要求所有业务仓库属于同一 Git checkout。旧 Plan 没有该字段时，只能显式补传映射，例如 `--code-workspace "RouYi=/absolute/path/to/RouYi"`；无法解析映射时必须阻断并回流 Plan，不得猜路径。
+launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> 绝对业务 Git 根` 映射，并返回 `codeWorkspaces`、`executionIsolation=platform_dynamic_worktrees` 与 `workflowHostGitRoot`。不得把 `artifactWorkspace` 当作代码仓库路径。旧 Plan 没有该字段时，只能显式补传映射，例如 `--code-workspace "RouYi=/absolute/path/to/RouYi"`；无法解析映射时必须阻断并回流 Plan，不得猜路径。
 
 只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`、`requiredAction=start_fixed_workflow` 且校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid` 时，才使用 launcher 返回的固定脚本内容启动 Workflow。launcher 会把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/` 作为审计副本，并返回 `workflowScriptContent`、`workflowScriptSha256`、`workflowScriptSource` 与可直接透传的 `workflowArgs`；`workflowScript` / `workflowScriptPath` 仅是审计路径，不得传给平台做 `scriptPath`。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排或改写 workflow。
 
 调用平台 `workflow` 的唯一允许形式是 `script=launcher.workflowScriptContent` 且 `args=JSON.stringify(launcher.workflowArgs)`。禁止自行拼接 JavaScript、禁止增删 phase、禁止从 launcher 输出以外重建参数。使用内联脚本是为了让平台把固定脚本持久化到当前对话 workspace；不得把 artifact workspace、业务仓库或插件目录的绝对路径作为平台 `scriptPath`。
 
-启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace` 和以逻辑 `workspaceRef` 为 key 的 `codeWorkspaces`。Workflow 可以从任意中性会话/产物工作区发起；插件按 `workspaceRef` 在 `<business-git-root>/.worktrees/` 创建 linked worktree。禁止使用平台 `isolation: "worktree"`，也禁止把对话 Workspace、artifactWorkspace 或主业务 checkout 当作 Batch 代码目录。
+启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace`、`workflowHostGitRoot` 和以逻辑 `workspaceRef` 为 key 的 `codeWorkspaces`。平台 Worktree 的源仓库由启动 Workflow 的宿主工作区决定，因此宿主 Git 根必须严格等于 `workflowHostGitRoot`；`artifactWorkspace` 只保存产物，不能作为 Workflow 宿主。固定脚本会在创建 scheduler run 前复核该条件。当前平台没有在单个 `agent()` 调用中指定其他 Git 隔离源的接口：若 `codeWorkspaces` 指向多个独立 Git 根，launcher 必须返回 `launch_workflow_per_code_repository` 并停止，按仓库拆分平台 Workflow；无需修改 Plan。
 
 固定脚本按以下顺序执行：
 
 - scheduler 先只选择依赖已经 `merged` 的 pending Batch；因此初始波次就是所有无依赖 Batch。
-- 同一波次受 `maxParallel` 限制并行执行；即使多个 Batch 指向同一个 `workspaceRef` / Git 仓库，插件也必须为每个 Batch 在该仓库 `.worktrees/` 下创建独立 linked worktree。每个 Batch 获取 lease、在插件分配的 worktree 内完成 TASK、batch compile，并由 `worktree_manager.py seal` 提交及标记 `ready_to_merge`。仓库重叠只在合并阶段由真实 Git 冲突决定是否阻断。
+- 同一波次受 `maxParallel` 限制并行执行；每个 Batch agent 调用时精确声明 `isolation: "worktree"`，平台从冻结的宿主 Git base 创建独立 checkout。每个 Batch 获取 lease、采集平台分配的路径和分支、完成 TASK、batch compile，并由 `worktree_manager.py seal` 提交及标记 `ready_to_merge`。仓库重叠只在合并阶段由真实 Git 冲突决定是否阻断。
 - 该波次全部完成后，shared workflow owner 立即运行 `batch_merger.py --conflict-mode native-rebase`。只有 commit 已真正合并为 `merged`，才调用 scheduler `resume` 计算下一波次；下游 Batch 不会读取未合并改动。
 - 不具备并行条件的 Batch 自然在下一波次串行执行。所有 Batch 合并后才执行 `parallel_final_verify.py`。若固定 Workflow 无法启动，必须停止并报告，禁止手工顺序执行 Batch 或在共享工作区继续写代码。
 
-并行模式的唯一状态源是 `.parallel-runs/<runId>/manifest.json`。真实 Git 冲突必须保持 fail-closed，禁止 `ours`、`theirs`、`git merge -s ours`、`--no-verify`、删除一侧变更或直接修改主工作区。恢复使用 `parallel_batch_scheduler.py resume`、`parallel_batch_lifecycle.py monitor` 与 `batch_lease_manager.py reclaim`；成功后使用 `parallel_batch_lifecycle.py cleanup`。
+并行模式的唯一调度状态源是 `.parallel-runs/<runId>/manifest.json`；平台 Workflow 面板仍是 Worktree 交付物的所有者。`batch_merger.py` 已经把成功 Batch 合入主分支后，面板条目仍会保留用于 Diff/恢复，不能再次点击平台「合并」造成重复集成；确认无误后按平台面板流程丢弃/清理该交付物。真实 Git 冲突必须保持 fail-closed，禁止 `ours`、`theirs`、`git merge -s ours`、`--no-verify`、删除一侧变更或直接修改主工作区。恢复使用 `parallel_batch_scheduler.py resume`、`parallel_batch_lifecycle.py monitor` 与 `batch_lease_manager.py reclaim`；`parallel_batch_lifecycle.py cleanup` 只记录清理，不删除平台 Worktree。
 
 ## 写入边界
 

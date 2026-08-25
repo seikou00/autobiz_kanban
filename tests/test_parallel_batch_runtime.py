@@ -32,7 +32,7 @@ from hooks.parallel_batch_scheduler import (
 )
 from hooks.plan_json import PlanBundle, load_plan_bundle
 from hooks.plan_json import task_set_digest
-from hooks.worktree_manager import create_parallel_worktree, seal_parallel_batch
+from hooks.worktree_manager import seal_parallel_batch
 from tests.test_task_runner import (
     _add_second_compile_only_batch,
     _configure_defer_to_test_stages,
@@ -60,8 +60,40 @@ def _create_native_worktree(
     repo_path: Path | None,
     owner_token: str,
 ) -> dict[str, Any]:
-    """Create the production plugin-managed delivery worktree."""
-    return create_parallel_worktree(workspace, feature, run_id, batch_id, repo_path, owner_token)
+    """Simulate a platform-provisioned Dynamic Workflow worktree.
+
+    Production uses ``agent(..., { isolation: "worktree" })``.  Tests create
+    the same kind of Git-registered checkout outside the source repository and
+    immediately record the path/branch through the scheduler boundary.
+    """
+    manifest = load_manifest(workspace, feature, run_id)
+    batch = manifest["batches"][batch_id]
+    repository_ref = batch["repositoryRef"]
+    git_root = Path(manifest["repositories"][repository_ref]["gitRoot"])
+    if repo_path is not None and repo_path.resolve() != git_root.resolve():
+        return {"success": False, "error": f"parallel_repository_binding_mismatch:{repository_ref}"}
+    target = workspace.parent / "platform-worktrees" / run_id / batch_id
+    target.parent.mkdir(parents=True, exist_ok=True)
+    branch = f"cmbcowork/{run_id.lower()}/{batch_id.lower()}"
+    base_sha = manifest["repositories"][repository_ref]["headSha"]
+    created = subprocess.run(
+        ["git", "worktree", "add", "-b", branch, str(target), base_sha],
+        cwd=git_root,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        return {"success": False, "error": f"git_worktree_add_failed:{created.stderr.strip()}"}
+    mark_batch(
+        workspace,
+        feature,
+        run_id,
+        batch_id,
+        "running",
+        worktreePath=str(target),
+        branchName=branch,
+    )
+    return {"success": True, "worktreePath": str(target.resolve()), "branchName": branch, "error": None}
 
 
 def _seal_native_worktree(
@@ -72,7 +104,7 @@ def _seal_native_worktree(
     repo_path: Path | None,
     owner_token: str,
 ) -> dict[str, Any]:
-    """Seal the production plugin-managed delivery worktree."""
+    """Seal a platform-provisioned delivery worktree."""
     return seal_parallel_batch(workspace, feature, run_id, batch_id, repo_path, owner_token)
 
 
@@ -107,8 +139,9 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
 
             self.assertEqual(rollback["status"], "rolled_back")
             self.assertEqual(cleanup["status"], "cleaned")
-            self.assertIn(str(delivery_path), cleanup["removedWorktrees"])
-            self.assertFalse(delivery_path.exists())
+            self.assertTrue(any(Path(path).samefile(delivery_path) for path in cleanup["retainedWorktrees"]))
+            self.assertTrue(delivery_path.exists())
+            task_runner_git(repo, "worktree", "remove", "--force", str(delivery_path))
 
     def test_scheduler_does_not_bind_a_run_to_the_workflow_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,7 +159,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 workflow_workspace=neutral,
             )
             manifest = load_manifest(workspace, "alpha", scheduled["runId"])
-            self.assertEqual(manifest["isolation"]["mode"], "plugin_managed_git_worktrees")
+            self.assertEqual(manifest["isolation"]["mode"], "platform_dynamic_worktrees")
 
     def test_scheduler_rejects_source_checkout_as_batch_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,7 +191,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
 
             self.assertEqual(load_manifest(workspace, "alpha", scheduled["runId"])["batches"]["B001"]["status"], "pending")
 
-    def test_scheduler_provisions_linked_worktree_before_batch_lease(self) -> None:
+    def test_scheduler_defers_worktree_provisioning_to_platform_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -173,11 +206,8 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             )
             run_id = scheduled["runId"]
             provisioned = scheduled["batchWorkspaces"]["B001"]
-            tree = Path(provisioned["worktreePath"])
-            self.assertTrue(tree.is_dir())
-            self.assertEqual(tree.parent, (repo / ".worktrees").resolve())
-            self.assertTrue(provisioned["branchName"])
-            self.assertEqual(_git(tree, "rev-parse", "HEAD"), _git(repo, "rev-parse", "HEAD"))
+            self.assertIsNone(provisioned["worktreePath"])
+            self.assertIsNone(provisioned["branchName"])
             manifest = load_manifest(workspace, "alpha", run_id)
             self.assertEqual(manifest["batches"]["B001"]["status"], "pending")
             self.assertIsNone(manifest["batches"]["B001"]["lease"])
@@ -185,19 +215,10 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             lease = acquire_lease(workspace, "alpha", run_id, "B001")
             delivery = _create_native_worktree(workspace, "alpha", run_id, "B001", repo, lease["ownerToken"])
             self.assertTrue(delivery["success"], delivery)
-            self.assertEqual(delivery["worktreePath"], str(tree))
+            tree = Path(delivery["worktreePath"])
             try:
                 manifest = load_manifest(workspace, "alpha", run_id)
                 assert_batch_worktree_isolated(manifest, "B001", tree)
-                mark_batch(
-                    workspace,
-                    "alpha",
-                    run_id,
-                    "B001",
-                    "running",
-                    worktreePath=str(tree),
-                    branchName=delivery["branchName"],
-                )
                 self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "running")
             finally:
                 subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=repo, check=True)
@@ -242,7 +263,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             base_sha = _git(repo, "rev-parse", "HEAD")
             deliveries = []
             for batch_id, filename in (("B001", "first.txt"), ("B002", "second.txt")):
-                worktree = repo / ".worktrees" / f"native-{batch_id}"
+                worktree = workspace.parent / "platform-worktrees" / run_id / f"native-{batch_id}"
                 worktree.parent.mkdir(parents=True, exist_ok=True)
                 branch = f"cmb/workflow-{batch_id.lower()}"
                 task_runner_git(repo, "worktree", "add", "-b", branch, str(worktree), base_sha)
@@ -275,7 +296,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual((repo / "second.txt").read_text(encoding="utf-8"), "B002\n")
             manifest = load_manifest(workspace, "alpha", run_id)
             self.assertEqual(manifest["status"], "verifying")
-            self.assertEqual(manifest["isolation"]["mode"], "plugin_managed_git_worktrees")
+            self.assertEqual(manifest["isolation"]["mode"], "platform_dynamic_worktrees")
 
             for worktree in deliveries:
                 task_runner_git(repo, "worktree", "remove", str(worktree))
@@ -645,10 +666,6 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             workspace, feature_dir, repo = _workspace(root)
             _configure_defer_to_test_stages(feature_dir)
             _add_second_compile_only_batch(feature_dir)
-            (repo / ".gitignore").write_text(".worktrees/\n", encoding="utf-8")
-            task_runner_git(repo, "add", ".gitignore")
-            task_runner_git(repo, "commit", "-m", "ignore worktrees")
-
             scheduled = create_run(
                 workspace,
                 "alpha",
@@ -660,13 +677,12 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(scheduled["readyBatches"], ["B001"])
             self.assertEqual(scheduled["mergeableBatches"], [])
             first_workspace = scheduled["batchWorkspaces"]["B001"]
-            self.assertTrue(Path(first_workspace["worktreePath"]).is_dir())
-            self.assertTrue(first_workspace["branchName"])
+            self.assertIsNone(first_workspace["worktreePath"])
+            self.assertIsNone(first_workspace["branchName"])
             self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
             first_lease = acquire_lease(workspace, "alpha", run_id, "B001")
             first_tree = _create_native_worktree(workspace, "alpha", run_id, "B001", None, first_lease["ownerToken"])
             self.assertTrue(first_tree["success"])
-            self.assertEqual(first_tree["worktreePath"], first_workspace["worktreePath"])
             (Path(first_tree["worktreePath"]) / "first.txt").write_text("first\n", encoding="utf-8")
             mark_batch(workspace, "alpha", run_id, "B001", "ready_to_merge", compileStatus="passed")
             self.assertTrue(_seal_native_worktree(workspace, "alpha", run_id, "B001", None, first_lease["ownerToken"])["success"])
@@ -681,15 +697,13 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             next_wave = schedule(workspace, "alpha", run_id)
             self.assertEqual(next_wave["scheduledGroups"], [["B002"]])
             second_workspace = next_wave["batchWorkspaces"]["B002"]
-            self.assertTrue(Path(second_workspace["worktreePath"]).is_dir())
-            self.assertTrue(second_workspace["branchName"])
-            self.assertEqual(_git(Path(second_workspace["worktreePath"]), "rev-parse", "HEAD"), first_merge_head)
+            self.assertIsNone(second_workspace["worktreePath"])
+            self.assertIsNone(second_workspace["branchName"])
             self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B002"]["status"], "pending")
 
             second_lease = acquire_lease(workspace, "alpha", run_id, "B002")
             second_tree = _create_native_worktree(workspace, "alpha", run_id, "B002", None, second_lease["ownerToken"])
             self.assertTrue(second_tree["success"])
-            self.assertEqual(second_tree["worktreePath"], second_workspace["worktreePath"])
             self.assertEqual(_git(Path(second_tree["worktreePath"]), "rev-parse", "HEAD"), first_merge_head)
             self.assertEqual((Path(second_tree["worktreePath"]) / "first.txt").read_text(encoding="utf-8"), "first\n")
             (Path(second_tree["worktreePath"]) / "second.txt").write_text("second\n", encoding="utf-8")

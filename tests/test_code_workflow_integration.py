@@ -101,8 +101,8 @@ def test_skill_integration():
     checks = [
         ("## Workflow 并行执行模式", "Workflow 章节"),
         ("workflow_launcher.py", "启动器引用"),
-        ("plugin_managed_git_worktrees", "插件 Worktree 隔离说明"),
-        ("插件为每个 Batch", "阶段说明"),
+        ("platform_dynamic_worktrees", "平台 Worktree 隔离说明"),
+        ("isolation: \"worktree\"", "平台隔离阶段说明"),
     ]
 
     all_passed = True

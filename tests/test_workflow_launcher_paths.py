@@ -34,21 +34,18 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             plugin_path = root / "plugin"
             artifact_workspace = root / "artifacts" / "project"
             code_workspace = root / "business-api"
-            web_workspace = root / "business-web"
             feature_dir = artifact_workspace / ".autobizdevops" / "features" / "three-paths"
             (plugin_path / "workflows").mkdir(parents=True)
             script = plugin_path / "workflows" / "code-batched-execution.workflow.js"
             script.write_text("export const meta = {};", encoding="utf-8")
             code_workspace.mkdir(parents=True)
             subprocess.run(["git", "init", "-q"], cwd=code_workspace, check=True)
-            web_workspace.mkdir(parents=True)
-            subprocess.run(["git", "init", "-q"], cwd=web_workspace, check=True)
             feature_dir.mkdir(parents=True)
             (artifact_workspace / ".autobizdevops" / "state.json").write_text("{}", encoding="utf-8")
             (feature_dir / "plan.json").write_text("{}", encoding="utf-8")
             bundle = PlanBundle(
                 root={
-                    "codeWorkspaces": {"api": str(code_workspace), "web": str(web_workspace)},
+                    "codeWorkspaces": {"api": str(code_workspace), "web": str(code_workspace)},
                     "batches": [
                         {"id": "B001", "status": "todo", "executionLane": "backend", "workspaceRef": "api", "deps": []},
                         {"id": "B002", "status": "todo", "executionLane": "frontend", "workspaceRef": "web", "deps": []},
@@ -62,7 +59,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 task_batches={},
             )
             (feature_dir / "plan.json").write_text(
-                '{"codeWorkspaces": {"api": "' + str(code_workspace) + '", "web": "' + str(web_workspace) + '"}}',
+                '{"codeWorkspaces": {"api": "' + str(code_workspace) + '", "web": "' + str(code_workspace) + '"}}',
                 encoding="utf-8",
             )
             with mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle) as load_bundle, mock.patch(
@@ -91,17 +88,19 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         )
         self.assertEqual(result["codeWorkspaces"], {
             "api": str(code_workspace.resolve()),
-            "web": str(web_workspace.resolve()),
+            "web": str(code_workspace.resolve()),
         })
-        self.assertEqual(result["executionIsolation"], "plugin_managed_git_worktrees")
+        self.assertEqual(result["executionIsolation"], "platform_dynamic_worktrees")
+        self.assertEqual(result["workflowHostGitRoot"], str(code_workspace.resolve()))
         self.assertEqual(result["workflowArgs"], {
             "feature": "three-paths",
             "pluginPath": str(plugin_path.resolve()),
             "artifactWorkspace": str(artifact_workspace.resolve()),
             "codeWorkspaces": {
                 "api": str(code_workspace.resolve()),
-                "web": str(web_workspace.resolve()),
+                "web": str(code_workspace.resolve()),
             },
+            "workflowHostGitRoot": str(code_workspace.resolve()),
             "maxParallel": 4,
             "timeoutPerBatch": 3600,
         })
@@ -111,6 +110,44 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         load_bundle.assert_called_once_with(feature_dir.resolve())
         validate.assert_called_once_with(artifact_workspace.resolve(), "three-paths")
         self.assertFalse((code_workspace / ".autobizdevops" / "features" / "three-paths" / "plan.json").exists())
+
+    def test_launcher_blocks_multiple_independent_worktree_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_path = root / "plugin"
+            artifact_workspace = root / "artifacts"
+            api = root / "api"
+            web = root / "web"
+            feature_dir = artifact_workspace / ".autobizdevops" / "features" / "multi"
+            (plugin_path / "workflows").mkdir(parents=True)
+            (plugin_path / "workflows" / "code-batched-execution.workflow.js").write_text("export const meta = {};", encoding="utf-8")
+            for repo in (api, web):
+                repo.mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            feature_dir.mkdir(parents=True)
+            (artifact_workspace / ".autobizdevops" / "state.json").write_text("{}", encoding="utf-8")
+            (feature_dir / "plan.json").write_text("{}", encoding="utf-8")
+            bundle = PlanBundle(
+                root={
+                    "codeWorkspaces": {"api": str(api), "web": str(web)},
+                    "batches": [
+                        {"id": "B001", "status": "todo", "workspaceRef": "api", "deps": []},
+                        {"id": "B002", "status": "todo", "workspaceRef": "web", "deps": []},
+                    ],
+                },
+                batches={"B001": {"tasks": [{"workspaceRef": "api"}]}, "B002": {"tasks": [{"workspaceRef": "web"}]}},
+                tasks=[],
+                task_batches={},
+            )
+            with mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), mock.patch(
+                "hooks.workflow_launcher.validate_plan_for_parallel",
+                return_value={"canParallel": True, "reason": "parallel_plan_valid"},
+            ):
+                result = analyze_batches("multi", plugin_path, artifact_workspace)
+
+        self.assertFalse(result["useWorkflow"])
+        self.assertEqual(result["requiredAction"], "launch_workflow_per_code_repository")
+        self.assertTrue(result["reason"].startswith("platform_worktree_multi_repository_requires_split_workflows:"))
 
     def test_launcher_blocks_without_code_workspace_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
