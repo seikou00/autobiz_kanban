@@ -40,6 +40,7 @@ from artifact_check import (  # noqa: E402
     placeholder_residue,
     proposal_capabilities,
     proposal_capability_groups,
+    proposal_new_capability_existing,
     removed_requirements_missing_fields,
     scenarios_without_requirement,
     spec_operations_with_requirements,
@@ -82,9 +83,24 @@ PROPOSAL_TAIL = """
 """
 
 
-def proposal_text(new: list[str], modified: list[str] = (), removed: list[str] = ()) -> str:
+def proposal_text(
+    new: list[str],
+    modified: list[str] = (),
+    removed: list[str] = (),
+    existing: dict[str, str] | None = None,
+) -> str:
+    """New 组默认带 `**Existing:** none`——那是通过态，反例各自覆写。"""
+    claims = existing or {}
+
     def group(title: str, names: list[str]) -> str:
-        body = "\n".join(f"- `{name}`: 说明" for name in names) or "- 无"
+        lines = []
+        for name in names:
+            lines.append(f"- `{name}`: 说明")
+            if title.startswith("New"):
+                claim = claims.get(name, "none")
+                if claim is not None:
+                    lines.append(f"  - **Existing:** {claim}")
+        body = "\n".join(lines) or "- 无"
         return f"\n### {title}\n\n{body}\n"
 
     return (
@@ -687,6 +703,97 @@ class ProposalOpenQuestionsTest(SpecContractValidatorTestBase):
             failures, output = self._run(validate_proposal_contract, project)
             self.assertGreaterEqual(failures, 1)
             self.assertIn("Open Questions", output)
+
+
+class NewCapabilityExistingEvidenceTest(SpecContractValidatorTestBase):
+    """New 组每项必须写下一句可证伪的存量断言。
+
+    `ADDED` 是零成本默认值：没搜索过也能一路写成新增，且 spec 是照着这个声明写
+    的，所以 `capability_spec_correspondence` 的自洽性检查完美通过——两边一起
+    错，就没有一个检查会响。这里钉的不是「断言为真」（脚本证明不了），而是
+    「断言必须被写下来」，从而给回检一个能逐条核对的靶子。
+    """
+
+    def test_none_claim_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project, feature_dir = self._feature(tmp)
+            (feature_dir / "proposal.md").write_text(
+                proposal_text(["order-export"], existing={"order-export": "none"}),
+                encoding="utf-8",
+            )
+            self._write_spec(feature_dir, "order-export")
+            failures, output = self._run(validate_capability_spec_correspondence, project)
+            self.assertEqual(failures, 0, output)
+
+    def test_missing_existing_line_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project, feature_dir = self._feature(tmp)
+            (feature_dir / "proposal.md").write_text(
+                proposal_text(["order-export"], existing={"order-export": None}),
+                encoding="utf-8",
+            )
+            self._write_spec(feature_dir, "order-export")
+            failures, output = self._run(validate_capability_spec_correspondence, project)
+            self.assertGreaterEqual(failures, 1)
+            self.assertIn("new_capability_existing_evidence_missing", output)
+
+    def test_placeholder_does_not_count_as_a_claim(self) -> None:
+        """模板槽位原样留着，等同于没写。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            project, feature_dir = self._feature(tmp)
+            (feature_dir / "proposal.md").write_text(
+                proposal_text(
+                    ["order-export"],
+                    existing={"order-export": "[none 或 现有入口的 `相对路径#符号`]"},
+                ),
+                encoding="utf-8",
+            )
+            self._write_spec(feature_dir, "order-export")
+            failures, output = self._run(validate_capability_spec_correspondence, project)
+            self.assertGreaterEqual(failures, 1)
+            self.assertIn("new_capability_existing_evidence_missing", output)
+
+    def test_declaring_a_path_while_staying_in_new_is_blocked(self) -> None:
+        """写了存量路径就不是新增；这正是 trace 里 12 个 capability 全标 ADDED 的反面。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            project, feature_dir = self._feature(tmp)
+            (feature_dir / "proposal.md").write_text(
+                proposal_text(
+                    ["order-export"],
+                    existing={"order-export": "src/adapter/ExportController.java#query"},
+                ),
+                encoding="utf-8",
+            )
+            self._write_spec(feature_dir, "order-export")
+            failures, output = self._run(validate_capability_spec_correspondence, project)
+            self.assertGreaterEqual(failures, 1)
+            self.assertIn("new_capability_declares_existing_code", output)
+            self.assertIn("ExportController", output)
+
+    def test_near_miss_wording_is_not_in_the_negative_closed_set(self) -> None:
+        """闭集只认 none / 无；放宽了这个字段就退回成自由散文。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            project, feature_dir = self._feature(tmp)
+            (feature_dir / "proposal.md").write_text(
+                proposal_text(["order-export"], existing={"order-export": "暂未发现相关代码"}),
+                encoding="utf-8",
+            )
+            self._write_spec(feature_dir, "order-export")
+            failures, output = self._run(validate_capability_spec_correspondence, project)
+            self.assertGreaterEqual(failures, 1)
+            self.assertIn("new_capability_declares_existing_code", output)
+
+    def test_modified_group_is_not_asked_for_the_claim(self) -> None:
+        """断言只为拦住「默认新增」；Modified 组本来就承认存量，不必重复声明。"""
+        self.assertEqual(
+            proposal_new_capability_existing(
+                proposal_text(["order-export"], modified=["approval-reminder"])
+            ),
+            {"order-export": "none"},
+        )
+
+    def test_empty_new_group_written_as_wu_claims_nothing(self) -> None:
+        self.assertEqual(proposal_new_capability_existing(proposal_text([])), {})
 
 
 class ValidatorRegistrationTest(unittest.TestCase):

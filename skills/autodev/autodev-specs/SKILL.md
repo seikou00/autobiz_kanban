@@ -142,11 +142,20 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 - 无法判断是否已有行为时，先搜索既有 specs、代码入口、接口、菜单、配置和测试；仍不确定则回到用户确认，不要猜测分类。
 - 本轮某个分组无 capability 时该组写 `无`；不得保留占位行。
 
+`New Capabilities` 每一项下必须写一行 `- **Existing:** <值>`，值只有两种合法形态：
+
+- `none`：已在代码库中搜索过，不存在承担该能力的外部可观察入口。
+- `<相对路径>#<符号>`：找到了同名或同职责的存量入口，例如 `src/main/java/.../DcpaController.java#queryProtocolStatus`。
+
+写了路径就意味着这不是新增能力：把该项移到 `Modified Capabilities`，其 spec 的 Requirement 相应写进 `## MODIFIED Requirements`。`capability_spec_correspondence` 判定这条——字段缺失、留占位、或写了路径却仍在 New 组都会失败。
+
+`ADDED` 是零成本默认值：没搜索过也能一路写成新增，且下游全部自洽。这一行的作用是把「我没找到存量」从沉默变成一句可被回检逐条核对的断言，因此填 `none` 之前必须真的用 `git ls-files` / `git grep` 搜过，不能凭印象。近似说法（`无相关代码`、`暂未发现`）不在闭集内，会按肯定断言处理并报错。
+
 必须包含：
 
 - **Why**：为什么要做。
 - **What Changes**：用户可见或系统外部可观察变化。
-- **Capabilities**：按 New / Modified / Removed 分组列出本轮能力，名称使用 kebab-case。
+- **Capabilities**：按 New / Modified / Removed 分组列出本轮能力，名称使用 kebab-case；New 组每项附 `**Existing:**` 断言行。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
 - **Decision Log**：本阶段定下的关键取舍，每条一个 `### DEC-NNN`，写决定/为什么/否决/约束。`design.md` 的规格追踪表按 `DEC-NNN` 引用本节，是 specs 阶段决策传到 plan 的唯一通道——不记的取舍只留在对话里，下游拿到结论拿不到理由。记录门槛三者取一，且必须是真实决策不是复述需求：① 结果偏离「直接读代码/需求会得到的显然做法」；② 有真实备选并择一；③ 改变外部可观察行为的边界或口径、读者不知理由会困惑。显然的、无备选的、需求直接决定的不记；无满足门槛的决策时本节正文只写「无」。
@@ -202,7 +211,7 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature 
 ## 完成条件
 
 - 「输入与输出」列出的两个产物都已生成，`specs/` 下至少存在一个 `spec.md`。
-- 产物契约预检通过。能力双向对应、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
+- 产物契约预检通过。能力双向对应、`New Capabilities` 的 `**Existing:**` 断言、REQ/SCN ID 格式与唯一性、每个 Requirement 至少一个 Scenario、proposal 必备章节都由它判定，失败无法写入 specs_done。
 - specs 只描述行为契约，不包含实现任务。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
 

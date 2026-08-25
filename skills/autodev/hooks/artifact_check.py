@@ -130,6 +130,14 @@ SPEC_OPERATION_SECTION = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 GROUP_TO_OPERATION = {"New": "ADDED", "Modified": "MODIFIED", "Removed": "REMOVED"}
+# New 组每项下面那行 `**Existing:** none` / `**Existing:** path#symbol`
+CAPABILITY_EXISTING_FIELD = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+)?\*\*Existing:?\*\*[:：]?[ \t]*(?P<value>.*)$",
+    re.MULTILINE,
+)
+# 否定断言的闭集，只认这两个写法。「无相关代码」「暂未发现」这类近似说法
+# 一律按肯定断言处理并报错——闭集一放宽，这个字段就退回成自由散文。
+CAPABILITY_EXISTING_NONE = re.compile(r"^(?:none|无)$", re.IGNORECASE)
 DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DATA_DEF_RE = re.compile(r"^\|\s*(DATA-\d{3})\s*\|", re.MULTILINE)
 DESIGN_DECISION_DEF_RE = re.compile(r"^\|\s*(D-\d{3})\s*\|", re.MULTILINE)
@@ -342,6 +350,36 @@ def proposal_capability_groups(text: str) -> dict[str, str]:
     return groups
 
 
+def proposal_new_capability_existing(text: str) -> dict[str, str | None]:
+    """Each ``New Capabilities`` item mapped to its declared ``**Existing:**`` value.
+
+    ``None`` means the line is absent. The value is deliberately not parsed any
+    further here: the check downstream is only whether a claim was written and
+    whether that claim is the negative one, not whether a cited path resolves.
+    """
+    section = CAPABILITIES_SECTION.search(text)
+    if not section:
+        return {}
+    body = section.group("body")
+
+    headings = list(CAPABILITY_GROUP_HEADING.finditer(body))
+    claims: dict[str, str | None] = {}
+    for index, heading in enumerate(headings):
+        if heading.group("group") != "New":
+            continue
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        group_body = body[heading.end() : end]
+        items = list(CAPABILITY_ITEM.finditer(group_body))
+        for position, item in enumerate(items):
+            item_end = items[position + 1].start() if position + 1 < len(items) else len(group_body)
+            block = group_body[item.start() : item_end]
+            field = CAPABILITY_EXISTING_FIELD.search(block)
+            claims[item.group("name")] = (
+                field.group("value").strip().strip("`").strip() if field else None
+            )
+    return claims
+
+
 def proposal_capabilities(text: str) -> set[str]:
     """Kebab-case capability names listed under ``## Capabilities``, any group."""
     section = CAPABILITIES_SECTION.search(text)
@@ -415,6 +453,39 @@ def validate_capability_spec_correspondence(ctx: HookContext) -> int:
             target=",".join(unlisted),
         )
     failures += _capability_operation_failures(ctx, text, declared & present)
+    failures += _new_capability_existing_failures(ctx, text)
+    return failures
+
+
+def _new_capability_existing_failures(ctx: HookContext, proposal_text: str) -> int:
+    """Force every ``New`` capability to state, in writing, what it searched for.
+
+    ``ADDED`` is the zero-effort default: a capability that already exists in
+    the codebase reaches ``New Capabilities`` by nobody looking, and every other
+    check downstream then passes because the spec was written to match the
+    declaration. Nothing here proves the claim is true — a lie still lands in
+    ``New`` with ``none`` under it. What changes is that the claim now has to be
+    written down, which makes it falsifiable: 回检 has a line to check against
+    the repository instead of an absence to notice.
+    """
+    failures = 0
+    for capability, value in sorted(proposal_new_capability_existing(proposal_text).items()):
+        if not value or placeholder_residue(value):
+            failures += fail_line(
+                ctx,
+                "new_capability_existing_evidence_missing",
+                f" capability={capability}",
+                target=capability,
+            )
+            continue
+        if not CAPABILITY_EXISTING_NONE.match(value):
+            failures += fail_line(
+                ctx,
+                "new_capability_declares_existing_code",
+                f" capability={capability} existing={value}",
+                target=capability,
+                fields={"existing": value},
+            )
     return failures
 
 
