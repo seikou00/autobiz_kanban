@@ -30,7 +30,12 @@ from board_core.artifact_paths import resolve_exact_relative_path
 from board_core.contracts import BoardConfigError, SkillContract, load_record_workflow_contracts
 from board_core.state_store import check_or_fix_state_sync
 from hooks.implementation_scope import load_scope, scope_path
-from hooks.source_references import has_source_section, validate_source_reference_section
+from hooks.source_context import validate_source_context
+from hooks.source_references import (
+    extract_source_references,
+    has_source_section,
+    validate_source_reference_section,
+)
 
 # 正式稿标题、禁用标题和必需段落的单一事实源在 prd_rules.py。
 from prd_rules import (  # noqa: F401  （re-export，供外部按原名引用）
@@ -205,6 +210,12 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
             )
         if has_source_section(content):
             errors.extend(validate_source_reference_section(content))
+            source_ids = {
+                reference.source_id
+                for reference in extract_source_references(content)
+            }
+            if source_ids:
+                errors.extend(validate_source_context(feature_dir, source_ids))
 
     _check_done_checkpoint(record, contract, errors)
 

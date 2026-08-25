@@ -1,7 +1,7 @@
 ---
 name: autodev-e2e
 description: E2E 验证单个 Autodev feature 的真实用户主链路。用于 autodev-utest 完成后进入 E2E 阶段，或从 e2e_in_progress 恢复执行；以 Playwright Test 可信执行、质量扫描、Evidence 和结构化结果裁定 e2e_done 或 needs_fix。
-version: v1.2.08211
+version: v1.2.0825
 ---
 
 # /autodev-e2e - 端到端测试
@@ -30,9 +30,9 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
 ```
 
-读取 `PRD.md`、`specs/**/*.md`、`design.md`、`plan.json`、batch plan、`REQUIREMENTS_EVAL.md`、单测结果和项目 Playwright 配置。解析 PRD 的 `外部资料与实现约束`，逐项打开外部接口 `SRC-NNN` 原件；同时读取 reviewer 的 `External Interface Coverage` 与 `E2E Focus`，不能用 specs/design 的摘要替代原接口契约。`deferredValidationIssues[]` 映射到具体用例或明确的 manual/missing 结论。
+读取 `PRD.md`、`source-context.json`、`sources/` 快照、`specs/**/*.md`、`design.md`、`plan.json`、batch plan、`REQUIREMENTS_EVAL.md`、单测结果和项目 Playwright 配置。逐项读取 `targets` 含 `e2e` 的来源要求及对应快照；同时读取 reviewer 的 `External Interface Coverage` 与 `E2E Focus`。`deferredValidationIssues[]` 映射到具体用例或明确的 manual/missing 结论。
 
-每个 PRD 外部接口 `SRC-NNN` 必须在 `E2E_TEST_CASES.yaml` 的 `source.external_sources` 中至少出现一次，并有覆盖 method/path、鉴权、请求响应、错误或超时中本期风险的用例。只允许在测试/沙箱环境执行有副作用调用；生产环境只做用户明确授权的只读验证。没有安全环境、凭据或资料不可访问时保留用例并形成 BLOCKED/missing 证据，不得静默省略或以 PASS 收口。
+每个 `targets` 含 `e2e` 的来源要求必须在 `E2E_TEST_CASES.yaml` 的 `source.source_requirements` 中至少出现一次，并有对应的机械断言。只允许在测试/沙箱环境执行有副作用调用；生产环境只做用户明确授权的只读验证。没有安全环境或凭据时保留用例并形成 BLOCKED/missing 证据；来源为 `snapshot_only` 时直接读取快照，不向用户索要原件。
 
 恢复时读取全部 E2E 机器产物和 `e2e-diagnostics/**/**/*.pending.json`。旧格式 `E2E_RESULT.json` 或纯文本 `e2e-run.log` 只读保留，列出需重新执行的用例；旧产物不能形成新 PASS。存在 pending 时执行：
 
@@ -118,7 +118,7 @@ python "${pluginPath}/hooks/e2e_result_writer.py" sync-quality-gate \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
 ```
 
-任一未裁定或确认的 blocker、未解析 import、登记输入哈希变化都阻断 verdict。语义审查还必须逐项核对外部接口 `SRC-NNN` 的原契约、测试请求与机械断言；缺少来源覆盖、实际调用证据或安全可执行环境均阻断 PASS。
+任一未裁定或确认的 blocker、未解析 import、登记输入哈希变化都阻断 verdict。语义审查还必须逐项核对 `targets` 含 `e2e` 的来源要求、对应快照、测试请求与机械断言；缺少来源覆盖、实际调用证据或安全可执行环境均阻断 PASS。
 
 ## 干净上下文裁定
 

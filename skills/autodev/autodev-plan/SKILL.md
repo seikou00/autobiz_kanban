@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.9.08211
+version: v1.9.0825
 ---
 
 ## 缺失产物处理
@@ -83,7 +83,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-- 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。存在 `PRD.md` 时必须解析 `外部资料与实现约束`，并逐项打开本期 `SRC-NNN` 指向的原始地址/路径；不能因为 proposal/specs 已淡化实现细节，就把这些资料当作可选背景。
+- 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。存在 `source-context.json` 时读取其中的来源要求与 `sources/SRC-NNN/` 快照；`snapshot_only` 直接使用快照，不能因为 proposal/specs 已淡化实现细节就重新询问或按现状猜测。
 - 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
 - 如果已有 Plan 产物，用户只要求调研、澄清或方案比较时，只把它们作为上下文讨论，不自动改写；当前请求已包含 Plan 生成/更新，或完整 Dev 工作流已路由到本节点时，视为已包含写入意图。
 
@@ -93,7 +93,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 | ---------------------------- | ------------------------------------------------------------ |
 | 需求目标、范围、非目标变化   | 回到 `proposal.md`，或在 `design.md` 记录影响与风险           |
 | 新增或变化的外部可观察行为   | 回到 `specs/**/*.md`，不得只写入 `design.md`                  |
-| PRD 中 `SRC-NNN` 外部资料约束 | `design.md` 的 External Source Coverage；外部接口同时进入 API Decisions |
+| `targets` 含 `design` 的 `SRC-NNN-RNNN` | `design.md` 对应 API/Data/Technical Decision，并保留要求 ID |
 | 新增或变化的 HTTP 行为       | `design.md` 的 API Decisions；无 API 写 `x-auto-no-http-api: true` |
 | 数据表/字段/索引/迁移需求    | `design.md` 的 Data Decisions；无数据变更写 `x-auto-no-sql: true` |
 | 技术方案、模块边界、集成点   | `design.md` 的 Technical Design                              |
@@ -194,7 +194,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 按 `${pluginPath}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
 
 - **Context / 输入上下文**：引用 proposal、PRD 外部资料索引和 specs，说明当前代码现状和约束。
-- **External Source Coverage / 外部资料覆盖**：逐项列出 PRD 定义的全部 `SRC-NNN`、关联 REQ/SCN、设计覆盖和消费证据。消费证据必须证明已打开原件（地址/路径、版本或关键契约事实），只复述 PRD 不算；外部接口资料不可访问时状态写“阻断”，不得继续宣称设计信息充分。不得引用 PRD 未定义的 `SRC-NNN`。
+- **External Source Coverage / 外部资料覆盖**：逐项列出 PRD 定义的全部 `SRC-NNN`、关联 REQ/SCN、设计覆盖和消费证据；存在 `source-context.json` 时，`targets` 含 `design` 的每个 `SRC-NNN-RNNN` 还必须出现在对应 API/Data/Technical Decision。快照存在时以快照为消费证据，不因原地址失联标记阻断。
 - **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。`Decision` 列填 proposal `## Decision Log` 里对应的 `DEC-NNN`——那是 specs 阶段为该 Requirement 定下的取舍及其否决项，实现遇阻要偏离时先看这里有没有权衡过；该 Requirement 无此类决策时写「无」。技术决策是 `Design Coverage` 列的 `D-NNN`，不要混进 `Decision` 列。`design_contract` 判定引用的 `DEC-NNN` 在 proposal 中真实存在。
 - **API Decisions / 接口决策**：
   - 不再生成独立接口契约文件。
@@ -277,7 +277,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 生成或修改 `plan.json` / `PLAN.md` 必须使用 `${pluginPath}/hooks/plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
+生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/sourceRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。`sourceRefs` 只列当前任务实际消费的 `SRC-NNN-RNNN`，没有来源要求时写 `[]`；它由分组表投影，task detail 不维护。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
 候选分组必须先做可验证性判断：backend group 若只产出 Entity/PO/DO/DTO/Mapper、配置或脚手架等结构，且唯一校验是 `compile/build` 或文件存在检查，则不得独立成 TASK；在不跨 workspace/lane 且不突破粒度上限时，合并到最早消费它的下游行为 group，并重排 ID/deps。只有能在不依赖后续 TASK 的情况下，通过真实的 behavior/integration/static 契约测试验证的数据迁移、ORM、序列化或 Schema 契约，才可保留为独立 backend TASK。frontend group 可按 frontend validation profile 使用 compile/build/typecheck 验证页面工程能成功编译，但不得把该命令伪装成 behavior test。此判断必须在 `preflight-task-groups` 和创建 Draft 前完成，不得在 task detail 阶段用空 `validationCommands`、伪 `static_check` 或占位命令兜底。Plan 仍必须生成测试相关的 `validationTestPlan` 和 `testIntent`，但这些内容不表示 Code 阶段创建或执行测试。
 
@@ -365,7 +365,7 @@ finalize 会重跑同一校验并通过事务一次写入正式根计划、全�
 用户补充信息沉淀规则：
 - 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
 - 必须在 `plan.json` 对应任务或风险字段中记录用户补充说明 / 技术细节； `PLAN.md`同步新增或更新「用户补充说明 / 技术细节」章节。
-- `PLAN.md` 必须从 `plan.json` 投影，任务 id / deps / status / workspaceRef / specRefs / designRefs / validationCommands / evidenceIds 不能漂移；任务的「做什么」「代码工作区」「涉及范围」「执行要点」「验收标准」「不做什么」只能来自 `goal` / `workspaceRef` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals`，不得在 `PLAN.md` 独写机器事实源没有的内容。
+- `PLAN.md` 必须从 `plan.json` 投影，任务 id / deps / status / workspaceRef / specRefs / sourceRefs / designRefs / validationCommands / evidenceIds 不能漂移；任务的「做什么」「代码工作区」「涉及范围」「执行要点」「验收标准」「不做什么」只能来自 `goal` / `workspaceRef` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals`，不得在 `PLAN.md` 独写机器事实源没有的内容。
 - 用户明确确认的内容，标记为「已确认」。
 - 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
@@ -398,7 +398,7 @@ UI 任务规则：
    - 一个任务应交付一个可理解、可执行、可验证的业务闭环；它可以同时涉及接口、服务、数据、前端、测试和配置。
    - 基础能力可以单独成 task，但必须服务于后续业务 vertical slice，并且 `validationCommands` 必须验证下游公开 seam。若只能验证工具类、DTO、Mapper 或内部函数，则并入第一个消费它的业务 task。
    - 准备 Draft Batch 前，必须先输出最终候选任务分组表，不得边补 task detail 边重新拆分。草稿阶段可用标题或 `C001` 标识候选项；进入 writer 前的最终表必须把 taskId 一次性重排为连续 `T001`、`T002`、`T003`...，禁止 `T003a`、`T004b1` 这类临时编号。
-   - 最终分组表列：`候选 Task / 完整 specRefs 清单 / SCN 数 / API 数 / Page 数 / UIX 数 / implementationPoints 数 / validationCommands / deps / 拆分结论 / splitRationale 草稿`。
+   - 最终分组表列：`候选 Task / 完整 specRefs 清单 / sourceRefs / SCN 数 / API 数 / Page 数 / UIX 数 / implementationPoints 数 / validationCommands / deps / 拆分结论 / splitRationale 草稿`。
    - 先按 `用户动作 + 公开 seam + 自动化验证边界` 分组，再为每组分配候选 task；不得先按 capability、同一页面或同一模块合并。
    - `SCN 数` 必须从完整路径级 `specRefs` 展开后计数；不同 spec 文件里的同号 `SCN-001` 必须按不同场景分别计数。最终表不得用 `SCN-007~SCN-016`、`SCN-001SCN-003(menu)` 这类范围或拼接文本作为计数依据；每个 SCN 必须单独写为 `specs/...#SCN-xxx`。
    - `拆分结论` 只能写 `通过`、`需拆分`、`可合并(附 splitRationale)`。`需拆分` 行不允许生成 task 输入文件；`可合并(附 splitRationale)` 行必须在分组表中写出完整 `splitRationale` 草稿，生成 task JSON 时原样带入，不得临场改写。
@@ -427,7 +427,8 @@ UI 任务规则：
    - 一个候选组只允许一次拆分：若拆分后仍是同一公开 seam 和同一自动化验证边界，且 SCN `<=12`，使用矩阵例外；若超过 `12` 或存在多个独立用户动作、seam 或验证边界，停止并报告规格/规划冲突。不得输出 `v2`、`v3` 等重复分组表，也不得生成 `T012a`、`T012b1` 等临时 taskId。
 
 6. 写入前预检每个 task 内容
-   - `specRefs` 至少包含一个真实 `REQ-xxx` 和一个真实 `SCN-xxx`；不同 spec 文件里的 `SCN-001` 是不同场景，必须写完整 `specs/<capability>/spec.md#SCN-001` 路径，不能只写 `#SCN-001` 造成路径级覆盖缺失。
+- `specRefs` 至少包含一个真实 `REQ-xxx` 和一个真实 `SCN-xxx`；不同 spec 文件里的 `SCN-001` 是不同场景，必须写完整 `specs/<capability>/spec.md#SCN-001` 路径，不能只写 `#SCN-001` 造成路径级覆盖缺失。
+- `source-context.json` 中 `targets` 含 `plan` 或 `code` 的要求必须进入至少一个真正消费它的 task `sourceRefs`；涉及可观察行为的要求仍由 `specRefs` 与 AC 锚定，不能用 `sourceRefs` 替代 Scenario。
    - 任务名用业务结果命名，例如“实现订单导出主链路”“支持审批超时提醒”“补齐用户配置保存与回显”，避免“修改某文件”“新增某类”。
    - 不要生成“新增 DTO”“修改 Controller”“补 Mapper”“写单测”这类单纯代码操作任务；不要生成只有“实现某能力”“补充验证”“更新相关代码”这类泛泛描述的任务。
    - 每个任务必须包含「涉及范围」「执行要点」「验证命令」「预期结果」：
@@ -441,7 +442,7 @@ UI 任务规则：
 7. 生成 DAG 与覆盖检查
    - Batch 按 `B001 -> B002` 的计划顺序串行执行；同一 Batch 的 TASK 由单一队列逐个完成生产实现，全部成为 `implemented` 后统一编译一次。依赖仍只表达真实业务前置关系，不要为了 Batch 串行额外伪造跨 Batch 依赖；Batch 内没有真实依赖的 TASK 也不启动并行 run。
    - 任务数不是首要目标：8-15 个清晰 vertical slice 优于 5 个巨型 capability task。超过 15 个任务时才检查是否把代码步骤误拆成任务；禁止为了压低任务数合并独立场景。
-   - specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
+- specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖；来源要求按 `sourceRefs` 完整覆盖。
 
 与 writer 的衔接：
 

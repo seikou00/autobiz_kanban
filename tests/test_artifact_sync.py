@@ -19,6 +19,7 @@ from hooks import artifact_sync, artifact_sync_execute_hook, sync_artifacts  # n
 
 EXPECTED_OUTPUT_METADATA = {
     "PRD.md": ("requirement", "final"),
+    "source-context.json": ("requirement_source", "final"),
     "proposal.md": ("behavior_proposal", "final"),
     "specs/**/*.md": ("behavior_spec", "final"),
     "design.md": ("technical_design", "process"),
@@ -108,6 +109,17 @@ class ArtifactCatalogContractTest(unittest.TestCase):
         self.assertEqual(original_entry["category"], "source_reference")
         self.assertEqual(original_entry["lifecycle"], "reference")
         self.assertEqual(original_entry["status_reason"], "file_size_exceeds_5mb")
+
+        source_snapshot = artifact_sync.catalog_entry(
+            path="sources/SRC-001/payment.docx",
+            stage="biz.prd",
+            upload_status="uploaded",
+            size=12,
+            sha256="def",
+        )
+        self.assertEqual(source_snapshot["source"], "extra")
+        self.assertEqual(source_snapshot["category"], "requirement_source_snapshot")
+        self.assertEqual(source_snapshot["lifecycle"], "reference")
 
     def test_catalog_writer_uses_required_fields_and_excludes_itself(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,8 +258,12 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             original_dir = feature_dir / "prd_original"
             original_dir.mkdir(parents=True)
+            source_dir = feature_dir / "sources" / "SRC-001"
+            source_dir.mkdir(parents=True)
             (feature_dir / "PRD.md").write_text("# 需求正式稿\n", encoding="utf-8")
+            (feature_dir / "source-context.json").write_text('{"version": 1}\n', encoding="utf-8")
             (original_dir / "source.docx").write_bytes(b"source")
+            (source_dir / "payment.docx").write_bytes(b"payment")
             state_path = workspace / ".autobizdevops" / "state.json"
             state_path.write_text(
                 json.dumps(
@@ -287,13 +303,21 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             self.assertEqual(event["source_skill"], "autobiz-requirement-discuss")
             self.assertEqual(
                 [item["path"] for item in event["artifacts"]],
-                ["PRD.md", "prd_original/source.docx", artifact_sync.CATALOG_FILE_NAME],
+                [
+                    "PRD.md",
+                    "prd_original/source.docx",
+                    "source-context.json",
+                    "sources/SRC-001/payment.docx",
+                    artifact_sync.CATALOG_FILE_NAME,
+                ],
             )
 
             catalog = json.loads((feature_dir / artifact_sync.CATALOG_FILE_NAME).read_text(encoding="utf-8"))
             by_path = {item["path"]: item for item in catalog["artifacts"]}
             self.assertEqual(by_path["PRD.md"]["stage"], "biz.prd")
+            self.assertEqual(by_path["source-context.json"]["stage"], "biz.prd")
             self.assertEqual(by_path["prd_original/source.docx"]["stage"], "biz.prd")
+            self.assertEqual(by_path["sources/SRC-001/payment.docx"]["stage"], "biz.prd")
 
     def test_read_status_migrates_retryable_discuss_events_and_retires_draft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

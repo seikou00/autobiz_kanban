@@ -12,6 +12,7 @@
         "specs/[capability]/spec.md#REQ-001",
         "specs/[capability]/spec.md#SCN-001"
       ],
+      "sourceRefs": [],
       "mergedScenarioRefs": [],
       "apiIds": [],
       "validationBoundary": "[public seam plus one executable validation command or assertion]"
@@ -29,6 +30,7 @@
       "specs/[ui-capability]/spec.md#REQ-001",
       "specs/[ui-capability]/spec.md#SCN-001"
     ],
+    "sourceRefs": [],
     "mergedScenarioRefs": [],
     "apiIds": [],
     "uiRefs": {
@@ -60,6 +62,7 @@
       "specs/[capability]/spec.md#SCN-005",
       "specs/[capability]/spec.md#SCN-006"
     ],
+    "sourceRefs": [],
     "mergedScenarioRefs": [
       "specs/[capability]/spec.md#SCN-001",
       "specs/[capability]/spec.md#SCN-002",
@@ -91,6 +94,7 @@
       "specs/[capability]/spec.md#REQ-001",
       "specs/[capability]/spec.md#SCN-001"
     ],
+    "sourceRefs": [],
     "mergedScenarioRefs": [],
     "apiIds": [],
     "validationBoundary": "record the external owner and tracking reference without creating local implementation or tests"

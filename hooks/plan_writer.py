@@ -51,6 +51,7 @@ from hooks.plan_json import (  # noqa: E402
     MAX_BATCH_TASKS,
     PROJECT_VALIDATION_KINDS,
     REPOSITORY_ID_RE,
+    SOURCE_REQUIREMENT_ID_RE,
     TASK_EXECUTION_MODES,
     TASK_VALIDATION_KINDS,
     VISUAL_SOURCE_ID_RE,
@@ -91,6 +92,7 @@ from hooks.artifact_ref_validator import (  # noqa: E402
     design_contract_snapshot,
     load_design_contract,
     validate_plan_design_coverage,
+    validate_plan_source_coverage,
     validate_task_artifact_refs,
     validate_task_group_design_contract,
 )
@@ -124,6 +126,7 @@ DRAFT_GROUP_OWNED_FIELDS = {
     "deps",
     "uiRequired",
     "specRefs",
+    "sourceRefs",
     "mergedScenarioRefs",
     "apiIds",
     "uiRefs",
@@ -172,6 +175,7 @@ TASK_DETAIL_FORBIDDEN_FIELDS = {
     "deps",
     "evidenceIds",
     "specRefs",
+    "sourceRefs",
     "apiIds",
     "dataIds",
     "designRefs",
@@ -828,6 +832,15 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
             errors.append({"reason": f"{task_id}.specRefs_missing_requirement_id"})
         if spec_refs and not any(SCENARIO_ID_RE.search(ref) for ref in spec_refs):
             errors.append({"reason": f"{task_id}.specRefs_missing_scenario_id"})
+        if "sourceRefs" in raw_group:
+            _group_string_list(
+                errors,
+                raw_group,
+                task_id,
+                "sourceRefs",
+                required=False,
+                item_re=SOURCE_REQUIREMENT_ID_RE,
+            )
         _group_string_list(
             errors,
             raw_group,
@@ -920,6 +933,7 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
     if design_errors:
         return errors
     errors.extend(validate_task_group_design_contract(design_contract, _task_groups(data)))
+    errors.extend(validate_plan_source_coverage(feature_dir, _task_groups(data)))
     if errors:
         return errors
     expected, covered = _scenario_coverage(feature_dir, _task_groups(data))
@@ -954,6 +968,7 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         "deps": item.get("deps") if isinstance(item.get("deps"), list) else [],
         "uiRequired": item.get("uiRequired"),
         "specRefs": item.get("specRefs") if isinstance(item.get("specRefs"), list) else [],
+        "sourceRefs": item.get("sourceRefs") if isinstance(item.get("sourceRefs"), list) else [],
         "mergedScenarioRefs": (
             item.get("mergedScenarioRefs") if isinstance(item.get("mergedScenarioRefs"), list) else []
         ),
@@ -1524,6 +1539,7 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
         "workspaceRef": group.get("workspaceRef"),
         "nonGoals": [],
         "specRefs": copy.deepcopy(group.get("specRefs", [])),
+        "sourceRefs": copy.deepcopy(group.get("sourceRefs", [])),
         "mergedScenarioRefs": copy.deepcopy(group.get("mergedScenarioRefs", [])),
         "designRefs": [],
         "apiIds": copy.deepcopy(group.get("apiIds", [])),
@@ -2123,6 +2139,7 @@ def _default_task(task_id: str, args: argparse.Namespace) -> dict[str, Any]:
         ),
         "nonGoals": non_goals,
         "specRefs": _split_values(args.spec_ref),
+        "sourceRefs": [],
         "designRefs": _split_values(args.design_ref),
         "apiIds": api_ids,
         "dataIds": _split_values(args.data_id),
@@ -2267,6 +2284,7 @@ def _normalize_task_body(
     task.setdefault("acceptanceCriteria", [])
     task.setdefault("nonGoals", [])
     task.setdefault("specRefs", [])
+    task.setdefault("sourceRefs", [])
     task.setdefault("designRefs", [])
     task.setdefault("apiIds", [])
     task.setdefault("dataIds", [])
@@ -2697,6 +2715,7 @@ def _task_set_preflight_errors(
             design_contract=design_contract,
         ))
     errors.extend(validate_plan_design_coverage(design_contract, _tasks(data)))
+    errors.extend(validate_plan_source_coverage(feature_dir, _tasks(data)))
     errors.extend(_task_set_validation_errors(data))
     errors.extend(_code_workspace_preflight_errors(data, code_workspaces))
     if not errors:
@@ -4943,6 +4962,7 @@ def _render_plan_md(data: dict[str, Any]) -> str:
                 f"- 做什么: {task.get('goal', '')}",
                 f"- 执行模式: {task_execution_mode(task)}",
                 f"- 规格依据: {_fmt(task.get('specRefs'))}",
+                f"- 外部资料要求: {_fmt(task.get('sourceRefs'))}",
                 f"- api_id: {_fmt(task.get('apiIds'))}",
                 f"- data_id: {_fmt(task.get('dataIds'))}",
                 f"- decision_id: {_fmt(task.get('decisionIds'))}",
@@ -5034,6 +5054,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
                 "title": task.get("title"),
                 "status": task.get("status"),
                 "specRefs": len(task.get("specRefs", [])) if isinstance(task.get("specRefs"), list) else 0,
+                "sourceRefs": len(task.get("sourceRefs", [])) if isinstance(task.get("sourceRefs"), list) else 0,
                 "apiIds": len(task.get("apiIds", [])) if isinstance(task.get("apiIds"), list) else 0,
             }
             for task in tasks

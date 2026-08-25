@@ -35,6 +35,7 @@ TASK_ID_RE = re.compile(r"^T\d{3}$")
 BATCH_ID_RE = re.compile(r"^B\d{3}$")
 REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
+SOURCE_REQUIREMENT_ID_RE = re.compile(r"^SRC-\d{3}-R\d{3}$")
 API_ID_RE = re.compile(r"^API-\d{3}$")
 DATA_ID_RE = re.compile(r"^DATA-\d{3}$")
 # 技术决策：plan 阶段写进 design 技术决策表，任务用 `decisionIds` 引用。
@@ -501,6 +502,15 @@ def _validate_tasks_container(
         if spec_refs and not any(SCN_ID_RE.search(ref) for ref in spec_refs):
             errors.append(f"{task_id}.specRefs_missing_scenario_id")
 
+        if "sourceRefs" in raw_task:
+            _validate_string_list(
+                errors,
+                raw_task,
+                task_id,
+                "sourceRefs",
+                required=False,
+                item_re=SOURCE_REQUIREMENT_ID_RE,
+            )
         _validate_string_list(errors, raw_task, task_id, "designRefs", required=False)
         if "mergedScenarioRefs" in raw_task:
             _validate_string_list(errors, raw_task, task_id, "mergedScenarioRefs", required=False)

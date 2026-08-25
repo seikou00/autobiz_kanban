@@ -280,6 +280,48 @@ def _write_plan_tasks(feature_dir: Path, tasks: list[dict]) -> None:
     path.write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _write_source_context(feature_dir: Path) -> None:
+    snapshot = feature_dir / "sources" / "SRC-001" / "payment.md"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text("支付接口调用超时时间为 3 秒。", encoding="utf-8")
+    (feature_dir / "source-context.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sources": [
+                    {
+                        "id": "SRC-001",
+                        "name": "支付接口",
+                        "path": "sources/SRC-001/payment.md",
+                        "availability": "snapshot_only",
+                        "readStatus": "complete",
+                        "freshness": "unknown",
+                        "sha256": "0" * 64,
+                        "items": [
+                            {
+                                "id": "SRC-001-I001",
+                                "location": "第 1 行",
+                                "original": "支付接口调用超时时间为 3 秒。",
+                                "disposition": "requirement",
+                                "requirements": [
+                                    {
+                                        "id": "SRC-001-R001",
+                                        "text": "支付接口调用超时时间为 3 秒",
+                                        "targets": ["plan", "code"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def _plan_task_body() -> dict:
     return {
         "id": "T001",
@@ -357,6 +399,7 @@ def _write_task_groups(path: Path, tasks: list[dict]) -> Path:
             "uiRequired": task.get("uiRequired") is True,
             "workspaceRef": task.get("workspaceRef", "default"),
             "specRefs": list(task.get("specRefs", [])),
+            "sourceRefs": list(task.get("sourceRefs", [])),
             "mergedScenarioRefs": list(task.get("mergedScenarioRefs", [])),
             "apiIds": list(task.get("apiIds", [])),
             "validationBoundary": task.get(
@@ -441,6 +484,39 @@ def _named_code_workspace(
 class JsonWriterTests(unittest.TestCase):
     def test_shell_join_quotes_arguments_on_python_37(self) -> None:
         self.assertEqual(shell_join(["python", "hello world", "plain"]), "python 'hello world' plain")
+
+    def test_plan_writer_requires_and_projects_source_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            _write_source_context(feature_dir)
+            task = _plan_task_body()
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+
+            missing = _run(
+                "plan_writer.py", "preflight-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("missing_plan_source_requirement_coverage", missing.stdout)
+
+            task["sourceRefs"] = ["SRC-001-R001"]
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            draft_batch = json.loads(
+                (
+                    feature_dir / ".tmp" / "plan_writer" / "draft"
+                    / "plans" / "B001" / "plan.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(draft_batch["tasks"][0]["sourceRefs"], ["SRC-001-R001"])
 
     def test_plan_writer_binds_each_task_to_one_of_multiple_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2933,6 +3009,48 @@ class JsonWriterTests(unittest.TestCase):
             _write_specs(feature_dir)
             _write_design(feature_dir)
             _write_plan(feature_dir)
+            tasks = _read_plan_tasks(feature_dir)
+            tasks[0]["sourceRefs"] = ["SRC-001-R001"]
+            _write_plan_tasks(feature_dir, tasks)
+            snapshot = feature_dir / "sources" / "SRC-001" / "payment.md"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text("支付接口调用超时时间为 3 秒。", encoding="utf-8")
+            (feature_dir / "source-context.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "sources": [
+                            {
+                                "id": "SRC-001",
+                                "name": "支付接口",
+                                "path": "sources/SRC-001/payment.md",
+                                "availability": "snapshot_only",
+                                "readStatus": "complete",
+                                "freshness": "unknown",
+                                "sha256": "0" * 64,
+                                "items": [
+                                    {
+                                        "id": "SRC-001-I001",
+                                        "location": "第 1 行",
+                                        "original": "支付接口调用超时时间为 3 秒。",
+                                        "disposition": "requirement",
+                                        "requirements": [
+                                            {
+                                                "id": "SRC-001-R001",
+                                                "text": "支付接口调用超时时间为 3 秒",
+                                                "targets": ["plan", "code"],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
             result = _run("code_task_context.py", "--workspace", str(workspace), "--feature", "alpha", "--task-id", "T001")
 
@@ -2941,10 +3059,13 @@ class JsonWriterTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(Path(payload["artifactFeatureDir"]).resolve(), feature_dir.resolve())
             self.assertEqual(payload["refResolution"]["specRefs"], "relative-to-artifactFeatureDir")
+            self.assertEqual(payload["refResolution"]["sourceRefs"], "requirement-ids-in-source-context.json")
             self.assertTrue(all(item["found"] for item in payload["resolvedSpecRefs"]))
             self.assertTrue(all(item["found"] for item in payload["resolvedDesignRefs"]))
+            self.assertTrue(all(item["found"] for item in payload["resolvedSourceRefs"]))
             self.assertIn("Scenario [SCN-001]", payload["resolvedSpecRefs"][1]["text"])
             self.assertIn("| API-001 |", payload["resolvedDesignRefs"][0]["text"])
+            self.assertEqual(payload["resolvedSourceRefs"][0]["original"], "支付接口调用超时时间为 3 秒。")
 
     def test_code_task_context_fails_on_missing_ref_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

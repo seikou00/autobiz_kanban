@@ -231,7 +231,7 @@
             }
           }
         },
-        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）",
+        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md；存在外部资料时生成 sources/ 快照与 source-context.json",
         "states": [
           { "nodeStatus": "not_started", "label": "未开始", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清与 PRD。" } },
           { "nodeStatus": "in_progress", "label": "进行中", "nextAction": { "slashSkill": "autobiz-requirement-discuss", "userMessage": "请使用 /autobiz-requirement-discuss 继续推进当前 Feature。", "dialogTips": "当前阶段：需求澄清与 PRD。" } },
@@ -241,7 +241,8 @@
         "artifacts": {
           "inputs": [],
           "outputs": [
-            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true }
+            { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true },
+            { "id": "source_context", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false }
           ]
         },
         "validators": [],
@@ -279,6 +280,10 @@
             { "id": "prd", "label": "PRD文档", "artifactType": "file", "path": "PRD.md", "required": true,
               "extract": {
                 "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时 targets 含 spec 的要求必须进入 Requirement 或 Scenario"
               } }
           ],
           "outputs": [
@@ -325,7 +330,11 @@
               } },
             { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时以 proposal/specs 设计；存在 PRD 时必须读取外部资料与实现约束并逐项消费 SRC-NNN，外部接口资料不可访问时不得宣称设计信息充分"
+                "degrade": "无 PRD 时以 proposal/specs 设计；存在来源快照时以 source-context.json 与 sources/ 为准，只有从未取得资料时才阻断"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时按 targets 写入 design，并把 plan/code 要求绑定到 task sourceRefs"
               } }
           ],
           "outputs": [
@@ -376,7 +385,11 @@
               } },
             { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时，以已有产物理解需求;存在 PRD 时必须读取外部资料与实现约束，并按当前 TASK 涉及的 SRC-NNN 打开原资料后实现"
+                "degrade": "无 PRD 时以已有产物理解需求；存在来源上下文时按当前 TASK 的 resolvedSourceRefs 与快照实现"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时只使用当前 task 的 resolvedSourceRefs，不从摘要反查或重新索取已有快照"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
@@ -445,7 +458,11 @@
               } },
             { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时直接跳过；存在 PRD 时 reviewer 必须读取外部资料与实现约束，并在报告中逐项核对外部接口 SRC-NNN"
+                "degrade": "无 PRD 时直接跳过；存在来源上下文时 reviewer 以 source-context.json 与 sources/ 快照逐项核对"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时 reviewer 必须逐项核对 targets 含 reviewer 的要求 ID"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
@@ -568,7 +585,11 @@
               } },
             { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时直接跳过；存在 PRD 时 E2E 必须读取外部资料与实现约束，并为每个外部接口 SRC-NNN 生成用例或明确阻断结论"
+                "degrade": "无 PRD 时直接跳过；存在来源上下文时 E2E 以 source-context.json 与 sources/ 快照生成用例"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时 targets 含 e2e 的要求必须进入 E2E 用例来源"
               } },
             { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {

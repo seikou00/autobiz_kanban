@@ -33,6 +33,7 @@ STATUS_FILE_NAME = "sync-status.json"
 CATALOG_FILE_NAME = "ARTIFACT_CATALOG.json"
 CATALOG_SCHEMA_VERSION = "autobizdevops.artifact-catalog.v1"
 PRD_ORIGINAL_DIR_NAME = "prd_original"
+SOURCE_SNAPSHOT_DIR_NAME = "sources"
 OPTIONAL_VERIFY_ARTIFACTS = (
     "FEATURE_API_DETAIL.md",
 )
@@ -327,6 +328,11 @@ CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
         "lifecycle": "final",
         "description": "正式产品需求文档。",
     },
+    "source-context.json": {
+        "category": "requirement_source",
+        "lifecycle": "final",
+        "description": "外部资料原文与稳定要求索引。",
+    },
     "UI_CONTEXT.json": {
         "category": "ui_context",
         "lifecycle": "final",
@@ -448,7 +454,11 @@ CATALOG_EXACT_METADATA: dict[str, dict[str, Any]] = {
 def catalog_source_for_path(relative_path: str) -> str:
     if relative_path == CATALOG_FILE_NAME:
         return "hook_generated"
-    if relative_path.startswith(f"{PRD_ORIGINAL_DIR_NAME}/") or relative_path in OPTIONAL_VERIFY_ARTIFACTS:
+    if (
+        relative_path.startswith(f"{PRD_ORIGINAL_DIR_NAME}/")
+        or relative_path.startswith(f"{SOURCE_SNAPSHOT_DIR_NAME}/")
+        or relative_path in OPTIONAL_VERIFY_ARTIFACTS
+    ):
         return "extra"
     return "workflow"
 
@@ -465,6 +475,12 @@ def catalog_metadata_for_path(relative_path: str) -> dict[str, Any]:
             "category": "source_reference",
             "lifecycle": "reference",
             "description": "原始需求文档或参考材料快照。",
+        }
+    if relative_path.startswith(f"{SOURCE_SNAPSHOT_DIR_NAME}/"):
+        return {
+            "category": "requirement_source_snapshot",
+            "lifecycle": "reference",
+            "description": "外部资料原件或 Feature 固定快照。",
         }
     if relative_path.startswith("e2e-diagnostics/"):
         return {
@@ -531,10 +547,11 @@ def collect_prd_original_artifacts(
     artifacts: list[dict[str, Any]] = []
     side_entries: list[dict[str, Any]] = []
     seen: set[str] = set()
-    prd_original_dir = feature_dir / PRD_ORIGINAL_DIR_NAME
-
-    if prd_original_dir.is_dir():
-        for path in sorted(prd_original_dir.rglob("*")):
+    for directory_name in (PRD_ORIGINAL_DIR_NAME, SOURCE_SNAPSHOT_DIR_NAME):
+        source_dir = feature_dir / directory_name
+        if not source_dir.is_dir():
+            continue
+        for path in sorted(source_dir.rglob("*")):
             if not path.is_file() or ignored_prd_original_file(path):
                 continue
             relative_path = relative_artifact_path(feature_dir, path)
@@ -562,7 +579,9 @@ def collect_prd_original_artifacts(
             )
 
     for relative_path in sorted(status.get("published_artifacts", {})):
-        if not isinstance(relative_path, str) or not relative_path.startswith(f"{PRD_ORIGINAL_DIR_NAME}/"):
+        if not isinstance(relative_path, str) or not relative_path.startswith(
+            (f"{PRD_ORIGINAL_DIR_NAME}/", f"{SOURCE_SNAPSHOT_DIR_NAME}/")
+        ):
             continue
         if relative_path in seen:
             continue

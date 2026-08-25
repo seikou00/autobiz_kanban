@@ -39,6 +39,7 @@ from hooks.repository_snapshot import (  # noqa: E402
     resolve_repositories,
     unignored_runtime_artifact_paths,
 )
+from hooks.source_context import resolve_source_requirement_refs  # noqa: E402
 
 
 PLAN_FILE = "plan.json"
@@ -416,6 +417,9 @@ def build_context(
         return fail("task_not_found", task_id, path=plan_path)
 
     resolved_specs, resolved_design, errors = resolve_task_refs(base, task)
+    source_refs = [ref for ref in task.get("sourceRefs", []) if isinstance(ref, str)]
+    resolved_sources, source_errors = resolve_source_requirement_refs(base, source_refs)
+    errors.extend(source_errors)
 
     data_out = {
         "feature": feature,
@@ -437,6 +441,7 @@ def build_context(
             "base": "artifactFeatureDir",
             "specRefs": "relative-to-artifactFeatureDir",
             "designRefs": "relative-to-artifactFeatureDir",
+            "sourceRefs": "requirement-ids-in-source-context.json",
             "codeWorkspace": "current working directory / project repository",
         },
         "task": task,
@@ -450,9 +455,11 @@ def build_context(
             "nonGoals": task.get("nonGoals"),
             "splitRationale": task.get("splitRationale", ""),
             "validationCommands": task.get("validationCommands"),
+            "sourceRefs": task.get("sourceRefs"),
         },
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
+        "resolvedSourceRefs": resolved_sources,
     }
     phase = _exploration_phase(active_plan)
     if code_workspaces:

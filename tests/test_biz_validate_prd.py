@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -102,6 +103,16 @@ VALID_PRD = FORMAL_PREFIX + """## 用户故事
 """
 
 
+PRD_WITH_SOURCE = VALID_PRD.replace(
+    "## 外部资料与实现约束\n\n无",
+    """## 外部资料与实现约束
+
+| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- |
+| SRC-001 | 外部接口 | 支付接口 | sources/SRC-001/payment.md | 支付超时与降级 | Specs、Plan、Code、Reviewer、E2E | snapshot_only |""",
+)
+
+
 class BizValidatePrdTests(unittest.TestCase):
     def make_workspace(self, prd_content: str) -> Path:
         tempdir = tempfile.TemporaryDirectory()
@@ -120,6 +131,45 @@ class BizValidatePrdTests(unittest.TestCase):
         env["FEATURE_ID"] = "alpha"
         env.pop("PLUGIN_OUTPUT_DIR", None)
         return env
+
+    def write_source_context(self, workspace: Path) -> None:
+        feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+        snapshot = feature_dir / "sources" / "SRC-001" / "payment.md"
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_text("支付接口调用超时时间为 3 秒。", encoding="utf-8")
+        context = {
+            "version": 1,
+            "sources": [
+                {
+                    "id": "SRC-001",
+                    "name": "支付网关 API",
+                    "path": "sources/SRC-001/payment.md",
+                    "availability": "snapshot_only",
+                    "readStatus": "complete",
+                    "freshness": "unknown",
+                    "sha256": "0" * 64,
+                    "items": [
+                        {
+                            "id": "SRC-001-I001",
+                            "location": "第 1 行",
+                            "original": "支付接口调用超时时间为 3 秒。",
+                            "disposition": "requirement",
+                            "requirements": [
+                                {
+                                    "id": "SRC-001-R001",
+                                    "text": "支付接口调用超时时间为 3 秒",
+                                    "targets": ["spec", "design", "plan", "code", "reviewer", "e2e"],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        (feature_dir / "source-context.json").write_text(
+            json.dumps(context, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def run_biz_validate(
         self,
@@ -256,6 +306,14 @@ class BizValidatePrdTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
 
+    def test_external_source_requires_source_context(self) -> None:
+        workspace = self.make_workspace(PRD_WITH_SOURCE)
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("必须生成 source-context.json", "\n".join(result["errors"]))
+
     def test_accepts_required_sections_anywhere_in_prd(self) -> None:
         discuss_with_section_names = DISCUSS_WITH_HISTORY.replace(
             "## 假设与风险",
@@ -287,6 +345,7 @@ class BizValidatePrdTests(unittest.TestCase):
         workspace = self.make_workspace(
             VALID_PRD.replace("## 外部资料与实现约束\n\n无", source_table.rstrip())
         )
+        self.write_source_context(workspace)
 
         result = validate_prd("alpha", workspace)
 

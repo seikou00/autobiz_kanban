@@ -1,14 +1,14 @@
 ---
 name: autobiz-requirement-discuss
 description: Biz 阶段需求澄清与正式 PRD 生成技能。
-version: v1.2.08211
+version: v1.2.0825
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清与 PRD 生成
 
 ## 产物协议
 
-- 产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`
+- 产物：`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md`；存在外部资料时同时生成 `sources/SRC-NNN/` 与 `source-context.json`
 
 ## 准备工作
 
@@ -88,6 +88,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 ### 保存原始材料快照
 将原始需求文档复制到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/prd_original/`（目录不存在则创建）保留快照
 
+会约束实现或验收的资料按 PRD 分配的 `SRC-NNN` 保存到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/sources/SRC-NNN/`。已经取得快照时后续阶段以快照为本 Feature 的依据，不得因原地址失联要求用户重新提供。
+
 ### 需求内容格式改造
 
 - 必须先完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/prd-formatter.md` 。
@@ -97,6 +99,8 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discu
 - **关键** ：以原需求文档为基准，核对生成的 `PRD.md` 是否遗漏功能说明；逐项检查功能清单、功能详情、字段/表格行、规则、链接、文案、状态、外部协作规则和验收项。发现遗漏、弱化或错位时，先更新 `PRD.md`，再重新核对。
 - 从原需求、初始上传与讨论补充资料中提取会约束实现或验收的外部接口文档、原型、数据字典、协议和附件，在 `## 外部资料与实现约束` 建立索引。每项分配稳定 `SRC-NNN`，后续增量只追加，禁止重编号或复用已删除 ID；没有此类资料时正文写“无”。
 - `类型=外部接口` 或 `第三方接口` 的条目必须保留可访问的地址/路径、约束范围与当前状态，`必读阶段` 固定覆盖 `Specs、Plan、Code、Reviewer、E2E`。链接本身不是充分摘要，接口方法、路径、鉴权、请求/响应结构、错误与超时等已知约束仍须写入对应 FR 或验收标准。
+- 存在来源项时完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/source-context.md`，直接生成 `source-context.json`。逐项保留快照定位、逐字原文、提取要求及多值 `targets`；不生成 `content.txt` 或来源覆盖报告。
+- `source-context.json` 的语义内容由本技能直接生成，不经过 writer。快照 SHA256 使用 `python "${pluginPath}/hooks/source_context.py" digest --feature-dir "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}" --path "sources/SRC-NNN/<快照文件>"` 计算；校验脚本只检查，不改写产物。
 
 ### 需求分析
 
@@ -245,6 +249,7 @@ python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${fea
 脚本通过即视为以下清单已完成：
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PRD.md` — 已存在并满足正式稿结构
+- PRD 存在 `SRC-NNN` 时，对应快照与 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/source-context.json` 已通过校验
 - Feature checkpoint 为 `prd_done`
 - 所有 P0 / P1 与待确认项已完成裁定并回写
 - 所有实现承重资料均已进入 `外部资料与实现约束`，外部接口项已声明 `Specs、Plan、Code、Reviewer、E2E` 全阶段必读

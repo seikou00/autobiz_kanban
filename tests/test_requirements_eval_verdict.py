@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -195,6 +196,56 @@ class RequirementsEvalGateTest(unittest.TestCase):
 | SRC-001 | POST /payments | API-001 | src/payment.py | gateway integration test | covered |
 """
         failures, output = self.validate(report)
+        self.assertEqual(failures, 0, output)
+
+    def test_requires_reviewer_targeted_source_requirements(self) -> None:
+        snapshot = self.feature_dir / "sources" / "SRC-001" / "payment.md"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text("支付接口调用超时时间为 3 秒。", encoding="utf-8")
+        (self.feature_dir / "source-context.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "sources": [
+                        {
+                            "id": "SRC-001",
+                            "name": "支付接口",
+                            "path": "sources/SRC-001/payment.md",
+                            "availability": "snapshot_only",
+                            "readStatus": "complete",
+                            "freshness": "unknown",
+                            "sha256": "0" * 64,
+                            "items": [
+                                {
+                                    "id": "SRC-001-I001",
+                                    "location": "第 1 行",
+                                    "original": "支付接口调用超时时间为 3 秒。",
+                                    "disposition": "requirement",
+                                    "requirements": [
+                                        {
+                                            "id": "SRC-001-R001",
+                                            "text": "支付接口调用超时时间为 3 秒",
+                                            "targets": ["reviewer"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        failures, output = self.validate(eval_report("PASS"))
+
+        self.assertGreater(failures, 0)
+        self.assertIn("requirements_eval_source_requirement_missing", output)
+
+        failures, output = self.validate(
+            eval_report("PASS") + "\n## Source Requirement Evidence\n\n- SRC-001-R001: 已核对实现与快照。\n"
+        )
         self.assertEqual(failures, 0, output)
 
 

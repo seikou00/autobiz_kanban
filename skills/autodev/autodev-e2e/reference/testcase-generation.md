@@ -2,18 +2,20 @@
 
 ## 输入优先级
 
-1. `PRD.md` 的 `外部资料与实现约束` 及其原始地址/路径
-2. `proposal.md`
-3. `specs/**/*.md`
-4. `design.md`
-5. `REQUIREMENTS_EVAL.md` 的 `External Interface Coverage` / `E2E Focus`
-6. `UNIT_TEST_REPORT.md` / `test-output.log`
-7. `PLAN.md`
-8. 直接相关的代码与配置
+1. `source-context.json` 中 `targets` 含 `e2e` 的要求及其 `sources/` 快照
+2. `PRD.md` 的 `外部资料与实现约束`
+3. `proposal.md`
+4. `specs/**/*.md`
+5. `design.md`
+6. `REQUIREMENTS_EVAL.md` 的 `External Interface Coverage` / `E2E Focus`
+7. `UNIT_TEST_REPORT.md` / `test-output.log`
+8. `PLAN.md`
+9. 直接相关的代码与配置
 
 各输入用途：
 
-- `PRD.md` 与原始资料：提取外部接口 `SRC-NNN`，核对 method/path、鉴权、请求响应、错误和超时约束
+- `source-context.json` 与快照：提取 `SRC-NNN-RNNN` 要求，核对其逐字证据、位置和测试落点
+- `PRD.md`：确认来源范围与业务背景
 - `proposal.md`：提取能力边界、影响面、非目标
 - `specs/**/*.md`：提取 Requirement / Scenario 行为契约，作为 pass/fail 的主要行为依据
 - `design.md`：提取接口决策、数据决策、成功与失败路径
@@ -32,8 +34,8 @@
 - 必须为 `specs/**/*.md` 中每个用户可见 Requirement / Scenario 生成最少一条用例
 - proposal 中每个本轮能力边界必须能追溯到至少一个 specs 场景，或明确标记不适合 E2E
 - `specs/**/*.md` 中每个属于用户主链路的 Requirement / Scenario 至少要被一条用例覆盖；API Decision 或 Data Decision 作为执行和断言上下文
-- PRD 中每个外部接口 `SRC-NNN` 必须至少映射到一条用例的 `source.external_sources`；用例必须实际验证本期相关契约，不能只挂 ID
-- 外部接口资料不可访问或没有安全测试环境/凭据时，仍保留对应用例并形成 BLOCKED/missing 结论；禁止静默删掉或让根 verdict 变为 PASS
+- `targets` 含 `e2e` 的每个来源要求必须至少映射到一条用例的 `source.source_requirements`；用例必须实际验证对应契约，不能只挂 ID
+- 没有安全测试环境或凭据时，仍保留对应用例并形成 BLOCKED/missing 结论；`snapshot_only` 直接读取快照
 - 有副作用的外部调用只允许测试/沙箱环境；生产环境除非用户明确授权，否则只能做只读验证
 - 每个用例必须标注 `execution_mode: browser | api | mixed | database_assisted`
 - 每个用例必须标注 `ui_required: true | false`
@@ -81,6 +83,8 @@ source:
   feature: {slug}
   external_sources:
     - SRC-001
+  source_requirements:
+    - SRC-001-R001
   proposal_capability:
     - comments
   design_contract:
@@ -152,6 +156,7 @@ cleanup:
 
 - `feature`：必填
 - `external_sources`：必填；填写该用例实际消费的 PRD `SRC-NNN` 列表，没有外部来源时写 `[]`
+- `source_requirements`：必填；填写该用例实际消费的 `SRC-NNN-RNNN` 列表，没有来源要求时写 `[]`
 - `proposal_capability`：建议填写
 - `specs_contract`：建议填写，指向 specs 文件、Requirement 和 Scenario
 - `design_contract`：涉及 HTTP/API 或数据变更时建议填写 API/Data Decision
@@ -202,7 +207,7 @@ cleanup:
 
 - 目标是用户可见或外部可观察行为
 - 用例能追溯到 specs Requirement / Scenario、API operation 或当前风险点
-- PRD 每个外部接口 `SRC-NNN` 都被至少一条用例真实消费，且断言与原契约一致
+- `targets` 含 `e2e` 的每个来源要求都被至少一条用例真实消费，且断言与快照证据一致
 - 前置条件和测试数据写清楚了
 - 每一步都有可执行断言
 - 用例足够聚焦，失败时有单一主要原因
