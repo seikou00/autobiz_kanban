@@ -77,6 +77,31 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(offenders),
         )
 
+    def test_every_workflow_skill_invokes_its_input_contract_once(self) -> None:
+        offenders: list[str] = []
+        skills = {
+            node.get("skill")
+            for _, node in _iter_nodes(_board_config())
+            if isinstance(node, dict) and isinstance(node.get("skill"), str)
+        }
+        for skill in sorted(skills):
+            group = skill.split("-", 1)[0]
+            relative_path = Path("skills") / group / skill / "SKILL.md"
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            command = (
+                'python "${pluginPath}/hooks/inspect_skill_contract.py" '
+                f'{skill} --feature "${{feature}}" --plain'
+            )
+            count = content.count(command)
+            if count != 1:
+                offenders.append(f"{relative_path}: invocation_count={count}")
+        self.assertEqual(
+            offenders,
+            [],
+            "every workflow skill must load its board input contract exactly once: "
+            + ", ".join(offenders),
+        )
+
     def test_workflow_skills_index_shared_completion_guide(self) -> None:
         index_line = (
             "技能完成后，读取并遵循 "

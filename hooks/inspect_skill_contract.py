@@ -21,7 +21,7 @@ from board_core.contracts import (  # noqa: E402
     load_record_workflow_contracts,
     load_repo_workflow_contracts,
 )
-from board_core.artifact_paths import artifact_exists_exact  # noqa: E402
+from board_core.artifact_paths import resolve_artifact_files_exact  # noqa: E402
 from board_core.state import find_feature_dir  # noqa: E402
 from board_core.state_store import load_state_json_records_result  # noqa: E402
 from board_core.workflow_compiler import (  # noqa: E402
@@ -72,17 +72,6 @@ def render_contract(contract: SkillContract) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _artifact_present(feature_dir: Path, path: str) -> bool:
-    """Whether an input artifact already exists (non-empty) under the feature dir.
-
-    Glob-aware and mirrors the precheck gate's notion of "generated"
-    (skills/autodev/hooks/common.py::artifact_exists): a file counts only when it
-    exists with the exact contract filename and size > 0, so empty placeholders
-    and case-only filename mismatches are treated as missing.
-    """
-    return artifact_exists_exact(feature_dir, path)
-
-
 def _missing_handling_line(artifact: ArtifactSpec) -> str:
     """The instruction for one missing input, taken from its ``extract.degrade``
     — authored per input in board_config.json for required and optional inputs
@@ -104,55 +93,60 @@ def render_contract_plain(
     contract: SkillContract,
     workflow_context: dict | None = None,
     feature_dir: Path | None = None,
-    extra_missing_inputs: tuple[ArtifactSpec, ...] = (),
+    extra_skipped_inputs: tuple[ArtifactSpec, ...] = (),
 ) -> str:
-    """Emit only how missing inputs are handled — nothing else.
-
-    With ``feature_dir`` (i.e. ``--feature``) on-disk existence selects exactly
-    the inputs that are missing; present inputs carry no runtime instruction (the
-    skill body reads them) and are omitted, so when every input is present the
-    output is empty. Without a feature dir (baseline preview) existence is
-    unknown, so every input's handling is previewed. Missing required inputs and
-    optional inputs with automatic fallback are rendered in separate sections.
-    The frame the checklist used to carry — title, checkpoint, workflow context,
-    boundary, outputs and validators — is intentionally dropped;
-    ``workflow_context`` is accepted for call-site compatibility but no longer
-    rendered. ``extra_missing_inputs`` is used for the chain entry node's inputs
-    that were dropped from the hard contract — their producer sits outside this
-    workflow, so the user may still supply them by hand and the degrade guidance
-    stays relevant.
-    """
+    """Render contract inputs with status, concrete files, and missing handling."""
     baseline = feature_dir is None
-    candidates: list[ArtifactSpec] = []
+    candidates: list[tuple[ArtifactSpec, bool]] = []
     seen_paths: set[str] = set()
-    for artifact in (*contract.inputs, *extra_missing_inputs):
+    for artifact in contract.inputs:
         if artifact.path in seen_paths:
             continue
         seen_paths.add(artifact.path)
-        candidates.append(artifact)
-
-    absent = [
-        artifact
-        for artifact in candidates
-        if baseline or not _artifact_present(feature_dir, artifact.path)
-    ]
-    if not absent:
-        return ""
-
-    required = [artifact for artifact in absent if artifact.required]
-    optional = [artifact for artifact in absent if not artifact.required]
-    lines: list[str] = []
-    for title, artifacts in (
-        ("## 缺失产物处理", required),
-        ("## 可选产物自动降级", optional),
-    ):
-        if not artifacts:
+        candidates.append((artifact, False))
+    for artifact in extra_skipped_inputs:
+        if artifact.path in seen_paths:
             continue
-        if lines:
-            lines.append("")
-        lines.append(title)
-        for index, artifact in enumerate(artifacts, start=1):
-            lines.append(f"{index}. {artifact.path}：{artifact.label}")
+        seen_paths.add(artifact.path)
+        candidates.append((artifact, True))
+
+    resolved_inputs: dict[str, tuple[Path, ...]] = {}
+    missing_required = False
+    if not baseline:
+        for artifact, dropped in candidates:
+            if dropped:
+                continue
+            resolved = resolve_artifact_files_exact(feature_dir, artifact.path)
+            resolved_inputs[artifact.path] = resolved
+            if artifact.required and not resolved:
+                missing_required = True
+
+    state = "unknown" if baseline else ("blocked" if missing_required else "ready")
+    lines = [f"## 输入产物（state: `{state}`）"]
+    if not candidates:
+        lines.append("- 无")
+        return "\n".join(lines) + "\n"
+
+    for artifact, dropped in candidates:
+        required = "必需" if artifact.required else "可选"
+        if dropped:
+            lines.append(
+                f"- `{artifact.path}`：{artifact.label}（裁剪前{required}，status: `skipped`）"
+            )
+            continue
+        if baseline:
+            lines.append(f"- `{artifact.path}`：{artifact.label}（{required}，status: `unknown`）")
+            continue
+
+        resolved = resolved_inputs[artifact.path]
+        if resolved:
+            read_paths = "、".join(f"`{path}`" for path in resolved)
+            lines.append(
+                f"- `{artifact.path}`：{artifact.label}（{required}，status: `present`）"
+                f"｜读取：{read_paths}"
+            )
+        else:
+            lines.append(f"- `{artifact.path}`：{artifact.label}（{required}，status: `missing`）")
             lines.append(_missing_handling_line(artifact))
     return "\n".join(lines) + "\n"
 
@@ -255,13 +249,10 @@ def _dropped_input_artifacts(
     node_id: str,
     record: dict,
 ) -> tuple[ArtifactSpec, ...]:
-    """Inputs dropped from the hard contract that the plain view still shows.
+    """Entry-node inputs dropped from the hard contract and shown as skipped.
 
-    Only the chain entry node qualifies: its dropped inputs have no producer
-    inside this workflow at all, so the user may hand them in and the degrade
-    guidance still applies. Drops on any later node mean the producing node is
-    not in the chain — the artifact cannot exist here, is not part of this
-    contract, and must not be reported as a missing artifact to handle.
+    Drops on later nodes are omitted because they are not part of the effective
+    contract and cannot be supplied by an upstream node in the active chain.
     """
     effective = load_record_effective_board_config(
         repo_root / "board_core" / "board_config.json",
@@ -325,14 +316,14 @@ def _find_feature_contract(
     if record.get("workflowSkippedNodes"):
         workflow_context["workflowSkippedNodes"] = record.get("workflowSkippedNodes")
     contract = contracts.contract_for_skill(skill)
-    extra_missing_inputs = _dropped_input_artifacts(
+    extra_skipped_inputs = _dropped_input_artifacts(
         repo_root,
         skill=skill,
         workspace=workspace,
         node_id=contract.node_id,
         record=record,
     )
-    return contract, workflow_context, extra_missing_inputs
+    return contract, workflow_context, extra_skipped_inputs
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -357,21 +348,20 @@ def main(argv: list[str] | None = None) -> int:
     output_group.add_argument(
         "--plain",
         action="store_true",
-        help="emit only how missing inputs are handled; with --feature, on-disk "
-        "existence selects exactly the missing inputs from the feature dir",
+        help="emit every input with status and resolved files; missing inputs also include handling",
     )
     args = parser.parse_args(argv)
 
     workflow_context: dict = {}
     feature_dir: Path | None = None
-    extra_missing_inputs: tuple[ArtifactSpec, ...] = ()
+    extra_skipped_inputs: tuple[ArtifactSpec, ...] = ()
     try:
         repo_root = Path(args.repo_root).resolve()
         if args.feature is not None:
             if args.workflow_profile != BASE_WORKFLOW_PROFILE or args.workflow_decision:
                 raise BoardConfigError("--feature 与 --workflow-profile/--workflow-decision 不能同时使用")
             workspace = _resolve_feature_workspace(args.workspace)
-            contract, workflow_context, extra_missing_inputs = _find_feature_contract(
+            contract, workflow_context, extra_skipped_inputs = _find_feature_contract(
                 repo_root,
                 skill=args.skill,
                 feature=args.feature,
@@ -417,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
                 contract,
                 workflow_context,
                 feature_dir,
-                extra_missing_inputs=extra_missing_inputs,
+                extra_skipped_inputs=extra_skipped_inputs,
             ),
             end="",
         )

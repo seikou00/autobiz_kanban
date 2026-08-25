@@ -1,12 +1,18 @@
 ---
 name: autodev-frontend
 description: Dev 阶段 frontend_before_specs workflow profile 的 HTML 转前端实现节点。用于在行为规格生成前，基于 PRD、HTML、接口说明和现有前端工程完成前端实现；仅保留标准 HTML、绝对定位高保真 HTML 两种实现路线，以及用户确认后的 review 路线。
-version: v1.1.08041
+version: v1.1.0825
 ---
 
 # /autodev-frontend - HTML 转前端实现
 
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
+
+## 输入产物
+
+```bash
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --feature "${feature}" --plain
+```
 
 本技能是 `frontend_before_specs` workflow profile 中的正式 Dev 节点。它只保留两种实现路线：
 
@@ -212,7 +218,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_done
 ## 执行清单
 
 1. 确认 Feature、workflow profile、checkpoint 和 `CODE_WORKSPACE`。
-2. 读取 `inspect_skill_contract.py` 输出的 Source Bundle / Method Bundle。
+2. 执行上面的输入产物命令并读取输出。
 3. 优先读取 系统约束，再读取项目说明、组件文档和目标代码。
 4. 确认用户提供了 HTML 文件、HTML 片段或可读取 HTML 内容；否则停止要求补充 HTML。
 5. 按路由规则进入 `route/with-absolute-html/SKILL.md` 或 `route/with-standard-html/SKILL.md`。

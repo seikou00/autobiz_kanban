@@ -1,7 +1,7 @@
 ---
 name: autodev-detail-design
 description: Autodev dynamic detailed design node.
-version: v1.2.0804
+version: v1.2.0825
 ---
 
 # /autodev-detail-design - 详细计划
@@ -39,7 +39,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled
 ```
 
-可检查动态节点缺失产物处理：
+读取动态节点输入产物：
 
 ```
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-detail-design --feature "${feature}" --plain
