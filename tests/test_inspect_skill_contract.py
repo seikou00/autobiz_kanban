@@ -88,5 +88,22 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertNotIn("design.md", output)
         self.assertNotIn("plan.json", output)
 
+    def test_plain_code_separates_optional_detail_design_from_missing_inputs(self) -> None:
+        feature = "code-without-detail-design"
+        self._create_feature(feature)
+        feature_dir = _resolve_feature_dir(self.workspace, feature)
+        for relative_path in ("proposal.md", "PRD.md", "design.md", "plan.json"):
+            (feature_dir / relative_path).write_text("content\n", encoding="utf-8")
+        spec = feature_dir / "specs" / "capability" / "spec.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("content\n", encoding="utf-8")
+
+        output = self._plain("autodev-code", feature)
+
+        self.assertNotIn("## 缺失产物处理", output)
+        self.assertIn("## 可选产物自动降级", output)
+        self.assertIn("DETAIL_DESIGN.md：详细设计参考", output)
+        self.assertIn("自动降级：无 DETAIL_DESIGN 时", output)
+
 if __name__ == "__main__":
     unittest.main()

@@ -81,7 +81,7 @@ class RenderContractPlainStateTests(unittest.TestCase):
 
         self.assertEqual(
             text,
-            "## 缺失产物处理\n1. PRD.md：PRD.md 标签\n   缺失处理：无 PRD 时直接跳过\n",
+            "## 可选产物自动降级\n1. PRD.md：PRD.md 标签\n   自动降级：无 PRD 时直接跳过\n",
         )
 
     def test_empty_degrade_falls_back_to_hardcoded_default(self) -> None:
@@ -97,8 +97,9 @@ class RenderContractPlainStateTests(unittest.TestCase):
 
         self.assertIn("1. a.md：A 标签", text)
         self.assertIn("缺失处理：停止——必需输入未生成，回流上游补齐后再执行", text)
-        self.assertIn("2. b.md：B 标签", text)
-        self.assertIn("缺失处理：直接跳过，不影响执行", text)
+        self.assertIn("## 可选产物自动降级", text)
+        self.assertIn("1. b.md：B 标签", text)
+        self.assertIn("自动降级：直接跳过，不影响执行", text)
 
     def test_only_missing_inputs_listed_and_renumbered(self) -> None:
         self.write("PRD.md")
@@ -169,8 +170,10 @@ class RenderContractPlainBaselineTests(unittest.TestCase):
             "## 缺失产物处理\n"
             "1. proposal.md：proposal.md 标签\n"
             "   缺失处理：回流上游\n"
-            "2. PRD.md：PRD.md 标签\n"
-            "   缺失处理：无 PRD 时跳过\n",
+            "\n"
+            "## 可选产物自动降级\n"
+            "1. PRD.md：PRD.md 标签\n"
+            "   自动降级：无 PRD 时跳过\n",
         )
 
     def test_contract_without_inputs_renders_empty(self) -> None:

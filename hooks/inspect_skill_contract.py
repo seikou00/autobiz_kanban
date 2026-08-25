@@ -96,7 +96,8 @@ def _missing_handling_line(artifact: ArtifactSpec) -> str:
             if artifact.required
             else "直接跳过，不影响执行"
         )
-    return f"   缺失处理：{degrade}"
+    label = "缺失处理" if artifact.required else "自动降级"
+    return f"   {label}：{degrade}"
 
 
 def render_contract_plain(
@@ -111,16 +112,15 @@ def render_contract_plain(
     the inputs that are missing; present inputs carry no runtime instruction (the
     skill body reads them) and are omitted, so when every input is present the
     output is empty. Without a feature dir (baseline preview) existence is
-    unknown, so every input's handling is previewed. Each entry is just the
-    input path, its label and its ``缺失处理`` (from ``extract.degrade``); the
-    required/optional flag and a ``未生成`` marker are not printed — the section
-    already means "these are the ones to handle". The frame the checklist used to
-    carry — title, checkpoint, workflow context, boundary, outputs and
-    validators — is intentionally dropped; ``workflow_context`` is accepted for
-    call-site compatibility but no longer rendered. ``extra_missing_inputs`` is
-    used for the chain entry node's inputs that were dropped from the hard
-    contract — their producer sits outside this workflow, so the user may still
-    supply them by hand and the degrade guidance stays relevant.
+    unknown, so every input's handling is previewed. Missing required inputs and
+    optional inputs with automatic fallback are rendered in separate sections.
+    The frame the checklist used to carry — title, checkpoint, workflow context,
+    boundary, outputs and validators — is intentionally dropped;
+    ``workflow_context`` is accepted for call-site compatibility but no longer
+    rendered. ``extra_missing_inputs`` is used for the chain entry node's inputs
+    that were dropped from the hard contract — their producer sits outside this
+    workflow, so the user may still supply them by hand and the degrade guidance
+    stays relevant.
     """
     baseline = feature_dir is None
     candidates: list[ArtifactSpec] = []
@@ -131,18 +131,29 @@ def render_contract_plain(
         seen_paths.add(artifact.path)
         candidates.append(artifact)
 
-    pending = [
+    absent = [
         artifact
         for artifact in candidates
         if baseline or not _artifact_present(feature_dir, artifact.path)
     ]
-    if not pending:
+    if not absent:
         return ""
 
-    lines = ["## 缺失产物处理"]
-    for index, artifact in enumerate(pending, start=1):
-        lines.append(f"{index}. {artifact.path}：{artifact.label}")
-        lines.append(_missing_handling_line(artifact))
+    required = [artifact for artifact in absent if artifact.required]
+    optional = [artifact for artifact in absent if not artifact.required]
+    lines: list[str] = []
+    for title, artifacts in (
+        ("## 缺失产物处理", required),
+        ("## 可选产物自动降级", optional),
+    ):
+        if not artifacts:
+            continue
+        if lines:
+            lines.append("")
+        lines.append(title)
+        for index, artifact in enumerate(artifacts, start=1):
+            lines.append(f"{index}. {artifact.path}：{artifact.label}")
+            lines.append(_missing_handling_line(artifact))
     return "\n".join(lines) + "\n"
 
 

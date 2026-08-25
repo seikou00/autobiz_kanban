@@ -48,6 +48,7 @@ from board_core.workflow import (  # noqa: E402
 from board_core.workflow_compiler import (  # noqa: E402
     BASE_WORKFLOW_PROFILE,
     BASE_WORKFLOW_TEMPLATE,
+    SKIPPED_WORKFLOW_DECISION,
     WorkflowCompileError,
     configured_dynamic_stages,
     configured_skip_policy,
@@ -194,6 +195,23 @@ def validate_workflow_decision_updates(
     return tuple(errors)
 
 
+def apply_implicit_skip_decisions(
+    *,
+    target_checkpoint: str,
+    decisions: dict[str, str],
+) -> dict[str, str]:
+    resolved = dict(decisions)
+    for stage in configured_dynamic_stages(
+        load_board_config(ROOT / "board_core" / "board_config.json")
+    ):
+        stage_id = stage["id"]
+        if stage_id in resolved:
+            continue
+        if target_checkpoint == stage["skipTargetCheckpoint"]:
+            resolved[stage_id] = SKIPPED_WORKFLOW_DECISION
+    return resolved
+
+
 def prepare_checkpoint_update(
     *,
     workspace: Path,
@@ -322,7 +340,29 @@ def prepare_checkpoint_update(
             workflow_profile=resolved_profile,
             workflow_decisions=old_decisions,
         )
-    resolved_decisions = {**old_decisions, **decision_updates}
+    try:
+        resolved_decisions = apply_implicit_skip_decisions(
+            target_checkpoint=checkpoint,
+            decisions={**old_decisions, **decision_updates},
+        )
+    except (BoardConfigError, WorkflowCompileError, ValueError) as exc:
+        return CheckpointUpdate(
+            ok=False,
+            state_path=state_path,
+            state_json_path=state_json_path,
+            content="",
+            state_json_content="",
+            transition_errors=(
+                "workflow dynamic stage 配置无效: "
+                f"{exc}；修复：检查 board_core/board_config.json 的 workflow.dynamicStages",
+            ),
+            lifecycle_errors=(),
+            records={},
+            old_checkpoint=old_map.get(feature),
+            new_checkpoint=None,
+            workflow_profile=resolved_profile,
+            workflow_decisions=old_decisions,
+        )
     workflow_record = {
         "workflowProfile": resolved_profile,
         "workflowDecisions": resolved_decisions,
