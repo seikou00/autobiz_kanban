@@ -49,6 +49,7 @@ from hooks.plan_json import (  # noqa: E402
     EXECUTION_LANES,
     FRONTEND_ROUTES,
     MAX_BATCH_TASKS,
+    PARALLEL_EXECUTION_STAGES,
     PROJECT_VALIDATION_KINDS,
     REPOSITORY_ID_RE,
     TASK_EXECUTION_MODES,
@@ -133,6 +134,7 @@ DRAFT_GROUP_OWNED_FIELDS = {
     "executionMode",
     "externalDependency",
     "executionStage",
+    "touches",
 }
 DRAFT_DETAIL_FIELDS = {
     "goal",
@@ -799,6 +801,11 @@ def _task_group_structure_errors(data: dict[str, Any]) -> list[dict[str, str]]:
         raw_execution_mode = raw_group.get("executionMode")
         if raw_execution_mode is not None and raw_execution_mode not in TASK_EXECUTION_MODES:
             errors.append({"reason": f"{task_id}.executionMode_invalid"})
+        execution_stage = raw_group.get("executionStage", "parallel")
+        if execution_stage not in PARALLEL_EXECUTION_STAGES:
+            errors.append({"reason": f"{task_id}.executionStage_invalid"})
+        if "touches" in raw_group:
+            _group_string_list(errors, raw_group, task_id, "touches", required=False)
         execution_mode = task_execution_mode(raw_group)
         external_dependency = raw_group.get("externalDependency")
         if execution_mode == "external_dependency":
@@ -960,7 +967,7 @@ def _task_group_digest(data: dict[str, Any]) -> str:
 
 def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
     ui_refs = item.get("uiRefs") if isinstance(item.get("uiRefs"), dict) else {}
-    return {
+    result = {
         "id": item.get("id"),
         "title": item.get("title"),
         "deps": item.get("deps") if isinstance(item.get("deps"), list) else [],
@@ -981,6 +988,7 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         "validationBoundary": item.get("validationBoundary"),
         "workspaceRef": item.get("workspaceRef"),
         "executionMode": item.get("executionMode", "code"),
+        "executionStage": item.get("executionStage", "parallel"),
         "externalDependency": (
             copy.deepcopy(item.get("externalDependency"))
             if isinstance(item.get("externalDependency"), dict)
@@ -988,6 +996,18 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "splitRationale": item.get("splitRationale") or None,
     }
+    if "touches" in item or (
+        isinstance(item.get("scope"), dict)
+        and isinstance(item["scope"].get("paths"), list)
+        and bool(item["scope"]["paths"])
+    ):
+        raw = item.get("touches") if isinstance(item.get("touches"), list) else item["scope"].get("paths", [])
+        result["touches"] = sorted({
+            str(path).replace("\\", "/").strip("/")
+            for path in raw
+            if isinstance(path, str) and path.strip()
+        })
+    return result
 
 
 def _task_group_contract_errors(
@@ -1011,6 +1031,18 @@ def _task_group_contract_errors(
                 "detail": f"task={expected.get('id')};fields={','.join(changed_fields)}",
             })
     return errors
+
+
+def _task_matches_group_projection(group: dict[str, Any], task: dict[str, Any]) -> bool:
+    """Compare only candidate-group owned fields.
+
+    A task detail may add concrete ``scope.paths`` after grouping.  When the
+    group did not declare planning ``touches``, those detail paths must not
+    invalidate an otherwise reusable draft task.
+    """
+    expected = _task_group_projection(group)
+    actual = _task_group_projection(task)
+    return all(actual.get(field) == value for field, value in expected.items())
 
 
 def _task_set_validation_errors(
@@ -1109,9 +1141,11 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     }
     used_ids = set(existing_ids)
     for task in tasks_view:
+        task_stage = str(task.get("executionStage") or "parallel")
+        if task_stage not in PARALLEL_EXECUTION_STAGES:
+            raise PlanWriterInputError("invalid_batch_execution_stage", f"task={task.get('id')};stage={task_stage}")
         task.pop("touches", None)
         task_id = str(task.get("id", ""))
-        task_stage = "parallel"
         batch_id = assignments.get(task_id)
         if batch_id is None:
             primary = _primary_spec_root(task)
@@ -1222,7 +1256,7 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         }
         batch_compile = previous.get("batchCompile") if isinstance(previous.get("batchCompile"), dict) else None
         status = _batch_status(batch_tasks, batch_validation, batch_compile)
-        execution_stage = "parallel"
+        execution_stage = execution_stages.get(batch_id, "parallel")
         task_ids_list = [str(task.get("id")) for task in batch_tasks]
         projected[batch_id] = {
             "featureId": root.get("featureId"),
@@ -1541,10 +1575,16 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
     ui_required = group.get("uiRequired") is True
     execution_mode = group.get("executionMode", "code")
     ui_refs = copy.deepcopy(group.get("uiRefs")) if isinstance(group.get("uiRefs"), dict) else None
+    touches = (
+        sorted({str(path).replace("\\", "/").strip("/") for path in group.get("touches", []) if isinstance(path, str) and path.strip()})
+        if isinstance(group.get("touches"), list)
+        else []
+    )
     task: dict[str, Any] = {
         "id": task_id,
         "title": group.get("title"),
         "executionMode": execution_mode,
+        "executionStage": group.get("executionStage", "parallel"),
         "goal": "",
         "status": "todo",
         "deps": copy.deepcopy(group.get("deps", [])),
@@ -1555,7 +1595,7 @@ def _draft_task_skeleton(group: dict[str, Any], workspace_roots: dict[str, str])
             "pages": copy.deepcopy(ui_refs.get("pageRefs", [])) if ui_refs else [],
             "dataObjects": [],
             "workspaceRoots": copy.deepcopy(workspace_roots),
-            "paths": [],
+            "paths": touches,
         },
         "implementationPoints": [],
         "acceptanceCriteria": [],
@@ -1751,7 +1791,10 @@ def _normalize_draft_task_detail(task: dict[str, Any], detail: dict[str, Any]) -
         else [],
         "dataObjects": copy.deepcopy(scope.get("dataObjects", [])),
         "workspaceRoots": copy.deepcopy(previous_scope.get("workspaceRoots", {})),
-        "paths": copy.deepcopy(scope.get("paths", [])),
+        # Candidate grouping owns planned file isolation. A detail may add
+        # concrete paths, but omitting the field must not erase the group
+        # projection before Code consumes it.
+        "paths": copy.deepcopy(scope["paths"] if "paths" in scope else previous_scope.get("paths", [])),
     }
     if not candidate["scope"]["workspaceRoots"]:
         candidate["scope"].pop("workspaceRoots")
@@ -3481,7 +3524,7 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
         if (
             workspace_contract_unchanged
             and old_task is not None
-            and _task_group_projection(old_task) == _task_group_projection(group)
+            and _task_matches_group_projection(group, old_task)
             and task_workspace_roots(old_task) == workspace_roots
         ):
             tasks.append(copy.deepcopy(old_task))

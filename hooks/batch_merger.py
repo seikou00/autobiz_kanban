@@ -20,6 +20,7 @@ from hooks.parallel_runtime import (  # noqa: E402
     load_manifest,
     run_lock,
     save_manifest,
+    utc_now,
 )
 from hooks.repository_snapshot import git_status_porcelain, resolve_git_root  # noqa: E402
 from hooks.plan_writer import mark_parallel_batch_tasks_merged  # noqa: E402
@@ -319,6 +320,11 @@ def merge_run(
                         "branchName": rebased.get("branch"),
                         "targetSha": record["headSha"],
                         "conflicts": rebased.get("conflicts", []),
+                        "validationCommands": (
+                            (bundle.batches.get(batch_id, {}).get("batchValidation") or {}).get("commands", [])
+                            if isinstance(bundle.batches.get(batch_id), dict)
+                            else []
+                        ),
                     }
                     batch["status"] = "needs_resolution"
                     batch["resolution"] = resolution
@@ -449,10 +455,97 @@ def merge_run(
         return result
 
 
+def resolve_merge_conflict(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+) -> dict[str, Any]:
+    """Accept a semantically resolved delivery after strict integration checks.
+
+    The resolver agent owns only the retained platform worktree.  This hook
+    never edits source files: it verifies that the agent rebased onto the
+    current repository head, that the branch is clean and conflict-free, then
+    moves the batch back to the normal merge barrier.
+    """
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = manifest.get("batches", {}).get(batch_id)
+        if not isinstance(batch, dict):
+            return {"success": False, "error": f"parallel_batch_not_found:{batch_id}"}
+        resolution = batch.get("resolution")
+        if batch.get("status") != "needs_resolution" or not isinstance(resolution, dict):
+            return {"success": False, "error": "parallel_batch_not_waiting_for_resolution", "batchId": batch_id}
+        worktree_name = resolution.get("worktreePath") or batch.get("worktreePath")
+        branch_name = resolution.get("branchName") or batch.get("branchName")
+        target_sha = resolution.get("targetSha")
+        if not all(isinstance(value, str) and value.strip() for value in (worktree_name, branch_name, target_sha)):
+            return {"success": False, "error": "parallel_resolution_contract_incomplete", "batchId": batch_id}
+        ref, root, _ = _batch_repository(manifest, batch_id)
+        current_head = _git(root, "rev-parse", "HEAD").stdout.strip()
+        if current_head != target_sha:
+            return {
+                "success": False,
+                "error": "parallel_resolution_target_head_changed",
+                "batchId": batch_id,
+                "targetSha": target_sha,
+                "actual": current_head,
+            }
+        worktree_path, actual_branch = _resolve_branch(root, worktree_name)
+        if worktree_path is None or not worktree_path.exists() or actual_branch != branch_name:
+            return {"success": False, "error": "parallel_resolution_worktree_mismatch", "batchId": batch_id}
+        if _dirty(worktree_path):
+            return {"success": False, "error": "parallel_resolution_worktree_dirty", "batchId": batch_id}
+        if _git(worktree_path, "branch", "--show-current").stdout.strip() != branch_name:
+            return {"success": False, "error": "parallel_resolution_branch_mismatch", "batchId": batch_id}
+        head_sha = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
+        if not head_sha or head_sha == target_sha:
+            return {"success": False, "error": "parallel_resolution_missing_delivery_commit", "batchId": batch_id}
+        if _git(worktree_path, "merge-base", "--is-ancestor", target_sha, head_sha).returncode != 0:
+            return {"success": False, "error": "parallel_resolution_not_rebased", "batchId": batch_id}
+        probe = _git(root, "merge-tree", "--write-tree", target_sha, branch_name)
+        if probe.returncode != 0:
+            return {"success": False, "error": "parallel_resolution_still_conflicts", "batchId": batch_id}
+        batch.update({
+            "status": "ready_to_merge",
+            "commitSha": head_sha,
+            "error": None,
+        })
+        batch.pop("resolution", None)
+        remaining = any(
+            isinstance(item, dict) and item.get("status") == "needs_resolution"
+            for item in manifest.get("batches", {}).values()
+        )
+        manifest["status"] = "needs_resolution" if remaining else "running"
+        save_manifest(workspace, feature, run_id, manifest)
+        append_event(
+            workspace,
+            feature,
+            run_id,
+            "native_rebase_conflict_resolved",
+            batchId=batch_id,
+            repositoryRef=ref,
+            worktreePath=str(worktree_path),
+            branchName=branch_name,
+            targetSha=target_sha,
+            commitSha=head_sha,
+            resolvedAt=utc_now(),
+        )
+        return {
+            "success": True,
+            "batchId": batch_id,
+            "repositoryRef": ref,
+            "worktreePath": str(worktree_path),
+            "branchName": branch_name,
+            "targetSha": target_sha,
+            "commitSha": head_sha,
+        }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Merge parallel Code batches")
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("command", nargs="?", choices=("merge",), default="merge")
+    parser.add_argument("command", nargs="?", choices=("merge", "resolve"), default="merge")
     parser.add_argument("--workspace")
     parser.add_argument("--feature")
     parser.add_argument("--run-id")
@@ -468,7 +561,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("feature_required")
         workspace = resolve_workspace(args.workspace)
         feature = resolve_feature(args.feature)
-        if args.run_id:
+        if args.run_id and args.command == "resolve":
+            if not args.batch_ids or len(args.batch_ids) != 1:
+                raise ValueError("resolve_requires_one_batch_id")
+            result = resolve_merge_conflict(workspace, feature, args.run_id, args.batch_ids[0])
+        elif args.run_id:
             result = merge_run(
                 workspace,
                 feature,

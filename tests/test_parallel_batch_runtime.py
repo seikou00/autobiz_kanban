@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import copy
+import os
 import subprocess
 import sys
 import tempfile
@@ -9,7 +10,7 @@ import time
 import unittest
 from pathlib import Path
 
-from hooks.batch_merger import merge_run, preflight_merge
+from hooks.batch_merger import merge_run, preflight_merge, resolve_merge_conflict
 from hooks.parallel_batch_lifecycle import cleanup_run, rollback_run
 from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import (
@@ -739,7 +740,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
         updated.batches["B001"]["tasks"][0]["goal"] = "changed"
         self.assertNotEqual(digest, plan_digest(updated))
 
-    def test_resource_groups_do_not_serialize_repository_or_component_overlap(self) -> None:
+    def test_resource_groups_isolate_overlapping_write_sets(self) -> None:
         manifest = {
             "batches": {
                 "B001": {"status": "pending", "workspaceRef": "api", "executionLane": "backend", "writeSet": ["a.py"], "dependencies": []},
@@ -748,8 +749,20 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 "B004": {"status": "pending", "workspaceRef": "cli", "executionLane": "backend", "writeSet": ["d.py"], "dependencies": []},
             }
         }
-        groups = {tuple(group) for group in resource_groups(manifest, ["B001", "B002", "B003", "B004"])}
-        self.assertEqual(groups, {("B001",), ("B002",), ("B003",), ("B004",)})
+        groups = resource_groups(manifest, ["B001", "B002", "B003", "B004"])
+        self.assertEqual(groups, [["B001", "B003", "B004"], ["B002"]])
+
+    def test_special_execution_stages_are_serialized_before_parallel_work(self) -> None:
+        manifest = {
+            "batches": {
+                "B001": {"status": "pending", "repositoryRef": "api", "executionStage": "parallel", "writeSet": ["api.py"]},
+                "B002": {"status": "pending", "repositoryRef": "api", "executionStage": "proto", "writeSet": ["schema.proto"]},
+                "B003": {"status": "pending", "repositoryRef": "api", "executionStage": "global", "writeSet": ["application.yml"]},
+            }
+        }
+        self.assertEqual(resource_groups(manifest, ["B001", "B002", "B003"]), [["B002"]])
+        manifest["batches"]["B002"]["status"] = "merged"
+        self.assertEqual(resource_groups(manifest, ["B001", "B003"]), [["B003"]])
 
     def test_multi_repository_run_binds_each_workspace_and_schedules_independently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -796,7 +809,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 timeout_seconds=60,
                 code_workspaces=[f"default={api}", f"web={web}"],
             )
-            self.assertEqual({tuple(group) for group in run["scheduledGroups"]}, {("B001",), ("B002",)})
+            self.assertEqual(run["scheduledGroups"], [["B001", "B002"]])
             bindings = run["batchWorkspaces"]
             self.assertEqual(bindings["B001"]["requestedPath"], str(api.resolve()))
             self.assertEqual(bindings["B002"]["requestedPath"], str(web.resolve()))
@@ -917,6 +930,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 timeout_seconds=60,
                 code_workspaces=[f"default={repo}", f"web={component}"],
             )
+            self.assertEqual(scheduled["scheduledGroups"], [["B001"]])
             run_id = scheduled["runId"]
             manifest = load_manifest(workspace, "alpha", run_id)
             self.assertEqual(
@@ -946,7 +960,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(verified["passed"])
             self.assertEqual({item["workspaceRef"] for item in verified["commands"]}, {"default", "web"})
 
-    def test_same_repository_overlap_runs_in_parallel_and_blocks_at_merge(self) -> None:
+    def test_same_repository_overlap_is_resolved_then_merged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -975,7 +989,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 timeout_seconds=60,
                 code_workspaces=[str(repo)],
             )
-            self.assertEqual({tuple(group) for group in scheduled["scheduledGroups"]}, {("B001",), ("B002",)})
+            self.assertEqual(scheduled["scheduledGroups"], [["B001"]])
             run_id = scheduled["runId"]
             leases = {
                 batch_id: acquire_lease(workspace, "alpha", run_id, batch_id)
@@ -1001,6 +1015,33 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual((repo / "existing.txt").read_text(encoding="utf-8"), "first\n")
             self.assertEqual(merged["failed"][0]["resolution"]["mode"], "native_rebase")
             self.assertEqual(merged["failed"][0]["resolution"]["worktreePath"], str(second_tree["worktreePath"]))
+            resolution = merged["failed"][0]["resolution"]
+            second_worktree = Path(second_tree["worktreePath"])
+            rebase = subprocess.run(
+                ["git", "rebase", resolution["targetSha"]],
+                cwd=second_worktree,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(rebase.returncode, 0, rebase.stdout + rebase.stderr)
+            (second_worktree / "existing.txt").write_text("first\nsecond\n", encoding="utf-8")
+            _git(second_worktree, "add", "existing.txt")
+            continued = subprocess.run(
+                ["git", "rebase", "--continue"],
+                cwd=second_worktree,
+                env={**os.environ, "GIT_EDITOR": "true"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(continued.returncode, 0, continued.stdout + continued.stderr)
+            resolved = resolve_merge_conflict(workspace, "alpha", run_id, "B002")
+            self.assertTrue(resolved["success"], resolved)
+            completed = merge_run(workspace, "alpha", run_id, batch_ids=["B002"])
+            self.assertTrue(completed["success"], completed)
+            self.assertEqual((repo / "existing.txt").read_text(encoding="utf-8"), "first\nsecond\n")
+            manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(manifest["batches"]["B002"]["status"], "merged")
+            self.assertTrue(manifest["batches"]["B002"]["mergeCommitSha"])
 
     def test_dependent_batch_starts_from_its_repositorys_advanced_head(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

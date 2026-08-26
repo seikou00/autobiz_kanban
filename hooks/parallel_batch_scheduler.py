@@ -542,11 +542,10 @@ def schedule(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
             if isinstance(item, dict) and item.get("status") in {"leased", "running"}
         )
         slots = max(0, max_parallel - active)
-        for group in groups:
-            if slots <= 0:
-                break
-            selected.append(group)
-            slots -= 1
+        if groups and slots > 0:
+            # ``resource_groups`` returns dependency-safe waves.  Only the
+            # first wave is released; later waves wait for a real merge.
+            selected.append(groups[0][:slots])
         manifest["scheduledAt"] = manifest.get("updatedAt")
         save_manifest(workspace, feature, run_id, manifest)
         return {

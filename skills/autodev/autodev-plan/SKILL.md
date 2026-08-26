@@ -322,7 +322,9 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${fe
 python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
-正式 Bundle 发布后，多个无未完成依赖的 Batch 会由 scheduler 并行执行。Plan 只声明任务、仓库和依赖；Code 阶段以任务 Git 快照、实际 diff 和回并结果为事实，合并阶段由 Git 检测真实冲突。
+正式 Bundle 发布后，scheduler 会按 `executionStage` 和实际写集生成安全波次。`parallel` 阶段只有同仓库写集不重叠的 Batch 才进入同一波；路径相同或父子目录重叠、写集未知的 Batch 会自动串行。`proto`、`global` 和 `integration` 阶段按单 Batch 串行收口，分别用于协议桩、数据库/全局配置和共享入口文件。候选分组中的 `touches` 是 task-planner 的文件级隔离输入，writer 会把它归一化到最终 `scope.paths`，不会把 `touches` 写入正式计划；无法确认的写集必须保守串行，最终仍应补充真实 `scope.paths` 或 `expectedFiles`。
+
+合并冲突不得通过丢弃一侧改动、`--no-verify`、`ours/theirs` 或跳过提交绕过。合并器会保留冲突 Batch 的平台 worktree，启动单个集成 Agent 在该 worktree 内对当前主分支执行语义 rebase，逐文件保留双方有效改动并运行 Batch 验证；只有 `resolve` 校验出 clean、无冲突且基于最新主分支的提交后，才会再次执行真实 merge 并释放下游依赖。解决失败则保持 `needs_resolution`，禁止标记完成。
 
 **预检与修复**：
 
@@ -445,7 +447,7 @@ UI 任务规则：
    - 测试通常作为每个需求任务的验证方法沉淀；只有跨多个需求的验收闭环、E2E 主链路或质量门禁需要单独编排时，才生成独立验证任务。
 
 7. 生成 DAG 与覆盖检查
-   - Batch 以真实跨 Batch `deps` 构成 DAG；没有未完成依赖的 Batch 必须可并行调度，不得按 `B001 -> B002` 编号、lane、仓库或文件写集伪造串行关系。仅当下游 Task 确实需要上游 Batch 产出的 API、协议、Schema、共享装配或业务行为时才写跨 Batch 依赖。每个就绪 Batch 由独立 subagent 在 worktree 执行；上游 Batch 编译通过并合并后，scheduler 立即重新计算就绪集合并启动其下游 subagent。同一 Batch 的 TASK 仍由单一队列逐个完成生产实现，全部成为 `implemented` 后统一编译一次。
+   - Batch 以真实跨 Batch `deps` 构成 DAG；依赖仍只能表达真实产出关系，不得为了串行而按编号虚构依赖。没有未完成依赖的 Batch 先进入调度器安全波次：普通 Batch 依据同仓库的 `scope.paths`/`expectedFiles` 做文件级隔离，未知写集保守串行；`proto`、`global`、`integration` 阶段强制单 Batch 收口。每个就绪 Batch 由独立 subagent 在 worktree 执行；当前波次全部真实 merge 后，scheduler 才重新计算下一波并释放下游。共享入口、协议、数据库和全局配置必须在候选分组表中标记对应阶段，并写明专属 Agent 的验证边界。同一 Batch 的 TASK 仍由单一队列逐个完成生产实现，全部成为 `implemented` 后统一编译一次。
    - 任务数不是首要目标：8-15 个清晰 vertical slice 优于 5 个巨型 capability task。超过 15 个任务时才检查是否把代码步骤误拆成任务；禁止为了压低任务数合并独立场景。
    - specs 中每个 `SCN-xxx` 必须至少被一个 task 的 `specRefs` 覆盖；design.md 中的每个 API Decision、Data Decision 和关键 Technical Decision 都必须被实现任务和验证方法覆盖，或明确说明无需实现。
 

@@ -696,6 +696,57 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(root["codeWorkspaces"], {"default": str(ROOT.resolve())})
             self.assertTrue((feature_dir / "PLAN.md").is_file())
 
+    def test_plan_writer_projects_execution_stage_and_planning_touches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            task = _plan_task_body()
+            task["executionStage"] = "integration"
+            task["touches"] = ["src/shared/entry.py"]
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [task])
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            group_data["groups"][0].update({
+                "executionStage": "integration",
+                "touches": ["src/shared/entry.py"],
+            })
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            draft_path = feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json"
+            draft_task = json.loads(draft_path.read_text(encoding="utf-8"))["tasks"][0]
+            self.assertEqual(draft_task["executionStage"], "integration")
+            self.assertEqual(draft_task["scope"]["paths"], ["src/shared/entry.py"])
+
+            detail = _draft_detail_body(task)
+            for command in detail["validationCommands"]:
+                command.pop("cwd", None)
+                command.pop("covers", None)
+            detail_path = Path(tmp) / "T001-detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+            detailed = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
+            )
+            self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+            finalized = _run(
+                "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            batch = json.loads((feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(root["batches"][0]["executionStage"], "integration")
+            self.assertEqual(batch["executionStage"], "integration")
+            self.assertEqual(batch["tasks"][0]["scope"]["paths"], ["src/shared/entry.py"])
+            self.assertNotIn("touches", json.dumps(root, ensure_ascii=False))
+            self.assertNotIn("touches", json.dumps(batch, ensure_ascii=False))
+
     def test_plan_writer_does_not_add_parallel_touch_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))

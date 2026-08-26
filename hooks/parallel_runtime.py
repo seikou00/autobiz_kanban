@@ -22,7 +22,13 @@ from typing import Any, Iterator
 
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, feature_dir
-from hooks.plan_json import BATCH_ID_RE, PlanBundle, load_plan_bundle, normalize_status
+from hooks.plan_json import (
+    BATCH_ID_RE,
+    PARALLEL_EXECUTION_STAGES,
+    PlanBundle,
+    load_plan_bundle,
+    normalize_status,
+)
 
 
 RUN_SCHEMA_VERSION = 1
@@ -245,6 +251,9 @@ def parallel_plan_errors(bundle: PlanBundle) -> list[str]:
             errors.append(f"{batch_id}.workspaceRef_projection_mismatch")
         if workspace is None:
             errors.append(f"{batch_id}.workspaceRef_ambiguous_or_missing")
+        execution_stage = entry.get("executionStage", "parallel")
+        if execution_stage not in PARALLEL_EXECUTION_STAGES:
+            errors.append(f"{batch_id}.executionStage_invalid")
         deps = entry.get("deps", [])
         graph[batch_id] = [str(dep) for dep in deps if isinstance(dep, str)] if isinstance(deps, list) else []
         for dep in graph[batch_id]:
@@ -623,16 +632,58 @@ def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
 
 
 def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None) -> list[list[str]]:
-    """Return independently schedulable batches.
+    """Build conservative execution waves from stage and physical write sets.
 
-    A worktree isolates every Batch, so repository/component/lane or declared
-    write-set overlap is deliberately *not* a scheduling lock.  Those risks
-    are resolved by the repository-local merge step, where Git can report the
-    actual conflict.  Dependencies are already enforced by ``ready_batches``;
-    the scheduler only applies the global ``maxParallel`` limit.
+    Worktrees isolate checkouts, not shared delivery risk.  A batch with an
+    unknown write set is therefore serialized with another batch in the same
+    repository.  Known paths conflict when they are equal or one is an
+    ancestor of the other.  Special stages (proto/global/integration) are
+    always single-batch waves and are ordered before ordinary implementation.
     """
-    ids = batch_ids or ready_batches(manifest)
-    return [[batch_id] for batch_id in sorted(ids)]
+    ids = sorted(set(batch_ids or ready_batches(manifest)))
+    if not ids:
+        return []
+    stages = {"proto": 0, "global": 1, "parallel": 2, "integration": 3}
+    by_id = manifest.get("batches", {})
+    stage_rank = lambda bid: stages.get(str(by_id.get(bid, {}).get("executionStage", "parallel")), 2)
+    frontier_rank = min(stage_rank(batch_id) for batch_id in ids)
+    frontier = [batch_id for batch_id in ids if stage_rank(batch_id) == frontier_rank]
+    if frontier_rank != stages["parallel"]:
+        return [[batch_id] for batch_id in frontier]
+
+    def normalized_paths(batch_id: str) -> tuple[str, ...]:
+        raw = by_id.get(batch_id, {}).get("writeSet")
+        if not isinstance(raw, list):
+            return ()
+        return tuple(sorted({str(path).replace("\\", "/").strip("/") for path in raw if str(path).strip()}))
+
+    def overlaps(left: str, right: str) -> bool:
+        if left == right:
+            return True
+        return left.startswith(right + "/") or right.startswith(left + "/")
+
+    def conflicts(left: str, right: str) -> bool:
+        a = by_id.get(left, {})
+        b = by_id.get(right, {})
+        left_repo = a.get("gitRoot") or a.get("repositoryRef") or a.get("workspaceRef")
+        right_repo = b.get("gitRoot") or b.get("repositoryRef") or b.get("workspaceRef")
+        if left_repo != right_repo:
+            return False
+        left_paths = normalized_paths(left)
+        right_paths = normalized_paths(right)
+        if not left_paths or not right_paths:
+            return True
+        return any(overlaps(path_a, path_b) for path_a in left_paths for path_b in right_paths)
+
+    waves: list[list[str]] = []
+    for batch_id in frontier:
+        for wave in waves:
+            if not any(conflicts(batch_id, existing) for existing in wave):
+                wave.append(batch_id)
+                break
+        else:
+            waves.append([batch_id])
+    return waves
 
 
 def list_runs(workspace: Path, feature: str) -> list[dict[str, Any]]:

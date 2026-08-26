@@ -12,6 +12,7 @@ export const meta = {
 
 const DEFAULT_MAX_PARALLEL = 4;
 const MAX_SCHEDULER_WAVES = 100;
+const MAX_AUTO_MERGE_RESOLUTION_ATTEMPTS = 1;
 const BATCH_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -34,7 +35,10 @@ const MERGE_RESULT_SCHEMA = {
     success: { type: "boolean" },
     merged: { type: "array", items: { type: "object" } },
     failed: { type: "array", items: { type: "object" } },
-    totalConflicts: { type: "number" }
+    needsResolution: { type: "boolean" },
+    totalConflicts: { type: "number" },
+    nextReadyBatches: { type: "array", items: { type: "string" } },
+    mergeableBatches: { type: "array", items: { type: "string" } }
   },
   required: ["success"],
   additionalProperties: false
@@ -239,16 +243,72 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0) {
   // This is the release barrier: dependent Batches cannot appear in the next
   // scheduler result until every completed Batch in this wave is merged.
   phase("合并");
-  const mergeResult = requireSuccess(await agent(
+  let mergeResult = unwrap(await agent(
     `合并刚完成的固定 DAG 波次。执行 python "${mergerPath}" --workspace "${artifactWorkspace}" ` +
     `--feature "${feature}" --run-id "${runId}" --conflict-mode native-rebase。` +
-    `只允许 shared workflow owner 执行此命令；不要修改业务代码。若返回冲突或 needsResolution，立即失败并保留 manifest。`,
+    `只允许 shared workflow owner 执行此命令；不要修改业务代码。返回 JSON；若返回 needsResolution=true，必须保留 manifest 与平台 worktree，禁止自行标记成功。`,
     { label: `merge-wave-${schedulerWaves}`, phase: "合并", schema: MERGE_RESULT_SCHEMA }
-  ), "merge completed wave");
+  ));
+  mergeResults.push(mergeResult);
+
+  if (!mergeResult.success && mergeResult.needsResolution) {
+    if (MAX_AUTO_MERGE_RESOLUTION_ATTEMPTS < 1) {
+      throw new Error(JSON.stringify({ error: "merge_resolution_disabled", runId, mergeResult, batchResults, mergeResults }));
+    }
+    const failedDelivery = Array.isArray(mergeResult.failed)
+      ? mergeResult.failed.find(item => item && item.needsResolution && item.resolution)
+      : null;
+    const resolution = failedDelivery && failedDelivery.resolution;
+    const conflictBatchId = failedDelivery && failedDelivery.batchId;
+    if (!conflictBatchId || !resolution || !resolution.worktreePath || !resolution.branchName || !resolution.targetSha) {
+      throw new Error(JSON.stringify({ error: "merge_resolution_contract_invalid", runId, mergeResult, batchResults, mergeResults }));
+    }
+    phase("合并");
+    const resolved = requireSuccess(await agent(
+      `自动收口 Batch ${conflictBatchId} 的真实 Git 冲突。只能操作平台保留的 worktree "${resolution.worktreePath}"，` +
+      `分支必须是 "${resolution.branchName}"，目标提交必须是 "${resolution.targetSha}"。先 cd 到该 worktree，确认 git 根和分支；` +
+      `执行 git rebase "${resolution.targetSha}"，按冲突文件逐个进行语义合并，保留双方不冲突的改动并补齐必要的接口/配置兼容。` +
+      `禁止 git checkout --ours/--theirs、git restore、git reset --hard、git rebase --skip、git merge --abort、任何 --no-verify，` +
+      `禁止修改主业务 checkout、删除 worktree 或丢弃任一侧改动。仅对已解决文件执行 git add，使用 GIT_EDITOR=true git rebase --continue。` +
+      `完成后必须确认 worktree clean、git merge-base --is-ancestor "${resolution.targetSha}" HEAD 成功，并执行验证命令：` +
+      `${JSON.stringify(resolution.validationCommands || [])}。只返回 {success:true,batchId,worktreePath,branchName,commitSha}。任何失败返回 success:false。`,
+      {
+        label: `resolve-merge-conflict-${conflictBatchId}`,
+        phase: "合并",
+        schema: {
+          type: "object",
+          properties: {
+            success: { type: "boolean" },
+            batchId: { type: "string" },
+            worktreePath: { type: "string" },
+            branchName: { type: "string" },
+            commitSha: { type: "string" },
+            errorMessage: { type: "string" }
+          },
+          required: ["success"],
+          additionalProperties: false
+        }
+      }
+    ), "merge conflict resolution");
+    const registered = requireSuccess(await agent(
+      `确认冲突解决提交并恢复合并屏障。执行 python "${mergerPath}" resolve --workspace "${artifactWorkspace}" ` +
+      `--feature "${feature}" --run-id "${runId}" --batch-id "${conflictBatchId}"。只返回 JSON；` +
+      `只有 worktree clean、分支已基于 targetSha 且无残余冲突时才允许 success。`,
+      { label: `register-merge-resolution-${conflictBatchId}`, phase: "合并", schema: { type: "object", properties: { success: { type: "boolean" }, batchId: { type: "string" }, commitSha: { type: "string" }, error: { type: "string" } }, required: ["success"], additionalProperties: false } }
+    ), "register merge resolution");
+    if (!resolved.success || !registered.success) {
+      throw new Error(JSON.stringify({ error: "merge_resolution_failed", runId, resolved, registered, batchResults, mergeResults }));
+    }
+    mergeResult = requireSuccess(await agent(
+      `重试刚完成冲突收口的 Batch。执行 python "${mergerPath}" --workspace "${artifactWorkspace}" ` +
+      `--feature "${feature}" --run-id "${runId}" --batch-id "${conflictBatchId}" --conflict-mode native-rebase。只返回 JSON。`,
+      { label: `merge-resolved-wave-${schedulerWaves}`, phase: "合并", schema: MERGE_RESULT_SCHEMA }
+    ), "merge resolved wave");
+    mergeResults.push(mergeResult);
+  }
   if (!mergeResult.success) {
     throw new Error(JSON.stringify({ error: "merge_failed", runId, mergeResult, batchResults, mergeResults }));
   }
-  mergeResults.push(mergeResult);
 
   const resumed = requireSuccess(await agent(
     `执行 python "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
