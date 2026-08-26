@@ -132,6 +132,11 @@ Within its platform-assigned worktree, a Batch agent must:
   back to the artifact workspace or source checkout;
 - pass `--workspace`, `--parallel-run-id`, and `--lease-token` to every
   `task_runner.py` command;
+- acquire the Batch lease with the scheduler's `timeoutPerBatch` as
+  `--ttl-seconds`, then run `batch_lease_manager.py heartbeat` in the
+  background throughout implementation, batch compile, and sealing; renew no
+  less often than every five minutes and verify both heartbeat liveness and
+  `check --owner-token` before compile and before seal;
 - pass the platform-assigned worktree as `--code-workspace`;
 - complete all assigned TASKs, then run the one allowed `batch-compile`;
 - invoke `worktree_manager.py seal` to commit the successful worktree and
@@ -156,6 +161,11 @@ state.
   recovery after inspecting the retained run.
 - Use `batch_lease_manager.py reclaim` for an expired lease and
   `parallel_batch_lifecycle.py monitor` to inspect a run.
+- The scheduler timeout and lease TTL are distinct unless the fixed Workflow
+  explicitly passes `--ttl-seconds ${timeoutPerBatch}`. Do not rely on the
+  lease CLI's 15-minute default for a Batch allowed to run longer. Stop the
+  heartbeat only after sealing, immediately before release; every failure
+  path must stop it and release the lease as `failed`.
 - A merge conflict, failed compile, plan digest change, or failed final verify
   blocks the run. Do not use `ours`, `theirs`, `git merge -s ours`,
   `--no-verify`, or direct edits in the shared checkout to bypass it.

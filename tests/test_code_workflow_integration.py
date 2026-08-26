@@ -89,6 +89,14 @@ def test_fixed_workflow_entrypoint():
         "required: [\"batchId\", \"status\", \"compileStatus\", \"worktreePath\", \"branchName\", \"commitSha\"]",
         "parallel_scheduler_stalled",
         "errorMessage",
+        "--ttl-seconds ${timeoutPerBatch}",
+        "heartbeat",
+        "--interval-seconds ${leaseHeartbeatInterval}",
+        "--max-seconds ${timeoutPerBatch}",
+        "后续实现、编译和 seal 全程保持 heartbeat 运行",
+        "kill -0",
+        "仅 valid=true 才可继续",
+        "停止 heartbeat",
     ]
     missing = [check for check in checks if check not in content]
     if missing:
