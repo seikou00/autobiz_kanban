@@ -51,6 +51,7 @@ class HookContext:
     root: Path
     required_inputs: tuple[str, ...] = ()
     required_outputs: tuple[str, ...] = ()
+    target_checkpoint: str | None = None
 
     def requires_artifact(self, name: str) -> bool:
         return name in self.required_inputs or name in self.required_outputs

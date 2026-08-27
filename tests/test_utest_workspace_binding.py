@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from hooks.utest_workspace_binding import (  # noqa: E402
     UTestWorkspaceBindingError,
     binding_path,
+    discover_candidates,
     resolve_workspace_binding,
 )
 
@@ -91,7 +92,11 @@ class UTestWorkspaceBindingTest(unittest.TestCase):
         self.assertEqual("workspace_binding_ambiguous", error.code)
         self.assertEqual("request_user_workspace_candidate_selection", error.required_action)
         self.assertEqual(2, len(error.candidates))
-        self.assertFalse(binding_path(self.workspace).exists())
+        pending = json.loads(binding_path(self.workspace).read_text(encoding="utf-8"))
+        self.assertEqual(
+            sorted(item["candidateId"] for item in error.candidates),
+            pending["pendingSelections"]["alpha"]["business-repo"]["candidateIds"],
+        )
 
         selected = error.candidates[0]
         result = resolve_workspace_binding(
@@ -102,11 +107,13 @@ class UTestWorkspaceBindingTest(unittest.TestCase):
         )
 
         self.assertEqual(selected["root"], result["root"])
+        self.assertEqual("candidate_selected", result["source"])
         saved = json.loads(binding_path(self.workspace).read_text(encoding="utf-8"))
         self.assertEqual(
             selected["candidateId"],
             saved["features"]["alpha"]["business-repo"]["candidateId"],
         )
+        self.assertNotIn("pendingSelections", saved)
 
     def test_persisted_selection_prevents_future_model_choice(self):
         with self.assertRaises(UTestWorkspaceBindingError) as caught:
@@ -123,6 +130,48 @@ class UTestWorkspaceBindingTest(unittest.TestCase):
 
         self.assertEqual(selected["root"], result["root"])
         self.assertEqual("persisted_binding", result["source"])
+
+    def test_candidate_selection_cannot_overwrite_persisted_binding(self):
+        with self.assertRaises(UTestWorkspaceBindingError) as caught:
+            resolve_workspace_binding(self.workspace, "alpha", "business-repo")
+        selected = caught.exception.candidates[0]
+        resolve_workspace_binding(
+            self.workspace,
+            "alpha",
+            "business-repo",
+            selected["candidateId"],
+        )
+        before = binding_path(self.workspace).read_text(encoding="utf-8")
+        other = next(
+            item
+            for item in discover_candidates(self.workspace, "alpha", "business-repo")
+            if item["candidateId"] != selected["candidateId"]
+        )
+
+        with self.assertRaises(UTestWorkspaceBindingError) as rejected:
+            resolve_workspace_binding(
+                self.workspace,
+                "alpha",
+                "business-repo",
+                other["candidateId"],
+            )
+
+        self.assertEqual("workspace_binding_selection_not_required", rejected.exception.code)
+        self.assertEqual(before, binding_path(self.workspace).read_text(encoding="utf-8"))
+
+    def test_candidate_selection_requires_pending_ambiguity(self):
+        candidate = discover_candidates(self.workspace, "alpha", "business-repo")[0]
+
+        with self.assertRaises(UTestWorkspaceBindingError) as caught:
+            resolve_workspace_binding(
+                self.workspace,
+                "alpha",
+                "business-repo",
+                candidate["candidateId"],
+            )
+
+        self.assertEqual("workspace_binding_selection_not_pending", caught.exception.code)
+        self.assertFalse(binding_path(self.workspace).exists())
 
     def test_model_authored_path_is_not_an_input(self):
         with self.assertRaises(TypeError):

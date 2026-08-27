@@ -315,6 +315,28 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             skill,
         )
 
+    def test_utest_skill_has_deterministic_blocked_exit(self) -> None:
+        skill = (ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        required = [
+            "--record-blocked",
+            "locationWarnings",
+            "blockedArtifacts",
+            "blockedArtifactError",
+            "--checkpoint needs_fix",
+            "没有环境变更或用户选择时不重跑检查器",
+            "`scope.modules` 无法解析不是 `contract_gap`",
+            "当前没有 pending ambiguity 时不得传 `--select-candidate`",
+        ]
+        missing = [phrase for phrase in required if phrase not in skill]
+        self.assertEqual(missing, [])
+
+        config = _board_config()
+        transitions = config["workflow"]["checkpoints"]["transitions"]
+        self.assertIn("needs_fix", transitions["unit_test_in_progress"])
+        self.assertIn("unit_test_in_progress", transitions["needs_fix"])
+
     def test_skill_output_sections_never_declare_global_state_files(self) -> None:
         state_files = (".autobizdevops/state.json", ".autobizdevops/STATE.md")
         offenders: list[str] = []

@@ -390,6 +390,21 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual("yudao-module-mkt", validation["executionCwd"])
         self.assertEqual([], validate_result_against_plan(self.feature_dir, self._unit_result()))
 
+    def test_semantic_scope_module_runs_from_validation_location_with_warning(self):
+        task = self._task()
+        task["scope"] = {
+            "modules": ["AiReview 评分模块"],
+            "workspaceRoots": {self.repo.name: "."},
+        }
+        self._write_plan(task)
+
+        result = self._execute()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(".", result["executionCwd"])
+        self.assertEqual("scope_module_unresolved", result["locationWarnings"][0]["code"])
+        self.assertEqual(["AiReview 评分模块"], result["locationWarnings"][0]["modules"])
+
     def test_writer_failure_retains_evidence_and_reports_recovery(self):
         with mock.patch(
             "hooks.run_utest_command.record_execution", side_effect=OSError("read-only")
@@ -452,6 +467,79 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertIn(
             "unit_test_target_plan_mismatch:UT-001:commandId", reasons
         )
+
+    def test_board_gate_accepts_plan_bound_blocked_result_for_needs_fix(self):
+        spec = self.feature_dir / "specs" / "cap" / "spec.md"
+        spec.parent.mkdir(parents=True)
+        spec.write_text(
+            "## ADDED Requirements\n\n"
+            "### Requirement [REQ-001]: pricing\n\n"
+            "#### Scenario [SCN-001]: fixed discount\n",
+            encoding="utf-8",
+        )
+        ensure_plan_result(self.workspace, "alpha", create=True)
+        hook_dir = ROOT / "skills" / "autodev" / "hooks"
+        sys.path.insert(0, str(hook_dir))
+        self.addCleanup(lambda: sys.path.remove(str(hook_dir)))
+        module_spec = importlib.util.spec_from_file_location(
+            "utest_blocked_artifact_check", str(hook_dir / "artifact_check.py")
+        )
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        ctx = module.HookContext(
+            skill="autodev-utest",
+            slug="alpha",
+            root=self.workspace,
+            required_outputs=("UNIT_TEST_RESULT.json",),
+            target_checkpoint="needs_fix",
+        )
+        reasons = []
+
+        def capture(_ctx, reason, *args, **kwargs):
+            del _ctx, args, kwargs
+            reasons.append(reason)
+            return 1
+
+        with mock.patch.object(module, "fail_line", side_effect=capture):
+            failures = module.validate_unit_test_result_json(ctx)
+
+        self.assertEqual(0, failures, reasons)
+        self.assertEqual("BLOCKED", self._unit_result()["verdict"])
+
+    def test_board_gate_rejects_fail_result_for_needs_fix(self):
+        ensure_plan_result(self.workspace, "alpha", create=True)
+        data = self._unit_result()
+        data["verdict"] = "FAIL"
+        (self.feature_dir / "UNIT_TEST_RESULT.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+        hook_dir = ROOT / "skills" / "autodev" / "hooks"
+        sys.path.insert(0, str(hook_dir))
+        self.addCleanup(lambda: sys.path.remove(str(hook_dir)))
+        module_spec = importlib.util.spec_from_file_location(
+            "utest_failed_artifact_check", str(hook_dir / "artifact_check.py")
+        )
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        ctx = module.HookContext(
+            skill="autodev-utest",
+            slug="alpha",
+            root=self.workspace,
+            required_outputs=("UNIT_TEST_RESULT.json",),
+            target_checkpoint="needs_fix",
+        )
+        reasons = []
+
+        def capture(_ctx, reason, *args, **kwargs):
+            del _ctx, args, kwargs
+            reasons.append(reason)
+            return 1
+
+        with mock.patch.object(module, "fail_line", side_effect=capture):
+            failures = module.validate_unit_test_result_json(ctx)
+
+        self.assertGreater(failures, 0)
+        self.assertIn("non_blocked_unit_test_needs_fix_verdict", reasons)
 
     def test_malformed_evidence_returns_gate_error_instead_of_raising(self):
         self._execute()

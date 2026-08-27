@@ -1984,8 +1984,13 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
     verdict = data.get("verdict")
     if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED"}:
         failures += fail_line(ctx, "invalid_unit_test_result_verdict")
-    elif ctx.requires_artifact("UNIT_TEST_RESULT.json") and verdict.upper() not in TERMINAL_PASS:
-        failures += fail_line(ctx, "non_terminal_unit_test_result_verdict")
+    elif ctx.requires_artifact("UNIT_TEST_RESULT.json"):
+        normalized_verdict = verdict.upper()
+        if ctx.target_checkpoint == "needs_fix":
+            if normalized_verdict != "BLOCKED":
+                failures += fail_line(ctx, "non_blocked_unit_test_needs_fix_verdict")
+        elif normalized_verdict not in TERMINAL_PASS:
+            failures += fail_line(ctx, "non_terminal_unit_test_result_verdict")
     targets = data.get("targets")
     if not isinstance(targets, list) or not targets:
         return failures + fail_line(ctx, "invalid_unit_test_targets")
@@ -1995,7 +2000,13 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
             failures += fail_line(ctx, "invalid_unit_test_target", f" item={context}")
             continue
         failures += _check_string_field(ctx, target, "targetId", context=context)
-        _, _, trace_failures = _check_trace_refs(ctx, target, context=context, require_task=True, require_evidence=True)
+        _, _, trace_failures = _check_trace_refs(
+            ctx,
+            target,
+            context=context,
+            require_task=True,
+            require_evidence=ctx.target_checkpoint != "needs_fix",
+        )
         failures += trace_failures
         result = target.get("result")
         if not isinstance(result, str) or result.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED", "SKIP"}:
@@ -2494,6 +2505,7 @@ def validate_fix_request_json(ctx: HookContext) -> int:
         "environment_issue",
         "permission_issue",
         "dependency_issue",
+        "plan_contract_gap",
         "unknown",
     }:
         failures += fail_line(ctx, "invalid_fix_request_root_cause")
@@ -3203,6 +3215,7 @@ def run_postcheck(
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: dict[str, str] | None = None,
     workflow_record: dict | None = None,
+    target_checkpoint: str | None = None,
 ) -> tuple[int, str]:
     try:
         config = load_artifact_config(
@@ -3213,7 +3226,15 @@ def run_postcheck(
             workflow_decisions=workflow_decisions,
             workflow_record=workflow_record,
         )
-        validate_required_files(workspace_root, slug, config.required_outputs)
+        required_outputs = list(config.required_outputs)
+        if (
+            skill == "autodev-utest"
+            and target_checkpoint == "needs_fix"
+            and "fix_request_json" in config.validators
+            and "FIX_REQUEST.json" not in required_outputs
+        ):
+            required_outputs.append("FIX_REQUEST.json")
+        validate_required_files(workspace_root, slug, required_outputs)
         for validator in config.validators:
             if validator not in VALIDATORS:
                 raise HookCheckError("unknown_validator", f"{skill}:{validator}")
@@ -3236,7 +3257,8 @@ def run_postcheck(
         slug=slug,
         root=workspace_root,
         required_inputs=config.required_inputs,
-        required_outputs=config.required_outputs,
+        required_outputs=tuple(required_outputs),
+        target_checkpoint=target_checkpoint,
     )
     failures = 0
     for validator in config.validators:

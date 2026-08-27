@@ -1,7 +1,7 @@
 ---
 name: autodev-utest
 description: "Dev 阶段单元测试协调、生成、执行与单测驱动最小修复技能。"
-version: v1.2.08143
+version: v1.2.0825
 ---
 
 ## 插件脚本执行
@@ -26,7 +26,13 @@ Plan 已固化每个 TASK 的实现范围，Code 只实现生产代码、不创�
 python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
-每次需要当前状态或 checkpoint 时重新运行该脚本，不得直接读取 `state.json`、`STATE.md`、`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`。
+每次需要当前状态或 checkpoint 时重新运行该脚本，不得直接读取 `.autobizdevops/state.json`、`.autobizdevops/STATE.md`、`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`。
+
+首次从 `requirements_eval_done` 进入本阶段时写入开始 checkpoint；当前已是 `unit_test_in_progress` 时不重复写入：
+
+```bash
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
+```
 
 ## 输入与产物
 
@@ -53,6 +59,7 @@ code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_REPORT.md`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/UNIT_TEST_RESULT.json`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/test-output.log`
+- 阻断回流时的 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/FIX_REQUEST.json`
 - validation Evidence
 
 可修改：
@@ -94,16 +101,31 @@ task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/
 一次检查当前 Feature 的全部 assignment：
 
 ```bash
-python "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
+python "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --record-blocked --json
 ```
 
-检查器调用 workspace binding 解析器，根据当前 plan 与已验证的 Code 产物自动保存仓库绑定，再用 `validationCommands.cwd` 定位构建根目录；模型不得填写 repo、仓库地址、framework 或 cwd，不得直接编辑 `.autobizdevops/workspace-bindings.json`。`workspace_binding_missing` 分类为 `environment`；`workspace_binding_ambiguous` 时向用户展示 `candidates`，用户选定后只传回该候选的 ID：
+检查器调用 workspace binding 解析器，根据当前 plan 与已验证的 Code 产物自动保存仓库绑定，再用 `validationCommands.cwd` 定位构建根目录；`scope.modules` 仅用于精确定位，无法解析时按检查器返回的 `locationWarnings` 回退 `validationLocations`。模型不得填写 repo、仓库地址、framework 或 cwd，不得直接编辑 `.autobizdevops/workspace-bindings.json`。
+
+按检查器 `status` 分支：
+
+- `ready`：继续测试计划。
+- `init_required`：应用对应 profile；完成环境变更后重跑一次检查器。
+- `workspace_binding_ambiguous`：向用户展示 `candidates`；收到用户选择后只传回候选 ID，再重跑一次检查器。
+- `contract_gap`、`workspace_binding_missing`、`workspace_binding_invalid`、`conflict`、`unsupported`、`environment_inspection_failed`：确认返回包含 `blockedArtifacts` 且不含 `blockedArtifactError`，推进 `needs_fix` 后立即停止：
+
+```bash
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
+```
+
+阻断产物写入失败时原样报告 `blockedArtifactError` 并停止，不更新 checkpoint。没有环境变更或用户选择时不重跑检查器。`contract_gap` 只用于 plan/TASK 契约损坏及 `workspaceRef`、`validationCommands.repo/cwd` 的非法或不一致；`scope.modules` 无法解析不是 `contract_gap`。
+
+`workspace_binding_ambiguous` 时，用户选定后运行：
 
 ```bash
 python "${pluginPath}/hooks/utest_workspace_binding.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --workspace-ref "<RETURNED_WORKSPACE_REF>" --select-candidate "<USER_SELECTED_CANDIDATE_ID>" --json
 ```
 
-不得由模型选择 candidate，也不得把候选路径改写成参数。`contract_gap` 只用于 plan 的 `workspaceRef` 与 `validationCommands.repo/cwd` 不一致。
+不得由模型选择 candidate，也不得把候选路径改写成参数。已有 persisted binding 或当前没有 pending ambiguity 时不得传 `--select-candidate`。
 
 `status=init_required` 时读取并应用：
 
@@ -140,12 +162,6 @@ python "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|
 真实浏览器、多页面导航或真实网络链路只写入 `e2e_handoff`，不生成 Playwright/Cypress。
 
 ## 工作流程
-
-### 写入开始 checkpoint
-
-```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
-```
 
 ### 展开 assignment 的测试计划
 
@@ -200,8 +216,8 @@ python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${plu
 |------|------|
 | `test_bug` | 测试工程师只修测试、fixture、mock、辅助代码或测试环境配置，重跑原命令 |
 | `source_bug` | 在失败测试锚定下做最小生产修复并重跑原命令；超出 assignment 边界时返回 `source_fix_request` |
-| `contract_gap` | 阻断并回流约束/计划 |
-| `environment` | 记录环境与复现命令；只应用受支持 initProfile |
+| `contract_gap` | 使用检查器落 BLOCKED 结果与 `FIX_REQUEST.json`，推进 `needs_fix` 后停止 |
+| `environment` | 只应用受支持 initProfile；无法继续时落 BLOCKED 结果并推进 `needs_fix` |
 | `flaky` | 记录多次重跑结果与根因 |
 | `unknown` | 停止，不猜修 |
 
@@ -271,9 +287,7 @@ python "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${
 python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 ```
 
-存在 FAIL、BLOCKED、未归因失败、`contract_gap` 或超过修复次数时保持 `unit_test_in_progress`。
-
-缺陷在本阶段修完，不留给下游。只有两种未修复的合法退出：`environment` 记录环境与复现命令后阻断，`contract_gap` 回流 `/autodev-plan`。`test_bug`、`source_bug`、`flaky` 和入场缺陷都不属于这两类。
+`test_bug`、`source_bug`、`flaky`、未归因失败或超过修复次数时保持 `unit_test_in_progress`。检查器已落阻断产物的 `contract_gap` / `environment` 推进 `needs_fix`；按 `FIX_REQUEST.json` 执行回流，不直接调用 `/autodev-plan` 修改 finalized Plan。
 
 ## 质量规则
 
@@ -293,7 +307,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 - [ ] 已列出 code 阶段遗留的入场缺陷，并全部重跑清零。
 - [ ] 已输出完整 UT target 表，覆盖全部 TASK 测试重点；浏览器目标已转 `e2e_handoff`。
 - [ ] 已按 Batch、lane、workspace 串行完成 assignment。
-- [ ] 已检查测试环境，inspector 返回 `ready`。
+- [ ] 已检查测试环境；`ready` 才进入测试，阻断时已落 BLOCKED 产物并推进 `needs_fix`。
 - [ ] 每个 UT target 均已落地测试文件，并通过 runner 记录命令、日志、Evidence 与 target。
 - [ ] 失败已分类，修复与 `source_fix_request` 已闭环。
 - [ ] 已执行扩大验证并生成 `UNIT_TEST_REPORT.md`。
