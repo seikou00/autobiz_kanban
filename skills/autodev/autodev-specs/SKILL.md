@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.10.0825
+version: v1.10.0827
 ---
 
 ## 缺失产物处理
@@ -187,13 +187,23 @@ capability 的变更分类写进 `## Capabilities` 节。探索中形成的判�
 - 操作段要与 proposal 的分组对上：`New Capabilities` 的 spec 在 `ADDED Requirements` 下写 Requirement，且 `MODIFIED`/`REMOVED` 段下不得有 Requirement（全新能力没有存量可改可删）；`Modified`/`Removed` 的 spec 必须在同名操作段下写 Requirement，另加 `ADDED` 是允许的。`capability_spec_correspondence` 判定这条。
 - 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
 
+## 回检与修复
+
+本节完整协议由脚本按阶段渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。
+
+```bash
+python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
+```
+
+回检结论必须写进 `SPECS_REVIEW.md`——只输出在回复里不算数，`specs_review_verdict` 判定该产物。回检修改与结论落盘完成后进入产物契约预检。
+
 ## 产物契约预检（机器校验）
 
 这是脚本对产物做的**机器检查**，只判定：必备产物与章节是否齐全、格式与结构是否合法、稳定 ID 是否规范唯一、引用能否解析、机械可判的覆盖关系是否成立。
 
 它**不**判定需求语义是否完整、方案是否合理、测试策略是否充分、代码事实是否属实——那些由回检子代理负责，两者职责不重叠。
 
-proposal 与全部 specs 生成完成后执行：
+proposal、全部 specs、`SPECS_REVIEW.md` 生成且回检修改完成后执行：
 
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature "${feature}"
@@ -201,11 +211,11 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature 
 
 处理流程：
 
-1. 等命令完整结束后再处理结果，不处理一条就重跑一次。
-2. 读取全部失败项。每一项都带 `artifact` / `target` / `problem` / `action` / `route`，按 `action` 修，不要自行推断修法。
-3. 按 `route` 分流：`fix_current` 在本阶段修；`return_specs` / `return_plan` 停止本阶段并回流；`ask_user` 回到用户确认，禁止自行填值。
-4. 按 `artifact` 归组，一次性改完全部可修项。
-5. 重跑完整预检；通过前不得推进 checkpoint。
+1. 等命令完整结束后读取全部失败项。
+2. 按 `route` 分流：`fix_current` 在本阶段修；`return_specs` / `return_plan` 停止本阶段并回流；`ask_user` 回到用户确认，禁止自行填值。
+3. 将本轮全部 `fix_current` 按 `artifact` 归组，同一产物一次性改完；每项按 `target` / `action` 修复。
+4. 逐项复核本轮失败清单；清单未清零时不得重跑预检。
+5. 清单清零后重跑完整预检；通过前不得推进 checkpoint。
 
 不以 `update_checkpoint.py` 代替产物契约预检。
 
@@ -216,16 +226,6 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --feature 
 - specs 只描述行为契约，不包含实现任务。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
 - `SPECS_REVIEW.md` 的 `## Unresolved` 段为「无」。
-
-## 回检与修复
-
-本节完整协议由脚本按阶段渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。
-
-```bash
-python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
-```
-
-回检结论必须写进 `SPECS_REVIEW.md`——只输出在回复里不算数，`specs_review_verdict` 判定该产物。写完（以及回检导致产物变化时）重跑一次产物契约预检。
 
 产物契约预检与回检修复均通过后推进 checkpoint：
 
