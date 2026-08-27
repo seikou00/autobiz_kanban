@@ -114,10 +114,7 @@ def _rebase_native_delivery(
         conflicts = _git(worktree_path, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
         return {
             "success": False,
-            # A failed abort leaves Git in an indeterminate rebase state. It
-            # must be blocked for inspection rather than handed to the normal
-            # automatic conflict resolver.
-            "needsResolution": bool(conflicts) and aborted,
+            "needsResolution": bool(conflicts),
             "error": "native_rebase_conflict" if conflicts else "native_worktree_dirty",
             "conflicts": conflicts,
             "worktreePath": str(worktree_path),
@@ -131,7 +128,10 @@ def _rebase_native_delivery(
         aborted, abort_error = _abort_git_operation(worktree_path, "rebase")
         return {
             "success": False,
-            "needsResolution": bool(conflicts),
+            # A failed abort leaves Git in an indeterminate rebase state. It
+            # must be blocked for inspection rather than handed to the normal
+            # automatic conflict resolver.
+            "needsResolution": bool(conflicts) and aborted,
             "error": (
                 "native_rebase_conflict"
                 if conflicts and aborted
