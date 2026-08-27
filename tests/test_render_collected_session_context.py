@@ -55,8 +55,10 @@ class CollectedSessionContextTest(unittest.TestCase):
     def test_calls_list_then_deploy_and_injects_system_prompt(self):
         calls = []
 
-        def fake_run(command, **_kwargs):
-            calls.append(command)
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs.get("cwd")))
+            if command[-1] == "install":
+                return _proc("")
             if "--listDeployUnits" in command:
                 return _proc(["LF39.18_wg_flow"])
             return _proc(
@@ -93,8 +95,10 @@ class CollectedSessionContextTest(unittest.TestCase):
         self.assertIn("title: 架构设计", result["sessionContext"])
         self.assertEqual(result["message"], "remote 1 / local 0 / 缺 0")
         self.assertEqual(result["agentmdLoadStatus"][0]["source"], "remote")
+        self.assertEqual(calls[0][0][-1], "install")
+        self.assertEqual(calls[0][1], str(Path("collect-knowledge.js").resolve().parent))
         self.assertEqual(
-            calls,
+            [command for command, _cwd in calls[1:]],
             [
                 [
                     "node",
@@ -134,7 +138,7 @@ class CollectedSessionContextTest(unittest.TestCase):
     def test_supported_unit_invalid_payload_falls_back_to_local_agents(self):
         local = Path(tempfile.mkdtemp())
         (local / "AGENTS.md").write_text("# 本地知识\n", encoding="utf-8")
-        responses = [_proc(["U1"]), _proc({"unexpected": "value"})]
+        responses = [_proc(""), _proc(["U1"]), _proc({"unexpected": "value"})]
         with patch(
             "hooks.render_collected_session_context.subprocess.run", side_effect=responses
         ):
@@ -147,6 +151,40 @@ class CollectedSessionContextTest(unittest.TestCase):
         self.assertEqual(result["agentmdLoadStatus"][0]["source"], "local")
         self.assertTrue(result["agentmdLoadStatus"][0]["loaded"])
         self.assertIn("缺少非空 systemPrompt", result["agentmdLoadStatus"][0]["message"])
+
+    def test_npm_install_failure_still_allows_collector(self):
+        def fake_run(command, **_kwargs):
+            if command[-1] == "install":
+                return _proc("", returncode=1, stderr="registry unreachable")
+            if "--listDeployUnits" in command:
+                return _proc(["U1"])
+            return _proc({"systemPrompt": "# 远端知识\n"})
+
+        with patch(
+            "hooks.render_collected_session_context.subprocess.run", side_effect=fake_run
+        ):
+            result = render(
+                [{"deployUnitId": "U1", "localRepoPath": ""}],
+                collector_script="collect-knowledge.js",
+            )
+
+        self.assertIn("# 远端知识", result["sessionContext"])
+        self.assertEqual(result["agentmdLoadStatus"][0]["source"], "remote")
+
+    def test_npm_install_failure_is_reported_when_collector_also_fails(self):
+        plugin_root = _legacy_plugin_root()
+        with patch(
+            "hooks.render_collected_session_context.subprocess.run",
+            return_value=_proc("", returncode=1, stderr="registry unreachable"),
+        ):
+            result = render(
+                [{"deployUnitId": "LF39.18_wg_flow", "localRepoPath": ""}],
+                plugin_root=plugin_root,
+                collector_script="collect-knowledge.js",
+            )
+
+        self.assertIn("npm install 失败", result["message"])
+        self.assertIn("已回退旧逻辑", result["message"])
 
     def test_empty_selection_does_not_start_collector(self):
         with patch("hooks.render_collected_session_context.subprocess.run") as run:

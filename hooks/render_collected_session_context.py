@@ -4,10 +4,11 @@
 
 本脚本是 ``render_session_context.py`` 之上的兼容适配层，不修改旧加载器：
 
-1. 调用 ``node collect-knowledge.js --listDeployUnits --knowledgePath <path>``；
-2. 对选中的 deployUnit 调用 ``--deployUnit <id>``；
-3. 将返回 JSON 的 ``systemPrompt`` 放入原有 ``sessionContext`` 契约；
-4. 列表接口不可用时，整次调用委托给旧 ``render_session_context.render``。
+1. 在 collector 所在目录执行 ``npm install``（每次都执行，不判断是否首次）；
+2. 调用 ``node collect-knowledge.js --listDeployUnits --knowledgePath <path>``；
+3. 对选中的 deployUnit 调用 ``--deployUnit <id>``；
+4. 将返回 JSON 的 ``systemPrompt`` 放入原有 ``sessionContext`` 契约；
+5. 列表接口不可用时，整次调用委托给旧 ``render_session_context.render``。
 
 部署单元接口失败时仍可回退到 ``<localRepoPath>/AGENTS.md``。除入参 JSON
 非法外，外部接口故障不会中断会话。
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +50,7 @@ from hooks.render_session_context import (  # noqa: E402
 
 DEFAULT_KNOWLEDGE_COLLECTOR = "collect-knowledge.js"
 KNOWLEDGE_COLLECT_TIMEOUT_SECONDS = 30
+NPM_INSTALL_TIMEOUT_SECONDS = 300
 
 
 class KnowledgeCollectorError(RuntimeError):
@@ -59,6 +62,38 @@ def _short_error(text: str, limit: int = 500) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1] + "…"
+
+
+def _npm_install(collector_script: str, *, npm_command: str = "npm") -> str:
+    """在 collector 所在目录安装依赖；每次都执行，不判断是否首次。
+
+    返回空串表示成功，否则返回失败原因，由调用方决定是否继续。
+    """
+    workdir = Path(collector_script).resolve().parent
+    executable = shutil.which(npm_command) or npm_command
+    try:
+        proc = subprocess.run(
+            [executable, "install"],
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=NPM_INSTALL_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        missing = exc.filename or npm_command
+        return f"未找到依赖安装命令: {missing}，请安装 Node.js/npm 或用 --npm-command 指定路径"
+    except subprocess.TimeoutExpired:
+        return f"依赖安装超时（{NPM_INSTALL_TIMEOUT_SECONDS} 秒），请在 {workdir} 手动执行 npm install"
+    except OSError as exc:
+        return f"启动依赖安装失败: {_short_error(str(exc))}"
+
+    if proc.returncode != 0:
+        detail = _short_error(proc.stderr or proc.stdout) or f"返回码 {proc.returncode}"
+        return f"npm install 失败: {detail}，请在 {workdir} 手动执行 npm install 并修复依赖"
+    return ""
 
 
 def _run_collector(
@@ -263,6 +298,7 @@ def render(
     collector_script: str = DEFAULT_KNOWLEDGE_COLLECTOR,
     knowledge_path: Optional[str] = None,
     node_command: str = "node",
+    npm_command: str = "npm",
 ) -> dict:
     """使用新接口渲染；接口不可用时委托旧 renderer。"""
     if not selected:
@@ -281,6 +317,7 @@ def render(
     resolved_knowledge_path = (knowledge_path or "").strip() or str(
         get_agents_root(plugin_root).resolve()
     )
+    npm_error = _npm_install(collector_script, npm_command=npm_command)
     try:
         supported_units = set(
             _list_deploy_units(
@@ -290,9 +327,10 @@ def render(
             )
         )
     except KnowledgeCollectorError as exc:
+        reason = f"{npm_error}；{exc}" if npm_error else str(exc)
         return _legacy_result(
             selected,
-            str(exc),
+            reason,
             plugin_root=plugin_root,
             session_workspace_path=session_workspace_path,
             platform=platform,
@@ -425,6 +463,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=DEFAULT_KNOWLEDGE_COLLECTOR,
     )
     parser.add_argument("--node-command", dest="node_command", default="node")
+    parser.add_argument("--npm-command", dest="npm_command", default="npm")
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     try:
@@ -457,6 +496,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             collector_script=args.collector_script,
             knowledge_path=args.knowledge_path,
             node_command=args.node_command,
+            npm_command=args.npm_command,
         )
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
