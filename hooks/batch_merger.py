@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
 from hooks.parallel_runtime import (  # noqa: E402
     append_event,
+    lease_path,
     load_manifest,
     run_lock,
     save_manifest,
@@ -28,6 +29,27 @@ from hooks.plan_writer import mark_parallel_batch_tasks_merged  # noqa: E402
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+
+
+def _merge_probe(repo: Path, target_sha: str, source_branch: str) -> dict[str, Any]:
+    """Detect conflicts without writing an unreferenced tree object."""
+    base = _git(repo, "merge-base", target_sha, source_branch)
+    if base.returncode != 0 or not base.stdout.strip():
+        return {"success": False, "error": base.stderr.strip() or "merge_base_failed", "conflicts": []}
+    probe = _git(repo, "merge-tree", "--trivial-merge", base.stdout.strip(), target_sha, source_branch)
+    if probe.returncode != 0:
+        return {"success": False, "error": probe.stderr.strip() or "merge_probe_failed", "conflicts": []}
+    output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
+    markers = ("changed in both", "added in both", "removed in both", "CONFLICT", "<<<<<<<")
+    conflicts = [line.strip() for line in output.splitlines() if any(marker in line for marker in markers)]
+    return {"success": not conflicts, "error": "merge_conflict" if conflicts else None, "conflicts": conflicts}
+
+
+def _abort_git_operation(repo: Path, operation: str) -> tuple[bool, str | None]:
+    result = _git(repo, operation, "--abort")
+    if result.returncode == 0:
+        return True, None
+    return False, result.stderr.strip() or result.stdout.strip() or f"{operation}_abort_failed"
 
 
 def _worktree_records(repo: Path) -> list[dict[str, str]]:
@@ -92,7 +114,10 @@ def _rebase_native_delivery(
         conflicts = _git(worktree_path, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
         return {
             "success": False,
-            "needsResolution": bool(conflicts),
+            # A failed abort leaves Git in an indeterminate rebase state. It
+            # must be blocked for inspection rather than handed to the normal
+            # automatic conflict resolver.
+            "needsResolution": bool(conflicts) and aborted,
             "error": "native_rebase_conflict" if conflicts else "native_worktree_dirty",
             "conflicts": conflicts,
             "worktreePath": str(worktree_path),
@@ -103,14 +128,22 @@ def _rebase_native_delivery(
         conflicts = _git(worktree_path, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
         # Restore the original delivery so this retained checkout stays clean
         # for explicit recovery or discard by the lifecycle hook.
-        _git(worktree_path, "rebase", "--abort")
+        aborted, abort_error = _abort_git_operation(worktree_path, "rebase")
         return {
             "success": False,
             "needsResolution": bool(conflicts),
-            "error": "native_rebase_conflict" if conflicts else result.stderr.strip() or "native_rebase_failed",
+            "error": (
+                "native_rebase_conflict"
+                if conflicts and aborted
+                else f"native_rebase_abort_failed:{abort_error}"
+                if not aborted
+                else result.stderr.strip() or "native_rebase_failed"
+            ),
             "conflicts": conflicts,
             "worktreePath": str(worktree_path),
             "branch": branch,
+            "abortError": abort_error,
+            "abortSucceeded": aborted,
         }
     return {
         "success": True,
@@ -164,8 +197,15 @@ def merge_worktree_to_main(repo_path: Path, worktree_name: str, target_branch: s
         result = _git(repo, *merge_args)
         if result.returncode != 0:
             conflicts = _git(repo, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
-            _git(repo, "merge", "--abort")
-            return {"success": False, "mergedFiles": [], "conflicts": conflicts, "error": "merge_conflict" if conflicts else result.stderr.strip() or "merge_failed"}
+            aborted, abort_error = _abort_git_operation(repo, "merge")
+            return {
+                "success": False,
+                "mergedFiles": [],
+                "conflicts": conflicts,
+                "error": "merge_conflict" if conflicts and aborted else f"merge_abort_failed:{abort_error}" if not aborted else result.stderr.strip() or "merge_failed",
+                "abortError": abort_error,
+                "abortSucceeded": aborted,
+            }
         sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
         return {"success": True, "mergedFiles": changed, "conflicts": [], "commitSha": sha, "error": None, "branch": branch}
     except (OSError, ValueError) as exc:
@@ -296,6 +336,17 @@ def merge_run(
             ref, root, base_sha = _batch_repository(manifest, batch_id)
             root_key = str(root.resolve())
             record = repositories[root_key]
+            # The worker lease is deliberately released during the seal
+            # handoff. Refuse a delivery if a lease record reappears while the
+            # merge barrier is running; otherwise an active or stale worker
+            # could race the shared checkout.
+            if batch.get("lease") is not None or lease_path(workspace, feature, run_id, batch_id).is_file():
+                failed.append({
+                    "batchId": batch_id,
+                    "repositoryRef": ref,
+                    "error": "parallel_merge_lease_not_released",
+                })
+                break
             worktree_path, source_branch = _resolve_branch(root, str(batch.get("worktreePath") or batch_id))
             if not source_branch:
                 failed.append({
@@ -362,14 +413,15 @@ def merge_run(
                 break
             source_branch = str(rebased["branch"])
             batch["commitSha"] = rebased.get("commitSha")
-            probe = _git(root, "merge-tree", "--write-tree", record["headSha"], source_branch)
-            if probe.returncode != 0:
+            probe = _merge_probe(root, record["headSha"], source_branch)
+            if not probe.get("success"):
                 failed.append({
                     "batchId": batch_id,
                     "repositoryRef": ref,
                     "worktree": batch.get("worktreePath"),
                     "error": "post_rebase_merge_probe_failed",
-                    "conflicts": [],
+                    "conflicts": probe.get("conflicts", []),
+                    "probeError": probe.get("error"),
                 })
                 break
             result = merge_worktree_to_main(
@@ -397,6 +449,14 @@ def merge_run(
                     delivery_run_id=run_id,
                 )
                 if not plan_result.ok:
+                    resolution = {
+                        "kind": "plan_state_update",
+                        "mergeCommitSha": result.get("commitSha"),
+                        "deliveryRunId": run_id,
+                        "repositoryRef": ref,
+                        "repositoryHeadSha": result.get("commitSha"),
+                        "planWriterErrors": plan_result.errors or [],
+                    }
                     record["headSha"] = result.get("commitSha")
                     for binding in manifest.get("repositories", {}).values():
                         if isinstance(binding, dict) and isinstance(binding.get("gitRoot"), str) and str(Path(binding["gitRoot"]).resolve()) == root_key:
@@ -408,12 +468,15 @@ def merge_run(
                         "error": "parallel_merge_plan_state_update_failed",
                         "planWriterErrors": plan_result.errors or [],
                         "sourceMerged": True,
+                        "needsPlanRecovery": True,
+                        "resolution": resolution,
                     })
                     batch.update(
                         {
                             "status": "needs_resolution",
                             "mergeCommitSha": result.get("commitSha"),
                             "error": "parallel_merge_plan_state_update_failed",
+                            "resolution": resolution,
                         }
                     )
                     break
@@ -503,9 +566,14 @@ def resolve_merge_conflict(
             return {"success": False, "error": "parallel_resolution_missing_delivery_commit", "batchId": batch_id}
         if _git(worktree_path, "merge-base", "--is-ancestor", target_sha, head_sha).returncode != 0:
             return {"success": False, "error": "parallel_resolution_not_rebased", "batchId": batch_id}
-        probe = _git(root, "merge-tree", "--write-tree", target_sha, branch_name)
-        if probe.returncode != 0:
-            return {"success": False, "error": "parallel_resolution_still_conflicts", "batchId": batch_id}
+        probe = _merge_probe(root, target_sha, branch_name)
+        if not probe.get("success"):
+            return {
+                "success": False,
+                "error": "parallel_resolution_still_conflicts",
+                "batchId": batch_id,
+                "conflicts": probe.get("conflicts", []),
+            }
         batch.update({
             "status": "ready_to_merge",
             "commitSha": head_sha,
@@ -542,10 +610,79 @@ def resolve_merge_conflict(
         }
 
 
+def recover_plan_state_after_merge(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+) -> dict[str, Any]:
+    """Repair Plan metadata after Git merged but the Plan writer failed."""
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = manifest.get("batches", {}).get(batch_id)
+        if not isinstance(batch, dict):
+            return {"success": False, "error": f"parallel_batch_not_found:{batch_id}"}
+        resolution = batch.get("resolution")
+        if batch.get("status") != "needs_resolution" or not isinstance(resolution, dict) or resolution.get("kind") != "plan_state_update":
+            return {"success": False, "error": "parallel_batch_not_waiting_for_plan_recovery", "batchId": batch_id}
+        commit_sha = str(resolution.get("mergeCommitSha") or batch.get("mergeCommitSha") or "")
+        if not commit_sha:
+            return {"success": False, "error": "parallel_plan_recovery_commit_missing", "batchId": batch_id}
+        ref, root, _ = _batch_repository(manifest, batch_id)
+        current_head = _git(root, "rev-parse", "HEAD").stdout.strip()
+        if current_head != commit_sha:
+            return {
+                "success": False,
+                "error": "parallel_plan_recovery_head_changed",
+                "batchId": batch_id,
+                "expected": commit_sha,
+                "actual": current_head,
+            }
+        plan_result = mark_parallel_batch_tasks_merged(
+            workspace,
+            feature,
+            batch_id,
+            merge_commit_sha=commit_sha,
+            delivery_run_id=str(resolution.get("deliveryRunId") or run_id),
+        )
+        if not plan_result.ok:
+            resolution["planWriterErrors"] = plan_result.errors or []
+            batch["resolution"] = resolution
+            save_manifest(workspace, feature, run_id, manifest)
+            return {
+                "success": False,
+                "error": "parallel_merge_plan_state_update_failed",
+                "batchId": batch_id,
+                "planWriterErrors": plan_result.errors or [],
+            }
+        batch.update({"status": "merged", "mergeCommitSha": commit_sha, "error": None})
+        batch.pop("resolution", None)
+        root_key = str(root.resolve())
+        for binding in manifest.get("repositories", {}).values():
+            if isinstance(binding, dict) and str(Path(binding.get("gitRoot", "")).resolve()) == root_key:
+                binding["headSha"] = commit_sha
+        all_merged = all(
+            isinstance(item, dict) and item.get("status") == "merged"
+            for item in manifest.get("batches", {}).values()
+        )
+        manifest["status"] = "verifying" if all_merged else "running"
+        save_manifest(workspace, feature, run_id, manifest)
+        append_event(
+            workspace,
+            feature,
+            run_id,
+            "plan_state_recovered_after_merge",
+            batchId=batch_id,
+            repositoryRef=ref,
+            commitSha=commit_sha,
+        )
+        return {"success": True, "batchId": batch_id, "repositoryRef": ref, "commitSha": commit_sha, "status": manifest["status"]}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Merge parallel Code batches")
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("command", nargs="?", choices=("merge", "resolve"), default="merge")
+    parser.add_argument("command", nargs="?", choices=("merge", "resolve", "recover-plan"), default="merge")
     parser.add_argument("--workspace")
     parser.add_argument("--feature")
     parser.add_argument("--run-id")
@@ -561,7 +698,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("feature_required")
         workspace = resolve_workspace(args.workspace)
         feature = resolve_feature(args.feature)
-        if args.run_id and args.command == "resolve":
+        if args.run_id and args.command == "recover-plan":
+            if not args.batch_ids or len(args.batch_ids) != 1:
+                raise ValueError("recover_plan_requires_one_batch_id")
+            result = recover_plan_state_after_merge(workspace, feature, args.run_id, args.batch_ids[0])
+        elif args.run_id and args.command == "resolve":
             if not args.batch_ids or len(args.batch_ids) != 1:
                 raise ValueError("resolve_requires_one_batch_id")
             result = resolve_merge_conflict(workspace, feature, args.run_id, args.batch_ids[0])

@@ -115,6 +115,10 @@ instead of modifying the repository.
 6. The merge hook writes `mergeCommitSha` and only then marks the Batch TASKs
    `done`. A compile-passed delivery remains `implemented` / `ready_to_merge`
    until this source-branch integration succeeds.
+   If Git merge succeeds but the Plan writer fails, the Batch is retained as
+   `needs_resolution` with `resolution.kind=plan_state_update`; the fixed
+   Workflow (and a subsequent `ensure`/`resume`) verifies the source HEAD and
+   retries the idempotent Plan update before releasing downstream work.
 7. Once all Batches are `merged`, `parallel_final_verify.py` runs the final
    compile gate.
 

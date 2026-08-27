@@ -633,6 +633,35 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
 
 def resume_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
     """Idempotently resume only batches that do not already own a result."""
+    # A Git merge may have committed successfully immediately before the Plan
+    # writer failed. Recover that metadata before evaluating the normal
+    # needs-resolution gate, so an interrupted workflow can resume unattended.
+    initial = load_manifest(workspace, feature, run_id)
+    recovery_batches = [
+        str(batch_id)
+        for batch_id, batch in initial.get("batches", {}).items()
+        if isinstance(batch, dict)
+        and batch.get("status") == "needs_resolution"
+        and isinstance(batch.get("resolution"), dict)
+        and batch["resolution"].get("kind") == "plan_state_update"
+    ]
+    if recovery_batches:
+        from hooks.batch_merger import recover_plan_state_after_merge
+
+        recovery_errors: list[str] = []
+        for batch_id in recovery_batches:
+            recovered = recover_plan_state_after_merge(workspace, feature, run_id, batch_id)
+            if not recovered.get("success"):
+                recovery_errors.append(str(recovered.get("error") or f"parallel_plan_recovery_failed:{batch_id}"))
+        if recovery_errors:
+            return {
+                "runId": run_id,
+                "status": "needs_resolution",
+                "scheduledGroups": [],
+                "mergeableBatches": mergeable_batches(load_manifest(workspace, feature, run_id)),
+                "recoveryRequired": True,
+                "errors": recovery_errors,
+            }
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in {"cleaned", "rolled_back"}:
@@ -764,6 +793,19 @@ def ensure_run(
         # A merge conflict is a retained platform delivery, not a stale lock.
         # Starting another run from a new base would conceal that delivery and
         # could schedule downstream work against the wrong source state.
+        unresolved = [
+            batch
+            for batch in active_manifest.get("batches", {}).values()
+            if isinstance(batch, dict) and batch.get("status") in {"needs_resolution", "conflict"}
+        ]
+        if unresolved and all(
+            isinstance(batch.get("resolution"), dict)
+            and batch["resolution"].get("kind") == "plan_state_update"
+            for batch in unresolved
+        ):
+            result = resume_run(workspace, feature, active_run_id)
+            result["reused"] = True
+            return result
         return {
             "runId": active_run_id,
             "status": "needs_resolution",

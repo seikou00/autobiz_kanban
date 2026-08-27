@@ -36,6 +36,7 @@ const MERGE_RESULT_SCHEMA = {
     merged: { type: "array", items: { type: "object" } },
     failed: { type: "array", items: { type: "object" } },
     needsResolution: { type: "boolean" },
+    needsPlanRecovery: { type: "boolean" },
     totalConflicts: { type: "number" },
     nextReadyBatches: { type: "array", items: { type: "string" } },
     mergeableBatches: { type: "array", items: { type: "string" } }
@@ -304,6 +305,29 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0) {
       `--feature "${feature}" --run-id "${runId}" --batch-id "${conflictBatchId}" --conflict-mode native-rebase。只返回 JSON。`,
       { label: `merge-resolved-wave-${schedulerWaves}`, phase: "合并", schema: MERGE_RESULT_SCHEMA }
     ), "merge resolved wave");
+    mergeResults.push(mergeResult);
+  }
+  if (!mergeResult.success && mergeResult.failed?.some(item => item && item.needsPlanRecovery)) {
+    const planFailure = mergeResult.failed.find(item => item && item.needsPlanRecovery);
+    const recoveryBatchId = planFailure && planFailure.batchId;
+    if (!recoveryBatchId) {
+      throw new Error(JSON.stringify({ error: "plan_recovery_contract_invalid", runId, mergeResult, batchResults, mergeResults }));
+    }
+    const recovered = requireSuccess(await agent(
+      `Git 已完成合并但 Plan 状态更新失败。执行 python "${mergerPath}" recover-plan --workspace "${artifactWorkspace}" ` +
+      `--feature "${feature}" --run-id "${runId}" --batch-id "${recoveryBatchId}"，仅恢复 Plan 元数据，禁止修改业务代码。只返回 JSON。`,
+      { label: `recover-plan-state-${recoveryBatchId}`, phase: "合并", schema: { type: "object", properties: { success: { type: "boolean" }, batchId: { type: "string" }, commitSha: { type: "string" }, error: { type: "string" } }, required: ["success"], additionalProperties: false } }
+    ), "recover plan state");
+    if (!recovered.success) {
+      throw new Error(JSON.stringify({ error: "plan_state_recovery_failed", runId, recovered, batchResults, mergeResults }));
+    }
+    mergeResult = {
+      success: true,
+      merged: [{ batchId: recoveryBatchId, commitSha: recovered.commitSha }],
+      failed: [],
+      totalConflicts: 0,
+      recoveredPlanState: true,
+    };
     mergeResults.push(mergeResult);
   }
   if (!mergeResult.success) {

@@ -620,6 +620,10 @@ def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
             continue
         if not item.get("commitSha"):
             continue
+        # A mergeable delivery must have completed the worker lease handoff.
+        # This prevents a still-running or stale worker from being merged.
+        if item.get("lease") is not None:
+            continue
         dependencies = item.get("dependencies", [])
         if all(
             isinstance(batches.get(dep), dict)
@@ -658,6 +662,8 @@ def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None
         return tuple(sorted({str(path).replace("\\", "/").strip("/") for path in raw if str(path).strip()}))
 
     def overlaps(left: str, right: str) -> bool:
+        if left in {".", ""} or right in {".", ""}:
+            return True
         if left == right:
             return True
         return left.startswith(right + "/") or right.startswith(left + "/")

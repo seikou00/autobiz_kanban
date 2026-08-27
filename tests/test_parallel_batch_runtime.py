@@ -8,9 +8,10 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-from hooks.batch_merger import merge_run, preflight_merge, resolve_merge_conflict
+from hooks.batch_merger import _merge_probe, merge_run, preflight_merge, recover_plan_state_after_merge, resolve_merge_conflict
 from hooks.parallel_batch_lifecycle import cleanup_run, rollback_run
 from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import (
@@ -26,6 +27,7 @@ from hooks.parallel_runtime import (
     save_manifest,
 )
 from hooks.repository_snapshot import git_status_porcelain
+from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_scheduler import (
     assert_batch_worktree_isolated,
     create_run as _create_run,
@@ -751,6 +753,76 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
         }
         groups = resource_groups(manifest, ["B001", "B002", "B003", "B004"])
         self.assertEqual(groups, [["B001", "B003", "B004"], ["B002"]])
+
+    def test_resource_groups_treats_repository_root_write_set_as_conflicting(self) -> None:
+        manifest = {
+            "batches": {
+                "B001": {"status": "pending", "repositoryRef": "api", "writeSet": ["."], "dependencies": []},
+                "B002": {"status": "pending", "repositoryRef": "api", "writeSet": ["src/api.py"], "dependencies": []},
+            }
+        }
+        self.assertEqual(resource_groups(manifest, ["B001", "B002"]), [["B001"], ["B002"]])
+
+    def test_merge_probe_does_not_write_tree_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            task_runner_git(repo, "init", "-b", "main")
+            task_runner_git(repo, "config", "user.email", "test@example.com")
+            task_runner_git(repo, "config", "user.name", "Test")
+            (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+            task_runner_git(repo, "add", "shared.txt")
+            task_runner_git(repo, "commit", "-m", "base")
+            task_runner_git(repo, "checkout", "-b", "feature")
+            (repo / "shared.txt").write_text("feature\n", encoding="utf-8")
+            task_runner_git(repo, "commit", "-am", "feature")
+            source = _git(repo, "rev-parse", "HEAD")
+            task_runner_git(repo, "checkout", "main")
+            (repo / "shared.txt").write_text("main\n", encoding="utf-8")
+            task_runner_git(repo, "commit", "-am", "main")
+            target = _git(repo, "rev-parse", "HEAD")
+            before = set(_git(repo, "count-objects", "-v").splitlines())
+            probe = _merge_probe(repo, target, "feature")
+            after = set(_git(repo, "count-objects", "-v").splitlines())
+            self.assertFalse(probe["success"])
+            self.assertTrue(probe["conflicts"])
+            self.assertEqual(before, after)
+            self.assertNotEqual(source, target)
+
+    def test_plan_state_recovery_marks_git_delivered_batch_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, _feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(workspace / ".autobizdevops" / "features" / "alpha")
+            scheduled = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = scheduled["runId"]
+            (repo / "merged.txt").write_text("merged\n", encoding="utf-8")
+            task_runner_git(repo, "add", "merged.txt")
+            task_runner_git(repo, "commit", "-m", "merged delivery")
+            commit_sha = _git(repo, "rev-parse", "HEAD")
+            manifest = load_manifest(workspace, "alpha", run_id)
+            manifest["batches"]["B001"].update(
+                {
+                    "status": "needs_resolution",
+                    "mergeCommitSha": commit_sha,
+                    "resolution": {
+                        "kind": "plan_state_update",
+                        "mergeCommitSha": commit_sha,
+                        "deliveryRunId": run_id,
+                    },
+                }
+            )
+            manifest["repositories"]["default"]["headSha"] = commit_sha
+            save_manifest(workspace, "alpha", run_id, manifest)
+            with patch(
+                "hooks.batch_merger.mark_parallel_batch_tasks_merged",
+                return_value=WriterResult(ok=True, changed=False, errors=[]),
+            ):
+                recovered = recover_plan_state_after_merge(workspace, "alpha", run_id, "B001")
+            self.assertTrue(recovered["success"], recovered)
+            persisted = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(persisted["batches"]["B001"]["status"], "merged")
+            self.assertEqual(persisted["batches"]["B001"]["mergeCommitSha"], commit_sha)
+            self.assertNotIn("resolution", persisted["batches"]["B001"])
 
     def test_special_execution_stages_are_serialized_before_parallel_work(self) -> None:
         manifest = {
