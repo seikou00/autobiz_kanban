@@ -27,7 +27,7 @@
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector collect-knowledge.js --knowledge-path ${pluginPath}/sys"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path ${pluginPath}/sys"
     },
     "linux": {
       "knowledge_path": "${pluginPath}/sys",
@@ -41,7 +41,7 @@
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector collect-knowledge.js --knowledge-path ${pluginPath}/sys"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path ${pluginPath}/sys"
     },
     "win32": {
       "knowledge_path": "${pluginPath}\\sys",
@@ -55,7 +55,7 @@
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --write-board-config",
-      "session_context_inject": "python ${pluginPath}\\hooks\\render_collected_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector collect-knowledge.js --knowledge-path ${pluginPath}\\sys"
+      "session_context_inject": "python ${pluginPath}\\hooks\\render_collected_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path ${pluginPath}\\sys"
     }
   },
   "workflow": {
@@ -176,7 +176,7 @@
         "code_done": ["requirements_eval_in_progress"],
         "requirements_eval_in_progress": ["requirements_eval_done"],
         "requirements_eval_done": ["unit_test_in_progress"],
-        "unit_test_in_progress": ["unit_test_done"],
+        "unit_test_in_progress": ["unit_test_done", "needs_fix"],
         "unit_test_done": ["e2e_in_progress"],
         "e2e_in_progress": ["e2e_done", "needs_fix"],
         "e2e_done": ["verify_in_progress"],
@@ -189,6 +189,7 @@
           "specs_in_progress",
           "plan_in_progress",
           "code_in_progress",
+          "unit_test_in_progress",
           "cicd_in_progress"
         ],
         "archived": []
@@ -547,7 +548,7 @@
             { "id": "evidence_stream", "label": "证据流", "artifactType": "json", "path": "evidence/EVIDENCE.jsonl", "required": true }
           ]
         },
-        "validators": ["unit_test_result_json", "evidence_integrity"]
+        "validators": ["unit_test_result_json", "fix_request_json", "evidence_integrity"]
       },
       {
         "id": "dev.e2e",
