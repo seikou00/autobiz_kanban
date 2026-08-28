@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import feature_dir, resolve_feature, resolve_workspace
+from hooks.evidence_kernel import FileLock
 from hooks.parallel_runtime import (
     append_event,
     create_manifest,
@@ -401,32 +402,39 @@ def create_run(
     verdict = validate_plan_for_parallel(workspace, feature)
     if not verdict["canParallel"]:
         raise ValueError(f"parallel_not_available:{verdict['reason']}")
-    if get_active_run(workspace, feature) is not None:
-        raise ValueError("parallel_run_already_active")
-    bundle = load_plan_bundle(feature_dir(workspace, feature))
-    repositories = resolve_repository_bindings(
-        bundle,
-        code_workspaces,
-        feature=feature,
-        allow_bootstrap=allow_bootstrap,
-    )
-    manifest = create_manifest(
-        workspace,
-        feature,
-        max_parallel=max_parallel,
-        timeout_seconds=timeout_seconds,
-        repositories=repositories,
-    )
-    manifest["isolation"] = {
-        "mode": "platform_dynamic_worktrees",
-        "owner": "platform",
-        "cleanupOwner": "platform",
-        "workspaceRefs": sorted(repositories),
-    }
-    manifest["status"] = "running"
-    save_manifest(workspace, feature, str(manifest["runId"]), manifest)
-    append_event(workspace, feature, str(manifest["runId"]), "run_created", maxParallel=manifest["maxParallel"])
-    return schedule(workspace, feature, str(manifest["runId"]))
+    # The active-run check and manifest creation must be one critical section.
+    # Child repository Workflows are launched concurrently and otherwise can
+    # both observe an empty run directory and create divergent DAG runs.
+    # Reuse the Feature's existing plan lock so an invalid source repository
+    # does not create a leftover ``.parallel-runs`` directory just to acquire
+    # a scheduler lock.  It also prevents Plan edits racing run creation.
+    with FileLock(feature_dir(workspace, feature) / ".plan.lock"):
+        if get_active_run(workspace, feature) is not None:
+            raise ValueError("parallel_run_already_active")
+        bundle = load_plan_bundle(feature_dir(workspace, feature))
+        repositories = resolve_repository_bindings(
+            bundle,
+            code_workspaces,
+            feature=feature,
+            allow_bootstrap=allow_bootstrap,
+        )
+        manifest = create_manifest(
+            workspace,
+            feature,
+            max_parallel=max_parallel,
+            timeout_seconds=timeout_seconds,
+            repositories=repositories,
+        )
+        manifest["isolation"] = {
+            "mode": "platform_dynamic_worktrees",
+            "owner": "platform",
+            "cleanupOwner": "platform",
+            "workspaceRefs": sorted(repositories),
+        }
+        manifest["status"] = "running"
+        save_manifest(workspace, feature, str(manifest["runId"]), manifest)
+        append_event(workspace, feature, str(manifest["runId"]), "run_created", maxParallel=manifest["maxParallel"])
+        return schedule(workspace, feature, str(manifest["runId"]))
 
 
 def _sealed_delivery_error(manifest: dict[str, Any], batch_id: str) -> str | None:
@@ -507,7 +515,26 @@ def _source_repository_errors(manifest: dict[str, Any]) -> list[str]:
     return errors
 
 
-def schedule(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
+def _scoped_batch_ids(manifest: dict[str, Any], batch_ids: list[str], workspace_refs: list[str] | None) -> list[str]:
+    if not workspace_refs:
+        return list(batch_ids)
+    allowed = {str(ref) for ref in workspace_refs if str(ref).strip()}
+    return [
+        batch_id
+        for batch_id in batch_ids
+        if str(
+            (manifest.get("batches", {}).get(batch_id, {}) or {}).get("workspaceRef")
+            or (manifest.get("batches", {}).get(batch_id, {}) or {}).get("repositoryRef")
+        ) in allowed
+    ]
+
+
+def schedule(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    workspace_refs: list[str] | None = None,
+) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         bundle = load_plan_bundle(feature_dir(workspace, feature))
@@ -534,27 +561,60 @@ def schedule(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
             raise ValueError("parallel_plan_digest_changed:" + json.dumps(drift, ensure_ascii=False, sort_keys=True))
         ready = ready_batches(manifest)
         groups = resource_groups(manifest, ready)
+        if workspace_refs:
+            known_refs = {
+                str(batch.get("workspaceRef") or batch.get("repositoryRef"))
+                for batch in manifest.get("batches", {}).values()
+                if isinstance(batch, dict)
+            }
+            requested_refs = {str(ref).strip() for ref in workspace_refs if str(ref).strip()}
+            unknown_refs = sorted(requested_refs - known_refs)
+            if unknown_refs:
+                raise ValueError("parallel_workspace_refs_unknown:" + ",".join(unknown_refs))
+        scoped_ready = _scoped_batch_ids(manifest, ready, workspace_refs)
+        scoped_groups = [
+            _scoped_batch_ids(manifest, group, workspace_refs)
+            for group in groups
+        ]
+        scoped_groups = [group for group in scoped_groups if group]
+        scoped_mergeable = _scoped_batch_ids(manifest, mergeable_batches(manifest), workspace_refs)
         max_parallel = int(manifest.get("maxParallel", 1))
         selected: list[list[str]] = []
+        allowed_refs = {str(ref) for ref in workspace_refs or []}
         active = sum(
             1
             for item in manifest.get("batches", {}).values()
             if isinstance(item, dict) and item.get("status") in {"leased", "running"}
         )
+        active_outside_scope = sum(
+            1
+            for item in manifest.get("batches", {}).values()
+            if isinstance(item, dict)
+            and item.get("status") in {"leased", "running"}
+            and str(item.get("workspaceRef") or item.get("repositoryRef")) not in allowed_refs
+        ) if workspace_refs else 0
         slots = max(0, max_parallel - active)
         if groups and slots > 0:
             # ``resource_groups`` returns dependency-safe waves.  Only the
             # first wave is released; later waves wait for a real merge.
-            selected.append(groups[0][:slots])
+            selected.append(_scoped_batch_ids(manifest, groups[0][:slots], workspace_refs))
+            selected = [group for group in selected if group]
         manifest["scheduledAt"] = manifest.get("updatedAt")
         save_manifest(workspace, feature, run_id, manifest)
         return {
             "runId": run_id,
             "status": manifest.get("status"),
-            "readyBatches": ready,
-            "mergeableBatches": mergeable_batches(manifest),
-            "parallelGroups": groups,
+            "readyBatches": scoped_ready,
+            "allReadyBatches": ready,
+            "mergeableBatches": scoped_mergeable,
+            "allMergeableBatches": mergeable_batches(manifest),
+            "parallelGroups": scoped_groups,
+            "allParallelGroups": groups,
             "scheduledGroups": selected,
+            "workspaceRefs": sorted(set(workspace_refs or [])),
+            "waitingForRepositories": bool(workspace_refs and not selected and not scoped_mergeable and (
+                groups or mergeable_batches(manifest) or active_outside_scope
+            )),
             "maxParallel": max_parallel,
             "activeWorkers": active,
             "batchWorkspaces": {
@@ -631,7 +691,12 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
         return manifest
 
 
-def resume_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
+def resume_run(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    workspace_refs: list[str] | None = None,
+) -> dict[str, Any]:
     """Idempotently resume only batches that do not already own a result."""
     # A Git merge may have committed successfully immediately before the Plan
     # writer failed. Recover that metadata before evaluating the normal
@@ -763,7 +828,7 @@ def resume_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
         manifest["status"] = "running"
         save_manifest(workspace, feature, run_id, manifest)
         append_event(workspace, feature, run_id, "run_resumed")
-    return schedule(workspace, feature, run_id)
+    return schedule(workspace, feature, run_id, workspace_refs=workspace_refs)
 
 
 def ensure_run(
@@ -774,20 +839,33 @@ def ensure_run(
     timeout_seconds: int,
     code_workspaces: list[str] | None = None,
     allow_bootstrap: bool = False,
+    workspace_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create one scheduler run or safely resume the existing durable run."""
     active_run_id = get_active_run(workspace, feature)
     if active_run_id is None:
-        result = create_run(
-            workspace,
-            feature,
-            max_parallel=max_parallel,
-            timeout_seconds=timeout_seconds,
-            code_workspaces=code_workspaces,
-            allow_bootstrap=allow_bootstrap,
-        )
-        result["reused"] = False
-        return result
+        try:
+            result = create_run(
+                workspace,
+                feature,
+                max_parallel=max_parallel,
+                timeout_seconds=timeout_seconds,
+                code_workspaces=code_workspaces,
+                allow_bootstrap=allow_bootstrap,
+            )
+            if workspace_refs:
+                result = schedule(workspace, feature, str(result["runId"]), workspace_refs=workspace_refs)
+            result["reused"] = False
+            return result
+        except ValueError as exc:
+            # Another concurrent ensure may have created the durable run after
+            # the initial active-run read. Re-read it and take the normal
+            # idempotent reuse path instead of creating a second run.
+            if str(exc) != "parallel_run_already_active":
+                raise
+            active_run_id = get_active_run(workspace, feature)
+            if active_run_id is None:
+                raise
     active_manifest = load_manifest(workspace, feature, active_run_id)
     if active_manifest.get("status") == "needs_resolution":
         # A merge conflict is a retained platform delivery, not a stale lock.
@@ -803,7 +881,7 @@ def ensure_run(
             and batch["resolution"].get("kind") == "plan_state_update"
             for batch in unresolved
         ):
-            result = resume_run(workspace, feature, active_run_id)
+            result = resume_run(workspace, feature, active_run_id, workspace_refs=workspace_refs)
             result["reused"] = True
             return result
         return {
@@ -815,7 +893,7 @@ def ensure_run(
             "recoveryRequired": True,
             "errors": ["parallel_run_needs_resolution"],
         }
-    result = resume_run(workspace, feature, active_run_id)
+    result = resume_run(workspace, feature, active_run_id, workspace_refs=workspace_refs)
     result["reused"] = True
     return result
 
@@ -839,6 +917,8 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--timeout-seconds", type=int, default=3600)
             item.add_argument("--code-workspace", action="append", required=True, help="workspaceRef=/path; single-ref runs may pass /path")
             item.add_argument("--allow-bootstrap", action="store_true", help="explicitly allow Git initialization or a baseline commit for a dirty source repository")
+        if name in {"status", "resume", "ensure"}:
+            item.add_argument("--workspace-ref", action="append", dest="workspace_refs", help="only schedule batches for these workspaceRef values")
     mark = subparsers.add_parser("mark-batch")
     mark.add_argument("--workspace")
     mark.add_argument("--feature", required=True)
@@ -879,12 +959,13 @@ def main(argv: list[str] | None = None) -> int:
                     timeout_seconds=args.timeout_seconds,
                     code_workspaces=args.code_workspace,
                     allow_bootstrap=args.allow_bootstrap,
+                    workspace_refs=args.workspace_refs,
                 ),
             )
         if args.command == "status":
-            return _emit(True, manifest=load_manifest(workspace, feature, args.run_id), **schedule(workspace, feature, args.run_id))
+            return _emit(True, manifest=load_manifest(workspace, feature, args.run_id), **schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
         if args.command == "resume":
-            return _emit(True, **resume_run(workspace, feature, args.run_id))
+            return _emit(True, **resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
         if args.command == "list":
             return _emit(True, runs=list_runs(workspace, feature))
         details = {key: value for key, value in vars(args).items() if key in {"commit_sha", "merge_commit_sha", "worktree_path", "branch_name", "compile_status", "error"} and value is not None}

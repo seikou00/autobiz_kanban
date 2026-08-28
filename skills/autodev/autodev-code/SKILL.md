@@ -7,19 +7,24 @@ allowed-tools: execute task_output read_file grep glob write_file edit_file
 
 # /autodev-code — 代码执行
 
-## 前端 Route 强制闸门（必须优先执行）
+## 前端 Route 闸门（按 Task 在 Agent 内执行）
 
-当本轮任务是前端代码生成、HTML/DOM/设计导出稿转工程代码，或触发「前端 HTML 实现分支」时，`/autodev-code` 不得自行改写成普通前端编码任务。必须先解析内部 route。UI 范围以 `UI_CONTEXT.json` 和 active batch task 的 `uiRequired/uiRefs` 为机器事实源，Markdown 只作迁移兜底。
+前端 Route 闸门属于前端 Task 的实现前置条件，不属于整个 Code Session 的全局入口。Code 入口只负责读取 `IMPLEMENTATION_SCOPE.json`、捕获一次基线并启动 Batch DAG；不得因为 Feature 含有任意前端 Task，就在进入 Code 或启动首个 Batch 前解析 Route。UI 范围以 `UI_CONTEXT.json` 和当前 Task 的 `taskContract.uiRequired/uiRefs` 为机器事实源，Markdown 只作迁移兜底。
 
-1. 推进到 `code_in_progress` 后，先解析并记录 route：
+每个 Batch agent 在执行 `code_task_context.py` 后，逐个判断当前 Task：
+
+- `taskContract.uiRequired=false`：跳过 Route resolver，不读取 HTML 或 Route SKILL，直接按后端 Task 协议实现。
+- `taskContract.uiRequired=true`：必须在该 Batch agent 内、写前端源码前完成下面的 Route 协议；不得由宿主 Code 入口代跑，也不得把后端 Task 的 Route 证据当作前端 Task 的证据。
+
+1. 前端 Task 在其 Agent 内解析并记录 route：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --start-route-run --json
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --start-route-run --json
 ```
 
 active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRefs`，由 resolver 从 Feature 内 `frontend-html/VIS-xxx/` 读取；不要用本轮 `--html-file` 替换 required VIS。只有没有 active Plan 绑定的兼容迁移场景，才允许追加 `--html-file`。
 
-2. 按输出的 `route` 读取 route SKILL 到 EOF：
+2. 仅当前端 Task 按输出的 `route` 读取 route SKILL 到 EOF：
    - `route=absolute-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-absolute-html/SKILL.md`
    - `route=standard-html`：完整读取 `skills/autodev/autodev-code/references/frontend-html/with-standard-html/SKILL.md`
    - `route=spec-driven-ui`：当前 active UI Task 的 `visualSourceRefs=[]`，按 specs/design/plan 实现前端；不读取 HTML parser，不要求 route SKILL。其他 Capability 的 required VIS 缺失不影响该 Task。
@@ -27,13 +32,13 @@ active Task 已绑定的 HTML 必须来自 `UI_CONTEXT.json` 的 `visualSourceRe
    - 如果读取工具返回截断内容，继续续读直到 EOF；未确认 `routeSkillReadComplete=true` 前，不得读取 parser、不得读取 HTML、不得写前端代码。
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-skill-read-complete --json
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-skill-read-complete --json
 ```
 
-3. 把 route SKILL 中定义的 `write_todos` 主流程转成可见任务清单，逐项执行并更新状态，不能合并成一句“实现前端页面”。清单创建后立即记录机器证据：
+3. 把 route SKILL 中定义的 `write_todos` 主流程转成该 Agent 的可见任务清单，逐项执行并更新状态，不能合并成一句“实现前端页面”。清单创建后立即记录机器证据：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todos-created --json
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-todos-created --json
 ```
 
 4. 只有 route SKILL 的清单推进到“转交 parser”步骤时，才能读取 parser：
@@ -42,24 +47,24 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
    - `/autodev-code` 根技能不得直接跳入 parser 文档。
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark parser-read --json
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark parser-read --json
 ```
 
 5. route SKILL 的全部主流程清单完成后记录：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --mark route-todos-completed --json
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --mark route-todos-completed --json
 ```
 
 6. 统一前端回检后，把结果写入 `{FEATURE_DIR}/FRONTEND_ROUTE.json`：
 
 ```bash
-python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_ID}" --review-status passed --json
+python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --workspace "{ARTIFACT_WORKSPACE}" --feature "{FEATURE_ID}" --review-status passed --json
 ```
 
 允许值：`passed`、`has-suggestions`、`skipped-by-user`、`failed`。`failed` 或未写明且未明确跳过时，`frontend_route_gate` 会阻断 `code_done`。
 
-`{FEATURE_DIR}/FRONTEND_ROUTE.json` 是本闸门的机器证据。HTML 路线下，前端代码生成任务缺少该文件、route SKILL 未读完、route todos 未创建/未完成、parser 未读、回检未通过或未明确跳过时，不得推进 `code_done`。`spec-driven-ui` 不要求 route SKILL / HTML parser，但仍必须完成统一前端回检并写入 `reviewStatus`；`none` 不允许写前端业务代码。
+`{FEATURE_DIR}/FRONTEND_ROUTE.json` 是本闸门的机器证据。HTML 路线下，当前前端 Task 缺少该文件、route SKILL 未读完、route todos 未创建/未完成、parser 未读、回检未通过或未明确跳过时，不得写入前端业务代码，也不得让该 Task 完成。`spec-driven-ui` 不要求 route SKILL / HTML parser，但仍必须完成统一前端回检并写入 `reviewStatus`；`none` 不允许写前端业务代码。后端 Task 不受残留的前端 Route 证据影响。
 
 进入 Code 前读取 Feature 的 `IMPLEMENTATION_SCOPE.json`。`backend_only` 只执行 backend task，`frontend_only` 只执行 frontend task；如果计划中存在相反 lane 的任务，停止并回到 `/autodev-plan` 修复，不得通过手工修改 `uiRequired` 绕过范围门禁。
 
@@ -71,13 +76,13 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
 python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
 ```
 
-## 前端 HTML 实现分支
+## 前端 HTML 实现分支（由前端 Task Agent 触发）
 
 HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，也不产生 `frontend_in_progress` / `frontend_done` checkpoint；完成后仍按本技能的批次编译协议推进到 `code_done`。本分支只处理 HTML/DOM/设计导出稿到真实工程代码的实现方式。
 
-触发条件（任一满足即进入本分支）：
+触发条件（由 Batch Agent 完成 `code_task_context.py` 后判断，任一满足即进入本分支）：
 
-- `UI_CONTEXT.json` 中 `uiRequired=true`，或当前 plan task 中 `uiRequired=true`。
+- 当前 Task 的 `taskContract.uiRequired=true`（该字段由 `code_task_context.py` 从 plan task 生成）；Feature 级 `UI_CONTEXT.json` 仅作为范围校验和回检依据。
 - active batch task 的 `uiRequired/uiRefs`、specs 或用户本轮任务明确要求根据 HTML、DOM 片段、设计导出 HTML 实现前端页面。
 - 用户本轮直接粘贴或提供了可读取的 HTML/DOM 片段、设计导出稿或静态页面素材。
 
@@ -90,7 +95,7 @@ HTML 转前端已经并入 `/autodev-code`。它不是独立 workflow 节点，�
 5. PRD / specs / plan.json 与 HTML 同时存在时：业务字段、文案、交互和任务边界以流程契约为准；布局、结构、间距、视觉层级以 HTML 为准。
 6. 如果当前 active UI Task 引用了 required VIS，但 resolver 报 `required_visual_source_missing` 或摘要不一致，先修复/重新归档该 VIS，不能降级为 `spec-driven-ui`，也不能用另一个 HTML 临时替代。
 
-路径边界：上述产物均指 feature 产物目录中的文件，不是业务代码仓库 cwd 下的同名路径；执行具体 task 时必须通过 `hooks/code_task_context.py` 解析并读取对应片段。
+路径边界：上述产物均指 feature 产物目录中的文件，不是业务代码仓库 cwd 下的同名路径；执行具体 task 时必须通过 `hooks/code_task_context.py` 解析并读取对应片段。后端 Task (`taskContract.uiRequired=false`) 不得因 Feature 存在 UI 产物而启动 Route resolver。
 
 HTML 分流规则：
 
@@ -139,7 +144,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
   --code-workspace "<plan 中声明的生产代码 workspace>" \
   --json
 ```
-该命令只保存 Code 开始前的 Git 可见文件快照，不修改业务仓库；已有 active 基线时脚本会复用它。
+该命令只保存 Code 开始前的 Git 可见文件快照，不修改业务仓库。基线 v2 对未修改的已提交文件只记录 Git blob 引用，不复制文件内容；已暂存、未暂存和未跟踪文件仍保存独立内容对象，保证回退不会丢失用户已有改动。已有 active v2 基线时脚本会复用它；旧版本 active 基线不会自动迁移，必须先完成回退清理后重新捕获。
 
 完成上述一次性基线检查后，读取根 Plan 的未完成 Batch 数量，并统一进入固定 Workflow 入口。不得让模型生成或改写 workflow 脚本。
 
@@ -363,11 +368,11 @@ launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
 
 launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> 绝对业务 Git 根` 映射，并返回 `codeWorkspaces`、`executionIsolation=platform_dynamic_worktrees` 与 `workflowHostGitRoot`。不得把 `artifactWorkspace` 当作代码仓库路径。旧 Plan 没有该字段时，只能显式补传映射，例如 `--code-workspace "RouYi=/absolute/path/to/RouYi"`；无法解析映射时必须阻断并回流 Plan，不得猜路径。
 
-只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`、`requiredAction=start_fixed_workflow` 且校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid` 时，才使用 launcher 返回的固定脚本内容启动 Workflow。launcher 会把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/` 作为审计副本，并返回 `workflowScriptContent`、`workflowScriptSha256`、`workflowScriptSource` 与可直接透传的 `workflowArgs`；`workflowScript` / `workflowScriptPath` 仅是审计路径，不得传给平台做 `scriptPath`。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排或改写 workflow。
+单一物理 Git 根时，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`、`requiredAction=start_fixed_workflow` 且校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`，才使用 launcher 返回的固定脚本内容启动 Workflow。多个物理 Git 根时，只有 `executionMode=repository_coordinated`、`requiredAction=start_repository_coordinator` 且 `canStartWorkflow=true`，才执行协调器的 `prepare`/`next` 协议并启动其返回的子 Workflow。launcher 会把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/` 作为审计副本，并返回 `workflowScriptContent`、`workflowScriptSha256`、`workflowScriptSource` 与可直接透传的 `workflowArgs`；`workflowScript` / `workflowScriptPath` 仅是审计路径，不得传给平台做 `scriptPath`。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排或改写 workflow。
 
 调用平台 `workflow` 的唯一允许形式是 `script=launcher.workflowScriptContent` 且 `args=JSON.stringify(launcher.workflowArgs)`。禁止自行拼接 JavaScript、禁止增删 phase、禁止从 launcher 输出以外重建参数。使用内联脚本是为了让平台把固定脚本持久化到当前对话 workspace；不得把 artifact workspace、业务仓库或插件目录的绝对路径作为平台 `scriptPath`。
 
-启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace`、`workflowHostGitRoot` 和以逻辑 `workspaceRef` 为 key 的 `codeWorkspaces`。平台 Worktree 的源仓库由启动 Workflow 的宿主工作区决定，因此宿主 Git 根必须严格等于 `workflowHostGitRoot`；`artifactWorkspace` 只保存产物，不能作为 Workflow 宿主。固定脚本会在创建 scheduler run 前复核该条件。当前平台没有在单个 `agent()` 调用中指定其他 Git 隔离源的接口：若 `codeWorkspaces` 指向多个独立 Git 根，launcher 必须返回 `launch_workflow_per_code_repository` 并停止，按仓库拆分平台 Workflow；无需修改 Plan。
+单一物理 Git 根的启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace`、`workflowHostGitRoot` 和以逻辑 `workspaceRef` 为 key 的 `codeWorkspaces`。平台 Worktree 的源仓库由启动 Workflow 的宿主工作区决定，因此宿主 Git 根必须严格等于 `workflowHostGitRoot`；`artifactWorkspace` 只保存产物，不能作为 Workflow 宿主。固定脚本会在创建 scheduler run 前复核该条件。当前平台没有在单个 `agent()` 调用中指定其他 Git 隔离源的接口：若 `codeWorkspaces` 指向多个独立 Git 根，launcher 返回 `executionMode=repository_coordinated`、`requiredAction=start_repository_coordinator` 和协调器命令，不直接启动多根 Workflow。协调器 `prepare` 必须向共享 scheduler 传递 `allow_bootstrap=True`，使受控的脏仓库基线提交策略与单仓库固定 Workflow 一致；仍只排除平台运行时文件，并为每个物理 Git 根记录一个明确的基线提交。协调器只创建一个共享 scheduler run，并按当前 DAG 波次的物理 Git 根返回 `repositoryWorkflows`；调用方必须用同一份固定脚本内容并行启动这些子 Workflow，子 Workflow 的启动参数只包含本仓库映射、`repositoryRefs`、`batchIds` 和各自的 `workflowHostGitRoot`，且宿主必须严格等于该根。所有子 Workflow 完成后调用协调器 `next`，重复到 `allMerged=true`，最后只调用一次 `final-verify`。不得把多仓库映射强行塞进一个平台 Workflow，也不得为每个仓库创建独立 scheduler run。
 
 固定脚本按以下顺序执行：
 

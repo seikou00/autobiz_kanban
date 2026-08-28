@@ -17,8 +17,14 @@ python "${pluginPath}/hooks/workflow_launcher.py" \
   --json
 ```
 
-Start the returned fixed script content only when all of these are true. The
-launcher copies the fixed plugin script into
+For a single physical Git root, start the returned fixed script content only
+when all of these are true. For multiple physical Git roots, require
+`executionMode=repository_coordinated` and
+`requiredAction=start_repository_coordinator`: run the coordinator `prepare`,
+launch every returned `repositoryWorkflows` entry from its own
+`workflowHostGitRoot`, wait for all child Workflows in that DAG wave, then run
+the coordinator `next`. Repeat until `allMerged=true`, then invoke the
+coordinator `final-verify` exactly once. The launcher copies the fixed plugin script into
 `artifactWorkspace/.cmbdevclaw/workflows/` as an audit copy and returns
 `workflowScriptContent` plus `workflowScriptSha256`. `workflowScriptSource`,
 `workflowScript`, and `workflowScriptPath` are audit fields; do not pass those
@@ -26,21 +32,27 @@ paths to the Workflow host. `workflowArgs` is the complete argument object for
 the Workflow call; do not reconstruct it.
 
 - `useWorkflow=true`
-- `executionMode=fixed`
 - `canStartWorkflow=true`
-- `requiredAction=start_fixed_workflow`
 - validation reason is `parallel_plan_valid` or `single_batch_workflow_valid`
+- single physical root: `executionMode=fixed` and
+  `requiredAction=start_fixed_workflow`
+- multiple physical roots: `executionMode=repository_coordinated` and
+  `requiredAction=start_repository_coordinator`
 
 The launcher reads the top-level `plan.json.codeWorkspaces` mapping and returns
 `codeWorkspaces`, `workflowHostGitRoot`, and
-`executionIsolation=platform_dynamic_worktrees`.
+`executionIsolation=platform_dynamic_worktrees` for a single physical Git
+root. For multiple physical roots it instead returns
+`executionMode=repository_coordinated` and a repository coordinator contract.
 `artifactWorkspace` is only the artifact/state directory and must never be
 reused as a code workspace by guesswork. The platform creates an isolated
 checkout only from the Workflow host Git root, so the host must be launched
 from `workflowHostGitRoot`. A fixed Workflow can cover one Git root (multiple
 logical refs to that same root are allowed). Multiple independent repositories
-must be launched as separate Workflows; the launcher stops with
-`launch_workflow_per_code_repository`. For an older exported Plan without this
+are launched as child Workflows by the coordinator, using the same fixed script
+and one shared scheduler run. The launcher returns
+`requiredAction=start_repository_coordinator`; it does not treat a multi-root
+mapping as a Plan error. For an older exported Plan without this
 field, pass an explicit mapping such as
 `--code-workspace "RouYi=/absolute/path/to/RouYi"`; otherwise stop with
 `provide_code_workspace_mapping`.
@@ -48,6 +60,12 @@ field, pass an explicit mapping such as
 The Code-session command is `task_runner.py code-session`; there is no
 `hooks/code_session.py`. Any baseline or workspace argument must be the
 absolute business Git root, never a logical workspace name such as `RouYi`.
+
+The Code Session baseline uses format v2: clean committed files are recorded
+as Git blob references (`storage=git_blob`, `gitSha`) instead of copied content;
+staged, unstaged, and untracked files still receive durable content objects so
+rollback preserves pre-existing local changes. An active baseline from an
+older format is not migrated and must be cleared before recapturing.
 
 The Workflow tool invocation is fixed too:
 
@@ -65,10 +83,20 @@ When resuming an existing run, pass only `resumeFromRunId` and do not resolve th
 artifact path again.
 
 The Workflow host workspace is a required platform Worktree source contract:
-it must be the launcher's `workflowHostGitRoot`. The artifact workspace remains
-independent and only stores Feature state.
+it must be the child request's `workflowHostGitRoot`. A coordinator child must
+contain exactly one physical Git root and only the returned `repositoryRefs` /
+`batchIds`; it must not receive another repository's workspace mapping. The
+artifact workspace remains independent and only stores Feature state.
 
 ## Execution Contract
+
+### Frontend Route Gate
+
+Route 解析不属于 Code Session 的全局前置步骤。Batch Agent 必须先执行
+`code_task_context.py`，再以返回的 `taskContract.uiRequired` 判断当前 Task：
+后端 Task 跳过 Route resolver、HTML 和 Route SKILL；前端 Task 才能在同一
+Agent 内完成 Route 解析、清单、parser（如适用）和 `FRONTEND_ROUTE.json`
+回检。这样同一批次中的后端 Task 不会被其他 Task 的 UI 产物阻塞。
 
 The fixed script starts with scheduler `ensure` and then runs a DAG in
 merge-gated waves. `ensure` creates the first durable run or reuses an active
@@ -91,6 +119,13 @@ delivery merges; platform-owned `.cmbdevclaw/**` files are excluded from both
 the dirty check and baseline commit. Direct CLI uses of `ensure` do not enable
 bootstrap by default and return `parallel_code_workspace_bootstrap_required`
 instead of modifying the repository.
+
+The multi-repository coordinator uses the same controlled bootstrap policy:
+`repository_workflow_coordinator.py prepare` passes `allow_bootstrap=True` to
+the shared scheduler before child Workflows are launched. This keeps dirty
+repositories from failing only because they entered through the coordinator;
+the bootstrap still excludes platform runtime files and records one explicit
+baseline commit per physical Git root.
 
 1. The scheduler selects pending Batches whose dependencies are all `merged`.
    It does not create a directory. The Workflow starts every selected child

@@ -164,7 +164,13 @@ def capture_untracked_files(repo: Path) -> list[str]:
     )
 
 
-def capture_repository_snapshot(repo: Path) -> dict[str, Any]:
+def capture_repository_snapshot(repo: Path, *, include_files: bool = True) -> dict[str, Any]:
+    """Capture repository identity and, unless disabled, visible file hashes.
+
+    Some callers only need the Git identity (HEAD plus index tree).  Keeping
+    that path separate avoids hashing every working-tree file when a durable
+    content reference can be recorded from Git instead.
+    """
     head = _run_text(repo, "rev-parse", "HEAD")
     index = _run_text(repo, "write-tree")
     if head.returncode != 0:
@@ -179,11 +185,13 @@ def capture_repository_snapshot(repo: Path) -> dict[str, Any]:
         head_commit = head.stdout.strip()
     if index.returncode != 0:
         raise RepositorySnapshotError("git_snapshot_failed")
-    return {
+    snapshot = {
         "headCommit": head_commit,
         "indexTree": index.stdout.strip(),
-        "files": capture_file_snapshot(repo),
     }
+    if include_files:
+        snapshot["files"] = capture_file_snapshot(repo)
+    return snapshot
 
 
 def file_kind(path: str) -> str:

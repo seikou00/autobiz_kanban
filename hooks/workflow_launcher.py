@@ -136,18 +136,19 @@ def resolve_code_workspace_contract(
     else:
         contract_path = None
     git_roots = sorted(set(mapping.values()))
-    if len(git_roots) != 1:
-        raise ValueError(
-            "platform_worktree_multi_repository_requires_split_workflows:"
-            + ",".join(sorted(mapping))
-        )
     return {
         "codeWorkspaces": mapping,
         "executionIsolation": "platform_dynamic_worktrees",
         # Dynamic Workflow derives an isolated checkout from its own host
         # workspace.  The plugin cannot redirect one agent to another Git
         # repository, so callers must launch this fixed Workflow from here.
-        "workflowHostGitRoot": git_roots[0],
+        # A platform Workflow can create worktrees for only its own Git root.
+        # The repository coordinator turns a multi-root contract into one
+        # child Workflow per root, while a same-root mapping continues to use
+        # the original single fixed Workflow.
+        "workflowHostGitRoot": git_roots[0] if len(git_roots) == 1 else None,
+        "workflowHostGitRoots": git_roots,
+        "repositoryCount": len(git_roots),
         "codeWorkspaceSource": parsed_source,
         "workspaceContractPath": str(contract_path) if contract_path else None,
     }
@@ -280,7 +281,6 @@ def analyze_batches(
                 code_workspaces,
             )
         except ValueError as exc:
-            multi_repository = str(exc).startswith("platform_worktree_multi_repository_requires_split_workflows:")
             return {
                 "useWorkflow": False,
                 "strategy": "blocked",
@@ -291,11 +291,7 @@ def analyze_batches(
                 "reason": str(exc),
                 "requiresPlanRepair": False,
                 "canStartWorkflow": False,
-                "requiredAction": (
-                    "launch_workflow_per_code_repository"
-                    if multi_repository
-                    else "provide_code_workspace_mapping"
-                ),
+                "requiredAction": "provide_code_workspace_mapping",
                 "validation": validation,
             }
 
@@ -303,10 +299,9 @@ def analyze_batches(
             workflow_script,
             str(artifact_workspace),
         )
-        return {
+        common_result = {
             "useWorkflow": True,
             "strategy": "fixed",
-            "executionMode": "fixed",
             "batchCount": len(valid_batches),
             "batches": valid_batches,
             "artifactWorkspace": str(artifact_workspace),
@@ -315,25 +310,68 @@ def analyze_batches(
             "codeWorkspaces": workspace_contract["codeWorkspaces"],
             "executionIsolation": workspace_contract["executionIsolation"],
             "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
+            "workflowHostGitRoots": workspace_contract["workflowHostGitRoots"],
+            "codeWorkspaceSource": workspace_contract["codeWorkspaceSource"],
+            "workspaceContractPath": workspace_contract["workspaceContractPath"],
+            "planDigest": plan_digest(bundle),
+            "canStartWorkflow": True,
+            "validation": validation,
+        }
+        if workspace_contract["repositoryCount"] == 1:
             # This is the complete payload for the platform workflow call.
             # Returning it avoids models reconstructing a workflow or guessing
             # a code workspace from the artifact directory.
+            return {
+                **common_result,
+                "executionMode": "fixed",
+                "workflowArgs": {
+                    "feature": feature,
+                    "pluginPath": str(script_root),
+                    "artifactWorkspace": str(artifact_workspace),
+                    "codeWorkspaces": workspace_contract["codeWorkspaces"],
+                    "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
+                    "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+                    "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+                },
+                "reason": f"fixed_workflow_for_pending_batches:{len(valid_batches)}",
+                "requiredAction": "start_fixed_workflow",
+            }
+
+        coordinator_path = script_root / "hooks" / "repository_workflow_coordinator.py"
+        if not coordinator_path.is_file():
+            return {
+                **common_result,
+                "useWorkflow": False,
+                "strategy": "blocked",
+                "executionMode": "repository_coordinated",
+                "reason": "repository_workflow_coordinator_not_found",
+                "canStartWorkflow": False,
+                "requiredAction": "restore_repository_workflow_coordinator",
+            }
+        # The parent Code session invokes this coordinator before each DAG
+        # wave. It returns child workflow args with exactly one physical Git
+        # root, which is the strongest routing contract the current platform
+        # worktree API can enforce.
+        return {
+            **common_result,
+            "strategy": "repository_coordinated",
+            "executionMode": "repository_coordinated",
             "workflowArgs": {
                 "feature": feature,
                 "pluginPath": str(script_root),
                 "artifactWorkspace": str(artifact_workspace),
                 "codeWorkspaces": workspace_contract["codeWorkspaces"],
-                "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
                 "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
                 "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
             },
-            "codeWorkspaceSource": workspace_contract["codeWorkspaceSource"],
-            "workspaceContractPath": workspace_contract["workspaceContractPath"],
-            "reason": f"fixed_workflow_for_pending_batches:{len(valid_batches)}",
-            "planDigest": plan_digest(bundle),
-            "canStartWorkflow": True,
-            "requiredAction": "start_fixed_workflow",
-            "validation": validation,
+            "repositoryCoordinator": {
+                "path": str(coordinator_path),
+                "prepareCommand": "prepare",
+                "nextCommand": "next",
+                "workflowInvocation": "launch_each_repository_workflow_in_parallel",
+            },
+            "reason": f"repository_coordinated_workflow_for_pending_batches:{len(valid_batches)}",
+            "requiredAction": "start_repository_coordinator",
         }
     except Exception as exc:
         return {

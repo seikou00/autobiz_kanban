@@ -886,6 +886,22 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(bindings["B001"]["requestedPath"], str(api.resolve()))
             self.assertEqual(bindings["B002"]["requestedPath"], str(web.resolve()))
 
+            api_wave = schedule(workspace, "alpha", run["runId"], workspace_refs=["default"])
+            web_wave = schedule(workspace, "alpha", run["runId"], workspace_refs=["web"])
+            self.assertEqual(api_wave["scheduledGroups"], [["B001"]])
+            self.assertEqual(web_wave["scheduledGroups"], [["B002"]])
+            self.assertEqual(api_wave["workspaceRefs"], ["default"])
+            self.assertEqual(web_wave["workspaceRefs"], ["web"])
+            self.assertEqual(api_wave["allParallelGroups"], [["B001", "B002"]])
+
+            waiting_manifest = load_manifest(workspace, "alpha", run["runId"])
+            waiting_manifest["batches"]["B001"]["dependencies"] = ["B002"]
+            waiting_manifest["batches"]["B002"]["status"] = "running"
+            save_manifest(workspace, "alpha", run["runId"], waiting_manifest)
+            waiting = schedule(workspace, "alpha", run["runId"], workspace_refs=["default"])
+            self.assertTrue(waiting["waitingForRepositories"])
+            self.assertEqual(waiting["scheduledGroups"], [])
+
     def test_multi_repository_worktrees_merge_back_to_their_own_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

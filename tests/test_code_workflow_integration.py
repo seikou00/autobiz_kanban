@@ -84,6 +84,11 @@ def test_fixed_workflow_entrypoint():
         "batchTaskIds",
         "不要用 read_file 读取 artifact 目录",
         "function usableString",
+        "function normalizePath",
+        "function samePath",
+        "function joinPath",
+        "taskContract.uiRequired",
+        "Route resolver",
         "invalid_code_workspace_path",
         "不得创建任何 workflow",
         "required: [\"batchId\", \"status\", \"compileStatus\", \"worktreePath\", \"branchName\", \"commitSha\"]",
@@ -101,6 +106,11 @@ def test_fixed_workflow_entrypoint():
     missing = [check for check in checks if check not in content]
     if missing:
         print(f"✗ 固定脚本缺少执行协议: {', '.join(missing)}")
+        return False
+    route_start = content.find("start-route-run")
+    task_prompt = content.find("以 taskContract.uiRequired 为唯一条件")
+    if route_start < 0 or task_prompt < 0 or route_start < task_prompt:
+        print("✗ Route resolver 未绑定到前端 Task Agent 协议")
         return False
     print("✓ 多 Batch 使用固定 workflow 脚本")
     print("✓ 每个波次完成后合并并重新调度")
@@ -129,6 +139,8 @@ def test_skill_integration():
         ("isolation: \"worktree\"", "平台隔离阶段说明"),
         ("不得调用不存在的 `hooks/code_session.py`", "废弃 Code 会话入口保护"),
         ("mergeCommitSha", "合并证据保护"),
+        ("前端 Route 闸门（按 Task 在 Agent 内执行）", "按 Task 执行 Route 闸门"),
+        ("taskContract.uiRequired=true", "Task UI 机器事实"),
     ]
 
     all_passed = True

@@ -499,13 +499,37 @@ class RollbackStageTest(unittest.TestCase):
         records, _, _ = load_state_json_records(self.project)
         self.assertEqual(records[self.feature]["checkpoint"], "plan_done")
 
-    def test_code_source_restore_uses_session_baseline_and_removes_created_files(self) -> None:
+    def test_code_source_restore_reuses_clean_git_blob_and_removes_created_files(self) -> None:
         self._set_checkpoint("code_done")
         repository = self._create_code_repository()
-        session = capture_code_session_baseline(
-            workspace=self.project,
-            feature=self.feature,
-            code_workspaces=[repository],
+        with patch("hooks.rollback_stage._baseline_entry") as stored_entry:
+            session = capture_code_session_baseline(
+                workspace=self.project,
+                feature=self.feature,
+                code_workspaces=[repository],
+            )
+        stored_entry.assert_not_called()
+        self.assertEqual(session["version"], 2)
+        baseline = session["repositories"][repository.name]
+        self.assertEqual(baseline["storage"], {"gitBlobFiles": 1, "objectFiles": 0})
+        entry = baseline["files"]["app.txt"]
+        self.assertEqual(entry["storage"], "git_blob")
+        self.assertEqual(
+            entry["gitSha"],
+            subprocess.check_output(
+                ["git", "-C", str(repository), "rev-parse", "HEAD:app.txt"],
+                text=True,
+            ).strip(),
+        )
+        self.assertFalse(
+            (
+                self.project
+                / ".autobizdevops"
+                / "rollback"
+                / "baselines"
+                / self.feature
+                / "objects"
+            ).exists()
         )
         (repository / "app.txt").write_text("feature implementation\n", encoding="utf-8")
         (repository / "new.txt").write_text("new feature file\n", encoding="utf-8")
@@ -540,6 +564,132 @@ class RollbackStageTest(unittest.TestCase):
         )
         self.assertEqual(active["sessionId"], session["sessionId"])
         self.assertEqual(active["status"], "rolled_back")
+
+    def test_code_source_restore_preserves_dirty_baseline_with_stored_object(self) -> None:
+        self._set_checkpoint("code_done")
+        repository = self._create_code_repository()
+        (repository / "app.txt").write_text("user baseline change\n", encoding="utf-8")
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+        baseline = session["repositories"][repository.name]
+        self.assertEqual(baseline["storage"], {"gitBlobFiles": 0, "objectFiles": 1})
+        entry = baseline["files"]["app.txt"]
+        self.assertEqual(entry["storage"], "baseline_object")
+        self.assertTrue(
+            (
+                self.project
+                / ".autobizdevops"
+                / "rollback"
+                / "baselines"
+                / self.feature
+                / "objects"
+                / entry["objectSha256"]
+            ).is_file()
+        )
+
+        (repository / "app.txt").write_text("feature implementation\n", encoding="utf-8")
+        (repository / "new.txt").write_text("new feature file\n", encoding="utf-8")
+        self._write_task_run(repository)
+        plan = prepare_stage_rollback(
+            workspace=self.project,
+            feature=self.feature,
+            stage="dev.code",
+            code_source="restore",
+        )
+
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual((repository / "app.txt").read_text(encoding="utf-8"), "user baseline change\n")
+
+    def test_code_session_preserves_tracked_file_deleted_before_capture(self) -> None:
+        self._set_checkpoint("code_done")
+        repository = self._create_code_repository()
+        (repository / "app.txt").unlink()
+
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+
+        baseline = session["repositories"][repository.name]
+        self.assertNotIn("app.txt", baseline["files"])
+
+        (repository / "app.txt").write_text("feature implementation\n", encoding="utf-8")
+        (repository / "new.txt").write_text("new feature file\n", encoding="utf-8")
+        self._write_task_run(repository)
+        plan = prepare_stage_rollback(
+            workspace=self.project,
+            feature=self.feature,
+            stage="dev.code",
+            code_source="restore",
+        )
+
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse((repository / "app.txt").exists())
+        self.assertFalse((repository / "new.txt").exists())
+
+    def test_code_session_stores_staged_content_outside_git_blob_reference(self) -> None:
+        repository = self._create_code_repository()
+        (repository / "app.txt").write_text("staged baseline change\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repository), "add", "app.txt"], check=True)
+
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+
+        entry = session["repositories"][repository.name]["files"]["app.txt"]
+        self.assertEqual(entry["storage"], "baseline_object")
+
+    def test_code_session_stores_untracked_content_outside_git_blob_reference(self) -> None:
+        repository = self._create_code_repository()
+        (repository / "local-only.txt").write_text("untracked baseline content\n", encoding="utf-8")
+
+        session = capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+
+        baseline = session["repositories"][repository.name]
+        self.assertEqual(baseline["storage"], {"gitBlobFiles": 1, "objectFiles": 1})
+        entry = baseline["files"]["local-only.txt"]
+        self.assertEqual(entry["storage"], "baseline_object")
+        self.assertTrue(entry["objectSha256"])
+
+    def test_code_session_rejects_active_pre_v2_baseline(self) -> None:
+        repository = self._create_code_repository()
+        capture_code_session_baseline(
+            workspace=self.project,
+            feature=self.feature,
+            code_workspaces=[repository],
+        )
+        active_path = (
+            self.project
+            / ".autobizdevops"
+            / "rollback"
+            / "baselines"
+            / self.feature
+            / "active.json"
+        )
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+        active["version"] = 1
+        active_path.write_text(json.dumps(active, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "基线版本不受支持"):
+            capture_code_session_baseline(
+                workspace=self.project,
+                feature=self.feature,
+                code_workspaces=[repository],
+            )
 
     def test_code_source_restore_blocks_when_file_changed_after_task_snapshot(self) -> None:
         self._set_checkpoint("code_done")

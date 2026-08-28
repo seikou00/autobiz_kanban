@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -59,6 +60,7 @@ from hooks.paths import (  # noqa: E402
     resolve_env_feature,
 )
 from hooks.repository_snapshot import (  # noqa: E402
+    capture_untracked_files,
     capture_repository_snapshot,
     resolve_repositories,
 )
@@ -73,6 +75,10 @@ ROLLBACK_STATE_MODES = (
     ROLLBACK_STATE_TARGET_IN_PROGRESS,
     ROLLBACK_STATE_PREVIOUS_DONE,
 )
+_PLATFORM_RUNTIME_EXCLUDE = ":(exclude).cmbdevclaw/**"
+_PLATFORM_RUNTIME_PREFIX = ".cmbdevclaw/"
+_GIT_OBJECT_ID_LENGTHS = frozenset({40, 64})
+CODE_SESSION_BASELINE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -211,7 +217,7 @@ def _store_baseline_object(session_root: Path, content: bytes) -> str:
     return digest
 
 
-def _baseline_entry(session_root: Path, path: Path, snapshot_sha256: object) -> dict[str, Any]:
+def _baseline_entry(session_root: Path, path: Path) -> dict[str, Any]:
     mode = stat.S_IMODE(path.lstat().st_mode)
     if path.is_symlink():
         kind = "symlink"
@@ -224,9 +230,159 @@ def _baseline_entry(session_root: Path, path: Path, snapshot_sha256: object) -> 
     return {
         "kind": kind,
         "mode": mode,
+        "storage": "baseline_object",
         "objectSha256": _store_baseline_object(session_root, content),
-        "snapshotSha256": snapshot_sha256,
     }
+
+
+def _git_bytes(repository: Path, *args: str) -> bytes:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *args],
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip().replace("\n", " ")
+        raise ValueError(f"Code Session Git 命令失败: {repository}:{' '.join(args)}:{detail}")
+    return completed.stdout
+
+
+def _nul_paths(raw: bytes) -> set[str]:
+    return {
+        value.decode("utf-8", "surrogateescape")
+        for value in raw.split(b"\0")
+        if value
+    }
+
+
+def _head_blob_entries(repository: Path, head_commit: object) -> dict[str, tuple[int, str]]:
+    if not isinstance(head_commit, str) or head_commit.startswith("unborn:"):
+        return {}
+    raw = _git_bytes(
+        repository,
+        "ls-tree",
+        "-r",
+        "-z",
+        head_commit,
+    )
+    entries: dict[str, tuple[int, str]] = {}
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        metadata, separator, encoded_path = record.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3 or fields[1] != b"blob":
+            raise ValueError(f"Code Session 不支持的 Git tree 条目: {repository}")
+        try:
+            mode = int(fields[0], 8)
+            blob_sha = fields[2].decode("ascii")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError(f"Code Session Git tree 条目无效: {repository}") from exc
+        if len(blob_sha) not in _GIT_OBJECT_ID_LENGTHS or any(char not in "0123456789abcdef" for char in blob_sha.lower()):
+            raise ValueError(f"Code Session Git blob SHA 无效: {repository}")
+        relative = encoded_path.decode("utf-8", "surrogateescape")
+        if relative.startswith(_PLATFORM_RUNTIME_PREFIX):
+            continue
+        entries[relative] = (mode, blob_sha)
+    return entries
+
+
+def _index_paths(repository: Path) -> set[str]:
+    raw = _git_bytes(
+        repository,
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+        ".",
+        _PLATFORM_RUNTIME_EXCLUDE,
+    )
+    paths: set[str] = set()
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        _metadata, separator, encoded_path = record.partition(b"\t")
+        if not separator:
+            raise ValueError(f"Code Session Git index 条目无效: {repository}")
+        paths.add(encoded_path.decode("utf-8", "surrogateescape"))
+    return paths
+
+
+def _dirty_against_head_paths(repository: Path, head_commit: object) -> set[str]:
+    if not isinstance(head_commit, str) or head_commit.startswith("unborn:"):
+        return _index_paths(repository)
+    return _nul_paths(
+        _git_bytes(
+            repository,
+            "diff",
+            "--name-only",
+            "-z",
+            head_commit,
+            "--",
+            ".",
+            _PLATFORM_RUNTIME_EXCLUDE,
+        )
+    )
+
+
+def _git_blob_baseline_entry(mode: int, blob_sha: str) -> dict[str, Any]:
+    if mode == 0o120000:
+        kind = "symlink"
+    elif mode in {0o100644, 0o100755}:
+        kind = "file"
+    else:
+        raise ValueError(f"Code Session 不支持的 Git 文件模式: {mode:o}")
+    return {
+        "kind": kind,
+        "mode": mode & 0o7777,
+        "storage": "git_blob",
+        "gitSha": blob_sha,
+    }
+
+
+def _capture_repository_baseline_entries(
+    *,
+    session_root: Path,
+    repository: Path,
+    head_commit: object,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Use HEAD blobs for clean files and persist only local working content.
+
+    A Code Session must be able to restore pre-existing staged, unstaged, and
+    untracked changes.  Those contents may stop being reachable from Git after
+    the user changes the index, so only files that match HEAD are referenced
+    directly from Git's immutable object store.
+    """
+
+    head_entries = _head_blob_entries(repository, head_commit)
+    dirty_paths = _dirty_against_head_paths(repository, head_commit)
+    index_paths = _index_paths(repository)
+    untracked_paths = set(capture_untracked_files(repository))
+    files: dict[str, dict[str, Any]] = {}
+    git_blob_files = 0
+    object_files = 0
+
+    for relative, (mode, blob_sha) in sorted(head_entries.items()):
+        candidate = repository / relative
+        if relative not in dirty_paths:
+            files[relative] = _git_blob_baseline_entry(mode, blob_sha)
+            git_blob_files += 1
+        elif candidate.exists() or candidate.is_symlink():
+            files[relative] = _baseline_entry(session_root, candidate)
+            object_files += 1
+
+    # Index-only paths are staged additions or unmerged entries.  Their
+    # contents cannot be recovered safely from the baseline commit, so retain
+    # the current working-tree version just as the legacy baseline did.
+    for relative in sorted((index_paths - set(head_entries)) | untracked_paths):
+        if relative in files:
+            continue
+        candidate = repository / relative
+        if candidate.exists() or candidate.is_symlink():
+            files[relative] = _baseline_entry(session_root, candidate)
+            object_files += 1
+
+    return files, {"gitBlobFiles": git_blob_files, "objectFiles": object_files}
 
 
 def _rollback_feature_lock(workspace: Path, feature: str) -> FileLock:
@@ -264,9 +420,11 @@ def _capture_code_session_baseline_locked(
     repositories = resolve_repositories(code_workspaces)
     root = _session_root(workspace, feature)
     active = _load_active_code_session(workspace, feature)
+    if active is not None and active.get("status") == "active" and active.get("version") != CODE_SESSION_BASELINE_VERSION:
+        raise ValueError("当前 Code Session 基线版本不受支持；请先完成回退清理后重新捕获基线")
     if active is None or active.get("status") != "active":
         active = {
-            "version": 1,
+            "version": CODE_SESSION_BASELINE_VERSION,
             "featureId": feature,
             "sessionId": f"code-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}",
             "status": "active",
@@ -280,17 +438,18 @@ def _capture_code_session_baseline_locked(
             if Path(str(existing.get("path", ""))).resolve() != repository.resolve():
                 raise ValueError(f"Code Session 仓库 ID 冲突: {repository_id}")
             continue
-        snapshot = capture_repository_snapshot(repository)
-        files: dict[str, dict[str, Any]] = {}
-        for relative, digest in sorted(snapshot.get("files", {}).items()):
-            candidate = repository / relative
-            if candidate.exists() or candidate.is_symlink():
-                files[relative] = _baseline_entry(root, candidate, digest)
+        snapshot = capture_repository_snapshot(repository, include_files=False)
+        files, storage = _capture_repository_baseline_entries(
+            session_root=root,
+            repository=repository,
+            head_commit=snapshot.get("headCommit"),
+        )
         repository_records[repository_id] = {
             "path": str(repository.resolve()),
             "headCommit": snapshot.get("headCommit"),
             "indexTree": snapshot.get("indexTree"),
             "files": files,
+            "storage": storage,
             "capturedAt": _utc_now(),
         }
     active["updatedAt"] = _utc_now()
@@ -399,6 +558,11 @@ def prepare_code_source_restore(workspace: Path, feature: str, feature_dir: Path
         return CodeSourcePlan(
             ok=False,
             errors=("当前 Feature 没有 Code Session 基线；只能使用 --code-source keep",),
+        )
+    if baseline.get("version") != CODE_SESSION_BASELINE_VERSION:
+        return CodeSourcePlan(
+            ok=False,
+            errors=("当前 Code Session 基线版本不受支持；请先完成回退清理后重新捕获基线",),
         )
     expected, owned, run_errors = _code_owned_final_files(
         feature_dir,
@@ -1368,21 +1532,32 @@ def _execute_source_restore(workspace: Path, feature: str, plan: CodeSourcePlan)
             _remove_path(target)
             entry = files.get(relative)
             if isinstance(entry, dict):
-                object_path = root / "objects" / str(entry.get("objectSha256", ""))
-                if not object_path.is_file():
-                    raise ValueError(f"Code Session 基线对象缺失: {repository_id}:{relative}")
-                object_content = object_path.read_bytes()
-                if _sha256(object_content) != str(entry.get("objectSha256", "")):
-                    raise ValueError(f"Code Session 基线对象校验失败: {repository_id}:{relative}")
+                storage = entry.get("storage")
+                if storage == "git_blob":
+                    blob_sha = entry.get("gitSha")
+                    if not isinstance(blob_sha, str) or len(blob_sha) not in _GIT_OBJECT_ID_LENGTHS or any(
+                        char not in "0123456789abcdef" for char in blob_sha.lower()
+                    ):
+                        raise ValueError(f"Code Session Git blob 引用无效: {repository_id}:{relative}")
+                    object_content = _git_bytes(repository, "cat-file", "blob", blob_sha)
+                elif storage == "baseline_object":
+                    object_path = root / "objects" / str(entry.get("objectSha256", ""))
+                    if not object_path.is_file():
+                        raise ValueError(f"Code Session 基线对象缺失: {repository_id}:{relative}")
+                    object_content = object_path.read_bytes()
+                    if _sha256(object_content) != str(entry.get("objectSha256", "")):
+                        raise ValueError(f"Code Session 基线对象校验失败: {repository_id}:{relative}")
+                else:
+                    raise ValueError(f"Code Session 基线存储类型无效: {repository_id}:{relative}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if entry.get("kind") == "symlink":
                     target.symlink_to(object_content.decode("utf-8", "surrogateescape"))
                 else:
                     target.write_bytes(object_content)
-                try:
-                    target.chmod(int(entry.get("mode", 0o644)))
-                except OSError:
-                    pass
+                    try:
+                        target.chmod(int(entry.get("mode", 0o644)))
+                    except OSError:
+                        pass
             restored.append(f"{repository_id}:{relative}")
     return tuple(restored)
 

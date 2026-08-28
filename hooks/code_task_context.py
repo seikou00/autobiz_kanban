@@ -455,6 +455,10 @@ def build_context(
         "taskContract": {
             "goal": task.get("goal"),
             "scope": task.get("scope"),
+            # These are the machine facts the Batch agent uses to decide
+            # whether the frontend Route protocol applies to this Task.
+            "uiRequired": task.get("uiRequired") is True,
+            "uiRefs": task.get("uiRefs") if isinstance(task.get("uiRefs"), dict) else {},
             "workspaceRef": task.get("workspaceRef"),
             "implementationPoints": task.get("implementationPoints"),
             "acceptanceCriteria": task.get("acceptanceCriteria"),
