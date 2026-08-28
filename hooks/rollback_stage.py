@@ -59,6 +59,7 @@ from hooks.paths import (  # noqa: E402
     get_plugin_output_workspace,
     resolve_env_feature,
 )
+from hooks.parallel_batch_lifecycle import cleanup_feature_runs_for_code_rollback  # noqa: E402
 from hooks.repository_snapshot import (  # noqa: E402
     capture_untracked_files,
     capture_repository_snapshot,
@@ -1621,7 +1622,14 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
     moved_artifacts: list[Path] = []
     moved_to_active = False
     restored_source_files: tuple[str, ...] = ()
+    parallel_cleanup: list[dict[str, Any]] = []
     try:
+        # ``.parallel-runs`` is an artifact of Code, but it owns native Git
+        # worktrees outside the Feature directory.  Never archive/reset it
+        # until the lifecycle manager has removed those worktrees, temporary
+        # branches, and leases and verified the cleanup completed.
+        if plan.code_in_scope:
+            parallel_cleanup = cleanup_feature_runs_for_code_rollback(plan.workspace, plan.feature)
         plan_backup_paths = _backup_plan_bundle(plan.workspace, plan.feature, plan_backup_dir)
         source_plan = (
             prepare_code_source_restore(plan.workspace, plan.feature, feature_dir)
@@ -1677,6 +1685,7 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
                 "deletedArtifacts": [path.relative_to(feature_dir).as_posix() for path in plan.artifact_paths],
                 "restoredSourceFiles": list(restored_source_files),
                 "codeResetTasks": list(plan.code_reset_tasks),
+                "parallelRunCleanup": parallel_cleanup,
             },
         )
     except (Exception, KeyboardInterrupt) as exc:

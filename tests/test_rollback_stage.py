@@ -99,6 +99,59 @@ class RollbackStageTest(unittest.TestCase):
         )
         return repository
 
+    def _create_parallel_runtime_resource(self, repository: Path, *, run_id: str = "cw-rollback-001") -> tuple[Path, Path, str, Path]:
+        """Create the plugin-owned Git resources a Code rollback must tear down."""
+        worktree = self.feature_dir / ".parallel-runs" / run_id / "worktrees" / "default" / "B001"
+        worktree.parent.mkdir(parents=True)
+        branch = f"autodev/{self.feature}/{run_id}/B001"
+        subprocess.run(
+            ["git", "-C", str(repository), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True,
+            capture_output=True,
+        )
+        run_dir = self.feature_dir / ".parallel-runs" / run_id
+        lease = run_dir / "leases" / "B001.json"
+        lease.parent.mkdir(parents=True, exist_ok=True)
+        lease.write_text(
+            json.dumps({"ownerToken": "test-owner", "expiresEpoch": 4_000_000_000}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        base_branch = subprocess.run(
+            ["git", "-C", str(repository), "branch", "--show-current"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        (run_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "runId": run_id,
+                    "feature": self.feature,
+                    "status": "running",
+                    "isolation": {"mode": "native_git_worktrees"},
+                    "repositories": {
+                        "default": {"gitRoot": str(repository), "baseBranch": base_branch}
+                    },
+                    "batches": {
+                        "B001": {
+                            "batchId": "B001",
+                            "repositoryRef": "default",
+                            "status": "leased",
+                            "lease": {"ownerToken": "redacted"},
+                            "worktreePath": str(worktree),
+                            "branchName": branch,
+                            "worktreeOwner": "plugin",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return repository, worktree, branch, lease
+
     def _write_task_run(self, repository: Path) -> None:
         run_dir = self.feature_dir / ".task-runs" / "T001"
         run_dir.mkdir(parents=True)
@@ -498,6 +551,80 @@ class RollbackStageTest(unittest.TestCase):
         self.assertTrue(all(item["evidenceIds"] == [] for item in batch["tasks"]))
         records, _, _ = load_state_json_records(self.project)
         self.assertEqual(records[self.feature]["checkpoint"], "plan_done")
+
+    def test_code_rollback_removes_parallel_worktree_branch_and_lease_before_archiving_runtime(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        repository = self._create_code_repository()
+        _, worktree, branch, lease = self._create_parallel_runtime_resource(repository)
+
+        plan = prepare_stage_rollback(
+            workspace=self.project,
+            feature=self.feature,
+            stage="dev.code",
+        )
+        result = execute_stage_rollback(plan)
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(worktree.exists())
+        self.assertFalse(lease.exists())
+        branch_exists = subprocess.run(
+            ["git", "-C", str(repository), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            capture_output=True,
+        )
+        self.assertNotEqual(branch_exists.returncode, 0)
+        archived_manifest = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id / "artifacts" / ".parallel-runs" / "cw-rollback-001" / "manifest.json"
+        archived_batch = json.loads(archived_manifest.read_text(encoding="utf-8"))["batches"]["B001"]
+        self.assertIsNone(archived_batch["worktreePath"])
+        self.assertIsNone(archived_batch["branchName"])
+        self.assertIsNone(archived_batch["lease"])
+        self.assertEqual(archived_batch["removedBranchName"], branch)
+
+    def test_code_rollback_removes_branch_when_manifest_worktree_path_is_already_stale(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        repository = self._create_code_repository()
+        _, worktree, branch, lease = self._create_parallel_runtime_resource(repository, run_id="cw-stale-001")
+        subprocess.run(
+            ["git", "-C", str(repository), "worktree", "remove", "--force", str(worktree)],
+            check=True,
+            capture_output=True,
+        )
+        self.assertFalse(worktree.exists())
+
+        result = execute_stage_rollback(
+            prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+        )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(lease.exists())
+        branch_exists = subprocess.run(
+            ["git", "-C", str(repository), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            capture_output=True,
+        )
+        self.assertNotEqual(branch_exists.returncode, 0)
+
+    def test_code_rollback_does_not_reset_feature_when_parallel_cleanup_fails(self) -> None:
+        self._set_checkpoint("code_done")
+        self._write_completed_code_plan()
+        runtime_manifest = self.feature_dir / ".parallel-runs" / "cw-failed-cleanup" / "manifest.json"
+        runtime_manifest.parent.mkdir(parents=True)
+        runtime_manifest.write_text("{}\n", encoding="utf-8")
+        plan = prepare_stage_rollback(workspace=self.project, feature=self.feature, stage="dev.code")
+
+        with patch(
+            "hooks.rollback_stage.cleanup_feature_runs_for_code_rollback",
+            side_effect=ValueError("parallel_run_cleanup_failed:cw-failed-cleanup:branch_still_exists"),
+        ):
+            result = execute_stage_rollback(plan)
+
+        self.assertFalse(result.ok)
+        self.assertIn("parallel_run_cleanup_failed", result.errors[0])
+        self.assertTrue(runtime_manifest.exists())
+        root = json.loads((self.feature_dir / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(root["status"], "in_progress")
+        records, _, _ = load_state_json_records(self.project)
+        self.assertEqual(records[self.feature]["checkpoint"], "code_done")
 
     def test_code_source_restore_reuses_clean_git_blob_and_removes_created_files(self) -> None:
         self._set_checkpoint("code_done")

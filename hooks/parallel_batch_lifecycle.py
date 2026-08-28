@@ -77,21 +77,37 @@ def reclaim_stale_leases(workspace: Path, feature: str, run_id: str, *, force: b
 
 
 def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = False) -> dict[str, Any]:
-    """Close a terminal run and remove plugin-owned native Git worktrees."""
+    """Close a run and remove every plugin-owned execution resource.
+
+    ``force`` is used by the feature rollback path.  It revokes outstanding
+    leases as well as removing native worktrees and their temporary branches,
+    including a branch recorded by a manifest whose worktree was already
+    removed outside this lifecycle manager.
+    """
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") not in {"succeeded", "failed", "blocked", "cancelled", "rolled_back"} and not force:
             raise ValueError("parallel_run_not_terminal")
         targets = [
-            (batch_id, str(item.get("worktreePath")), str(item.get("status") or ""))
+            (batch_id, str(item.get("worktreePath") or ""), str(item.get("branchName") or ""), str(item.get("status") or ""))
             for batch_id, item in manifest.get("batches", {}).items()
-            if isinstance(item, dict) and isinstance(item.get("worktreePath"), str) and item.get("worktreePath")
+            if isinstance(item, dict)
         ]
 
     removed: list[str] = []
+    removed_branches: list[str] = []
     retained: list[str] = []
+    released_leases: list[str] = []
     errors: list[str] = []
-    for batch_id, path, status in targets:
+    for batch_id, path, branch, status in targets:
+        try:
+            if reclaim_lease(workspace, feature, run_id, batch_id, force=True):
+                released_leases.append(batch_id)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{batch_id}:lease_release_failed:{exc}")
+
+        if not path and not branch:
+            continue
         result = remove_parallel_worktree(
             workspace,
             feature,
@@ -105,7 +121,10 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
             if result.get("retained"):
                 retained.append(path)
             else:
-                removed.append(path)
+                if path:
+                    removed.append(path)
+                if result.get("branchRemoved") and isinstance(result.get("branchName"), str):
+                    removed_branches.append(result["branchName"])
         else:
             errors.append(f"{batch_id}:{result.get('error', 'worktree_remove_failed')}")
 
@@ -114,7 +133,9 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
         manifest["cleanup"] = {
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "removedWorktrees": removed,
+            "removedBranches": removed_branches,
             "retainedWorktrees": retained,
+            "releasedLeases": released_leases,
             "errors": errors,
         }
         manifest["status"] = "cleaned" if not errors else "cleanup_failed"
@@ -125,16 +146,45 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
             run_id,
             "run_cleaned",
             removedWorktrees=removed,
+            removedBranches=removed_branches,
             retainedWorktrees=retained,
+            releasedLeases=released_leases,
             errors=errors,
         )
         return {
             "runId": run_id,
             "status": manifest["status"],
             "removedWorktrees": removed,
+            "removedBranches": removed_branches,
             "retainedWorktrees": retained,
+            "releasedLeases": released_leases,
             "errors": errors,
         }
+
+
+def cleanup_feature_runs_for_code_rollback(workspace: Path, feature: str) -> list[dict[str, Any]]:
+    """Synchronously dismantle every recorded run before Code state is reset.
+
+    The Code-stage rollback moves ``.parallel-runs`` into its rollback
+    history.  Cleaning the run directories first is therefore essential: once
+    that manifest is archived, the plugin can no longer reliably identify
+    native worktrees, temporary branches, or lease files to release.
+    """
+    results: list[dict[str, Any]] = []
+    for manifest in list_runs(workspace, feature):
+        run_id = manifest.get("runId")
+        if not isinstance(run_id, str) or not run_id:
+            # Non-runtime files under the artifact directory have no plugin
+            # ownership information and are handled by artifact archival.
+            continue
+        result = cleanup_run(workspace, feature, run_id, force=True)
+        if result.get("status") != "cleaned" or result.get("errors"):
+            raise ValueError(
+                f"parallel_run_cleanup_failed:{run_id}:"
+                + ";".join(str(item) for item in result.get("errors", []))
+            )
+        results.append(result)
+    return results
 
 
 def rollback_run(workspace: Path, feature: str, run_id: str, *, mode: str = "partial", confirm: bool = False) -> dict[str, Any]:

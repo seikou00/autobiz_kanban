@@ -287,16 +287,29 @@ def remove_parallel_worktree(
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
         raw_path = batch.get("worktreePath")
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            return {"success": True, "worktreePath": None, "error": None}
-        worktree = Path(raw_path).expanduser().resolve()
+        worktree = (
+            Path(raw_path).expanduser().resolve()
+            if isinstance(raw_path, str) and raw_path.strip()
+            else None
+        )
         isolation = manifest.get("isolation") if isinstance(manifest.get("isolation"), dict) else {}
         if isolation.get("mode") != "native_git_worktrees":
             return {"success": False, "error": f"parallel_worktree_cleanup_owner_unknown:{batch_id}"}
         branch = str(batch.get("branchName") or "")
 
+        # A damaged manifest can have lost ``branchName`` while its linked
+        # checkout still exists. Resolve it before removal so the temporary
+        # branch is not orphaned. A missing path plus a missing branch is
+        # already clean and remains a harmless idempotent call.
+        if not branch and worktree is not None and worktree.exists():
+            current = _git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
+            if current.returncode == 0:
+                branch = current.stdout.strip()
+        if worktree is None and not branch:
+            return {"success": True, "worktreePath": None, "branchName": None, "error": None}
+
     removed = False
-    if worktree.exists():
+    if worktree is not None and worktree.exists():
         args = ["worktree", "remove"]
         if force:
             args.append("--force")
@@ -310,11 +323,20 @@ def remove_parallel_worktree(
         return {"success": False, "error": f"parallel_worktree_prune_failed:{pruned.stderr.strip()}"}
     branch_removed = False
     if branch and branch != str((manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("baseBranch") or ""):
-        delete = _git(git_root, "branch", "-D" if force else "-d", branch)
-        branch_removed = delete.returncode == 0
+        exists = _git(git_root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        if exists.returncode == 0:
+            delete = _git(git_root, "branch", "-D" if force else "-d", branch)
+            if delete.returncode != 0:
+                return {"success": False, "error": f"parallel_worktree_branch_remove_failed:{delete.stderr.strip()}"}
+            branch_removed = True
     with run_lock(artifact_workspace, feature, run_id):
         manifest, batch, _repository_ref, _git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
-        batch["worktreeRemovedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        removed_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        batch["removedWorktreePath"] = str(worktree) if worktree is not None else None
+        batch["removedBranchName"] = branch or None
+        batch["worktreePath"] = None
+        batch["branchName"] = None
+        batch["worktreeRemovedAt"] = removed_at
         save_manifest(artifact_workspace, feature, run_id, manifest)
     append_event(
         artifact_workspace,
@@ -322,7 +344,8 @@ def remove_parallel_worktree(
         run_id,
         "worktree_removed",
         batchId=batch_id,
-        path=str(worktree),
+        path=str(worktree) if worktree is not None else None,
+        branch=branch or None,
         owner="plugin",
         requestedForce=force,
         removed=removed,
@@ -330,7 +353,8 @@ def remove_parallel_worktree(
     )
     return {
         "success": True,
-        "worktreePath": str(worktree),
+        "worktreePath": str(worktree) if worktree is not None else None,
+        "branchName": branch or None,
         "removed": removed,
         "branchRemoved": branch_removed,
         "error": None,
