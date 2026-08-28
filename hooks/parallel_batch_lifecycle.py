@@ -33,7 +33,14 @@ from hooks.repository_snapshot import git_status_porcelain
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def detect_external_changes(repo_path: Path, base_sha: str, *, allow_paths: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -70,12 +77,7 @@ def reclaim_stale_leases(workspace: Path, feature: str, run_id: str, *, force: b
 
 
 def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = False) -> dict[str, Any]:
-    """Close a terminal run without deleting platform-owned worktrees.
-
-    Dynamic Workflow retains its Worktree deliverables for the platform panel.
-    The plugin only records that ownership and cleanup remain with the
-    platform; it must never call ``git worktree remove`` for those paths.
-    """
+    """Close a terminal run and remove plugin-owned native Git worktrees."""
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") not in {"succeeded", "failed", "blocked", "cancelled", "rolled_back"} and not force:
@@ -210,7 +212,7 @@ def monitor_run(workspace: Path, feature: str, run_id: str) -> dict[str, Any]:
 
 
 def auto_cleanup_old_runs(workspace: Path, feature: str, *, keep_days: int = 7) -> list[dict[str, Any]]:
-    """Mark old successful runs cleaned while leaving platform deliveries intact."""
+    """Mark old successful runs cleaned and remove plugin-owned native worktrees."""
     cutoff = time.time() - max(0, keep_days) * 24 * 60 * 60
     cleaned: list[dict[str, Any]] = []
     for manifest in list_runs(workspace, feature):

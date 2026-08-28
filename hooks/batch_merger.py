@@ -23,12 +23,19 @@ from hooks.parallel_runtime import (  # noqa: E402
     save_manifest,
     utc_now,
 )
-from hooks.repository_snapshot import git_status_porcelain, resolve_git_root  # noqa: E402
+from hooks.repository_snapshot import current_git_branch, git_status_porcelain, resolve_git_root  # noqa: E402
 from hooks.plan_writer import mark_parallel_batch_tasks_merged  # noqa: E402
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def _merge_probe(repo: Path, target_sha: str, source_branch: str) -> dict[str, Any]:
@@ -72,8 +79,7 @@ def _worktree_records(repo: Path) -> list[dict[str, str]]:
 def _resolve_branch(repo: Path, name: str) -> tuple[Path | None, str | None]:
     requested_path = Path(name).expanduser()
     if requested_path.exists() and requested_path.is_dir():
-        branch_result = _git(requested_path, "branch", "--show-current")
-        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+        branch = current_git_branch(requested_path) or ""
         if branch:
             return requested_path.resolve(), branch
     records = _worktree_records(repo)
@@ -94,7 +100,7 @@ def _rebase_native_delivery(
     worktree_name: str,
     target_sha: str,
 ) -> dict[str, Any]:
-    """Rebase a retained platform-managed worktree before merging it to the source.
+    """Rebase a retained plugin-managed native worktree before merging it to the source.
 
     This runs from the shared workflow owner, because isolated agents are
     intentionally forbidden from merge/rebase operations by the platform.
@@ -188,11 +194,10 @@ def merge_worktree_to_main(repo_path: Path, worktree_name: str, target_branch: s
         if _git(repo, "rev-parse", "--verify", branch).returncode != 0:
             return {"success": False, "mergedFiles": [], "conflicts": [], "error": f"worktree_branch_not_found:{branch}"}
         changed = _git(repo, "diff", "--name-only", "HEAD", branch).stdout.splitlines()
-        target = target_branch or _git(repo, "branch", "--show-current").stdout.strip()
+        target = target_branch or current_git_branch(repo) or ""
         merge_args = ["merge", "--no-ff", "--no-edit", branch]
         if target and target != "HEAD":
-            checkout = _git(repo, "branch", "--show-current")
-            if checkout.stdout.strip() != target:
+            if current_git_branch(repo) != target:
                 return {"success": False, "mergedFiles": [], "conflicts": [], "error": f"target_branch_mismatch:{target}"}
         result = _git(repo, *merge_args)
         if result.returncode != 0:
@@ -526,7 +531,7 @@ def resolve_merge_conflict(
 ) -> dict[str, Any]:
     """Accept a semantically resolved delivery after strict integration checks.
 
-    The resolver agent owns only the retained platform worktree.  This hook
+    The resolver agent owns only the retained plugin worktree.  This hook
     never edits source files: it verifies that the agent rebased onto the
     current repository head, that the branch is clean and conflict-free, then
     moves the batch back to the normal merge barrier.
@@ -559,7 +564,7 @@ def resolve_merge_conflict(
             return {"success": False, "error": "parallel_resolution_worktree_mismatch", "batchId": batch_id}
         if _dirty(worktree_path):
             return {"success": False, "error": "parallel_resolution_worktree_dirty", "batchId": batch_id}
-        if _git(worktree_path, "branch", "--show-current").stdout.strip() != branch_name:
+        if current_git_branch(worktree_path) != branch_name:
             return {"success": False, "error": "parallel_resolution_branch_mismatch", "batchId": batch_id}
         head_sha = _git(worktree_path, "rev-parse", "HEAD").stdout.strip()
         if not head_sha or head_sha == target_sha:

@@ -138,14 +138,12 @@ def resolve_code_workspace_contract(
     git_roots = sorted(set(mapping.values()))
     return {
         "codeWorkspaces": mapping,
-        "executionIsolation": "platform_dynamic_worktrees",
-        # Dynamic Workflow derives an isolated checkout from its own host
-        # workspace.  The plugin cannot redirect one agent to another Git
-        # repository, so callers must launch this fixed Workflow from here.
-        # A platform Workflow can create worktrees for only its own Git root.
-        # The repository coordinator turns a multi-root contract into one
-        # child Workflow per root, while a same-root mapping continues to use
-        # the original single fixed Workflow.
+        "executionIsolation": "native_git_worktrees",
+        # The plugin creates linked native Git worktrees from each repository
+        # binding.  The workflow host may therefore be an artifact directory;
+        # it no longer needs to be the business repository root.
+        # The repository coordinator still turns multi-root contracts into one
+        # child Workflow per root so each child has a single repository scope.
         "workflowHostGitRoot": git_roots[0] if len(git_roots) == 1 else None,
         "workflowHostGitRoots": git_roots,
         "repositoryCount": len(git_roots),
@@ -350,8 +348,8 @@ def analyze_batches(
             }
         # The parent Code session invokes this coordinator before each DAG
         # wave. It returns child workflow args with exactly one physical Git
-        # root, which is the strongest routing contract the current platform
-        # worktree API can enforce.
+        # root. The plugin provisions the native worktree for that binding;
+        # the workflow host itself is not a repository-routing contract.
         return {
             **common_result,
             "strategy": "repository_coordinated",

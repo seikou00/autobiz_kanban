@@ -2,8 +2,8 @@
 """Durable runtime state for parallel Code batch execution.
 
 The plan remains the business source of truth. This module only stores the
-state of one scheduler run, its leases, and references to platform-owned Git
-worktree deliveries.
+state of one scheduler run, its leases, and references to plugin-owned native
+Git worktree deliveries.
 """
 
 from __future__ import annotations

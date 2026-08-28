@@ -324,7 +324,7 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 
 正式 Bundle 发布后，scheduler 会按 `executionStage` 和实际写集生成安全波次。`parallel` 阶段只有同仓库写集不重叠的 Batch 才进入同一波；路径相同或父子目录重叠、写集未知的 Batch 会自动串行。`proto`、`global` 和 `integration` 阶段按单 Batch 串行收口，分别用于协议桩、数据库/全局配置和共享入口文件。候选分组中的 `touches` 是 task-planner 的文件级隔离输入，writer 会把它归一化到最终 `scope.paths`，不会把 `touches` 写入正式计划；无法确认的写集必须保守串行，最终仍应补充真实 `scope.paths` 或 `expectedFiles`。
 
-合并冲突不得通过丢弃一侧改动、`--no-verify`、`ours/theirs` 或跳过提交绕过。合并器会保留冲突 Batch 的平台 worktree，启动单个集成 Agent 在该 worktree 内对当前主分支执行语义 rebase，逐文件保留双方有效改动并运行 Batch 验证；只有 `resolve` 校验出 clean、无冲突且基于最新主分支的提交后，才会再次执行真实 merge 并释放下游依赖。解决失败则保持 `needs_resolution`，禁止标记完成。
+合并冲突不得通过丢弃一侧改动、`--no-verify`、`ours/theirs` 或跳过提交绕过。合并器会保留冲突 Batch 的插件原生 Worktree，启动单个集成 Agent 在该 Worktree 内对当前主分支执行语义 rebase，逐文件保留双方有效改动并运行 Batch 验证；只有 `resolve` 校验出 clean、无冲突且基于最新主分支的提交后，才会再次执行真实 merge 并释放下游依赖。解决失败则保持 `needs_resolution`，禁止标记完成。
 
 **预检与修复**：
 

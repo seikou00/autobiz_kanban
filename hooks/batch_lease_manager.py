@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "acquire":
             lease = acquire_lease(workspace, feature, args.run_id, args.batch_id, ttl_seconds=args.ttl_seconds, owner_token=args.owner_token)
             return _emit(True, lease=lease)
-        if not args.owner_token:
+        if args.command in {"check", "renew", "release"} and not args.owner_token:
             return _emit(False, error="owner_token_required")
         if args.command == "check":
             return _emit(True, valid=check_lease(workspace, feature, args.run_id, args.batch_id, args.owner_token))

@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Delivery operations for platform-owned Dynamic Workflow worktrees.
+"""Lifecycle operations for plugin-owned native Git worktrees.
 
-The platform creates a private native Git worktree for each Batch agent via
-``agent(..., { isolation: "worktree" })``.  This module deliberately never
-creates or removes those worktrees.  It validates the platform-assigned
-checkout, commits the compiled Batch, and records the delivery SHA so the
-Batch merger can integrate it deterministically.
+The workflow host may be an artifact directory or another repository.  The
+plugin therefore creates a real linked Git worktree from each repository
+binding and records its path in the scheduler manifest.  Agents only receive
+that explicit path; all delivery and cleanup remains deterministic here.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,17 +23,135 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.parallel_runtime import append_event, check_lease, load_manifest, run_lock, save_manifest
+from hooks.parallel_runtime import append_event, check_lease, load_manifest, run_dir, run_lock, save_manifest
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
+    current_git_branch,
     git_status_porcelain,
     resolve_git_root,
 )
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _branch_component(value: str) -> str:
+    component = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-")
+    return component or "workspace"
+
+
+def _native_worktree_path(
+    artifact_workspace: Path,
+    feature: str,
+    run_id: str,
+    repository_ref: str,
+    batch_id: str,
+) -> Path:
+    return (
+        run_dir(artifact_workspace, feature, run_id)
+        / "worktrees"
+        / _branch_component(repository_ref)
+        / _branch_component(batch_id)
+    ).resolve()
+
+
+def provision_parallel_worktree(
+    artifact_workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+) -> dict[str, Any]:
+    """Create or reuse the native Git worktree assigned to one Batch.
+
+    Provisioning is idempotent for a live Batch, but stale paths and branches
+    are rejected rather than overwritten.  This prevents an interrupted run
+    from silently attaching a Batch to another checkout.
+    """
+    with run_lock(artifact_workspace, feature, run_id):
+        try:
+            manifest, batch, repository_ref, git_root = _parallel_binding(
+                artifact_workspace, feature, run_id, batch_id
+            )
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+        status = str(batch.get("status") or "pending")
+        if status in {"merged", "succeeded", "cancelled"}:
+            return {"success": False, "error": f"parallel_batch_not_provisionable:{batch_id}:{status}"}
+
+        raw_path = batch.get("worktreePath")
+        if isinstance(raw_path, str) and raw_path.strip():
+            existing = Path(raw_path).expanduser().resolve()
+            try:
+                from hooks.parallel_batch_scheduler import assert_batch_worktree_isolated
+
+                assert_batch_worktree_isolated(manifest, batch_id, existing)
+                expected = str(batch.get("branchName") or "")
+                if current_git_branch(existing) == expected:
+                    return {
+                        "success": True,
+                        "batchId": batch_id,
+                        "repositoryRef": repository_ref,
+                        "worktreePath": str(existing),
+                        "branchName": expected,
+                        "reused": True,
+                    }
+            except (ValueError, OSError):
+                pass
+            return {"success": False, "error": f"parallel_worktree_stale:{batch_id}"}
+
+        head = str(
+            (manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("headSha")
+            or (manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("baseSha")
+            or ""
+        )
+        if not head or _git(git_root, "rev-parse", "--verify", head).returncode != 0:
+            return {"success": False, "error": f"parallel_repository_head_unavailable:{repository_ref}"}
+        branch_name = "autodev/{}/{}/{}".format(
+            _branch_component(feature), _branch_component(run_id), _branch_component(batch_id)
+        )
+        target = _native_worktree_path(artifact_workspace, feature, run_id, repository_ref, batch_id)
+        if target.exists():
+            return {"success": False, "error": f"parallel_worktree_path_occupied:{target}"}
+        if _git(git_root, "show-ref", "--verify", f"refs/heads/{branch_name}").returncode == 0:
+            return {"success": False, "error": f"parallel_worktree_branch_occupied:{branch_name}"}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        created = _git(git_root, "worktree", "add", "-b", branch_name, str(target), head)
+        if created.returncode != 0:
+            return {"success": False, "error": f"parallel_worktree_create_failed:{created.stderr.strip()}"}
+        batch.update({
+            "worktreePath": str(target),
+            "branchName": branch_name,
+            "worktreeOwner": "plugin",
+        })
+        save_manifest(artifact_workspace, feature, run_id, manifest)
+    append_event(
+        artifact_workspace,
+        feature,
+        run_id,
+        "worktree_provisioned",
+        batchId=batch_id,
+        repositoryRef=repository_ref,
+        path=str(target),
+        branch=branch_name,
+        owner="plugin",
+    )
+    return {
+        "success": True,
+        "batchId": batch_id,
+        "repositoryRef": repository_ref,
+        "worktreePath": str(target),
+        "branchName": branch_name,
+        "reused": False,
+    }
 
 
 def _parallel_binding(
@@ -110,7 +229,7 @@ def seal_parallel_batch(
             assert_batch_worktree_isolated(manifest, batch_id, worktree)
         except ValueError:
             return {"success": False, "error": f"parallel_worktree_invalid:{batch_id}"}
-        if _git(worktree, "branch", "--show-current").stdout.strip() != batch.get("branchName"):
+        if current_git_branch(worktree) != batch.get("branchName"):
             return {"success": False, "error": f"parallel_worktree_branch_mismatch:{batch_id}"}
         runtime_error = _unstage_platform_runtime(worktree)
         if runtime_error:
@@ -161,30 +280,61 @@ def remove_parallel_worktree(
     *,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Record that platform owns cleanup of the terminal Batch worktree."""
+    """Remove a plugin-owned native Worktree after delivery or failure."""
     with run_lock(artifact_workspace, feature, run_id):
         try:
-            manifest, batch, _repository_ref, _git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
+            manifest, batch, repository_ref, git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
         raw_path = batch.get("worktreePath")
         if not isinstance(raw_path, str) or not raw_path.strip():
             return {"success": True, "worktreePath": None, "error": None}
-        worktree = Path(raw_path).resolve()
+        worktree = Path(raw_path).expanduser().resolve()
         isolation = manifest.get("isolation") if isinstance(manifest.get("isolation"), dict) else {}
-        if isolation.get("mode") != "platform_dynamic_worktrees":
+        if isolation.get("mode") != "native_git_worktrees":
             return {"success": False, "error": f"parallel_worktree_cleanup_owner_unknown:{batch_id}"}
+        branch = str(batch.get("branchName") or "")
+
+    removed = False
+    if worktree.exists():
+        args = ["worktree", "remove"]
+        if force:
+            args.append("--force")
+        args.append(str(worktree))
+        result = _git(git_root, *args)
+        if result.returncode != 0:
+            return {"success": False, "error": f"parallel_worktree_remove_failed:{result.stderr.strip()}"}
+        removed = True
+    pruned = _git(git_root, "worktree", "prune")
+    if pruned.returncode != 0:
+        return {"success": False, "error": f"parallel_worktree_prune_failed:{pruned.stderr.strip()}"}
+    branch_removed = False
+    if branch and branch != str((manifest.get("repositories", {}).get(repository_ref, {}) or {}).get("baseBranch") or ""):
+        delete = _git(git_root, "branch", "-D" if force else "-d", branch)
+        branch_removed = delete.returncode == 0
+    with run_lock(artifact_workspace, feature, run_id):
+        manifest, batch, _repository_ref, _git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
+        batch["worktreeRemovedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        save_manifest(artifact_workspace, feature, run_id, manifest)
     append_event(
         artifact_workspace,
         feature,
         run_id,
-        "worktree_retained",
+        "worktree_removed",
         batchId=batch_id,
         path=str(worktree),
-        owner="platform",
+        owner="plugin",
         requestedForce=force,
+        removed=removed,
+        branchRemoved=branch_removed,
     )
-    return {"success": True, "worktreePath": str(worktree), "retained": True, "error": None}
+    return {
+        "success": True,
+        "worktreePath": str(worktree),
+        "removed": removed,
+        "branchRemoved": branch_removed,
+        "error": None,
+    }
 
 
 def list_worktrees(repo_path: Path) -> dict[str, Any]:
@@ -214,9 +364,14 @@ def list_worktrees(repo_path: Path) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="管理平台 Dynamic Workflow Worktree 的 Batch 交付")
+    parser = argparse.ArgumentParser(description="管理插件托管原生 Git Worktree 的 Batch 交付")
     parser.add_argument("--json", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
+    provision = commands.add_parser("provision")
+    provision.add_argument("--artifact-workspace", required=True)
+    provision.add_argument("--feature", required=True)
+    provision.add_argument("--run-id", required=True)
+    provision.add_argument("--batch-id", required=True)
     seal = commands.add_parser("seal")
     seal.add_argument("--repo")
     seal.add_argument("--artifact-workspace", required=True)
@@ -228,7 +383,9 @@ def main(argv: list[str] | None = None) -> int:
     listed.add_argument("--repo", required=True)
     args = parser.parse_args(argv)
 
-    if args.command == "seal":
+    if args.command == "provision":
+        result = provision_parallel_worktree(Path(args.artifact_workspace), args.feature, args.run_id, args.batch_id)
+    elif args.command == "seal":
         result = seal_parallel_batch(Path(args.artifact_workspace), args.feature, args.run_id, args.batch_id, Path(args.repo) if args.repo else None, args.owner_token)
     else:
         result = list_worktrees(Path(args.repo))

@@ -24,10 +24,18 @@ class RepositorySnapshotError(ValueError):
 
 
 def _run_text(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run Git with a stable text codec on every supported platform.
+
+    Windows commonly reports the active code page as GBK while Git emits UTF-8
+    paths.  Relying on ``text=True`` alone therefore makes repositories with
+    CJK path segments fail before the actual Git operation is evaluated.
+    """
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -61,6 +69,20 @@ def resolve_git_root(code_workspace: Path) -> Path:
             suffix += f":{detail}"
         raise RepositorySnapshotError(f"code_workspace_not_git_repository:{code_workspace}{suffix}")
     return Path(completed.stdout.strip()).resolve()
+
+
+def current_git_branch(repo: Path) -> str | None:
+    """Return the checked-out branch using syntax supported by Git 2.20+.
+
+    ``git branch --show-current`` was only added in Git 2.22.  Native
+    worktree verification must also support the older Git bundled with many
+    Windows enterprise environments, where ``symbolic-ref`` is available.
+    Detached HEAD deliberately returns ``None`` and fails the caller's branch
+    equality guard.
+    """
+    completed = _run_text(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+    value = completed.stdout.strip()
+    return value if completed.returncode == 0 and value else None
 
 
 def resolve_repositories(code_workspaces: Path | list[Path]) -> RepositoryMap:

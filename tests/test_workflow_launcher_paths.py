@@ -162,7 +162,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             "api": str(code_workspace.resolve()),
             "web": str(code_workspace.resolve()),
         })
-        self.assertEqual(result["executionIsolation"], "platform_dynamic_worktrees")
+        self.assertEqual(result["executionIsolation"], "native_git_worktrees")
         self.assertEqual(result["workflowHostGitRoot"], str(code_workspace.resolve()))
         self.assertEqual(result["workflowArgs"], {
             "feature": "three-paths",

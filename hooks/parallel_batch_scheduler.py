@@ -39,6 +39,7 @@ from hooks.plan_json import load_plan_bundle
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
+    current_git_branch,
     git_status_porcelain,
     resolve_git_root,
 )
@@ -46,6 +47,18 @@ _BOOTSTRAP_IGNORE_RULES = (
     ".cmbdevclaw/large_tool_results/",
     ".autobizdevops/features/*/.parallel-runs/",
 )
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run Git using UTF-8 so CJK worktree paths work on Windows."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def _ensure_git_root(requested: Path, *, allow_bootstrap: bool) -> tuple[Path, bool]:
@@ -57,21 +70,11 @@ def _ensure_git_root(requested: Path, *, allow_bootstrap: bool) -> tuple[Path, b
             raise ValueError(f"parallel_code_workspace_git_repository_required:{requested}")
         if not requested.is_dir():
             raise
-        init = subprocess.run(
-            ["git", "init", "-b", "main"],
-            cwd=requested,
-            capture_output=True,
-            text=True,
-        )
+        init = _git(requested, "init", "-b", "main")
         if init.returncode != 0:
             # Older Git versions do not support `init -b`; retain the same
             # bootstrap behavior with the portable form.
-            init = subprocess.run(
-                ["git", "init"],
-                cwd=requested,
-                capture_output=True,
-                text=True,
-            )
+            init = _git(requested, "init")
         if init.returncode != 0:
             raise ValueError(f"parallel_code_workspace_git_init_failed:{init.stderr.strip()}")
         return resolve_git_root(requested), True
@@ -90,32 +93,25 @@ def _ensure_runtime_ignores(git_root: Path) -> list[str]:
 
 
 def _git_head(git_root: Path) -> str | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=git_root,
-        capture_output=True,
-        text=True,
-    )
+    result = _git(git_root, "rev-parse", "--verify", "HEAD")
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
 
 
 def _unstage_platform_runtime(git_root: Path, *, has_head: bool) -> None:
     """Keep already-staged platform artifacts out of an automatic baseline."""
     if has_head:
-        staged = subprocess.run(
-            ["git", "diff", "--cached", "--quiet", "--", PLATFORM_RUNTIME_DIRECTORY],
-            cwd=git_root,
-            capture_output=True,
-            text=True,
-        )
+        staged = _git(git_root, "diff", "--cached", "--quiet", "--", PLATFORM_RUNTIME_DIRECTORY)
         if staged.returncode == 0:
             return
         if staged.returncode != 1:
             raise ValueError(f"parallel_code_workspace_runtime_stage_check_failed:{staged.stderr.strip()}")
-        command = ["git", "restore", "--staged", "--", PLATFORM_RUNTIME_DIRECTORY]
+        # ``git restore`` arrived after the Git version shipped by several
+        # supported Windows images.  ``reset HEAD --`` has the same staging
+        # effect here and is supported by Git 2.20.
+        command = ["reset", "HEAD", "--", PLATFORM_RUNTIME_DIRECTORY]
     else:
-        command = ["git", "rm", "-r", "--cached", "--ignore-unmatch", "--", PLATFORM_RUNTIME_DIRECTORY]
-    result = subprocess.run(command, cwd=git_root, capture_output=True, text=True)
+        command = ["rm", "-r", "--cached", "--ignore-unmatch", "--", PLATFORM_RUNTIME_DIRECTORY]
+    result = _git(git_root, *command)
     if result.returncode != 0:
         raise ValueError(f"parallel_code_workspace_runtime_unstage_failed:{result.stderr.strip()}")
 
@@ -148,31 +144,21 @@ def _bootstrap_repository(
         raise ValueError(f"parallel_code_workspace_bootstrap_required:{reason}:{git_root}")
 
     _unstage_platform_runtime(git_root, has_head=before_head is not None)
-    add = subprocess.run(
-        ["git", "add", "-A", "--", ".", f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**"],
-        cwd=git_root,
-        capture_output=True,
-        text=True,
-    )
+    add = _git(git_root, "add", "-A", "--", ".", f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**")
     if add.returncode != 0:
         raise ValueError(f"parallel_code_workspace_bootstrap_stage_failed:{add.stderr.strip()}")
     reason = "unborn_head" if before_head is None else "dirty_worktree"
     message = f"autodev: bootstrap {feature} baseline"
-    commit = subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=AutoDevOps",
-            "-c",
-            "user.email=autodev@localhost",
-            "commit",
-            "--allow-empty",
-            "-m",
-            message,
-        ],
-        cwd=git_root,
-        capture_output=True,
-        text=True,
+    commit = _git(
+        git_root,
+        "-c",
+        "user.name=AutoDevOps",
+        "-c",
+        "user.email=autodev@localhost",
+        "commit",
+        "--allow-empty",
+        "-m",
+        message,
     )
     if commit.returncode != 0:
         raise ValueError(f"parallel_code_workspace_bootstrap_commit_failed:{commit.stderr.strip()}")
@@ -239,7 +225,7 @@ def resolve_repository_bindings(
             allow_bootstrap=allow_bootstrap,
         )
         head = bootstrap["headSha"]
-        branch = subprocess.run(["git", "branch", "--show-current"], cwd=git_root, capture_output=True, text=True)
+        branch = current_git_branch(git_root)
         bindings[ref] = {
             "workspaceRef": ref,
             "requestedPath": str(requested),
@@ -248,7 +234,7 @@ def resolve_repository_bindings(
             # This moves forward only through merges owned by this run.  It
             # is the expected main HEAD for later dependency waves.
             "headSha": head,
-            "baseBranch": branch.stdout.strip() or None,
+            "baseBranch": branch,
             "bootstrap": bootstrap,
             "runtimeIgnoreAdditions": ignore_additions,
         }
@@ -257,12 +243,7 @@ def resolve_repository_bindings(
 
 def _git_metadata_path(git_root: Path, argument: str) -> Path:
     """Resolve a Git metadata path returned relative to a worktree root."""
-    result = subprocess.run(
-        ["git", "rev-parse", argument],
-        cwd=git_root,
-        capture_output=True,
-        text=True,
-    )
+    result = _git(git_root, "rev-parse", argument)
     raw = result.stdout.strip()
     if result.returncode != 0 or not raw:
         raise ValueError(f"parallel_batch_worktree_git_metadata_unavailable:{git_root}")
@@ -275,11 +256,11 @@ def assert_batch_worktree_isolated(
     batch_id: str,
     worktree_path: Path | str,
 ) -> None:
-    """Require the platform-owned linked worktree assigned to a Batch.
+    """Require the plugin-owned linked native worktree assigned to a Batch.
 
-    Dynamic Workflow provisions a linked worktree immediately before an
-    ``agent(..., { isolation: "worktree" })`` call starts.  The plugin never
-    derives an ownership path; it verifies Git's own worktree metadata instead.
+    The plugin provisions a linked worktree before starting the Batch agent and
+    this guard verifies Git's own worktree metadata rather than trusting a
+    filesystem path supplied by the agent.
     """
     batch = manifest.get("batches", {}).get(batch_id)
     if not isinstance(batch, dict):
@@ -327,12 +308,7 @@ def assert_batch_worktree_isolated(
             )
         )
 
-    listed = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=source_root,
-        capture_output=True,
-        text=True,
-    )
+    listed = _git(source_root, "worktree", "list", "--porcelain")
     registered = {
         Path(line.removeprefix("worktree ")).resolve()
         for line in listed.stdout.splitlines()
@@ -426,9 +402,10 @@ def create_run(
             repositories=repositories,
         )
         manifest["isolation"] = {
-            "mode": "platform_dynamic_worktrees",
-            "owner": "platform",
-            "cleanupOwner": "platform",
+            "mode": "native_git_worktrees",
+            "owner": "plugin",
+            "cleanupOwner": "plugin",
+            "provisioner": "hooks/worktree_manager.py",
             "workspaceRefs": sorted(repositories),
         }
         manifest["status"] = "running"
@@ -438,7 +415,7 @@ def create_run(
 
 
 def _sealed_delivery_error(manifest: dict[str, Any], batch_id: str) -> str | None:
-    """Validate a retained platform Worktree before a scheduler run is resumed."""
+    """Validate a plugin-managed native Worktree before resuming a run."""
     batch = manifest.get("batches", {}).get(batch_id)
     if not isinstance(batch, dict):
         return f"parallel_batch_not_found:{batch_id}"
@@ -448,35 +425,24 @@ def _sealed_delivery_error(manifest: dict[str, Any], batch_id: str) -> str | Non
     worktree_path = batch.get("worktreePath")
     branch_name = batch.get("branchName")
     if not isinstance(worktree_path, str) or not worktree_path:
-        return f"platform_worktree_delivery_missing:{batch_id}:path"
+        return f"native_worktree_delivery_missing:{batch_id}:path"
     if not isinstance(branch_name, str) or not branch_name:
-        return f"platform_worktree_delivery_missing:{batch_id}:branch"
+        return f"native_worktree_delivery_missing:{batch_id}:branch"
     try:
         assert_batch_worktree_isolated(manifest, batch_id, worktree_path)
     except ValueError:
-        return f"platform_worktree_delivery_missing:{batch_id}:worktree"
+        return f"native_worktree_delivery_missing:{batch_id}:worktree"
     worktree = Path(worktree_path)
-    branch = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
-    if branch.returncode != 0 or branch.stdout.strip() != branch_name:
-        return f"platform_worktree_delivery_missing:{batch_id}:branch"
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
+    if current_git_branch(worktree) != branch_name:
+        return f"native_worktree_delivery_missing:{batch_id}:branch"
+    head = _git(worktree, "rev-parse", "HEAD")
     if head.returncode != 0 or head.stdout.strip() != commit_sha:
-        return f"platform_worktree_delivery_commit_mismatch:{batch_id}"
+        return f"native_worktree_delivery_commit_mismatch:{batch_id}"
     status = git_status_porcelain(worktree)
     if status.returncode != 0:
-        return f"platform_worktree_delivery_status_unavailable:{batch_id}"
+        return f"native_worktree_delivery_status_unavailable:{batch_id}"
     if status.stdout.strip():
-        return f"platform_worktree_delivery_dirty:{batch_id}"
+        return f"native_worktree_delivery_dirty:{batch_id}"
     return None
 
 
@@ -660,16 +626,10 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
             if not isinstance(candidate, str) or not candidate.strip():
                 raise ValueError(f"parallel_batch_worktree_path_required:{batch_id}")
             assert_batch_worktree_isolated(manifest, batch_id, candidate)
-            branch = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=Path(candidate),
-                capture_output=True,
-                text=True,
-            )
             expected_branch = details.get("branchName") or batch.get("branchName")
             if not isinstance(expected_branch, str) or not expected_branch.strip():
                 raise ValueError(f"parallel_batch_worktree_branch_required:{batch_id}")
-            if branch.returncode != 0 or branch.stdout.strip() != expected_branch:
+            if current_git_branch(Path(candidate)) != expected_branch:
                 raise ValueError(f"parallel_batch_worktree_branch_mismatch:{batch_id}")
         batch["status"] = status
         for key in ("worktreePath", "branchName", "commitSha", "compileStatus", "mergeCommitSha", "error"):
@@ -868,7 +828,7 @@ def ensure_run(
                 raise
     active_manifest = load_manifest(workspace, feature, active_run_id)
     if active_manifest.get("status") == "needs_resolution":
-        # A merge conflict is a retained platform delivery, not a stale lock.
+        # A merge conflict is a retained native delivery, not a stale lock.
         # Starting another run from a new base would conceal that delivery and
         # could schedule downstream work against the wrong source state.
         unresolved = [

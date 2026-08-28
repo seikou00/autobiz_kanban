@@ -40,14 +40,14 @@ the Workflow call; do not reconstruct it.
   `requiredAction=start_repository_coordinator`
 
 The launcher reads the top-level `plan.json.codeWorkspaces` mapping and returns
-`codeWorkspaces`, `workflowHostGitRoot`, and
-`executionIsolation=platform_dynamic_worktrees` for a single physical Git
-root. For multiple physical roots it instead returns
+`codeWorkspaces`, optional `workflowHostGitRoot` metadata, and
+`executionIsolation=native_git_worktrees` for a single physical Git root. For
+multiple physical roots it instead returns
 `executionMode=repository_coordinated` and a repository coordinator contract.
 `artifactWorkspace` is only the artifact/state directory and must never be
-reused as a code workspace by guesswork. The platform creates an isolated
-checkout only from the Workflow host Git root, so the host must be launched
-from `workflowHostGitRoot`. A fixed Workflow can cover one Git root (multiple
+reused as a code workspace by guesswork. The plugin creates linked native
+checkouts from each `codeWorkspaces` binding, so the host may be launched from
+the artifact directory. A fixed Workflow can cover one Git root (multiple
 logical refs to that same root are allowed). Multiple independent repositories
 are launched as child Workflows by the coordinator, using the same fixed script
 and one shared scheduler run. The launcher returns
@@ -82,8 +82,9 @@ current conversation workspace and then applies its normal workflow controls.
 When resuming an existing run, pass only `resumeFromRunId` and do not resolve the
 artifact path again.
 
-The Workflow host workspace is a required platform Worktree source contract:
-it must be the child request's `workflowHostGitRoot`. A coordinator child must
+The Workflow host workspace is not a Worktree source contract. The plugin
+resolves each repository from `codeWorkspaces` and provisions its own native
+Worktree. A coordinator child must
 contain exactly one physical Git root and only the returned `repositoryRefs` /
 `batchIds`; it must not receive another repository's workspace mapping. The
 artifact workspace remains independent and only stores Feature state.
@@ -100,7 +101,7 @@ Agent 内完成 Route 解析、清单、parser（如适用）和 `FRONTEND_ROUTE
 
 The fixed script starts with scheduler `ensure` and then runs a DAG in
 merge-gated waves. `ensure` creates the first durable run or reuses an active
-run only after validating every sealed platform delivery. A `needs_resolution`
+run only after validating every sealed native delivery. A `needs_resolution`
 run or a missing sealed worktree remains fail-closed; do not create a new run
 to bypass it.
 
@@ -113,7 +114,7 @@ set this status.
 
 The fixed Workflow passes `--allow-bootstrap` to `ensure`. When the source
 repository has uncommitted business changes, the scheduler automatically creates
-one `autodev: bootstrap <feature> baseline` commit before platform worktrees
+one `autodev: bootstrap <feature> baseline` commit before native worktrees
 are provisioned. This is the only automatic source-branch commit before Batch
 delivery merges; platform-owned `.cmbdevclaw/**` files are excluded from both
 the dirty check and baseline commit. Direct CLI uses of `ensure` do not enable
@@ -128,15 +129,14 @@ the bootstrap still excludes platform runtime files and records one explicit
 baseline commit per physical Git root.
 
 1. The scheduler selects pending Batches whose dependencies are all `merged`.
-   It does not create a directory. The Workflow starts every selected child
-   with `agent(..., { isolation: "worktree" })`; the platform then creates and
-   records the native linked worktree from the frozen host base. The first wave
-   therefore contains all no-dependency Batches.
+   The Workflow first calls `worktree_manager.py provision` for every selected
+   Batch; the plugin creates and records a native linked Worktree from the
+   frozen repository head. The first wave therefore contains all no-dependency
+   Batches.
 2. The current wave runs concurrently with `parallel()` up to `maxParallel`.
-   Every Batch leases the platform-assigned linked worktree and records its
-   actual path and branch in the scheduler manifest. Each isolated agent gets
-   its own checkout; any overlap is handled as a real merge conflict at the
-   barrier.
+   Every Batch leases the plugin-assigned linked Worktree and records its actual
+   path and branch in the scheduler manifest. Each agent receives an explicit
+   checkout path; any overlap is handled as a real merge conflict at the barrier.
 3. Each Batch acquires a lease, implements only its assigned TASKs, runs
    `batch-compile`, then invokes `worktree_manager.py seal` to commit and
    persist its delivery SHA. `lease release --final-status ready_to_merge`
@@ -163,7 +163,7 @@ which is the required serial behavior.
 
 ## Batch Agent Boundaries
 
-Within its platform-assigned worktree, a Batch agent must:
+Within its plugin-provisioned native Git Worktree, a Batch agent must:
 
 - acquire and later release the `runId + batchId` lease;
 - capture its actual path and branch from `pwd`, `git rev-parse --show-toplevel`
@@ -176,13 +176,13 @@ Within its platform-assigned worktree, a Batch agent must:
   background throughout implementation, batch compile, and sealing; renew no
   less often than every five minutes and verify both heartbeat liveness and
   `check --owner-token` before compile and before seal;
-- pass the platform-assigned worktree as `--code-workspace`;
+- pass the plugin-provisioned Worktree as `--code-workspace`;
 - complete all assigned TASKs, then run the one allowed `batch-compile`;
 - invoke `worktree_manager.py seal` to commit the successful worktree and
   persist its path, branch, and commit SHA before releasing as `ready_to_merge`.
 
-The Batch agent must not merge, rebase, resolve conflicts, delete worktrees, or
-modify a shared main checkout. It must run with platform `isolation: "worktree"`.
+The Batch agent must not merge, rebase, resolve conflicts, delete Worktrees, or
+modify a shared main checkout. It receives no platform isolation option.
 The shared Workflow owner is the only actor that invokes the merge hook.
 All workflow paths and the feature ID come only from launcher `workflowArgs`;
 literal `undefined` or non-absolute paths are rejected before any Batch agent
@@ -209,16 +209,16 @@ state.
   blocks the run. Do not use `ours`, `theirs`, `git merge -s ours`,
   `--no-verify`, or direct edits in the shared checkout to bypass it.
 - Successful or explicitly rolled-back terminal runs may be handed to
-  `parallel_batch_lifecycle.py cleanup`; it records retained platform
-  deliveries but never removes their directories or branches.
+  `parallel_batch_lifecycle.py cleanup`; it removes plugin-owned native
+  worktrees and records the cleanup result.
 - Platform-owned `.cmbdevclaw/workflows/**` journal, state, and toolstream
   files are excluded from source-dirt checks. Do not use `git checkout -- .`
   or `git clean` to remove them: those commands can destroy user work or the
   Workflow journal needed for recovery.
 - `batch_merger.py` is the integration owner for this workflow. After it has
-  merged a Batch, the platform panel may still show the retained delivery for
-  Diff/recovery; do not click the platform Merge action a second time. Inspect
-  it, then use the platform's discard/cleanup flow when it is no longer needed.
+  merged a Batch, the plugin may retain the native delivery for Diff/recovery;
+  do not merge it a second time. Inspect it, then use the plugin cleanup hook
+  when it is no longer needed.
 - Never delete `.parallel-runs/<runId>`, copy files out of an orphaned
   worktree, or manually merge a Batch branch. Those operations bypass delivery
   evidence and leave the run unrecoverable.

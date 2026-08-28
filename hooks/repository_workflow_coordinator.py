@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Coordinate one fixed platform Workflow per physical Git repository.
+"""Coordinate one fixed native-worktree Workflow per physical Git repository.
 
-The platform worktree API derives a child worktree from the Workflow host and
-cannot select a different repository per agent.  This hook keeps one durable
-cross-repository scheduler run, then emits child Workflow requests grouped by
-physical Git root.  The caller launches those requests in parallel and calls
-``next`` after the whole wave has merged.
+The platform does not provide a repository-selectable Worktree API. This hook
+keeps one durable cross-repository scheduler run, then emits child Workflow
+requests grouped by physical Git root. Each child asks the plugin's
+``worktree_manager.py`` to create a linked native Git worktree from that
+binding; the caller launches those requests in parallel and calls ``next``
+after the whole wave has merged.
 """
 
 from __future__ import annotations

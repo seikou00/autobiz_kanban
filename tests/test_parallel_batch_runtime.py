@@ -26,7 +26,7 @@ from hooks.parallel_runtime import (
     run_lock,
     save_manifest,
 )
-from hooks.repository_snapshot import git_status_porcelain
+from hooks.repository_snapshot import current_git_branch, git_status_porcelain
 from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_scheduler import (
     assert_batch_worktree_isolated,
@@ -39,7 +39,7 @@ from hooks.parallel_batch_scheduler import (
 )
 from hooks.plan_json import PlanBundle, load_plan_bundle
 from hooks.plan_json import task_set_digest
-from hooks.worktree_manager import seal_parallel_batch
+from hooks.worktree_manager import provision_parallel_worktree, remove_parallel_worktree, seal_parallel_batch
 from tests.test_task_runner import (
     _add_second_compile_only_batch,
     _configure_defer_to_test_stages,
@@ -67,11 +67,11 @@ def _create_native_worktree(
     repo_path: Path | None,
     owner_token: str,
 ) -> dict[str, Any]:
-    """Simulate a platform-provisioned Dynamic Workflow worktree.
+    """Simulate a plugin-provisioned native Git worktree.
 
-    Production uses ``agent(..., { isolation: "worktree" })``.  Tests create
-    the same kind of Git-registered checkout outside the source repository and
-    immediately record the path/branch through the scheduler boundary.
+    Production uses ``worktree_manager.py provision``. Tests create the same
+    Git-registered checkout outside the source repository and record it through
+    the scheduler boundary.
     """
     manifest = load_manifest(workspace, feature, run_id)
     batch = manifest["batches"][batch_id]
@@ -79,7 +79,7 @@ def _create_native_worktree(
     git_root = Path(manifest["repositories"][repository_ref]["gitRoot"])
     if repo_path is not None and repo_path.resolve() != git_root.resolve():
         return {"success": False, "error": f"parallel_repository_binding_mismatch:{repository_ref}"}
-    target = workspace.parent / "platform-worktrees" / run_id / batch_id
+    target = workspace.parent / "native-worktrees" / run_id / batch_id
     target.parent.mkdir(parents=True, exist_ok=True)
     branch = f"cmbcowork/{run_id.lower()}/{batch_id.lower()}"
     base_sha = manifest["repositories"][repository_ref]["headSha"]
@@ -111,11 +111,21 @@ def _seal_native_worktree(
     repo_path: Path | None,
     owner_token: str,
 ) -> dict[str, Any]:
-    """Seal a platform-provisioned delivery worktree."""
+    """Seal a plugin-provisioned native delivery worktree."""
     return seal_parallel_batch(workspace, feature, run_id, batch_id, repo_path, owner_token)
 
 
 class ParallelBatchRuntimeTest(unittest.TestCase):
+    def test_current_branch_uses_legacy_git_compatible_plumbing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+
+            self.assertEqual(
+                current_git_branch(repo),
+                _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD"),
+            )
+
     def test_ensure_reuses_existing_scheduler_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -286,7 +296,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "parallel_final_verify_merge_commit_missing:B001"):
                 verify_final(workspace, "alpha", created["runId"])
 
-    def test_resume_blocks_when_sealed_platform_delivery_is_missing(self) -> None:
+    def test_resume_blocks_when_sealed_native_delivery_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -327,7 +337,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
 
             self.assertEqual(resumed["status"], "blocked")
             self.assertTrue(resumed["recoveryRequired"])
-            self.assertIn("platform_worktree_delivery_missing:B001:worktree", resumed["errors"])
+            self.assertIn("native_worktree_delivery_missing:B001:worktree", resumed["errors"])
 
     def test_unsealed_batch_cannot_be_released_or_report_an_empty_merge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -389,7 +399,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(preflight["error"], "main_worktree_dirty")
             self.assertEqual(len(preflight["changes"]), 1)
 
-    def test_partial_rollback_run_can_be_cleaned(self) -> None:
+    def test_partial_rollback_run_removes_native_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -419,9 +429,9 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
 
             self.assertEqual(rollback["status"], "rolled_back")
             self.assertEqual(cleanup["status"], "cleaned")
-            self.assertTrue(any(Path(path).samefile(delivery_path) for path in cleanup["retainedWorktrees"]))
-            self.assertTrue(delivery_path.exists())
-            task_runner_git(repo, "worktree", "remove", "--force", str(delivery_path))
+            self.assertNotIn(str(delivery_path), cleanup["retainedWorktrees"])
+            self.assertTrue(any(Path(path).resolve() == delivery_path.resolve() for path in cleanup["removedWorktrees"]))
+            self.assertFalse(delivery_path.exists())
 
     def test_scheduler_does_not_bind_a_run_to_the_workflow_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -439,7 +449,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 workflow_workspace=neutral,
             )
             manifest = load_manifest(workspace, "alpha", scheduled["runId"])
-            self.assertEqual(manifest["isolation"]["mode"], "platform_dynamic_worktrees")
+            self.assertEqual(manifest["isolation"]["mode"], "native_git_worktrees")
 
     def test_scheduler_rejects_source_checkout_as_batch_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -471,7 +481,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
 
             self.assertEqual(load_manifest(workspace, "alpha", scheduled["runId"])["batches"]["B001"]["status"], "pending")
 
-    def test_scheduler_defers_worktree_provisioning_to_platform_agent(self) -> None:
+    def test_scheduler_defers_worktree_provisioning_to_plugin_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -502,6 +512,41 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "running")
             finally:
                 subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=repo, check=True)
+
+    def test_plugin_worktree_manager_provisions_reuses_and_removes_native_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+                workflow_workspace=root / "artifact-host",
+            )
+            run_id = scheduled["runId"]
+
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            self.assertTrue(worktree.is_dir())
+            self.assertEqual(_git(worktree, "rev-parse", "--show-toplevel"), str(worktree))
+            self.assertEqual(first["repositoryRef"], "default")
+            manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(manifest["batches"]["B001"]["worktreeOwner"], "plugin")
+
+            reused = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(reused["success"], reused)
+            self.assertTrue(reused["reused"])
+            self.assertEqual(reused["worktreePath"], first["worktreePath"])
+
+            removed = remove_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(removed["success"], removed)
+            self.assertTrue(removed["removed"])
+            self.assertFalse(worktree.exists())
+            self.assertIsNotNone(load_manifest(workspace, "alpha", run_id)["batches"]["B001"].get("worktreeRemovedAt"))
 
     def test_native_rebase_mode_auto_merges_parallel_deliveries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -543,7 +588,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             base_sha = _git(repo, "rev-parse", "HEAD")
             deliveries = []
             for batch_id, filename in (("B001", "first.txt"), ("B002", "second.txt")):
-                worktree = workspace.parent / "platform-worktrees" / run_id / f"native-{batch_id}"
+                worktree = workspace.parent / "native-worktrees" / run_id / f"native-{batch_id}"
                 worktree.parent.mkdir(parents=True, exist_ok=True)
                 branch = f"cmb/workflow-{batch_id.lower()}"
                 task_runner_git(repo, "worktree", "add", "-b", branch, str(worktree), base_sha)
@@ -576,7 +621,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual((repo / "second.txt").read_text(encoding="utf-8"), "B002\n")
             manifest = load_manifest(workspace, "alpha", run_id)
             self.assertEqual(manifest["status"], "verifying")
-            self.assertEqual(manifest["isolation"]["mode"], "platform_dynamic_worktrees")
+            self.assertEqual(manifest["isolation"]["mode"], "native_git_worktrees")
 
             for worktree in deliveries:
                 task_runner_git(repo, "worktree", "remove", str(worktree))
@@ -1252,6 +1297,45 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(pid_file.exists())
             self.assertTrue(check_lease(workspace, feature, run, "B001", lease["ownerToken"]))
+
+    def test_force_reclaim_cli_does_not_require_worker_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature = "alpha"
+            run = "cw-20260819-000003-test"
+            state_path = workspace / ".autobizdevops" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps({"features": {feature: {"checkpoint": "code_in_progress"}}}), encoding="utf-8")
+            run_dir = workspace / ".autobizdevops" / "features" / feature / ".parallel-runs" / run
+            (run_dir / "leases").mkdir(parents=True)
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"runId": run, "batches": {"B001": {"status": "leased", "lease": {}}}}),
+                encoding="utf-8",
+            )
+            acquire_lease(workspace, feature, run, "B001", ttl_seconds=60)
+            manager = Path(__file__).resolve().parents[1] / "hooks" / "batch_lease_manager.py"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(manager),
+                    "reclaim",
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    feature,
+                    "--run-id",
+                    run,
+                    "--batch-id",
+                    "B001",
+                    "--force",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(json.loads(result.stdout)["reclaimed"])
+            self.assertEqual(load_manifest(workspace, feature, run)["batches"]["B001"]["status"], "pending")
 
     def test_lease_rejects_dependency_without_merge_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
