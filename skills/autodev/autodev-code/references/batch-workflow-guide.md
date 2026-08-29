@@ -208,17 +208,23 @@ state.
 - A merge conflict, failed compile, plan digest change, or failed final verify
   blocks the run. Do not use `ours`, `theirs`, `git merge -s ours`,
   `--no-verify`, or direct edits in the shared checkout to bypass it.
-- Successful or explicitly rolled-back terminal runs may be handed to
-  `parallel_batch_lifecycle.py cleanup`; it removes plugin-owned native
-  worktrees and records the cleanup result.
+- After every successful merge, the fixed Workflow calls
+  `parallel_batch_lifecycle.py cleanup-merged` before releasing downstream
+  Batches. It removes only plugin-owned deliveries whose manifest status is
+  `merged`, including an orphaned lease, native worktree, and temporary branch.
+  A cleanup failure blocks the next wave and is retried at the start of the
+  next Workflow. `failed`, `blocked`, and `needs_resolution` deliveries stay
+  intact for diagnosis and recovery. Explicitly rolled-back terminal runs use
+  `parallel_batch_lifecycle.py cleanup` to remove all remaining resources.
 - Platform-owned `.cmbdevclaw/workflows/**` journal, state, and toolstream
   files are excluded from source-dirt checks. Do not use `git checkout -- .`
   or `git clean` to remove them: those commands can destroy user work or the
   Workflow journal needed for recovery.
-- `batch_merger.py` is the integration owner for this workflow. After it has
-  merged a Batch, the plugin may retain the native delivery for Diff/recovery;
-  do not merge it a second time. Inspect it, then use the plugin cleanup hook
-  when it is no longer needed.
+- `batch_merger.py` is the integration owner for this workflow. Once it has
+  written `mergeCommitSha`, the fixed Workflow cleans that delivered native
+  worktree and temporary branch before the scheduler may start a dependent
+  Batch. Do not merge a delivery a second time or delete any unresolved
+  worktree manually.
 - Never delete `.parallel-runs/<runId>`, copy files out of an orphaned
   worktree, or manually merge a Batch branch. Those operations bypass delivery
   evidence and leave the run unrecoverable.

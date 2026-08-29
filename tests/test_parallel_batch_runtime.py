@@ -12,7 +12,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from hooks.batch_merger import _merge_probe, merge_run, preflight_merge, recover_plan_state_after_merge, resolve_merge_conflict
-from hooks.parallel_batch_lifecycle import cleanup_run, rollback_run
+from hooks.parallel_batch_lifecycle import cleanup_merged_batches, cleanup_run, rollback_run
 from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import (
     acquire_lease,
@@ -623,8 +623,22 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(manifest["status"], "verifying")
             self.assertEqual(manifest["isolation"]["mode"], "native_git_worktrees")
 
+            cleaned = cleanup_merged_batches(
+                workspace,
+                "alpha",
+                run_id,
+                batch_ids=["B001", "B002"],
+            )
+            self.assertTrue(cleaned["success"], cleaned)
+            self.assertEqual(cleaned["cleanedBatchIds"], ["B001", "B002"])
+            self.assertEqual(cleaned["errors"], [])
             for worktree in deliveries:
-                task_runner_git(repo, "worktree", "remove", str(worktree))
+                self.assertFalse(worktree.exists())
+            cleaned_manifest = load_manifest(workspace, "alpha", run_id)
+            for batch_id in ("B001", "B002"):
+                self.assertIsNone(cleaned_manifest["batches"][batch_id]["worktreePath"])
+                self.assertIsNone(cleaned_manifest["batches"][batch_id]["branchName"])
+                self.assertEqual(cleaned_manifest["mergedBatchCleanup"][batch_id]["status"], "cleaned")
 
     def test_scheduler_rejects_dirty_repository_without_explicit_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

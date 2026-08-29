@@ -83,6 +83,17 @@ const WORKTREE_SCHEMA = {
   required: ["success", "batchId", "repositoryRef"],
   additionalProperties: false
 };
+const MERGED_CLEANUP_SCHEMA = {
+  type: "object",
+  properties: {
+    success: { type: "boolean" },
+    cleanedBatchIds: { type: "array", items: { type: "string" } },
+    releasedLeases: { type: "array", items: { type: "string" } },
+    errors: { type: "array", items: { type: "string" } }
+  },
+  required: ["success", "cleanedBatchIds", "errors"],
+  additionalProperties: true
+};
 
 function unwrap(value) {
   if (value && typeof value === "object" && typeof value.value === "string") return unwrap(value.value);
@@ -200,6 +211,7 @@ const taskRunnerPath = joinPath(pluginPath, "hooks/task_runner.py");
 const routeResolverPath = joinPath(pluginPath, "hooks/resolve_frontend_html_route.py");
 const worktreeManagerPath = joinPath(pluginPath, "hooks/worktree_manager.py");
 const mergerPath = joinPath(pluginPath, "hooks/batch_merger.py");
+const lifecyclePath = joinPath(pluginPath, "hooks/parallel_batch_lifecycle.py");
 const finalVerifyPath = joinPath(pluginPath, "hooks/parallel_final_verify.py");
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
   .map(([workspaceRef, path]) => `--code-workspace "${workspaceRef}=${path}"`)
@@ -251,6 +263,7 @@ let batchTaskIds = prepared.batchTaskIds || {};
 let batchWorkspaces = prepared.batchWorkspaces || {};
 const batchResults = [];
 const mergeResults = [];
+const cleanupResults = [];
 let schedulerWaves = 0;
 
 async function failBatchAndReclaimLease(batchId, batchWorktree, batchBranch, reason) {
@@ -264,6 +277,38 @@ async function failBatchAndReclaimLease(batchId, batchWorktree, batchBranch, rea
     { label: `cleanup-failed-batch-${batchId}`, phase: "实现" }
   );
 }
+
+function mergedBatchIds(mergeResult) {
+  return [...new Set(
+    (Array.isArray(mergeResult && mergeResult.merged) ? mergeResult.merged : [])
+      .map(item => item && item.batchId)
+      .filter(batchId => usableString(batchId))
+  )];
+}
+
+async function cleanupMergedWorktrees(batchIds, label) {
+  const expected = [...new Set((Array.isArray(batchIds) ? batchIds : [])
+    .filter(batchId => usableString(batchId)))];
+  const batchArgs = expected.map(batchId => `--batch-id "${batchId}"`).join(" ");
+  const cleanup = requireSuccess(await agent(
+    `清理已交付 Batch 的插件原生 Worktree。执行 python "${lifecyclePath}" cleanup-merged ` +
+    `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${batchArgs}。` +
+    `只允许清理 manifest 中 status=merged 的 Batch：释放残留 lease、删除该 Worktree 与临时分支并更新 manifest；` +
+    `不得清理 failed、blocked 或 needs_resolution 的 Worktree。只返回 JSON。`,
+    { label, phase: "合并", schema: MERGED_CLEANUP_SCHEMA }
+  ), label);
+  const cleaned = new Set(Array.isArray(cleanup.cleanedBatchIds) ? cleanup.cleanedBatchIds : []);
+  const missing = expected.filter(batchId => !cleaned.has(batchId));
+  if (missing.length > 0) {
+    throw new Error(`merged_worktree_cleanup_incomplete:${missing.join(",")}`);
+  }
+  cleanupResults.push(cleanup);
+  return cleanup;
+}
+
+// A resumed run can already contain merged deliveries from a prior interrupted
+// Workflow. Clear those first so a retry never inherits occupied branches.
+await cleanupMergedWorktrees([], "recover-merged-worktree-cleanup");
 
 if (!scheduledGroups.length && !mergeableBatches.length && !["verifying", "succeeded"].includes(prepared.status) && !prepared.waitingForRepositories && !hasWorkOutsideScope(prepared)) {
   throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: prepared, batchResults, mergeResults }));
@@ -395,6 +440,10 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0) {
     { label: `merge-wave-${schedulerWaves}`, phase: "合并", schema: MERGE_RESULT_SCHEMA }
   ));
   mergeResults.push(mergeResult);
+  await cleanupMergedWorktrees(
+    mergedBatchIds(mergeResult),
+    `cleanup-merged-wave-${schedulerWaves}`
+  );
 
   if (!mergeResult.success && mergeResult.needsResolution) {
     if (MAX_AUTO_MERGE_RESOLUTION_ATTEMPTS < 1) {
@@ -450,6 +499,10 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0) {
       { label: `merge-resolved-wave-${schedulerWaves}`, phase: "合并", schema: MERGE_RESULT_SCHEMA }
     ), "merge resolved wave");
     mergeResults.push(mergeResult);
+    await cleanupMergedWorktrees(
+      mergedBatchIds(mergeResult),
+      `cleanup-resolved-wave-${schedulerWaves}`
+    );
   }
   if (!mergeResult.success && mergeResult.failed?.some(item => item && item.needsPlanRecovery)) {
     const planFailure = mergeResult.failed.find(item => item && item.needsPlanRecovery);
@@ -473,6 +526,10 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0) {
       recoveredPlanState: true,
     };
     mergeResults.push(mergeResult);
+    await cleanupMergedWorktrees(
+      mergedBatchIds(mergeResult),
+      `cleanup-recovered-wave-${schedulerWaves}`
+    );
   }
   if (!mergeResult.success) {
     throw new Error(JSON.stringify({ error: "merge_failed", runId, mergeResult, batchResults, mergeResults }));
@@ -499,6 +556,7 @@ if (coordinatorManaged) {
     runId,
     batchResults,
     mergeResults,
+    cleanupResults,
     waitingForRepositories: true,
     nextAction: "repository_coordinator_next",
   };
@@ -511,4 +569,4 @@ const verification = requireSuccess(await agent(
   { label: "verify-merged-batches", phase: "最终验证", schema: VERIFICATION_SCHEMA }
 ), "final verification");
 
-return { ok: true, feature, runId, batchResults, mergeResults, verification };
+return { ok: true, feature, runId, batchResults, mergeResults, cleanupResults, verification };

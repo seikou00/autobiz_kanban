@@ -162,6 +162,107 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
         }
 
 
+def cleanup_merged_batches(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    *,
+    batch_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Release completed delivery worktrees without closing the active run.
+
+    A Batch is eligible only after its commit has been merged and the manifest
+    records that outcome.  That keeps the native worktree available for real
+    rebase conflicts and Plan-state recovery, while preventing already
+    delivered branches from blocking a later Workflow attempt.
+    """
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batches = manifest.get("batches") if isinstance(manifest.get("batches"), dict) else {}
+        requested = (
+            list(batch_ids)
+            if batch_ids is not None
+            else sorted(
+                batch_id
+                for batch_id, batch in batches.items()
+                if isinstance(batch, dict) and batch.get("status") == "merged"
+            )
+        )
+        targets: list[str] = []
+        skipped: list[dict[str, str]] = []
+        errors: list[str] = []
+        for batch_id in requested:
+            batch = batches.get(batch_id)
+            if not isinstance(batch, dict):
+                errors.append(f"{batch_id}:parallel_batch_not_found")
+                continue
+            if batch.get("status") != "merged":
+                skipped.append({"batchId": batch_id, "status": str(batch.get("status") or "unknown")})
+                continue
+            targets.append(batch_id)
+
+    cleaned: list[str] = []
+    released_leases: list[str] = []
+    for batch_id in targets:
+        try:
+            if reclaim_lease(workspace, feature, run_id, batch_id, force=True):
+                released_leases.append(batch_id)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{batch_id}:lease_release_failed:{exc}")
+            continue
+
+        result = remove_parallel_worktree(
+            workspace,
+            feature,
+            run_id,
+            batch_id,
+            force=False,
+        )
+        if result.get("success"):
+            cleaned.append(batch_id)
+        else:
+            errors.append(f"{batch_id}:{result.get('error', 'worktree_remove_failed')}")
+
+    completed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        cleanup = manifest.setdefault("mergedBatchCleanup", {})
+        if not isinstance(cleanup, dict):
+            cleanup = {}
+            manifest["mergedBatchCleanup"] = cleanup
+        for batch_id in cleaned:
+            cleanup[batch_id] = {
+                "at": completed_at,
+                "status": "cleaned",
+                "leaseReleased": batch_id in released_leases,
+            }
+        for item in skipped:
+            cleanup[item["batchId"]] = {
+                "at": completed_at,
+                "status": "skipped",
+                "batchStatus": item["status"],
+            }
+        save_manifest(workspace, feature, run_id, manifest)
+        append_event(
+            workspace,
+            feature,
+            run_id,
+            "merged_batch_worktrees_cleaned",
+            cleanedBatchIds=cleaned,
+            releasedLeases=released_leases,
+            skipped=skipped,
+            errors=errors,
+        )
+    return {
+        "success": not errors,
+        "runId": run_id,
+        "cleanedBatchIds": cleaned,
+        "releasedLeases": released_leases,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
 def cleanup_feature_runs_for_code_rollback(workspace: Path, feature: str) -> list[dict[str, Any]]:
     """Synchronously dismantle every recorded run before Code state is reset.
 
@@ -281,7 +382,7 @@ def auto_cleanup_old_runs(workspace: Path, feature: str, *, keep_days: int = 7) 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Manage parallel Code run lifecycle")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("monitor", "reclaim-leases", "cleanup", "rollback", "external-changes", "auto-cleanup"):
+    for name in ("monitor", "reclaim-leases", "cleanup", "cleanup-merged", "rollback", "external-changes", "auto-cleanup"):
         p = sub.add_parser(name)
         p.add_argument("--workspace")
         p.add_argument("--feature", required=True)
@@ -291,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--repo-path")
         if name in {"cleanup", "reclaim-leases"}:
             p.add_argument("--force", action="store_true")
+        if name == "cleanup-merged":
+            p.add_argument("--batch-id", action="append")
         if name == "rollback":
             p.add_argument("--mode", choices=("full", "partial"), default="partial")
             p.add_argument("--confirm", action="store_true")
@@ -308,6 +411,13 @@ def main(argv: list[str] | None = None) -> int:
             result = {"reclaimed": reclaim_stale_leases(workspace, feature, args.run_id, force=args.force)}
         elif args.command == "cleanup":
             result = cleanup_run(workspace, feature, args.run_id, force=args.force)
+        elif args.command == "cleanup-merged":
+            result = cleanup_merged_batches(
+                workspace,
+                feature,
+                args.run_id,
+                batch_ids=args.batch_id,
+            )
         elif args.command == "rollback":
             result = rollback_run(workspace, feature, args.run_id, mode=args.mode, confirm=args.confirm)
         elif args.command == "auto-cleanup":
