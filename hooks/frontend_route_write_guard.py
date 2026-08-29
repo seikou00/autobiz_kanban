@@ -257,7 +257,7 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
     return 0
 
 
-def validate_code_exploration_write(workspace: Path, feature: str) -> int:
+def validate_code_task_run_write(workspace: Path, feature: str) -> int:
     target = feature_dir(workspace, feature)
     active_runs: list[tuple[Path, dict]] = []
     for path in (target / ".task-runs").glob("T*/*.json"):
@@ -270,8 +270,8 @@ def validate_code_exploration_write(workspace: Path, feature: str) -> int:
     if len(active_runs) != 1:
         return block(
             "business code write requires exactly one active task run: "
-            f"found={len(active_runs)}; next=run task_runner.py start after code exploration is fresh",
-            system_message="业务代码写入前必须存在一个由 task_runner 创建且带当前探索证明的活动 run。",
+            f"found={len(active_runs)}; next=run task_runner.py start",
+            system_message="业务代码写入前必须存在一个由 task_runner 创建的活动 run。",
         )
     run_path, run = active_runs[0]
     integrity_error = strict_task_run_integrity_error(run)
@@ -296,45 +296,7 @@ def validate_code_exploration_write(workspace: Path, feature: str) -> int:
             f"executionMode={execution_mode} does not permit business source writes",
             system_message="verified_existing 与 external_dependency 任务不得写入业务源码。",
         )
-    gate = run.get("explorationGate")
-    repository_gates = gate.get("repositories") if isinstance(gate, dict) else None
-    if (
-        not isinstance(gate, dict)
-        or gate.get("source") not in {"current_cache", "inherited_after_recheck"}
-        or not isinstance(repository_gates, dict)
-        or not repository_gates
-    ):
-        return block(
-            "active task run has no current sealed exploration proof; "
-            "next=finish or abort the legacy run, complete code exploration, and start a new run",
-            system_message="业务代码写入前必须由当前 start 基于实时缓存密封探索证明。",
-        )
-    if gate.get("source") == "inherited_after_recheck" and (
-        not isinstance(gate.get("inheritedFromRunId"), str)
-        or not isinstance(gate.get("observedRepositories"), dict)
-    ):
-        return block(
-            "inherited exploration proof is missing provenance",
-            system_message="继承的探索证明必须记录来源 run 和本次实际缓存状态。",
-        )
-    invalid = {
-        repository_id: item.get("status") if isinstance(item, dict) else None
-        for repository_id, item in repository_gates.items()
-        if not isinstance(item, dict)
-        or item.get("status") not in {"fresh", "fresh_with_trusted_changes"}
-    }
-    if invalid:
-        return block(
-            f"active task run exploration proof is invalid: {invalid}",
-            system_message="活动 task run 的探索证明不是 fresh，禁止写入业务源码。",
-        )
     return 0
-
-
-def validate_frontend_exploration_write(workspace: Path, feature: str) -> int:
-    """Compatibility alias for callers using the original frontend-only name."""
-
-    return validate_code_exploration_write(workspace, feature)
 
 
 def main() -> int:
@@ -365,7 +327,7 @@ def main() -> int:
             if result:
                 return result
         if is_business_code_path(target_path):
-            result = validate_code_exploration_write(workspace, feature)
+            result = validate_code_task_run_write(workspace, feature)
             if result:
                 return result
     return 0

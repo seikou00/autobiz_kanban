@@ -17,7 +17,6 @@ if str(ROOT) not in sys.path:
 
 from hooks.utest_workspace_binding import (  # noqa: E402
     UTestWorkspaceBindingError,
-    binding_path,
     resolve_workspace_binding,
 )
 
@@ -35,39 +34,6 @@ class UTestWorkspaceBindingTest(unittest.TestCase):
         )
         self.first = self._git_repo(root / "first" / "business-repo")
         self.second = self._git_repo(root / "second" / "business-repo")
-        cache = (
-            self.feature_dir
-            / "cache"
-            / "code-exploration"
-            / "business-repo"
-            / "backend.json"
-        )
-        cache.parent.mkdir(parents=True)
-        cache.write_text(
-            json.dumps(
-                {
-                    "schemaVersion": "autodev.code-exploration.v1",
-                    "repository": {
-                        "id": "business-repo",
-                        "root": str(self.first),
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        run_path = self.feature_dir / ".task-runs" / "T001" / "run.json"
-        run_path.parent.mkdir(parents=True)
-        run_path.write_text(
-            json.dumps(
-                {
-                    "status": "implemented",
-                    "repositories": [
-                        {"id": "business-repo", "path": str(self.second)}
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
 
     def _git_repo(self, path):
         path.mkdir(parents=True)
@@ -79,50 +45,41 @@ class UTestWorkspaceBindingTest(unittest.TestCase):
         )
         return path.resolve()
 
-    def test_ambiguous_candidates_require_user_selection_by_id(self):
-        with self.assertRaises(UTestWorkspaceBindingError) as caught:
-            resolve_workspace_binding(
-                self.workspace,
-                "alpha",
-                "business-repo",
-            )
-
-        error = caught.exception
-        self.assertEqual("workspace_binding_ambiguous", error.code)
-        self.assertEqual("request_user_workspace_candidate_selection", error.required_action)
-        self.assertEqual(2, len(error.candidates))
-        self.assertFalse(binding_path(self.workspace).exists())
-
-        selected = error.candidates[0]
-        result = resolve_workspace_binding(
-            self.workspace,
-            "alpha",
-            "business-repo",
-            selected["candidateId"],
+    def test_missing_plan_mapping_does_not_fall_back_to_task_runs(self):
+        run_path = self.feature_dir / ".task-runs" / "T001" / "run.json"
+        run_path.parent.mkdir(parents=True, exist_ok=True)
+        run_path.write_text(
+            json.dumps(
+                {
+                    "status": "implemented",
+                    "repositories": [{"id": "business-repo", "path": str(self.first)}],
+                }
+            ),
+            encoding="utf-8",
         )
 
-        self.assertEqual(selected["root"], result["root"])
-        saved = json.loads(binding_path(self.workspace).read_text(encoding="utf-8"))
-        self.assertEqual(
-            selected["candidateId"],
-            saved["features"]["alpha"]["business-repo"]["candidateId"],
-        )
-
-    def test_persisted_selection_prevents_future_model_choice(self):
         with self.assertRaises(UTestWorkspaceBindingError) as caught:
             resolve_workspace_binding(self.workspace, "alpha", "business-repo")
-        selected = caught.exception.candidates[1]
-        resolve_workspace_binding(
-            self.workspace,
-            "alpha",
-            "business-repo",
-            selected["candidateId"],
+
+        error = caught.exception
+        self.assertEqual("workspace_binding_missing", error.code)
+        self.assertEqual("repair_plan_code_workspaces", error.required_action)
+
+    def test_plan_code_workspace_mapping_is_authoritative(self):
+        (self.feature_dir / "plan.json").write_text(
+            json.dumps(
+                {
+                    "codeWorkspaces": {"business-repo": str(self.first)},
+                    "batches": [{"id": "B001", "path": "plans/B001/plan.json"}],
+                }
+            ),
+            encoding="utf-8",
         )
 
         result = resolve_workspace_binding(self.workspace, "alpha", "business-repo")
 
-        self.assertEqual(selected["root"], result["root"])
-        self.assertEqual("persisted_binding", result["source"])
+        self.assertEqual(str(self.first), result["root"])
+        self.assertEqual("plan_code_workspaces", result["source"])
 
     def test_model_authored_path_is_not_an_input(self):
         with self.assertRaises(TypeError):

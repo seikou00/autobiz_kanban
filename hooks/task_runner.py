@@ -29,14 +29,11 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence, read_records, stream_path  # noqa: E402
 from hooks.evidence_kernel import FileLock, unlink_if_exists  # noqa: E402
-from hooks.code_exploration import CodeExplorationError, inspect_exploration_cache  # noqa: E402
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
-    EXECUTION_LANES,
     PlanBundle,
     defer_to_test_stages_enabled,
-    bundle_unfinished_tasks,
     find_task,
     load_plan_bundle,
     normalize_status,
@@ -742,53 +739,6 @@ def _active_feature_runs(feature_dir: Path, *, exclude: Path | None = None) -> l
     return sorted(active)
 
 
-def _latest_sealed_prior_task_run(
-    feature_dir: Path,
-    feature: str,
-    task: dict[str, Any],
-) -> dict[str, Any] | None:
-    task_id = str(task.get("id", ""))
-    expected_contract = task_contract_sha256(task)
-    candidates: list[dict[str, Any]] = []
-    for path in (feature_dir / ".task-runs" / task_id).glob("*.json"):
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if (
-            isinstance(state, dict)
-            and state.get("featureId") == feature
-            and state.get("taskId") == task_id
-            and state.get("taskContractSha256") == expected_contract
-            and state.get("executionMode") == "code"
-            and state.get("status") in {"implemented", "done", "failed", "aborted"}
-            and isinstance(state.get("explorationGate"), dict)
-            and strict_task_run_integrity_error(state) is None
-        ):
-            candidates.append(state)
-    if not candidates:
-        return None
-    return max(
-        candidates,
-        key=lambda state: (str(state.get("startedAt", "")), str(state.get("runId", ""))),
-    )
-
-
-def _evidence_only_exploration_staleness(exploration: dict[str, Any]) -> bool:
-    stale_reasons = exploration.get("staleReasons")
-    return (
-        exploration.get("status") == "stale"
-        and not exploration.get("changedPaths")
-        and not exploration.get("criticalHits")
-        and isinstance(stale_reasons, list)
-        and bool(stale_reasons)
-        and all(
-            isinstance(reason, str) and reason.startswith("implementation_evidence_invalid:")
-            for reason in stale_reasons
-        )
-        )
-
-
 def _start_task_unlocked(
     workspace: Path,
     feature: str,
@@ -885,98 +835,6 @@ def _start_task_unlocked(
             activeRuns=active,
         )
     execution_mode = task_execution_mode(task)
-    exploration_gate = None
-    if execution_mode == "code":
-        repository_gates: dict[str, Any] = {}
-        observed_exploration: dict[str, dict[str, Any]] = {}
-        unready_exploration: dict[str, dict[str, Any]] = {}
-        for repository_id, repository_root in repositories.items():
-            try:
-                exploration = inspect_exploration_cache(
-                    feature_dir,
-                    plan,
-                    task_id,
-                    repository_root,
-                )
-            except (CodeExplorationError, RepositorySnapshotError) as exc:
-                detail = str(exc)
-                raise TaskRunnerError(
-                    f"code_exploration_inspect_failed:{repository_id}:{detail}",
-                    requiredAction=(
-                        "repair_git_snapshot_and_retry_context"
-                        if "git_snapshot_failed" in detail
-                        else "repair_exploration_cache_and_retry_context"
-                    ),
-                    explorationBlocked=True,
-                    implementationAllowed=False,
-                ) from exc
-            status = exploration.get("status")
-            observed_exploration[repository_id] = {
-                "status": status,
-                "cachePath": exploration.get("cachePath"),
-                "cacheSha256": exploration.get("cacheSha256"),
-                "changedPaths": exploration.get("changedPaths", []),
-                "criticalHits": exploration.get("criticalHits", []),
-                "staleReasons": exploration.get("staleReasons", []),
-            }
-            if status not in {"fresh", "fresh_with_trusted_changes"}:
-                unready_exploration[repository_id] = exploration
-                continue
-            repository_gates[repository_id] = {
-                "status": status,
-                "cachePath": exploration.get("cachePath"),
-                "cacheSha256": exploration.get("cacheSha256"),
-            }
-        if unready_exploration:
-            prior_run = _latest_sealed_prior_task_run(feature_dir, feature, task)
-            prior_gate = prior_run.get("explorationGate") if isinstance(prior_run, dict) else None
-            prior_repositories = (
-                prior_gate.get("repositories") if isinstance(prior_gate, dict) else None
-            )
-            controlled_retry = isinstance(repair_context, dict) or all(
-                _evidence_only_exploration_staleness(item)
-                for item in unready_exploration.values()
-            )
-            if (
-                controlled_retry
-                and isinstance(prior_repositories, dict)
-                and set(prior_repositories) == set(repositories)
-            ):
-                exploration_gate = {
-                    "checkedAt": _utc_now(),
-                    "source": "inherited_after_recheck",
-                    "inheritedFromRunId": prior_run.get("runId"),
-                    "inheritedGateCheckedAt": prior_gate.get("checkedAt"),
-                    "observedRepositories": observed_exploration,
-                    "repositories": dict(prior_repositories),
-                }
-            else:
-                repository_id, exploration = next(iter(unready_exploration.items()))
-                status = exploration.get("status")
-                required_action = (
-                    "record_code_exploration_and_retry_start"
-                    if status in {"missing", "stale"}
-                    else "patch_code_exploration_and_retry_start"
-                    if status == "reusable_with_changes"
-                    else "rerun_code_task_context_before_start"
-                )
-                raise TaskRunnerError(
-                    f"code_exploration_not_ready:{repository_id}:{status}",
-                    requiredAction=required_action,
-                    explorationStatus=status,
-                    explorationPolicy=exploration.get("policy"),
-                    changedPaths=exploration.get("changedPaths", []),
-                    criticalHits=exploration.get("criticalHits", []),
-                    staleReasons=exploration.get("staleReasons", []),
-                    explorationBlocked=True,
-                    implementationAllowed=False,
-                )
-        else:
-            exploration_gate = {
-                "checkedAt": _utc_now(),
-                "source": "current_cache",
-                "repositories": repository_gates,
-            }
     declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
     repository_state = _repository_state(repositories)
 
@@ -1012,8 +870,6 @@ def _start_task_unlocked(
         state["revalidation"] = dict(pending_revalidation)
     if isinstance(repair_context, dict):
         state["repairContext"] = dict(repair_context)
-    if isinstance(exploration_gate, dict):
-        state["explorationGate"] = exploration_gate
     state["integritySha256"] = task_run_integrity_sha256(state)
     path = _run_path(feature_dir, task_id, run_id)
     _save_run(path, state)
@@ -1930,7 +1786,7 @@ def _finish_implementation_unlocked(
                 if task_status == "failed"
                 else "use_latest_implementation_run"
                 if isinstance(latest_implementation_run_id, str)
-                else "call_code_session"
+                else "inspect_task_run_and_resume_workflow"
             ),
             taskId=task_id,
             staleRunId=run_id,
@@ -3605,152 +3461,6 @@ def _integrate_batch_compile_result(
         }
 
 
-def _code_session_unlocked(workspace: Path, feature: str) -> dict[str, Any]:
-    feature_dir = _feature_dir(workspace, feature)
-    try:
-        bundle = load_plan_bundle(feature_dir)
-    except ValueError as exc:
-        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
-
-    pending_batch_ids = _unfinished_batch_ids(bundle)
-    if len(pending_batch_ids) > 1:
-        return {
-            "action": "start_parallel_batch_workflow",
-            "requiredAction": "start_parallel_batch_workflow",
-            "batchIds": pending_batch_ids,
-            "userMessage": "检测到多个未完成 Batch；请通过并行调度工作流按依赖 DAG 执行。",
-        }
-
-    active_batch_id = bundle.root.get("activeBatchId")
-    if isinstance(active_batch_id, str):
-        entry = next(
-            (item for item in bundle.root.get("batches", []) if item.get("id") == active_batch_id),
-            None,
-        )
-        if not isinstance(entry, dict):
-            raise TaskRunnerError(f"active_batch_missing:{active_batch_id}")
-        execution_lane = entry.get("executionLane")
-        if execution_lane not in EXECUTION_LANES:
-            raise TaskRunnerError(f"active_batch_execution_lane_invalid:{active_batch_id}")
-        batch_plan = bundle.batches.get(active_batch_id)
-        batch_tasks = batch_plan.get("tasks", []) if isinstance(batch_plan, dict) else []
-        # Code has one gate: compile the final batch snapshot after all tasks are implemented.
-        if not defer_to_test_stages_enabled(bundle.root):
-            raise TaskRunnerError("unsupported_task_validation_policy")
-        if defer_to_test_stages_enabled(bundle.root):
-            batch_compile = batch_plan.get("batchCompile") if isinstance(batch_plan, dict) else None
-            batch_compile_status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
-
-            # 所有任务 implemented 或 done，且编译状态是 pending
-            all_tasks_ready = bool(batch_tasks) and all(
-                isinstance(task, dict) and normalize_status(task.get("status")) in {"implemented", "done"}
-                for task in batch_tasks
-            )
-
-            if all_tasks_ready and batch_compile_status == "pending":
-                return {
-                    "action": "run_batch_compile",
-                    "activeBatchId": active_batch_id,
-                    "executionLane": execution_lane,
-                    "userMessage": f"批次 {active_batch_id} 的所有任务已实现，开始执行批次编译验证。",
-                }
-            elif batch_compile_status == "failed":
-                attempts = int(batch_compile.get("repairAttempts", 0))
-                exhausted = attempts >= BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
-                return {
-                    "action": (
-                        "batch_compile_repair_exhausted"
-                        if exhausted
-                        else "start_batch_compile_repair"
-                    ),
-                    "requiredAction": (
-                        "escalate_batch_compile_repair_exhausted"
-                        if exhausted
-                        else "start_batch_compile_repair"
-                    ),
-                    "nextActor": "main_agent" if exhausted else "model",
-                    "modelRepairRequired": not exhausted,
-                    "activeBatchId": active_batch_id,
-                    "executionLane": execution_lane,
-                    "compileOutput": batch_compile.get("output", ""),
-                    "failureCategory": batch_compile.get("failureCategory", ""),
-                    "commandId": batch_compile.get("commandId", ""),
-                    "diagnosticPaths": batch_compile.get("diagnosticPaths", []),
-                    "repairOwnerTaskIds": batch_compile.get("repairOwnerTaskIds", []),
-                    "repairAttempts": attempts,
-                    "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
-                    "remainingRepairAttempts": max(
-                        BATCH_COMPILE_MAX_REPAIR_ATTEMPTS - attempts,
-                        0,
-                    ),
-                    "allowedRunnerCommands": (
-                        [] if exhausted else ["start-batch-compile-repair"]
-                    ),
-                    "userMessage": (
-                        f"批次 {active_batch_id} 的编译修复已达到 3 次上限，流程已阻断。"
-                        if exhausted
-                        else (
-                            f"批次 {active_batch_id} 编译失败；必须由模型启动受控修复任务，"
-                            "修复完成并记录新的 implementation evidence 后才能重新编译。"
-                        )
-                    ),
-                }
-            elif batch_compile_status == "repairing":
-                return {
-                    "action": "continue_batch_compile_repair",
-                    "requiredAction": "model_fix_then_finish_implementation",
-                    "nextActor": "model",
-                    "activeBatchId": active_batch_id,
-                    "executionLane": execution_lane,
-                    "repairTaskId": batch_compile.get("repairTaskId"),
-                    "repairAttempts": batch_compile.get("repairAttempts", 0),
-                    "maxRepairAttempts": BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
-                    "diagnosticPaths": batch_compile.get("diagnosticPaths", []),
-                    "allowedRunnerCommands": ["finish-implementation"],
-                    "userMessage": (
-                        f"模型正在修复批次 {active_batch_id} 的编译问题；"
-                        "完成代码修改后记录 implementation evidence。"
-                    ),
-                }
-            elif batch_compile_status == "passed":
-                return {
-                    "action": "code_done_ready",
-                    "completedBatchId": active_batch_id,
-                    "userMessage": f"批次 {active_batch_id} 已完成（编译通过）。所有批次已完成，功能开发结束。",
-                }
-            elif batch_compile_status is not None:
-                raise TaskRunnerError(
-                    f"batch_compile_status_invalid:{active_batch_id}:{batch_compile_status}"
-                )
-            elif all_tasks_ready:
-                raise TaskRunnerError(f"batch_compile_contract_missing:{active_batch_id}")
-            else:
-                return {
-                    "action": "execute_active_batch",
-                    "activeBatchId": active_batch_id,
-                    "executionLane": execution_lane,
-                    "taskIds": list(entry.get("taskIds", [])),
-                    "userMessage": f"继续实现批次 {active_batch_id}。",
-                }
-
-
-    unfinished = bundle_unfinished_tasks(bundle)
-    if unfinished:
-        raise TaskRunnerError("no_active_batch_for_unfinished_tasks:" + ",".join(unfinished))
-    return {
-        "action": "code_done_ready",
-        "activeBatchId": None,
-        "validationOutcome": "passed",
-        "userMessage": "所有批次均已通过生产代码编译门禁。",
-    }
-
-
-def code_session(workspace: Path, feature: str) -> dict[str, Any]:
-    feature_dir = _feature_dir(workspace, feature)
-    with _task_run_lock(feature_dir):
-        return _code_session_unlocked(workspace, feature)
-
-
 def _resolve(args: argparse.Namespace) -> tuple[Path, str, list[Path]]:
     workspace = resolve_workspace(args.workspace)
     feature = resolve_feature(args.feature)
@@ -3969,15 +3679,6 @@ def _cmd_revalidate_batch_compile(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
-def _cmd_code_session(args: argparse.Namespace) -> int:
-    try:
-        workspace = resolve_workspace(args.workspace)
-        feature = resolve_feature(args.feature)
-        return _emit(True, **code_session(workspace, feature))
-    except (TaskRunnerError, ValueError) as exc:
-        return _emit_error(exc)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Implement structured code tasks and compile batches")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -4028,11 +3729,6 @@ def main(argv: list[str] | None = None) -> int:
     common(inspect)
     inspect.add_argument("--run-id")
     inspect.set_defaults(func=_cmd_inspect)
-
-    session = subparsers.add_parser("code-session")
-    session.add_argument("--workspace")
-    session.add_argument("--feature")
-    session.set_defaults(func=_cmd_code_session)
 
     batch_compile = subparsers.add_parser("batch-compile")
     batch_compile.add_argument("--workspace")

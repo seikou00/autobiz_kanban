@@ -25,8 +25,6 @@ from hooks.json_writer_common import (  # noqa: E402
     resolve_workspace,
     with_result_data,
 )
-from hooks.code_exploration import CodeExplorationError  # noqa: E402
-from hooks.code_exploration_writer import inspect_caches  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
     load_plan,
@@ -201,57 +199,6 @@ def resolve_task_refs(base: Path, task: dict[str, Any]) -> tuple[list[dict[str, 
     return resolved_specs, resolved_design, spec_errors + design_errors
 
 
-def _batch_exploration_scope(active_plan: dict[str, Any]) -> dict[str, Any]:
-    tasks = [item for item in active_plan.get("tasks", []) if isinstance(item, dict)]
-    scope_fields = ("modules", "entrypoints", "paths", "pages", "dataObjects")
-    scope: dict[str, Any] = {
-        "taskIds": [str(item["id"]) for item in tasks if isinstance(item.get("id"), str)],
-        "workspaceRefs": sorted(
-            {
-                str(item["workspaceRef"])
-                for item in tasks
-                if isinstance(item.get("workspaceRef"), str) and item["workspaceRef"].strip()
-            }
-        ),
-    }
-    for field in scope_fields:
-        scope[field] = sorted(
-            {
-                str(value)
-                for item in tasks
-                for value in (
-                    item.get("scope", {}).get(field, [])
-                    if isinstance(item.get("scope"), dict)
-                    else []
-                )
-                if isinstance(value, str) and value.strip()
-            }
-        )
-    scope["validationCommands"] = [
-        {
-            "taskId": str(item.get("id", "")),
-            "id": str(command.get("id", "")),
-            "argv": list(command.get("argv", [])),
-            "cwd": command.get("cwd"),
-            "kind": command.get("kind"),
-            **({"repo": command.get("repo")} if isinstance(command.get("repo"), str) else {}),
-        }
-        for item in tasks
-        for command in item.get("validationCommands", [])
-        if isinstance(command, dict)
-    ]
-    return scope
-
-
-def _exploration_phase(active_plan: dict[str, Any]) -> str:
-    tasks = [item for item in active_plan.get("tasks", []) if isinstance(item, dict)]
-    execution_started = any(
-        str(item.get("status", "todo")).strip().lower() != "todo"
-        for item in tasks
-    )
-    return "task_guard" if execution_started else "batch_bootstrap"
-
-
 def _context_argv(
     workspace: Path,
     feature: str,
@@ -288,54 +235,6 @@ def _start_argv(workspace: Path, feature: str, task_id: str, code_workspace: Pat
     if code_workspace is not None:
         argv.extend(["--code-workspace", str(code_workspace)])
     return argv
-
-
-def _exploration_next_commands(
-    workspace: Path,
-    feature: str,
-    task_id: str,
-    caches: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    writer = str(Path(__file__).with_name("code_exploration_writer.py").resolve())
-    commands: list[dict[str, Any]] = []
-    for cache in caches:
-        status = cache.get("status")
-        repository_root = cache.get("repositoryRoot")
-        cache_sha = cache.get("cacheSha256")
-        repository_id = cache.get("repositoryId")
-        if status in {"missing", "stale"}:
-            action = "record_code_exploration"
-            writer_command = "record"
-        elif status == "reusable_with_changes":
-            action = "patch_code_exploration"
-            writer_command = "patch"
-        else:
-            continue
-        commands.append(
-            {
-                "action": action,
-                "repositoryId": repository_id,
-                "bodyInput": "stdin",
-                "contractArgv": [sys.executable, writer, "contract", "--section", writer_command],
-                "argv": [
-                    sys.executable,
-                    writer,
-                    writer_command,
-                    "--workspace",
-                    str(workspace),
-                    "--feature",
-                    feature,
-                    "--task-id",
-                    task_id,
-                    "--code-workspace",
-                    str(repository_root),
-                    "--expected-cache-sha256",
-                    str(cache_sha),
-                    "--body-stdin",
-                ],
-            }
-        )
-    return commands
 
 
 def build_context(
@@ -441,7 +340,6 @@ def build_context(
             "completedTaskCount": active_plan.get("completedTaskCount"),
             "taskCount": active_plan.get("taskCount"),
         },
-        "batchExplorationScope": _batch_exploration_scope(active_plan),
         "taskId": task_id,
         "artifactWorkspace": str(workspace),
         "artifactFeatureDir": str(base),
@@ -470,7 +368,6 @@ def build_context(
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
     }
-    phase = _exploration_phase(active_plan)
     if code_workspaces:
         try:
             repositories = resolve_repositories(code_workspaces)
@@ -487,10 +384,9 @@ def build_context(
             ]
         except RepositorySnapshotError as exc:
             return with_result_data(
-                fail("code_exploration_inspect_failed", str(exc), path=active_plan_path),
-                requiredAction="repair_git_snapshot_and_retry_context",
+                fail("code_workspace_resolution_failed", str(exc), path=active_plan_path),
+                requiredAction="repair_code_workspace_and_retry_context",
                 retryContextArgv=_context_argv(workspace, feature, task_id, code_workspaces),
-                explorationBlocked=True,
                 implementationAllowed=False,
                 startAllowed=False,
             )
@@ -516,93 +412,25 @@ def build_context(
                         "allowedFiles": [".gitignore", ".git/info/exclude"],
                     },
                     "retryContextArgv": _context_argv(workspace, feature, task_id, code_workspaces),
-                    "explorationDirective": {
-                        "phase": phase,
-                        "scopeSource": "batchExplorationScope" if phase == "batch_bootstrap" else "taskContract.scope",
-                        "fullExplorationAllowed": False,
-                        "requiresRecord": False,
-                        "requiresPatch": False,
-                        "requiredAction": "configure_git_ignore_and_retry_context",
-                    },
-                    "explorationBlocked": True,
                     "implementationAllowed": False,
                     "startAllowed": False,
                 },
             )
-        try:
-            data_out.update(inspect_caches(workspace, feature, task_id, code_workspaces))
-        except CodeExplorationError as exc:
-            detail = str(exc)
-            action = (
-                "repair_git_snapshot_and_retry_context"
-                if "git_snapshot_failed" in detail
-                else "repair_exploration_cache_and_retry_context"
-            )
-            return with_result_data(
-                fail("code_exploration_inspect_failed", detail, path=active_plan_path),
-                requiredAction=action,
-                retryContextArgv=_context_argv(workspace, feature, task_id, code_workspaces),
-                explorationBlocked=True,
-                implementationAllowed=False,
-                startAllowed=False,
-            )
-    else:
-        data_out["explorationCaches"] = []
-        data_out["explorationPolicy"] = {
-            "status": "unavailable",
-            "explorationPolicy": "repository_required",
-            "requiresRecord": False,
-            "requiresPatch": False,
-        }
-    policy_status = data_out["explorationPolicy"]["status"]
-    full_exploration_required = policy_status in {"missing", "stale"}
-    requires_record = bool(data_out["explorationPolicy"].get("requiresRecord"))
-    requires_patch = bool(data_out["explorationPolicy"].get("requiresPatch"))
-    start_allowed = not errors and policy_status in {"fresh", "fresh_with_trusted_changes"}
-    if requires_record:
-        required_action = "record_code_exploration_before_start"
-    elif requires_patch:
-        required_action = "patch_code_exploration_before_start"
-    elif policy_status == "unavailable":
-        required_action = "provide_code_workspace_and_retry_context"
-    elif errors:
-        required_action = "repair_context_errors_before_start"
-    else:
-        required_action = "start_task"
-    contract_section = "record" if requires_record else "patch" if requires_patch else "full"
-    data_out["explorationDirective"] = {
-        "phase": phase,
-        "scopeSource": (
-            "batchExplorationScope"
-            if phase == "batch_bootstrap" or full_exploration_required
-            else "taskContract.scope"
-        ),
-        "fullExplorationAllowed": full_exploration_required,
-        "requiresRecord": requires_record,
-        "requiresPatch": requires_patch,
-        "requiredAction": required_action,
-        "contractArgv": [
-            sys.executable,
-            str(Path(__file__).with_name("code_exploration_writer.py").resolve()),
-            "contract",
-            "--section",
-            contract_section,
-        ],
-        "nextCommands": _exploration_next_commands(
-            workspace,
-            feature,
-            task_id,
-            data_out["explorationCaches"],
-        ),
-        "retryContextArgv": _context_argv(workspace, feature, task_id, code_workspaces or []),
-        "startArgv": _start_argv(
-            workspace,
-            feature,
-            task_id,
-            code_workspaces[0] if code_workspaces else None,
-        ),
-    }
-    data_out["explorationBlocked"] = not start_allowed
+    start_allowed = not errors and bool(code_workspaces)
+    data_out["requiredAction"] = (
+        "start_task"
+        if start_allowed
+        else "provide_code_workspace_and_retry_context"
+        if not code_workspaces
+        else "repair_context_errors_before_start"
+    )
+    data_out["retryContextArgv"] = _context_argv(workspace, feature, task_id, code_workspaces or [])
+    data_out["startArgv"] = _start_argv(
+        workspace,
+        feature,
+        task_id,
+        code_workspaces[0] if code_workspaces else None,
+    )
     data_out["implementationAllowed"] = start_allowed
     data_out["startAllowed"] = start_allowed
     return WriterResult(ok=not errors, path=active_plan_path, errors=errors, data=data_out)

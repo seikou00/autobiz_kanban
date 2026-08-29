@@ -142,7 +142,7 @@ def test_skill_integration():
         ("workflow_launcher.py", "启动器引用"),
         ("native_git_worktrees", "插件原生 Worktree 隔离说明"),
         ("worktree_manager.py provision", "插件 Worktree 创建阶段说明"),
-        ("不得调用不存在的 `hooks/code_session.py`", "废弃 Code 会话入口保护"),
+        ("不得调用 `task_runner.py code-session`", "废弃 Code 会话入口保护"),
         ("mergeCommitSha", "合并证据保护"),
         ("前端 Route 闸门（按 Task 在 Agent 内执行）", "按 Task 执行 Route 闸门"),
         ("taskContract.uiRequired=true", "Task UI 机器事实"),

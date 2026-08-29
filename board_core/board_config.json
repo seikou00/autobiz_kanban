@@ -734,16 +734,6 @@
               "extract": {
                 "degrade": "缺失时由 task_runner 首次验证时在 Feature 产物目录原子创建；非空 evidence stream 缺少 EVIDENCE.index.json 时停止并恢复，不能重建绕过"
               }
-            },
-            {
-              "id": "code_exploration_cache",
-              "label": "代码探索缓存",
-              "artifactType": "json",
-              "path": "cache/code-exploration/**/*.json",
-              "required": false,
-              "extract": {
-                "degrade": "缺失或过期时由 Code 上下文返回 full_bounded_explore，不能以缓存替代 plan/evidence 验收"
-              }
             }
           ]
         },
@@ -764,7 +754,6 @@
           "archive": [
             ".parallel-runs",
             ".task-runs",
-            "cache/code-exploration",
             "evidence",
             "FRONTEND_ROUTE.json"
           ]

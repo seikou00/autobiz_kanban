@@ -599,33 +599,25 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-plan skill must keep the pre-write task splitting algorithm: " + ", ".join(missing),
         )
 
-    def test_code_skill_requires_compile_only_batch_session_actions(self) -> None:
+    def test_code_skill_requires_compile_only_fixed_workflow(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "execute_active_batch",
-            "run_batch_compile",
-            "start_batch_compile_repair",
-            "continue_batch_compile_repair",
-            "start_parallel_batch_workflow",
-            "code_done_ready",
-            "协议层约束",
-            "explorationCaches",
-            "full_bounded_explore",
-            "task_scope_only",
-            "targeted_reread",
-            "requiresRecord",
-            "requiresPatch",
-            "changedPaths + 1-hop 依赖 + 当前 Task scope",
-            "fresh/reusable_with_changes 时禁止无边界全仓探索",
-            "code_exploration_writer.py",
-            "explorationPolicy.status=unavailable",
-            "必须停止并补传 `--code-workspace`",
+            "workflow_launcher.py",
+            "唯一的 Code 启动入口",
+            "不得调用 `task_runner.py code-session`",
+            "固定 Workflow",
+            "batch-compile",
+            "start-batch-compile-repair",
+            "原生 Git Worktree",
+            "Task Run 的 Git 快照",
+            "batchExecutionPlan",
+            "展示给用户",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
             missing,
             [],
-            "autodev-code must enforce compile-only Code session actions: " + ", ".join(missing),
+            "autodev-code must enforce compile-only fixed Workflow execution: " + ", ".join(missing),
         )
 
     def test_code_skill_requires_same_batch_continuation(self) -> None:
@@ -679,27 +671,19 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-code must define transient validation file handling: " + ", ".join(missing),
         )
 
-    def test_code_skill_defines_batch_level_exploration_cache_policy(self) -> None:
+    def test_code_skill_displays_batch_execution_plan_before_starting_workflow(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
-            "batchExplorationScope",
-            "explorationDirective",
-            "batch_bootstrap",
-            "task_guard",
-            "fullExplorationAllowed=false",
-            "首个 TASK run 启动前",
-            "fresh_with_trusted_changes",
-            "同一 active batch",
-            "implementation Evidence",
-            "批次边界",
-            "shared/integration",
-            "deferredCacheUpdate",
+            "batchExecutionPlan",
+            "逐 Batch 列出 ID、标题、TASK 数、执行 lane、代码仓库、依赖和写集",
+            "按 `waves` 展示",
+            "实际后续 Wave 只会在上游合并成功后释放",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
             missing,
             [],
-            "autodev-code must define batch-level exploration cache policy: " + ", ".join(missing),
+            "autodev-code must display the batch execution plan: " + ", ".join(missing),
         )
 
     def test_plan_and_code_skills_define_requested_workspace_scope_base(self) -> None:
@@ -729,18 +713,16 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(missing),
         )
 
-    def test_code_exploration_cache_is_an_optional_code_output(self) -> None:
+    def test_code_exploration_cache_is_not_a_code_output(self) -> None:
         code = next(
             item
             for context, item in _iter_nodes(_board_config())
             if context == "workflow.nodes" and item.get("id") == "dev.code"
         )
         outputs = code["artifacts"]["outputs"]
-        matches = [item for item in outputs if item.get("path") == "cache/code-exploration/**/*.json"]
-        self.assertEqual(len(matches), 1)
-        self.assertFalse(matches[0]["required"])
+        self.assertNotIn("cache/code-exploration/**/*.json", [item.get("path") for item in outputs])
 
-    def test_plan_skill_points_batch_resume_to_code_session(self) -> None:
+    def test_plan_skill_points_batch_resume_to_parallel_scheduler(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("并行 scheduler", content)
         self.assertIn("依赖 Batch 必须等其 `deps` 全部合并", content)

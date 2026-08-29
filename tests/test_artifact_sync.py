@@ -27,7 +27,6 @@ EXPECTED_OUTPUT_METADATA = {
     "plan.json": ("implementation_plan", "final"),
     "DETAIL_DESIGN.md": ("technical_detail", "process"),
     "evidence/EVIDENCE.jsonl": ("evidence_stream", "evidence"),
-    "cache/code-exploration/**/*.json": ("artifact", "process"),
     "REQUIREMENTS_EVAL.md": ("review_report", "evidence"),
     "UNIT_TEST_REPORT.md": ("unit_test_report", "evidence"),
     "UNIT_TEST_RESULT.json": ("unit_test_result", "evidence"),
@@ -60,8 +59,6 @@ def _workflow_nodes() -> list[dict]:
 def _sample_path(path: str) -> str:
     if path == "specs/**/*.md":
         return "specs/example/spec.md"
-    if path == "cache/code-exploration/**/*.json":
-        return "cache/code-exploration/example.json"
     if path == "e2e-diagnostics/**/*":
         return "e2e-diagnostics/round-1/report.json"
     return path

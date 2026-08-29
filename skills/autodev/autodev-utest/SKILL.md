@@ -98,13 +98,7 @@ task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/
 python "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
-检查器调用 workspace binding 解析器，根据当前 plan 与已验证的 Code 产物自动保存仓库绑定，再用 `scope.modules` 定位测试模块；模型不得填写 repo、仓库地址、framework 或 cwd，不得直接编辑 `.autobizdevops/workspace-bindings.json`。`workspace_binding_missing` 分类为 `environment`；`workspace_binding_ambiguous` 时向用户展示 `candidates`，用户选定后只传回该候选的 ID：
-
-```bash
-python "${pluginPath}/hooks/utest_workspace_binding.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --workspace-ref "<RETURNED_WORKSPACE_REF>" --select-candidate "<USER_SELECTED_CANDIDATE_ID>" --json
-```
-
-不得由模型选择 candidate，也不得把候选路径改写成参数。`contract_gap` 只用于 plan 的 `workspaceRef`、`scope.modules` 与 `validationCommands.repo/cwd` 不一致。
+检查器只从当前 Plan 的 `codeWorkspaces` 映射解析仓库，再用 `scope.modules` 定位测试模块；模型不得填写 repo、仓库地址、framework 或 cwd，也不得从历史 Task Run、当前 cwd 或任何缓存推断仓库。`workspace_binding_missing` 时回到 `/autodev-plan` 修正 `codeWorkspaces`；`contract_gap` 只用于 plan 的 `workspaceRef`、`scope.modules` 与 `validationCommands.repo/cwd` 不一致。
 
 `status=init_required` 时读取并应用：
 

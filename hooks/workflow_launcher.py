@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import feature_dir, resolve_workspace  # noqa: E402
 from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E402
-from hooks.parallel_runtime import batch_workspace_ref, plan_digest  # noqa: E402
+from hooks.parallel_runtime import batch_workspace_ref, plan_digest, resource_groups  # noqa: E402
 from hooks.plan_json import BATCH_ID_RE, load_plan_bundle, plan_json_path  # noqa: E402
 from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root  # noqa: E402
 
@@ -48,42 +48,21 @@ def _plan_workspace_refs(bundle: Any) -> set[str]:
 
 
 def _workspace_contract_values(
-    code_workspaces: Mapping[str, str] | list[str] | None,
+    code_workspaces: Mapping[str, str] | None,
 ) -> tuple[dict[str, str], str]:
-    """Resolve the Plan workspace refs to real code repositories."""
-    raw_values: Mapping[str, str] | list[str] | None = code_workspaces
-    if raw_values is None:
+    """Resolve the Plan's required workspace refs to real code repositories."""
+    if code_workspaces is None:
         raise ValueError("code_workspace_mapping_missing:plan.json:codeWorkspaces")
 
+    if not isinstance(code_workspaces, Mapping):
+        raise ValueError("code_workspace_mapping_invalid:expected_object")
     mapping: dict[str, str] = {}
-    bare: list[str] = []
-    if isinstance(raw_values, dict):
-        items = list(raw_values.items())
-    elif isinstance(raw_values, list):
-        items = []
-        for value in raw_values:
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError("code_workspace_mapping_invalid:empty_value")
-            key, separator, path = value.partition("=")
-            if separator:
-                items.append((key, path))
-            else:
-                bare.append(value)
-    else:
-        raise ValueError("code_workspace_mapping_invalid:expected_object_or_array")
-
-    # The caller attaches the expected refs after parsing; keeping this helper
-    # independent makes its path validation reusable by CLI and lock inputs.
-    for key, value in items:
+    for key, value in code_workspaces.items():
         if not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip():
             raise ValueError("code_workspace_mapping_invalid:key_or_path_empty")
         if key in mapping:
             raise ValueError(f"code_workspace_mapping_duplicate:{key}")
         mapping[key.strip()] = value.strip()
-    if bare:
-        if len(bare) != 1:
-            raise ValueError("code_workspace_mapping_required_named_refs")
-        mapping["__bare__"] = bare[0]
 
     resolved: dict[str, str] = {}
     for key, raw_path in mapping.items():
@@ -94,35 +73,24 @@ def _workspace_contract_values(
             git_root = resolve_git_root(requested)
         except RepositorySnapshotError as exc:
             raise ValueError(f"code_workspace_not_git_repository:{key}:{requested}") from exc
-        ref = git_root.name if key == "__bare__" else key
-        if ref in resolved:
-            raise ValueError(f"code_workspace_duplicate_repository:{ref}")
+        if key in resolved:
+            raise ValueError(f"code_workspace_duplicate_repository:{key}")
         # Platform worktree isolation starts from the Workflow host's Git
         # checkout.  Persist the Git root, not a potentially nested module
         # directory, so the host contract is unambiguous.
-        resolved[ref] = str(git_root)
+        resolved[key] = str(git_root)
 
-    return resolved, "cli"
+    return resolved, "plan_json"
 
 
 def resolve_code_workspace_contract(
     bundle: Any,
     artifact_workspace: Path,
     feature: str,
-    code_workspaces: Mapping[str, str] | list[str] | None = None,
 ) -> dict[str, Any]:
     refs = _plan_workspace_refs(bundle)
-    source = "cli"
-    resolved_values = code_workspaces
-    if resolved_values is None:
-        plan_has_contract = isinstance(bundle.root, dict) and "codeWorkspaces" in bundle.root
-        plan_values = bundle.root.get("codeWorkspaces") if isinstance(bundle.root, dict) else None
-        if plan_has_contract:
-            resolved_values = plan_values if isinstance(plan_values, (dict, list)) else {}
-            source = "plan_json"
-    mapping, parsed_source = _workspace_contract_values(resolved_values)
-    if source == "plan_json":
-        parsed_source = source
+    plan_values = bundle.root.get("codeWorkspaces") if isinstance(bundle.root, dict) else None
+    mapping, parsed_source = _workspace_contract_values(plan_values)
     if not refs:
         raise ValueError("code_workspace_refs_missing_from_plan")
     missing = sorted(refs - set(mapping))
@@ -181,11 +149,91 @@ def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[s
     }
 
 
+def _batch_execution_plan(
+    batches: list[dict[str, Any]],
+    code_workspaces: Mapping[str, str],
+) -> dict[str, Any]:
+    """Render the scheduler's deterministic preflight view for the caller.
+
+    It deliberately stays a preview: a later scheduler resume can change the
+    remaining waves after a merge failure or plan repair.  The initial order,
+    dependencies, write-set serialization, and parallelism limit all use the
+    same resource grouping logic as the runtime scheduler.
+    """
+    by_id = {str(batch["id"]): batch for batch in batches}
+    remaining = set(by_id)
+    completed = {
+        dependency
+        for batch in batches
+        for dependency in batch.get("deps", [])
+        if dependency not in by_id
+    }
+    preview_manifest = {
+        "batches": {
+            batch_id: {
+                "repositoryRef": batch.get("workspaceRef"),
+                "workspaceRef": batch.get("workspaceRef"),
+                "gitRoot": code_workspaces.get(str(batch.get("workspaceRef") or "")),
+                "executionStage": batch.get("executionStage", "parallel"),
+                "writeSet": batch.get("writeSet", []),
+            }
+            for batch_id, batch in by_id.items()
+        }
+    }
+    waves: list[dict[str, Any]] = []
+    while remaining:
+        ready = sorted(
+            batch_id
+            for batch_id in remaining
+            if all(dependency in completed for dependency in by_id[batch_id].get("deps", []))
+        )
+        if not ready:
+            # The plan validator reports the precise graph error separately.
+            # Keep an inspectable fallback rather than looping forever when a
+            # caller requests a preview for an invalid/incomplete draft.
+            waves.append({"index": len(waves) + 1, "batchIds": sorted(remaining), "parallel": False, "blocked": True})
+            break
+        grouped = resource_groups(preview_manifest, ready)
+        selected = grouped[0][:DEFAULT_WORKFLOW_MAX_PARALLEL] if grouped else ready[:DEFAULT_WORKFLOW_MAX_PARALLEL]
+        waves.append(
+            {
+                "index": len(waves) + 1,
+                "batchIds": selected,
+                "parallel": len(selected) > 1,
+                "blocked": False,
+            }
+        )
+        completed.update(selected)
+        remaining.difference_update(selected)
+    return {
+        "schemaVersion": 1,
+        "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+        "batches": [
+            {
+                "id": batch["id"],
+                "title": batch.get("title"),
+                "taskIds": batch.get("taskIds", []),
+                "taskCount": batch.get("taskCount", 0),
+                "executionLane": batch.get("executionLane"),
+                "workspaceRef": batch.get("workspaceRef"),
+                "executionStage": batch.get("executionStage"),
+                "dependencies": batch.get("deps", []),
+                "writeSet": batch.get("writeSet", []),
+            }
+            for batch in batches
+        ],
+        "waves": waves,
+        "notes": [
+            "每个 Wave 完成并合并后才会释放其下游 Batch。",
+            "同一仓库的重叠写集会拆分为串行 Wave；原生 Git Worktree 仅隔离 checkout，不绕过该规则。",
+        ],
+    }
+
+
 def analyze_batches(
     feature: str,
     plugin_path: Path | None = None,
     workspace: Path | None = None,
-    code_workspaces: Mapping[str, str] | list[str] | None = None,
 ) -> dict:
     """Return the fixed workflow entrypoint for every valid pending Batch."""
     try:
@@ -220,6 +268,7 @@ def analyze_batches(
             batch_plan = bundle.batches.get(batch_id, {})
             valid_batches.append({
                 "id": batch_id,
+                "title": entry.get("title") or batch_plan.get("title"),
                 "lane": entry.get("executionLane", entry.get("lane", "unknown")),
                 "executionLane": entry.get("executionLane", entry.get("lane", "unknown")),
                 "workspaceRef": entry.get("workspaceRef") or batch_workspace_ref(batch_plan),
@@ -227,6 +276,12 @@ def analyze_batches(
                 "deps": list(entry.get("deps", [])),
                 "status": status,
                 "taskCount": len([task for task in batch_plan.get("tasks", []) if isinstance(task, dict)]),
+                "taskIds": [
+                    str(task.get("id"))
+                    for task in batch_plan.get("tasks", [])
+                    if isinstance(task, dict) and isinstance(task.get("id"), str)
+                ],
+                "writeSet": list(batch_plan.get("writeSet", entry.get("writeSet", [])) or []),
             })
 
         if not valid_batches:
@@ -276,7 +331,6 @@ def analyze_batches(
                 bundle,
                 artifact_workspace,
                 feature,
-                code_workspaces,
             )
         except ValueError as exc:
             return {
@@ -312,6 +366,10 @@ def analyze_batches(
             "codeWorkspaceSource": workspace_contract["codeWorkspaceSource"],
             "workspaceContractPath": workspace_contract["workspaceContractPath"],
             "planDigest": plan_digest(bundle),
+            "batchExecutionPlan": _batch_execution_plan(
+                valid_batches,
+                workspace_contract["codeWorkspaces"],
+            ),
             "canStartWorkflow": True,
             "validation": validation,
         }
@@ -390,11 +448,6 @@ def main() -> int:
     parser.add_argument("--feature", required=True, help="Feature ID")
     parser.add_argument("--plugin-path", help="Plugin source path; defaults to this repository")
     parser.add_argument("--workspace", help="Artifact workspace containing .autobizdevops/state.json")
-    parser.add_argument(
-        "--code-workspace",
-        action="append",
-        help="Optional workspaceRef=/absolute/code/repository mapping; repeat for multiple repositories",
-    )
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     args = parser.parse_args()
 
@@ -402,7 +455,6 @@ def main() -> int:
         args.feature,
         Path(args.plugin_path) if args.plugin_path else None,
         Path(args.workspace) if args.workspace else None,
-        args.code_workspace,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

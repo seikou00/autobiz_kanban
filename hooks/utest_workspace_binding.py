@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Resolve and persist trusted UTest workspace bindings without model-authored paths."""
+"""Resolve trusted UTest workspaces from the current Plan contract."""
 
 from __future__ import print_function
 
@@ -9,7 +9,6 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -17,20 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.json_writer_common import (  # noqa: E402
-    WriterError,
-    atomic_write_json,
-    resolve_feature,
-    resolve_workspace,
-)
+from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
 from hooks.utest_plan_contract import (  # noqa: E402
     UTestPlanContractError,
     load_utest_plan,
 )
-
-
-SCHEMA_VERSION = "autodev.utest-workspace-bindings.v1"
-BINDING_FILE = "workspace-bindings.json"
 
 
 class UTestWorkspaceBindingError(ValueError):
@@ -58,19 +48,9 @@ class RepairArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise UTestWorkspaceBindingError(
             "workspace_binding_input_invalid",
-            "命令参数无效：{}。修复：只传入产物 workspace、feature；仅在用户选择候选后传 candidate ID。".format(
-                message
-            ),
+            "命令参数无效：{}。修复：只传入产物 workspace、feature。".format(message),
             "repair_workspace_binding_input",
         )
-
-
-def _utc_now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def binding_path(workspace):
-    return Path(workspace) / ".autobizdevops" / BINDING_FILE
 
 
 def _read_json(path):
@@ -79,22 +59,6 @@ def _read_json(path):
     except (OSError, ValueError):
         return None
     return value if isinstance(value, dict) else None
-
-
-def _load_bindings(workspace):
-    path = binding_path(workspace)
-    data = _read_json(path)
-    if data is None:
-        return {"schemaVersion": SCHEMA_VERSION, "features": {}}
-    if data.get("schemaVersion") != SCHEMA_VERSION or not isinstance(data.get("features"), dict):
-        raise UTestWorkspaceBindingError(
-            "workspace_binding_invalid",
-            "workspace binding 文件结构无效：{}。修复：删除该损坏文件后重试，解析器会从已验证的 Code 产物自动重建。".format(
-                path
-            ),
-            "remove_invalid_binding_and_retry",
-        )
-    return data
 
 
 def _git_root(raw_path):
@@ -117,11 +81,6 @@ def _git_root(raw_path):
     return root if root.is_dir() else None
 
 
-def _candidate_id(root):
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:12]
-    return "WS-{}".format(digest.upper())
-
-
 def _matches_workspace_ref(root, workspace_ref):
     return workspace_ref == "default" or root.name == workspace_ref
 
@@ -136,7 +95,6 @@ def _add_candidate(target, raw_path, workspace_ref, source):
     record = target.get(key)
     if record is None:
         record = {
-            "candidateId": _candidate_id(root),
             "repositoryId": root.name,
             "root": key,
             "sources": [],
@@ -146,160 +104,51 @@ def _add_candidate(target, raw_path, workspace_ref, source):
         record["sources"].append(source)
 
 
-def _paths_from_runtime_payload(data, workspace_ref):
-    if not isinstance(data, dict):
-        return []
-    paths = []
-    repository = data.get("repository")
-    if isinstance(repository, dict):
-        repository_id = repository.get("id")
-        if workspace_ref == "default" or repository_id == workspace_ref:
-            paths.append(repository.get("root"))
-    repositories = data.get("repositories")
-    if isinstance(repositories, list):
-        for item in repositories:
-            if not isinstance(item, dict):
-                continue
-            repository_id = item.get("id")
-            if workspace_ref == "default" or repository_id == workspace_ref:
-                paths.append(item.get("path"))
-    scope_workspaces = data.get("scopeWorkspaces")
-    if isinstance(scope_workspaces, list):
-        for item in scope_workspaces:
-            if not isinstance(item, dict):
-                continue
-            repository_id = item.get("repository")
-            if workspace_ref == "default" or repository_id == workspace_ref:
-                paths.append(item.get("resolvedGitRoot"))
-    for field in ("resolvedGitRoots", "requestedCodeWorkspaces"):
-        values = data.get(field)
-        if isinstance(values, list):
-            paths.extend(values)
-    paths.append(data.get("codeWorkspace"))
-    return [item for item in paths if isinstance(item, str)]
-
-
-def _feature_candidates(workspace, feature, workspace_ref):
-    feature_dir = Path(workspace) / ".autobizdevops" / "features" / feature
+def _plan_workspace_candidates(feature_dir, workspace_ref):
+    """Read the Plan's explicit, repository-owned Code workspace binding."""
+    root = _read_json(Path(feature_dir) / "plan.json")
+    mapping = root.get("codeWorkspaces") if isinstance(root, dict) else None
+    if not isinstance(mapping, dict):
+        return {}
     candidates = {}
-    cache_root = feature_dir / "cache" / "code-exploration"
-    if cache_root.is_dir():
-        for path in sorted(cache_root.glob("*/*.json")):
-            data = _read_json(path)
-            if not isinstance(data, dict) or data.get("schemaVersion") != "autodev.code-exploration.v1":
-                continue
-            for raw_path in _paths_from_runtime_payload(data, workspace_ref):
-                _add_candidate(candidates, raw_path, workspace_ref, "feature_code_exploration")
-    runs_root = feature_dir / ".task-runs"
-    if runs_root.is_dir():
-        for path in sorted(runs_root.glob("**/*.json")):
-            data = _read_json(path)
-            if not isinstance(data, dict) or data.get("status") not in {
-                "implemented",
-                "done",
-                "passed",
-            }:
-                continue
-            for raw_path in _paths_from_runtime_payload(data, workspace_ref):
-                _add_candidate(candidates, raw_path, workspace_ref, "feature_task_run")
-    return candidates
-
-
-def _cross_feature_candidates(workspace, feature, workspace_ref):
-    candidates = {}
-    features_root = Path(workspace) / ".autobizdevops" / "features"
-    if not features_root.is_dir():
-        return candidates
-    for other in sorted(features_root.iterdir()):
-        if not other.is_dir() or other.name == feature:
-            continue
-        cache_root = other / "cache" / "code-exploration"
-        if not cache_root.is_dir():
-            continue
-        for path in sorted(cache_root.glob("*/*.json")):
-            data = _read_json(path)
-            if not isinstance(data, dict) or data.get("schemaVersion") != "autodev.code-exploration.v1":
-                continue
-            for raw_path in _paths_from_runtime_payload(data, workspace_ref):
-                _add_candidate(candidates, raw_path, workspace_ref, "project_code_exploration")
+    if workspace_ref == "default":
+        for raw_path in mapping.values():
+            _add_candidate(candidates, raw_path, workspace_ref, "feature_plan_code_workspace")
+    else:
+        _add_candidate(
+            candidates,
+            mapping.get(workspace_ref),
+            workspace_ref,
+            "feature_plan_code_workspace",
+        )
     return candidates
 
 
 def discover_candidates(workspace, feature, workspace_ref):
-    local = _feature_candidates(workspace, feature, workspace_ref)
-    if local:
-        candidates = local
-    elif workspace_ref == "default":
-        candidates = {}
-    else:
-        current = {}
-        _add_candidate(current, str(Path.cwd()), workspace_ref, "current_git_workspace")
-        candidates = current if current else _cross_feature_candidates(workspace, feature, workspace_ref)
+    feature_dir = Path(workspace) / ".autobizdevops" / "features" / feature
+    candidates = _plan_workspace_candidates(feature_dir, workspace_ref)
     return [candidates[key] for key in sorted(candidates)]
 
 
-def _persist_binding(data, workspace, feature, workspace_ref, candidate, source):
-    features = data.setdefault("features", {})
-    feature_bindings = features.setdefault(feature, {})
-    previous = feature_bindings.get(workspace_ref)
-    record = {
-        "workspaceRef": workspace_ref,
-        "repositoryId": candidate["repositoryId"],
-        "root": candidate["root"],
-        "candidateId": candidate["candidateId"],
-        "source": source,
-    }
-    if previous != record:
-        feature_bindings[workspace_ref] = record
-        data["updatedAt"] = _utc_now()
-        atomic_write_json(binding_path(workspace), data)
-    return record
-
-
-def resolve_workspace_binding(workspace, feature, workspace_ref, selected_candidate_id=None):
+def resolve_workspace_binding(workspace, feature, workspace_ref):
     workspace = Path(workspace).resolve()
-    data = _load_bindings(workspace)
-    feature_bindings = data.get("features", {}).get(feature, {})
-    existing = feature_bindings.get(workspace_ref) if isinstance(feature_bindings, dict) else None
-    if isinstance(existing, dict) and selected_candidate_id is None:
-        root = _git_root(existing.get("root", ""))
-        if root is not None and _matches_workspace_ref(root, workspace_ref):
-            result = dict(existing)
-            result["root"] = str(root)
-            result["source"] = "persisted_binding"
-            return result
-
     candidates = discover_candidates(workspace, feature, workspace_ref)
-    if selected_candidate_id is not None:
-        selected = [item for item in candidates if item["candidateId"] == selected_candidate_id]
-        if len(selected) != 1:
-            raise UTestWorkspaceBindingError(
-                "workspace_binding_candidate_invalid",
-                "候选 ID {} 不属于 workspaceRef={}。修复：使用解析器本轮返回的 candidateId。".format(
-                    selected_candidate_id, workspace_ref
-                ),
-                "select_returned_workspace_candidate",
-                candidates,
-            )
-        return _persist_binding(data, workspace, feature, workspace_ref, selected[0], "user_selected")
     if not candidates:
         raise UTestWorkspaceBindingError(
             "workspace_binding_missing",
-            "未找到 workspaceRef={} 对应的已验证 Git 仓库。修复：先完成该 Feature 的 Code 执行，或在对应代码仓库中重新运行 UTest；解析器会自动保存绑定。".format(
-                workspace_ref
-            ),
-            "complete_code_or_open_repository_and_retry",
+            "Plan 的 codeWorkspaces 未提供 workspaceRef={} 对应的有效 Git 仓库。修复：回到 /autodev-plan 修正当前 Plan 的代码仓库映射后重试。".format(workspace_ref),
+            "repair_plan_code_workspaces",
         )
     if len(candidates) > 1:
         raise UTestWorkspaceBindingError(
-            "workspace_binding_ambiguous",
-            "workspaceRef={} 对应多个已验证仓库。修复：向用户展示 candidates，并将用户选择的 candidateId 交给 workspace binding 脚本保存；不要让模型选择或传递仓库路径。".format(
-                workspace_ref
-            ),
-            "request_user_workspace_candidate_selection",
-            candidates,
+            "workspace_binding_invalid",
+            "Plan 的 codeWorkspaces 对 workspaceRef={} 解析出多个 Git 仓库。修复：回到 /autodev-plan 保留唯一映射。".format(workspace_ref),
+            "repair_plan_code_workspaces",
         )
-    return _persist_binding(data, workspace, feature, workspace_ref, candidates[0], "auto_discovered")
+    result = dict(candidates[0])
+    result["workspaceRef"] = workspace_ref
+    result["source"] = "plan_code_workspaces"
+    return result
 
 
 def _safe_relative(value, label, task_id):
@@ -546,7 +395,7 @@ def select_task_execution_target(context, test_files=None):
     return targets[0]
 
 
-def resolve_feature_bindings(workspace, feature, selected_workspace_ref=None, selected_candidate_id=None):
+def resolve_feature_bindings(workspace, feature):
     feature_dir = Path(workspace) / ".autobizdevops" / "features" / feature
     try:
         plan = load_utest_plan(feature_dir)
@@ -557,54 +406,28 @@ def resolve_feature_bindings(workspace, feature, selected_workspace_ref=None, se
         for task in batch["tasks"]:
             if task["workspaceRef"] not in refs:
                 refs.append(task["workspaceRef"])
-    if selected_candidate_id is not None:
-        if selected_workspace_ref not in refs:
-            raise UTestWorkspaceBindingError(
-                "workspace_binding_input_invalid",
-                "--workspace-ref 不属于当前 plan。修复：使用 candidates 对应的 workspaceRef。",
-                "use_current_plan_workspace_ref",
-            )
-        refs = [selected_workspace_ref]
     result = {}
     for workspace_ref in refs:
-        result[workspace_ref] = resolve_workspace_binding(
-            workspace,
-            feature,
-            workspace_ref,
-            selected_candidate_id if workspace_ref == selected_workspace_ref else None,
-        )
+        result[workspace_ref] = resolve_workspace_binding(workspace, feature, workspace_ref)
     return result
 
 
 def main(argv=None):
-    parser = RepairArgumentParser(description="自动解析并持久化 UTest workspace binding")
+    parser = RepairArgumentParser(description="从当前 Plan 解析 UTest workspace")
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--feature", required=True)
-    parser.add_argument("--workspace-ref")
-    parser.add_argument("--select-candidate")
     parser.add_argument("--json", action="store_true")
     try:
         args = parser.parse_args(argv)
         workspace = resolve_workspace(args.workspace)
         feature = resolve_feature(args.feature)
-        if bool(args.workspace_ref) != bool(args.select_candidate):
-            raise UTestWorkspaceBindingError(
-                "workspace_binding_input_invalid",
-                "--workspace-ref 与 --select-candidate 必须同时提供。修复：正常自动解析时两者都省略；仅在用户选定候选后同时传入。",
-                "repair_workspace_binding_input",
-            )
-        bindings = resolve_feature_bindings(
-            workspace,
-            feature,
-            args.workspace_ref,
-            args.select_candidate,
-        )
+        bindings = resolve_feature_bindings(workspace, feature)
         result = {"status": "ready", "bindings": bindings, "errors": []}
     except UTestWorkspaceBindingError as exc:
         result = exc.payload()
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=False))
         return 2
-    except (WriterError, ValueError, OSError) as exc:
+    except (ValueError, OSError) as exc:
         result = {
             "status": "workspace_binding_failed",
             "owner": "utest_workspace_binding",

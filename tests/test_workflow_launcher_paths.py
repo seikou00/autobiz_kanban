@@ -179,6 +179,12 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertEqual(result["codeWorkspaceSource"], "plan_json")
         self.assertEqual(result["workspaceContractPath"], str((feature_dir / "plan.json").resolve()))
         self.assertEqual(result["reason"], "fixed_workflow_for_pending_batches:2")
+        execution_plan = result["batchExecutionPlan"]
+        self.assertEqual(execution_plan["maxParallel"], 4)
+        self.assertEqual([item["id"] for item in execution_plan["batches"]], ["B001", "B002"])
+        self.assertEqual(execution_plan["waves"][0]["batchIds"], ["B001"])
+        self.assertEqual(execution_plan["waves"][1]["batchIds"], ["B002"])
+        self.assertTrue(any("合并" in note and "下游" in note for note in execution_plan["notes"]))
         load_bundle.assert_called_once_with(feature_dir.resolve())
         validate.assert_called_once_with(artifact_workspace.resolve(), "three-paths")
         self.assertFalse((code_workspace / ".autobizdevops" / "features" / "three-paths" / "plan.json").exists())

@@ -39,8 +39,8 @@ the Workflow call; do not reconstruct it.
 - multiple physical roots: `executionMode=repository_coordinated` and
   `requiredAction=start_repository_coordinator`
 
-The launcher reads the top-level `plan.json.codeWorkspaces` mapping and returns
-`codeWorkspaces`, optional `workflowHostGitRoot` metadata, and
+The launcher reads the mandatory top-level `plan.json.codeWorkspaces` mapping
+and returns `codeWorkspaces`, optional `workflowHostGitRoot` metadata, and
 `executionIsolation=native_git_worktrees` for a single physical Git root. For
 multiple physical roots it instead returns
 `executionMode=repository_coordinated` and a repository coordinator contract.
@@ -52,14 +52,14 @@ logical refs to that same root are allowed). Multiple independent repositories
 are launched as child Workflows by the coordinator, using the same fixed script
 and one shared scheduler run. The launcher returns
 `requiredAction=start_repository_coordinator`; it does not treat a multi-root
-mapping as a Plan error. For an older exported Plan without this
-field, pass an explicit mapping such as
-`--code-workspace "RouYi=/absolute/path/to/RouYi"`; otherwise stop with
-`provide_code_workspace_mapping`.
+mapping as a Plan error. A missing or invalid mapping is a Plan error: stop and
+repair the Plan. There is no CLI workspace override or legacy mapping fallback.
 
-The Code-session command is `task_runner.py code-session`; there is no
-`hooks/code_session.py`. Any baseline or workspace argument must be the
-absolute business Git root, never a logical workspace name such as `RouYi`.
+There is no `task_runner.py code-session` command and no
+`hooks/code_session.py`. Capture the baseline only with
+`rollback_stage.py --capture-code-session`; then start the fixed Workflow via
+the launcher. Any baseline workspace argument must be the absolute business
+Git root, never a logical workspace name such as `RouYi`.
 
 The Code Session baseline uses format v2: clean committed files are recorded
 as Git blob references (`storage=git_blob`, `gitSha`) instead of copied content;

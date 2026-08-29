@@ -73,27 +73,6 @@ class RunUTestCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
         self._write_plan()
-        cache_path = (
-            self.feature_dir
-            / "cache"
-            / "code-exploration"
-            / self.repo.name
-            / "backend.json"
-        )
-        cache_path.parent.mkdir(parents=True)
-        cache_path.write_text(
-            json.dumps(
-                {
-                    "schemaVersion": "autodev.code-exploration.v1",
-                    "repository": {
-                        "id": self.repo.name,
-                        "root": str(self.repo),
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-
     def _task(self, task_id="T001", argv=None, behavior="fixed amount discount"):
         command_id = "VAL-{}-01".format(task_id)
         criterion_id = "AC-{}-01".format(task_id)
@@ -152,7 +131,12 @@ class RunUTestCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
         (self.feature_dir / "plan.json").write_text(
-            json.dumps({"batches": [{"id": "B001", "path": "plans/B001/plan.json"}]}),
+            json.dumps(
+                {
+                    "codeWorkspaces": {self.repo.name: str(self.repo)},
+                    "batches": [{"id": "B001", "path": "plans/B001/plan.json"}],
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -191,15 +175,7 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual(["test_sample.py"], record["validation"]["testFiles"])
         self.assertEqual(["test_sample.py"], record["changedFiles"])
         self.assertEqual(record["covers"], target["covers"])
-        bindings = json.loads(
-            (self.workspace / ".autobizdevops" / "workspace-bindings.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        self.assertEqual(
-            str(self.repo.resolve()),
-            bindings["features"]["alpha"][self.repo.name]["root"],
-        )
+        self.assertFalse((self.workspace / ".autobizdevops" / "workspace-bindings.json").exists())
         self.assertEqual("PASS", self._unit_result()["verdict"])
         self.assertEqual([], validate_result_against_plan(self.feature_dir, self._unit_result()))
 
