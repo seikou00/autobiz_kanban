@@ -43,6 +43,7 @@ from hooks.worktree_manager import provision_parallel_worktree, remove_parallel_
 from tests.test_task_runner import (
     _add_second_compile_only_batch,
     _configure_defer_to_test_stages,
+    _refresh_parallel_pipeline,
     _configure_runtime_ignore,
     _git as task_runner_git,
     _workspace,
@@ -293,8 +294,9 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             manifest["status"] = "succeeded"
             save_manifest(workspace, "alpha", created["runId"], manifest)
 
-            with self.assertRaisesRegex(ValueError, "parallel_final_verify_merge_commit_missing:B001"):
-                verify_final(workspace, "alpha", created["runId"])
+            verified = verify_final(workspace, "alpha", created["runId"])
+            self.assertFalse(verified["passed"])
+            self.assertIn("B001.not_merged", verified["errors"])
 
     def test_resume_blocks_when_sealed_native_delivery_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -324,13 +326,13 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             runtime_file = tree / ".cmbdevclaw" / "workflows" / "batch.journal"
             runtime_file.parent.mkdir(parents=True)
             runtime_file.write_text("platform runtime\n", encoding="utf-8")
-            mark_batch(workspace, "alpha", run_id, "B001", "ready_to_merge", compileStatus="passed")
+            mark_batch(workspace, "alpha", run_id, "B001", "sealed", compileStatus="passed")
             sealed = _seal_native_worktree(workspace, "alpha", run_id, "B001", tree, lease["ownerToken"])
             self.assertTrue(sealed["success"], sealed)
             committed_files = _git(tree, "show", "--format=", "--name-only", sealed["commitSha"]).splitlines()
             self.assertIn("delivery.txt", committed_files)
             self.assertNotIn(".cmbdevclaw/workflows/batch.journal", committed_files)
-            release_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"], final_status="ready_to_merge")
+            release_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"], final_status="sealed")
             subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=repo, check=True)
 
             resumed = resume_run(workspace, "alpha", run_id)
@@ -360,7 +362,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 lease["ownerToken"],
             )
             self.assertTrue(delivery["success"], delivery)
-            mark_batch(workspace, "alpha", run_id, "B001", "ready_to_merge", compileStatus="passed")
+            mark_batch(workspace, "alpha", run_id, "B001", "sealed", compileStatus="passed")
 
             with self.assertRaisesRegex(ValueError, "parallel_batch_not_sealed:B001"):
                 release_lease(
@@ -369,7 +371,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                     run_id,
                     "B001",
                     lease["ownerToken"],
-                    final_status="ready_to_merge",
+                    final_status="sealed",
                 )
             self.assertTrue(check_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"]))
 
@@ -377,10 +379,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(resumed["status"], "blocked")
             self.assertIn("parallel_batch_seal_required:B001", resumed["errors"])
 
-            merged = merge_run(workspace, "alpha", run_id)
-            self.assertFalse(merged["success"])
-            self.assertEqual(merged["failed"][0]["error"], "parallel_merge_frontier_empty")
-            self.assertEqual(merged["failed"][0]["pendingBatches"], ["B001"])
+            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "blocked")
 
     def test_platform_workflow_runtime_files_do_not_dirty_merge_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -548,6 +547,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertFalse(worktree.exists())
             self.assertIsNotNone(load_manifest(workspace, "alpha", run_id)["batches"]["B001"].get("worktreeRemovedAt"))
 
+    @unittest.skip("native-rebase merger removed; candidate Merge Train coverage is in test_parallel_staged_pipeline")
     def test_native_rebase_mode_auto_merges_parallel_deliveries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -925,11 +925,21 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             root_path = feature_dir / "plan.json"
             plan = json.loads(root_path.read_text(encoding="utf-8"))
             plan["batches"][1].update({"workspaceRef": "web", "deps": []})
+            plan["projectValidationCommands"][0]["repo"] = "default"
+            plan["projectValidationCommands"].append({
+                "id": "PROJECT-VAL-002",
+                "argv": [sys.executable, "-c", "print('web project validation')"],
+                "cwd": ".",
+                "repo": "web",
+                "kind": "integration_test",
+                "required": True,
+            })
             plan["taskSetDigest"] = task_set_digest(plan, {"B001": b1, "B002": b2})
             root_path.write_text(json.dumps(plan), encoding="utf-8")
+            _refresh_parallel_pipeline(feature_dir)
 
             verdict = validate_plan_for_parallel(workspace, "alpha")
-            self.assertTrue(verdict["canParallel"])
+            self.assertTrue(verdict["canParallel"], verdict)
             self.assertEqual(verdict["workspaceRefs"], ["default", "web"])
             with self.assertRaisesRegex(ValueError, "parallel_code_workspace_missing:web"):
                 create_run(workspace, "alpha", max_parallel=4, timeout_seconds=60, code_workspaces=[f"default={api}"])
@@ -961,6 +971,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(waiting["waitingForRepositories"])
             self.assertEqual(waiting["scheduledGroups"], [])
 
+    @unittest.skip("direct cross-root merger removed; repository coordinator now uses per-root Merge Trains")
     def test_multi_repository_worktrees_merge_back_to_their_own_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1035,6 +1046,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual((web / "web-change.txt").read_text(encoding="utf-8"), "web\n")
             self.assertEqual(load_manifest(workspace, "alpha", run_id)["status"], "verifying")
 
+    @unittest.skip("direct component merger removed; candidate Merge Train owns promotion")
     def test_monorepo_components_share_one_git_root_but_merge_independently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1107,6 +1119,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(verified["passed"])
             self.assertEqual({item["workspaceRef"] for item in verified["commands"]}, {"default", "web"})
 
+    @unittest.skip("native rebase conflict flow removed; candidate build preserves deliveries on conflict")
     def test_same_repository_overlap_is_resolved_then_merged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1190,6 +1203,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(manifest["batches"]["B002"]["status"], "merged")
             self.assertTrue(manifest["batches"]["B002"]["mergeCommitSha"])
 
+    @unittest.skip("legacy direct merger removed; dependent release is covered by Merge Train promotion")
     def test_dependent_batch_starts_from_its_repositorys_advanced_head(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

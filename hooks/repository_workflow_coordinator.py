@@ -23,7 +23,8 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
 from hooks.parallel_batch_scheduler import ensure_run, resume_run  # noqa: E402
-from hooks.parallel_final_verify import verify_final  # noqa: E402
+from hooks.parallel_evidence_aggregate import aggregate_evidence  # noqa: E402
+from hooks.parallel_merge_train import begin_e2e, finish_e2e  # noqa: E402
 from hooks.parallel_runtime import load_manifest  # noqa: E402
 
 
@@ -122,13 +123,13 @@ def _result(
         "repositoryWorkflows": requests,
         "waitingForRepositories": bool(scheduler.get("waitingForRepositories")),
         "allMerged": all_merged,
-        "nextAction": "final_verify" if all_merged else ("launch_repository_workflows" if requests else "wait_for_other_repository_workflows"),
+        "nextAction": "begin_e2e" if all_merged else ("launch_repository_workflows" if requests else "wait_for_other_repository_workflows"),
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Coordinate fixed Workflows across physical Git repositories")
-    parser.add_argument("command", choices=("prepare", "next", "final-verify"))
+    parser.add_argument("command", choices=("prepare", "next", "begin-e2e", "finish-e2e", "final-verify"))
     parser.add_argument("--workspace")
     parser.add_argument("--feature", required=True)
     parser.add_argument("--plugin-path", default=str(ROOT))
@@ -136,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--code-workspace", action="append")
+    parser.add_argument("--passed", choices=("true", "false"))
+    parser.add_argument("--metadata-json", default="{}")
     args = parser.parse_args(argv)
     try:
         workspace = resolve_workspace(args.workspace)
@@ -160,10 +163,25 @@ def main(argv: list[str] | None = None) -> int:
             if not args.run_id:
                 raise ValueError("repository_coordinator_run_id_required")
             scheduler = resume_run(workspace, feature, args.run_id)
+        elif args.command == "begin-e2e":
+            if not args.run_id:
+                raise ValueError("repository_coordinator_run_id_required")
+            result = begin_e2e(workspace, feature, args.run_id)
+            print(json.dumps({"ok": bool(result.get("success")), **result}, ensure_ascii=False, indent=2))
+            return 0 if result.get("success") else 1
+        elif args.command == "finish-e2e":
+            if not args.run_id or args.passed is None:
+                raise ValueError("repository_coordinator_e2e_result_required")
+            metadata = json.loads(args.metadata_json)
+            if not isinstance(metadata, dict):
+                raise ValueError("repository_coordinator_e2e_metadata_must_be_object")
+            result = finish_e2e(workspace, feature, args.run_id, passed=args.passed == "true", metadata=metadata)
+            print(json.dumps({"ok": bool(result.get("success")), **result}, ensure_ascii=False, indent=2))
+            return 0 if result.get("success") else 1
         else:
             if not args.run_id:
                 raise ValueError("repository_coordinator_run_id_required")
-            result = verify_final(workspace, feature, args.run_id)
+            result = aggregate_evidence(workspace, feature, args.run_id)
             print(json.dumps({"ok": result["passed"], **result}, ensure_ascii=False, indent=2))
             return 0 if result["passed"] else 1
         result = _result(workspace, feature, scheduler, plugin_path=args.plugin_path)

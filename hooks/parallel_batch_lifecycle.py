@@ -128,6 +128,72 @@ def cleanup_run(workspace: Path, feature: str, run_id: str, *, force: bool = Fal
         else:
             errors.append(f"{batch_id}:{result.get('error', 'worktree_remove_failed')}")
 
+    # Validation and Merge-Train worktrees are also plugin-owned lifecycle
+    # resources.  They never appear as delivery Batches, so clean them from
+    # their explicit manifest records during rollback/terminal cleanup.
+    with run_lock(workspace, feature, run_id):
+        latest = load_manifest(workspace, feature, run_id)
+        validation_records = [
+            (str(ref), str(path), str(item.get("status") or "pending"))
+            for item in (latest.get("validationBatches", {}) or {}).values()
+            if isinstance(item, dict)
+            for ref, path in ((item.get("worktrees") or {}).items() if isinstance(item.get("worktrees"), dict) else [])
+        ]
+        candidate_records = [
+            (str(item.get("repositoryRef") or ""), str(item.get("worktreePath") or ""), str(item.get("branchName") or ""))
+            for item in (latest.get("mergeTrains", {}) or {}).values()
+            if isinstance(item, dict)
+        ]
+        repositories = latest.get("repositories", {}) if isinstance(latest.get("repositories"), dict) else {}
+    for ref, path, validation_status in validation_records:
+        if not force and validation_status != "verified":
+            retained.append(path)
+            continue
+        binding = repositories.get(ref)
+        if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str) or not path:
+            continue
+        repo = Path(binding["gitRoot"])
+        if Path(path).exists():
+            removed_validation = _git(repo, "worktree", "remove", "--force", path)
+            if removed_validation.returncode != 0:
+                errors.append(f"validation:{ref}:worktree_remove_failed:{removed_validation.stderr.strip()}")
+            else:
+                removed.append(path)
+        _git(repo, "worktree", "prune")
+    for ref, path, branch in candidate_records:
+        candidate_status = next(
+            (
+                str(item.get("status") or "pending")
+                for item in (latest.get("mergeTrains", {}) or {}).values()
+                if isinstance(item, dict)
+                and str(item.get("repositoryRef") or "") == ref
+                and str(item.get("worktreePath") or "") == path
+                and str(item.get("branchName") or "") == branch
+            ),
+            "pending",
+        )
+        if not force and candidate_status not in {"promoted", "stale"}:
+            if path:
+                retained.append(path)
+            continue
+        binding = repositories.get(ref)
+        if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
+            continue
+        repo = Path(binding["gitRoot"])
+        if path and Path(path).exists():
+            removed_candidate = _git(repo, "worktree", "remove", "--force", path)
+            if removed_candidate.returncode != 0:
+                errors.append(f"candidate:{ref}:worktree_remove_failed:{removed_candidate.stderr.strip()}")
+            else:
+                removed.append(path)
+        _git(repo, "worktree", "prune")
+        if branch and _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+            removed_branch = _git(repo, "branch", "-D", branch)
+            if removed_branch.returncode != 0:
+                errors.append(f"candidate:{ref}:branch_remove_failed:{removed_branch.stderr.strip()}")
+            else:
+                removed_branches.append(branch)
+
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         manifest["cleanup"] = {

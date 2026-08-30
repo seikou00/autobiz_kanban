@@ -23,8 +23,9 @@ when all of these are true. For multiple physical Git roots, require
 `requiredAction=start_repository_coordinator`: run the coordinator `prepare`,
 launch every returned `repositoryWorkflows` entry from its own
 `workflowHostGitRoot`, wait for all child Workflows in that DAG wave, then run
-the coordinator `next`. Repeat until `allMerged=true`, then invoke the
-coordinator `final-verify` exactly once. The launcher copies the fixed plugin script into
+the coordinator `next`. Repeat until `allMerged=true`, then invoke coordinator
+`begin-e2e`, run B-E2E only in its returned temporary worktrees, invoke
+`finish-e2e`, and finally invoke `final-verify` exactly once. The launcher copies the fixed plugin script into
 `artifactWorkspace/.cmbdevclaw/workflows/` as an audit copy and returns
 `workflowScriptContent` plus `workflowScriptSha256`. `workflowScriptSource`,
 `workflowScript`, and `workflowScriptPath` are audit fields; do not pass those
@@ -108,8 +109,9 @@ to bypass it.
 The reuse validation also blocks a Batch marked `merged` without a non-empty
 `mergeCommitSha`, a dirty source checkout, or a source HEAD that differs from
 the run's recorded HEAD. In each case it returns the original `runId` with a
-blocked result. A Batch is `merged` only when `batch_merger.py` has completed
-the Git integration and written its merge commit; no worker-facing command may
+blocked result. A Batch is `merged` only when `parallel_merge_train.py` has
+fast-forwarded the candidate Merge Train's B-INT-verified SHA and written its
+merge commit; no worker-facing command may
 set this status.
 
 The fixed Workflow passes `--allow-bootstrap` to `ensure`. When the source
@@ -139,23 +141,30 @@ baseline commit per physical Git root.
    checkout path; any overlap is handled as a real merge conflict at the barrier.
 3. Each Batch acquires a lease, implements only its assigned TASKs, runs
    `batch-compile`, then invokes `worktree_manager.py seal` to commit and
-   persist its delivery SHA. `lease release --final-status ready_to_merge`
+   persist its delivery SHA. `lease release --final-status sealed`
    accepts that status only after the persisted SHA is present; an unsealed
    compile result cannot enter the merge frontier.
-4. After every Batch in that wave finishes, the shared Workflow owner invokes
-   `batch_merger.py --conflict-mode native-rebase`.
-5. Only after that merge succeeds does the script call scheduler `resume` to
+4. `parallelBatchPipeline.validationOwnership` assigns each executable
+   validation exactly once: compile belongs to implement, unit test intents to
+   delivery test, non-compile Batch commands to quality gate, and integration/
+   E2E intents plus project commands to B-INT/B-E2E. The Workflow uses
+   `parallel_stage_validation.py` to enforce that table and write evidence.
+5. Each sealed delivery performs `review`, Plan-owned `test`, and
+   `quality_gate`; only then is it `ready_to_candidate`. The shared Workflow
+   builds a Merge Train candidate, runs B-INT there, and fast-forwards exactly
+   that verified SHA to main. A changed main SHA makes the candidate stale and
+   requires rebuild/retest rather than rebase.
+6. Only after that promotion succeeds does the script call scheduler `resume` to
    calculate the next wave. A dependent Batch never starts from an unmerged
    upstream result.
-6. The merge hook writes `mergeCommitSha` and only then marks the Batch TASKs
-   `done`. A compile-passed delivery remains `implemented` / `ready_to_merge`
+7. The merge hook writes `mergeCommitSha` and only then marks the Batch TASKs
+   `done`. A compile-passed delivery remains `implemented` / `sealed`
    until this source-branch integration succeeds.
-   If Git merge succeeds but the Plan writer fails, the Batch is retained as
-   `needs_resolution` with `resolution.kind=plan_state_update`; the fixed
-   Workflow (and a subsequent `ensure`/`resume`) verifies the source HEAD and
-   retries the idempotent Plan update before releasing downstream work.
-7. Once all Batches are `merged`, `parallel_final_verify.py` runs the final
-   compile gate.
+   If promotion succeeds but the Plan writer fails, the run is retained in
+   `needs_resolution` until its Plan state is recovered.
+8. Once all Batches are `merged`, B-E2E runs in a temporary validation
+   Worktree. `parallel_evidence_aggregate.py` then validates existing
+   content-bound evidence only; it never runs a duplicate compile/test command.
 
 Independent Batches run in parallel, including independent Batches in the same
 repository. A dependency chain naturally advances one merged wave at a time,
@@ -179,7 +188,7 @@ Within its plugin-provisioned native Git Worktree, a Batch agent must:
 - pass the plugin-provisioned Worktree as `--code-workspace`;
 - complete all assigned TASKs, then run the one allowed `batch-compile`;
 - invoke `worktree_manager.py seal` to commit the successful worktree and
-  persist its path, branch, and commit SHA before releasing as `ready_to_merge`.
+  persist its path, branch, and commit SHA before releasing as `sealed`.
 
 The Batch agent must not merge, rebase, resolve conflicts, delete Worktrees, or
 modify a shared main checkout. It receives no platform isolation option.
@@ -205,7 +214,7 @@ state.
   lease CLI's 15-minute default for a Batch allowed to run longer. Stop the
   heartbeat only after sealing, immediately before release; every failure
   path must stop it and release the lease as `failed`.
-- A merge conflict, failed compile, plan digest change, or failed final verify
+- A candidate conflict, failed Batch stage, plan digest change, or failed B-INT/B-E2E
   blocks the run. Do not use `ours`, `theirs`, `git merge -s ours`,
   `--no-verify`, or direct edits in the shared checkout to bypass it.
 - After every successful merge, the fixed Workflow calls
@@ -220,8 +229,8 @@ state.
   files are excluded from source-dirt checks. Do not use `git checkout -- .`
   or `git clean` to remove them: those commands can destroy user work or the
   Workflow journal needed for recovery.
-- `batch_merger.py` is the integration owner for this workflow. Once it has
-  written `mergeCommitSha`, the fixed Workflow cleans that delivered native
+- `parallel_merge_train.py` is the integration owner for this workflow. Once it
+  has promoted the B-INT-verified candidate and written `mergeCommitSha`, the fixed Workflow cleans that delivered native
   worktree and temporary branch before the scheduler may start a dependent
   Batch. Do not merge a delivery a second time or delete any unresolved
   worktree manually.

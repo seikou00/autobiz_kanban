@@ -201,7 +201,7 @@
           "code_done"
         ],
         "code_done": [
-          "requirements_eval_in_progress"
+          "cicd_in_progress"
         ],
         "requirements_eval_in_progress": [
           "requirements_eval_done"
@@ -641,9 +641,9 @@
             "nodeStatus": "done",
             "label": "已完成",
             "nextAction": {
-              "slashSkill": "autodev-reviewer",
-              "userMessage": "请使用 /autodev-reviewer 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：需求实现评审。"
+              "slashSkill": "autoops-cicd",
+              "userMessage": "请使用 /autoops-cicd 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：CI/CD。批次内 review、test、quality gate、B-INT、B-E2E 与证据汇总已完成，不重复执行。"
             }
           }
         ],
@@ -1715,13 +1715,13 @@
         }
       },
       {
-        "id": "code-to-review",
+        "id": "code-to-cicd",
         "from": {
           "nodeId": "dev.code",
           "state": "done"
         },
         "to": {
-          "nodeId": "dev.review",
+          "nodeId": "ops.cicd",
           "state": "in_progress"
         }
       },

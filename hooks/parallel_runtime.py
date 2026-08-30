@@ -31,7 +31,7 @@ from hooks.plan_json import (
 )
 
 
-RUN_SCHEMA_VERSION = 1
+RUN_SCHEMA_VERSION = 2
 DEFAULT_TTL_SECONDS = 15 * 60
 HEARTBEAT_SECONDS = 30
 
@@ -294,6 +294,9 @@ def create_manifest(
 ) -> dict[str, Any]:
     bundle = load_plan_bundle(feature_dir(workspace, feature))
     errors = parallel_plan_errors(bundle)
+    from hooks.parallel_validation_ownership import validation_ownership_errors
+
+    errors.extend(validation_ownership_errors(bundle.root, bundle.batches))
     if errors:
         raise ValueError("parallel_plan_invalid:" + ";".join(errors))
     refs = {batch_workspace_ref(batch) for batch in bundle.batches.values()}
@@ -339,6 +342,7 @@ def create_manifest(
             ]
         entries[batch_id] = {
             "batchId": batch_id,
+            "type": "delivery",
             # Persist the Plan-owned task contract in the durable run. The
             # workflow must consume these IDs from the scheduler response; it
             # must not rediscover or invent them from the artifact workspace.
@@ -361,7 +365,20 @@ def create_manifest(
             "startedAt": None,
             "completedAt": None,
             "error": None,
+            "activeStage": None,
+            "stageStates": {
+                stage: {
+                    "status": "passed" if batch_status == "done" else "pending",
+                    "attempt": 0,
+                    "evidenceIds": [],
+                    "latestEvidenceId": None,
+                    "startedAt": None,
+                    "completedAt": None,
+                }
+                for stage in ("prepare", "implement", "review", "test", "quality_gate")
+            },
         }
+    pipeline = bundle.root["parallelBatchPipeline"]
     manifest = {
         "schemaVersion": RUN_SCHEMA_VERSION,
         "runId": run_id,
@@ -373,9 +390,33 @@ def create_manifest(
         "repositories": repositories,
         "planDigest": plan_digest(bundle),
         "planContract": plan_contract_snapshot(bundle),
+        "pipeline": pipeline,
         "maxParallel": max(1, int(max_parallel)),
         "timeoutPerBatch": max(1, int(timeout_seconds)),
         "batches": entries,
+        "validationBatches": {
+            "V-INT": {
+                "batchId": "V-INT",
+                "type": "validation",
+                "validationStage": "integration_test",
+                "status": "pending",
+                "dependencies": sorted(entries),
+                "stageStates": {},
+                "evidence": [],
+                "activeStage": None,
+            },
+            "V-E2E": {
+                "batchId": "V-E2E",
+                "type": "validation",
+                "validationStage": "e2e_test",
+                "status": "pending",
+                "dependencies": ["V-INT"],
+                "stageStates": {},
+                "evidence": [],
+                "activeStage": None,
+            },
+        },
+        "mergeTrains": {},
         "costs": {"totalTimeSeconds": 0, "estimatedTokens": 0, "batchCosts": {}},
     }
     atomic_write_json(manifest_path(workspace, feature, run_id), manifest)
@@ -444,7 +485,14 @@ def acquire_lease(workspace: Path, feature: str, run_id: str, batch_id: str, *, 
         batch = manifest.get("batches", {}).get(batch_id)
         if not isinstance(batch, dict):
             raise ValueError(f"parallel_batch_not_found:{batch_id}")
-        if batch.get("status") not in {"pending", "leased"}:
+        rework_stage = (
+            (batch.get("stageStates") or {}).get("implement", {}).get("status")
+            if isinstance(batch.get("stageStates"), dict)
+            else None
+        )
+        if batch.get("status") not in {"pending", "leased", "sealed"} or (
+            batch.get("status") == "sealed" and rework_stage != "pending"
+        ):
             raise ValueError(f"parallel_batch_not_leaseable:{batch_id}:{batch.get('status')}")
         dependencies = batch.get("dependencies", [])
         for dependency in dependencies:
@@ -557,12 +605,12 @@ def renew_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner
 
 
 def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner_token: str, *, final_status: str = "pending") -> None:
-    if final_status not in {"pending", "failed", "compile_failed", "blocked", "ready_to_merge"}:
+    if final_status not in {"pending", "failed", "compile_failed", "blocked", "sealed"}:
         raise ValueError(f"parallel_batch_release_status_invalid:{final_status}")
 
-    # A worker may only release a delivery as mergeable after `seal` has
-    # persisted a delivery commit.  Without this guard a failed worker could
-    # create a false merge frontier with no commit SHA.
+    # A worker may only release a delivery after ``seal`` has persisted its
+    # immutable commit.  Review/test/quality-gate own the later transition to
+    # ``ready_to_candidate``.
     path = lease_path(workspace, feature, run_id, batch_id)
     with run_lock(workspace, feature, run_id):
         with FileLock(path.with_suffix(".lock")):
@@ -572,8 +620,8 @@ def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, own
             batch = manifest.get("batches", {}).get(batch_id)
             if not isinstance(batch, dict):
                 raise ValueError(f"parallel_batch_not_found:{batch_id}")
-            if final_status == "ready_to_merge":
-                if batch.get("status") != "ready_to_merge" or batch.get("compileStatus") != "passed":
+            if final_status == "sealed":
+                if batch.get("status") != "sealed" or batch.get("compileStatus") != "passed":
                     raise ValueError(f"parallel_batch_not_ready_to_release:{batch_id}")
                 commit_sha = batch.get("commitSha")
                 if not isinstance(commit_sha, str) or not commit_sha.strip():
@@ -616,7 +664,7 @@ def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
     batches = manifest.get("batches", {})
     result: list[str] = []
     for batch_id, item in batches.items():
-        if not isinstance(item, dict) or item.get("status") != "ready_to_merge":
+        if not isinstance(item, dict) or item.get("type", "delivery") == "validation" or item.get("status") != "ready_to_candidate":
             continue
         if not item.get("commitSha"):
             continue
@@ -630,6 +678,28 @@ def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
             and batches[dep].get("status") == "merged"
             and batches[dep].get("mergeCommitSha")
             for dep in dependencies
+        ):
+            result.append(str(batch_id))
+    return sorted(result)
+
+
+def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
+    """Return sealed deliveries whose post-implementation stages remain open.
+
+    This is distinct from ``ready_batches``: no source task is scheduled here.
+    The delivery commit and linked worktree already exist, so a resumed
+    Workflow only needs to continue review/test/quality-gate idempotently.
+    """
+    result: list[str] = []
+    for batch_id, item in manifest.get("batches", {}).items():
+        if not isinstance(item, dict) or item.get("status") != "sealed":
+            continue
+        if not isinstance(item.get("commitSha"), str) or not item.get("commitSha"):
+            continue
+        states = item.get("stageStates") if isinstance(item.get("stageStates"), dict) else {}
+        if any(
+            not isinstance(states.get(stage), dict) or states[stage].get("status") not in {"passed", "skipped"}
+            for stage in ("prepare", "implement", "review", "test", "quality_gate")
         ):
             result.append(str(batch_id))
     return sorted(result)

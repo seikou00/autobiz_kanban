@@ -3388,12 +3388,12 @@ def _integrate_batch_compile_result(
                 feature,
                 parallel_run_id,
                 batch_id,
-                "ready_to_merge",
+                "sealed",
                 compileStatus="passed",
             )
             return {
                 "compileStatus": "passed",
-                "requiredAction": "ready_to_merge",
+                "requiredAction": "review_test_quality_gate",
                 "batchId": batch_id,
                 "parallelRunId": parallel_run_id,
             }

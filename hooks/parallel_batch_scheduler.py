@@ -30,12 +30,14 @@ from hooks.parallel_runtime import (
     plan_drift_details,
     plan_digest,
     mergeable_batches,
+    stage_recovery_batches,
     ready_batches,
     resource_groups,
     run_lock,
     save_manifest,
 )
 from hooks.plan_json import load_plan_bundle
+from hooks.parallel_validation_ownership import validation_ownership_errors
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
@@ -335,7 +337,7 @@ def validate_plan_for_parallel(workspace: Path, feature: str) -> dict[str, Any]:
             "reason": f"invalid_plan:{exc}",
             "errors": [str(exc)],
         }
-    errors = parallel_plan_errors(bundle)
+    errors = [*parallel_plan_errors(bundle), *validation_ownership_errors(bundle.root, bundle.batches)]
     if errors:
         return {
             "canParallel": False,
@@ -450,7 +452,7 @@ def _source_repository_errors(manifest: dict[str, Any]) -> list[str]:
     """Return source-worktree violations before an active run is reused.
 
     Each repository binding freezes the expected HEAD.  It moves forward only
-    through ``batch_merger.py`` after a real merge.  Direct commits, resets,
+    through ``parallel_merge_train.py`` after exact candidate promotion. Direct commits, resets,
     and shared-checkout changes must stop recovery before another Batch runs
     against a different base.
     """
@@ -544,6 +546,7 @@ def schedule(
         ]
         scoped_groups = [group for group in scoped_groups if group]
         scoped_mergeable = _scoped_batch_ids(manifest, mergeable_batches(manifest), workspace_refs)
+        scoped_stage_recovery = _scoped_batch_ids(manifest, stage_recovery_batches(manifest), workspace_refs)
         max_parallel = int(manifest.get("maxParallel", 1))
         selected: list[list[str]] = []
         allowed_refs = {str(ref) for ref in workspace_refs or []}
@@ -574,6 +577,25 @@ def schedule(
             "allReadyBatches": ready,
             "mergeableBatches": scoped_mergeable,
             "allMergeableBatches": mergeable_batches(manifest),
+            "stageRecoveryBatches": [
+                {
+                    "batchId": batch_id,
+                    "worktreePath": manifest["batches"][batch_id].get("worktreePath"),
+                    "branchName": manifest["batches"][batch_id].get("branchName"),
+                    "commitSha": manifest["batches"][batch_id].get("commitSha"),
+                    "nextStage": next(
+                        (
+                            stage
+                            for stage in ("prepare", "implement", "review", "test", "quality_gate")
+                            if not isinstance((manifest["batches"][batch_id].get("stageStates") or {}).get(stage), dict)
+                            or (manifest["batches"][batch_id].get("stageStates") or {}).get(stage, {}).get("status") not in {"passed", "skipped"}
+                        ),
+                        None,
+                    ),
+                }
+                for batch_id in scoped_stage_recovery
+            ],
+            "allStageRecoveryBatches": stage_recovery_batches(manifest),
             "parallelGroups": scoped_groups,
             "allParallelGroups": groups,
             "scheduledGroups": selected,
@@ -605,11 +627,11 @@ def schedule(
 
 
 def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status: str, **details: Any) -> dict[str, Any]:
-    # ``merged`` is written only by batch_merger.py after its Git merge and
+    # ``merged`` is written only by the Merge Train after exact candidate promotion and
     # plan-state update. Worker-facing status changes may never unlock deps.
     if status == "merged":
         raise ValueError(f"parallel_batch_merge_owner_required:{batch_id}")
-    allowed = {"pending", "leased", "running", "compile_failed", "ready_to_merge", "needs_resolution", "failed", "blocked", "cancelled"}
+    allowed = {"pending", "leased", "running", "compile_failed", "sealed", "ready_to_candidate", "needs_resolution", "failed", "blocked", "cancelled"}
     if status not in allowed:
         raise ValueError(f"parallel_batch_status_invalid:{status}")
     with run_lock(workspace, feature, run_id):
@@ -621,7 +643,7 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
         terminal = {"merged", "failed", "blocked", "cancelled"}
         if previous in terminal and previous != status:
             raise ValueError(f"parallel_batch_terminal:{batch_id}:{previous}")
-        if status in {"running", "ready_to_merge"}:
+        if status in {"running", "sealed", "ready_to_candidate"}:
             candidate = details.get("worktreePath") or batch.get("worktreePath")
             if not isinstance(candidate, str) or not candidate.strip():
                 raise ValueError(f"parallel_batch_worktree_path_required:{batch_id}")
@@ -758,9 +780,9 @@ def resume_run(
                     batch.update({"status": "blocked", "error": delivery_error})
                     invalid_deliveries.append(delivery_error)
                 else:
-                    batch["status"] = "ready_to_merge"
-            elif batch.get("status") == "ready_to_merge":
-                # A compile result may enter ready_to_merge before seal.  It
+                    batch["status"] = "sealed"
+            elif batch.get("status") == "sealed":
+                # A compile result may enter sealed before `seal`.  It
                 # must not be resumed as a merge candidate without a delivery
                 # SHA, otherwise the workflow reports an empty successful
                 # merge and leaves downstream dependencies blocked forever.

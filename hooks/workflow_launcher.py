@@ -206,8 +206,18 @@ def _batch_execution_plan(
         completed.update(selected)
         remaining.difference_update(selected)
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+        "deliveryStages": ["prepare", "implement", "review", "test", "quality_gate"],
+        "mergeBarrier": {
+            "type": "merge_train",
+            "validationBatch": "V-INT",
+            "rule": "candidate_sha_must_pass_before_fast_forward_promotion",
+        },
+        "postMergeValidation": {
+            "validationBatch": "V-E2E",
+            "rule": "temporary_main_worktree_then_evidence_aggregate_only",
+        },
         "batches": [
             {
                 "id": batch["id"],
@@ -224,7 +234,9 @@ def _batch_execution_plan(
         ],
         "waves": waves,
         "notes": [
-            "每个 Wave 完成并合并后才会释放其下游 Batch。",
+            "每个 Batch 依次完成 prepare、implement、review、test、quality gate；通过后才进入候选合并。",
+            "每个 Wave 先在 Merge Train 候选 Worktree 运行 B-INT；只有同一 candidate SHA 通过才 fast-forward 推广并释放下游 Batch。",
+            "所有 delivery Batch 推广后，B-E2E 在临时 main Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
             "同一仓库的重叠写集会拆分为串行 Wave；原生 Git Worktree 仅隔离 checkout，不绕过该规则。",
         ],
     }

@@ -206,7 +206,7 @@ def seal_parallel_batch(
             manifest, batch, repository_ref, git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        if batch.get("status") != "ready_to_merge" or batch.get("compileStatus") != "passed":
+        if batch.get("status") != "sealed" or batch.get("compileStatus") != "passed":
             return {"success": False, "error": f"parallel_batch_not_ready_to_seal:{batch_id}"}
         raw_worktree = batch.get("worktreePath")
         if not isinstance(raw_worktree, str) or not raw_worktree.strip():

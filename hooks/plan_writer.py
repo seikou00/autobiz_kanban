@@ -95,6 +95,7 @@ from hooks.artifact_ref_validator import (  # noqa: E402
     validate_task_artifact_refs,
     validate_task_group_design_contract,
 )
+from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
 from board_core.state_store import load_state_json_records_result  # noqa: E402
 
 
@@ -1302,6 +1303,11 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             }
         )
     root["batches"] = root_entries
+    # The parallel workflow consumes this contract directly.  It deliberately
+    # owns Review/Test execution inside each Batch and reserves integration
+    # and E2E validation for runtime validation Batches, so Board-level stages
+    # cannot execute the same command a second time after merge.
+    root["parallelBatchPipeline"] = build_pipeline_contract(root, projected)
     deferred_issues: list[dict[str, Any]] = []
     seen_issue_ids: set[str] = set()
     for batch_plan in projected.values():

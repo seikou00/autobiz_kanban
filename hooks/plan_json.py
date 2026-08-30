@@ -406,6 +406,11 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
             payload["codeWorkspaces"] = root.get("codeWorkspaces")
         else:
             payload = {"codeWorkspaces": root.get("codeWorkspaces"), "entries": payload}
+    if root.get("parallelBatchPipeline") is not None:
+        if isinstance(payload, dict):
+            payload["parallelBatchPipeline"] = root.get("parallelBatchPipeline")
+        else:
+            payload = {"parallelBatchPipeline": root.get("parallelBatchPipeline"), "entries": payload}
     content = json.dumps(
         payload,
         ensure_ascii=False,

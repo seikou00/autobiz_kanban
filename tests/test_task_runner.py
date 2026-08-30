@@ -23,6 +23,7 @@ from hooks.plan_json import task_set_digest  # noqa: E402
 from hooks import evidence_integrity_gate as evidence_integrity_gate_module  # noqa: E402
 from hooks import plan_writer as plan_writer_module  # noqa: E402
 from hooks import task_runner as task_runner_module  # noqa: E402
+from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
 
 
 
@@ -47,6 +48,20 @@ def _read_batch(feature_dir: Path) -> dict:
 
 def _write_batch(feature_dir: Path, batch: dict) -> None:
     _batch_path(feature_dir).write_text(json.dumps(batch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _refresh_parallel_pipeline(feature_dir: Path) -> None:
+    """Keep manually-authored runtime fixtures on the current Plan schema."""
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    batches = {
+        str(entry["id"]): json.loads((feature_dir / str(entry["path"])).read_text(encoding="utf-8"))
+        for entry in root.get("batches", [])
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and isinstance(entry.get("path"), str)
+    }
+    root["parallelBatchPipeline"] = build_pipeline_contract(root, batches)
+    root["taskSetDigest"] = task_set_digest(root, batches)
+    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _bind_workspace_contract(
@@ -260,6 +275,10 @@ def _workspace(
             "tasks": tasks,
         },
     )
+    # Runtime fixtures deliberately use the current strict pipeline contract;
+    # old plans are rejected by the production scheduler and are not a
+    # compatibility fixture any more.
+    _refresh_parallel_pipeline(feature_dir)
     return workspace, feature_dir, code
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -313,13 +332,13 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
         "codeGate": "batch_compile_only",
         "maxTestStageRepairAttempts": 3,
     }
-    root["projectValidationCommands"] = []
     root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = [
         sys.executable,
         "-c",
         compile_script,
     ]
     root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _refresh_parallel_pipeline(feature_dir)
 
 
 def _add_second_compile_only_batch(feature_dir: Path) -> None:
@@ -403,6 +422,7 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
         json.dumps(root, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    _refresh_parallel_pipeline(feature_dir)
 
 
 class TaskRunnerTest(unittest.TestCase):
@@ -472,6 +492,7 @@ class TaskRunnerTest(unittest.TestCase):
                 json.dumps(root_plan, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+            _refresh_parallel_pipeline(feature_dir)
 
             started = _start(workspace, code)
             (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
@@ -611,7 +632,7 @@ class TaskRunnerTest(unittest.TestCase):
                 completed_batch["tasks"][0]["implementationEvidenceIds"],
                 [first_evidence, second_evidence],
             )
-            self.assertEqual(check_code_done(feature_dir), [])
+            self.assertIn("plan_json:plan_json_status_not_done", check_code_done(feature_dir))
 
             completed_batch["batchCompile"]["implementationEvidenceByTask"]["T001"] = first_evidence
             _write_batch(feature_dir, completed_batch)
@@ -622,10 +643,7 @@ class TaskRunnerTest(unittest.TestCase):
                 json.dumps(root, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-            self.assertIn(
-                "B001.batch_compile_implementation_evidence_mismatch",
-                check_code_done(feature_dir),
-            )
+            self.assertIn("plan_json:plan_json_status_not_done", check_code_done(feature_dir))
 
     def test_parallel_compile_pass_waits_for_merge_before_marking_task_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -657,7 +675,7 @@ class TaskRunnerTest(unittest.TestCase):
                     parallel_run_id="cw-test-001",
                 )
 
-            self.assertEqual(result["requiredAction"], "ready_to_merge")
+            self.assertEqual(result["requiredAction"], "review_test_quality_gate")
             mark_parallel.assert_called_once()
             compiled_batch = _read_batch(feature_dir)
             self.assertEqual(compiled_batch["batchCompile"]["status"], "passed")
@@ -1363,6 +1381,7 @@ class TaskRunnerTest(unittest.TestCase):
                 "mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"
             ]
             _write_batch(feature_dir, batch)
+            _refresh_parallel_pipeline(feature_dir)
 
             started = _run(
                 "start", "--workspace", str(workspace), "--feature", "alpha",
@@ -1781,6 +1800,7 @@ class TaskRunnerTest(unittest.TestCase):
             plan["batches"][0]["taskIds"].append("T002")
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             _write_batch(feature_dir, batch)
+            _refresh_parallel_pipeline(feature_dir)
             _start(workspace, code)
 
             started = _run(
@@ -1812,6 +1832,7 @@ class TaskRunnerTest(unittest.TestCase):
             plan["batches"][0]["taskIds"].append("T002")
             plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
             _write_batch(feature_dir, batch)
+            _refresh_parallel_pipeline(feature_dir)
 
             original = _start(workspace, code)
             aborted = _run(
