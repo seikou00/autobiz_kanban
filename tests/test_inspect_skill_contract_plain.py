@@ -189,7 +189,9 @@ class RenderContractPlainBaselineTests(unittest.TestCase):
                 "## 输入产物（state: `ready`）\n- 无\n",
             )
 
-    def test_workflow_context_is_accepted_but_not_rendered(self) -> None:
+    def test_workflow_context_adds_no_standalone_section(self) -> None:
+        # Workflow context only ever surfaces as one skipped input's reason;
+        # with nothing dropped it stays out of the output entirely.
         contract = make_contract(inputs=(spec("design.md", required=True, degrade="回流上游"),))
 
         text = render_contract_plain(
@@ -199,6 +201,56 @@ class RenderContractPlainBaselineTests(unittest.TestCase):
 
         self.assertNotIn("上下文", text)
         self.assertNotIn("feature=alpha", text)
+        self.assertNotIn("工作流模板", text)
+
+
+class SkippedInputReasonTests(unittest.TestCase):
+    """A skipped input must say why, so it never reads as a missing one."""
+
+    def render(self, workflow_context: dict | None) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            return render_contract_plain(
+                make_contract(),
+                workflow_context,
+                Path(tmp),
+                extra_skipped_inputs=(spec("PRD.md", required=True),),
+            )
+
+    def test_node_subset_template_is_named_as_the_reason(self) -> None:
+        text = self.render({"workflowTemplate": "lean"})
+
+        self.assertIn(
+            "- `PRD.md`：PRD.md 标签（裁剪前必需，status: `skipped` "
+            "— 工作流模板 `lean` 未包含产出该产物的节点）",
+            text,
+        )
+
+    def test_explicitly_skipped_nodes_are_named_as_the_reason(self) -> None:
+        text = self.render({"workflowTemplate": "standard", "workflowSkippedNodes": ["biz.prd"]})
+
+        self.assertIn("status: `skipped` — 上游节点 `biz.prd` 已跳过", text)
+
+    def test_both_causes_are_reported_together(self) -> None:
+        text = self.render(
+            {"workflowTemplate": "lean", "workflowSkippedNodes": ["biz.prd", "dev.plan"]}
+        )
+
+        self.assertIn(
+            "status: `skipped` — 工作流模板 `lean` 未包含产出该产物的节点；"
+            "上游节点 `biz.prd`、`dev.plan` 已跳过",
+            text,
+        )
+
+    def test_reason_falls_back_when_no_workflow_context_is_supplied(self) -> None:
+        text = self.render(None)
+
+        self.assertIn("status: `skipped` — 产出该产物的节点不在当前工作流链路中", text)
+
+    def test_skipped_input_never_carries_missing_handling(self) -> None:
+        text = self.render({"workflowTemplate": "lean"})
+
+        self.assertNotIn("缺失处理", text)
+        self.assertNotIn("自动降级", text)
 
 
 class PlainCliTests(unittest.TestCase):

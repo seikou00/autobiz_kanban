@@ -89,6 +89,31 @@ def _missing_handling_line(artifact: ArtifactSpec) -> str:
     return f"   {label}：{degrade}"
 
 
+def _skipped_reason(workflow_context: dict | None) -> str:
+    """Why a dropped input is absent from this Feature's contract.
+
+    An input is dropped when its producer left the active chain — either the
+    workflow template selects a node subset, or nodes were skipped explicitly.
+    Naming the cause separates "裁剪掉了" from "上游漏产出了"。"""
+    context = workflow_context or {}
+    reasons: list[str] = []
+
+    template = str(context.get("workflowTemplate") or "").strip()
+    if template and template != BASE_WORKFLOW_TEMPLATE:
+        reasons.append(f"工作流模板 `{template}` 未包含产出该产物的节点")
+
+    skipped_nodes = [
+        str(node).strip()
+        for node in context.get("workflowSkippedNodes") or []
+        if str(node).strip()
+    ]
+    if skipped_nodes:
+        joined = "、".join(f"`{node}`" for node in skipped_nodes)
+        reasons.append(f"上游节点 {joined} 已跳过")
+
+    return "；".join(reasons) or "产出该产物的节点不在当前工作流链路中"
+
+
 def render_contract_plain(
     contract: SkillContract,
     workflow_context: dict | None = None,
@@ -122,6 +147,7 @@ def render_contract_plain(
                 missing_required = True
 
     state = "unknown" if baseline else ("blocked" if missing_required else "ready")
+    skipped_reason = _skipped_reason(workflow_context)
     lines = [f"## 输入产物（state: `{state}`）"]
     if not candidates:
         lines.append("- 无")
@@ -131,7 +157,8 @@ def render_contract_plain(
         required = "必需" if artifact.required else "可选"
         if dropped:
             lines.append(
-                f"- `{artifact.path}`：{artifact.label}（裁剪前{required}，status: `skipped`）"
+                f"- `{artifact.path}`：{artifact.label}"
+                f"（裁剪前{required}，status: `skipped` — {skipped_reason}）"
             )
             continue
         if baseline:

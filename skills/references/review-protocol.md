@@ -12,6 +12,8 @@
 <!-- section: 前提与角色 | stages: dev.specs -->
 ## 前提与角色
 
+`dev.specs` structure gate 已通过后再启动回检。
+
 使用 task 工具，指定 `critic-autodev` 角色，对比上游需求与本阶段产物进行严格审查：spec 是否已完全覆盖需求范围，是否有违反需求的地方。
 
 启动时必须在 task prompt 中写全下面两份清单。任缺一项，回检就只覆盖模型当时想到的部分——遗漏不会以失败的形式出现，只会以「没提」的形式消失。
@@ -29,7 +31,7 @@
 
 ### 必查项
 
-五项逐项给结论，不合并、不省略。这五项与 `SPECS_REVIEW.md` 的 `## Review Baseline` 一一对应，每项的结论只能取 `通过` / `发现问题` / `不适用`，且必须附证据。
+五项逐项给结论，不合并、不省略，每项写清结论与证据。这五项由 critic 判定，不进入机器校验。
 
 | 必查项 | 查什么 | 证据形态 |
 |--------|--------|----------|
@@ -161,14 +163,13 @@
 <!-- section: 结论落盘 | stages: dev.specs -->
 ## 结论落盘
 
-回复中的结论块只是给用户看的即时视图，不是产物。同一份内容必须同时写进 `SPECS_REVIEW.md`，否则本阶段的回检等于没发生过——`specs_review_verdict` 判定它，缺失或不合格时 `specs_done` 写不进去。
+回复中的结论块只是给用户看的即时视图，不是产物。同一份内容必须同时写进 `SPECS_REVIEW.md`。
 
-按 `autodev-specs` 技能 `templates/specs-review.md` 的形状输出，四节都必填：
+按 `autodev-specs` 技能 `templates/specs-review.md` 的形状输出，三节都必填：
 
 - `## Verdict`：`PASS` / `PASS_WITH_WARNINGS` / `FAIL` / `DEGRADED` 取一。只有 `PASS` 与 `PASS_WITH_WARNINGS` 能推进。
-- `## Review Baseline`：上面「必查项」五项各一行，结论取 `通过` / `发现问题` / `不适用`，证据列必填。某项标了 `发现问题`，`## Findings` 就必须有对应条目。
-- `## Findings`：每条结论一行，`Critical` / `Major` 必须有分类与处置。本轮无结论时正文写「无」。
-- `## Unresolved`：仍待用户裁定、尚未拿到答复的条目；有条目就不能推进 `specs_done`。裁定完成后把该条移出本节，并在 Findings 的处置列写下裁定结果——不得自行裁定后直接清空。
+- `## Findings`：每条结论一行，写清结论、证据与处置。本轮无结论时正文写「无」。
+- `## Unresolved`：仍待用户裁定、尚未拿到答复的条目；有条目就不能推进 `specs_done`。裁定完成后把该条移出本节，并在 Findings 的处置列写下裁定结果。
 
 <!-- section: 分类取值 | stages: dev.specs -->
 本阶段 `分类` 允许取值：`产物可修` | `需用户裁定` | `回流上游` | `仅列出` | `结论不成立`。
@@ -197,7 +198,9 @@
 <!-- section: 收口 | stages: dev.specs -->
 ## 收口
 
-改完先写 `SPECS_REVIEW.md`，再重跑「产物契约预检（机器校验）」——预检此时才会连同回检结论一起判定。仍有未裁定的「需用户裁定」条目时不推进 `specs_done`。
+按结论改完 proposal/specs 后重跑 structure gate，写 `SPECS_REVIEW.md`，再运行 final gate。
+
+处置 finding 造成的修改由主模型自行收口，不必重新调用 critic。只有当修改本身改变了行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）时才重跑一轮回检。仍有未裁定的「需用户裁定」条目时不推进 `specs_done`。
 
 <!-- section: 收口 | stages: dev.plan -->
 ## 收口

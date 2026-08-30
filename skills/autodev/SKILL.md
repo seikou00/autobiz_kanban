@@ -104,9 +104,9 @@ Dev 阶段的可选步骤由 `${pluginPath}/board_core/board_config.json` 的 `w
 
 1. 根据用户表达判断是否需要在 code 前生成 `DETAIL_DESIGN.md`。
 2. 不需要时，推进到 `code_in_progress`：
-   `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
+   `python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
 3. 需要时，推进到 `detail_design_in_progress`：
-   `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled`
+   `python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled`
 4. `/autodev-detail-design` 生成 `DETAIL_DESIGN.md` 后推进到 `detail_design_done`，根路由器再次刷新状态并进入 `/autodev-code`。
 
 ### 约束

@@ -7,7 +7,7 @@ version: v1.4.08042
 ## 缺失产物处理
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature "${feature}" --plain
+python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature "${feature}" --plain
 ```
 
 
@@ -34,7 +34,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-verify --feature 
 调用脚本读取当前 Feature 状态：
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -52,7 +52,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ## 写入 Checkpoint（标记开始）
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint verify_in_progress
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint verify_in_progress
 ```
 
 ## 提取验收契约
@@ -235,7 +235,7 @@ ${pluginPath}/skills/autodev/autodev-verify/references/feature-api-detail.md
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `verify_done`。本轮验收摘要与历史证据写入 `VERIFY_REPORT.md`。
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint verify_done
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint verify_done
 ```
 
 **输出提示：**
@@ -260,7 +260,7 @@ checkpoint=verify_done → Dev 阶段结束
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `needs_fix`：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 ```
 
 在 `VERIFY_REPORT.md` 的失败详情中追加：

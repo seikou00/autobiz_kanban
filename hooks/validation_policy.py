@@ -57,6 +57,7 @@ _TEST_EXECUTABLES = frozenset({
 })
 _FRONTEND_COMPILE_SCRIPT_MARKERS = ("build", "compile", "typecheck", "type-check")
 _TEST_SCRIPT_MARKERS = ("cypress", "e2e", "integration", "jest", "mocha", "playwright", "spec", "test", "vitest")
+PATH_PROBE_EXECUTABLES = frozenset({"dir", "find", "ls", "stat", "test"})
 
 _NOOP_EXECUTABLES = {"echo", "false", "printf", "true"}
 _INLINE_SHELL_FLAGS = {
@@ -108,6 +109,8 @@ def command_policy_errors(command: Any) -> list[str]:
     executable = command_executable(argv)
     lowered = " ".join(argv).lower()
     errors: list[str] = []
+    if executable in PATH_PROBE_EXECUTABLES:
+        errors.append("validation_command_path_probe_only")
     if executable in _NOOP_EXECUTABLES:
         errors.append("validation_command_noop")
     if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
@@ -134,6 +137,8 @@ def compile_only_command_errors(command: Any) -> list[str]:
         return []
     executable = command_executable(argv)
     lowered_args = [item.lower() for item in argv[1:]]
+    if executable in PATH_PROBE_EXECUTABLES:
+        return ["compile_command_path_probe"]
     if executable in _TEST_EXECUTABLES:
         return ["compile_command_executes_tests"]
     if executable in MAVEN_EXECUTABLES:

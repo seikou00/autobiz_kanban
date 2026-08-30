@@ -115,6 +115,16 @@ def source_requirement_ids_for_target(data: Optional[Dict[str, Any]], target: st
     }
 
 
+def source_ids_for_target(data: Optional[Dict[str, Any]], target: str) -> Set[str]:
+    return {
+        requirement["sourceId"]
+        for requirement in source_requirement_index(data).values()
+        if isinstance(requirement.get("sourceId"), str)
+        and isinstance(requirement.get("targets"), list)
+        and target in requirement["targets"]
+    }
+
+
 def resolve_source_requirement_refs(
     feature_dir: Path,
     refs: List[str],

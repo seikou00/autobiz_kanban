@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 
-SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:", re.MULTILINE)
+SCENARIO_DEF_RE = re.compile(
+    r"^####\s+Scenario\s+(?=\[?(SCN-\d{3})\]?:)(?:\[SCN-\d{3}\]|SCN-\d{3}):",
+    re.MULTILINE,
+)
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 

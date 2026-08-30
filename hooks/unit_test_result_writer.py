@@ -27,6 +27,8 @@ from hooks.json_writer_common import (  # noqa: E402
 from hooks.utest_plan_contract import (  # noqa: E402
     UTestPlanContractError,
     derive_scenario_coverage,
+    derive_check_matrix,
+    derive_unverified_checks,
     derive_verdict,
     expand_plan_targets,
     load_utest_plan,
@@ -69,6 +71,7 @@ def _initial_from_plan(feature_dir):
     plan_targets = expand_plan_targets(plan)
     targets = [public_target(target) for target in plan_targets]
     evidence_by_id = {}
+    checks = derive_check_matrix(targets, plan_targets)
     return {
         "version": 1,
         "verdict": derive_verdict(targets, plan_targets),
@@ -79,6 +82,8 @@ def _initial_from_plan(feature_dir):
             evidence_by_id,
             scenario_refs=plan_scenario_refs(plan),
         ),
+        "checks": checks,
+        "unverifiedChecks": derive_unverified_checks(checks),
     }
 
 
@@ -117,6 +122,33 @@ def _refresh_derived(feature_dir, data, plan, plan_targets, evidence_by_id):
         evidence_by_id,
         scenario_refs=plan_scenario_refs(plan),
     )
+    data["checks"] = derive_check_matrix(
+        data["targets"], plan_targets, data.get("runtimeBlock")
+    )
+    data["unverifiedChecks"] = derive_unverified_checks(data["checks"])
+
+
+def record_runtime_block(workspace, feature, payload):
+    """Record an inspector-owned block and derive the closed check matrix."""
+    workspace = resolve_workspace(workspace)
+    feature = resolve_feature(feature)
+    feature_dir = _feature_dir(workspace, feature)
+    data, _ = ensure_plan_result(workspace, feature, create=True)
+    data["runtimeBlock"] = {
+        "reasonCode": str(payload.get("status", "environment_inspection_failed")),
+        "requiredAction": str(payload.get("requiredAction", "inspect_environment")),
+    }
+    plan = load_utest_plan(feature_dir)
+    plan_targets = expand_plan_targets(plan)
+    _refresh_derived(feature_dir, data, plan, plan_targets, _evidence_by_id(feature_dir))
+    errors = validate_result_against_plan(feature_dir, data)
+    if errors:
+        raise ValueError(
+            "UTest blocked matrix 派生失败：{}。修复：重建 plan-bound result。".format(
+                ",".join(errors)
+            )
+        )
+    return data, _write(workspace, feature, data)
 
 
 def record_execution(
@@ -221,6 +253,7 @@ def record_execution(
         target["evidenceIds"].append(evidence_id)
     target["result"] = derived_result
     target["command"] = validation.get("command")
+    data.pop("runtimeBlock", None)
     _refresh_derived(feature_dir, data, plan, plan_targets, evidence_by_id)
     errors = validate_result_against_plan(feature_dir, data)
     if errors:

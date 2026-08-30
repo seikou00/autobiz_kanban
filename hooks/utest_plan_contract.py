@@ -264,6 +264,16 @@ def _validate_task(task, batch_id):
 def load_utest_plan(feature_dir):
     feature_root = Path(feature_dir).expanduser().resolve()
     root = _read_object(feature_root / "plan.json")
+    run_context_path = feature_root / ".runtime" / "RUN_CONTEXT.json"
+    if run_context_path.is_file():
+        try:
+            from hooks.run_context import load as load_run_context
+
+            run_context = load_run_context(feature_root.parents[2], feature_root.name)
+        except ValueError as exc:
+            _error("SCOPE_UNRESOLVED: {}".format(exc))
+        if root.get("runContextDigest") != run_context.get("contextDigest"):
+            _error("plan.runContextDigest 与当前 RunContext 不一致")
     batches = root.get("batches")
     if not isinstance(batches, list) or not batches:
         _error("root plan.batches 必须是非空数组")
@@ -437,6 +447,52 @@ def derive_verdict(targets, plan_targets):
     if any(result != "PASS" for result in required_results + optional_results):
         return "BLOCKED"
     return "PASS"
+
+
+def derive_check_matrix(result_targets, plan_targets, runtime_block=None):
+    required_by_id = {item["targetId"]: item["required"] for item in plan_targets}
+    block_code = runtime_block.get("reasonCode") if isinstance(runtime_block, dict) else None
+    result = []
+    for target in result_targets:
+        raw_result = target.get("result", "BLOCKED")
+        if raw_result in {"PASS", "PASS_WITH_WARNINGS"}:
+            status = "passed"
+            reason_code = None
+        elif raw_result == "FAIL":
+            status = "failed"
+            reason_code = None
+        elif raw_result == "SKIP":
+            status = "skipped"
+            reason_code = "optional_check_skipped"
+        elif block_code:
+            status = "blocked"
+            reason_code = block_code
+        else:
+            status = "not_run"
+            reason_code = "not_executed"
+        row = {
+            "checkId": "CHECK-{}".format(target.get("targetId")),
+            "targetId": target.get("targetId"),
+            "kind": "unit_test",
+            "required": required_by_id.get(target.get("targetId"), True),
+            "status": status,
+        }
+        if reason_code is not None:
+            row["reasonCode"] = reason_code
+        result.append(row)
+    return result
+
+
+def derive_unverified_checks(checks):
+    return [
+        {
+            "checkId": item.get("checkId"),
+            "kind": item.get("kind"),
+            "reasonCode": item.get("reasonCode", "not_executed"),
+        }
+        for item in checks
+        if isinstance(item, dict) and item.get("status") in {"blocked", "not_run", "skipped"}
+    ]
 
 
 def _scenario_ids(refs):
@@ -634,6 +690,11 @@ def validate_result_against_plan(feature_dir, data):
     )
     if data.get("scenarioCoverage") != expected_coverage:
         errors.append("unit_test_coverage_not_derived_from_plan_evidence")
+    expected_checks = derive_check_matrix(targets, plan_targets, data.get("runtimeBlock"))
+    if data.get("checks") != expected_checks:
+        errors.append("unit_test_checks_not_derived_from_plan_evidence")
+    if data.get("unverifiedChecks") != derive_unverified_checks(expected_checks):
+        errors.append("unit_test_unverified_checks_not_derived")
     return errors
 
 

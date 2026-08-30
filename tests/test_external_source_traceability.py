@@ -104,7 +104,7 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         (self.feature_dir / "specs" / "payment").mkdir(parents=True)
         (self.feature_dir / "PRD.md").write_text(PRD, encoding="utf-8")
 
-    def _write_source_context(self, targets: list[str]) -> None:
+    def _write_source_context(self, targets: list[str] | None) -> None:
         snapshot = self.feature_dir / "sources" / "SRC-001" / "payment.md"
         snapshot.parent.mkdir(parents=True, exist_ok=True)
         snapshot.write_text("支付接口调用超时时间为 3 秒。", encoding="utf-8")
@@ -126,14 +126,14 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
                                     "id": "SRC-001-I001",
                                     "location": "第 1 行",
                                     "original": "支付接口调用超时时间为 3 秒。",
-                                    "disposition": "requirement",
-                                    "requirements": [
+                                    "disposition": "requirement" if targets else "background",
+                                    "requirements": ([
                                         {
                                             "id": "SRC-001-R001",
                                             "text": "支付接口调用超时时间为 3 秒",
                                             "targets": targets,
                                         }
-                                    ],
+                                    ] if targets else []),
                                 }
                             ],
                         }
@@ -187,6 +187,32 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         )
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
         self.assertEqual(failures, 0, output)
+
+    def test_background_source_without_spec_requirements_needs_no_fake_mapping(self) -> None:
+        self._write_source_context(None)
+        spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
+        spec_path.write_text(SPEC.format(source_rows="无"), encoding="utf-8")
+
+        failures, output = self._run(validate_specs_contract, skill="autodev-specs")
+        self.assertEqual(failures, 0, output)
+
+        optional_row = (
+            "| Source ID | Requirement / Scenario | Usage |\n"
+            "|---|---|---|\n"
+            "| SRC-001 | - | background，仅作上下文 |"
+        )
+        spec_path.write_text(SPEC.format(source_rows=optional_row), encoding="utf-8")
+        failures, output = self._run(validate_specs_contract, skill="autodev-specs")
+        self.assertEqual(failures, 0, output)
+
+    def test_spec_targeted_source_still_requires_a_real_mapping(self) -> None:
+        self._write_source_context(["spec"])
+        spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
+        spec_path.write_text(SPEC.format(source_rows="无"), encoding="utf-8")
+
+        failures, output = self._run(validate_specs_contract, skill="autodev-specs")
+        self.assertGreater(failures, 0)
+        self.assertIn("spec_source_reference_missing", output)
 
     def test_design_requires_source_coverage_and_api_link(self) -> None:
         missing_section = DESIGN.format(source_section="", api_source="无")

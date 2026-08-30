@@ -19,6 +19,7 @@ from hooks.artifact_ref_validator import (  # noqa: E402
 )
 from hooks.source_context import (  # noqa: E402
     resolve_source_requirement_refs,
+    source_ids_for_target,
     source_requirement_ids_for_target,
     validate_source_context,
 )
@@ -183,6 +184,8 @@ class SourceContextTests(unittest.TestCase):
             source_requirement_ids_for_target(data, "spec"),
             {"SRC-001-R001", "SRC-001-R002"},
         )
+        self.assertEqual(source_ids_for_target(data, "spec"), {"SRC-001"})
+        self.assertEqual(source_ids_for_target(data, "unknown"), set())
 
     def test_digest_cli_only_reads_feature_snapshot(self) -> None:
         result = subprocess.run(

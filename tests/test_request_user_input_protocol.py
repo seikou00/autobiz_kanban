@@ -138,7 +138,7 @@ class RequestUserInputProtocolTest(unittest.TestCase):
         content = SPECS_SKILL.read_text(encoding="utf-8")
 
         for required_rule in (
-            "探索并生成待确认问题清单",
+            "探索结束时先生成待确认问题清单",
             "仅裁定讨论表中的待确认条目",
             # 「不把切分、命名或规格范围交给用户确认」不在此列：AGENTS.md 把该句
             # 本身列为技能编写反模式（不要把需求或改动目的写入技能）。同一语义由

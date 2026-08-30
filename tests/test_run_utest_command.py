@@ -390,7 +390,7 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertEqual("yudao-module-mkt", validation["executionCwd"])
         self.assertEqual([], validate_result_against_plan(self.feature_dir, self._unit_result()))
 
-    def test_semantic_scope_module_runs_from_validation_location_with_warning(self):
+    def test_semantic_scope_module_blocks_without_fallback(self):
         task = self._task()
         task["scope"] = {
             "modules": ["AiReview 评分模块"],
@@ -398,12 +398,10 @@ class RunUTestCommandTest(unittest.TestCase):
         }
         self._write_plan(task)
 
-        result = self._execute()
+        with self.assertRaises(UTestCommandError) as caught:
+            self._execute()
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(".", result["executionCwd"])
-        self.assertEqual("scope_module_unresolved", result["locationWarnings"][0]["code"])
-        self.assertEqual(["AiReview 评分模块"], result["locationWarnings"][0]["modules"])
+        self.assertIn("禁止降级到 validationLocations 或 '.'", str(caught.exception))
 
     def test_writer_failure_retains_evidence_and_reports_recovery(self):
         with mock.patch(

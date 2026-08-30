@@ -55,10 +55,10 @@ version: v1.0.0804
 
 ```bash
 # 从管道传入
-python "${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py" '{"rawPasswd": ["1111"]}'
+python3 "${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py" '{"rawPasswd": ["1111"]}'
 
 # 或 echo 传入
-echo '{"rawPasswd": ["1111"]}' | python "${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py"
+echo '{"rawPasswd": ["1111"]}' | python3 "${pluginPath}/skills/autodev/hooks/password-encrypt/scripts/password-encrypt.py"
 ```
 
 ### 方式 2: Shell 脚本

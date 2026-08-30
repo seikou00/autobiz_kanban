@@ -130,27 +130,34 @@ _SPECS: Dict[str, Repair] = {
     "invalid_spec_missing_requirement": Repair(
         artifact="{target}",
         problem="{target} 没有任何合法 Requirement",
-        action="按「### Requirement [REQ-NNN]: <标题>」写出 Requirement（NNN 三位数字，方括号不能省）。",
+        action="按「### Requirement REQ-NNN: <标题>」写出 Requirement，NNN 使用三位数字。",
     ),
     "invalid_spec_missing_scenario": Repair(
         artifact="{target}",
         problem="{target} 没有任何合法 Scenario",
-        action="按「#### Scenario [SCN-NNN]: <标题>」补 Scenario，并归属到本文件已有的 Requirement 下。",
+        action="按「#### Scenario SCN-NNN: <标题>」补 Scenario，并归属到本文件已有的 Requirement 下。",
     ),
     "spec_contract_heading_malformed": Repair(
         artifact="{target}",
         problem="{target} 中的契约标题写法不规范，索引器读不到：{headings}",
         action=(
-            "把报错的标题改成规范写法：「### Requirement [REQ-NNN]: <标题>」/"
-            "「#### Scenario [SCN-NNN]: <标题>」。NNN 是三位数字，方括号和层级都不能省——"
-            "索引器只认这一种写法，其余写法会被静默跳过，该 Requirement 对下游覆盖检查等于不存在。"
+            "把报错的标题改成「### Requirement REQ-NNN: <标题>」/"
+            "「#### Scenario SCN-NNN: <标题>」。NNN 是三位数字，ID 外的方括号可有可无。"
+        ),
+    ),
+    "spec_id_width_invalid": Repair(
+        artifact="{target}",
+        problem="{target} 中的规格 ID {id} 不是三位数字",
+        action=(
+            "把 {id} 改为 {suggested}，并同步本文件 Source References 及其他引用。"
+            "该错误只处理位数，不要改操作分组或 Requirement 内容。"
         ),
     ),
     "spec_requirement_without_scenario": Repair(
         artifact="{target}",
         problem="{target} 中这些 Requirement 自身块内没有 Scenario：{requirements}",
         action=(
-            "为报错的每个 Requirement 补至少一个「#### Scenario [SCN-NNN]: <标题>」；"
+            "为报错的每个 Requirement 补至少一个「#### Scenario SCN-NNN: <标题>」；"
             "REMOVED Requirement 用 Scenario 描述旧入口被触发时的期望响应。"
         ),
     ),
@@ -158,18 +165,8 @@ _SPECS: Dict[str, Repair] = {
         artifact="{target}",
         problem="{target} 中这些 Scenario 不归属任何 Requirement：{scenarios}",
         action=(
-            "把报错的每个 Scenario 移到它所属的「### Requirement [REQ-NNN]:」标题之下；"
+            "把报错的每个 Scenario 移到它所属的「### Requirement REQ-NNN:」标题之下；"
             "Scenario 出现在首个 Requirement 之前或操作段标题正下方时不归属任何 Requirement。"
-        ),
-    ),
-    "spec_id_out_of_order": Repair(
-        artifact="{target}",
-        problem="{target} 中这些相邻 REQ/SCN 编号出现回退：{pairs}",
-        action=(
-            "把每对中后出现的那个编号改成括号里的建议值——建议值已避开本 feature "
-            "全部已用 ID，直接替换即可，不必自行找空号。"
-            "只改报错的这几个标题，其余 ID 不重排；允许跳号（删除后 ID 不复用会留下空档），"
-            "但后出现的编号不得小于先出现的。"
         ),
     ),
     "removed_requirement_missing_field": Repair(
@@ -185,15 +182,15 @@ _SPECS: Dict[str, Repair] = {
         problem="{target} 中残留模板槽位：{placeholders}",
         action=(
             "把报错的模板槽位替换成实际内容。"
-            "`[REQ-NNN]` / `[SCN-NNN]` 是 ID 语法不算槽位，Markdown 链接也不算。"
+            "`REQ-NNN` / `SCN-NNN` 必须替换成三位数字 ID；Markdown 链接不算槽位。"
         ),
     ),
     "spec_source_reference_missing": Repair(
         artifact="specs/**/spec.md",
-        problem="PRD 外部资料索引中的这些来源未被任何 spec 保留：{target}",
+        problem="这些含 spec 目标要求的来源未被任何 spec 保留：{target}",
         action=(
             "在相关 spec 的 `## Source References / 外部资料引用` 表补齐 SRC-NNN 与 REQ/SCN 映射；"
-            "会改变外部可观察行为的约束还必须写入 Requirement/Scenario，纯实现约束注明不扩写行为。"
+            "并把对应 SRC-NNN-RNNN 落入 Requirement/Scenario。"
         ),
     ),
     "spec_source_reference_unknown": Repair(
@@ -204,15 +201,17 @@ _SPECS: Dict[str, Repair] = {
     "spec_source_reference_incomplete": Repair(
         artifact="specs/**/spec.md",
         problem="这些来源引用缺少 Requirement/Scenario 映射或 Usage：{target}",
-        action="在 Source References 表补齐每个 SRC-NNN 对应的 REQ/SCN 和实际用途；只写来源 ID 不算跨阶段传递。",
+        action=(
+            "含 spec 目标要求的来源补齐 REQ/SCN 与 Usage；无 spec 要求的来源可删除该行，"
+            "或保留 `-` 映射并填写 Usage。"
+        ),
     ),
     "duplicate_spec_id_across_specs": Repair(
         artifact="specs/**/spec.md",
         problem="{target} 在多个 spec 中重复定义：{files}",
         action=(
-            "ID 在同一 feature 内必须全局唯一——覆盖检查按扁平 ID 集合判定，"
-            "重号会让覆盖其中一个就算覆盖全部。给其中一处换一个未使用的编号，"
-            "并同步所有引用它的地方。"
+            "保留 {keep} 的 {target}；按以下 replacement map 修改其他 owner，并同步各文件内引用："
+            "{replacements}。建议值已避开本 feature 全部已用 ID，不要另行猜号。"
         ),
     ),
     "duplicate_requirement_id": Repair(
@@ -285,8 +284,7 @@ _SPECS: Dict[str, Repair] = {
         problem="SPECS_REVIEW.md 不存在或为空——本阶段回检没有落盘",
         action=(
             "先按 hooks/render_review_protocol.py --stage dev.specs 完整跑完回检，"
-            "再把结论写进 SPECS_REVIEW.md，章节为 Verdict / Review Baseline / Findings / Unresolved。"
-            "回检结论只输出在回复里不算数：没有产物就没有门。"
+            "再把结论写进 SPECS_REVIEW.md，章节为 Verdict / Findings / Unresolved。"
         ),
     ),
     "invalid_specs_review_verdict": Repair(
@@ -297,51 +295,17 @@ _SPECS: Dict[str, Repair] = {
     "non_terminal_specs_review_verdict": Repair(
         artifact="SPECS_REVIEW.md",
         problem="SPECS_REVIEW.md 的结论是 {verdict}，不是终态",
-        action="按分类表把 blocker 改完并重跑回检；只有 PASS 或 PASS_WITH_WARNINGS 可以推进 specs_done。",
+        action="把 blocker 改完并重写结论；只有 PASS 或 PASS_WITH_WARNINGS 可以推进 specs_done。",
     ),
-    "specs_review_baseline_incomplete": Repair(
+    "missing_specs_review_findings": Repair(
         artifact="SPECS_REVIEW.md",
-        problem="SPECS_REVIEW.md 的 `## Review Baseline` 缺这些必查项：{items}",
-        action=(
-            "必查项由回检协议定义，一项都不能省：为缺失的每项补一行 "
-            "`| <必查项> | 通过/发现问题/不适用 | <证据> |`。"
-            "没查过就不要填「通过」——这张表的作用就是让「查过了」变成可核对的事实。"
-        ),
+        problem="SPECS_REVIEW.md 缺 `## Findings` 段或该段为空",
+        action="补 `## Findings` 段，逐条写下 critic 的结论与处置；本轮无结论时正文写「无」。",
     ),
-    "specs_review_baseline_invalid_result": Repair(
+    "missing_specs_review_unresolved": Repair(
         artifact="SPECS_REVIEW.md",
-        problem="必查项「{item}」的结论写成了 {result}，不在闭集内",
-        action="把该行第二列改成 `通过`、`发现问题` 或 `不适用` 三者之一，不要自造取值。",
-    ),
-    "specs_review_baseline_missing_evidence": Repair(
-        artifact="SPECS_REVIEW.md",
-        problem="必查项「{item}」没有写证据",
-        action=(
-            "为该行第三列补具体证据：file:line、REQ/SCN 编号或产物原文。"
-            "空证据的「通过」是自证，不构成回检。"
-        ),
-    ),
-    "specs_review_finding_missing_disposition": Repair(
-        artifact="SPECS_REVIEW.md",
-        problem="回检结论 {target}（严重度 {severity}）缺分类或处置",
-        action=(
-            "Critical / Major 每条都必须落一个分类："
-            "产物可修 / 需用户裁定 / 回流上游 / 仅列出 / 结论不成立，"
-            "并在处置列写清落到哪个产物的哪一条，或不改的依据。"
-        ),
-    ),
-    "specs_review_finding_invalid_category": Repair(
-        artifact="SPECS_REVIEW.md",
-        problem="回检结论 {target} 的分类 {category} 不在本阶段闭集内",
-        action="dev.specs 的分类只能取：产物可修 / 需用户裁定 / 回流上游 / 仅列出 / 结论不成立。",
-    ),
-    "specs_review_baseline_finding_mismatch": Repair(
-        artifact="SPECS_REVIEW.md",
-        problem="必查项 {items} 标了「发现问题」，Findings 表却一条都没有",
-        action=(
-            "把这些问题逐条写进 `## Findings`（含来源、原文严重度、证据、分类、处置）；"
-            "若复核后认为不成立，把该必查项的结论改回「通过」并在证据列写明依据。"
-        ),
+        problem="SPECS_REVIEW.md 缺 `## Unresolved` 段或该段为空",
+        action="补 `## Unresolved` 段，列出仍待用户裁定的条目；没有时正文写「无」。",
     ),
     "unresolved_specs_review_finding": Repair(
         artifact="SPECS_REVIEW.md",
@@ -349,7 +313,6 @@ _SPECS: Dict[str, Repair] = {
         action=(
             "「需用户裁定」的条目必须按 ask-user-question.md 协议逐条问过用户再落盘；"
             "裁定后把该条从 Unresolved 移走、在 Findings 的处置列写下裁定结果，本段写「无」。"
-            "不得自行裁定后直接清空。"
         ),
         route=ROUTE_ASK_USER,
     ),

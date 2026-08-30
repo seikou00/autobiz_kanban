@@ -18,6 +18,12 @@ from hooks.validation_groups import plan_validation_groups
 
 
 class ValidationPolicyTest(unittest.TestCase):
+    def test_path_probe_cannot_satisfy_compile(self) -> None:
+        self.assertEqual(
+            ["compile_command_path_probe"],
+            compile_only_command_errors({"argv": ["ls", "src/views"], "cwd": "."}),
+        )
+
     def test_compile_only_policy_supports_frontend_build_and_typecheck(self) -> None:
         self.assertEqual(
             compile_only_command_errors({"argv": ["npm", "run", "build"]}),

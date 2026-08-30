@@ -8,7 +8,7 @@ author: zhangQiuFeng
 ## 缺失产物处理
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "${feature}" --plain
+python3 "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "${feature}" --plain
 ```
 
 # /autoops-cicd — CI/CD 清单与流水线阻断处理
@@ -49,7 +49,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-cicd --feature "$
 
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 3. 每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -57,7 +57,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 5. 使用统一脚本将当前 Feature 的 checkpoint 推进为 `cicd_in_progress`。写 `CI/CD（来源: Dev 交接）`：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress --stage "CI/CD（来源: Dev 验收）" --allow-create
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress --stage "CI/CD（来源: Dev 验收）" --allow-create
 ```
 
 ### 生成交付文档
@@ -87,7 +87,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_in_progress 
 3. 轮询命令保持现有约定：
 
 ```bash
-python "${pluginPath}/skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py" --pipelineCode <pipeline_code> --pipelineNum <pipeline_build_num>
+python3 "${pluginPath}/skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py" --pipelineCode <pipeline_code> --pipelineNum <pipeline_build_num>
 ```
 
 4. 该脚本为耗时操作，可后台运行
@@ -125,7 +125,7 @@ python "${pluginPath}/skills/autoops/autoops-cicd/hooks/poll_pipeline_status.py"
 macOS/Linux:
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_done
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint cicd_done
 ```
 
 ### 是否再次执行

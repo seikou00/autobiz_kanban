@@ -49,10 +49,10 @@ version: v1.1.2609
 
 ```bash
 # 已知 Feature
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 # 未知 Feature：先读取全部 records，再选择或要求用户选择 Feature
-python "${pluginPath}/read_state_json.py"
+python3 "${pluginPath}/read_state_json.py"
 ```
 
 - 需要用户从候选 Feature 中选择时，按 `${pluginPath}/skills/references/ask-user-question.md` 提问。候选不超过 3 个时直接列成结构化选项；超过 3 个时先展示完整 slug 清单，再把最多 3 个最相关候选放入结构化选项，其他候选由客户端自动提供的 Other 自由输入承接。若当前模式不支持 `request_user_input`，必须列出完整候选 slug 并显式追问用户回复其一。未拿到明确选择前，不得推进任何 checkpoint。
@@ -64,7 +64,7 @@ python "${pluginPath}/read_state_json.py"
 所有根路由判断必须以 `${pluginPath}/board_core/board_config.json` 编译后的有效 workflow 为准：
 
 ```bash
-python "${pluginPath}/hooks/resolve_next_skill.py" --json
+python3 "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 - `currentNodeId` 所属 group 为 `Biz` 时，进入 `/autobiz`。
@@ -77,7 +77,7 @@ python "${pluginPath}/hooks/resolve_next_skill.py" --json
 所有阶段推进 checkpoint 时，必须使用统一脚本更新 `.autobizdevops/state.json`，不得手工修改 `state.json` 或生成视图 `STATE.md`。脚本会同步重生 `.autobizdevops/STATE.md`，并在写入前复用 checkpoint 流转和 Autodev 产物校验。
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint {checkpoint}
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint {checkpoint}
 ```
 
 静态 checkpoint 表不得作为事实源；如本文与 `resolve_next_skill.py --json` 输出冲突，以脚本输出为准。

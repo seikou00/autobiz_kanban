@@ -25,9 +25,9 @@ version: v1.2.0825
 ## 建立上下文与恢复
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-e2e --feature "${feature}" --plain
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
+python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-e2e --feature "${feature}" --plain
+python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
 ```
 
 读取 `PRD.md`、`source-context.json`、`sources/` 快照、`specs/**/*.md`、`design.md`、`plan.json`、batch plan、`REQUIREMENTS_EVAL.md`、单测结果和项目 Playwright 配置。逐项读取 `targets` 含 `e2e` 的来源要求及对应快照；同时读取 reviewer 的 `External Interface Coverage` 与 `E2E Focus`。`deferredValidationIssues[]` 映射到具体用例或明确的 manual/missing 结论。
@@ -37,7 +37,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_in_progress
 恢复时读取全部 E2E 机器产物和 `e2e-diagnostics/**/**/*.pending.json`。旧格式 `E2E_RESULT.json` 或纯文本 `e2e-run.log` 只读保留，列出需重新执行的用例；旧产物不能形成新 PASS。存在 pending 时执行：
 
 ```bash
-python "${pluginPath}/hooks/run_e2e_command.py" resume \
+python3 "${pluginPath}/hooks/run_e2e_command.py" resume \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --feature "${feature}" \
   --run-id "<runId>"
@@ -50,21 +50,21 @@ python "${pluginPath}/hooks/run_e2e_command.py" resume \
 首次执行：
 
 ```bash
-python "${pluginPath}/hooks/e2e_result_writer.py" init \
+python3 "${pluginPath}/hooks/e2e_result_writer.py" init \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
-python "${pluginPath}/hooks/e2e_result_writer.py" add-case \
+python3 "${pluginPath}/hooks/e2e_result_writer.py" add-case \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
   --task-id "<taskId>" --spec-ref "<spec#REQ-NNN>" --spec-ref "<spec#SCN-NNN>" \
   --priority P0 --ui-required true --execution-mode mixed \
   --step-json '{"action":"<action>","expected":"<visible result>","verification":{"type":"ui","details":"<mechanical assertion>"}}'
-python "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
+python3 "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --kind initial
 ```
 
 任何测试资产或源码修复前开 repair 轮；最多三轮：
 
 ```bash
-python "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
+python3 "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --kind repair
 ```
 
@@ -77,7 +77,7 @@ python "${pluginPath}/hooks/e2e_result_writer.py" begin-round \
 探索、服务与鉴权事实写 JSONL note：
 
 ```bash
-python "${pluginPath}/hooks/run_e2e_command.py" note \
+python3 "${pluginPath}/hooks/run_e2e_command.py" note \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
   --phase discovery --text "<URL、auth、service、locator 或诊断摘要>"
 ```
@@ -87,7 +87,7 @@ python "${pluginPath}/hooks/run_e2e_command.py" note \
 读取 [`${pluginPath}/skills/autodev/autodev-e2e/reference/e2e-quality-gate.md`](reference/e2e-quality-gate.md)。先扫描持久化 spec 及其依赖：
 
 ```bash
-python "${pluginPath}/hooks/e2e_quality_check.py" scan \
+python3 "${pluginPath}/hooks/e2e_quality_check.py" scan \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --feature "${feature}" \
   --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
@@ -98,7 +98,7 @@ python "${pluginPath}/hooks/e2e_quality_check.py" scan \
 无法解析的 alias、barrel、动态 import 或自定义 fixture 注入用保守目录哈希补齐后重扫：
 
 ```bash
-python "${pluginPath}/hooks/e2e_quality_check.py" scan \
+python3 "${pluginPath}/hooks/e2e_quality_check.py" scan \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --feature "${feature}" \
   --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
@@ -109,12 +109,12 @@ python "${pluginPath}/hooks/e2e_quality_check.py" scan \
 逐条裁定 candidate；误报使用 `dismissed` 并填写理由，真实问题使用 `confirmed` 后修复和重扫。语义审查新问题以 `semantic:<name>` 登记。
 
 ```bash
-python "${pluginPath}/hooks/e2e_quality_check.py" resolve \
+python3 "${pluginPath}/hooks/e2e_quality_check.py" resolve \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" \
   --finding-id "<findingId>" --status dismissed \
   --reviewer autodev-e2e --rationale "<why false positive>" \
   --input "<reviewed source>"
-python "${pluginPath}/hooks/e2e_result_writer.py" sync-quality-gate \
+python3 "${pluginPath}/hooks/e2e_result_writer.py" sync-quality-gate \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
 ```
 
@@ -125,7 +125,7 @@ python "${pluginPath}/hooks/e2e_result_writer.py" sync-quality-gate \
 每个 case 单独用 `--grep <caseId>` 重放；浏览器跟随项目配置。只接受直接 Playwright Test 命令，不使用探索 CLI 或 `npm/pnpm/yarn run` 包脚本。
 
 ```bash
-python "${pluginPath}/hooks/run_e2e_command.py" run \
+python3 "${pluginPath}/hooks/run_e2e_command.py" run \
   --workspace "${pluginWorkspace}/${projectDir}" \
   --feature "${feature}" \
   --code-workspace "<assignment workspaceRef 的绝对仓库路径>" \
@@ -159,11 +159,11 @@ python "${pluginPath}/hooks/run_e2e_command.py" run \
 ## 派生 coverage 与最终 verdict
 
 ```bash
-python "${pluginPath}/hooks/e2e_result_writer.py" derive-scenario-coverage \
+python3 "${pluginPath}/hooks/e2e_result_writer.py" derive-scenario-coverage \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
-python "${pluginPath}/hooks/e2e_result_writer.py" finalize \
+python3 "${pluginPath}/hooks/e2e_result_writer.py" finalize \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
-python "${pluginPath}/hooks/e2e_result_writer.py" validate \
+python3 "${pluginPath}/hooks/e2e_result_writer.py" validate \
   --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --gate
 ```
 
@@ -172,13 +172,13 @@ python "${pluginPath}/hooks/e2e_result_writer.py" validate \
 PASS 时：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_done
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint e2e_done
 ```
 
 FAIL/BLOCKED 时写明分类、诊断与映射；需要回流时生成合法 `FIX_REQUEST.json` 后：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 ```
 
 ## 完成交接

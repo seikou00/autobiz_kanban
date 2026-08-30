@@ -3,7 +3,7 @@
 """
 autobiz 统一校验脚本
 用法:
-    python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "<slug>"
+    python3 "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "<slug>"
 """
 
 import argparse

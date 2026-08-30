@@ -121,14 +121,14 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
 2. **默认必跑 `prepare_html_analysis.py`。** 使用完整命令模板，参数齐全后再执行：
    - `SKILL_ROOT` 目录：
      ```
-     python route/with-absolute-html/scripts/prepare_html_analysis.py \
+     python3 route/with-absolute-html/scripts/prepare_html_analysis.py \
        --project-root . \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>
      ```
    - `route/with-absolute-html/` 目录：
      ```
-     python scripts/prepare_html_analysis.py \
+     python3 scripts/prepare_html_analysis.py \
        --project-root ../.. \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>

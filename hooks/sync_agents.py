@@ -4,7 +4,7 @@
 
 board_config.json 注册::
 
-    "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config"
+    "pull_knowledge": "python ${pluginPath}/hooks/sync_agents.py --write-board-config"
 
 仓库地址来自 board_config.json 顶层 ``agentsRepo``（可被 --repo-url/--ssh-url/--ref 覆盖）::
 

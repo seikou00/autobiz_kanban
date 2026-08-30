@@ -47,6 +47,9 @@ from hooks.render_session_context import (  # noqa: E402
     _workspace_status,
     render as render_legacy,
 )
+from hooks.paths import get_plugin_output_workspace_from_args  # noqa: E402
+from hooks.run_context import breadcrumb as run_context_breadcrumb, persist as persist_run_context  # noqa: E402
+from hooks.validation_capabilities import persist as persist_validation_capabilities  # noqa: E402
 
 DEFAULT_KNOWLEDGE_COLLECTOR = "collect-knowledge.js"
 KNOWLEDGE_COLLECT_TIMEOUT_SECONDS = 30
@@ -498,6 +501,45 @@ def main(argv: Optional[List[str]] = None) -> int:
             node_command=args.node_command,
             npm_command=args.npm_command,
         )
+
+        if args.plugin_workspace and args.project and args.feature and selected:
+            try:
+                runtime_workspace = get_plugin_output_workspace_from_args(
+                    args.plugin_workspace, args.project
+                )
+                runtime_context = persist_run_context(
+                    runtime_workspace, args.feature, selected
+                )
+                runtime_capabilities = persist_validation_capabilities(
+                    runtime_workspace / ".autobizdevops" / "features" / args.feature,
+                    runtime_context,
+                )
+                runtime_broadcast = run_context_breadcrumb(
+                    runtime_workspace, args.feature
+                )
+                current_context = str(result.get("sessionContext", "") or "")
+                result["sessionContext"] = (
+                    runtime_broadcast + ("\n\n" + current_context if current_context else "")
+                )
+                result["runContext"] = runtime_context
+                result["validationCapabilities"] = {
+                    "catalogDigest": runtime_capabilities.get("catalogDigest"),
+                    "count": len(runtime_capabilities.get("capabilities", [])),
+                    "capabilities": runtime_capabilities.get("capabilities", []),
+                }
+                if runtime_context.get("status") != "ready":
+                    result["ok"] = False
+                    result["message"] = "SCOPE_UNRESOLVED: " + json.dumps(
+                        runtime_context.get("errors", []), ensure_ascii=False
+                    )
+            except (OSError, ValueError) as exc:
+                result["ok"] = False
+                result["message"] = "SCOPE_UNRESOLVED: {}".format(exc)
+                result["runContext"] = {
+                    "schemaVersion": "autodev.run-context.v1",
+                    "status": "SCOPE_UNRESOLVED",
+                    "errors": [{"code": "SCOPE_UNRESOLVED", "detail": str(exc)}],
+                }
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     print()

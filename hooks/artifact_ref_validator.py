@@ -430,9 +430,15 @@ def _find_unique_anchor_file(base: Path, anchor: str, *, design: bool) -> Path:
 def _extract_spec_snippet(text: str, anchor: str) -> str | None:
     """Extract spec snippet for REQ/SCN anchors."""
     if anchor.startswith("REQ-"):
-        start_re = re.compile(rf"^###\s+Requirement\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
+        start_re = re.compile(
+            rf"^###\s+Requirement\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
+            re.MULTILINE,
+        )
     elif anchor.startswith("SCN-"):
-        start_re = re.compile(rf"^####\s+Scenario\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
+        start_re = re.compile(
+            rf"^####\s+Scenario\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
+            re.MULTILINE,
+        )
     else:
         return None
 

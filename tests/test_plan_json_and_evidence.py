@@ -306,6 +306,7 @@ class PlanJsonTest(unittest.TestCase):
             "visualSourceRefs": [],
             "frontendRoute": "spec-driven-ui",
         }
+        task["expectedFiles"] = ["src/views/promotion/activity/index.vue"]
         task["validationCommands"][0].update({
             "argv": ["npm", "run", "build"],
             "kind": "build",

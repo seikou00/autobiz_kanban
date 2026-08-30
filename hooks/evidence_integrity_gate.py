@@ -37,6 +37,7 @@ from plan_json import (  # noqa: E402
     tasks,
     unfinished_tasks,
 )
+from hooks.run_context import load as load_run_context  # noqa: E402
 PASS_RESULTS = {"pass", "passed", "success", "ok", "PASS", "PASS_WITH_WARNINGS"}
 
 
@@ -253,6 +254,20 @@ def _check_completion(
     if not defer_to_test_stages_enabled(plan):
         return ["taskValidationPolicy_not_supported"]
 
+    repository_roots: list[Path] = []
+    if feature_dir is not None and (feature_dir / ".runtime" / "RUN_CONTEXT.json").is_file():
+        try:
+            runtime_context = load_run_context(feature_dir.parents[2], feature_dir.name)
+            if plan.get("runContextDigest") != runtime_context.get("contextDigest"):
+                errors.append("plan_run_context_digest_mismatch")
+            repository_roots = [
+                Path(item["root"]).resolve()
+                for item in runtime_context.get("repositories", [])
+                if isinstance(item, dict) and isinstance(item.get("root"), str)
+            ]
+        except ValueError as exc:
+            errors.append("SCOPE_UNRESOLVED:{}".format(exc))
+
     for task in tasks(plan):
         task_id = str(task.get("id", ""))
         implementation_ids = task.get("implementationEvidenceIds")
@@ -272,6 +287,30 @@ def _check_completion(
                 or record.get("taskId") != task_id
             ):
                 errors.append(f"{task_id}.implementation_evidence_invalid:{evidence_id}")
+
+        expected_files = task.get("expectedFiles")
+        expected_files = expected_files if isinstance(expected_files, list) else []
+        latest_record = by_id.get(str(latest_implementation))
+        latest_changed_files = (
+            latest_record.get("changedFiles", []) if isinstance(latest_record, dict) else []
+        )
+        evidence_files = {
+            str(value).replace("\\", "/").lstrip("./")
+            for value in latest_changed_files
+            if isinstance(value, str) and value.strip()
+        }
+        for expected_file in expected_files:
+            if not isinstance(expected_file, str) or not expected_file.strip():
+                continue
+            normalized = expected_file.replace("\\", "/").lstrip("./")
+            if normalized not in evidence_files:
+                errors.append(f"{task_id}.expected_file_not_in_latest_implementation_evidence:{expected_file}")
+            if repository_roots:
+                matches = [root / normalized for root in repository_roots if (root / normalized).is_file()]
+                if not matches:
+                    errors.append(f"{task_id}.expected_file_missing:{expected_file}")
+                elif len(matches) > 1:
+                    errors.append(f"{task_id}.expected_file_root_ambiguous:{expected_file}")
 
         completion_ids = task.get("completionEvidenceIds")
         completion_ids = completion_ids if isinstance(completion_ids, list) else []

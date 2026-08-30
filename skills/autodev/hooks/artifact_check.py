@@ -44,6 +44,7 @@ from hooks.e2e_trust_common import (  # noqa: E402
     validate_scan_current,
 )
 from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
+from hooks.candidate_digest import compute as compute_candidate_digest  # noqa: E402
 from hooks.source_references import (  # noqa: E402
     SOURCE_ID_RE,
     extract_source_references,
@@ -54,6 +55,7 @@ from hooks.source_references import (  # noqa: E402
 from hooks.source_context import (  # noqa: E402
     load_source_context,
     referenced_source_requirement_ids,
+    source_ids_for_target,
     source_requirement_ids_for_target,
     source_requirement_index,
     validate_source_context,
@@ -80,8 +82,22 @@ REQ_ID = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID = re.compile(r"\bSCN-\d{3}\b")
 TASK_ID = re.compile(r"\bT\d{3}\b")
 EVIDENCE_ID = re.compile(r"\bev_\d{4}\b")
-SPEC_REQUIREMENT_DEF_RE = re.compile(r"^###\s+Requirement\s+\[(REQ-\d{3})\]:\s+.+$", re.MULTILINE)
-SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
+SPEC_REQUIREMENT_DEF_RE = re.compile(
+    r"^###\s+Requirement\s+(?=\[?(REQ-\d{3})\]?:\s+.+$)(?:\[REQ-\d{3}\]|REQ-\d{3}):\s+.+$",
+    re.MULTILINE,
+)
+SPEC_SCENARIO_DEF_RE = re.compile(
+    r"^####\s+Scenario\s+(?=\[?(SCN-\d{3})\]?:\s+.+$)(?:\[SCN-\d{3}\]|SCN-\d{3}):\s+.+$",
+    re.MULTILINE,
+)
+SPEC_REQUIREMENT_NUMERIC_RE = re.compile(
+    r"^###\s+Requirement\s+(?=\[?(REQ-(?P<digits>\d+))\]?:\s+.+$)(?:\[REQ-\d+\]|REQ-\d+):\s+.+$",
+    re.MULTILINE,
+)
+SPEC_SCENARIO_NUMERIC_RE = re.compile(
+    r"^####\s+Scenario\s+(?=\[?(SCN-(?P<digits>\d+))\]?:\s+.+$)(?:\[SCN-\d+\]|SCN-\d+):\s+.+$",
+    re.MULTILINE,
+)
 # 带 REQ-/SCN- 记号的标题行；与上面两个正则的差集就是索引器看不见的写法
 CONTRACT_HEADING_CANDIDATE = re.compile(r"^#{1,6}[ \t]+.*?\b(?:REQ|SCN)-\S")
 # 二级标题（操作段）；`###` 不算，否则 Requirement 标题会被当成段边界
@@ -93,12 +109,16 @@ REMOVED_SECTION = re.compile(
 REMOVED_FIELD = re.compile(
     r"^\*\*(?P<name>Reason|Migration)[:：]\*\*(?P<value>.*)$", re.MULTILINE
 )
-# `[能力名]` 这类待填槽位。排除 `[REQ-001]`/`[SCN-001]`（真 ID 语法）、
+# `[能力名]` 这类待填槽位。排除所有纯数字 REQ/SCN 记号；位数是否合法由
+# ``spec_id_width_invalid`` 单独判定，避免一个四位 ID 同时报模板残留。
+# `REQ-NNN` / `SCN-NNN` 是模板槽位，由 ``PLACEHOLDER_WORD`` 统一捕获。
 # Markdown 链接 `[文字](url)`、以及任务勾选框 `[ ]` / `[x]`。
 PLACEHOLDER_BRACKET = re.compile(
-    r"\[(?!(?:REQ|SCN)-\d{3}\])(?![ xX]\])(?P<slot>[^\]\n]{1,40})\](?!\()"
+    r"\[(?!(?:REQ|SCN)-(?:\d+|NNN)\])(?![ xX]\])(?P<slot>[^\]\n]{1,40})\](?!\()"
 )
-PLACEHOLDER_WORD = re.compile(r"TBD|待补充|待提供|待定|占位", re.IGNORECASE)
+PLACEHOLDER_WORD = re.compile(
+    r"\b(?:REQ|SCN)-NNN\b|TBD|待补充|待提供|待定|占位", re.IGNORECASE
+)
 PLACEHOLDER_TEXT = re.compile(r"\[[^\]\n]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
 # 规格决策 DEC-NNN：specs 阶段在 proposal `## Decision Log` 定义，design 追踪表引用。
 # 与技术决策 `D-NNN`（plan 阶段自产，见 hooks/plan_json.TECH_DECISION_ID_RE）不是一回事，
@@ -560,9 +580,25 @@ def validate_specs_contract(ctx: HookContext) -> int:
             failures += fail_line(ctx, reason, f" file={rel}", target=str(rel))
         if not re.search(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", text, re.MULTILINE):
             failures += fail_line(ctx, "invalid_spec_missing_operation_header", f" file={rel}", target=str(rel))
-        if not re.search(r"^###\s+Requirement\s+\[REQ-\d{3}\]:\s+.+", text, re.MULTILINE):
+        width_errors = contract_id_width_errors(text, taken)
+        for width_error in width_errors:
+            if width_error.suggested:
+                taken.add(width_error.suggested)
+            failures += fail_line(
+                ctx,
+                "spec_id_width_invalid",
+                f" file={rel} id={width_error.current} suggested={width_error.suggested or 'NONE'}",
+                target=str(rel),
+                fields={
+                    "id": width_error.current,
+                    "suggested": width_error.suggested or "三位 ID 空间已耗尽",
+                },
+            )
+        has_requirement_candidate = SPEC_REQUIREMENT_NUMERIC_RE.search(text) is not None
+        has_scenario_candidate = SPEC_SCENARIO_NUMERIC_RE.search(text) is not None
+        if not has_requirement_candidate:
             failures += fail_line(ctx, "invalid_spec_missing_requirement", f" file={rel}", target=str(rel))
-        if not re.search(r"^####\s+Scenario\s+\[SCN-\d{3}\]:\s+.+", text, re.MULTILINE):
+        if not has_scenario_candidate:
             failures += fail_line(ctx, "invalid_spec_missing_scenario", f" file={rel}", target=str(rel))
         malformed = malformed_contract_headings(text)
         if malformed:
@@ -590,17 +626,6 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 f" file={rel} scenarios={','.join(orphans)}",
                 target=str(rel),
                 fields={"scenarios": ",".join(orphans)},
-            )
-        disordered = out_of_order_ids(text, taken)
-        if disordered:
-            taken.update(descent.suggested for descent in disordered)
-            pairs = "; ".join(descent.describe() for descent in disordered)
-            failures += fail_line(
-                ctx,
-                "spec_id_out_of_order",
-                f" file={rel} pairs={pairs}",
-                target=str(rel),
-                fields={"pairs": pairs},
             )
         missing_fields = removed_requirements_missing_fields(text)
         if missing_fields:
@@ -643,6 +668,12 @@ def _validate_specs_source_references(ctx: HookContext, specs: list[Path]) -> in
         return 0
 
     defined = {reference.source_id for reference in extract_source_references(prd_text)}
+    source_context, _ = load_source_context(ctx.feature_dir)
+    required = (
+        defined
+        if source_context is None
+        else defined & source_ids_for_target(source_context, "spec")
+    )
     cited: set[str] = set()
     rows: dict[str, list[str]] = {}
     for spec in specs:
@@ -656,7 +687,7 @@ def _validate_specs_source_references(ctx: HookContext, specs: list[Path]) -> in
             cited.update(section_rows)
 
     failures = 0
-    missing = sorted(defined - cited)
+    missing = sorted(required - cited)
     if missing:
         failures += fail_line(
             ctx,
@@ -675,7 +706,9 @@ def _validate_specs_source_references(ctx: HookContext, specs: list[Path]) -> in
     incomplete = sorted(
         source_id
         for source_id, cells in rows.items()
-        if len(cells) < 3 or any(_coverage_cell_is_empty(cell) for cell in cells[1:3])
+        if len(cells) < 3
+        or _coverage_cell_is_empty(cells[2])
+        or (source_id in required and _coverage_cell_is_empty(cells[1]))
     )
     if incomplete:
         failures += fail_line(
@@ -753,54 +786,81 @@ def _duplicate_ids_across_specs(ctx: HookContext, specs: list[Path]) -> int:
             for spec_id in set(pattern.findall(text)):
                 owners.setdefault(spec_id, []).append(rel)
 
+    reserved = set(owners)
     failures = 0
     for spec_id, files in sorted(owners.items()):
         if len(files) > 1:
+            sorted_files = sorted(files)
+            prefix = spec_id.split("-", 1)[0]
+            replacements: list[str] = []
+            for owner in sorted_files[1:]:
+                suggested = _next_free_spec_id(prefix, 0, reserved)
+                if suggested:
+                    reserved.add(suggested)
+                    replacements.append(f"{owner}:{spec_id}->{suggested}")
+                else:
+                    replacements.append(f"{owner}:{spec_id}->三位 ID 空间已耗尽")
             failures += fail_line(
                 ctx,
                 "duplicate_spec_id_across_specs",
-                f" id={spec_id} files={','.join(sorted(files))}",
+                f" id={spec_id} keep={sorted_files[0]} replacements={';'.join(replacements)}",
                 target=spec_id,
-                fields={"files": ",".join(sorted(files))},
+                fields={
+                    "files": ",".join(sorted_files),
+                    "keep": sorted_files[0],
+                    "replacements": "; ".join(replacements),
+                },
             )
     return failures
 
 
 def malformed_contract_headings(text: str) -> list[str]:
-    """Heading lines carrying a REQ-/SCN- token that the ID indexer will not see.
-
-    The indexer accepts exactly one spelling. A heading one bracket or one ``#``
-    away from it is not a syntax error anywhere — it simply vanishes, and the
-    Requirement it names drops out of every downstream coverage check while the
-    file still passes because its *other* headings are well formed. That silent
-    partial loss is why this has to be caught at the spec itself.
-    """
+    """Heading lines carrying a REQ-/SCN- token that the ID indexer will not see."""
     malformed: list[str] = []
     for line in text.splitlines():
         if not CONTRACT_HEADING_CANDIDATE.match(line):
             continue
         if SPEC_REQUIREMENT_DEF_RE.match(line) or SPEC_SCENARIO_DEF_RE.match(line):
             continue
+        if "REQ-NNN" in line or "SCN-NNN" in line:
+            continue
+        # 数字 ID 的标题形状正确但位数错误时，由 ``spec_id_width_invalid``
+        # 给唯一根因和替换值；这里不再重复报 malformed。
+        if SPEC_REQUIREMENT_NUMERIC_RE.match(line) or SPEC_SCENARIO_NUMERIC_RE.match(line):
+            continue
         malformed.append(line.strip())
     return malformed
 
 
-class SpecIdDescent(NamedTuple):
-    """One descending step, named by both of its ends plus a free replacement.
-
-    Reporting only the offending ID (the old shape) tells the agent a number is
-    wrong but not what it has to clear, so the repair is a guess: renumber, hit
-    ``duplicate_spec_id_across_specs``, renumber again. ``previous`` gives the
-    ID it must exceed and ``suggested`` gives one that is free across the whole
-    feature, which turns the repair into a substitution.
-    """
-
-    previous: str
+class SpecIdWidth(NamedTuple):
     current: str
     suggested: str
 
-    def describe(self) -> str:
-        return f"{self.previous} -> {self.current}（建议改为 {self.suggested}）"
+
+def contract_id_width_errors(text: str, taken: Iterable[str] = ()) -> list[SpecIdWidth]:
+    """Well-shaped numeric contract headings whose ID is not exactly three digits."""
+
+    reserved = set(taken)
+    reserved.update(SPEC_REQUIREMENT_DEF_RE.findall(text))
+    reserved.update(SPEC_SCENARIO_DEF_RE.findall(text))
+    errors: list[SpecIdWidth] = []
+    for prefix, pattern in (
+        ("REQ", SPEC_REQUIREMENT_NUMERIC_RE),
+        ("SCN", SPEC_SCENARIO_NUMERIC_RE),
+    ):
+        highest = 0
+        for match in pattern.finditer(text):
+            digits = match.group("digits")
+            current = match.group(1)
+            if len(digits) == 3:
+                highest = max(highest, int(digits))
+                continue
+            suggested = _next_free_spec_id(prefix, highest, reserved)
+            if suggested:
+                reserved.add(suggested)
+                highest = int(suggested.rpartition("-")[2])
+            errors.append(SpecIdWidth(current, suggested))
+    return errors
 
 
 def _next_free_spec_id(prefix: str, floor: int, reserved: set[str]) -> str:
@@ -809,44 +869,7 @@ def _next_free_spec_id(prefix: str, floor: int, reserved: set[str]) -> str:
         candidate = f"{prefix}-{number:03d}"
         if candidate not in reserved:
             return candidate
-    return f"{prefix}-{min(floor + 1, 999):03d}"
-
-
-def out_of_order_ids(text: str, taken: Iterable[str] = ()) -> list[SpecIdDescent]:
-    """REQ/SCN IDs whose number does not exceed every ID before it in the file.
-
-    The rule is ascending, not contiguous. "删除后 ID 不复用" guarantees gaps
-    (delete REQ-002 and 001/003 remain), so requiring contiguity would fire on
-    exactly the state the other rule mandates. Equal numbers are left to the
-    duplicate check so one mistake is not reported twice.
-
-    ``taken`` carries the IDs already spoken for elsewhere in the feature so a
-    suggestion cannot collide with another spec file. Each suggestion is also
-    reserved as it is issued, and raises the running ceiling: a file with two
-    descents gets two distinct numbers that ascend once both are applied,
-    rather than the same number twice.
-    """
-    reserved = set(taken)
-    reserved.update(SPEC_REQUIREMENT_DEF_RE.findall(text))
-    reserved.update(SPEC_SCENARIO_DEF_RE.findall(text))
-
-    violations: list[SpecIdDescent] = []
-    for pattern in (SPEC_REQUIREMENT_DEF_RE, SPEC_SCENARIO_DEF_RE):
-        highest = 0
-        previous: str | None = None
-        for match in pattern.finditer(text):
-            spec_id = match.group(1)
-            prefix, _, digits = spec_id.rpartition("-")
-            number = int(digits)
-            if number < highest and previous is not None:
-                suggested = _next_free_spec_id(prefix, highest, reserved)
-                reserved.add(suggested)
-                highest = max(highest, int(suggested.rpartition("-")[2]))
-                violations.append(SpecIdDescent(previous, spec_id, suggested))
-            else:
-                highest = max(highest, number)
-            previous = spec_id
-    return violations
+    return ""
 
 
 def scenarios_without_requirement(text: str) -> list[str]:
@@ -903,9 +926,9 @@ def removed_requirements_missing_fields(text: str) -> list[str]:
 def placeholder_residue(text: str) -> list[str]:
     """Template placeholders left in a generated artifact.
 
-    ``[REQ-001]`` / ``[SCN-001]`` are the real ID syntax and Markdown links are
-    ordinary prose, so both are excluded -- what is left is a slot the author
-    was supposed to fill.
+    Numeric ``[REQ-...]`` / ``[SCN-...]`` tokens are left to the dedicated ID
+    validators. ``REQ-NNN`` / ``SCN-NNN`` and bracketed prose are template
+    slots; Markdown links are ordinary prose.
     """
     residue = [match.group(0) for match in PLACEHOLDER_BRACKET.finditer(text)]
     residue += [match.group(0) for match in PLACEHOLDER_WORD.finditer(text)]
@@ -1645,10 +1668,6 @@ def requirements_eval_has_warnings(text: str) -> bool:
     return _requirements_eval_section_has_items(text, REQUIREMENTS_EVAL_WARNINGS_SECTION)
 
 
-SPECS_REVIEW_BASELINE_SECTION = re.compile(
-    r"^##\s+Review Baseline\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
 SPECS_REVIEW_FINDINGS_SECTION = re.compile(
     r"^##\s+Findings\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
@@ -1657,70 +1676,18 @@ SPECS_REVIEW_UNRESOLVED_SECTION = re.compile(
     r"^##\s+Unresolved\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
 )
-# 必查项闭集。与 skills/references/review-protocol.md 的 dev.specs 必查项一一对应：
-# 协议定义要查什么，本表让「查过了」成为可校验的事实而不是一句自述。
-SPECS_REVIEW_BASELINE_ITEMS = (
-    "需求覆盖",
-    "实现范围符合性",
-    "操作分类与代码事实",
-    "上游资料引用",
-    "待确认项消解",
-)
-SPECS_REVIEW_BASELINE_RESULTS = ("通过", "发现问题", "不适用")
-# dev.specs 的分类取值，同样取自协议的分类表。
-SPECS_REVIEW_CATEGORIES = ("产物可修", "需用户裁定", "回流上游", "仅列出", "结论不成立")
-# 必须带分类与处置的严重度；Minor / Open Questions 不强制。
-SPECS_REVIEW_SCORED_SEVERITIES = ("critical", "major")
 
 
-def _markdown_table_rows(body: str) -> list[list[str]]:
-    """管道表的数据行，跳过表头分隔行与仍带模板槽位的示例行。
-
-    槽位判定走 ``placeholder_residue`` 而不是裸的方括号匹配：证据列本来就会
-    引用 ``[SCN-012]`` 或写 Markdown 链接，用粗判据会把真实行当模板行丢掉，
-    然后以「必查项缺失」的形式报一个不存在的问题。
-    """
-    rows: list[list[str]] = []
-    for line in body.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if not cells or all(set(cell) <= set("-: ") for cell in cells):
-            continue
-        if any(placeholder_residue(cell) for cell in cells):
-            continue
-        rows.append(cells)
-    return rows
-
-
-def _specs_review_cell_is_empty(cell: str) -> bool:
-    return not cell or bool(placeholder_residue(cell))
-
-
-def specs_review_baseline(text: str) -> dict[str, list[str]]:
-    """必查项 -> 该行的全部单元格。表头行本身不会命中闭集，自然被丢掉。"""
-    section = SPECS_REVIEW_BASELINE_SECTION.search(text)
+def specs_review_section_is_empty(text: str, section_pattern: "re.Pattern[str]") -> bool:
+    """段存在但正文什么都没有——模板槽位不算内容。"""
+    section = section_pattern.search(text)
     if section is None:
-        return {}
-    baseline: dict[str, list[str]] = {}
-    for cells in _markdown_table_rows(section.group("body")):
-        for item in SPECS_REVIEW_BASELINE_ITEMS:
-            if cells[0] == item:
-                baseline[item] = cells
-    return baseline
-
-
-def specs_review_findings(text: str) -> list[list[str]]:
-    """Findings 表的数据行；`| ID | 来源 | 原文严重度 | 结论 | 证据 | 分类 | 处置 |`。"""
-    section = SPECS_REVIEW_FINDINGS_SECTION.search(text)
-    if section is None:
-        return []
-    return [
-        cells
-        for cells in _markdown_table_rows(section.group("body"))
-        if cells and cells[0].upper().startswith("F-")
-    ]
+        return True
+    body = section.group("body")
+    return not any(
+        line.strip() and not placeholder_residue(line)
+        for line in body.splitlines()
+    )
 
 
 def specs_review_has_unresolved(text: str) -> bool:
@@ -1728,13 +1695,10 @@ def specs_review_has_unresolved(text: str) -> bool:
 
 
 def validate_specs_review_verdict(ctx: HookContext) -> int:
-    """把 dev.specs 的回检从一段文字义务变成一个可校验产物。
+    """回检结论必须落盘，机器只判三件事：verdict、findings、unresolved。
 
-    协议早就要求逐条分类与处置，但它只活在回复里：模型少输出一条、或干脆不
-    输出，`update_checkpoint.py --checkpoint specs_done` 照样成功——没有落盘就
-    没有门。形状照抄 `validate_requirements_eval_verdict`：产物缺失 fail、
-    verdict 非终态 fail、baseline 不全 fail，外加一条交叉校验——必查项报了
-    「发现问题」却一条 Finding 都没有，就是自相矛盾的 PASS。
+    这一段的内容质量由 critic 负责。机器不核对必查项表格、不校验分类措辞，
+    也不比对严重度——那些换个说法就能过，只会推着模型改词，不会提高审查质量。
     """
     review_path = ctx.file("SPECS_REVIEW.md")
     if not is_nonempty(review_path):
@@ -1759,76 +1723,12 @@ def validate_specs_review_verdict(ctx: HookContext) -> int:
             fields={"verdict": verdict},
         )
 
-    baseline = specs_review_baseline(text)
-    missing_items = [item for item in SPECS_REVIEW_BASELINE_ITEMS if item not in baseline]
-    if missing_items:
-        failures += fail_line(
-            ctx,
-            "specs_review_baseline_incomplete",
-            f" items={','.join(missing_items)}",
-            target="SPECS_REVIEW.md",
-            fields={"items": "、".join(missing_items)},
-        )
+    if specs_review_section_is_empty(text, SPECS_REVIEW_FINDINGS_SECTION):
+        failures += fail_line(ctx, "missing_specs_review_findings", target="SPECS_REVIEW.md")
 
-    flagged: list[str] = []
-    for item, cells in baseline.items():
-        result = cells[1] if len(cells) > 1 else ""
-        evidence = cells[2] if len(cells) > 2 else ""
-        if result not in SPECS_REVIEW_BASELINE_RESULTS:
-            failures += fail_line(
-                ctx,
-                "specs_review_baseline_invalid_result",
-                f" item={item} result={result}",
-                target=item,
-                fields={"item": item, "result": result},
-            )
-        elif result == "发现问题":
-            flagged.append(item)
-        if _specs_review_cell_is_empty(evidence):
-            failures += fail_line(
-                ctx,
-                "specs_review_baseline_missing_evidence",
-                f" item={item}",
-                target=item,
-                fields={"item": item},
-            )
-
-    findings = specs_review_findings(text)
-    for cells in findings:
-        finding_id = cells[0]
-        severity = cells[2] if len(cells) > 2 else ""
-        category = cells[5] if len(cells) > 5 else ""
-        disposition = cells[6] if len(cells) > 6 else ""
-        scored = any(word in severity.lower() for word in SPECS_REVIEW_SCORED_SEVERITIES)
-        if category and category not in SPECS_REVIEW_CATEGORIES:
-            failures += fail_line(
-                ctx,
-                "specs_review_finding_invalid_category",
-                f" finding={finding_id} category={category}",
-                target=finding_id,
-                fields={"category": category},
-            )
-        if scored and (
-            _specs_review_cell_is_empty(category) or _specs_review_cell_is_empty(disposition)
-        ):
-            failures += fail_line(
-                ctx,
-                "specs_review_finding_missing_disposition",
-                f" finding={finding_id} severity={severity}",
-                target=finding_id,
-                fields={"severity": severity},
-            )
-
-    if flagged and not findings:
-        failures += fail_line(
-            ctx,
-            "specs_review_baseline_finding_mismatch",
-            f" items={','.join(flagged)}",
-            target="SPECS_REVIEW.md",
-            fields={"items": "、".join(flagged)},
-        )
-
-    if specs_review_has_unresolved(text):
+    if specs_review_section_is_empty(text, SPECS_REVIEW_UNRESOLVED_SECTION):
+        failures += fail_line(ctx, "missing_specs_review_unresolved", target="SPECS_REVIEW.md")
+    elif specs_review_has_unresolved(text):
         failures += fail_line(
             ctx,
             "unresolved_specs_review_finding",
@@ -1972,6 +1872,12 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
     )
     if data is None:
         return failures
+    report_path = ctx.file("UNIT_TEST_REPORT.md")
+    if ctx.requires_artifact("UNIT_TEST_REPORT.md"):
+        if not is_nonempty(report_path):
+            failures += fail_line(ctx, "missing_required_artifact", " item=UNIT_TEST_REPORT.md")
+        elif "## 未验证项及原因" not in report_path.read_text(encoding="utf-8", errors="replace"):
+            failures += fail_line(ctx, "unit_test_report_unverified_section_missing")
     for reason in validate_result_against_plan(ctx.feature_dir, data):
         failures += fail_line(
             ctx,
@@ -2382,6 +2288,15 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
         return failures
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_verify_decision_version")
+    run_context_path = ctx.feature_dir / ".runtime" / "RUN_CONTEXT.json"
+    if run_context_path.is_file():
+        try:
+            current_diff_digest = compute_candidate_digest(ctx.root, ctx.slug)
+        except ValueError as exc:
+            failures += fail_line(ctx, "verify_diff_digest_unresolved", f" detail={exc}")
+        else:
+            if data.get("diffDigest") != current_diff_digest:
+                failures += fail_line(ctx, "verify_diff_digest_stale")
     verdict = data.get("verdict")
     if not isinstance(verdict, str) or verdict.lower() not in {"pass", "fail", "manual"}:
         failures += fail_line(ctx, "invalid_verify_decision_verdict")
@@ -2506,6 +2421,8 @@ def validate_fix_request_json(ctx: HookContext) -> int:
         "permission_issue",
         "dependency_issue",
         "plan_contract_gap",
+        "workspace_binding_invalid",
+        "evidence_integrity_issue",
         "unknown",
     }:
         failures += fail_line(ctx, "invalid_fix_request_root_cause")
@@ -3216,6 +3133,8 @@ def run_postcheck(
     workflow_decisions: dict[str, str] | None = None,
     workflow_record: dict | None = None,
     target_checkpoint: str | None = None,
+    validators_override: Iterable[str] | None = None,
+    required_outputs_override: Iterable[str] | None = None,
 ) -> tuple[int, str]:
     try:
         config = load_artifact_config(
@@ -3226,16 +3145,24 @@ def run_postcheck(
             workflow_decisions=workflow_decisions,
             workflow_record=workflow_record,
         )
-        required_outputs = list(config.required_outputs)
+        required_outputs = list(
+            required_outputs_override
+            if required_outputs_override is not None
+            else config.required_outputs
+        )
+        validators = list(
+            validators_override if validators_override is not None else config.validators
+        )
         if (
-            skill == "autodev-utest"
+            required_outputs_override is None
+            and skill == "autodev-utest"
             and target_checkpoint == "needs_fix"
-            and "fix_request_json" in config.validators
+            and "fix_request_json" in validators
             and "FIX_REQUEST.json" not in required_outputs
         ):
             required_outputs.append("FIX_REQUEST.json")
         validate_required_files(workspace_root, slug, required_outputs)
-        for validator in config.validators:
+        for validator in validators:
             if validator not in VALIDATORS:
                 raise HookCheckError("unknown_validator", f"{skill}:{validator}")
     except HookCheckError as error:
@@ -3261,7 +3188,7 @@ def run_postcheck(
         target_checkpoint=target_checkpoint,
     )
     failures = 0
-    for validator in config.validators:
+    for validator in validators:
         failures += VALIDATORS[validator](ctx)
     if failures:
         return 1, f"POST_SKILL_FAIL skill={skill} failures={failures}"

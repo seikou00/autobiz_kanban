@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
-from hooks.unit_test_result_writer import ensure_plan_result  # noqa: E402
+from hooks.unit_test_result_writer import ensure_plan_result, record_runtime_block  # noqa: E402
 
 
 BLOCKING_STATUSES = {
@@ -25,6 +25,10 @@ BLOCKING_STATUSES = {
     "conflict",
     "unsupported",
     "environment_inspection_failed",
+    "SCOPE_UNRESOLVED",
+    "EVIDENCE_ROOT_MISMATCH",
+    "EVIDENCE_FILE_STALE",
+    "IMPLEMENTATION_EVIDENCE_MISSING",
 }
 
 
@@ -74,7 +78,7 @@ def record_utest_block(workspace, feature, payload):
         )
 
     feature_dir = workspace / ".autobizdevops" / "features" / feature
-    result, result_write = ensure_plan_result(workspace, feature, create=True)
+    result, _ = ensure_plan_result(workspace, feature, create=True)
     if result.get("verdict") != "BLOCKED":
         raise ValueError(
             "UNIT_TEST_RESULT 当前 verdict={}，不能用环境阻断覆盖已完成结果。修复：保留现有 Evidence 并人工归因。".format(
@@ -82,8 +86,15 @@ def record_utest_block(workspace, feature, payload):
             )
         )
 
+    result, result_write = record_runtime_block(workspace, feature, payload)
+
     plan_gap = status == "contract_gap"
-    root_cause = "plan_contract_gap" if plan_gap else "environment_issue"
+    if status in {"SCOPE_UNRESOLVED", "EVIDENCE_ROOT_MISMATCH", "workspace_binding_missing", "workspace_binding_invalid"}:
+        root_cause = "workspace_binding_invalid"
+    elif status in {"EVIDENCE_FILE_STALE", "IMPLEMENTATION_EVIDENCE_MISSING"}:
+        root_cause = "evidence_integrity_issue"
+    else:
+        root_cause = "plan_contract_gap" if plan_gap else "environment_issue"
     suggested_checkpoint = "plan_in_progress" if plan_gap else "unit_test_in_progress"
     repair_strategy = "rollback_plan_keep_source" if plan_gap else "resolve_environment_then_retry_utest"
     reason = _blocking_reason(payload)
@@ -108,6 +119,16 @@ def record_utest_block(workspace, feature, payload):
     atomic_write_json(fix_path, fix_request)
 
     report_path = feature_dir / "UNIT_TEST_REPORT.md"
+    unverified_lines = [
+        "- `{}` (`{}`): `{}`".format(
+            item.get("checkId", "unknown"),
+            item.get("kind", "unknown"),
+            item.get("reasonCode", "not_executed"),
+        )
+        for item in result.get("unverifiedChecks", [])
+        if isinstance(item, dict)
+    ]
+    unverified_text = "\n".join(unverified_lines) or "- 无"
     report = (
         "# Unit Test Report\n\n"
         "- **Feature:** {feature}\n"
@@ -121,6 +142,8 @@ def record_utest_block(workspace, feature, payload):
         "- Required action: `{required_action}`\n\n"
         "## Coverage Matrix\n\n"
         "未执行测试，coverage 保持 missing。\n\n"
+        "## 未验证项及原因\n\n"
+        "{unverified_text}\n\n"
         "## Failure Analysis\n\n"
         "{reason}\n\n"
         "## Fix Attempts\n\n"
@@ -136,6 +159,7 @@ def record_utest_block(workspace, feature, payload):
         status=status,
         required_action=fix_request["requiredAction"],
         reason=reason,
+        unverified_text=unverified_text,
         repair_strategy=repair_strategy,
         suggested_checkpoint=suggested_checkpoint,
     )

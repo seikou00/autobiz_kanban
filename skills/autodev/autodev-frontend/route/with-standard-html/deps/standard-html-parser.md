@@ -208,7 +208,7 @@ description: 处理标准 DOM / 语义明确 HTML 的独立 route 依赖。该�
 从本技能仓库根目录运行：
 
 ```bash
-python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
+python3 route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown
 ```
 
 脚本只扫描 `.tsx` / `.jsx` 源码。退出码 `0` 表示未发现候选项；退出码 `1` 表示发现可能遗漏的 Ant Design 转换候选项，应把输出作为待处理清单继续转换或说明，不视为脚本故障。
@@ -288,7 +288,7 @@ python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-pro
 - 前端任务要启动 dev server，并用浏览器确认页面非空白、资源加载、布局无明显错位。
 - 检查桌面和移动视口：溢出、裁切、文本重叠、按钮挤压、表格横向滚动。
 - Ant Design 场景检查：样式是否加载、版本 API 是否正确、Form 默认值与校验、Radio/Checkbox/Select/Tabs 状态、Table `rowKey`、Modal/Drawer open/close、feedback API provider context。
-- Ant Design 转换被请求或被选择时，运行 `python route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
+- Ant Design 转换被请求或被选择时，运行 `python3 route/with-standard-html/scripts/audit_antd_coverage.py <target-react-project-or-src> --format markdown` 做覆盖审计；只看 JSX / TSX 源码，不看运行时 DOM；不得留下未审计 / 未说明的原生产品控件、表格、表单控件、弹窗、反馈、分页、上传或导航控件。
 - 检查图标 / 图表来源层级和可访问性。
 - 回查页面主区域、字段、标题、按钮、表格列、tab、展开收起区、图标、图表和明显交互是否有增减或丢失。
 

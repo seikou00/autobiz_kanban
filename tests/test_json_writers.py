@@ -65,11 +65,11 @@ def _write_specs(feature_dir: Path, *, second: bool = False) -> None:
     spec_dir.mkdir(parents=True, exist_ok=True)
     lines = [
         "## ADDED Requirements",
-        "### Requirement [REQ-001]: capability",
-        "#### Scenario [SCN-001]: happy path",
+        "### Requirement REQ-001: capability",
+        "#### Scenario SCN-001: happy path",
     ]
     if second:
-        lines.append("#### Scenario [SCN-002]: alternate path")
+        lines.append("#### Scenario SCN-002: alternate path")
     (spec_dir / "spec.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -544,6 +544,7 @@ class JsonWriterTests(unittest.TestCase):
                 "deps": ["T001"],
                 "uiRequired": True,
                 "workspaceRef": "frontend-repo",
+                "expectedFiles": ["src/views/feature/index.vue"],
             })
             frontend["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
             frontend["acceptanceCriteria"][0].update({
@@ -1290,6 +1291,7 @@ class JsonWriterTests(unittest.TestCase):
             _, module = _code_module(root)
             task = _plan_task_body()
             task["uiRequired"] = True
+            task["expectedFiles"] = ["module-a/src/views/feature/index.vue"]
             task["scope"]["pages"] = ["PAGE-001"]
             task["uiRefs"] = {
                 "pageRefs": ["PAGE-001"],
@@ -1435,6 +1437,7 @@ class JsonWriterTests(unittest.TestCase):
             backend = _plan_task_body()
             frontend = _plan_task_body()
             frontend.update({"id": "T002", "title": "frontend", "uiRequired": True, "deps": ["T001"]})
+            frontend["expectedFiles"] = ["src/views/feature/index.vue"]
             frontend["scope"] = {
                 "modules": ["ui"], "entrypoints": ["route"], "pages": ["PAGE-001"],
                 "dataObjects": [], "paths": [],
@@ -1912,6 +1915,15 @@ class JsonWriterTests(unittest.TestCase):
         self.assertNotIn("status", contract["taskInputExample"])
         self.assertEqual(contract["recommendedInputMode"], "draft-batch")
         self.assertEqual(
+            "runtime_owned_and_projected_during_preflight_and_finalize",
+            contract["batchValidationOwnership"]["withRunContext"],
+        )
+        self.assertNotIn(
+            "add-batch-validation-command",
+            contract["taskSetFinalization"]["requiredBefore"],
+        )
+        self.assertIs(contract["terminalRuntimeErrors"]["retryable"], False)
+        self.assertEqual(
             contract["taskDetailTemplate"],
             "skills/autodev/autodev-plan/templates/task-detail-input.json",
         )
@@ -2077,7 +2089,6 @@ class JsonWriterTests(unittest.TestCase):
                 "command": "finalize-task-draft",
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
-                    "add-batch-validation-command",
                     "add-project-validation-command",
                     "render-md",
                 ],
@@ -3063,7 +3074,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertTrue(all(item["found"] for item in payload["resolvedSpecRefs"]))
             self.assertTrue(all(item["found"] for item in payload["resolvedDesignRefs"]))
             self.assertTrue(all(item["found"] for item in payload["resolvedSourceRefs"]))
-            self.assertIn("Scenario [SCN-001]", payload["resolvedSpecRefs"][1]["text"])
+            self.assertIn("Scenario SCN-001", payload["resolvedSpecRefs"][1]["text"])
             self.assertIn("| API-001 |", payload["resolvedDesignRefs"][0]["text"])
             self.assertEqual(payload["resolvedSourceRefs"][0]["original"], "支付接口调用超时时间为 3 秒。")
 

@@ -26,7 +26,9 @@ from hooks.json_writer_common import (  # noqa: E402
 from hooks.utest_plan_contract import (  # noqa: E402
     UTestPlanContractError,
     load_utest_plan,
+    read_evidence_records,
 )
+from hooks.run_context import load as load_run_context  # noqa: E402
 
 
 SCHEMA_VERSION = "autodev.utest-workspace-bindings.v1"
@@ -520,6 +522,155 @@ def _execution_target_id(task_id, repository_root, execution_root):
     return "ENV-{}-{}".format(task_id, digest)
 
 
+def _normalize_repo_path(value):
+    return str(value or "").replace("\\", "/").lstrip("./")
+
+
+def _validate_expected_file_evidence(feature_dir, task, repository_root):
+    raw_task = task.get("rawTask") if isinstance(task, dict) else None
+    expected_files = raw_task.get("expectedFiles") if isinstance(raw_task, dict) else None
+    if not isinstance(expected_files, list) or not expected_files:
+        return
+    implementation_ids = raw_task.get("implementationEvidenceIds")
+    implementation_ids = implementation_ids if isinstance(implementation_ids, list) else []
+    latest_id = raw_task.get("latestImplementationEvidenceId")
+    records = {
+        record.get("evidenceId"): record
+        for record in read_evidence_records(feature_dir)
+        if isinstance(record, dict) and isinstance(record.get("evidenceId"), str)
+    }
+    latest = records.get(latest_id) if latest_id in implementation_ids else None
+    if not isinstance(latest, dict) or latest.get("taskId") != task.get("id"):
+        raise UTestWorkspaceBindingError(
+            "IMPLEMENTATION_EVIDENCE_MISSING",
+            "{} 缺少绑定当前 TASK 的 latest implementation Evidence。修复：回到 Code 由 task runner 重新记录实现。".format(task.get("id", "TASK")),
+            "record_current_implementation_evidence",
+        )
+    evidence_files = {
+        _normalize_repo_path(value)
+        for value in latest.get("changedFiles", [])
+        if isinstance(value, str) and value.strip()
+    }
+    existing_files = []
+    matched_files = []
+    normalized_expected = []
+    for raw_path in expected_files:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        normalized = _normalize_repo_path(raw_path)
+        normalized_expected.append(normalized)
+        actual = (repository_root / normalized).resolve()
+        if not path_within(actual, repository_root):
+            raise UTestWorkspaceBindingError(
+                "EVIDENCE_ROOT_MISMATCH",
+                "{} expectedFiles 越出绑定 Git root：{}。修复：回到 Plan 修正 expectedFiles。".format(task.get("id", "TASK"), raw_path),
+                "repair_expected_file_root",
+            )
+        if actual.is_file():
+            existing_files.append(normalized)
+            if normalized in evidence_files:
+                matched_files.append(normalized)
+    if matched_files:
+        return
+    if not existing_files:
+        raise UTestWorkspaceBindingError(
+            "EVIDENCE_ROOT_MISMATCH",
+            "{} 的 expectedFiles 均未在绑定仓库找到：{}；Evidence files={}。修复：校正 RunContext/workspace binding，或回到 Code 补齐至少一个声明产物并重录 Evidence。".format(
+                task.get("id", "TASK"),
+                ",".join(normalized_expected) or "<empty>",
+                ",".join(sorted(evidence_files)) or "<empty>",
+            ),
+            "repair_evidence_workspace_binding",
+        )
+    raise UTestWorkspaceBindingError(
+        "EVIDENCE_FILE_STALE",
+        "{} 的 expectedFiles 没有一项绑定到 latest implementation Evidence：{}。修复：回到 Code 由 task runner 重录 changedFiles。".format(
+            task.get("id", "TASK"), ",".join(existing_files)
+        ),
+        "refresh_implementation_evidence",
+    )
+
+
+def _run_context_execution_roots(workspace, feature, task, repository_root, locations):
+    runtime_path = (
+        Path(workspace) / ".autobizdevops" / "features" / feature
+        / ".runtime" / "RUN_CONTEXT.json"
+    )
+    if not runtime_path.is_file():
+        return None
+    try:
+        context = load_run_context(workspace, feature)
+    except ValueError as exc:
+        raise UTestWorkspaceBindingError(
+            "SCOPE_UNRESOLVED", str(exc), "restart_feature_scope_resolution"
+        )
+    def same_root(value):
+        try:
+            return Path(value).samefile(repository_root)
+        except OSError:
+            return Path(value).resolve() == repository_root.resolve()
+
+    repository_ids = {
+        str(item.get("repositoryId"))
+        for item in context.get("repositories", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("root"), str)
+        and same_root(item["root"])
+    }
+    modules = [
+        item for item in context.get("modules", [])
+        if isinstance(item, dict) and str(item.get("repositoryId")) in repository_ids
+    ]
+    if not modules:
+        raise UTestWorkspaceBindingError(
+            "EVIDENCE_ROOT_MISMATCH",
+            "{} 的 workspace binding 不属于当前 RunContext。修复：重新启动 Feature 并重建 workspace binding。".format(task.get("id", "TASK")),
+            "repair_evidence_workspace_binding",
+        )
+    raw_task = task.get("rawTask") if isinstance(task, dict) else None
+    expected_files = raw_task.get("expectedFiles") if isinstance(raw_task, dict) else []
+    expected_files = [
+        _normalize_repo_path(value)
+        for value in expected_files or []
+        if isinstance(value, str) and value.strip()
+    ]
+    workspace_root = _workspace_prefix(task)
+    workspace_path = (repository_root / workspace_root).resolve()
+    selected = []
+    for module in modules:
+        module_root = Path(str(module.get("root", ""))).resolve()
+        if not module_root.is_dir() or not path_within(module_root, repository_root):
+            continue
+        relative_root = _normalize_repo_path(module.get("relativeRoot", ".")) or "."
+        if expected_files and not any(
+            relative_root == "."
+            or value == relative_root
+            or value.startswith(relative_root + "/")
+            for value in expected_files
+        ):
+            continue
+        if not (
+            path_within(module_root, workspace_path)
+            or path_within(workspace_path, module_root)
+        ):
+            continue
+        allowed = [
+            item for item in locations
+            if path_within(module_root, item["root"])
+            or path_within(item["root"], module_root)
+        ]
+        if not allowed:
+            continue
+        selected.append((str(module.get("moduleId")), module_root))
+    if not selected:
+        raise UTestWorkspaceBindingError(
+            "SCOPE_UNRESOLVED",
+            "{} 无法把 expectedFiles/workspaceRoots 映射到当前 RunContext module root。修复：回到 Plan 修正路径契约。".format(task.get("id", "TASK")),
+            "repair_plan_task_location",
+        )
+    return selected
+
+
 def resolve_task_workspace(workspace, feature, task_id, selected_target_id=None):
     workspace = Path(workspace).resolve()
     feature_dir = workspace / ".autobizdevops" / "features" / feature
@@ -532,12 +683,16 @@ def resolve_task_workspace(workspace, feature, task_id, selected_target_id=None)
     batch, task = _task_from_plan(plan, task_id)
     binding = resolve_workspace_binding(workspace, feature, task["workspaceRef"])
     repository_root = Path(binding["root"]).resolve()
+    _validate_expected_file_evidence(feature_dir, task, repository_root)
     locations = _location_roots(task, repository_root)
     workspace_root = _workspace_prefix(task)
     modules = _task_modules(task)
-    execution_roots = []
+    execution_roots = _run_context_execution_roots(
+        workspace, feature, task, repository_root, locations
+    )
+    execution_roots = [] if execution_roots is None else execution_roots
     location_warnings = []
-    if modules:
+    if not execution_roots and modules:
         unresolved = []
         for module in modules:
             module_root = _module_root(repository_root, workspace_root, locations, module)
@@ -555,16 +710,14 @@ def resolve_task_workspace(workspace, feature, task_id, selected_target_id=None)
                 continue
             execution_roots.append((module, module_root))
         if unresolved:
-            execution_roots = _location_execution_roots(locations)
-            location_warnings.append(
-                {
-                    "code": "scope_module_unresolved",
-                    "taskId": task_id,
-                    "modules": unresolved,
-                    "fallback": "validationLocations",
-                }
+            raise UTestWorkspaceBindingError(
+                "SCOPE_UNRESOLVED",
+                "{} scope.modules 无法解析到 RunContext/绑定仓库：{}。修复：回到 Plan 使用真实模块路径；禁止降级到 validationLocations 或 '.'。".format(
+                    task_id, ",".join(unresolved)
+                ),
+                "repair_plan_task_location",
             )
-    else:
+    elif not execution_roots:
         execution_roots = _location_execution_roots(locations)
 
     targets = []

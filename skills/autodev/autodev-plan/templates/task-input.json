@@ -63,6 +63,6 @@
       "covers": ["AC-T001-01"]
     }
   ],
-  "expectedFiles": [],
+  "expectedFiles": ["[production artifact path; required for UI tasks]"],
   "blockers": []
 }

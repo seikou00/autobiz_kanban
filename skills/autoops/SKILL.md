@@ -36,14 +36,14 @@ version: v1.1.0804
 ###  确定 Feature状态
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python "${pluginPath}/hooks/resolve_next_skill.py" --json
+python3 "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 ---

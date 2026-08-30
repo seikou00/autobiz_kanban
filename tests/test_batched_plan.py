@@ -139,6 +139,7 @@ def task(
         "blockers": [],
     }
     if ui_required:
+        item["expectedFiles"] = ["src/views/feature/index.vue"]
         item["uiRefs"] = {
             "pageRefs": ["PAGE-001"],
             "interactionRefs": ["UIX-001"],
@@ -783,9 +784,9 @@ class BatchedPlanContractTest(unittest.TestCase):
                 "\n".join(
                     [
                         "## ADDED Requirements",
-                        "### Requirement [REQ-001]: capability",
-                        "#### Scenario [SCN-001]: happy path",
-                        "#### Scenario [SCN-002]: alternate path",
+                        "### Requirement REQ-001: capability",
+                        "#### Scenario SCN-001: happy path",
+                        "#### Scenario SCN-002: alternate path",
                     ]
                 ),
                 encoding="utf-8",

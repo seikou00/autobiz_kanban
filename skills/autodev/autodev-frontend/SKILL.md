@@ -11,7 +11,7 @@ version: v1.1.0825
 ## 输入产物
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --feature "${feature}" --plain
+python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --feature "${feature}" --plain
 ```
 
 本技能是 `frontend_before_specs` workflow profile 中的正式 Dev 节点。它只保留两种实现路线：
@@ -28,13 +28,13 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --featur
 进入本技能前，当前 workflow profile 必须是 `frontend_before_specs`。如果由 `prd_done` 直接进入本技能，先使用统一脚本推进 checkpoint：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
 ```
 
 完成前端实现和必要验证后：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_done
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_done
 ```
 
 完成后汇报变更文件、验证命令和未覆盖风险。

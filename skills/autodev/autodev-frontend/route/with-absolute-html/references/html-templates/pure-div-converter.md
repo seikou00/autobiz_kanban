@@ -27,10 +27,10 @@ description: >
 
 ```bash
 # 仓库根目录执行
-python route/with-absolute-html/scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
+python3 route/with-absolute-html/scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
 
 # route/with-absolute-html/ 目录执行
-python scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
+python3 scripts/analyze_absolute_html.py "<html-file>" --project-root "<project-root>" --out-dir output/html-analysis --output-name <task-stem>
 ```
 
 转换时优先读取 `output/html-analysis/<task-stem>.md`，只在需要核对局部样式或节点关系时回查原始 HTML。不要把完整原始 HTML 一次性交给模型转换。

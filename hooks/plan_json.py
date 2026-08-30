@@ -613,7 +613,19 @@ def _validate_tasks_container(
                 errors.append(f"{task_id}.latestPassEvidenceId_not_completion_evidence:{latest_pass}")
             elif isinstance(latest_pass, str) and latest_pass != completion_evidence_ids[-1]:
                 errors.append(f"{task_id}.latestPassEvidenceId_not_latest:{latest_pass}")
-        _validate_string_list(errors, raw_task, task_id, "expectedFiles", required=False)
+        expected_files = _validate_string_list(
+            errors, raw_task, task_id, "expectedFiles", required=False
+        )
+        for expected_file in expected_files:
+            expected_path = Path(expected_file.replace("\\", "/"))
+            if (
+                expected_path.is_absolute()
+                or ".." in expected_path.parts
+                or expected_file.startswith("./")
+                or expected_file.endswith("/")
+                or expected_file == "."
+            ):
+                errors.append(f"{task_id}.expectedFiles_path_invalid:{expected_file}")
         blockers = _validate_string_list(errors, raw_task, task_id, "blockers", required=False)
         if require_all_done and blockers:
             errors.append(f"{task_id}.blockers_unresolved")
@@ -622,6 +634,8 @@ def _validate_tasks_container(
         is_ui_required = ui_required is True
         if ui_required is not None and not isinstance(ui_required, bool):
             errors.append(f"{task_id}.uiRequired_must_be_bool")
+        if is_ui_required and not expected_files:
+            errors.append(f"{task_id}.expectedFiles_missing_for_ui")
         ui_refs = raw_task.get("uiRefs")
         if ui_refs is None:
             if is_ui_required:

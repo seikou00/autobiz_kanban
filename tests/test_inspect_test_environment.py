@@ -23,6 +23,7 @@ from hooks.inspect_test_environment import (  # noqa: E402
     inspect_feature_environments,
     main,
 )
+from hooks.utest_workspace_binding import UTestWorkspaceBindingError  # noqa: E402
 
 
 class InspectTestEnvironmentTest(unittest.TestCase):
@@ -330,7 +331,7 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertEqual("workspace_binding_missing", payload["status"])
         self.assertEqual("utest_workspace_binding", payload["owner"])
 
-    def test_semantic_scope_module_falls_back_to_validation_location_with_warning(self):
+    def test_semantic_scope_module_blocks_without_fallback(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "ruoyi-vue-pro"
@@ -341,23 +342,12 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         )
         self._feature(workspace, repo, modules=["AiReview 评分模块"])
 
-        result = inspect_feature_environments(workspace, "alpha")
+        with self.assertRaises(UTestWorkspaceBindingError) as caught:
+            inspect_feature_environments(workspace, "alpha")
 
-        self.assertEqual("ready", result["status"])
-        self.assertEqual(str(repo.resolve()), result["targets"][0]["projectRoot"])
-        self.assertEqual(
-            [
-                {
-                    "code": "scope_module_unresolved",
-                    "taskId": "T001",
-                    "modules": ["AiReview 评分模块"],
-                    "fallback": "validationLocations",
-                }
-            ],
-            result["locationWarnings"],
-        )
+        self.assertEqual("SCOPE_UNRESOLVED", caught.exception.code)
 
-    def test_mixed_physical_and_semantic_modules_fall_back_for_whole_task(self):
+    def test_mixed_physical_and_semantic_modules_block_whole_task(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "ruoyi-vue-pro"
@@ -376,11 +366,10 @@ class InspectTestEnvironmentTest(unittest.TestCase):
             modules=["yudao-module-mkt", "会员积分模块"],
         )
 
-        result = inspect_feature_environments(workspace, "alpha")
+        with self.assertRaises(UTestWorkspaceBindingError) as caught:
+            inspect_feature_environments(workspace, "alpha")
 
-        self.assertEqual("ready", result["status"])
-        self.assertEqual(str(repo.resolve()), result["targets"][0]["projectRoot"])
-        self.assertEqual(["会员积分模块"], result["locationWarnings"][0]["modules"])
+        self.assertEqual("SCOPE_UNRESOLVED", caught.exception.code)
 
     def test_invalid_plan_location_is_contract_gap_not_environment_failure(self):
         root = self._root()
@@ -434,11 +423,17 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertEqual("needs_fix", payload["blockedArtifacts"]["nextCheckpoint"])
         result = json.loads((feature_dir / "UNIT_TEST_RESULT.json").read_text(encoding="utf-8"))
         self.assertEqual("BLOCKED", result["verdict"])
+        self.assertEqual("blocked", result["checks"][0]["status"])
+        self.assertEqual("contract_gap", result["unverifiedChecks"][0]["reasonCode"])
         fix_request = json.loads((feature_dir / "FIX_REQUEST.json").read_text(encoding="utf-8"))
         self.assertEqual("plan_contract_gap", fix_request["rootCause"])
         self.assertEqual("plan_in_progress", fix_request["suggestedCheckpoint"])
         self.assertEqual("rollback_plan_keep_source", fix_request["repairStrategy"])
         self.assertTrue((feature_dir / "UNIT_TEST_REPORT.md").is_file())
+        self.assertIn(
+            "## 未验证项及原因",
+            (feature_dir / "UNIT_TEST_REPORT.md").read_text(encoding="utf-8"),
+        )
         self.assertTrue((feature_dir / "test-output.log").is_file())
 
 

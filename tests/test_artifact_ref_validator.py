@@ -142,8 +142,8 @@ class ArtifactRefValidatorTests(unittest.TestCase):
             specs_dir = base / "specs"
             specs_dir.mkdir()
             (specs_dir / "user.md").write_text(
-                "### Requirement [REQ-001]: User can login\n"
-                "#### Scenario [SCN-001]: Valid credentials\n",
+                "### Requirement REQ-001: User can login\n"
+                "#### Scenario SCN-001: Valid credentials\n",
                 encoding="utf-8",
             )
             validate_artifact_ref(base, "specs/user.md#REQ-001", design=False)

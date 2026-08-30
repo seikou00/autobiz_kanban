@@ -7,7 +7,7 @@ version: v1.6.08253
 ## 缺失产物处理
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --feature "${feature}" --plain
+python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --feature "${feature}" --plain
 ```
 
 
@@ -30,7 +30,7 @@ reviewer 的只读命令白名单、禁止清单、审查流程、finding 准入
 
 ### 1. 准入
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 读取 Feature 状态；每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -39,7 +39,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 开始审查前写入进行中状态：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_in_progress
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_in_progress
 ```
 
 ### 2. 写 completion proposal
@@ -91,7 +91,7 @@ FAIL 修复规则：
 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS` 后写入：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_done
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_done
 ```
 
 ### 6. 最终回复

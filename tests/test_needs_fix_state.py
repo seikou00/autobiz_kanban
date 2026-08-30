@@ -125,7 +125,6 @@ class NeedsFixStateTest(unittest.TestCase):
             "--evidence-id",
             record["evidenceId"],
         )
-        self._run_verify_writer("set-verdict", "fail")
 
     def test_checkpoint_update_persists_and_clears_needs_fix_source(self) -> None:
         self._set_checkpoint("verify_in_progress")

@@ -15,14 +15,14 @@ version: v1.7.0825
 ## 缺失产物处理
 
 ```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
+python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-code --feature "${feature}" --plain
 ```
 
 ## 准入检查
 
 
 ```bash
-python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 准入只验证 Plan 声明的生产 workspace、scope 绑定与唯一编译策略，不执行编译命令，也不检查 TASK 测试命令的 cwd、manifest、依赖或可执行文件；这些测试设施由后续 UTest/E2E 阶段负责。批次编译命令以 `batchValidation.commands` 中 required `kind=compile` 的命令为准。
@@ -32,7 +32,7 @@ python "${pluginPath}/read_state_json.py" --feature "${feature}"
 开始编码前推进到 `code_in_progress`：
 
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 ```
 
 ## 执行协议
@@ -48,7 +48,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress
 
 首次为当前 Feature 启动 Code Session 前，如果还没有基线，先对计划声明的每个生产代码 workspace 执行一次独立回退脚本的基线捕获；同一 Session 后续批次不得重复捕获：
 ```bash
-python "${pluginPath}/hooks/rollback_stage.py" \
+python3 "${pluginPath}/hooks/rollback_stage.py" \
   --capture-code-session \
   --feature "${feature}" \
   --code-workspace "<plan 中声明的生产代码 workspace>" \
@@ -58,7 +58,7 @@ python "${pluginPath}/hooks/rollback_stage.py" \
 
 完成上述一次性基线检查后，每次进入 Code 阶段或在新对话恢复 Code 时，执行：
 ```bash
-python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
+python3 "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 ```
 
 若根计划处于 `awaiting_next_conversation`，它会校验并消费 `BATCH_HANDOFF.json`，自动激活 `nextBatchId`，无需用户提供 batch ID。必须严格按返回的 `action` 分支：
@@ -94,7 +94,7 @@ python "${pluginPath}/hooks/task_runner.py" code-session --feature "${feature}"
 2. 读唯一 `plan.json` 中的结构化执行契约。**必须先运行任务上下文解析脚本，且这一步发生在上面的 `start` 命令之前：**
 
 ```bash
-python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
+python3 "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 该脚本输出是当前 task 的上游上下文，必须读取其中的 `batchExplorationScope`、`taskContract`、`resolvedSpecRefs`、`resolvedDesignRefs`、`resolvedSourceRefs`、`explorationCaches`、`explorationPolicy` 和 `explorationDirective`。`explorationDirective.nextCommands` 是机器生成的下一步命令，必须原样执行，不得自行猜参数；`explorationDirective.requiredAction` 不是建议而是当前闸门动作。探索范围按上方 Batch 级探索闸门服从 `explorationDirective`。只传 `taskContract.workspaceRef` 对应的一个 `--code-workspace`。`specRefs` / `designRefs` 一律按 `artifactFeatureDir`（`${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`）解析，不得按业务代码仓库 cwd 直接读取 `specs/...`、`design.md`、`PLAN.md`；业务代码仓库 cwd 只用于定位生产源码和理解既有实现。脚本只要返回 `ok=false`，无论是引用、计划、Git 快照还是探索缓存错误，都必须停止编码、不得读取 HTML/调用 parser/修改业务代码；先按 `requiredAction` 修复并重新运行，直到返回 `ok=true`。其中 `explorationBlocked=true` 或 `implementationAllowed=false` 是机器阻断证据，不得被自然语言解释覆盖。若脚本返回 `missing_ref_file` / `missing_ref_anchor` / `missing_source_context` / `unknown_source_requirement_ref` / `invalid_plan_json` / `task_not_found`，停止编码并回流 `/autodev-plan` 修复产物引用，不得猜测补路径。
@@ -116,7 +116,7 @@ python "${pluginPath}/hooks/code_task_context.py" --feature "${feature}" --task-
 4. context 返回 `startAllowed=true` 后，在修改业务代码前启动任务运行并保存 Git 快照：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"
+python3 "${pluginPath}/hooks/task_runner.py" start --feature "${feature}" --task-id "<TASK_ID>" --code-workspace "<TASK_WORKSPACE>"
 ```
 
 保存输出中的 `runId`。同一 feature 同时只允许一个活动 task run；重复执行、异常中断或工具崩溃后，不得新建 run 绕过，必须使用 `inspect` / `resume` / `abort` 处理原 run。收到 `active_task_run_exists` / `active_feature_task_run_exists` 时必须 inspect 并继续现有 run，不得为了重新 start 而 abort。业务源码写入前，写入闸门会严格校验完整 v2 run、路径身份、`executionMode=code` 和密封探索证明；`verified_existing` / `external_dependency` 不允许写业务源码。每次普通 start 都会重新检查当前探索缓存；abort 后不得复用过期 `fresh`。批编译修复导致的受控重试允许在重新检查后继承旧证明，并必须记录 `inheritedFromRunId`、本次观察状态和 stale 原因。
@@ -139,7 +139,7 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 8. 实现完成必须只走 `finish-implementation`。该命令检查 scope 和 start 快照、写 `action=implementation` Evidence，并把 TASK 从 `in_progress` 置为 `implemented`；它不运行 `validationCommands`，不写 `completionEvidenceIds`，也不把 TASK 置为 done。旧 `complete` 命令已删除：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
+python3 "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 若返回 scope/workspace 错误，仍按原 run 修正或回流 Plan，不得重新 start 掩盖基线。`implemented` 是实现终态，不等于业务完成；同批后继 TASK 可以依赖它，跨批依赖、handoff 和 code-done 只接受 `done`。
@@ -147,13 +147,13 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 实现 Evidence 尚未落盘时发生进程中断，才使用原 runId 恢复：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task-id "<TASK_ID>" --run-id "<ORIGINAL_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
+python3 "${pluginPath}/hooks/task_runner.py" resume --feature "${feature}" --task-id "<TASK_ID>" --run-id "<ORIGINAL_RUN_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 确实没有文件变更时，不得伪造 changedFiles，也不得把空 diff 当遗漏。必须说明原因并提供至少一个仓库内已有生产实现文件；Plan 中仍必须保留该 TASK 的测试意图，Code 阶段不执行它：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
+python3 "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --no-code-change-why "<WHY_EXISTING_IMPLEMENTATION_IS_SUFFICIENT>" --supporting-file "<RELATIVE_PATH>"
 ```
 
 `--supporting-file` 必须是仓库根相对路径；多仓库时使用 `repoId:relative/path`。`--no-code-change-why` 只用于 start 前已经存在且经行为验证确认满足契约的实现，不得用它绕过误 abort、重启 run 或 staging 操作造成的空 diff；runner 会拒绝与历史 aborted run 变更冲突的 no-code claim。
@@ -165,7 +165,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 当前批次全部 TASK 为 `implemented` 且 `code-session.action=run_batch_compile` 后执行：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
+python3 "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 `batch-compile` 是 Code 阶段唯一构建命令，只编译生产代码，不运行 TASK 测试，也不创建测试资产。长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
@@ -174,7 +174,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 - 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码。推荐先执行下列命令建立 repair run，再修改代码：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" start-batch-compile-repair --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<REPAIR_OWNER_TASK_ID>" --code-workspace "<BUSINESS_REPO>"
+python3 "${pluginPath}/hooks/task_runner.py" start-batch-compile-repair --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<REPAIR_OWNER_TASK_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 如果模型已先完成生产代码修复，再执行 `start-batch-compile-repair`，不得回滚修复：runner 会以失败编译快照为基线收编真实文件差异，并在返回中设置 `adoptedPreStartChanges=true`。随后即使不再修改文件，也必须用返回的 runId 执行 `finish-implementation`，生成新的 implementation evidence，再重新执行同一批次的 `batch-compile`。收编仍受 workspace 边界和测试文件禁改规则约束。
@@ -223,14 +223,14 @@ python "${pluginPath}/hooks/task_runner.py" start-batch-compile-repair --feature
 
 ```bash
 # 1. 启动任务修复
-python "${pluginPath}/hooks/task_runner.py" start-task-repair --feature "${feature}" --task-id "<TASK_ID>" --prior-evidence-id "<PRIOR_EVIDENCE_ID>" --code-workspace "<BUSINESS_REPO>"
+python3 "${pluginPath}/hooks/task_runner.py" start-task-repair --feature "${feature}" --task-id "<TASK_ID>" --prior-evidence-id "<PRIOR_EVIDENCE_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 `--prior-evidence-id` 是该 TASK 的 `latestImplementationEvidenceId`（可从 PLAN.json 或 PLAN.md 中查看）。
 
 ```bash
 # 2. 修复完成后
-python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --repair-mode
+python3 "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${feature}" --task-id "<TASK_ID>" --run-id "<RUN_ID>" --code-workspace "<BUSINESS_REPO>" --repair-mode
 ```
 
 这会生成新的 implementation evidence，保留 `priorEvidenceId` 引用链，并自动更新计划中该 TASK 的 evidence 指针。
@@ -242,7 +242,7 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 当批次的所有 TASK 都已修复完成，需要重新验证整批编译：
 
 ```bash
-python "${pluginPath}/hooks/task_runner.py" revalidate-batch-compile --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
+python3 "${pluginPath}/hooks/task_runner.py" revalidate-batch-compile --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
 此命令与 `batch-compile` 类似，但用于修复场景，会检查所有 TASK 的最新 evidence 并重新执行编译验证。
@@ -252,7 +252,7 @@ python "${pluginPath}/hooks/task_runner.py" revalidate-batch-compile --feature "
 本节完整协议由脚本渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。
 
 ```bash
-python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
+python3 "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
 ```
 
 推进 `code_done` 前先回填领域词汇表锚点：会话工作区 `CONTEXT.md` 中锚点为「规划中」且本轮已落地的词条，回填为实际类/表/枚举与相对路径（协议见 `${pluginPath}/skills/references/domain-context.md`；无该文件或无「规划中」词条则跳过）。
@@ -260,8 +260,8 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.code
 项目级验证收敛后：
 
 ```bash
-python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.code --feature "${feature}"
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
+python3 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.code --feature "${feature}"
+python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 ```
 ## 写入边界
 

@@ -88,6 +88,11 @@ from hooks.validation_policy import (  # noqa: E402
     package_script_name,
     package_script_policy_errors,
 )
+from hooks.run_context import load as load_run_context  # noqa: E402
+from hooks.validation_capabilities import (  # noqa: E402
+    command_errors as validation_capability_command_errors,
+    load as load_validation_capabilities,
+)
 from hooks.artifact_ref_validator import (  # noqa: E402
     design_contract_snapshot,
     load_design_contract,
@@ -102,7 +107,10 @@ from board_core.state_store import load_state_json_records_result  # noqa: E402
 PLAN_FILE = "plan.json"
 PLAN_MD_FILE = "PLAN.md"
 PLAN_WRITE_TRANSACTION_FILE = ".plan-write-transaction.json"
-SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
+SPEC_SCENARIO_DEF_RE = re.compile(
+    r"^####\s+Scenario\s+(?=\[?(SCN-\d{3})\]?:\s+.+$)(?:\[SCN-\d{3}\]|SCN-\d{3}):\s+.+$",
+    re.MULTILINE,
+)
 SCENARIO_ID_RE = re.compile(r"\bSCN-\d{3}\b")
 TASK_GROUP_TASK_ID_RE = re.compile(r"^T\d{3}$")
 TASK_GROUP_REQUIREMENT_ID_RE = re.compile(r"\bREQ-\d{3}\b")
@@ -928,6 +936,9 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
         errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
     if errors:
         return errors
+    runtime_errors = _runtime_task_group_lane_errors(feature_dir, data)
+    if runtime_errors:
+        return runtime_errors
     design_contract, design_errors = load_design_contract(feature_dir)
     errors.extend(design_errors)
     if design_errors:
@@ -1089,10 +1100,15 @@ def _batch_profile_command_matches_workspace(
     if len(workspace_contract) != 1:
         return False
     repository = workspace_contract[0][0]
+    workspace_root = workspace_contract[0][1]
     command_repository = command.get("repo")
     if repository == "default":
-        return command_repository in {None, "default"}
-    return command_repository == repository
+        repository_matches = command_repository in {None, "default"}
+    else:
+        repository_matches = command_repository == repository
+    return repository_matches and _relative_paths_overlap(
+        str(command.get("cwd", ".")), workspace_root
+    )
 
 
 def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
@@ -2697,6 +2713,9 @@ def _task_set_preflight_errors(
     group_data: dict[str, Any],
     code_workspaces: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    runtime_profile_errors = _apply_runtime_validation_profiles(feature_dir, data)
+    if runtime_profile_errors:
+        return runtime_profile_errors
     errors = _task_group_preflight_errors(feature_dir, group_data)
     if errors:
         return errors
@@ -2718,6 +2737,7 @@ def _task_set_preflight_errors(
     errors.extend(validate_plan_source_coverage(feature_dir, _tasks(data)))
     errors.extend(_task_set_validation_errors(data))
     errors.extend(_code_workspace_preflight_errors(data, code_workspaces))
+    errors.extend(_runtime_plan_contract_errors(feature_dir, data))
     if not errors:
         root, batches = _project_batches(data)
         bundle_errors = validate_plan_bundle_data(root, batches)
@@ -2731,6 +2751,404 @@ def _task_set_preflight_errors(
             "field": "specRefs",
             "repairTarget": "task_group",
         })
+    return errors
+
+
+def _runtime_scope_error(reason: str, detail: str) -> dict[str, Any]:
+    return {
+        "reason": reason,
+        "detail": detail,
+        "repairTarget": "draft_integrity",
+        "repairable": False,
+        "retryable": False,
+        "requiredAction": "restart_feature_after_runtime_fix",
+        "repairSuggestion": (
+            "停止当前 Plan；修正部署单元目录、manifest 或构建脚本后新开 Feature 会话。"
+            "不得重跑 preflight/finalize、使用 --force、编辑 .runtime 或删除/重建 Draft。"
+        ),
+    }
+
+
+def _runtime_toolchain_error(
+    feature_dir: Path,
+    lane: str,
+    unavailable: list[dict[str, Any]],
+) -> dict[str, Any]:
+    executables = sorted({
+        str(item.get("requiredExecutable"))
+        for item in unavailable
+        if item.get("requiredExecutable")
+    })
+    manifests = sorted({
+        "{}/{}".format(item.get("cwd", "."), item.get("source", "manifest")).replace("./", "")
+        for item in unavailable
+    })
+    refresh_command = "python {} refresh --feature-dir {} --lane {}".format(
+        ROOT / "hooks" / "validation_capabilities.py",
+        feature_dir,
+        lane,
+    )
+    return {
+        "reason": "validation_toolchain_unavailable",
+        "detail": "lane={};missingExecutables={};manifests={}".format(
+            lane,
+            ",".join(executables) or "unknown",
+            ",".join(manifests) or "unknown",
+        ),
+        "repairTarget": "runtime_environment",
+        "repairable": False,
+        "retryable": True,
+        "requiredAction": "install_missing_tool_and_refresh_validation_capabilities",
+        "repairSuggestion": "安装 {}，再执行 `{}`；refresh 成功前不得重跑 Plan preflight/finalize。".format(
+            ", ".join(executables) or "缺失构建工具",
+            refresh_command,
+        ),
+    }
+
+
+def _runtime_lane_items(catalog: dict[str, Any], lane: str, field: str) -> list[dict[str, Any]]:
+    return [
+        item for item in catalog.get(field, [])
+        if isinstance(item, dict)
+        and (
+            (lane == "frontend" and str(item.get("source", "")).startswith("package.json"))
+            or (lane == "backend" and not str(item.get("source", "")).startswith("package.json"))
+        )
+    ]
+
+
+def _runtime_task_group_lane_errors(
+    feature_dir: Path,
+    data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    context_path = feature_dir / ".runtime" / "RUN_CONTEXT.json"
+    if not context_path.is_file():
+        return []
+    try:
+        run_context = load_run_context(feature_dir.parents[2], feature_dir.name)
+        catalog = load_validation_capabilities(
+            feature_dir, run_context.get("contextDigest")
+        )
+    except ValueError as exc:
+        return [_runtime_scope_error("SCOPE_UNRESOLVED", str(exc))]
+    used_lanes = {
+        "frontend" if group.get("uiRequired") is True else "backend"
+        for group in _task_groups(data)
+    }
+    for lane in sorted(used_lanes):
+        if _runtime_lane_items(catalog, lane, "capabilities"):
+            continue
+        unavailable = _runtime_lane_items(catalog, lane, "unavailable")
+        if unavailable:
+            return [_runtime_toolchain_error(feature_dir, lane, unavailable)]
+        return [_runtime_scope_error(
+            "validation_capability_unresolved",
+            "lane={};missingManifestOrBuildScript=true;catalog={}".format(
+                lane, catalog.get("catalogDigest", "missing")
+            ),
+        )]
+    return []
+
+
+def _relative_paths_overlap(first: str, second: str) -> bool:
+    left = str(first or ".").replace("\\", "/").strip("/") or "."
+    right = str(second or ".").replace("\\", "/").strip("/") or "."
+    return (
+        left == "."
+        or right == "."
+        or left == right
+        or left.startswith(right + "/")
+        or right.startswith(left + "/")
+    )
+
+
+def _preferred_runtime_capability(
+    capabilities: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not capabilities:
+        return None
+    priority = {"build": 0, "compile": 1, "typecheck": 2}
+    return sorted(
+        capabilities,
+        key=lambda item: (
+            priority.get(str(item.get("kind")), 99),
+            str(item.get("source", "")),
+            str(item.get("capabilityId", "")),
+        ),
+    )[0]
+
+
+def _task_roots_for_repository(
+    tasks: list[dict[str, Any]],
+    repository_name: str,
+    repository_count: int,
+) -> list[str]:
+    roots: list[str] = []
+    for task in tasks:
+        for key, value in task_workspace_roots(task).items():
+            if key == repository_name or (key == "default" and repository_count == 1):
+                normalized = str(value or ".").replace("\\", "/").strip("/") or "."
+                if normalized not in roots:
+                    roots.append(normalized)
+    return roots
+
+
+def _select_module_runtime_capabilities(
+    module: dict[str, Any],
+    capabilities: list[dict[str, Any]],
+    task_roots: list[str],
+) -> list[dict[str, Any]]:
+    if not capabilities or not task_roots:
+        return []
+    module_root = str(module.get("relativeRoot", ".") or ".").strip("/") or "."
+    if not any(_relative_paths_overlap(module_root, root) for root in task_roots):
+        return []
+    matching = [
+        item for item in capabilities
+        if any(_relative_paths_overlap(str(item.get("cwd", ".")), root) for root in task_roots)
+    ]
+    at_module_root = [
+        item for item in matching
+        if (str(item.get("cwd", ".")).strip("/") or ".") == module_root
+    ]
+    if at_module_root:
+        preferred = _preferred_runtime_capability(at_module_root)
+        return [preferred] if preferred is not None else []
+    selected: list[dict[str, Any]] = []
+    by_cwd: dict[str, list[dict[str, Any]]] = {}
+    for item in matching:
+        by_cwd.setdefault(str(item.get("cwd", ".")), []).append(item)
+    for cwd in sorted(by_cwd):
+        preferred = _preferred_runtime_capability(by_cwd[cwd])
+        if preferred is not None:
+            selected.append(preferred)
+    return selected
+
+
+def _runtime_items_for_lane_tasks(
+    items: list[dict[str, Any]],
+    modules: dict[str, dict[str, Any]],
+    repositories: dict[str, str],
+    lane_tasks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for item in items:
+        module = modules.get(str(item.get("moduleId", "")), {})
+        repository_name = repositories.get(str(module.get("repositoryId")), "")
+        task_roots = _task_roots_for_repository(
+            lane_tasks, repository_name, len(repositories)
+        )
+        module_root = str(module.get("relativeRoot", ".") or ".").strip("/") or "."
+        if not any(_relative_paths_overlap(module_root, root) for root in task_roots):
+            continue
+        if any(_relative_paths_overlap(str(item.get("cwd", ".")), root) for root in task_roots):
+            selected.append(item)
+    return selected
+
+
+def _apply_runtime_validation_profiles(
+    feature_dir: Path,
+    data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Project manifest-derived capabilities into Runtime-owned batch profiles."""
+
+    context_path = feature_dir / ".runtime" / "RUN_CONTEXT.json"
+    if not context_path.is_file():
+        return []
+    try:
+        run_context = load_run_context(feature_dir.parents[2], feature_dir.name)
+        catalog = load_validation_capabilities(
+            feature_dir, run_context.get("contextDigest")
+        )
+    except ValueError as exc:
+        return [_runtime_scope_error("SCOPE_UNRESOLVED", str(exc))]
+    data["runContextDigest"] = run_context.get("contextDigest")
+
+    repositories = {
+        str(item.get("repositoryId")): Path(str(item.get("root"))).name
+        for item in run_context.get("repositories", [])
+        if isinstance(item, dict)
+    }
+    capabilities = [
+        item for item in catalog.get("capabilities", []) if isinstance(item, dict)
+    ]
+    modules = {
+        str(item.get("moduleId")): item
+        for item in run_context.get("modules", [])
+        if isinstance(item, dict)
+    }
+    used_lanes = {
+        task_execution_lane(task) for task in _tasks(data) if isinstance(task, dict)
+    }
+    profiles: dict[str, dict[str, Any]] = {}
+    for lane in sorted(used_lanes):
+        eligible = _runtime_lane_items(catalog, lane, "capabilities")
+        selected: list[dict[str, Any]] = []
+        by_module: dict[str, list[dict[str, Any]]] = {}
+        for capability in eligible:
+            by_module.setdefault(str(capability.get("moduleId", "")), []).append(capability)
+        lane_tasks = [task for task in _tasks(data) if task_execution_lane(task) == lane]
+        for module_id, module_capabilities in sorted(by_module.items()):
+            module = modules.get(module_id, {})
+            repository_name = repositories.get(str(module.get("repositoryId")), "")
+            task_roots = _task_roots_for_repository(
+                lane_tasks, repository_name, len(repositories)
+            )
+            selected.extend(_select_module_runtime_capabilities(
+                module, module_capabilities, task_roots
+            ))
+        if not selected:
+            unavailable = _runtime_items_for_lane_tasks(
+                _runtime_lane_items(catalog, lane, "unavailable"),
+                modules,
+                repositories,
+                lane_tasks,
+            )
+            if unavailable:
+                return [_runtime_toolchain_error(feature_dir, lane, unavailable)]
+            workspace_rows = sorted({
+                "{}={}".format(key, value)
+                for task in lane_tasks
+                for key, value in task_workspace_roots(task).items()
+            })
+            candidate_rows = sorted({
+                "{}:{}".format(item.get("moduleId"), item.get("cwd", "."))
+                for item in eligible
+            })
+            if eligible:
+                return [{
+                    "reason": "validation_capability_workspace_unresolved",
+                    "detail": "lane={};workspaceRoots={};candidates={}".format(
+                        lane,
+                        ",".join(workspace_rows) or "none",
+                        ",".join(candidate_rows) or "none",
+                    ),
+                    "repairTarget": "task_group",
+                    "repairable": True,
+                    "retryable": True,
+                    "requiredAction": "repair_task_workspace_roots",
+                    "repairSuggestion": "使用真实代码工作区重新 prepare/rebuild Draft，使 lane 任务的 workspaceRoots 与候选 manifest 目录相交。",
+                }]
+            module_rows = ",".join(
+                "{}={}".format(item.get("moduleId"), item.get("root"))
+                for item in run_context.get("modules", [])
+                if isinstance(item, dict)
+            )
+            return [_runtime_scope_error(
+                "validation_capability_unresolved",
+                "lane={};modules={};catalog={}".format(
+                    lane, module_rows or "none", catalog.get("catalogDigest", "missing")
+                ),
+            )]
+        named_repositories = {
+            key
+            for task in lane_tasks
+            for key in task_workspace_roots(task)
+            if key != "default"
+        }
+        commands = []
+        unique_selected = {
+            str(item.get("capabilityId")): item for item in selected
+            if item.get("capabilityId")
+        }
+        for capability in sorted(
+            unique_selected.values(),
+            key=lambda item: (
+                repositories.get(str(item.get("repositoryId")), ""),
+                str(item.get("cwd", ".")),
+                str(item.get("capabilityId", "")),
+            ),
+        ):
+            repository_name = repositories.get(str(capability.get("repositoryId")))
+            command = {
+                "argv": copy.deepcopy(capability.get("argv", [])),
+                "cwd": capability.get("cwd", "."),
+                "kind": "compile",
+                "required": True,
+                "capabilityId": capability.get("capabilityId"),
+            }
+            if repository_name in named_repositories:
+                command["repo"] = repository_name
+            commands.append(command)
+        profiles[lane] = {"mode": "commands", "commands": commands}
+    data["batchValidationProfiles"] = profiles
+    return []
+
+
+def _runtime_plan_contract_errors(
+    feature_dir: Path,
+    data: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Apply the RunContext/capability contract when this Feature has one."""
+
+    context_path = feature_dir / ".runtime" / "RUN_CONTEXT.json"
+    if not context_path.is_file():
+        return []
+    workspace = feature_dir.parents[2]
+    try:
+        run_context = load_run_context(workspace, feature_dir.name)
+        catalog = load_validation_capabilities(
+            feature_dir, run_context.get("contextDigest")
+        )
+    except ValueError as exc:
+        return [_runtime_scope_error("SCOPE_UNRESOLVED", str(exc))]
+
+    module_prefixes = {
+        str(item.get("relativeRoot", ".") or ".").strip("/") or "."
+        for item in run_context.get("modules", [])
+        if isinstance(item, dict)
+    }
+    errors: list[dict[str, Any]] = []
+    for task in _tasks(data):
+        task_id = str(task.get("id", "task"))
+        task_prefixes = {
+            str(value or ".").replace("\\", "/").strip("/") or "."
+            for value in task_workspace_roots(task).values()
+        }
+        for expected_file in task.get("expectedFiles", []):
+            if not isinstance(expected_file, str):
+                continue
+            normalized = expected_file.replace("\\", "/").lstrip("./")
+            if not any(
+                prefix == "." or normalized == prefix or normalized.startswith(prefix + "/")
+                for prefix in module_prefixes
+            ):
+                errors.append({
+                    "reason": f"{task_id}.expected_file_outside_module_root",
+                    "detail": f"path={expected_file};moduleRoots={','.join(sorted(module_prefixes))}",
+                    "field": "expectedFiles",
+                    "repairTarget": "task_detail",
+                })
+            if task_prefixes and not any(
+                prefix == "." or normalized == prefix or normalized.startswith(prefix + "/")
+                for prefix in task_prefixes
+            ):
+                errors.append({
+                    "reason": f"{task_id}.expected_file_outside_task_workspace_root",
+                    "detail": f"path={expected_file};workspaceRoots={','.join(sorted(task_prefixes))}",
+                    "field": "expectedFiles",
+                    "repairTarget": "task_detail",
+                })
+        for index, command in enumerate(task.get("validationCommands", []), start=1):
+            if not isinstance(command, dict) or command.get("kind") not in FRONTEND_COMPILE_VALIDATION_KINDS:
+                continue
+            for reason in validation_capability_command_errors(
+                catalog, command, f"{task_id}.validationCommands[{index - 1}]"
+            ):
+                errors.append({"reason": reason, "field": "validationCommands", "repairTarget": "task_detail"})
+
+    root, _ = _project_batches(data)
+    profiles = root.get("batchValidationProfiles")
+    if isinstance(profiles, dict):
+        for lane, profile in profiles.items():
+            commands = profile.get("commands", []) if isinstance(profile, dict) else []
+            for index, command in enumerate(commands):
+                if not isinstance(command, dict) or command.get("required") is not True:
+                    continue
+                for reason in validation_capability_command_errors(
+                    catalog, command, f"batchValidationProfiles.{lane}.commands[{index}]"
+                ):
+                    errors.append({"reason": reason, "field": "batchValidationProfiles", "repairTarget": "task_group"})
     return errors
 
 
@@ -3175,6 +3593,13 @@ def _cmd_diagnose_plan_repair(args: argparse.Namespace) -> int:
     formal_validation_errors: list[str] = []
     if formal_root is not None and not formal_load_errors:
         formal_validation_errors = validate_plan_bundle_data(formal_root, formal_batches)
+        stored_digest = formal_root.get("taskSetDigest")
+        if (
+            stored_digest is not None
+            and stored_digest != task_set_digest(formal_root, formal_batches)
+            and "task_set_digest_mismatch" not in formal_validation_errors
+        ):
+            formal_validation_errors.append("task_set_digest_mismatch")
     checkpoint, execution_blockers = _formal_execution_blockers(
         workspace,
         feature,
@@ -3812,6 +4237,24 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "frontend": sorted(TASK_VALIDATION_KINDS),
                     },
                     "batchValidationKinds": ["compile"],
+                    "batchValidationOwnership": {
+                        "withRunContext": "runtime_owned_and_projected_during_preflight_and_finalize",
+                        "withoutRunContext": "plan_owned_legacy_flow",
+                        "manualAddWhenRuntimeOwned": "forbidden",
+                        "legacyManualCommand": (
+                            "add-batch-validation-command --lane <backend|frontend> "
+                            "[--repo <workspaceRef>] --command <command> --code-workspace <path>"
+                        ),
+                    },
+                    "terminalRuntimeErrors": {
+                        "reasons": [
+                            "SCOPE_UNRESOLVED",
+                            "validation_capability_unresolved",
+                        ],
+                        "retryable": False,
+                        "requiredAction": "restart_feature_after_runtime_fix",
+                        "activation": "any_writer_issue_with_retryable_false",
+                    },
                     "validationCoverage": {
                         "rule": "required_commands_cover_all_acceptance_criteria",
                         "compileMayCoverAcceptanceCriteriaByLane": {
@@ -3907,7 +4350,6 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "command": "finalize-task-draft",
                         "coverage": "all_path_qualified_spec_scenarios",
                         "requiredBefore": [
-                            "add-batch-validation-command",
                             "add-project-validation-command",
                             "render-md",
                         ],
@@ -4166,6 +4608,17 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
 
 def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
+    if (_path(workspace, feature).parent / ".runtime" / "RUN_CONTEXT.json").is_file():
+        return render_result(WriterResult(
+            ok=False,
+            path=_path(workspace, feature),
+            errors=[_runtime_scope_error(
+                "batch_validation_profile_runtime_owned",
+                "Plan 不直接写批次验证命令。若 preflight/finalize 报 Runtime 错误，"
+                "停止当前 Plan，修正运行上下文后新开 Feature 会话；不得重试、--force、"
+                "编辑 .runtime 或删除/重建 Draft。",
+            )],
+        ))
     data = _load(workspace, feature)
     lane_workspace_contracts = {
         _batch_workspace_contract(task)

@@ -199,9 +199,18 @@ class CollectedSessionContextTest(unittest.TestCase):
         )
         for platform in ("darwin", "linux", "win32"):
             command = config["inspectCommands"][platform]["session_context_inject"]
+            separator = "\\" if platform == "win32" else "/"
             self.assertIn("render_collected_session_context.py", command)
-            self.assertIn("--knowledge-collector collect-knowledge.js", command)
-            self.assertIn("--knowledge-path ${pluginPath}", command)
+            self.assertIn(
+                "--knowledge-collector ${{pluginPath}}{0}hooks{0}collect-knowledge.js".format(
+                    separator
+                ),
+                command,
+            )
+            self.assertIn(
+                "--knowledge-path ${{pluginPath}}{0}sys".format(separator),
+                command,
+            )
 
 
 if __name__ == "__main__":

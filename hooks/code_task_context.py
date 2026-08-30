@@ -108,12 +108,21 @@ def _resolve_path(base: Path, ref: str, anchor: str, *, design: bool) -> Path:
 
 
 def _extract_spec_snippet(text: str, anchor: str) -> tuple[str, int] | None:
+    end_re = re.compile(
+        r"^(?:####\s+Scenario\s+(?:\[SCN-\d{3}\]|SCN-\d{3})|"
+        r"###\s+Requirement\s+(?:\[REQ-\d{3}\]|REQ-\d{3})):",
+        re.MULTILINE,
+    )
     if anchor.startswith("REQ-"):
-        start_re = re.compile(rf"^###\s+Requirement\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
-        end_re = re.compile(r"^(####\s+Scenario\s+\[|###\s+Requirement\s+\[)", re.MULTILINE)
+        start_re = re.compile(
+            rf"^###\s+Requirement\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
+            re.MULTILINE,
+        )
     elif anchor.startswith("SCN-"):
-        start_re = re.compile(rf"^####\s+Scenario\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
-        end_re = re.compile(r"^(####\s+Scenario\s+\[|###\s+Requirement\s+\[)", re.MULTILINE)
+        start_re = re.compile(
+            rf"^####\s+Scenario\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
+            re.MULTILINE,
+        )
     else:
         return None
 
