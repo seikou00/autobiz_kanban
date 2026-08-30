@@ -185,11 +185,11 @@ class CodeReviewIsReadOnlyTest(unittest.TestCase):
         # 丢失的旧指令：回检后直接修代码。恢复它等于恢复绕过 runner 的裸改。
         self.assertNotIn("如任一子代理返回有问题，则需要修复代码", output)
 
-    def test_code_stage_hands_findings_to_named_downstream_stages(self) -> None:
+    def test_code_stage_hands_findings_to_the_batch_pipeline(self) -> None:
         output = render("dev.code")
 
         self.assertIn("交接下游", output)
-        for target in ("dev.review", "dev.utest", "dev.e2e"):
+        for target in ("review", "test", "quality_gate", "B-INT", "B-E2E"):
             self.assertIn(target, output)
 
     def test_code_review_does_not_normalize_severity(self) -> None:

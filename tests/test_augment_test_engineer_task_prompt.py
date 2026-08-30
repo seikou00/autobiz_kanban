@@ -204,22 +204,10 @@ class AugmentTestEngineerTaskPromptTest(unittest.TestCase):
 
 
 class UTestRoleRegistrationTest(unittest.TestCase):
-    def test_dev_utest_registers_test_engineer_only(self):
+    def test_test_engineer_is_not_a_separate_board_stage(self):
         board = json.loads((ROOT / "board_core" / "board_config.json").read_text(encoding="utf-8"))
         nodes = board["workflow"]["nodes"]
-        node = next(item for item in nodes if item.get("id") == "dev.utest")
-        policy = node["runtimePolicy"]
-
-        self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
-        self.assertEqual(
-            ["agents/test-engineer.md"],
-            policy["subagentConfig"]["customSubagentFiles"],
-        )
-        self.assertEqual(
-            ["test-engineer"],
-            policy["subagentConfig"]["disabledBuiltinSubagents"],
-        )
-        self.assertNotIn("verification", json.dumps(policy))
+        self.assertNotIn("dev.utest", {node.get("id") for node in nodes})
         agent = (ROOT / "agents" / "test-engineer.md").read_text(encoding="utf-8")
         self.assertIn("name: test-engineer-autodev", agent)
 
@@ -228,7 +216,7 @@ class UTestRoleRegistrationTest(unittest.TestCase):
         registrations = [item for item in config["PreToolUse"] if item.get("matcher") == "task|Task"]
         commands = [hook.get("command") for hook in registrations[0]["hooks"]]
 
-        self.assertIn("python3 hooks/augment_test_engineer_task_prompt.py", commands)
+        self.assertIn("python hooks/augment_test_engineer_task_prompt.py", commands)
 
 
 if __name__ == "__main__":

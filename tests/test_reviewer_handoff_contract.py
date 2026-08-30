@@ -51,16 +51,10 @@ class ReviewerRoleIsResolvableTest(unittest.TestCase):
         self.assertIn("name: reviewer-autodev", REVIEWER_AGENT.read_text(encoding="utf-8"))
         self.assertIn("reviewer-autodev", REVIEWER_SKILL.read_text(encoding="utf-8"))
 
-    def test_dev_review_injects_reviewer_agent(self) -> None:
+    def test_reviewer_is_not_a_separate_board_stage(self) -> None:
         config = json.loads(BOARD_CONFIG.read_text(encoding="utf-8"))
-        for node in config["workflow"]["nodes"]:
-            if node.get("id") == "dev.review":
-                subagents = node["runtimePolicy"]["subagentConfig"]
-                break
-        else:
-            raise AssertionError("board_config 中找不到 dev.review 节点")
-
-        self.assertIn("agents/reviewer.md", subagents["customSubagentFiles"])
+        node_ids = {node.get("id") for node in config["workflow"]["nodes"]}
+        self.assertNotIn("dev.review", node_ids)
 
     def test_skill_does_not_inline_agent_definition(self) -> None:
         """角色定义只在 agents/reviewer.md；skill 里再贴一份就会与之漂移。"""

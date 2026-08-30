@@ -169,24 +169,18 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
 
-    def test_e2e_stage_declares_trust_gate_and_diagnostics_outputs(self) -> None:
-        nodes = [node for _, node in _iter_nodes(_board_config()) if node.get("id") == "dev.e2e"]
-        self.assertEqual(1, len(nodes))
-        outputs = nodes[0]["artifacts"]["outputs"]
-        by_path = {artifact["path"]: artifact for artifact in outputs}
-        self.assertIn("E2E_QUALITY_SCAN.json", by_path)
-        self.assertFalse(by_path["E2E_QUALITY_SCAN.json"]["required"])
-        self.assertIn("e2e-diagnostics/**/*", by_path)
-        self.assertFalse(by_path["e2e-diagnostics/**/*"]["required"])
+    def test_batch_pipeline_stages_are_not_duplicated_as_board_nodes(self) -> None:
+        config = _board_config()
+        node_ids = {node.get("id") for _, node in _iter_nodes(config)}
+        self.assertNotIn("dev.review", node_ids)
+        self.assertNotIn("dev.utest", node_ids)
+        self.assertNotIn("dev.e2e", node_ids)
+        self.assertNotIn("dev.verify", node_ids)
+        transitions = config["workflow"]["transitions"]
+        transition_ids = {transition["id"] for transition in transitions}
         self.assertEqual(
-            [
-                "ui_context_json",
-                "e2e_result_json",
-                "e2e_cases_contract",
-                "fix_request_json",
-                "evidence_integrity",
-            ],
-            nodes[0]["validators"],
+            {"prd-to-specs", "specs-to-plan", "plan-to-code", "code-to-cicd", "cicd-to-archive"},
+            transition_ids,
         )
 
 

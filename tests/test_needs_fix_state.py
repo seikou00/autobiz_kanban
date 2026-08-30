@@ -148,8 +148,7 @@ class NeedsFixStateTest(unittest.TestCase):
         self._run_verify_writer("set-verdict", "fail")
 
     def test_checkpoint_update_persists_and_clears_needs_fix_source(self) -> None:
-        self._set_checkpoint("verify_in_progress")
-        self._write_verify_artifacts()
+        self._set_checkpoint("needs_fix", needs_fix_from="code_in_progress")
 
         blocked = prepare_checkpoint_update(
             workspace=self.project,
@@ -160,14 +159,14 @@ class NeedsFixStateTest(unittest.TestCase):
         self.assertTrue(blocked.ok, blocked.errors)
         self.assertEqual(
             blocked.records[self.feature]["needsFixFromCheckpoint"],
-            "verify_in_progress",
+            "code_in_progress",
         )
         write_state_records(self.project, blocked.records)
         reloaded, errors, _ = load_state_json_records(self.project)
         self.assertEqual(errors, [])
         self.assertEqual(
             reloaded[self.feature]["needsFixFromCheckpoint"],
-            "verify_in_progress",
+            "code_in_progress",
         )
 
         unchanged = prepare_checkpoint_update(
@@ -178,7 +177,7 @@ class NeedsFixStateTest(unittest.TestCase):
         self.assertTrue(unchanged.ok, unchanged.errors)
         self.assertEqual(
             unchanged.records[self.feature]["needsFixFromCheckpoint"],
-            "verify_in_progress",
+            "code_in_progress",
         )
 
         (self.feature_dir / "proposal.md").write_text("proposal\n", encoding="utf-8")
@@ -188,6 +187,26 @@ class NeedsFixStateTest(unittest.TestCase):
         specs_dir = self.feature_dir / "specs"
         specs_dir.mkdir(exist_ok=True)
         (specs_dir / "requirements.md").write_text("requirements\n", encoding="utf-8")
+        (self.feature_dir / "UI_CONTEXT.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "featureId": self.feature,
+                    "uiRequired": False,
+                    "decisionStatus": "locked",
+                    "decisionSource": "default_false",
+                    "confirmedAtCheckpoint": "prd_done",
+                    "lockedAtCheckpoint": "specs_done",
+                    "notApplicableReason": "纯后端能力",
+                    "pages": [],
+                    "interactions": [],
+                    "visualSources": [],
+                    "capabilities": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
         resumed = prepare_checkpoint_update(
             workspace=self.project,
@@ -198,43 +217,41 @@ class NeedsFixStateTest(unittest.TestCase):
         self.assertTrue(resumed.ok, resumed.errors)
         self.assertNotIn("needsFixFromCheckpoint", resumed.records[self.feature])
 
-    def test_inspect_and_route_resolve_blocked_verify_node(self) -> None:
-        self._set_checkpoint("needs_fix", needs_fix_from="verify_in_progress")
+    def test_inspect_and_route_resolve_blocked_code_node(self) -> None:
+        self._set_checkpoint("needs_fix", needs_fix_from="code_in_progress")
         config = _load_board_config()
 
         feature_payload = _capture_json(run_mode, self.project, self.feature, config)
         run = feature_payload["run"]
         statuses = {node["id"]: node["nodeStatus"] for node in run["nodes"]}
-        self.assertEqual(run["currentNodeId"], "dev.verify")
-        self.assertEqual(statuses["dev.e2e"], "done")
-        self.assertEqual(statuses["dev.verify"], "blocked")
+        self.assertEqual(run["currentNodeId"], "dev.code")
+        self.assertEqual(statuses["dev.code"], "blocked")
         self.assertEqual(statuses["ops.cicd"], "not_started")
 
         project_payload = _capture_json(project_mode, self.root, ["demo"], config)
         summary = project_payload["projects"]["demo"]["runs"][0]
-        self.assertEqual(summary["currentNodeId"], "dev.verify")
+        self.assertEqual(summary["currentNodeId"], "dev.code")
         self.assertEqual(summary["currentNodeStatus"], "blocked")
 
         route, exit_code = resolve_route(self.project, self.feature)
         self.assertEqual(exit_code, 0)
         self.assertTrue(route["ok"])
-        self.assertEqual(route["currentNodeId"], "dev.verify")
+        self.assertEqual(route["currentNodeId"], "dev.code")
         self.assertEqual(route["currentNodeStatus"], "blocked")
         self.assertEqual(route["recommendedNextSkill"], "")
         self.assertIn("code_in_progress", route["allowedNextCheckpoints"])
         self.assertEqual(route["skippableNodes"], [])
 
-    def test_e2e_source_marks_only_e2e_as_blocked(self) -> None:
-        self._set_checkpoint("needs_fix", needs_fix_from="e2e_in_progress")
+    def test_code_source_marks_only_code_as_blocked(self) -> None:
+        self._set_checkpoint("needs_fix", needs_fix_from="code_in_progress")
 
         payload = _capture_json(run_mode, self.project, self.feature, _load_board_config())
         run = payload["run"]
         statuses = {node["id"]: node["nodeStatus"] for node in run["nodes"]}
 
-        self.assertEqual(run["currentNodeId"], "dev.e2e")
-        self.assertEqual(statuses["dev.utest"], "done")
-        self.assertEqual(statuses["dev.e2e"], "blocked")
-        self.assertEqual(statuses["dev.verify"], "not_started")
+        self.assertEqual(run["currentNodeId"], "dev.code")
+        self.assertEqual(statuses["dev.code"], "blocked")
+        self.assertEqual(statuses["ops.cicd"], "not_started")
 
     def test_manual_needs_fix_without_source_uses_unique_stage(self) -> None:
         self._set_checkpoint("needs_fix", stage="Specs")
@@ -251,13 +268,13 @@ class NeedsFixStateTest(unittest.TestCase):
             workspace=self.project,
             feature=self.feature,
             checkpoint="needs_fix",
-            needs_fix_from_checkpoint="verify_in_progress",
+            needs_fix_from_checkpoint="code_in_progress",
         )
 
         self.assertTrue(repaired.ok, repaired.errors)
         self.assertEqual(
             repaired.records[self.feature]["needsFixFromCheckpoint"],
-            "verify_in_progress",
+            "code_in_progress",
         )
 
     def test_needs_fix_rejects_skip_with_blocked_state_message(self) -> None:

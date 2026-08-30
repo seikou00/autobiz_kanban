@@ -429,7 +429,7 @@ class RuntimePolicyTest(unittest.TestCase):
 
         # dev.specs 起各节点配置了子代理，子代理只能经 task 工具启动，因此必须放开 task；
         # 同时自 e3abd1f（配合 devclaw1.4.9）起 agentMode 为 multi。
-        for node_id in ("dev.specs", "dev.plan", "dev.code", "dev.utest"):
+        for node_id in ("dev.specs", "dev.plan", "dev.code"):
             policy = _runtime_policy(node_id)
             self.assertEqual(policy["agentMode"], "multi")
             self.assertTrue(policy["toolCustomConfig"]["task"]["enabled"])
