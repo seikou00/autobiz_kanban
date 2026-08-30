@@ -25,6 +25,7 @@ from hooks.plan_json import (  # noqa: E402
     TASK_VALIDATION_KINDS,
     task_set_digest,
 )
+from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
 from hooks.plan_writer import _annotate_validation_test_plan  # noqa: E402
 from hooks.stage_gate import validate_stage  # noqa: E402
 from skills.autodev.hooks.artifact_check import run_postcheck  # noqa: E402
@@ -254,6 +255,11 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "completedAt": None,
         "tasks": [task],
     }
+    # A finalized parallel plan carries the deterministic staged-pipeline
+    # projection.  Keep this common fixture representative of a plan which is
+    # eligible to leave the Plan stage; tests which exercise invalid pipeline
+    # contracts mutate it explicitly.
+    root["parallelBatchPipeline"] = build_pipeline_contract(root, {"B001": batch})
     root["taskSetDigest"] = task_set_digest(root, {"B001": batch})
     (feature_dir / "plan.json").write_text(
         json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -1971,6 +1977,13 @@ class JsonWriterTests(unittest.TestCase):
             ["e2e_test", "integration_test", "static_check"],
         )
         self.assertTrue(contract["projectValidationCommand"]["mustNotDuplicateBatchProfile"])
+        self.assertTrue(contract["projectValidationCommand"]["requiredForParallelPipeline"])
+        self.assertEqual(
+            contract["projectValidationCommand"]["requiredPerWorkspaceRef"],
+            "one_candidate_integration_command",
+        )
+        self.assertEqual(contract["projectValidationCommand"]["executionTarget"], "merge_candidate")
+        self.assertTrue(contract["projectValidationCommand"]["repoRequiredWhenMultipleWorkspaces"])
         self.assertEqual(
             contract["batchValidationCommand"],
             {
@@ -2132,6 +2145,10 @@ class JsonWriterTests(unittest.TestCase):
                 "requiredFields": ["id", "argv", "cwd", "kind", "required"],
                 "allowedKinds": ["e2e_test", "integration_test", "static_check"],
                 "mustNotDuplicateBatchProfile": True,
+                "requiredForParallelPipeline": True,
+                "requiredPerWorkspaceRef": "one_candidate_integration_command",
+                "executionTarget": "merge_candidate",
+                "repoRequiredWhenMultipleWorkspaces": True,
             },
         )
         self.assertEqual(

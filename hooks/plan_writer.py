@@ -4074,6 +4074,10 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "requiredFields": ["id", "argv", "cwd", "kind", "required"],
                         "allowedKinds": sorted(PROJECT_VALIDATION_KINDS),
                         "mustNotDuplicateBatchProfile": True,
+                        "requiredForParallelPipeline": True,
+                        "requiredPerWorkspaceRef": "one_candidate_integration_command",
+                        "executionTarget": "merge_candidate",
+                        "repoRequiredWhenMultipleWorkspaces": True,
                     },
                     "batchValidationCommand": {
                         "command": (

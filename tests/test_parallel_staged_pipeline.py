@@ -60,6 +60,13 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             root["parallelBatchPipeline"] = build_pipeline_contract(root, {"B001": batch})
             self.assertEqual(validation_ownership_errors(root, {"B001": batch}), [])
 
+            root["projectValidationCommands"] = []
+            root["parallelBatchPipeline"] = build_pipeline_contract(root, {"B001": batch})
+            self.assertIn(
+                "parallel_batch_pipeline_integration_commands_missing",
+                validation_ownership_errors(root, {"B001": batch}),
+            )
+
     def test_candidate_sha_is_verified_promoted_and_evidence_aggregated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))

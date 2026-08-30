@@ -52,9 +52,11 @@ from hooks.artifact_ref_validator import (  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     failed_tasks,
     load_and_validate_plan,
+    load_plan_bundle,
     plan_json_path,
     unfinished_tasks,
 )
+from hooks.parallel_validation_ownership import validation_ownership_errors  # noqa: E402
 from hooks.code_task_context import resolve_task_refs  # noqa: E402
 from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
 from hooks.utest_plan_contract import validate_result_against_plan  # noqa: E402
@@ -2341,6 +2343,28 @@ def validate_plan_json_initial_tasks(ctx: HookContext) -> int:
     return failures
 
 
+def validate_parallel_batch_pipeline_contract(ctx: HookContext) -> int:
+    """Require a runnable B-INT command before the Plan stage can complete."""
+    plan_json = ctx.file("plan.json")
+    if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
+        info(ctx, "parallel_batch_pipeline_not_in_contract_degrade")
+        return 0
+    try:
+        bundle = load_plan_bundle(ctx.feature_dir)
+    except Exception as exc:  # plan_json_contract reports the structural cause too.
+        return fail_line(ctx, "invalid_parallel_batch_pipeline", f" detail={exc}")
+
+    failures = 0
+    for error in validation_ownership_errors(bundle.root, bundle.batches):
+        failures += fail_line(
+            ctx,
+            "invalid_parallel_batch_pipeline",
+            f" detail={error}",
+            target=error,
+        )
+    return failures
+
+
 def validate_plan_json_contract(ctx: HookContext) -> int:
     plan_json = ctx.file("plan.json")
     if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
@@ -2617,6 +2641,7 @@ VALIDATORS = {
     "design_contract": validate_design_contract,
     "plan_json_contract": validate_plan_json_contract,
     "plan_json_initial_tasks": validate_plan_json_initial_tasks,
+    "parallel_batch_pipeline_contract": validate_parallel_batch_pipeline_contract,
     "plan_task_granularity": validate_plan_task_granularity,
     "plan_scenario_coverage": validate_plan_scenario_coverage,
     "plan_ref_resolution": validate_plan_ref_resolution,

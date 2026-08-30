@@ -545,6 +545,7 @@
           "ui_context_json",
           "plan_json_contract",
           "plan_json_initial_tasks",
+          "parallel_batch_pipeline_contract",
           "plan_ref_resolution",
           "plan_task_granularity",
           "plan_scenario_coverage"
