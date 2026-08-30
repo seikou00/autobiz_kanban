@@ -919,12 +919,14 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             b2["tasks"][0]["scope"]["workspaceRoots"] = {"web": "."}
             for command in b2["tasks"][0]["validationCommands"]:
                 command["repo"] = "web"
-            for command in b2["batchValidation"]["commands"]:
-                command["repo"] = "web"
+            b2["compileCommand"]["repo"] = "web"
             b2_path.write_text(json.dumps(b2), encoding="utf-8")
             root_path = feature_dir / "plan.json"
             plan = json.loads(root_path.read_text(encoding="utf-8"))
             plan["batches"][1].update({"workspaceRef": "web", "deps": []})
+            plan["compileProfiles"]["backend"]["commands"].append({
+                key: value for key, value in b2["compileCommand"].items() if key != "id"
+            })
             plan["projectValidationCommands"][0]["repo"] = "default"
             plan["projectValidationCommands"].append({
                 "id": "PROJECT-VAL-002",
@@ -1000,8 +1002,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             b2["tasks"][0]["scope"]["workspaceRoots"] = {"web": "."}
             for command in b2["tasks"][0]["validationCommands"]:
                 command["repo"] = "web"
-            for command in b2["batchValidation"]["commands"]:
-                command["repo"] = "web"
+            b2["compileCommand"]["repo"] = "web"
             b2_path.write_text(json.dumps(b2), encoding="utf-8")
             root_path = feature_dir / "plan.json"
             plan = json.loads(root_path.read_text(encoding="utf-8"))
@@ -1064,16 +1065,17 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             b2_path = feature_dir / "plans" / "B002" / "plan.json"
             b1 = json.loads(b1_path.read_text(encoding="utf-8"))
             b2 = json.loads(b2_path.read_text(encoding="utf-8"))
-            b1["batchValidation"]["commands"][0]["argv"] = [sys.executable, "-c", "print('api compile')"]
+            b1["compileCommand"]["argv"] = [sys.executable, "-c", "print('api compile')"]
             b2["tasks"][0].update({"workspaceRef": "web", "deps": []})
             b2["tasks"][0]["scope"]["workspaceRoots"] = {"web": "apps/web"}
             for command in b2["tasks"][0]["validationCommands"]:
                 command["repo"] = "web"
                 command["cwd"] = "apps/web"
-            for command in b2["batchValidation"]["commands"]:
-                command["repo"] = "web"
-                command["cwd"] = "apps/web"
-                command["argv"] = [sys.executable, "-c", "print('web compile')"]
+            b2["compileCommand"].update({
+                "repo": "web",
+                "cwd": "apps/web",
+                "argv": [sys.executable, "-c", "print('web compile')"],
+            })
             b1_path.write_text(json.dumps(b1), encoding="utf-8")
             b2_path.write_text(json.dumps(b2), encoding="utf-8")
             root_path = feature_dir / "plan.json"

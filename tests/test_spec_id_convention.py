@@ -5,19 +5,16 @@
     ### Requirement [REQ-001]:            #### Scenario [SCN-001]:
 
 历史上 `autodev-specs/SKILL.md` 与 specs 模板一度教 `REQ-<capability>-NNN`
-这种带 capability 前缀的写法，而下游 JSON 校验器（review / utest / e2e /
-verify）的 scenario 索引只识别括号式。索引取不到 ID 时 `defined_scenarios`
-为空集，`missing_scenario_coverage_rows` 用 `defined_scenarios - seen_scenarios`
-判完整性，差集恒空——覆盖门被真空满足，零覆盖的 VERIFY_DECISION 能一路放行
-到 verify_done。
+这种带 capability 前缀的写法，而下游测试和 B-E2E 证据聚合的 scenario 索引
+只识别括号式。索引取不到 ID 时，覆盖门会把空集合误判为完整。
 
 修复方向是让「技能教的」与「校验器索引的」收敛到同一种写法，因此本文件钉三件事：
-括号式能被索引、模板与校验器的正则彼此吻合、零覆盖必须被拦。
+括号式能被索引、模板与校验器的正则彼此吻合、旧 Verify checkpoint 不得绕过
+当前 Batch Pipeline。
 """
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -37,7 +34,6 @@ from artifact_check import (  # noqa: E402
     _spec_scenario_refs_by_path,
     collect_spec_definition_index,
 )
-from hooks.evidence_store import append_evidence  # noqa: E402
 from hooks.init_workspace import create_feature, init_workspace  # noqa: E402
 from hooks.update_checkpoint import prepare_checkpoint_update  # noqa: E402
 
@@ -105,59 +101,10 @@ class SpecIdConventionTest(unittest.TestCase):
             "修复：模板改用 '#### Scenario [SCN-NNN]: <标题>'",
         )
 
-    def test_zero_coverage_verify_decision_is_blocked(self) -> None:
-        """覆盖门不得被零覆盖的 VERIFY_DECISION 真空满足。"""
+    def test_legacy_verify_checkpoint_is_rejected_after_pipeline_convergence(self) -> None:
+        """B-E2E 已归属 Code Pipeline，旧 Verify 阶段不得重新进入流程。"""
         with tempfile.TemporaryDirectory() as tmp:
-            project, feature_dir = self._feature(tmp, SPEC_BODY)
-            (feature_dir / "proposal.md").write_text("# proposal\n", encoding="utf-8")
-            (feature_dir / "design.md").write_text(
-                "# design\n\n- D-001: 决策\n", encoding="utf-8"
-            )
-            (feature_dir / "VERIFY_REPORT.md").write_text("all pass\n", encoding="utf-8")
-            record = append_evidence(
-                feature_dir,
-                {
-                    "featureId": "alpha",
-                    "checkpoint": "code_in_progress",
-                    "nodeId": "dev.code",
-                    "skill": "autodev-code",
-                    "taskId": "T001",
-                    "action": "validation",
-                    "specRefs": ["specs/order-export/spec.md#REQ-001"],
-                    "designRefs": ["design.md#D-001"],
-                    "changedFiles": ["src/example.py"],
-                    "validation": {
-                        "command": "echo ok",
-                        "exitCode": 0,
-                        "result": "pass",
-                    },
-                },
-            )
-            (feature_dir / "VERIFY_DECISION.json").write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "verdict": "pass",
-                        "nextCheckpoint": "verify_done",
-                        "evidenceIds": [record["evidenceId"]],
-                        "scenarioCoverage": [],
-                        "passedScenarioRefs": [],
-                        "failedScenarioRefs": [],
-                        "manualVerificationRefs": [],
-                        "missingScenarioRefs": [],
-                        "summary": {
-                            "total": 0,
-                            "passed": 0,
-                            "failed": 0,
-                            "manual": 0,
-                            "missing": 0,
-                        },
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+            project, _ = self._feature(tmp, SPEC_BODY)
 
             from board_core.state_store import (
                 load_state_json_records,
@@ -166,20 +113,17 @@ class SpecIdConventionTest(unittest.TestCase):
 
             records, _, _ = load_state_json_records(project)
             current = dict(records["alpha"])
-            current["checkpoint"] = "verify_in_progress"
-            current["stage"] = "verify_in_progress"
+            current["checkpoint"] = "code_in_progress"
+            current["stage"] = "Code"
             records["alpha"] = current
             write_state_records(project, records)
 
             result = prepare_checkpoint_update(
                 workspace=project, feature="alpha", checkpoint="verify_done"
             )
-            self.assertFalse(
-                result.ok,
-                "零 scenario 覆盖的 VERIFY_DECISION 不得推进 verify_done",
-            )
+            self.assertFalse(result.ok, "旧 Verify checkpoint 不得绕过 Batch Pipeline")
             joined = " ".join(str(error) for error in (result.errors or ()))
-            self.assertIn("missing_scenario_coverage_rows", joined)
+            self.assertIn("未知 checkpoint", joined)
 
 
 if __name__ == "__main__":

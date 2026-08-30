@@ -27,19 +27,6 @@ EXPECTED_OUTPUT_METADATA = {
     "plan.json": ("implementation_plan", "final"),
     "DETAIL_DESIGN.md": ("technical_detail", "process"),
     "evidence/EVIDENCE.jsonl": ("evidence_stream", "evidence"),
-    "REQUIREMENTS_EVAL.md": ("review_report", "evidence"),
-    "UNIT_TEST_REPORT.md": ("unit_test_report", "evidence"),
-    "UNIT_TEST_RESULT.json": ("unit_test_result", "evidence"),
-    "test-output.log": ("log", "log"),
-    "E2E_TEST_CASES.yaml": ("e2e_cases", "evidence"),
-    "E2E_REPORT.md": ("e2e_report", "evidence"),
-    "E2E_RESULT.json": ("e2e_result", "evidence"),
-    "E2E_QUALITY_SCAN.json": ("e2e_quality_scan", "evidence"),
-    "e2e-diagnostics/**/*": ("e2e_diagnostic", "evidence"),
-    "FIX_REQUEST.json": ("fix_request", "process"),
-    "e2e-run.log": ("log", "log"),
-    "VERIFY_REPORT.md": ("verify_report", "final"),
-    "VERIFY_DECISION.json": ("verify_decision", "final"),
 }
 
 

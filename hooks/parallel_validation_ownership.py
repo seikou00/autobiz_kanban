@@ -26,7 +26,13 @@ from hooks.plan_json import PlanBundle, load_plan_bundle
 
 
 PIPELINE_SCHEMA_VERSION = "autobiz.parallel.pipeline.v1"
-DELIVERY_STAGES = ("prepare", "implement", "review", "test", "quality_gate")
+DELIVERY_STAGES = ("prepare", "implement", "review", "test")
+OPTIONAL_DELIVERY_STAGES = (
+    {
+        "stage": "quality_gate",
+        "enabledWhen": "qualityGateCommands_present",
+    },
+)
 VALIDATION_BATCHES = (
     {
         "id": "V-INT",
@@ -63,7 +69,8 @@ def _pipeline_revision(root: dict[str, Any], batches: dict[str, dict[str, Any]])
                     if isinstance(task, dict)
                     for path in (task.get("scope", {}).get("paths", []) if isinstance(task.get("scope"), dict) else [])
                 ],
-                "batchValidation": batches.get(str(entry.get("id")), {}).get("batchValidation", {}),
+                "compileCommand": batches.get(str(entry.get("id")), {}).get("compileCommand"),
+                "qualityGateCommands": batches.get(str(entry.get("id")), {}).get("qualityGateCommands", []),
                 "taskValidation": [
                     {
                         "id": task.get("id"),
@@ -95,17 +102,21 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
             "stage": "review",
             "kind": "review",
         }
-        validation = batch.get("batchValidation") if isinstance(batch, dict) else None
-        commands = validation.get("commands", []) if isinstance(validation, dict) else []
-        for command in commands if isinstance(commands, list) else []:
+        compile_command = batch.get("compileCommand") if isinstance(batch, dict) else None
+        compile_id = compile_command.get("id") if isinstance(compile_command, dict) else None
+        if isinstance(compile_id, str) and compile_id:
+            ownership[compile_id] = {
+                "ownerBatchId": batch_id,
+                "stage": "implement",
+                "kind": "command",
+            }
+        quality_commands = batch.get("qualityGateCommands") if isinstance(batch, dict) else []
+        for command in quality_commands if isinstance(quality_commands, list) else []:
             command_id = command.get("id") if isinstance(command, dict) else None
             if isinstance(command_id, str) and command_id:
                 ownership[command_id] = {
                     "ownerBatchId": batch_id,
-                    # Compile is the only validation permitted during the
-                    # implementation stage.  Other batch-owned commands are
-                    # quality gates and must not be repeated after merge.
-                    "stage": "implement" if command.get("kind") == "compile" else "quality_gate",
+                    "stage": "quality_gate",
                     "kind": "command",
                 }
         for task in batch.get("tasks", []) if isinstance(batch, dict) else []:
@@ -144,6 +155,7 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
         "schemaVersion": PIPELINE_SCHEMA_VERSION,
         "planRevision": _pipeline_revision(root, batches),
         "deliveryStages": list(DELIVERY_STAGES),
+        "optionalDeliveryStages": [dict(item) for item in OPTIONAL_DELIVERY_STAGES],
         "validationBatches": [dict(item) for item in VALIDATION_BATCHES],
         "validationOwnership": ownership,
         "finalization": {
@@ -162,6 +174,8 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
         errors.append("parallel_batch_pipeline_schema_invalid")
     if pipeline.get("deliveryStages") != list(DELIVERY_STAGES):
         errors.append("parallel_batch_pipeline_delivery_stages_invalid")
+    if pipeline.get("optionalDeliveryStages") != [dict(item) for item in OPTIONAL_DELIVERY_STAGES]:
+        errors.append("parallel_batch_pipeline_optional_delivery_stages_invalid")
     if not isinstance(pipeline.get("planRevision"), str) or not pipeline["planRevision"].startswith("sha256:"):
         errors.append("parallel_batch_pipeline_revision_invalid")
     elif pipeline["planRevision"] != _pipeline_revision(root, batches):
@@ -216,8 +230,11 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
             continue
         batch_id = entry["id"]
         batch = batches.get(batch_id, {})
-        validation = batch.get("batchValidation") if isinstance(batch, dict) else None
-        for command in validation.get("commands", []) if isinstance(validation, dict) else []:
+        compile_command = batch.get("compileCommand") if isinstance(batch, dict) else None
+        if isinstance(compile_command, dict) and isinstance(compile_command.get("id"), str):
+            source_ids.append(compile_command["id"])
+        quality_commands = batch.get("qualityGateCommands") if isinstance(batch, dict) else []
+        for command in quality_commands if isinstance(quality_commands, list) else []:
             if isinstance(command, dict) and isinstance(command.get("id"), str):
                 source_ids.append(command["id"])
         for task in batch.get("tasks", []) if isinstance(batch, dict) else []:
@@ -266,7 +283,7 @@ def ownership_report(root: dict[str, Any], batches: dict[str, dict[str, Any]]) -
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate staged Batch validation ownership")
+    parser = argparse.ArgumentParser(description="Validate staged Batch command ownership")
     parser.add_argument("command", choices=("validate", "report"))
     parser.add_argument("--workspace")
     parser.add_argument("--feature", required=True)

@@ -254,8 +254,8 @@ class ExploreRoleIsResolvableTest(unittest.TestCase):
         self.assertIn("Explore", subagents["disabledBuiltinSubagents"])
 
 
-class BatchValidationRoleIsResolvableTest(unittest.TestCase):
-    """Code 阶段批次验证角色必须可被宿主解析。"""
+class BatchCompileRoleIsResolvableTest(unittest.TestCase):
+    """Code 阶段批次编译角色必须可被宿主解析。"""
 
     def test_agent_name_matches_runner_directive(self) -> None:
         self.assertIn("name: verification-autodev", _read(VERIFICATION_AGENT))

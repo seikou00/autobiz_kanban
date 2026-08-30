@@ -19,9 +19,11 @@ BEHAVIOR_TASK_VALIDATION_KINDS = frozenset({
 })
 FRONTEND_COMPILE_VALIDATION_KINDS = frozenset({"build", "compile", "typecheck"})
 TASK_VALIDATION_KINDS = BEHAVIOR_TASK_VALIDATION_KINDS | FRONTEND_COMPILE_VALIDATION_KINDS
-# Batch plans deliberately expose one schema kind. Frontend build/typecheck
-# semantics are carried by argv and checked by compile_only_command_errors.
-BATCH_VALIDATION_KINDS = frozenset({"compile"})
+# Compilation and quality gates have distinct lifecycle owners.  A compile
+# command is the sole implement-stage gate; quality gates are optional static
+# checks and never run a test suite.
+COMPILE_PROFILE_KINDS = frozenset({"compile"})
+QUALITY_GATE_KINDS = frozenset({"static_check"})
 MAVEN_EXECUTABLES = frozenset({"mvn", "mvn.cmd", "mvnw", "mvnw.cmd"})
 _MAVEN_PROJECT_LIST_FLAGS = ("-pl", "--projects")
 _MAVEN_OPTIONS_WITH_VALUE = frozenset({

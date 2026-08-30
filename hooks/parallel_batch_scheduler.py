@@ -23,6 +23,7 @@ from hooks.evidence_kernel import FileLock
 from hooks.parallel_runtime import (
     append_event,
     create_manifest,
+    delivery_stage_names,
     get_active_run,
     list_runs,
     load_manifest,
@@ -586,7 +587,7 @@ def schedule(
                     "nextStage": next(
                         (
                             stage
-                            for stage in ("prepare", "implement", "review", "test", "quality_gate")
+                            for stage in delivery_stage_names(manifest["batches"][batch_id])
                             if not isinstance((manifest["batches"][batch_id].get("stageStates") or {}).get(stage), dict)
                             or (manifest["batches"][batch_id].get("stageStates") or {}).get(stage, {}).get("status") not in {"passed", "skipped"}
                         ),
@@ -610,6 +611,7 @@ def schedule(
                     "workspaceRef": item.get("workspaceRef"),
                     "componentRoots": item.get("componentRoots", []),
                     "executionStage": item.get("executionStage", "parallel"),
+                    "qualityGateRequired": item.get("qualityGateRequired") is True,
                     "requestedPath": (manifest.get("repositories", {}).get(str(item.get("repositoryRef")), {}) or {}).get("requestedPath"),
                     "worktreePath": item.get("worktreePath"),
                     "branchName": item.get("branchName"),

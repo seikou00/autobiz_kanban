@@ -70,16 +70,10 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
             if evidence_id != _expected_evidence_id(line_no):
                 errors.append(f"non_sequential_evidence_id:line={line_no}:id={evidence_id}")
         task_id = record.get("taskId")
-        is_batch_validation = (
-            record.get("action") == "batch_validation"
-            and task_id == "__batch__"
-            and isinstance(record.get("batchId"), str)
-        )
         if (
             isinstance(task_id, str)
             and task_id
             and task_id != "__project__"
-            and not is_batch_validation
             and not task_id.startswith("T")
         ):
             errors.append(f"line={line_no}:invalid_task_id:{task_id}")
@@ -105,7 +99,7 @@ def check_integrity(target_feature_dir: Path, *, require_index: bool = True) -> 
 
 
 def _validation_passed(record: dict[str, Any]) -> bool:
-    if record.get("action") not in {"validation", "batch_validation", "project_check"}:
+    if record.get("action") not in {"validation", "batch_compile", "project_check"}:
         return False
     validation = record.get("validation")
     if not isinstance(validation, dict):
@@ -139,16 +133,11 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
     for record in records:
         task_id = record.get("taskId")
         is_project_check = record.get("action") == "project_check" and task_id == "__project__"
-        is_batch_validation = (
-            record.get("action") == "batch_validation"
-            and task_id == "__batch__"
-        )
         if (
             isinstance(task_id, str)
             and task_id
             and task_id not in known_tasks
             and not is_project_check
-            and not is_batch_validation
         ):
             errors.append(f"unknown_evidence_task_id:{task_id}")
     for task in tasks(plan):
@@ -174,26 +163,6 @@ def check_plan_evidence_refs(target_feature_dir: Path) -> list[str]:
                 errors.append(f"unknown_project_check_evidence_id:{evidence_id}")
             elif record.get("action") != "project_check" or record.get("taskId") != "__project__":
                 errors.append(f"invalid_project_check_evidence_id:{evidence_id}")
-    batch_plans = plan.get("_bundleBatches")
-    if isinstance(batch_plans, dict):
-        records_by_id = {
-            str(record.get("evidenceId")): record
-            for record in records
-            if isinstance(record.get("evidenceId"), str)
-        }
-        for batch_id, batch in batch_plans.items():
-            validation = batch.get("batchValidation") if isinstance(batch, dict) else None
-            evidence_ids = validation.get("evidenceIds") if isinstance(validation, dict) else None
-            for evidence_id in evidence_ids or []:
-                record = records_by_id.get(str(evidence_id))
-                if record is None:
-                    errors.append(f"{batch_id}.unknown_batch_validation_evidence_id:{evidence_id}")
-                elif (
-                    record.get("action") != "batch_validation"
-                    or record.get("taskId") != "__batch__"
-                    or record.get("batchId") != batch_id
-                ):
-                    errors.append(f"{batch_id}.invalid_batch_validation_evidence_id:{evidence_id}")
     return errors
 
 
@@ -346,19 +315,13 @@ def _check_batch_completion(
         if not isinstance(command_id, str) or not command_id.strip():
             errors.append(f"{batch_id}.batch_compile_commandId_missing_or_empty")
             continue
-        batch_validation = batch.get("batchValidation")
-        commands = batch_validation.get("commands", []) if isinstance(batch_validation, dict) else []
-        compile_command = next(
-            (
-                command for command in commands
-                if isinstance(command, dict)
-                and command.get("kind") == "compile"
-                and command.get("required") is True
-                and command.get("id") == command_id
-            ),
-            None,
-        )
-        if compile_command is None:
+        compile_command = batch.get("compileCommand")
+        if not (
+            isinstance(compile_command, dict)
+            and compile_command.get("kind") == "compile"
+            and compile_command.get("required") is True
+            and compile_command.get("id") == command_id
+        ):
             errors.append(f"{batch_id}.batch_compile_commandId_not_found_in_plan:{command_id}")
             continue
         expected_evidence = {

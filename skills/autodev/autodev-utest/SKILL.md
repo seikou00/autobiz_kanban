@@ -38,7 +38,7 @@ python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWor
 
 每个 assignment 的 `promptContent` 只包含 Batch plan 的绝对路径，以及 TASK `id`、`implementationPoints`、`nonGoals` 和从 `validationCommands` 提取的 `validationLocations.repo/cwd`。派发时原样使用；不得自行打开 plan 补取、转述或拼接 TASK 字段。Plan 命令的 argv 不作为测试命令。
 
-code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前逐个 Batch 读取并列出：`batchCompile`（`status`、`failureCategory`、`lastFailure`、`repairAttempts` / `maxRepairAttempts`）、`batchValidation.status` 与 `deferredIssues[]`、TASK `blockers[]`、根 `deferredValidationIssues[]`。它们是本阶段必须修复的入场缺陷，与 UT target 并列进入修复队列。
+code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前逐个 Batch 读取并列出：`batchCompile`（`status`、`failureCategory`、`lastFailure`、`repairAttempts` / `maxRepairAttempts`）、`qualityGateCommands[]` 对应 manifest `quality_gate` 状态（仅命令存在时）、TASK `blockers[]`、根 `deferredValidationIssues[]`。它们是本阶段必须修复的入场缺陷，与 UT target 并列进入修复队列。
 
 判定现状以本轮重跑该命令的结果为准，不以字段快照为准：`status=passed` 的条目里 `lastFailure` 只是修复过程记录，重跑通过即不再是缺陷；`status` 非 `passed` 或存在未清空的 `blockers` / `deferredIssues` 时，先重跑确认复现，再按失败分类修复。未经重跑不得直接依据字段动生产代码。
 

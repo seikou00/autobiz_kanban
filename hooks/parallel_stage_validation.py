@@ -38,7 +38,13 @@ def _command_index(bundle: PlanBundle) -> dict[str, tuple[dict[str, Any], str | 
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
             continue
         batch = bundle.batches.get(entry["id"], {})
-        for command in (batch.get("batchValidation") or {}).get("commands", []):
+        compile_command = batch.get("compileCommand")
+        if isinstance(compile_command, dict) and isinstance(compile_command.get("id"), str):
+            result[compile_command["id"]] = (
+                dict(compile_command),
+                str(compile_command.get("repo")) if compile_command.get("repo") else str(entry.get("workspaceRef") or "") or None,
+            )
+        for command in batch.get("qualityGateCommands", []):
             if isinstance(command, dict) and isinstance(command.get("id"), str):
                 result[command["id"]] = (dict(command), str(command.get("repo")) if command.get("repo") else str(entry.get("workspaceRef") or "") or None)
         for task in batch.get("tasks", []):

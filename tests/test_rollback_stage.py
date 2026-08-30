@@ -65,9 +65,6 @@ class RollbackStageTest(unittest.TestCase):
         batch["status"] = "in_progress"
         batch["startedAt"] = "2026-08-18T10:00:00Z"
         batch["batchCompile"] = {"status": "passed", "runId": "compile-1"}
-        batch["batchValidation"]["status"] = "passed"
-        batch["batchValidation"]["evidenceIds"] = ["EV-COMPILE"]
-        batch["batchValidation"]["latestPassEvidenceIds"] = ["EV-COMPILE"]
 
         root = root_plan(batches=[batch_entry("B001", ["T001", "T002"])])
         root["featureId"] = self.feature
@@ -179,38 +176,27 @@ class RollbackStageTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_deletes_target_and_downstream_outputs_then_updates_state(self) -> None:
-        self._set_checkpoint("verify_done")
+    def test_rolls_back_code_and_downstream_outputs_then_updates_state(self) -> None:
+        self._set_checkpoint("code_done")
         keep = {
             "PRD.md": "prd",
-            "UNIT_TEST_REPORT.md": "unit",
-            "test-output.log": "unit log",
+            "PLAN.md": "plan",
         }
         delete = {
-            "E2E_TEST_CASES.yaml": "cases",
-            "E2E_QUALITY_SCAN.json": "quality",
-            "E2E_REPORT.md": "e2e",
-            "e2e-run.log": "e2e log",
-            "VERIFY_REPORT.md": "verify",
             "CICD_CHECKLIST.md": "cicd",
             "PR_BODY.md": "pr",
         }
         for name, content in {**keep, **delete}.items():
             (self.feature_dir / name).write_text(content, encoding="utf-8")
-        diagnostics = self.feature_dir / "e2e-diagnostics" / "round-1"
-        diagnostics.mkdir(parents=True)
-        (diagnostics / "report.json").write_text("{}\n", encoding="utf-8")
-        diagnostics_lock = self.feature_dir / "e2e-diagnostics" / "e2e-run.lock"
-        diagnostics_lock.write_text("0", encoding="utf-8")
 
         plan = prepare_stage_rollback(
             workspace=self.project,
             feature=self.feature,
-            stage="dev.e2e",
+            stage="dev.code",
             updated_at="2026-07-29 12:00:00",
         )
         self.assertTrue(plan.ok, plan.errors)
-        self.assertEqual(plan.new_checkpoint, "unit_test_done")
+        self.assertEqual(plan.new_checkpoint, "plan_done")
 
         result = execute_stage_rollback(plan)
 
@@ -219,12 +205,10 @@ class RollbackStageTest(unittest.TestCase):
             self.assertTrue((self.feature_dir / name).exists(), name)
         for name in delete:
             self.assertFalse((self.feature_dir / name).exists(), name)
-        self.assertFalse((diagnostics / "report.json").exists())
-        self.assertFalse(diagnostics_lock.exists())
         records, errors, _ = load_state_json_records(self.project)
         self.assertEqual(errors, [])
-        self.assertEqual(records[self.feature]["checkpoint"], "unit_test_done")
-        self.assertNotEqual(records[self.feature]["stage"], "verify_done")
+        self.assertEqual(records[self.feature]["checkpoint"], "plan_done")
+        self.assertNotEqual(records[self.feature]["stage"], "code_done")
 
     def test_glob_removes_only_declared_files_and_prunes_empty_directories(self) -> None:
         self._set_checkpoint("plan_done")
@@ -541,7 +525,6 @@ class RollbackStageTest(unittest.TestCase):
         self.assertEqual(root["status"], "todo")
         self.assertEqual(root["projectCheckEvidenceIds"], [])
         self.assertNotIn("batchCompile", batch)
-        self.assertEqual(batch["batchValidation"]["status"], "pending")
         self.assertEqual([item["status"] for item in batch["tasks"]], ["todo", "todo"])
         self.assertTrue(all(item["evidenceIds"] == [] for item in batch["tasks"]))
         records, _, _ = load_state_json_records(self.project)

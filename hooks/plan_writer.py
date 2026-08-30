@@ -484,7 +484,8 @@ def _initial(feature: str) -> dict[str, Any]:
         "batchPolicy": {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY},
         "taskValidationPolicy": copy.deepcopy(DEFAULT_TASK_VALIDATION_POLICY),
         "batches": [],
-        "batchValidationProfiles": {},
+        "compileProfiles": {},
+        "qualityGateProfiles": {},
         "projectValidationCommands": [],
         "projectCheckEvidenceIds": [],
         "latestProjectCheckEvidenceId": None,
@@ -509,8 +510,10 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     if "version" in root or "taskDetailVersion" in root:
         raise PlanWriterInputError("legacy_plan_requires_rebuild")
     finalized = root.get("taskSetStatus") == "finalized"
-    if finalized and "batchValidationProfiles" not in root:
-        raise PlanWriterInputError("batch_validation_contract_requires_rebuild", "batchValidationProfiles")
+    if finalized and "compileProfiles" not in root:
+        raise PlanWriterInputError("batch_compile_contract_requires_rebuild", "compileProfiles")
+    if finalized and "qualityGateProfiles" not in root:
+        raise PlanWriterInputError("quality_gate_contract_requires_rebuild", "qualityGateProfiles")
     data = dict(root)
     data.setdefault("featureId", feature)
     data.setdefault("status", "todo")
@@ -518,7 +521,8 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
     data.setdefault("nextBatchId", None)
     data.setdefault("batchPolicy", {"maxTasks": MAX_BATCH_TASKS, "strategy": BATCH_STRATEGY})
     data.setdefault("batches", [])
-    data.setdefault("batchValidationProfiles", {})
+    data.setdefault("compileProfiles", {})
+    data.setdefault("qualityGateProfiles", {})
     data.setdefault("projectValidationCommands", [])
     data.setdefault("projectCheckEvidenceIds", [])
     data.setdefault("latestProjectCheckEvidenceId", None)
@@ -536,10 +540,15 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
         plan = load_json(batch_plan_path(feature_dir, batch_id))
         if not isinstance(plan, dict):
             raise PlanWriterInputError("missing_batch_plan", batch_id)
-        if finalized and "batchValidation" not in plan:
+        if finalized and "compileCommand" not in plan:
             raise PlanWriterInputError(
-                "batch_validation_contract_requires_rebuild",
-                f"{batch_id}.batchValidation",
+                "batch_compile_contract_requires_rebuild",
+                f"{batch_id}.compileCommand",
+            )
+        if finalized and "qualityGateCommands" not in plan:
+            raise PlanWriterInputError(
+                "quality_gate_contract_requires_rebuild",
+                f"{batch_id}.qualityGateCommands",
             )
         batch_plans[batch_id] = plan
         for task in plan.get("tasks", []):
@@ -675,35 +684,6 @@ def _formal_execution_blockers(
             blockers.append(f"batch_runtime_timestamp_present:{batch_id}")
         if isinstance(batch.get("completionEvidenceIds"), list) and batch["completionEvidenceIds"]:
             blockers.append(f"batch_evidence_present:{batch_id}")
-        for validation_name in ("batchValidation",):
-            validation = batch.get(validation_name)
-            if not isinstance(validation, dict):
-                continue
-            status = validation.get("status")
-            if status not in {None, "pending"}:
-                blockers.append(f"validation_started:{batch_id}:{validation_name}:{status}")
-            for field in (
-                "activeRunId",
-                "lastRunId",
-                "currentTaskId",
-                "batchSnapshotSha256",
-            ):
-                if validation.get(field) is not None:
-                    blockers.append(f"validation_runtime_data_present:{batch_id}:{validation_name}.{field}")
-            for field in (
-                "completedTaskIds",
-                "evidenceIds",
-                "latestPassEvidenceIds",
-                "deferredTaskIds",
-            ):
-                value = validation.get(field)
-                if isinstance(value, list) and value:
-                    blockers.append(f"validation_runtime_data_present:{batch_id}:{validation_name}.{field}")
-            latest = validation.get("latestPassEvidenceByTask")
-            if isinstance(latest, dict) and latest:
-                blockers.append(
-                    f"validation_runtime_data_present:{batch_id}:{validation_name}.latestPassEvidenceByTask"
-                )
         for task in batch.get("tasks", []):
             if not isinstance(task, dict):
                 blockers.append(f"task_invalid:{batch_id}")
@@ -1078,13 +1058,11 @@ def _next_batch_id(batch_ids: set[str]) -> str:
 
 def _batch_status(
     batch_tasks: list[dict[str, Any]],
-    batch_validation: dict[str, Any],
     batch_compile: dict[str, Any] | None = None,
 ) -> str:
     statuses = [normalize_status(task.get("status")) for task in batch_tasks]
     if (
         any(status == "failed" for status in statuses)
-        or batch_validation.get("status") == "failed"
         or (isinstance(batch_compile, dict) and batch_compile.get("status") == "failed")
     ):
         return "failed"
@@ -1212,51 +1190,48 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
         spec_root = spec_roots[batch_id]
         execution_lane = execution_lanes[batch_id]
         title = str(previous.get("title") or Path(spec_root).parent.name or batch_id)
-        profiles = root.get("batchValidationProfiles")
-        profile = profiles.get(execution_lane) if isinstance(profiles, dict) else None
-        all_profile_commands = profile.get("commands") if isinstance(profile, dict) else []
-        if not isinstance(all_profile_commands, list):
-            all_profile_commands = []
-        profile_mode = "commands"
+        compile_profiles = root.get("compileProfiles")
+        compile_profile = (
+            compile_profiles.get(execution_lane) if isinstance(compile_profiles, dict) else None
+        )
+        compile_profile_commands = (
+            compile_profile.get("commands") if isinstance(compile_profile, dict) else []
+        )
+        if not isinstance(compile_profile_commands, list):
+            compile_profile_commands = []
+        quality_profiles = root.get("qualityGateProfiles")
+        quality_profile = (
+            quality_profiles.get(execution_lane) if isinstance(quality_profiles, dict) else None
+        )
+        quality_profile_commands = (
+            quality_profile.get("commands") if isinstance(quality_profile, dict) else []
+        )
+        if not isinstance(quality_profile_commands, list):
+            quality_profile_commands = []
         workspace_contract = workspace_contracts[batch_id]
-        profile_commands = [
+        compile_matches = [
             command
-            for command in all_profile_commands
+            for command in compile_profile_commands
             if isinstance(command, dict)
             and _batch_profile_command_matches_workspace(command, workspace_contract)
         ]
-        effective_commands = [
-            {**command, "id": f"BATCH-{batch_id}-VAL-{command_index:03d}"}
-            for command_index, command in enumerate(profile_commands, start=1)
-        ]
-        previous_validation = previous.get("batchValidation")
-        previous_validation = previous_validation if isinstance(previous_validation, dict) else {}
-        coverage_command_ids: list[str] = []
-        contract_unchanged = (
-            previous_validation.get("mode", "commands" if previous_validation.get("commands") else None)
-            == profile_mode
-            and previous_validation.get("coverageCommandIds", []) == coverage_command_ids
-            and previous_validation.get("commands") == effective_commands
+        compile_command = (
+            {**compile_matches[0], "id": f"BATCH-{batch_id}-COMPILE"}
+            if len(compile_matches) == 1
+            else None
         )
-        batch_validation = {
-            "mode": profile_mode,
-            "profile": execution_lane,
-            "status": previous_validation.get("status", "pending") if contract_unchanged else "pending",
-            "coverageCommandIds": coverage_command_ids,
-            "commands": effective_commands,
-            "evidenceIds": list(previous_validation.get("evidenceIds", [])) if contract_unchanged else [],
-            "latestPassEvidenceIds": (
-                list(previous_validation.get("latestPassEvidenceIds", [])) if contract_unchanged else []
-            ),
-            "activeRunId": previous_validation.get("activeRunId") if contract_unchanged else None,
-            "deferredIssues": (
-                copy.deepcopy(previous_validation.get("deferredIssues", []))
-                if contract_unchanged
-                else []
-            ),
-        }
+        quality_matches = [
+            command
+            for command in quality_profile_commands
+            if isinstance(command, dict)
+            and _batch_profile_command_matches_workspace(command, workspace_contract)
+        ]
+        quality_commands = [
+            {**command, "id": f"BATCH-{batch_id}-QUALITY-{command_index:03d}"}
+            for command_index, command in enumerate(quality_matches, start=1)
+        ]
         batch_compile = previous.get("batchCompile") if isinstance(previous.get("batchCompile"), dict) else None
-        status = _batch_status(batch_tasks, batch_validation, batch_compile)
+        status = _batch_status(batch_tasks, batch_compile)
         execution_stage = execution_stages.get(batch_id, "parallel")
         task_ids_list = [str(task.get("id")) for task in batch_tasks]
         projected[batch_id] = {
@@ -1270,7 +1245,8 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             "completedTaskCount": sum(normalize_status(task.get("status")) == "done" for task in batch_tasks),
             "completionEvidenceIds": completion_ids,
             "taskIds": task_ids_list,
-            "batchValidation": batch_validation,
+            "compileCommand": compile_command,
+            "qualityGateCommands": quality_commands,
             **({"batchCompile": previous.get("batchCompile")} if "batchCompile" in previous else {}),
             **({"mergeCommitSha": previous.get("mergeCommitSha")} if "mergeCommitSha" in previous else {}),
             **({"deliveryRunId": previous.get("deliveryRunId")} if "deliveryRunId" in previous else {}),
@@ -1310,15 +1286,6 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
     root["parallelBatchPipeline"] = build_pipeline_contract(root, projected)
     deferred_issues: list[dict[str, Any]] = []
     seen_issue_ids: set[str] = set()
-    for batch_plan in projected.values():
-        for validation_name in ("batchValidation",):
-            validation = batch_plan.get(validation_name)
-            issues = validation.get("deferredIssues") if isinstance(validation, dict) else None
-            for issue in issues if isinstance(issues, list) else []:
-                issue_id = issue.get("issueId") if isinstance(issue, dict) else None
-                if isinstance(issue_id, str) and issue_id not in seen_issue_ids:
-                    deferred_issues.append(copy.deepcopy(issue))
-                    seen_issue_ids.add(issue_id)
     project_disposition = root.get("projectValidationDisposition")
     project_issue_id = (
         project_disposition.get("issueId") if isinstance(project_disposition, dict) else None
@@ -3912,7 +3879,8 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "backend": sorted(BEHAVIOR_TASK_VALIDATION_KINDS),
                         "frontend": sorted(TASK_VALIDATION_KINDS),
                     },
-                    "batchValidationKinds": ["compile"],
+                    "compileCommandKinds": ["compile"],
+                    "qualityGateCommandKinds": ["static_check"],
                     "validationCoverage": {
                         "rule": "required_commands_cover_all_acceptance_criteria",
                         "compileMayCoverAcceptanceCriteriaByLane": {
@@ -4008,7 +3976,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "command": "finalize-task-draft",
                         "coverage": "all_path_qualified_spec_scenarios",
                         "requiredBefore": [
-                            "add-batch-validation-command",
+                            "add-compile-command",
                             "add-project-validation-command",
                             "render-md",
                         ],
@@ -4079,20 +4047,27 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "executionTarget": "merge_candidate",
                         "repoRequiredWhenMultipleWorkspaces": True,
                     },
-                    "batchValidationCommand": {
+                    "compileCommand": {
                         "command": (
-                            "add-batch-validation-command --lane <backend|frontend> "
+                            "add-compile-command --lane <backend|frontend> "
                             "[--repo <workspaceRef>] --command <command> "
                             "--code-workspace <path>"
                         ),
                         "requiredFields": ["argv", "cwd", "kind", "required"],
-                        "requiredPerUsedWorkspaceInLane": "commands_mode_only",
+                        "requiredPerUsedWorkspaceInLane": "exactly_one",
                         "repoRequiredWhenLaneUsesMultipleWorkspaces": True,
                         "defaultCwd": "declared_workspace_root",
                     },
-                    "batchValidationMode": {
-                        "mode": "commands",
-                        "requiredGate": "one required compile command per used lane and workspace",
+                    "qualityGateCommand": {
+                        "command": (
+                            "add-quality-gate-command --lane <backend|frontend> "
+                            "[--repo <workspaceRef>] --command <static-check-command> "
+                            "--code-workspace <path>"
+                        ),
+                        "requiredFields": ["argv", "cwd", "kind", "required"],
+                        "allowedKinds": ["static_check"],
+                        "optional": True,
+                        "executionStage": "quality_gate_only_when_commands_present",
                     },
                     "writerOwnedGeneratedArtifacts": {
                         "rootPlan": "plan.json",
@@ -4269,7 +4244,7 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
     return render_result(_write(workspace, feature, data))
 
 
-def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
+def _cmd_add_compile_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     data = _load(workspace, feature)
     lane_workspace_contracts = {
@@ -4279,13 +4254,13 @@ def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
     }
     if any(len(contract) != 1 for contract in lane_workspace_contracts):
         return render_result(fail(
-            "batch_validation_task_workspace_invalid",
+            "compile_command_task_workspace_invalid",
             args.lane,
             path=_path(workspace, feature),
         ))
     if not lane_workspace_contracts:
         return render_result(fail(
-            "batch_validation_lane_unused",
+            "compile_command_lane_unused",
             args.lane,
             path=_path(workspace, feature),
         ))
@@ -4294,13 +4269,13 @@ def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
     }
     if len(contracts_by_repository) != len(lane_workspace_contracts):
         return render_result(fail(
-            "batch_validation_repository_workspace_ambiguous",
+            "compile_command_repository_workspace_ambiguous",
             args.lane,
             path=_path(workspace, feature),
         ))
     if len(lane_workspace_contracts) > 1 and not args.repo:
         return render_result(fail(
-            "batch_validation_repository_required",
+            "compile_command_repository_required",
             args.lane,
             path=_path(workspace, feature),
         ))
@@ -4310,7 +4285,7 @@ def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
     selected_contract = contracts_by_repository.get(selected_repository)
     if selected_contract is None:
         return render_result(fail(
-            "batch_validation_repository_unknown",
+            "compile_command_repository_unknown",
             f"lane={args.lane};repo={selected_repository};available={','.join(sorted(contracts_by_repository))}",
             path=_path(workspace, feature),
         ))
@@ -4326,21 +4301,21 @@ def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
     command = {
         "argv": shlex.split(args.command),
         "cwd": args.cwd or workspace_roots[root_key],
-        "kind": args.kind,
-        "required": not args.optional,
+        "kind": "compile",
+        "required": True,
         **({"repo": command_repository} if command_repository else {}),
     }
     if workspace_preflight_required:
         if not args.code_workspace:
             return render_result(fail(
                 "code_workspace_preflight_required",
-                "add-batch-validation-command",
+                "add-compile-command",
                 path=_path(workspace, feature),
             ))
         contexts = _code_workspace_contexts(args.code_workspace)
         command_errors = _command_workspace_preflight_errors(
             command,
-            context_name=f"batchValidationProfiles.{args.lane}",
+            context_name=f"compileProfiles.{args.lane}",
             workspace_roots=workspace_roots,
             contexts=contexts,
             compile_only=True,
@@ -4351,12 +4326,103 @@ def _cmd_add_batch_validation_command(args: argparse.Namespace) -> int:
                 path=_path(workspace, feature),
                 errors=command_errors,
             ))
-    profiles = data.setdefault("batchValidationProfiles", {})
+    profiles = data.setdefault("compileProfiles", {})
     if not isinstance(profiles, dict):
         profiles = {}
-        data["batchValidationProfiles"] = profiles
-    profile = profiles.setdefault(args.lane, {"mode": "commands", "commands": []})
-    profile["mode"] = "commands"
+        data["compileProfiles"] = profiles
+    profile = profiles.setdefault(args.lane, {"commands": []})
+    commands = profile.setdefault("commands", [])
+    if not isinstance(commands, list):
+        commands = []
+        profile["commands"] = commands
+    commands.append(command)
+    return render_result(_write(workspace, feature, data))
+
+
+def _cmd_add_quality_gate_command(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    data = _load(workspace, feature)
+    lane_workspace_contracts = {
+        _batch_workspace_contract(task)
+        for task in _tasks(data)
+        if task_execution_lane(task) == args.lane
+    }
+    if any(len(contract) != 1 for contract in lane_workspace_contracts):
+        return render_result(fail(
+            "quality_gate_command_task_workspace_invalid",
+            args.lane,
+            path=_path(workspace, feature),
+        ))
+    if not lane_workspace_contracts:
+        return render_result(fail(
+            "quality_gate_command_lane_unused",
+            args.lane,
+            path=_path(workspace, feature),
+        ))
+    contracts_by_repository = {
+        contract[0][0]: contract for contract in lane_workspace_contracts
+    }
+    if len(contracts_by_repository) != len(lane_workspace_contracts):
+        return render_result(fail(
+            "quality_gate_command_repository_workspace_ambiguous",
+            args.lane,
+            path=_path(workspace, feature),
+        ))
+    if len(lane_workspace_contracts) > 1 and not args.repo:
+        return render_result(fail(
+            "quality_gate_command_repository_required",
+            args.lane,
+            path=_path(workspace, feature),
+        ))
+    selected_repository = args.repo or next(iter(contracts_by_repository))
+    selected_contract = contracts_by_repository.get(selected_repository)
+    if selected_contract is None:
+        return render_result(fail(
+            "quality_gate_command_repository_unknown",
+            f"lane={args.lane};repo={selected_repository};available={','.join(sorted(contracts_by_repository))}",
+            path=_path(workspace, feature),
+        ))
+    workspace_roots = dict(selected_contract)
+    root_key = selected_contract[0][0]
+    command_repository = None if root_key == "default" else root_key
+    command = {
+        "argv": shlex.split(args.command),
+        "cwd": args.cwd or workspace_roots[root_key],
+        "kind": "static_check",
+        "required": True,
+        **({"repo": command_repository} if command_repository else {}),
+    }
+    workspace_preflight_required = any(
+        task_execution_lane(task) == args.lane
+        and _batch_workspace_contract(task) == selected_contract
+        and bool(task_workspace_roots(task))
+        for task in _tasks(data)
+    )
+    if workspace_preflight_required:
+        if not args.code_workspace:
+            return render_result(fail(
+                "code_workspace_preflight_required",
+                "add-quality-gate-command",
+                path=_path(workspace, feature),
+            ))
+        command_errors = _command_workspace_preflight_errors(
+            command,
+            context_name=f"qualityGateProfiles.{args.lane}",
+            workspace_roots=workspace_roots,
+            contexts=_code_workspace_contexts(args.code_workspace),
+            compile_only=False,
+        )
+        if command_errors:
+            return render_result(WriterResult(
+                ok=False,
+                path=_path(workspace, feature),
+                errors=command_errors,
+            ))
+    profiles = data.setdefault("qualityGateProfiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+        data["qualityGateProfiles"] = profiles
+    profile = profiles.setdefault(args.lane, {"commands": []})
     commands = profile.setdefault("commands", [])
     if not isinstance(commands, list):
         commands = []
@@ -4605,14 +4671,12 @@ def update_batch_compile_status(
             )
 
         command_id = compile_result.get("commandId")
-        batch_validation = batch_plan.get("batchValidation")
-        commands = batch_validation.get("commands", []) if isinstance(batch_validation, dict) else []
-        if not any(
-            isinstance(command, dict)
-            and command.get("kind") == "compile"
-            and command.get("required") is True
-            and command.get("id") == command_id
-            for command in commands
+        compile_command = batch_plan.get("compileCommand")
+        if not (
+            isinstance(compile_command, dict)
+            and compile_command.get("kind") == "compile"
+            and compile_command.get("required") is True
+            and compile_command.get("id") == command_id
         ):
             return fail("batch_compile_command_invalid", command_id, path=_path(workspace, feature))
 
@@ -4785,14 +4849,12 @@ def mark_batch_tasks_done_after_compile(
         if not isinstance(batch_compile, dict) or batch_compile.get("status") != "passed":
             return fail("batch_compile_not_passed", batch_id, path=_path(workspace, feature))
         command_id = batch_compile.get("commandId")
-        batch_validation = batch_plan.get("batchValidation")
-        commands = batch_validation.get("commands", []) if isinstance(batch_validation, dict) else []
-        if not any(
-            isinstance(command, dict)
-            and command.get("kind") == "compile"
-            and command.get("required") is True
-            and command.get("id") == command_id
-            for command in commands
+        compile_command = batch_plan.get("compileCommand")
+        if not (
+            isinstance(compile_command, dict)
+            and compile_command.get("kind") == "compile"
+            and compile_command.get("required") is True
+            and compile_command.get("id") == command_id
         ):
             return fail("batch_compile_command_invalid", command_id, path=_path(workspace, feature))
 
@@ -5408,20 +5470,23 @@ def main(argv: list[str] | None = None) -> int:
     validation_command.add_argument("--covers", action="append")
     validation_command.set_defaults(func=_cmd_add_validation_command)
 
-    batch_validation = sub.add_parser("add-batch-validation-command")
-    _common(batch_validation)
-    batch_validation.add_argument("--lane", choices=sorted(EXECUTION_LANES), required=True)
-    batch_validation.add_argument("--command", required=True)
-    batch_validation.add_argument("--cwd")
-    batch_validation.add_argument("--repo")
-    batch_validation.add_argument("--code-workspace", action="append")
-    batch_validation.add_argument(
-        "--kind",
-        choices=["compile"],
-        default="compile",
-    )
-    batch_validation.add_argument("--optional", action="store_true")
-    batch_validation.set_defaults(func=_cmd_add_batch_validation_command)
+    compile_command = sub.add_parser("add-compile-command")
+    _common(compile_command)
+    compile_command.add_argument("--lane", choices=sorted(EXECUTION_LANES), required=True)
+    compile_command.add_argument("--command", required=True)
+    compile_command.add_argument("--cwd")
+    compile_command.add_argument("--repo")
+    compile_command.add_argument("--code-workspace", action="append")
+    compile_command.set_defaults(func=_cmd_add_compile_command)
+
+    quality_gate = sub.add_parser("add-quality-gate-command")
+    _common(quality_gate)
+    quality_gate.add_argument("--lane", choices=sorted(EXECUTION_LANES), required=True)
+    quality_gate.add_argument("--command", required=True)
+    quality_gate.add_argument("--cwd")
+    quality_gate.add_argument("--repo")
+    quality_gate.add_argument("--code-workspace", action="append")
+    quality_gate.set_defaults(func=_cmd_add_quality_gate_command)
 
     project_validation = sub.add_parser("add-project-validation-command")
     _common(project_validation)

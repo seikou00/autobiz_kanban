@@ -19,9 +19,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from hooks.validation_policy import (
-    BATCH_VALIDATION_KINDS,
     BEHAVIOR_TASK_VALIDATION_KINDS,
+    COMPILE_PROFILE_KINDS,
     FRONTEND_COMPILE_VALIDATION_KINDS,
+    QUALITY_GATE_KINDS,
     TASK_VALIDATION_KINDS,
     command_policy_errors,
     compile_only_command_errors,
@@ -45,7 +46,8 @@ EVIDENCE_ID_RE = re.compile(r"^ev_\d{4}$")
 ACCEPTANCE_ID_RE = re.compile(r"^AC-T\d{3}-\d{2,3}$")
 VALIDATION_ID_RE = re.compile(r"^VAL-T\d{3}-\d{2,3}$")
 PROJECT_VALIDATION_ID_RE = re.compile(r"^PROJECT-VAL-\d{3}$")
-BATCH_VALIDATION_ID_RE = re.compile(r"^BATCH-B\d{3}-VAL-\d{3}$")
+BATCH_COMPILE_ID_RE = re.compile(r"^BATCH-B\d{3}-COMPILE$")
+BATCH_QUALITY_GATE_ID_RE = re.compile(r"^BATCH-B\d{3}-QUALITY-\d{3}$")
 REPOSITORY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 PAGE_ID_RE = re.compile(r"^PAGE-\d{3}$")
 INTERACTION_ID_RE = re.compile(r"^UIX-\d{3}$")
@@ -57,7 +59,6 @@ COMPLETION_POLICIES = {
     "external_dependency_recorded",
 }
 TASK_EXECUTION_MODES = {"code", "verified_existing", "external_dependency"}
-BATCH_VALIDATION_MODES = {"commands"}
 TASK_VALIDATION_POLICY_MODES = {"defer_to_test_stages"}
 TASK_VALIDATION_ERROR_CATEGORIES = {
     "external_dependency",
@@ -73,7 +74,7 @@ PROJECT_VALIDATION_KINDS = {
     "e2e_test",
     "static_check",
 }
-VALIDATION_KINDS = TASK_VALIDATION_KINDS | BATCH_VALIDATION_KINDS
+VALIDATION_KINDS = TASK_VALIDATION_KINDS | COMPILE_PROFILE_KINDS | QUALITY_GATE_KINDS
 MAX_BATCH_TASKS = 5
 BATCH_STRATEGY = "spec_capability_execution_lane_topological"
 EXECUTION_LANES = {"backend", "frontend"}
@@ -81,14 +82,6 @@ IMPLEMENTATION_SCOPES = {"full_stack", "backend_only", "frontend_only"}
 TASK_SET_STATUSES = {"collecting", "finalized"}
 FEATURE_STATUSES = {"todo", "in_progress", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
-BATCH_VALIDATION_STATUSES = {
-    "pending",
-    "running",
-    "failed",
-    "revalidation_required",
-    "passed",
-    "deferred",
-}
 BATCH_COMPILE_STATUSES = {"pending", "repairing", "failed", "passed"}
 BATCH_COMPILE_MAX_REPAIR_ATTEMPTS = 3
 PARALLEL_EXECUTION_STAGES = {"parallel", "proto", "global", "integration"}
@@ -214,10 +207,6 @@ def defer_to_test_stages_enabled(data: dict[str, Any]) -> bool:
 
 
 
-
-
-def batch_validation_terminal(status: Any) -> bool:
-    return status in {"passed", "deferred"}
 
 
 def normalize_repository_relative_path(value: Any) -> str | None:
@@ -356,8 +345,6 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
         batch_id = str(raw_entry.get("id", ""))
         batch = batch_data.get(batch_id, {})
         batch_tasks = tasks(batch) if isinstance(batch, dict) else []
-        validation = batch.get("batchValidation") if isinstance(batch, dict) else None
-        validation = validation if isinstance(validation, dict) else None
         entries.append({
             "id": batch_id,
             "path": raw_entry.get("path"),
@@ -368,7 +355,8 @@ def task_set_digest(root: dict[str, Any], batch_data: dict[str, dict[str, Any]])
             "taskIds": raw_entry.get("taskIds"),
             "batchTitle": batch.get("title") if isinstance(batch, dict) else None,
             "batchExecutionLane": batch.get("executionLane") if isinstance(batch, dict) else None,
-            "batchValidationCommands": validation.get("commands") if validation is not None else None,
+            "compileCommand": batch.get("compileCommand") if isinstance(batch, dict) else None,
+            "qualityGateCommands": batch.get("qualityGateCommands") if isinstance(batch, dict) else None,
             # P1-7: 新策略包含 batchCompile 在 digest 中
             **(
                 {
@@ -830,13 +818,14 @@ def validate_plan_data(
         and entry.get("workspaceRef")
     }
     _validate_code_workspace_bindings(errors, data, batch_workspace_refs)
-    _validate_batch_profiles(
+    _validate_compile_profiles(
         errors,
         data,
         require_initial_status=require_initial_status,
         require_backend_compile=(require_backend_compile or require_all_done),
         used_lanes=used_lanes,
     )
+    _validate_quality_gate_profiles(errors, data)
 
     known_batches = set(batch_ids)
     for field in ("activeBatchId", "nextBatchId"):
@@ -858,7 +847,7 @@ def validate_batch_plan_data(
     known_task_ids: set[str] | None = None,
     require_initial_status: bool = False,
     require_all_done: bool = False,
-    require_backend_compile: bool = True,
+    require_backend_compile: bool = False,
     defer_to_test_stages: bool = False,
 ) -> list[str]:
     errors: list[str] = []
@@ -897,7 +886,7 @@ def validate_batch_plan_data(
     completed_count = sum(normalize_status(item.get("status")) == "done" for item in batch_tasks)
     if data.get("completedTaskCount") != completed_count:
         errors.append(f"{batch_id}.completedTaskCount_mismatch")
-    _validate_batch_validation(
+    _validate_batch_execution_commands(
         errors,
         data,
         str(batch_id),
@@ -936,24 +925,19 @@ def validate_batch_plan_data(
     }
     if len(frontend_routes) > 1:
         errors.append(f"{batch_id}.mixed_task_frontend_routes")
-    validation = data.get("batchValidation")
-    commands = validation.get("commands") if isinstance(validation, dict) else []
-    mode = (
-        validation.get("mode", "commands" if commands else None)
-        if isinstance(validation, dict)
-        else None
+    compile_command = data.get("compileCommand")
+    _validate_command_workspace_root(
+        errors,
+        compile_command,
+        context=f"{batch_id}.compileCommand",
+        workspace_roots=workspace_roots,
     )
-    batch_commands = commands if isinstance(commands, list) else []
-    if require_initial_status and mode == "commands" and not any(
-        isinstance(command, dict) and command.get("required") is True
-        for command in batch_commands
-    ):
-        errors.append(f"{batch_id}.batchValidation.required_command_missing")
-    for index, command in enumerate(batch_commands):
+    quality_commands = data.get("qualityGateCommands")
+    for index, command in enumerate(quality_commands if isinstance(quality_commands, list) else []):
         _validate_command_workspace_root(
             errors,
             command,
-            context=f"{batch_id}.batchValidation.commands[{index}]",
+            context=f"{batch_id}.qualityGateCommands[{index}]",
             workspace_roots=workspace_roots,
         )
     _validate_string_list(errors, data, str(batch_id), "completionEvidenceIds", required=False, item_re=EVIDENCE_ID_RE)
@@ -1205,7 +1189,7 @@ def _validate_validation_test_plan(
                 errors.append(f"{item_context}.testIntent.acceptanceCriteria_mismatch")
 
 
-def _validate_batch_command(
+def _validate_compile_command(
     errors: list[str],
     command: Any,
     *,
@@ -1217,7 +1201,7 @@ def _validate_batch_command(
         return
     if command_id_required:
         command_id = command.get("id")
-        if not isinstance(command_id, str) or not BATCH_VALIDATION_ID_RE.fullmatch(command_id):
+        if not isinstance(command_id, str) or not BATCH_COMPILE_ID_RE.fullmatch(command_id):
             errors.append(f"{context}.id_invalid")
     argv = _string_list(command.get("argv"))
     if argv is None or not argv:
@@ -1241,7 +1225,41 @@ def _validate_batch_command(
         errors.append(f"{context}.repo_invalid")
 
 
-def _validate_batch_profiles(
+def _validate_quality_gate_command(
+    errors: list[str],
+    command: Any,
+    *,
+    context: str,
+    command_id_required: bool,
+) -> None:
+    if not isinstance(command, dict):
+        errors.append(f"{context}_must_be_object")
+        return
+    if command_id_required:
+        command_id = command.get("id")
+        if not isinstance(command_id, str) or not BATCH_QUALITY_GATE_ID_RE.fullmatch(command_id):
+            errors.append(f"{context}.id_invalid")
+    argv = _string_list(command.get("argv"))
+    if argv is None or not argv:
+        errors.append(f"{context}.argv_missing")
+    else:
+        for policy_error in command_policy_errors(command):
+            errors.append(f"{context}.{policy_error}")
+    cwd = command.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip() or Path(cwd).is_absolute() or ".." in Path(cwd).parts:
+        errors.append(f"{context}.cwd_invalid")
+    if command.get("kind") not in QUALITY_GATE_KINDS:
+        errors.append(f"{context}.kind_invalid")
+    if command.get("required") is not True:
+        errors.append(f"{context}.required_must_be_true")
+    repository = command.get("repo")
+    if repository is not None and (
+        not isinstance(repository, str) or not REPOSITORY_ID_RE.fullmatch(repository)
+    ):
+        errors.append(f"{context}.repo_invalid")
+
+
+def _validate_compile_profiles(
     errors: list[str],
     data: dict[str, Any],
     *,
@@ -1249,27 +1267,23 @@ def _validate_batch_profiles(
     require_backend_compile: bool,
     used_lanes: set[str],
 ) -> None:
-    profiles = data.get("batchValidationProfiles")
+    profiles = data.get("compileProfiles")
     if not isinstance(profiles, dict):
-        errors.append("batch_validation_contract_requires_rebuild:batchValidationProfiles")
+        errors.append("batch_compile_contract_requires_rebuild:compileProfiles")
         return
     for lane, profile in profiles.items():
         if lane not in EXECUTION_LANES:
-            errors.append(f"batchValidationProfiles_unknown_lane:{lane}")
+            errors.append(f"compileProfiles_unknown_lane:{lane}")
             continue
         if not isinstance(profile, dict):
-            errors.append(f"batchValidationProfiles.{lane}_must_be_object")
+            errors.append(f"compileProfiles.{lane}_must_be_object")
             continue
         commands = profile.get("commands")
         if not isinstance(commands, list):
-            errors.append(f"batchValidationProfiles.{lane}.commands_must_be_array")
+            errors.append(f"compileProfiles.{lane}.commands_must_be_array")
             continue
-        mode = profile.get("mode", "commands" if commands else None)
-        if mode != "commands":
-            errors.append(f"batchValidationProfiles.{lane}.mode_invalid")
         if (
             require_backend_compile
-            and mode == "commands"
             and not any(
                 isinstance(command, dict)
                 and command.get("required") is True
@@ -1277,26 +1291,20 @@ def _validate_batch_profiles(
                 for command in commands
             )
         ):
-            errors.append(f"batchValidationProfiles.{lane}.backend_compile_command_missing")
+            errors.append(f"compileProfiles.{lane}.compile_command_missing")
         for index, command in enumerate(commands):
-            _validate_batch_command(
+            _validate_compile_command(
                 errors,
                 command,
-                context=f"batchValidationProfiles.{lane}.commands[{index}]",
+                context=f"compileProfiles.{lane}.commands[{index}]",
                 command_id_required=False,
             )
     if require_initial_status:
         for lane in sorted(used_lanes):
             profile = profiles.get(lane)
             commands = profile.get("commands") if isinstance(profile, dict) else None
-            mode = (
-                profile.get("mode", "commands" if commands else None)
-                if isinstance(profile, dict)
-                else None
-            )
             configured = (
-                mode == "commands"
-                and isinstance(commands, list)
+                isinstance(commands, list)
                 and any(
                     isinstance(command, dict)
                     and command.get("required") is True
@@ -1305,90 +1313,71 @@ def _validate_batch_profiles(
                 )
             )
             if not configured:
-                errors.append(f"batchValidationProfiles_missing_lane:{lane}")
+                errors.append(f"compileProfiles_missing_lane:{lane}")
 
 
-def _validate_batch_validation(
+def _validate_quality_gate_profiles(errors: list[str], data: dict[str, Any]) -> None:
+    profiles = data.get("qualityGateProfiles")
+    if not isinstance(profiles, dict):
+        errors.append("quality_gate_contract_requires_rebuild:qualityGateProfiles")
+        return
+    for lane, profile in profiles.items():
+        if lane not in EXECUTION_LANES:
+            errors.append(f"qualityGateProfiles_unknown_lane:{lane}")
+            continue
+        if not isinstance(profile, dict):
+            errors.append(f"qualityGateProfiles.{lane}_must_be_object")
+            continue
+        commands = profile.get("commands")
+        if not isinstance(commands, list):
+            errors.append(f"qualityGateProfiles.{lane}.commands_must_be_array")
+            continue
+        for index, command in enumerate(commands):
+            _validate_quality_gate_command(
+                errors,
+                command,
+                context=f"qualityGateProfiles.{lane}.commands[{index}]",
+                command_id_required=False,
+            )
+
+
+def _validate_batch_execution_commands(
     errors: list[str],
     data: dict[str, Any],
     batch_id: str,
     *,
     require_backend_compile: bool,
 ) -> None:
-    validation = data.get("batchValidation")
-    if validation is None:
-        errors.append(f"batch_validation_contract_requires_rebuild:{batch_id}.batchValidation")
-        return
-    if not isinstance(validation, dict):
-        errors.append(f"{batch_id}.batchValidation_must_be_object")
-        return
-    if validation.get("profile") != data.get("executionLane"):
-        errors.append(f"{batch_id}.batchValidation.profile_mismatch")
-    commands = validation.get("commands")
-    mode = validation.get("mode", "commands" if commands else None)
-    if mode != "commands":
-        errors.append(f"{batch_id}.batchValidation.mode_invalid")
-    if validation.get("status") not in BATCH_VALIDATION_STATUSES:
-        errors.append(f"{batch_id}.batchValidation.status_invalid")
-    if not isinstance(commands, list):
-        errors.append(f"{batch_id}.batchValidation.commands_must_be_array")
+    compile_command = data.get("compileCommand")
+    if compile_command is None:
+        if require_backend_compile:
+            errors.append(f"batch_compile_contract_requires_rebuild:{batch_id}.compileCommand")
     else:
-        seen: set[str] = set()
-        for index, command in enumerate(commands):
-            context = f"{batch_id}.batchValidation.commands[{index}]"
-            _validate_batch_command(errors, command, context=context, command_id_required=True)
-            command_id = command.get("id") if isinstance(command, dict) else None
-            if isinstance(command_id, str):
-                if command_id in seen:
-                    errors.append(f"{batch_id}.batchValidation.commands_duplicate:{command_id}")
-                seen.add(command_id)
-    raw_coverage_ids = validation.get("coverageCommandIds", [])
-    coverage_ids = _string_list(raw_coverage_ids)
-    if coverage_ids is None:
-        errors.append(f"{batch_id}.coverageCommandIds_must_be_string_array")
-        coverage_ids = []
-    for command_id in coverage_ids:
-        if not VALIDATION_ID_RE.fullmatch(command_id):
-            errors.append(f"{batch_id}.coverageCommandIds_invalid:{command_id}")
-    if mode == "commands" and coverage_ids:
-        errors.append(f"{batch_id}.batchValidation.commands_mode_coverage_must_be_empty")
-    if (
-        require_backend_compile
-        and mode == "commands"
-        and isinstance(commands, list)
-        and not any(
-            isinstance(command, dict)
-            and command.get("required") is True
-            and command.get("kind") == "compile"
-            for command in commands
-        )
-    ):
-        errors.append(f"{batch_id}.batchValidation.compile_command_missing")
-    _validate_string_list(errors, validation, batch_id, "evidenceIds", required=False, item_re=EVIDENCE_ID_RE)
-    _validate_string_list(
-        errors,
-        validation,
-        batch_id,
-        "latestPassEvidenceIds",
-        required=False,
-        item_re=EVIDENCE_ID_RE,
-    )
-    active_run_id = validation.get("activeRunId")
-    if active_run_id is not None and (not isinstance(active_run_id, str) or not active_run_id.strip()):
-        errors.append(f"{batch_id}.batchValidation.activeRunId_invalid")
-    deferred_issues = validation.get("deferredIssues", [])
-    if not isinstance(deferred_issues, list):
-        errors.append(f"{batch_id}.batchValidation.deferredIssues_must_be_array")
-        deferred_issues = []
-    for index, issue in enumerate(deferred_issues):
-        _validate_validation_deferral(
+        _validate_compile_command(
             errors,
-            issue,
-            context=f"{batch_id}.batchValidation.deferredIssues[{index}]",
-            expected_scope="batch",
+            compile_command,
+            context=f"{batch_id}.compileCommand",
+            command_id_required=True,
         )
-    if validation.get("status") == "deferred" and not deferred_issues:
-        errors.append(f"{batch_id}.batchValidation.deferred_issue_missing")
+    if require_backend_compile and not (
+        isinstance(compile_command, dict)
+        and compile_command.get("required") is True
+        and compile_command.get("kind") == "compile"
+    ):
+        errors.append(f"{batch_id}.compileCommand.required_compile_missing")
+    quality_commands = data.get("qualityGateCommands")
+    if not isinstance(quality_commands, list):
+        errors.append(f"quality_gate_contract_requires_rebuild:{batch_id}.qualityGateCommands")
+        return
+    seen: set[str] = set()
+    for index, command in enumerate(quality_commands):
+        context = f"{batch_id}.qualityGateCommands[{index}]"
+        _validate_quality_gate_command(errors, command, context=context, command_id_required=True)
+        command_id = command.get("id") if isinstance(command, dict) else None
+        if isinstance(command_id, str):
+            if command_id in seen:
+                errors.append(f"{batch_id}.qualityGateCommands_duplicate:{command_id}")
+            seen.add(command_id)
 
 
 def _validate_batch_compile(
@@ -1404,16 +1393,12 @@ def _validate_batch_compile(
         if compile_state is not None:
             errors.append(f"{batch_id}.batchCompile_unexpected")
         return
-    batch_validation = data.get("batchValidation")
-    commands = batch_validation.get("commands", []) if isinstance(batch_validation, dict) else []
-    compile_commands = [
-        command
-        for command in commands
-        if isinstance(command, dict)
-        and command.get("kind") == "compile"
-        and command.get("required") is True
-    ]
-    if not compile_commands and (
+    compile_command = data.get("compileCommand")
+    if not (
+        isinstance(compile_command, dict)
+        and compile_command.get("kind") == "compile"
+        and compile_command.get("required") is True
+    ) and (
         require_all_done or data.get("taskSetStatus") == "finalized"
     ):
         errors.append(f"{batch_id}.batchCompile.required_compile_command_missing")
@@ -1444,8 +1429,8 @@ def _validate_batch_compile(
         errors.append(f"{batch_id}.batchCompile.commandId_missing")
     elif command_id is not None and (not isinstance(command_id, str) or not command_id.strip()):
         errors.append(f"{batch_id}.batchCompile.commandId_invalid")
-    elif isinstance(command_id, str) and not any(
-        command.get("id") == command_id for command in compile_commands
+    elif isinstance(command_id, str) and (
+        not isinstance(compile_command, dict) or compile_command.get("id") != command_id
     ):
         errors.append(f"{batch_id}.batchCompile.commandId_not_required_compile")
 
@@ -1603,8 +1588,10 @@ def _validate_project_commands(
         return
     seen: set[str] = set()
     profile_signatures: dict[tuple[tuple[str, ...], str, str | None], str] = {}
-    profiles = data.get("batchValidationProfiles")
-    if isinstance(profiles, dict):
+    for profile_field in ("compileProfiles", "qualityGateProfiles"):
+        profiles = data.get(profile_field)
+        if not isinstance(profiles, dict):
+            continue
         for lane, profile in profiles.items():
             profile_commands = profile.get("commands") if isinstance(profile, dict) else None
             for command in profile_commands if isinstance(profile_commands, list) else []:
@@ -1903,6 +1890,64 @@ def task_ids(data: dict[str, Any]) -> set[str]:
     return {task["id"] for task in tasks(data) if isinstance(task.get("id"), str)}
 
 
+def _profile_command_matches_batch_workspace(command: dict[str, Any], workspace_ref: str | None) -> bool:
+    """Mirror the writer's projection rule without importing the writer.
+
+    Root profiles are the declarative source; Batch commands are generated
+    projections.  Comparing them here keeps manual Batch edits from silently
+    changing which command a pipeline stage executes.
+    """
+    repository = command.get("repo")
+    if workspace_ref in {None, DEFAULT_WORKSPACE_ROOT}:
+        return repository in {None, DEFAULT_WORKSPACE_ROOT}
+    return repository == workspace_ref
+
+
+def _validate_batch_execution_command_projection(
+    errors: list[str],
+    root: dict[str, Any],
+    entry: dict[str, Any],
+    batch: dict[str, Any],
+) -> None:
+    batch_id = str(entry.get("id", ""))
+    lane = entry.get("executionLane")
+    workspace_refs = {
+        str(task.get("workspaceRef"))
+        for task in tasks(batch)
+        if isinstance(task.get("workspaceRef"), str) and task.get("workspaceRef")
+    }
+    if not isinstance(lane, str) or len(workspace_refs) != 1:
+        return
+    workspace_ref = next(iter(workspace_refs))
+
+    def matching_commands(profile_field: str) -> list[dict[str, Any]]:
+        profiles = root.get(profile_field)
+        profile = profiles.get(lane) if isinstance(profiles, dict) else None
+        commands = profile.get("commands") if isinstance(profile, dict) else []
+        return [
+            command
+            for command in commands
+            if isinstance(command, dict)
+            and _profile_command_matches_batch_workspace(command, workspace_ref)
+        ] if isinstance(commands, list) else []
+
+    compile_matches = matching_commands("compileProfiles")
+    expected_compile = (
+        {**compile_matches[0], "id": f"BATCH-{batch_id}-COMPILE"}
+        if len(compile_matches) == 1
+        else None
+    )
+    if batch.get("compileCommand") != expected_compile:
+        errors.append(f"{batch_id}.compileCommand_profile_projection_mismatch")
+
+    expected_quality = [
+        {**command, "id": f"BATCH-{batch_id}-QUALITY-{index:03d}"}
+        for index, command in enumerate(matching_commands("qualityGateProfiles"), start=1)
+    ]
+    if batch.get("qualityGateCommands") != expected_quality:
+        errors.append(f"{batch_id}.qualityGateCommands_profile_projection_mismatch")
+
+
 def unfinished_tasks(data: dict[str, Any]) -> list[str]:
     return [
         str(task.get("id", ""))
@@ -1934,7 +1979,7 @@ def _bundle_consistency_errors(
     *,
     require_initial_status: bool = False,
     require_all_done: bool = False,
-    require_backend_compile: bool = True,
+    require_backend_compile: bool = False,
 ) -> list[str]:
     entries = [entry for entry in root.get("batches", []) if isinstance(entry, dict)]
     all_tasks: list[dict[str, Any]] = []
@@ -1986,6 +2031,7 @@ def _bundle_consistency_errors(
                 defer_to_test_stages=defer_to_test_stages_enabled(root),
             )
         )
+        _validate_batch_execution_command_projection(errors, root, entry, data)
         actual_ids = [str(item.get("id")) for item in tasks(data)]
         if entry.get("taskIds") != actual_ids:
             errors.append(f"{batch_id}.taskIds_mismatch")
@@ -2009,15 +2055,6 @@ def _bundle_consistency_errors(
             errors.append(f"{batch_id}.workspaceRef_ambiguous")
         elif entry.get("workspaceRef") is not None and entry.get("workspaceRef") not in task_workspace_refs:
             errors.append(f"{batch_id}.workspaceRef_projection_mismatch")
-        profiles = root.get("batchValidationProfiles")
-        profile = profiles.get(str(batch_lane)) if isinstance(profiles, dict) else None
-        validation = data.get("batchValidation")
-        if isinstance(profile, dict) and isinstance(validation, dict):
-            profile_commands = profile.get("commands")
-            profile_mode = profile.get("mode", "commands" if profile_commands else None)
-            validation_mode = validation.get("mode", "commands" if validation.get("commands") else None)
-            if profile_mode != validation_mode:
-                errors.append(f"{batch_id}.batchValidation.mode_projection_mismatch")
         if "taskValidation" in data:
             errors.append(f"{batch_id}.taskValidation_forbidden")
 

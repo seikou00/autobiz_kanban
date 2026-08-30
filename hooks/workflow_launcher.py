@@ -208,7 +208,11 @@ def _batch_execution_plan(
     return {
         "schemaVersion": 2,
         "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
-        "deliveryStages": ["prepare", "implement", "review", "test", "quality_gate"],
+        "deliveryStages": ["prepare", "implement", "review", "test"],
+        "optionalDeliveryStage": {
+            "stage": "quality_gate",
+            "enabledWhen": "qualityGateCommands_present",
+        },
         "mergeBarrier": {
             "type": "merge_train",
             "validationBatch": "V-INT",
@@ -234,7 +238,7 @@ def _batch_execution_plan(
         ],
         "waves": waves,
         "notes": [
-            "每个 Batch 依次完成 prepare、implement、review、test、quality gate；通过后才进入候选合并。",
+            "每个 Batch 依次完成 prepare、implement、review、test；只有声明静态检查命令时才追加 quality gate，随后进入候选合并；成功合并后才释放下游。",
             "每个 Wave 先在 Merge Train 候选 Worktree 运行 B-INT；只有同一 candidate SHA 通过才 fast-forward 推广并释放下游 Batch。",
             "所有 delivery Batch 推广后，B-E2E 在临时 main Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
             "同一仓库的重叠写集会拆分为串行 Wave；原生 Git Worktree 仅隔离 checkout，不绕过该规则。",

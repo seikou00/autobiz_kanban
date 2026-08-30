@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace
-from hooks.parallel_runtime import append_event, load_manifest, run_lock, save_manifest
+from hooks.parallel_runtime import append_event, delivery_stage_names, load_manifest, run_lock, save_manifest
 
 
 def _overlap(left: str, right: str) -> bool:
@@ -61,7 +61,7 @@ def compute_impact_set(manifest: dict[str, Any], batch_id: str, changed_files: l
             impacted.append({
                 "batchId": other_id,
                 "reasons": (["l1_path_overlap"] if l1 else []) + (["dag_dependency"] if dependency else []),
-                "staleStages": ["test", "quality_gate"],
+                "staleStages": [stage for stage in delivery_stage_names(other) if stage in {"test", "quality_gate"}],
             })
     return {
         "sourceBatchId": batch_id,

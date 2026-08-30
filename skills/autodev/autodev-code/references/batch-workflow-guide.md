@@ -145,12 +145,14 @@ baseline commit per physical Git root.
    accepts that status only after the persisted SHA is present; an unsealed
    compile result cannot enter the merge frontier.
 4. `parallelBatchPipeline.validationOwnership` assigns each executable
-   validation exactly once: compile belongs to implement, unit test intents to
-   delivery test, non-compile Batch commands to quality gate, and integration/
-   E2E intents plus project commands to B-INT/B-E2E. The Workflow uses
+   validation exactly once: `compileCommand` belongs to implement, unit test
+   intents to delivery test, and `qualityGateCommands` to an optional quality
+   gate. Integration/E2E intents plus project commands belong to B-INT/B-E2E.
+   The Workflow uses
    `parallel_stage_validation.py` to enforce that table and write evidence.
-5. Each sealed delivery performs `review`, Plan-owned `test`, and
-   `quality_gate`; only then is it `ready_to_candidate`. The shared Workflow
+5. Each sealed delivery performs `review` and Plan-owned `test`; it performs
+   `quality_gate` only if the Batch declares static-check commands. Only then
+   is it `ready_to_candidate`. The shared Workflow
    builds a Merge Train candidate, runs B-INT there, and fast-forwards exactly
    that verified SHA to main. A changed main SHA makes the candidate stale and
    requires rebuild/retest rather than rebase.

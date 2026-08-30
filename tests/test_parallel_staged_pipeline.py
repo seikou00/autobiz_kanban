@@ -73,6 +73,8 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             _enable_pipeline(feature_dir)
             created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
             run_id = created["runId"]
+            initial_manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertNotIn("quality_gate", initial_manifest["batches"]["B001"]["stageStates"])
             provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
             self.assertTrue(provisioned["success"])
             worktree = Path(provisioned["worktreePath"])
@@ -81,7 +83,7 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             _git(worktree, "commit", "-m", "delivery")
             commit = _git_output(worktree, "rev-parse", "HEAD")
             mark_batch(workspace, "alpha", run_id, "B001", "sealed", worktreePath=str(worktree), branchName=provisioned["branchName"], commitSha=commit, compileStatus="passed")
-            for stage in ("prepare", "implement", "review", "test", "quality_gate"):
+            for stage in ("prepare", "implement", "review", "test"):
                 start_stage(workspace, "alpha", run_id, "B001", stage)
                 complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
             gated = gate_batch(workspace, "alpha", run_id, "B001")
@@ -105,6 +107,47 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             manifest = load_manifest(workspace, "alpha", run_id)
             self.assertEqual(manifest["status"], "succeeded")
 
+    def test_quality_gate_exists_only_for_declared_static_check_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            root_path = feature_dir / "plan.json"
+            batch_path = feature_dir / "plans" / "B001" / "plan.json"
+            root = json.loads(root_path.read_text(encoding="utf-8"))
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+            static_check = {
+                "argv": ["python3", "-c", "print('static check')"],
+                "cwd": ".",
+                "kind": "static_check",
+                "required": True,
+            }
+            root["qualityGateProfiles"] = {"backend": {"commands": [static_check]}}
+            batch["qualityGateCommands"] = [{**static_check, "id": "BATCH-B001-QUALITY-001"}]
+            atomic_write_json(root_path, root)
+            atomic_write_json(batch_path, batch)
+            _enable_pipeline(feature_dir)
+
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertIn("quality_gate", manifest["batches"]["B001"]["stageStates"])
+            self.assertTrue(manifest["batches"]["B001"]["qualityGateRequired"])
+
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            (worktree / "delivery.txt").write_text("delivery\n", encoding="utf-8")
+            _git(worktree, "add", "delivery.txt")
+            _git(worktree, "commit", "-m", "delivery")
+            commit = _git_output(worktree, "rev-parse", "HEAD")
+            mark_batch(workspace, "alpha", run_id, "B001", "sealed", worktreePath=str(worktree), branchName=provisioned["branchName"], commitSha=commit, compileStatus="passed")
+            for stage in ("prepare", "implement", "review"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
+            self.assertTrue(run_owned_stage(workspace, "alpha", run_id, "B001", "test")["success"])
+            quality = run_owned_stage(workspace, "alpha", run_id, "B001", "quality_gate")
+            self.assertTrue(quality["success"], quality)
+            self.assertEqual([item["commandId"] for item in quality["commands"]], ["BATCH-B001-QUALITY-001"])
+            self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])
+
     def test_owned_commands_run_once_in_their_declared_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))
@@ -112,7 +155,7 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             bundle_root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             bundle_batch = json.loads((feature_dir / "plans" / "B001" / "plan.json").read_text(encoding="utf-8"))
             owners = bundle_root["parallelBatchPipeline"]["validationOwnership"]
-            self.assertEqual(owners["BATCH-B001-VAL-001"]["stage"], "implement")
+            self.assertEqual(owners["BATCH-B001-COMPILE"]["stage"], "implement")
             self.assertEqual(owners["VAL-T001-01"], {
                 "ownerBatchId": "B001", "stage": "test", "kind": "test_intent", "taskId": "T001", "sourceBatchId": "B001",
             })
@@ -134,9 +177,6 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             tested = run_owned_stage(workspace, "alpha", run_id, "B001", "test")
             self.assertTrue(tested["success"], tested)
             self.assertEqual([item["commandId"] for item in tested["commands"]], ["VAL-T001-01"])
-            gated_stage = run_owned_stage(workspace, "alpha", run_id, "B001", "quality_gate")
-            self.assertTrue(gated_stage["success"], gated_stage)
-            self.assertEqual(gated_stage["commands"], [])
             self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])
 
     def test_failed_validation_creates_review_required_repair_contract(self) -> None:
@@ -156,7 +196,7 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             _git(worktree, "commit", "-m", "delivery")
             commit = _git_output(worktree, "rev-parse", "HEAD")
             mark_batch(workspace, "alpha", run_id, "B001", "sealed", worktreePath=str(worktree), branchName=provisioned["branchName"], commitSha=commit, compileStatus="passed")
-            for stage in ("prepare", "implement", "review", "test", "quality_gate"):
+            for stage in ("prepare", "implement", "review", "test"):
                 start_stage(workspace, "alpha", run_id, "B001", stage)
                 complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
             self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])

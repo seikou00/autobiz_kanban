@@ -376,10 +376,10 @@ def merge_run(
                         "branchName": rebased.get("branch"),
                         "targetSha": record["headSha"],
                         "conflicts": rebased.get("conflicts", []),
-                        "validationCommands": (
-                            (bundle.batches.get(batch_id, {}).get("batchValidation") or {}).get("commands", [])
+                        "compileCommand": (
+                            bundle.batches.get(batch_id, {}).get("compileCommand")
                             if isinstance(bundle.batches.get(batch_id), dict)
-                            else []
+                            else None
                         ),
                     }
                     batch["status"] = "needs_resolution"

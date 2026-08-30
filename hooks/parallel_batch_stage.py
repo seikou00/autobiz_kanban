@@ -16,10 +16,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
-from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest
+from hooks.parallel_runtime import (
+    append_event,
+    delivery_stage_names,
+    load_manifest,
+    run_dir,
+    run_lock,
+    save_manifest,
+)
 
 
-DELIVERY_STAGES = ("prepare", "implement", "review", "test", "quality_gate")
 VALIDATION_STAGE_BY_BATCH = {"V-INT": "integration_test", "V-E2E": "e2e_test"}
 STAGE_STATUSES = {"pending", "running", "passed", "failed", "stale", "skipped", "needs_triage"}
 FAILURE_NEXT_STAGE = {
@@ -41,10 +47,10 @@ def stage_names(batch: dict[str, Any]) -> tuple[str, ...]:
     batch_type = str(batch.get("type") or "delivery")
     if batch_type == "validation":
         stage = str(batch.get("validationStage") or VALIDATION_STAGE_BY_BATCH.get(str(batch.get("batchId")), "integration_test"))
-        return ("prepare", stage, "quality_gate")
+        return ("prepare", stage)
     if batch_type == "repair":
-        return DELIVERY_STAGES
-    return DELIVERY_STAGES
+        return delivery_stage_names(batch)
+    return delivery_stage_names(batch)
 
 
 def stage_template(batch: dict[str, Any]) -> dict[str, dict[str, Any]]:

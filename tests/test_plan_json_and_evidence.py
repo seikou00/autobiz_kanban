@@ -132,7 +132,7 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 "maxTestStageRepairAttempts": 3,
             },
             "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
-            "batchValidationProfiles": {
+            "compileProfiles": {
                 execution_lane: {
                     "commands": [
                         {
@@ -144,6 +144,7 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                     ]
                 }
             },
+            "qualityGateProfiles": {},
             "batches": [
                 {
                     "id": "B001",
@@ -176,22 +177,14 @@ def write_test_plan(feature_dir: Path, plan: dict) -> None:
                 for item in task_items
                 for evidence_id in item.get("completionEvidenceIds", [])
             ],
-            "batchValidation": {
-                "profile": execution_lane,
-                "status": "passed" if all_done else "pending",
-                "commands": [
-                    {
-                        "id": "BATCH-B001-VAL-001",
-                        "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
-                        "cwd": ".",
-                        "kind": "compile",
-                        "required": True,
-                    }
-                ],
-                "evidenceIds": [],
-                "latestPassEvidenceIds": [],
-                "activeRunId": None,
+            "compileCommand": {
+                "id": "BATCH-B001-COMPILE",
+                "argv": [sys.executable, "-c", f"print('{execution_lane} compile')"],
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
             },
+            "qualityGateCommands": [],
             "startedAt": None,
             "completedAt": "2026-07-10T00:00:00Z" if all_done else None,
             "tasks": task_items,
@@ -1320,13 +1313,16 @@ class EvidenceGateTest(unittest.TestCase):
                 "tasks": [],
                 "batchCompile": {
                     "status": "passed",
-                    "commandId": "BATCH-VAL-001",
+                    "commandId": "BATCH-B001-COMPILE",
                     "implementationEvidenceByTask": {},
                     "implementationRevisionByTask": {},
                 },
-                "batchValidation": {
-                    "commands": [{"id": "BATCH-VAL-001", "kind": "compile", "required": True}],
+                "compileCommand": {
+                    "id": "BATCH-B001-COMPILE",
+                    "kind": "compile",
+                    "required": True,
                 },
+                "qualityGateCommands": [],
             }
             plan = {
                 "taskValidationPolicy": {

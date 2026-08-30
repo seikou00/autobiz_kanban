@@ -78,14 +78,19 @@ def _bind_workspace_contract(
             command["cwd"] = cwd
             if repo is not None:
                 command["repo"] = repo
-    for command in batch.get("batchValidation", {}).get("commands", []):
+    compile_command = batch.get("compileCommand")
+    if isinstance(compile_command, dict):
+        compile_command["cwd"] = cwd
+        if repo is not None:
+            compile_command["repo"] = repo
+    for command in batch.get("qualityGateCommands", []):
         command["cwd"] = cwd
         if repo is not None:
             command["repo"] = repo
     root_path = feature_dir / "plan.json"
     root = json.loads(root_path.read_text(encoding="utf-8"))
     lane = str(batch.get("executionLane", "backend"))
-    for command in root.get("batchValidationProfiles", {}).get(lane, {}).get("commands", []):
+    for command in root.get("compileProfiles", {}).get(lane, {}).get("commands", []):
         command["cwd"] = cwd
         if repo is not None:
             command["repo"] = repo
@@ -202,7 +207,7 @@ def _workspace(
             "maxTestStageRepairAttempts": 3,
         },
         "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
-        "batchValidationProfiles": {
+        "compileProfiles": {
             "backend": {
                 "commands": [
                     {
@@ -214,6 +219,7 @@ def _workspace(
                 ]
             }
         },
+        "qualityGateProfiles": {},
         "batches": [
             {
                 "id": "B001",
@@ -254,22 +260,14 @@ def _workspace(
             "taskCount": len(tasks),
             "completedTaskCount": 0,
             "completionEvidenceIds": [],
-            "batchValidation": {
-                "profile": "backend",
-                "status": "pending",
-                "commands": [
-                    {
-                        "id": "BATCH-B001-VAL-001",
-                        "argv": [sys.executable, "-c", "print('batch compile')"],
-                        "cwd": ".",
-                        "kind": "compile",
-                        "required": True,
-                    }
-                ],
-                "evidenceIds": [],
-                "latestPassEvidenceIds": [],
-                "activeRunId": None,
+            "compileCommand": {
+                "id": "BATCH-B001-COMPILE",
+                "argv": [sys.executable, "-c", "print('batch compile')"],
+                "cwd": ".",
+                "kind": "compile",
+                "required": True,
             },
+            "qualityGateCommands": [],
             "startedAt": None,
             "completedAt": None,
             "tasks": tasks,
@@ -321,7 +319,7 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
         "import sys; print('repair.txt:1: cannot find symbol', file=sys.stderr); "
         + ("raise SystemExit(1)" if always_fail else "raise SystemExit(0 if __import__('pathlib').Path('compile-fixed.txt').exists() else 1)")
     )
-    batch["batchValidation"]["commands"][0]["argv"] = [sys.executable, "-c", compile_script]
+    batch["compileCommand"]["argv"] = [sys.executable, "-c", compile_script]
     _write_batch(feature_dir, batch)
 
     root_path = feature_dir / "plan.json"
@@ -332,7 +330,7 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
         "codeGate": "batch_compile_only",
         "maxTestStageRepairAttempts": 3,
     }
-    root["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = [
+    root["compileProfiles"]["backend"]["commands"][0]["argv"] = [
         sys.executable,
         "-c",
         compile_script,
@@ -389,11 +387,7 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
         }
     )
     second.pop("batchCompile", None)
-    second["batchValidation"]["status"] = "pending"
-    second["batchValidation"]["commands"][0]["id"] = "BATCH-B002-VAL-001"
-    second["batchValidation"]["evidenceIds"] = []
-    second["batchValidation"]["latestPassEvidenceIds"] = []
-    second["batchValidation"]["activeRunId"] = None
+    second["compileCommand"]["id"] = "BATCH-B002-COMPILE"
     second_path = feature_dir / "plans" / "B002" / "plan.json"
     second_path.parent.mkdir(parents=True)
     second_path.write_text(
@@ -475,7 +469,7 @@ class TaskRunnerTest(unittest.TestCase):
                 "print('batch compile')"
             )
             batch = _read_batch(feature_dir)
-            batch["batchValidation"]["commands"][0]["argv"] = [
+            batch["compileCommand"]["argv"] = [
                 sys.executable,
                 "-c",
                 compile_script,
@@ -483,7 +477,7 @@ class TaskRunnerTest(unittest.TestCase):
             _write_batch(feature_dir, batch)
             root_plan_path = feature_dir / "plan.json"
             root_plan = json.loads(root_plan_path.read_text(encoding="utf-8"))
-            root_plan["batchValidationProfiles"]["backend"]["commands"][0]["argv"] = [
+            root_plan["compileProfiles"]["backend"]["commands"][0]["argv"] = [
                 sys.executable,
                 "-c",
                 compile_script,
@@ -660,7 +654,7 @@ class TaskRunnerTest(unittest.TestCase):
             evidence_id = json.loads(finished.stdout)["implementationEvidenceId"]
             compile_result = {
                 "compileStatus": "passed",
-                "commandId": "BATCH-B001-VAL-001",
+                "commandId": "BATCH-B001-COMPILE",
                 "requestedCodeWorkspaces": [str(code.resolve())],
                 "workspaceSnapshotSha256": "b" * 64,
                 "implementationEvidenceByTask": {"T001": evidence_id},
@@ -675,7 +669,7 @@ class TaskRunnerTest(unittest.TestCase):
                     parallel_run_id="cw-test-001",
                 )
 
-            self.assertEqual(result["requiredAction"], "review_test_quality_gate")
+            self.assertEqual(result["requiredAction"], "review_and_test")
             mark_parallel.assert_called_once()
             compiled_batch = _read_batch(feature_dir)
             self.assertEqual(compiled_batch["batchCompile"]["status"], "passed")
@@ -888,7 +882,7 @@ class TaskRunnerTest(unittest.TestCase):
     def test_source_diagnostics_use_one_compile_failure_category(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp).resolve()
-            command = {"id": "BATCH-B001-VAL-001", "cwd": ".", "kind": "compile"}
+            command = {"id": "BATCH-B001-COMPILE", "cwd": ".", "kind": "compile"}
             for relative in (
                 "src/main/java/example/App.java",
                 "src/test/java/example/AppTest.java",
@@ -1042,7 +1036,7 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertIn('"event":"validation_process_started"', progress.getvalue())
             self.assertIn('"event":"validation_process_finished"', progress.getvalue())
 
-    def test_windows_batch_validation_uses_comspec_and_command_side_log_redirection(self) -> None:
+    def test_windows_batch_compile_uses_comspec_and_command_side_log_redirection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = (Path(tmp) / "repo with spaces").resolve()
             tool_dir = (Path(tmp) / "工具 with spaces").resolve()
@@ -1167,7 +1161,7 @@ class TaskRunnerTest(unittest.TestCase):
                 "time.sleep(1.2)"
             )
             command = {
-                "id": "BATCH-B001-VAL-001",
+                "id": "BATCH-B001-COMPILE",
                 "argv": [sys.executable, "-c", script],
                 "cwd": ".",
                 "kind": "compile",
@@ -1348,11 +1342,11 @@ class TaskRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
             batch = _read_batch(feature_dir)
-            batch["batchValidation"].update({"mode": "commands", "commands": []})
+            batch.pop("compileCommand")
             _write_batch(feature_dir, batch)
             root_path = feature_dir / "plan.json"
             root = json.loads(root_path.read_text(encoding="utf-8"))
-            root["batchValidationProfiles"]["backend"] = {"mode": "commands", "commands": []}
+            root["compileProfiles"]["backend"] = {"commands": []}
             root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
             started = _run(
@@ -1361,7 +1355,7 @@ class TaskRunnerTest(unittest.TestCase):
             )
 
             self.assertNotEqual(started.returncode, 0)
-            self.assertIn("backend_compile_command_missing", started.stdout)
+            self.assertIn("compileProfiles.backend.compile_command_missing", started.stdout)
             self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
 
     def test_start_ignores_task_test_manifest_in_compile_only_code_stage(self) -> None:

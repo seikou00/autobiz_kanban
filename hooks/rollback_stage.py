@@ -643,25 +643,6 @@ def _prepare_code_execution_reset(workspace: Path, feature: str) -> CodeResetPla
         batch.pop("batchCompile", None)
         batch["startedAt"] = None
         batch["completedAt"] = None
-        validation = batch.get("batchValidation")
-        if isinstance(validation, dict):
-            validation["status"] = "pending"
-            for field_name in (
-                "activeRunId",
-                "lastRunId",
-                "currentTaskId",
-                "batchSnapshotSha256",
-            ):
-                validation[field_name] = None
-            for field_name in (
-                "completedTaskIds",
-                "evidenceIds",
-                "latestPassEvidenceIds",
-                "deferredTaskIds",
-                "deferredIssues",
-            ):
-                validation[field_name] = []
-            validation["latestPassEvidenceByTask"] = {}
     # Rebuild the batch projection from the preserved task contracts. Keeping
     # old assignments here can resurrect stale batches after a plan rebuild.
     data["batches"] = []

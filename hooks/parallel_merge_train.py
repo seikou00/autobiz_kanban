@@ -255,8 +255,6 @@ def verify_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, r
         )
         return {"success": False, "status": "failed", "failure": failed, "repair": repair.get("repair"), "commands": results, "candidateSha": record["candidateSha"]}
     complete_stage(workspace, feature, run_id, "V-INT", "integration_test", metadata=metadata)
-    start_stage(workspace, feature, run_id, "V-INT", "quality_gate")
-    complete_stage(workspace, feature, run_id, "V-INT", "quality_gate", metadata={"candidateSha": record["candidateSha"], "commands": results})
     gate = gate_batch(workspace, feature, run_id, "V-INT")
     with run_lock(workspace, feature, run_id):
         updated = load_manifest(workspace, feature, run_id)
@@ -404,8 +402,6 @@ def finish_e2e(workspace: Path, feature: str, run_id: str, *, passed: bool, meta
     states = e2e.get("stageStates") if isinstance(e2e, dict) and isinstance(e2e.get("stageStates"), dict) else {}
     if not isinstance(states.get("e2e_test"), dict) or states["e2e_test"].get("status") != "passed":
         complete_stage(workspace, feature, run_id, "V-E2E", "e2e_test", metadata=metadata)
-    start_stage(workspace, feature, run_id, "V-E2E", "quality_gate")
-    complete_stage(workspace, feature, run_id, "V-E2E", "quality_gate", metadata=metadata)
     result = gate_batch(workspace, feature, run_id, "V-E2E")
     cleanup_errors: list[str] = []
     if result.get("success") and isinstance(worktrees, dict):

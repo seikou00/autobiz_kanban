@@ -13,11 +13,7 @@
       "dialogTips": "发起知识沉淀"
     }
   },
-  "supported_deploy_units": [
-    "LA64.05_UEX",
-    "LB47.05",
-    "LA64.05"
-  ],
+  "supported_deploy_units": ["LA64.05_UEX", "LB47.05", "LA64.05"],
   "inspectCommands": {
     "darwin": {
       "knowledge_path": "${pluginPath}/sys",

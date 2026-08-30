@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: "由 workflow_launcher.py 在存在合法待执行 Batch 时调用",
   phases: [
     { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 波次" },
-    { title: "Batch 阶段", detail: "prepare → implement → review → test → quality gate，所有状态和证据持久化" },
+    { title: "Batch 阶段", detail: "prepare → implement → review → test；仅声明静态检查时追加 quality gate，所有状态和证据持久化" },
     { title: "候选验证", detail: "Merge Train 在候选 Worktree 上运行 B-INT，验证通过的同一 SHA 才能推广" },
     { title: "最终验证", detail: "合并后运行 B-E2E，最终只聚合既有证据、不重复执行命令" }
   ]
@@ -315,6 +315,7 @@ async function runDeliveryReviewTestAndGate(batchResult) {
   const batchBranch = batchResult.branchName;
   const commitSha = batchResult.commitSha;
   const taskIds = Array.isArray(batchTaskIds[batchId]) ? batchTaskIds[batchId] : [];
+  const qualityGateRequired = (batchWorkspaces[batchId] || {}).qualityGateRequired === true;
   if (!usableString(commitSha)) throw new Error(`sealed_batch_commit_missing:${batchId}`);
   const metadata = JSON.stringify({ batchCommit: commitSha, worktreePath: batchWorktree, branchName: batchBranch });
   const stageResult = requireSuccess(await agent(
@@ -341,13 +342,21 @@ async function runDeliveryReviewTestAndGate(batchResult) {
     `失败时它会使用 classifier 记录回流状态；不得修改主 checkout。只返回 JSON。`,
     { label: `stage-test-${batchId}`, phase: "Batch 阶段" }
   ), `stage test ${batchId}`);
-  requireSuccess(await agent(
-    `执行 Batch ${batchId} 的质量门。执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage quality_gate。` +
-    `该命令只运行本 Batch 所有非 compile 的 batchValidation 命令；编译已经由 implement 阶段唯一执行，禁止重复 projectValidationCommands。` +
-    `通过后执行 python "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
-    `只返回 gate JSON；只有 ready_to_candidate 才算成功。`,
-    { label: `stage-quality-gate-${batchId}`, phase: "Batch 阶段" }
-  ), `stage quality gate ${batchId}`);
+  if (qualityGateRequired) {
+    requireSuccess(await agent(
+      `执行 Batch ${batchId} 的静态质量门。执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage quality_gate。` +
+      `该命令只运行 Plan 明确归属本 Batch 的 qualityGateCommands（lint/static check）；编译已经由 implement 阶段唯一执行，禁止重复 TASK 测试、projectValidationCommands 或 E2E。` +
+      `通过后执行 python "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
+      `只返回 gate JSON；只有 ready_to_candidate 才算成功。`,
+      { label: `stage-quality-gate-${batchId}`, phase: "Batch 阶段" }
+    ), `stage quality gate ${batchId}`);
+  } else {
+    requireSuccess(await agent(
+      `Batch ${batchId} 未声明 qualityGateCommands，质量门不创建空步骤。直接执行 python "${stagePath}" gate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}"。` +
+      `只返回 gate JSON；只有 ready_to_candidate 才算成功。`,
+      { label: `stage-gate-${batchId}`, phase: "Batch 阶段" }
+    ), `stage gate ${batchId}`);
+  }
   return { batchId, status: "ready_to_candidate", commitSha };
 }
 

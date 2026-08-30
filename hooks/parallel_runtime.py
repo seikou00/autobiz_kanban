@@ -34,6 +34,20 @@ from hooks.plan_json import (
 RUN_SCHEMA_VERSION = 2
 DEFAULT_TTL_SECONDS = 15 * 60
 HEARTBEAT_SECONDS = 30
+BASE_DELIVERY_STAGES = ("prepare", "implement", "review", "test")
+
+
+def delivery_stage_names(batch: dict[str, Any]) -> tuple[str, ...]:
+    """Return the concrete stages for one delivery Batch.
+
+    Quality-gate work is optional by contract: no static command means no
+    synthetic pass/evidence node is created for that Batch.
+    """
+    return (
+        (*BASE_DELIVERY_STAGES, "quality_gate")
+        if batch.get("qualityGateRequired") is True
+        else BASE_DELIVERY_STAGES
+    )
 
 _PLAN_MUTABLE_KEYS = {
     "status", "activeBatchId", "nextBatchId", "startedAt", "completedAt",
@@ -340,7 +354,8 @@ def create_manifest(
                 for task in batch.get("tasks", [])
                 if isinstance(task, dict) and isinstance(task.get("id"), str) and task.get("id").strip()
             ]
-        entries[batch_id] = {
+        quality_gate_required = bool(batch.get("qualityGateCommands"))
+        entry_state = {
             "batchId": batch_id,
             "type": "delivery",
             # Persist the Plan-owned task contract in the durable run. The
@@ -354,6 +369,7 @@ def create_manifest(
             "gitRoot": repositories[str(batch_workspace_ref(batch))]["gitRoot"],
             "writeSet": list(batch_write_set(batch)),
             "executionStage": entry.get("executionStage", "parallel"),
+            "qualityGateRequired": quality_gate_required,
             "dependencies": sorted(set(entry.get("deps", []))),
             "status": "merged" if batch_status == "done" else "failed" if batch_status == "failed" else "pending",
             "lease": None,
@@ -366,18 +382,19 @@ def create_manifest(
             "completedAt": None,
             "error": None,
             "activeStage": None,
-            "stageStates": {
-                stage: {
-                    "status": "passed" if batch_status == "done" else "pending",
-                    "attempt": 0,
-                    "evidenceIds": [],
-                    "latestEvidenceId": None,
-                    "startedAt": None,
-                    "completedAt": None,
-                }
-                for stage in ("prepare", "implement", "review", "test", "quality_gate")
-            },
         }
+        entry_state["stageStates"] = {
+            stage: {
+                "status": "passed" if batch_status == "done" else "pending",
+                "attempt": 0,
+                "evidenceIds": [],
+                "latestEvidenceId": None,
+                "startedAt": None,
+                "completedAt": None,
+            }
+            for stage in delivery_stage_names(entry_state)
+        }
+        entries[batch_id] = entry_state
     pipeline = bundle.root["parallelBatchPipeline"]
     manifest = {
         "schemaVersion": RUN_SCHEMA_VERSION,
@@ -688,7 +705,8 @@ def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
 
     This is distinct from ``ready_batches``: no source task is scheduled here.
     The delivery commit and linked worktree already exist, so a resumed
-    Workflow only needs to continue review/test/quality-gate idempotently.
+    Workflow only needs to continue its remaining review/test/quality stages
+    idempotently.
     """
     result: list[str] = []
     for batch_id, item in manifest.get("batches", {}).items():
@@ -699,7 +717,7 @@ def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
         states = item.get("stageStates") if isinstance(item.get("stageStates"), dict) else {}
         if any(
             not isinstance(states.get(stage), dict) or states[stage].get("status") not in {"passed", "skipped"}
-            for stage in ("prepare", "implement", "review", "test", "quality_gate")
+            for stage in delivery_stage_names(item)
         ):
             result.append(str(batch_id))
     return sorted(result)

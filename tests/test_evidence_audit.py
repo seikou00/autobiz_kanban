@@ -88,7 +88,7 @@ class EvidenceAuditTest(unittest.TestCase):
                             "maxTestStageRepairAttempts": 3,
                         },
                         "batchPolicy": {"maxTasks": 5, "strategy": "spec_capability_execution_lane_topological"},
-                        "batchValidationProfiles": {
+                        "compileProfiles": {
                             "backend": {
                                 "commands": [
                                     {
@@ -100,6 +100,7 @@ class EvidenceAuditTest(unittest.TestCase):
                                 ]
                             }
                         },
+                        "qualityGateProfiles": {},
                         "batches": [
                             {
                                 "id": "B001",
@@ -149,22 +150,14 @@ class EvidenceAuditTest(unittest.TestCase):
                             "taskCount": 1,
                             "completedTaskCount": completed_count,
                             "completionEvidenceIds": [],
-                            "batchValidation": {
-                                "profile": "backend",
-                                "status": "passed" if status == "done" else "pending",
-                                "commands": [
-                                    {
-                                        "id": f"BATCH-{batch_id}-VAL-001",
-                                        "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
-                                        "cwd": ".",
-                                        "kind": "compile",
-                                        "required": True,
-                                    }
-                                ],
-                                "evidenceIds": [],
-                                "latestPassEvidenceIds": [],
-                                "activeRunId": None,
+                            "compileCommand": {
+                                "id": f"BATCH-{batch_id}-COMPILE",
+                                "argv": [sys.executable, "-m", "compileall", "-q", "hooks"],
+                                "cwd": ".",
+                                "kind": "compile",
+                                "required": True,
                             },
+                            "qualityGateCommands": [],
                             "startedAt": None,
                             "completedAt": completed_at,
                             "tasks": [batch_task],

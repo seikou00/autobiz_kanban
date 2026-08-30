@@ -202,7 +202,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                     "specRoots": ["specs/cap/spec.md"], "executionLane": "backend",
                     "deps": [], "taskIds": ["T001"], "status": "todo",
                 }],
-                "batchValidationProfiles": {
+                "compileProfiles": {
                     "backend": {
                         "commands": [
                             {
@@ -214,6 +214,7 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
                         ]
                     }
                 },
+                "qualityGateProfiles": {},
                 "projectValidationCommands": [
                     {
                         "id": "PROJECT-VAL-001",
@@ -235,22 +236,14 @@ def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
         "taskCount": 1,
         "completedTaskCount": 0,
         "completionEvidenceIds": [],
-        "batchValidation": {
-            "profile": "backend",
-            "status": "pending",
-            "commands": [
-                {
-                    "id": "BATCH-B001-VAL-001",
-                    "argv": [sys.executable, "-c", "print('backend compile')"],
-                    "cwd": ".",
-                    "kind": "compile",
-                    "required": True,
-                }
-            ],
-            "evidenceIds": [],
-            "latestPassEvidenceIds": [],
-            "activeRunId": None,
+        "compileCommand": {
+            "id": "BATCH-B001-COMPILE",
+            "argv": [sys.executable, "-c", "print('backend compile')"],
+            "cwd": ".",
+            "kind": "compile",
+            "required": True,
         },
+        "qualityGateCommands": [],
         "startedAt": None,
         "completedAt": None,
         "tasks": [task],
@@ -914,19 +907,19 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
 
             missing_repo = _run(
-                "plan_writer.py", "add-batch-validation-command", "--workspace", str(workspace),
+                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--lane", "backend", "--command", "mvn compile -q",
-                "--kind", "compile", "--code-workspace", str(backend_a),
+                "--code-workspace", str(backend_a),
             )
             self.assertNotEqual(missing_repo.returncode, 0)
-            self.assertIn("batch_validation_repository_required", missing_repo.stdout)
+            self.assertIn("compile_command_repository_required", missing_repo.stdout)
             for index, (repository, code_workspace) in enumerate(
                 (("backend-a", backend_a), ("backend-b", backend_b))
             ):
                 added = _run(
-                    "plan_writer.py", "add-batch-validation-command", "--workspace", str(workspace),
+                    "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
                     "--feature", "alpha", "--lane", "backend", "--repo", repository,
-                    "--command", "mvn compile -q", "--kind", "compile",
+                    "--command", "mvn compile -q",
                     "--code-workspace", str(code_workspace),
                 )
                 self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
@@ -937,7 +930,7 @@ class JsonWriterTests(unittest.TestCase):
                     )
                     self.assertNotEqual(incomplete.returncode, 0)
                     self.assertIn(
-                        "B002.batchValidation.required_command_missing",
+                        "B002.compileCommand.required_compile_missing",
                         incomplete.stdout,
                     )
 
@@ -954,12 +947,12 @@ class JsonWriterTests(unittest.TestCase):
                 (feature_dir / "plans" / "B002" / "plan.json").read_text(encoding="utf-8")
             )
             self.assertEqual(
-                [command.get("repo") for command in first_batch["batchValidation"]["commands"]],
-                ["backend-a"],
+                first_batch["compileCommand"].get("repo"),
+                "backend-a",
             )
             self.assertEqual(
-                [command.get("repo") for command in second_batch["batchValidation"]["commands"]],
-                ["backend-b"],
+                second_batch["compileCommand"].get("repo"),
+                "backend-b",
             )
 
     def test_plan_writer_draft_rejects_group_owned_detail_fields(self) -> None:
@@ -1516,14 +1509,14 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertEqual(materialized.returncode, 0, materialized.stdout + materialized.stderr)
             batch_command = _run(
-                "plan_writer.py", "add-batch-validation-command", "--workspace", str(workspace),
+                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--lane", "backend", "--command", "mvn.cmd compile -q",
-                "--kind", "compile", "--code-workspace", str(module),
+                "--code-workspace", str(module),
             )
             self.assertEqual(batch_command.returncode, 0, batch_command.stdout + batch_command.stderr)
             root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(
-                root_plan["batchValidationProfiles"]["backend"]["commands"][0]["cwd"],
+                root_plan["compileProfiles"]["backend"]["commands"][0]["cwd"],
                 "backend/service",
             )
 
@@ -1971,7 +1964,8 @@ class JsonWriterTests(unittest.TestCase):
             contract["validationTestPlanPolicy"]["createInCodeAllowed"],
             False,
         )
-        self.assertEqual(contract["batchValidationKinds"], ["compile"])
+        self.assertEqual(contract["compileCommandKinds"], ["compile"])
+        self.assertEqual(contract["qualityGateCommandKinds"], ["static_check"])
         self.assertEqual(
             contract["projectValidationCommand"]["allowedKinds"],
             ["e2e_test", "integration_test", "static_check"],
@@ -1985,24 +1979,21 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(contract["projectValidationCommand"]["executionTarget"], "merge_candidate")
         self.assertTrue(contract["projectValidationCommand"]["repoRequiredWhenMultipleWorkspaces"])
         self.assertEqual(
-            contract["batchValidationCommand"],
+            contract["compileCommand"],
             {
                 "command": (
-                    "add-batch-validation-command --lane <backend|frontend> "
+                    "add-compile-command --lane <backend|frontend> "
                     "[--repo <workspaceRef>] --command <command> --code-workspace <path>"
                 ),
                 "requiredFields": ["argv", "cwd", "kind", "required"],
-                "requiredPerUsedWorkspaceInLane": "commands_mode_only",
+                "requiredPerUsedWorkspaceInLane": "exactly_one",
                 "repoRequiredWhenLaneUsesMultipleWorkspaces": True,
                 "defaultCwd": "declared_workspace_root",
             },
         )
         self.assertEqual(
-            contract["batchValidationMode"],
-            {
-                "mode": "commands",
-                "requiredGate": "one required compile command per used lane and workspace",
-            },
+            contract["qualityGateCommand"]["executionStage"],
+            "quality_gate_only_when_commands_present",
         )
         self.assertEqual(contract["workspaceContract"]["field"], "scope.workspaceRoots")
         self.assertEqual(contract["workspaceContract"]["taskBindingField"], "workspaceRef")
@@ -2077,7 +2068,7 @@ class JsonWriterTests(unittest.TestCase):
                 "command": "finalize-task-draft",
                 "coverage": "all_path_qualified_spec_scenarios",
                 "requiredBefore": [
-                    "add-batch-validation-command",
+                    "add-compile-command",
                     "add-project-validation-command",
                     "render-md",
                 ],

@@ -1139,7 +1139,7 @@ def _assert_validation_command_environment(
             raise _validation_environment_error(
                 command,
                 category="command_shell_missing",
-                detail="COMSPEC/cmd.exe is unavailable for Windows batch validation",
+                detail="COMSPEC/cmd.exe is unavailable for Windows Batch compilation",
                 retry_same_run=retry_same_run,
                 run_id=run_id,
                 batch_id=batch_id,
@@ -3143,27 +3143,15 @@ def _run_batch_compile(
     repositories = _resolve_repositories(requested_workspaces, workspace_ref)
     if not repositories:
         raise TaskRunnerError("no_repositories_resolved")
-    # 查找编译命令
-    batch_validation = batch.get("batchValidation")
-    if not isinstance(batch_validation, dict):
-        raise TaskRunnerError(f"batch_validation_config_missing:{batch_id}")
-
-    commands = batch_validation.get("commands", [])
-    compile_command = next(
-        (
-            cmd
-            for cmd in commands
-            if isinstance(cmd, dict)
-            and cmd.get("kind") == "compile"
-            and cmd.get("required") is True
-        ),
-        None,
-    )
-
-    if not compile_command:
+    compile_command = batch.get("compileCommand")
+    if not (
+        isinstance(compile_command, dict)
+        and compile_command.get("kind") == "compile"
+        and compile_command.get("required") is True
+    ):
         raise TaskRunnerError(
             f"batch_compile_command_not_found:{batch_id}",
-            availableCommands=[cmd.get("kind") for cmd in commands if isinstance(cmd, dict)],
+            availableCommand=compile_command.get("kind") if isinstance(compile_command, dict) else None,
         )
     compile_policy_errors = compile_only_command_errors(compile_command)
     if compile_policy_errors:
@@ -3393,7 +3381,7 @@ def _integrate_batch_compile_result(
             )
             return {
                 "compileStatus": "passed",
-                "requiredAction": "review_test_quality_gate",
+                "requiredAction": "review_and_test",
                 "batchId": batch_id,
                 "parallelRunId": parallel_run_id,
             }
