@@ -3220,6 +3220,63 @@ def _cmd_repair_draft_tasks(args: argparse.Namespace) -> int:
     return render_result(_apply_draft_task_repairs(workspace, feature, repairs))
 
 
+def _validate_draft_engineering_commands(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """校验 Draft 的工程命令是否完整
+
+    Returns:
+        错误列表，空列表表示通过
+    """
+    errors = []
+
+    # 收集各 lane 的 code 模式任务
+    backend_tasks = [
+        t for t in _tasks(data)
+        if task_execution_lane(t) == "backend"
+        and task_execution_mode(t) == "code"
+    ]
+    frontend_tasks = [
+        t for t in _tasks(data)
+        if task_execution_lane(t) == "frontend"
+        and task_execution_mode(t) == "code"
+    ]
+
+    compile_profiles = data.get("compileProfiles", {})
+    backend_compile = (
+        isinstance(compile_profiles, dict)
+        and isinstance(compile_profiles.get("backend"), dict)
+        and bool(compile_profiles["backend"].get("commands"))
+    )
+    frontend_compile = (
+        isinstance(compile_profiles, dict)
+        and isinstance(compile_profiles.get("frontend"), dict)
+        and bool(compile_profiles["frontend"].get("commands"))
+    )
+
+    if backend_tasks and not backend_compile:
+        errors.append({
+            "reason": "missing_backend_compile_command",
+            "detail": f"有 {len(backend_tasks)} 个 backend 任务，但缺少编译命令",
+            "repairSuggestion": (
+                "运行 add-compile-command --feature <feature> --lane backend "
+                "--command '<COMPILE_COMMAND>' --cwd '<CWD>' "
+                "[--code-workspace '<WORKSPACE>'] [--repo '<REPO>']"
+            ),
+        })
+
+    if frontend_tasks and not frontend_compile:
+        errors.append({
+            "reason": "missing_frontend_compile_command",
+            "detail": f"有 {len(frontend_tasks)} 个 frontend 任务，但缺少编译命令",
+            "repairSuggestion": (
+                "运行 add-compile-command --feature <feature> --lane frontend "
+                "--command '<COMPILE_COMMAND>' --cwd '<CWD>' "
+                "[--code-workspace '<WORKSPACE>'] [--repo '<REPO>']"
+            ),
+        })
+
+    return errors
+
+
 def _draft_preflight(
     workspace: Path,
     feature: str,
@@ -3242,12 +3299,15 @@ def _draft_preflight(
     code_workspaces = [
         item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)
     ]
-    return lock, data, group_data, _task_set_preflight_errors(
+    errors = _task_set_preflight_errors(
         _path(workspace, feature).parent,
         data,
         group_data,
         code_workspaces,
     )
+    # 新增：工程命令完整性校验
+    errors.extend(_validate_draft_engineering_commands(data))
+    return lock, data, group_data, errors
 
 
 def _cmd_preflight_task_draft(args: argparse.Namespace) -> int:
@@ -4289,7 +4349,17 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
 
 def _cmd_add_compile_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
-    data = _load(workspace, feature)
+    # Check if plan is already finalized - engineering commands must be configured in Draft
+    if _path(workspace, feature).is_file():
+        return render_result(fail(
+            "plan_already_finalized",
+            "工程命令必须在 Draft 阶段配置。如需修改，请先运行 reopen-finalized-draft",
+            path=_path(workspace, feature),
+        ))
+    try:
+        lock, data = _load_draft_bundle(workspace, feature)
+    except PlanWriterInputError as e:
+        return render_result(fail(str(e), path=_draft_plan_path(workspace, feature)))
     lane_workspace_contracts = {
         _batch_workspace_contract(task)
         for task in _tasks(data)
@@ -4379,12 +4449,22 @@ def _cmd_add_compile_command(args: argparse.Namespace) -> int:
         commands = []
         profile["commands"] = commands
     commands.append(command)
-    return render_result(_write(workspace, feature, data))
+    return render_result(_write_draft_bundle(workspace, feature, data, lock))
 
 
 def _cmd_add_quality_gate_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
-    data = _load(workspace, feature)
+    # Check if plan is already finalized - engineering commands must be configured in Draft
+    if _path(workspace, feature).is_file():
+        return render_result(fail(
+            "plan_already_finalized",
+            "工程命令必须在 Draft 阶段配置。如需修改，请先运行 reopen-finalized-draft",
+            path=_path(workspace, feature),
+        ))
+    try:
+        lock, data = _load_draft_bundle(workspace, feature)
+    except PlanWriterInputError as e:
+        return render_result(fail(str(e), path=_draft_plan_path(workspace, feature)))
     lane_workspace_contracts = {
         _batch_workspace_contract(task)
         for task in _tasks(data)
@@ -4471,15 +4551,22 @@ def _cmd_add_quality_gate_command(args: argparse.Namespace) -> int:
         commands = []
         profile["commands"] = commands
     commands.append(command)
-    return render_result(_write(workspace, feature, data))
+    return render_result(_write_draft_bundle(workspace, feature, data, lock))
 
 
 def _cmd_add_project_validation_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
-    guard = require_finalized_plan(workspace, feature)
-    if guard:
-        return render_result(guard)
-    data = _load(workspace, feature)
+    # Check if plan is already finalized - engineering commands must be configured in Draft
+    if _path(workspace, feature).is_file():
+        return render_result(fail(
+            "plan_already_finalized",
+            "工程命令必须在 Draft 阶段配置。如需修改，请先运行 reopen-finalized-draft",
+            path=_path(workspace, feature),
+        ))
+    try:
+        lock, data = _load_draft_bundle(workspace, feature)
+    except PlanWriterInputError as e:
+        return render_result(fail(str(e), path=_draft_plan_path(workspace, feature)))
     commands = data.setdefault("projectValidationCommands", [])
     if not isinstance(commands, list):
         commands = []
@@ -4494,7 +4581,7 @@ def _cmd_add_project_validation_command(args: argparse.Namespace) -> int:
             **({"repo": args.repo} if args.repo else {}),
         }
     )
-    return render_result(_write(workspace, feature, data))
+    return render_result(_write_draft_bundle(workspace, feature, data, lock))
 
 
 def _cmd_set_split_rationale(args: argparse.Namespace) -> int:

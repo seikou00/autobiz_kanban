@@ -462,12 +462,15 @@ UI 任务规则：
 - 预检失败时读取 `validation.issues`，按每条 issue 的 `repairSuggestion` 执行修复。不要根据 SCN 编号连续性、标题相似度或 API 数量自行猜测应移动哪些 Scenario；不得把缺失 Scenario 添加到标题相近的任务；若要拆分，必须回到覆盖矩阵定位遗漏并重新分组。
 - 每个 `set-draft-task-detail` 成功后该 task 才进入 ready；失败不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
 - 分组 digest 变化时运行 `rebuild-task-draft`；writer 保留分组投影未变化的 ready task，重置其余 task。不得修改 group 后继续向旧 Draft 写详情。
-- 全部 task ready 后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。若预检失败，先按 `validation.issues` 定位并修复 Draft，再重新预检，不删除 Draft。
+- 全部 task ready 后，**在 finalize 之前**必须配置工程命令（见下节），然后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。若预检失败，先按 `validation.issues` 定位并修复 Draft，再重新预检，不删除 Draft。
 - 对 finalized 计划不原地解封、不直接编辑 JSON（不得绕过 Draft lock 修改正式 Bundle）。先运行 `diagnose-plan-repair`：未开始执行且 Draft 完整时，运行 `reopen-finalized-draft --reason <reason>` 进入可修复状态；修复后使用 `finalize-task-draft --force` 重新物化并重算 `taskSetDigest`、`taskContractSha256ByTask`。若已开始执行，禁止覆盖正式计划并转入计划修订；只有 Draft 缺失或不可校验时才清理并全量重建。
 - `validate --structure` 会复核已生成 bundle 的结构、完整性摘要和 Task 粒度，但不替代完整 Scenario 覆盖预检或 `dev.plan` 阶段门禁。
 
+#### 配置工程命令（Draft 阶段，finalize 之前）
 
-finalize 成功后，必须为每个实际使用的 lane 添加一条 required 编译命令，并为每个实际 `workspaceRef` 添加一条 required 的 B-INT 集成命令；批次统一使用 `mode=commands`：
+**重要**：工程命令必须在 Draft 阶段配置完成，finalize 会校验工程命令完整性。finalize 后计划进入只读状态，不可再添加工程命令。
+
+为每个实际使用的 lane 添加一条 required 编译命令，并为每个实际 `workspaceRef` 添加一条 required 的 B-INT 集成命令；批次统一使用 `mode=commands`：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane backend --command "<BACKEND_COMPILE_OR_BUILD>" --code-workspace "<BACKEND_MODULE>"
@@ -479,6 +482,10 @@ python "${pluginPath}/hooks/plan_writer.py" add-project-validation-command --fea
 同一 lane 只使用一个 workspace 时 writer 可自动选择；使用多个仓库时必须为每个 workspace 分别添加 required 编译命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。B-INT 命令同理：单仓库可以省略 `--repo`，多仓库必须每个 repo 一条且显式传 `--repo <workspaceRef>`。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。B-INT 在候选 Worktree、真 merge 前执行，不能留给 Board、CI/CD 或合并后的 E2E 阶段。
 
 Plan 阶段不再生成独立 smoke 计划。每个 Batch 的 Code 编译收口只落在 `compileCommand` 的 required `kind=compile` 命令中；frontend 命令的 argv 可以是 build/typecheck，但不得执行或串联测试。只有声明了 `qualityGateCommands` 时，才在 test 后运行对应的 lint/静态检查。TASK `validationCommands` 继续投影为 `testIntent`，由后续 UTest/E2E 阶段执行。
+
+#### Finalize 与产物生成
+
+所有 Draft 配置（任务详情 + 工程命令）完成后，finalize 会一次性物化为正式执行产物。finalize 后不可再修改计划配置，发现问题需要先 reopen。
 
 完成任务、Batch 和可选项目验证配置后，运行 `python "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`。阶段门禁见文末「整体完成条件」；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代它。
 
