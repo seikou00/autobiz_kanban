@@ -21,11 +21,11 @@
 
 ### Modified Capabilities
 
-- `[existing-capability]`: [修改原因与范围；无则写“无”]
+- `[existing-capability]`: [修改原因与范围]
 
 ### Removed Capabilities
 
-- `[removed-capability]`: [移除原因；无则写“无”]
+- `[removed-capability]`: [移除原因]
 
 ## Impact
 
@@ -45,11 +45,11 @@
 
 - **决定:** [定了什么行为、边界或口径]
 - **为什么:** [理由]
-- **否决:** [被否决的备选及原因；无真实备选写「无」]
+- **否决:** [被否决的备选及原因]
 - **约束:** [关联的 capability 或 REQ-NNN]
 
 ## Open Questions
 
 | ID    | Question | Impact | Status |
 |-------|----------|--------|--------|
-| [SPEC/API/DATA-NNN] | [待确认问题；无则写“无”] | [影响] | 已确认/待确认 |
+| [SPEC/API/DATA-NNN] | [待确认问题] | [影响] | 已确认/待确认 |

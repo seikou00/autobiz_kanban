@@ -6,7 +6,7 @@
 
 | Source ID | Requirement / Scenario | Usage |
 |-----------|------------------------|-------|
-| SRC-001 | REQ-NNN / SCN-NNN | [该资料约束的可观察行为；仅实现细节时写“实现约束，行为不扩写”] |
+| SRC-001 | REQ-NNN / SCN-NNN | [该资料约束的可观察行为] |
 
 ## ADDED Requirements
 
