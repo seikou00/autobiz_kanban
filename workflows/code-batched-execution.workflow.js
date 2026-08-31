@@ -12,6 +12,9 @@ export const meta = {
 
 const DEFAULT_MAX_PARALLEL = 4;
 const MAX_SCHEDULER_WAVES = 100;
+// Repair review/test findings in their original Batch first.  If the finding
+// persists, preserve it for the final report and let later validation finish.
+const MAX_DELIVERY_IMPLEMENTATION_REPAIRS = 3;
 const BATCH_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -55,7 +58,7 @@ const SCHEDULER_RESULT_SCHEMA = {
     },
     batchWorkspaces: { type: "object" }
   },
-  required: ["runId", "status", "scheduledGroups"],
+  required: ["runId", "status", "scheduledGroups", "batchTaskIds", "batchWorkspaces"],
   additionalProperties: true
 };
 const VERIFICATION_SCHEMA = {
@@ -309,7 +312,39 @@ async function cleanupMergedWorktrees(batchIds, label) {
   return cleanup;
 }
 
-async function runDeliveryReviewTestAndGate(batchResult) {
+function requiresImplementationRework(result) {
+  const normalized = unwrap(result);
+  const failure = unwrap(normalized.failure);
+  return (
+    normalized.nextStage === "implement" ||
+    failure.nextStage === "implement" ||
+    (normalized.status === "failed" && normalized.failureType === "implementation") ||
+    (failure.status === "failed" && failure.failureType === "implementation")
+  );
+}
+
+function implementationReworkRequired(batchResult, failedStage, result) {
+  const normalized = unwrap(result);
+  const failure = unwrap(normalized.failure);
+  const failureType = failure.type || normalized.failureType || "implementation";
+  const failureMessage = failure.message || normalized.message || normalized.error || "";
+  return {
+    batchId: batchResult.batchId,
+    status: "implementation_rework_required",
+    failedStage,
+    reviewResult: normalized,
+    reworkFingerprint: JSON.stringify({ failedStage, failureType, failureMessage }),
+    recovery: {
+      batchId: batchResult.batchId,
+      worktreePath: batchResult.worktreePath,
+      branchName: batchResult.branchName,
+      commitSha: batchResult.commitSha,
+      nextStage: "implement",
+    },
+  };
+}
+
+async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
   const batchBranch = batchResult.branchName;
@@ -327,21 +362,34 @@ async function runDeliveryReviewTestAndGate(batchResult) {
     { label: `stage-implement-${batchId}`, phase: "Batch 阶段" }
   ), `stage implement ${batchId}`);
   void stageResult;
-  requireSuccess(await agent(
+  if (!options.skipReview) {
+    const review = unwrap(await agent(
     `对已封存的 Batch ${batchId} 做只读评审。代码只在原生 worktree "${batchWorktree}"，分支 "${batchBranch}"；TASK 范围仅为 ${JSON.stringify(taskIds)}。` +
     `先执行 python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review。` +
     `评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
     `通过后执行 python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
-    `发现问题则用 python "${stagePath}" fail 并给出 implementation/documentation/needs_triage 分类，保留 Worktree。只返回 JSON。`,
+    `发现可由当前 Batch 生产代码修复的问题时，用 failure-type=implementation 标记失败并给出具体问题；Workflow 会在同一 Worktree 修复、重新编译、重新封存后再次评审。` +
+    `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
     { label: `stage-review-${batchId}`, phase: "Batch 阶段" }
-  ), `stage review ${batchId}`);
-  requireSuccess(await agent(
+    ));
+    if (requiresImplementationRework(review)) {
+      return implementationReworkRequired(batchResult, "review", review);
+    }
+    requireSuccess(review, `stage review ${batchId}`);
+  }
+  if (!options.skipTest) {
+    const test = unwrap(await agent(
     `执行 Batch ${batchId} 唯一拥有的测试阶段。worktree="${batchWorktree}"，TASK=${JSON.stringify(taskIds)}。` +
     `执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage test。` +
     `该命令只解析并运行 Plan 中归属本 Batch/test 的 validationTestPlan 命令，并写入内容绑定 evidence；禁止运行 projectValidationCommands、E2E 或其他 Batch 的命令。` +
     `失败时它会使用 classifier 记录回流状态；不得修改主 checkout。只返回 JSON。`,
     { label: `stage-test-${batchId}`, phase: "Batch 阶段" }
-  ), `stage test ${batchId}`);
+    ));
+    if (requiresImplementationRework(test)) {
+      return implementationReworkRequired(batchResult, "test", test);
+    }
+    requireSuccess(test, `stage test ${batchId}`);
+  }
   if (qualityGateRequired) {
     requireSuccess(await agent(
       `执行 Batch ${batchId} 的静态质量门。执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage quality_gate。` +
@@ -379,6 +427,78 @@ async function reworkDeliveryImplementation(recovery) {
     `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；任何失败保留 Worktree 并以 failed 释放 lease。返回 {batchId,status:"success",compileStatus:"passed",worktreePath,branchName,commitSha}。`,
     { label: `rework-implement-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
   ), `implementation rework ${batchId}`);
+}
+
+async function deferImplementationFinding(delivery, staged, disposition) {
+  const batchId = delivery.batchId;
+  const metadata = JSON.stringify({
+    batchCommit: delivery.commitSha,
+    worktreePath: delivery.worktreePath,
+    branchName: delivery.branchName,
+  });
+  const precedingStages = staged.failedStage === "test"
+    ? ["implement", "review"]
+    : ["implement"];
+  const replay = precedingStages.map(stage =>
+    `python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage ${stage}；` +
+    `python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage ${stage} --metadata-json '${metadata}'；`
+  ).join("");
+  return requireSuccess(await agent(
+    `Batch ${batchId} 的 ${staged.failedStage} 实现问题在受控修复后仍未关闭。不得再修改代码、不得阻断后续验证。` +
+    `先恢复同一封存提交的前置阶段 evidence：${replay}` +
+    `再执行 python "${stagePath}" defer --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage ${staged.failedStage} --disposition ${disposition}。` +
+    `该命令会把原始失败信息写入 run 的 deferredIssues，并将该阶段标为 deferred；只返回 JSON。`,
+    { label: `defer-${staged.failedStage}-finding-${batchId}`, phase: "Batch 阶段" }
+  ), `defer ${staged.failedStage} finding ${batchId}`);
+}
+
+async function runDeliveryWithImplementationRepair(batchResult) {
+  let delivery = batchResult;
+  const seenFeedback = new Set();
+  let skipReview = false;
+  let skipTest = false;
+  for (let attempt = 0; attempt <= MAX_DELIVERY_IMPLEMENTATION_REPAIRS;) {
+    const staged = await runDeliveryReviewTestAndGate(delivery, { skipReview, skipTest });
+    skipReview = false;
+    skipTest = false;
+    if (staged.status === "ready_to_candidate") return staged;
+    if (staged.status !== "implementation_rework_required") {
+      throw new Error(`unexpected_delivery_stage_result:${JSON.stringify(staged)}`);
+    }
+    const disposition = attempt >= MAX_DELIVERY_IMPLEMENTATION_REPAIRS
+      ? "repair_limit_reached"
+      : seenFeedback.has(staged.reworkFingerprint)
+        ? "repeated_feedback"
+        : null;
+    if (disposition) {
+      await deferImplementationFinding(delivery, staged, disposition);
+      skipReview = true;
+      skipTest = staged.failedStage === "test";
+      continue;
+    }
+    seenFeedback.add(staged.reworkFingerprint);
+    // review/test -> implement repair -> compile/seal -> review.  The repair
+    // keeps the original native Worktree and branch, so no unreviewed change
+    // can bypass the delivery evidence or merge train.
+    const priorCommitSha = delivery.commitSha;
+    const repaired = await reworkDeliveryImplementation(staged.recovery);
+    if (!usableString(repaired.commitSha) || repaired.commitSha === priorCommitSha) {
+      await deferImplementationFinding(delivery, staged, "no_new_commit");
+      skipReview = true;
+      skipTest = staged.failedStage === "test";
+      continue;
+    }
+    delivery = repaired;
+    attempt += 1;
+  }
+  throw new Error(`delivery_implementation_rework_loop_unreachable:${delivery.batchId}`);
+}
+
+async function continueRecoveredDelivery(recovery) {
+  const delivery = recovery.nextStage === "implement"
+    ? await reworkDeliveryImplementation(recovery)
+    : recovery;
+  return runDeliveryWithImplementationRepair(delivery);
 }
 
 function candidateGroups(batchIds) {
@@ -462,7 +582,7 @@ async function validateAndPromoteWave(batchIds, wave) {
 // Workflow. Clear those first so a retry never inherits occupied branches.
 await cleanupMergedWorktrees([], "recover-merged-worktree-cleanup");
 
-if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !["verifying", "succeeded"].includes(prepared.status) && !prepared.waitingForRepositories && !hasWorkOutsideScope(prepared)) {
+if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !["verifying", "succeeded", "succeeded_with_issues"].includes(prepared.status) && !prepared.waitingForRepositories && !hasWorkOutsideScope(prepared)) {
   throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: prepared, batchResults, mergeResults }));
 }
 
@@ -581,20 +701,13 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0 || stageRecover
 
   // Candidate validation is the release barrier. A dependency is unlocked
   // only after the exact candidate SHA passed B-INT and was fast-forwarded.
-  const implementationRecoveries = stageRecoveryBatches.filter(result => result.nextStage === "implement");
-  const reworked = await parallel(
-    implementationRecoveries.map(result => () => reworkDeliveryImplementation(result))
-  );
   const recovered = await parallel(
-    [
-      ...stageRecoveryBatches.filter(result => result.nextStage !== "implement"),
-      ...reworked,
-    ].map(result => () => runDeliveryReviewTestAndGate(result))
+    stageRecoveryBatches.map(result => () => continueRecoveredDelivery(result))
   );
   const gated = await parallel(
     batchResults
       .filter(result => result && result.status === "success" && currentWaveBatchIds.includes(result.batchId))
-      .map(result => () => runDeliveryReviewTestAndGate(result))
+      .map(result => () => runDeliveryWithImplementationRepair(result))
   );
   const mergeIds = [...new Set([...mergeableBatches, ...gated.map(result => result.batchId), ...recovered.map(result => result.batchId)])]
     .filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
@@ -615,7 +728,7 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0 || stageRecover
   stageRecoveryBatches = (resumed.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(result.batchId)));
   batchTaskIds = resumed.batchTaskIds || batchTaskIds;
   batchWorkspaces = resumed.batchWorkspaces || batchWorkspaces;
-  if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !["verifying", "succeeded"].includes(resumed.status) && !resumed.waitingForRepositories && !hasWorkOutsideScope(resumed)) {
+  if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !["verifying", "succeeded", "succeeded_with_issues"].includes(resumed.status) && !resumed.waitingForRepositories && !hasWorkOutsideScope(resumed)) {
     throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: resumed, batchResults, mergeResults }));
   }
 }
@@ -655,4 +768,15 @@ const verification = requireSuccess(await agent(
   { label: "aggregate-staged-evidence", phase: "最终验证", schema: VERIFICATION_SCHEMA }
 ), "evidence aggregate");
 
-return { ok: true, feature, runId, batchResults, mergeResults, cleanupResults, e2e, verification };
+return {
+  ok: true,
+  feature,
+  runId,
+  batchResults,
+  mergeResults,
+  cleanupResults,
+  e2e,
+  verification,
+  finalStatus: verification.hasDeferredIssues ? "succeeded_with_issues" : "succeeded",
+  deferredIssues: Array.isArray(verification.deferredIssues) ? verification.deferredIssues : [],
+};
