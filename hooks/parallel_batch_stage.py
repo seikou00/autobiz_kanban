@@ -27,7 +27,7 @@ from hooks.parallel_runtime import (
 
 
 VALIDATION_STAGE_BY_BATCH = {"V-INT": "integration_test", "V-E2E": "e2e_test"}
-STAGE_STATUSES = {"pending", "running", "passed", "failed", "stale", "skipped", "needs_triage"}
+STAGE_STATUSES = {"pending", "running", "passed", "failed", "stale", "skipped", "deferred", "needs_triage"}
 FAILURE_NEXT_STAGE = {
     "implementation": "implement",
     "test_definition": "test",
@@ -219,7 +219,7 @@ def start_stage(workspace: Path, feature: str, run_id: str, batch_id: str, stage
         # Workflow retries are normal after a host interruption.  A completed
         # stage must keep its original evidence, and a running stage must not
         # acquire a second attempt merely because the coordinator retried.
-        if state.get("status") in {"passed", "skipped"}:
+        if state.get("status") in {"passed", "skipped", "deferred"}:
             save_manifest(workspace, feature, run_id, manifest)
             return {
                 "batchId": batch_id,
@@ -240,7 +240,7 @@ def start_stage(workspace: Path, feature: str, run_id: str, batch_id: str, stage
         expected = next(
             (
                 name for name in stage_names(batch)
-                if states[name].get("status") not in {"passed", "skipped"}
+                if states[name].get("status") not in {"passed", "skipped", "deferred"}
             ),
             None,
         )
@@ -272,7 +272,7 @@ def complete_stage(
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
         state = states.get(stage)
-        if isinstance(state, dict) and state.get("status") in {"passed", "skipped"}:
+        if isinstance(state, dict) and state.get("status") in {"passed", "skipped", "deferred"}:
             return {
                 "batchId": batch_id,
                 "stage": stage,
@@ -366,7 +366,84 @@ def fail_stage(
             batch["status"] = "blocked" if failure_type == "needs_triage" else "failed"
         save_manifest(workspace, feature, run_id, manifest)
     append_event(workspace, feature, run_id, "batch_stage_failed", batchId=batch_id, stage=stage, failureType=failure_type)
-    return {"batchId": batch_id, "stage": stage, "status": state["status"], "nextStage": next_name}
+    return {
+        "batchId": batch_id,
+        "stage": stage,
+        "status": state["status"],
+        "nextStage": next_name,
+        # The Workflow needs the original finding to distinguish a genuine
+        # follow-up issue from an unchanged review result after a repair.
+        # Returning it also keeps the recovery decision evidence-bound.
+        "failure": dict(state.get("failure") or {}),
+    }
+
+
+def defer_stage(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    stage: str,
+    *,
+    disposition: str,
+) -> dict[str, Any]:
+    """Persist an unresolved implementation finding and advance the pipeline."""
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        states = _ensure_stage_states(batch)
+        state = states.get(stage)
+        if not isinstance(state, dict) or state.get("status") not in {"pending", "failed"}:
+            raise ValueError(f"parallel_batch_stage_not_deferable:{batch_id}:{stage}")
+        failure = dict(state.get("failure") or {})
+        if failure.get("type") != "implementation" or failure.get("nextStage") != "implement":
+            raise ValueError(f"parallel_batch_stage_deferred_failure_invalid:{batch_id}:{stage}")
+        issue_index = 1 + sum(
+            1
+            for item in manifest.get("deferredIssues", [])
+            if isinstance(item, dict) and item.get("batchId") == batch_id and item.get("stage") == stage
+        )
+        issue_id = f"DEFERRED-{batch_id}-{stage.upper()}-{issue_index:03d}"
+
+    # Write ordinary, content-bound evidence first.  The state is then made
+    # explicitly ``deferred`` so it cannot be mistaken for a successful review.
+    start_stage(workspace, feature, run_id, batch_id, stage)
+    completed = complete_stage(
+        workspace,
+        feature,
+        run_id,
+        batch_id,
+        stage,
+        metadata={"deferredIssueId": issue_id, "deferredDisposition": disposition, "failure": failure},
+    )
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        batch = _batch(manifest, batch_id)
+        states = _ensure_stage_states(batch)
+        state = states[stage]
+        if state.get("status") != "passed" or state.get("latestEvidenceId") != completed.get("evidenceId"):
+            raise ValueError(f"parallel_batch_stage_defer_completion_changed:{batch_id}:{stage}")
+        issue = {
+            "issueId": issue_id,
+            "batchId": batch_id,
+            "stage": stage,
+            "failureType": failure["type"],
+            "message": str(failure.get("message") or "implementation_issue"),
+            "disposition": disposition,
+            "status": "open",
+            "evidenceId": completed["evidenceId"],
+            "batchCommit": (completed.get("evidence") or {}).get("inputs", {}).get("batchCommit"),
+            "createdAt": _utc_now(),
+        }
+        issues = manifest.setdefault("deferredIssues", [])
+        if not isinstance(issues, list):
+            raise ValueError("parallel_deferred_issues_invalid")
+        issues.append(issue)
+        state.update({"status": "deferred", "failure": failure, "deferredIssueId": issue_id})
+        batch["activeStage"] = None
+        save_manifest(workspace, feature, run_id, manifest)
+    append_event(workspace, feature, run_id, "batch_stage_deferred", batchId=batch_id, stage=stage, issueId=issue_id, disposition=disposition)
+    return {"success": True, "batchId": batch_id, "stage": stage, "status": "deferred", "issue": issue}
 
 
 def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dict[str, Any]:
@@ -374,7 +451,7 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dic
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
-        missing = [stage for stage in stage_names(batch) if states[stage].get("status") not in {"passed", "skipped"}]
+        missing = [stage for stage in stage_names(batch) if states[stage].get("status") not in {"passed", "skipped", "deferred"}]
         if missing:
             return {"success": False, "batchId": batch_id, "error": "parallel_batch_stage_gate_incomplete", "missingStages": missing}
         if str(batch.get("type") or "delivery") == "validation":
@@ -409,13 +486,13 @@ def triage_failure(workspace: Path, feature: str, run_id: str, batch_id: str, st
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Advance a staged parallel Batch")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("next", "start", "complete", "fail", "gate", "triage-failure", "reset-validation"):
+    for name in ("next", "start", "complete", "fail", "defer", "gate", "triage-failure", "reset-validation"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
         item.add_argument("--run-id", required=True)
         item.add_argument("--batch-id", required=True)
-        if name in {"start", "complete", "fail", "triage-failure"}:
+        if name in {"start", "complete", "fail", "defer", "triage-failure"}:
             item.add_argument("--stage", required=True)
         if name == "complete":
             item.add_argument("--metadata-json", default="{}")
@@ -423,6 +500,8 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--failure-type", required=True, choices=tuple(FAILURE_NEXT_STAGE))
         if name == "fail":
             item.add_argument("--message", required=True)
+        if name == "defer":
+            item.add_argument("--disposition", required=True, choices=("repeated_feedback", "repair_limit_reached", "no_new_commit"))
         if name == "reset-validation":
             item.add_argument("--candidate-sha", required=True)
             item.add_argument("--candidate-base-sha", required=True)
@@ -442,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
             result = complete_stage(workspace, feature, args.run_id, args.batch_id, args.stage, metadata=metadata)
         elif args.command == "fail":
             result = fail_stage(workspace, feature, args.run_id, args.batch_id, args.stage, failure_type=args.failure_type, message=args.message)
+        elif args.command == "defer":
+            result = defer_stage(workspace, feature, args.run_id, args.batch_id, args.stage, disposition=args.disposition)
         elif args.command == "triage-failure":
             result = triage_failure(workspace, feature, args.run_id, args.batch_id, args.stage, args.failure_type)
         elif args.command == "reset-validation":

@@ -113,6 +113,13 @@ def test_fixed_workflow_entrypoint():
         "reclaim --workspace",
         "--force",
         "禁止检查/修改插件源码",
+        "runDeliveryWithImplementationRepair",
+        "implementation_rework_required",
+        "deferImplementationFinding",
+        "deferredIssues",
+        "repeated_feedback",
+        "succeeded_with_issues",
+        "同一 Worktree 修复、重新编译、重新封存后再次评审",
     ]
     missing = [check for check in checks if check not in content]
     if missing:

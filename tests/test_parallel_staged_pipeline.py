@@ -9,8 +9,8 @@ from pathlib import Path
 
 from hooks.json_writer_common import atomic_write_json
 from hooks.json_writer_common import WriterResult
-from hooks.parallel_batch_scheduler import create_run, mark_batch
-from hooks.parallel_batch_stage import complete_stage, gate_batch, start_stage
+from hooks.parallel_batch_scheduler import create_run, mark_batch, schedule
+from hooks.parallel_batch_stage import complete_stage, defer_stage, fail_stage, gate_batch, start_stage
 from hooks.parallel_evidence_aggregate import aggregate_evidence
 from hooks.parallel_merge_train import begin_e2e, build_candidate, finish_e2e, promote_candidate, verify_candidate
 from hooks.parallel_runtime import load_manifest
@@ -50,6 +50,78 @@ def _add_validation_intent(feature_dir: Path, *, asset_type: str = "unit_test") 
 
 
 class ParallelStagedPipelineTest(unittest.TestCase):
+    def test_unresolved_review_is_deferred_without_blocking_batch_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "sealed",
+                worktreePath=provisioned["worktreePath"],
+                branchName=provisioned["branchName"],
+                commitSha="reviewed-commit",
+            )
+            for stage in ("prepare", "implement"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": "reviewed-commit"})
+            start_stage(workspace, "alpha", run_id, "B001", "review")
+
+            failed = fail_stage(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "review",
+                failure_type="implementation",
+                message="missing authorization check",
+            )
+
+            self.assertEqual(failed["nextStage"], "implement")
+            self.assertEqual(
+                failed["failure"],
+                {
+                    "type": "implementation",
+                    "message": "missing authorization check",
+                    "nextStage": "implement",
+                },
+            )
+            states = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["stageStates"]
+            self.assertEqual(states["prepare"]["status"], "passed")
+            self.assertEqual(states["implement"]["status"], "pending")
+            self.assertEqual(states["review"]["status"], "pending")
+            recovery = schedule(workspace, "alpha", run_id)
+            self.assertEqual(
+                [(item["batchId"], item["nextStage"]) for item in recovery["stageRecoveryBatches"]],
+                [("B001", "implement")],
+            )
+
+            start_stage(workspace, "alpha", run_id, "B001", "implement")
+            complete_stage(workspace, "alpha", run_id, "B001", "implement", metadata={"batchCommit": "reviewed-commit"})
+            deferred = defer_stage(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "review",
+                disposition="repeated_feedback",
+            )
+            self.assertEqual(deferred["status"], "deferred")
+            self.assertEqual(deferred["issue"]["message"], "missing authorization check")
+            self.assertEqual(deferred["issue"]["disposition"], "repeated_feedback")
+
+            start_stage(workspace, "alpha", run_id, "B001", "test")
+            complete_stage(workspace, "alpha", run_id, "B001", "test", metadata={"batchCommit": "reviewed-commit"})
+            self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])
+            manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(manifest["batches"]["B001"]["stageStates"]["review"]["status"], "deferred")
+            self.assertEqual(manifest["deferredIssues"][0]["issueId"], "DEFERRED-B001-REVIEW-001")
+
     def test_plan_ownership_is_required_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, _ = _workspace(Path(tmp))
@@ -83,9 +155,24 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             _git(worktree, "commit", "-m", "delivery")
             commit = _git_output(worktree, "rev-parse", "HEAD")
             mark_batch(workspace, "alpha", run_id, "B001", "sealed", worktreePath=str(worktree), branchName=provisioned["branchName"], commitSha=commit, compileStatus="passed")
-            for stage in ("prepare", "implement", "review", "test"):
+            for stage in ("prepare", "implement"):
                 start_stage(workspace, "alpha", run_id, "B001", stage)
                 complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
+            start_stage(workspace, "alpha", run_id, "B001", "review")
+            fail_stage(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "review",
+                failure_type="implementation",
+                message="known review finding",
+            )
+            start_stage(workspace, "alpha", run_id, "B001", "implement")
+            complete_stage(workspace, "alpha", run_id, "B001", "implement", metadata={"batchCommit": commit})
+            defer_stage(workspace, "alpha", run_id, "B001", "review", disposition="repair_limit_reached")
+            start_stage(workspace, "alpha", run_id, "B001", "test")
+            complete_stage(workspace, "alpha", run_id, "B001", "test", metadata={"batchCommit": commit})
             gated = gate_batch(workspace, "alpha", run_id, "B001")
             self.assertTrue(gated["success"], gated)
 
@@ -105,7 +192,9 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             aggregate = aggregate_evidence(workspace, "alpha", run_id)
             self.assertTrue(aggregate["passed"], aggregate["errors"])
             manifest = load_manifest(workspace, "alpha", run_id)
-            self.assertEqual(manifest["status"], "succeeded")
+            self.assertEqual(manifest["status"], "succeeded_with_issues")
+            self.assertTrue(aggregate["hasDeferredIssues"])
+            self.assertEqual(aggregate["deferredIssues"][0]["message"], "known review finding")
 
     def test_quality_gate_exists_only_for_declared_static_check_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -86,6 +86,21 @@ delivery Batch 先完成上述阶段，再进入 Merge Train。B-INT 在临时�
 上通过后，才允许 fast-forward 推广同一候选 SHA。所有 delivery Batch 合并
 后才执行 B-E2E；它不会在每个 Batch 完成时运行。
 
+`review` 或 Batch `test` 发现可由当前 Batch 修复的生产代码问题时，必须以
+`implementation` 分类回流：在原 Worktree、原分支中修复，重新执行该 Batch
+的编译和封存，再从 `review` 重新开始。只有重新评审通过后才可以继续 `test`
+或进入 Merge Train；回流次数受 Workflow 的上限保护，超限时保留 Worktree 并
+不再重复修复。修复未产生新的 Batch commit、同一条结构化评审反馈再次出现，或
+达到修复上限时，Workflow 会把原始 finding 写入 run 的 `deferredIssues`，以
+`deferred` 状态继续后续 test、Merge Train 和 E2E。最终结果为
+`succeeded_with_issues`，并返回全部待用户处理的问题；不得把它们伪装为 review
+通过或从最终报告中省略。
+
+review/test 以 `implementation` 分类回流后，Batch 会临时处于 `running`，但其
+封存 commit 与 Worktree 仍有效。scheduler 必须把这种“有 commit、后置阶段未
+完成”的 `running` Batch 作为 stage recovery 返回，恢复 implement 或记录
+deferred finding；不得直接调 test，也不得因它不再是 `sealed` 而停滞。
+
 已推广的 delivery Batch 会立即删除插件管理的 Worktree、Batch 分支和 lease。
 失败、阻断或待修复的 Worktree 保留供诊断；回退 Code 阶段时，插件先通过
 生命周期接口清理 active run 资源，再重置调度和 Feature 状态。

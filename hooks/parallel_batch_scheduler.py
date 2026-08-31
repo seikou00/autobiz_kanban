@@ -749,7 +749,7 @@ def resume_run(
                 "recoveryRequired": True,
                 "errors": invalid_deliveries,
             }
-        if manifest.get("status") in {"succeeded", "verifying"}:
+        if manifest.get("status") in {"succeeded", "succeeded_with_issues", "verifying"}:
             return {"runId": run_id, "status": manifest.get("status"), "skipped": "terminal_run"}
         unresolved = [
             str(batch_id)

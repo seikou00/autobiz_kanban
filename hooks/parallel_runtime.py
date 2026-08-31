@@ -715,22 +715,25 @@ def mergeable_batches(manifest: dict[str, Any]) -> list[str]:
 
 
 def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
-    """Return sealed deliveries whose post-implementation stages remain open.
+    """Return recoverable deliveries whose post-implementation stages remain open.
 
     This is distinct from ``ready_batches``: no source task is scheduled here.
     The delivery commit and linked worktree already exist, so a resumed
     Workflow only needs to continue its remaining review/test/quality stages
-    idempotently.
+    idempotently.  A review/test implementation finding resets a Batch to
+    ``running`` while retaining its sealed commit, so that state is also a
+    recovery candidate; otherwise a resumed Workflow would stall before it
+    can repair or defer the finding.
     """
     result: list[str] = []
     for batch_id, item in manifest.get("batches", {}).items():
-        if not isinstance(item, dict) or item.get("status") != "sealed":
+        if not isinstance(item, dict) or item.get("status") not in {"sealed", "running"}:
             continue
         if not isinstance(item.get("commitSha"), str) or not item.get("commitSha"):
             continue
         states = item.get("stageStates") if isinstance(item.get("stageStates"), dict) else {}
         if any(
-            not isinstance(states.get(stage), dict) or states[stage].get("status") not in {"passed", "skipped"}
+            not isinstance(states.get(stage), dict) or states[stage].get("status") not in {"passed", "skipped", "deferred"}
             for stage in delivery_stage_names(item)
         ):
             result.append(str(batch_id))

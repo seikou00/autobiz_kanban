@@ -358,6 +358,26 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertFalse(verified["passed"])
             self.assertIn("B001.not_merged", verified["errors"])
 
+    def test_resume_treats_succeeded_with_issues_as_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            manifest = load_manifest(workspace, "alpha", created["runId"])
+            manifest["status"] = "succeeded_with_issues"
+            save_manifest(workspace, "alpha", created["runId"], manifest)
+
+            resumed = resume_run(workspace, "alpha", created["runId"])
+
+            self.assertEqual(resumed["status"], "succeeded_with_issues")
+            self.assertEqual(resumed["skipped"], "terminal_run")
+
     def test_resume_blocks_when_sealed_native_delivery_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
