@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import feature_dir, resolve_workspace  # noqa: E402
 from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E402
-from hooks.parallel_runtime import batch_workspace_ref, plan_digest, resource_groups  # noqa: E402
+from hooks.parallel_runtime import batch_workspace_ref, batch_write_set, plan_digest, resource_groups  # noqa: E402
 from hooks.plan_json import BATCH_ID_RE, load_plan_bundle, plan_json_path  # noqa: E402
 from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root  # noqa: E402
 
@@ -149,9 +149,42 @@ def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[s
     }
 
 
+def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
+    """Load runtime configuration from .autobiz/runtime_config.json"""
+    config_path = artifact_workspace / ".autobiz" / "runtime_config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+    # Default: conservative mode
+    return {
+        "parallelSchedulingMode": "conservative",
+        "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+    }
+
+
+def _find_write_set_overlap(batches_in_wave: list[str], by_id: dict[str, Any]) -> list[str]:
+    """Find files that are modified by multiple batches in the same wave."""
+    all_files: set[str] = set()
+    overlapping: set[str] = set()
+
+    for batch_id in batches_in_wave:
+        batch = by_id.get(batch_id, {})
+        write_set = batch.get("writeSet", [])
+        if isinstance(write_set, list):
+            batch_files = set(str(f) for f in write_set if f)
+            overlapping.update(all_files & batch_files)
+            all_files.update(batch_files)
+
+    return sorted(overlapping)
+
+
 def _batch_execution_plan(
     batches: list[dict[str, Any]],
     code_workspaces: Mapping[str, str],
+    artifact_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Render the scheduler's deterministic preflight view for the caller.
 
@@ -160,6 +193,11 @@ def _batch_execution_plan(
     dependencies, write-set serialization, and parallelism limit all use the
     same resource grouping logic as the runtime scheduler.
     """
+    # Load runtime config
+    runtime_config = _load_runtime_config(artifact_workspace) if artifact_workspace else {}
+    optimistic_mode = runtime_config.get("parallelSchedulingMode") == "optimistic"
+    max_parallel = runtime_config.get("maxParallel", DEFAULT_WORKFLOW_MAX_PARALLEL)
+
     by_id = {str(batch["id"]): batch for batch in batches}
     remaining = set(by_id)
     completed = {
@@ -178,7 +216,8 @@ def _batch_execution_plan(
                 "writeSet": batch.get("writeSet", []),
             }
             for batch_id, batch in by_id.items()
-        }
+        },
+        "runtimeConfig": runtime_config,  # Pass config to resource_groups
     }
     waves: list[dict[str, Any]] = []
     while remaining:
@@ -193,21 +232,64 @@ def _batch_execution_plan(
             # caller requests a preview for an invalid/incomplete draft.
             waves.append({"index": len(waves) + 1, "batchIds": sorted(remaining), "parallel": False, "blocked": True})
             break
+
+        # Use real scheduler logic
         grouped = resource_groups(preview_manifest, ready)
-        selected = grouped[0][:DEFAULT_WORKFLOW_MAX_PARALLEL] if grouped else ready[:DEFAULT_WORKFLOW_MAX_PARALLEL]
-        waves.append(
-            {
-                "index": len(waves) + 1,
-                "batchIds": selected,
-                "parallel": len(selected) > 1,
-                "blocked": False,
-            }
-        )
+        selected = grouped[0][:max_parallel] if grouped else ready[:max_parallel]
+
+        # Detect write-set overlap for risk warning
+        overlapping_files = _find_write_set_overlap(selected, by_id)
+
+        # Determine strategy display
+        if by_id[selected[0]].get("executionStage") in ["proto", "global", "integration"]:
+            strategy = "serial"
+            strategy_reason = "critical_phase"
+        elif optimistic_mode:
+            strategy = "optimistic_parallel"
+            strategy_reason = f"maxParallel={max_parallel}"
+        else:
+            strategy = "conservative"
+            strategy_reason = "write_set_conflict_avoidance"
+
+        wave_info = {
+            "index": len(waves) + 1,
+            "batchIds": selected,
+            "parallel": len(selected) > 1,
+            "blocked": False,
+            "strategy": strategy,
+            "strategyReason": strategy_reason,
+        }
+
+        # Add risk warning if write-set overlap detected
+        if overlapping_files:
+            wave_info["writeSetOverlap"] = overlapping_files
+            wave_info["riskLevel"] = "medium" if optimistic_mode else "low"
+            if optimistic_mode:
+                wave_info["conflictResolution"] = "merge_train_detection"
+
+        waves.append(wave_info)
         completed.update(selected)
         remaining.difference_update(selected)
+
+    notes = [
+        "每个 Batch 依次完成 prepare、implement、review、test；只有声明静态检查命令时才追加 quality gate，随后进入候选合并；成功合并后才释放下游。",
+        "每个 Wave 先在 Merge Train 候选 Worktree 运行 B-INT；只有同一 candidate SHA 通过才 fast-forward 推广并释放下游 Batch。",
+        "所有 delivery Batch 推广后，B-E2E 在临时 main Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
+    ]
+
+    if optimistic_mode:
+        notes.append(
+            "乐观并行模式：忽略写集冲突，依赖满足即并行；Git 冲突在 Merge Train 中检测并自动解决或人工介入。"
+        )
+    else:
+        notes.append(
+            "保守模式：同一仓库的重叠写集会拆分为串行 Wave；原生 Git Worktree 仅隔离 checkout，不绕过该规则。"
+        )
+
     return {
         "schemaVersion": 2,
-        "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+        "maxParallel": max_parallel,
+        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "conservative"),
         "deliveryStages": ["prepare", "implement", "review", "test"],
         "optionalDeliveryStage": {
             "stage": "quality_gate",
@@ -237,12 +319,7 @@ def _batch_execution_plan(
             for batch in batches
         ],
         "waves": waves,
-        "notes": [
-            "每个 Batch 依次完成 prepare、implement、review、test；只有声明静态检查命令时才追加 quality gate，随后进入候选合并；成功合并后才释放下游。",
-            "每个 Wave 先在 Merge Train 候选 Worktree 运行 B-INT；只有同一 candidate SHA 通过才 fast-forward 推广并释放下游 Batch。",
-            "所有 delivery Batch 推广后，B-E2E 在临时 main Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
-            "同一仓库的重叠写集会拆分为串行 Wave；原生 Git Worktree 仅隔离 checkout，不绕过该规则。",
-        ],
+        "notes": notes,
     }
 
 
@@ -297,7 +374,7 @@ def analyze_batches(
                     for task in batch_plan.get("tasks", [])
                     if isinstance(task, dict) and isinstance(task.get("id"), str)
                 ],
-                "writeSet": list(batch_plan.get("writeSet", entry.get("writeSet", [])) or []),
+                "writeSet": list(batch_write_set(batch_plan)),
             })
 
         if not valid_batches:
@@ -385,6 +462,7 @@ def analyze_batches(
             "batchExecutionPlan": _batch_execution_plan(
                 valid_batches,
                 workspace_contract["codeWorkspaces"],
+                artifact_workspace,  # Pass artifact_workspace to load runtime config
             ),
             "canStartWorkflow": True,
             "validation": validation,
@@ -393,6 +471,10 @@ def analyze_batches(
             # This is the complete payload for the platform workflow call.
             # Returning it avoids models reconstructing a workflow or guessing
             # a code workspace from the artifact directory.
+            # Load runtime config and pass to workflow
+            runtime_config = _load_runtime_config(artifact_workspace)
+            max_parallel = runtime_config.get("maxParallel", DEFAULT_WORKFLOW_MAX_PARALLEL)
+
             return {
                 **common_result,
                 "executionMode": "fixed",
@@ -402,8 +484,9 @@ def analyze_batches(
                     "artifactWorkspace": str(artifact_workspace),
                     "codeWorkspaces": workspace_contract["codeWorkspaces"],
                     "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
-                    "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+                    "maxParallel": max_parallel,
                     "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+                    "runtimeConfig": runtime_config,  # Pass full config to workflow
                 },
                 "reason": f"fixed_workflow_for_pending_batches:{len(valid_batches)}",
                 "requiredAction": "start_fixed_workflow",

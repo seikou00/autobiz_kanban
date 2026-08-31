@@ -402,11 +402,43 @@ async function validateAndPromoteWave(batchIds, wave) {
     // candidate, because that would sever the evidence-to-SHA relationship.
     let promotion;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const built = requireSuccess(await agent(
+      const builtRaw = unwrap(await agent(
         `构建 Wave ${wave} 的 Merge Train 候选（第 ${attempt} 次）。执行 python "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave} ${batchArgs}。` +
         `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。只返回 JSON。`,
         { label: `build-candidate-${repositoryRef}-${wave}-${attempt}`, phase: "候选验证" }
-      ), `build candidate ${repositoryRef}`);
+      ));
+
+      // Handle conflict resolution if needed
+      let built = builtRaw;
+      if (builtRaw && builtRaw.status === "candidate_conflicted") {
+        log(`Wave ${wave} 检测到冲突，尝试自动解决...`);
+        const resolved = unwrap(await agent(
+          `尝试解决 Wave ${wave} 的合并冲突。执行 python "${mergeTrainPath}" resolve-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
+          `若自动解决成功，返回 built 状态和新的 candidateSha；若需要人工介入，返回 needs_resolution 状态。只返回 JSON。`,
+          { label: `resolve-conflict-${repositoryRef}-${wave}`, phase: "冲突解决" }
+        ));
+
+        if (resolved && resolved.status === "built") {
+          log(`Wave ${wave} 冲突已自动解决，方法：${resolved.resolutionMethod || 'unknown'}`);
+          built = resolved;
+        } else if (resolved && resolved.status === "needs_resolution") {
+          // Manual intervention required - throw error with context
+          throw new Error(`Wave ${wave} 需要人工解决冲突: ${JSON.stringify({
+            repositoryRef,
+            wave,
+            conflictedFiles: resolved.conflictedFiles,
+            worktreePath: resolved.worktreePath,
+            reason: resolved.reason || resolved.error
+          })}`);
+        } else {
+          // Resolution failed entirely
+          throw new Error(`Wave ${wave} 冲突解决失败: ${JSON.stringify(resolved)}`);
+        }
+      }
+
+      // Now require success on the built result
+      built = requireSuccess(built, `build candidate ${repositoryRef}`);
+
       const verified = requireSuccess(await agent(
         `在候选 SHA ${built.candidateSha} 上运行 B-INT。执行 python "${mergeTrainPath}" verify-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
         `只运行 Plan 的 projectValidationCommands；失败时阻断推广，保留 delivery Worktree，不得直接在 main 修复。只返回 JSON。`,
