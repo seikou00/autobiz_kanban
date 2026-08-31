@@ -481,6 +481,153 @@ def _named_code_workspace(
     return repository, workspace
 
 
+def _spec_with_scenarios(feature_dir: Path, count: int) -> None:
+    spec_dir = feature_dir / "specs" / "cap"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["## ADDED Requirements", "### Requirement REQ-001: capability"]
+    lines.extend(f"#### Scenario SCN-{index:03d}: case {index}" for index in range(1, count + 1))
+    (spec_dir / "spec.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+class PreflightLayeringTests(unittest.TestCase):
+    """One preflight call must report every independently detectable problem."""
+
+    def test_faults_in_four_layers_are_reported_in_one_pass(self) -> None:
+        from hooks.plan_writer import _task_set_preflight_errors
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _spec_with_scenarios(feature_dir, 6)
+            repository, _ = _named_code_workspace(root, "code", manifest="pom.xml")
+
+            scenario_refs = [
+                f"specs/cap/spec.md#SCN-{index:03d}" for index in range(1, 7)
+            ]
+            task = _plan_task_body()
+            task.update({
+                "specRefs": ["specs/cap/spec.md#REQ-001", *scenario_refs],
+                "mergedScenarioRefs": scenario_refs,
+                # 1) task_local: over the soft cap with a rationale that names no ids
+                "splitRationale": "这些场景一起实现比较方便，放在同一个模块里。",
+                # 2) cross_artifact: a design id the Design never defines
+                "designRefs": ["design.md#API-001", "design.md#DATA-001", "design.md#D-001"],
+                "decisionIds": ["D-001", "D-404"],
+            })
+            task["acceptanceCriteria"] = [
+                {
+                    "id": f"AC-T001-{index:02d}",
+                    "text": "behavior is observable",
+                    "scenarioRefs": [scenario_refs[index - 1]],
+                }
+                for index in range(1, 7)
+            ]
+            # 4) task_local: a command that validates nothing
+            task["validationCommands"] = [{
+                "id": "VAL-T001-01",
+                "argv": ["echo", "ok"],
+                "cwd": ".",
+                "kind": "behavior_test",
+                "required": True,
+                "covers": [f"AC-T001-{index:02d}" for index in range(1, 7)],
+            }]
+
+            # 3) runtime: a second task bound to a workspace nobody registered
+            ghost = _plan_task_body()
+            ghost.update({
+                "id": "T002",
+                "title": "ghost",
+                "deps": ["T001"],
+                "workspaceRef": "ghost",
+                "scope": {
+                    "modules": ["ghost:src"],
+                    "entrypoints": [],
+                    "pages": [],
+                    "dataObjects": [],
+                    "workspaceRoots": {"ghost": "ghost/module"},
+                },
+            })
+            ghost["acceptanceCriteria"][0]["id"] = "AC-T002-01"
+            ghost["validationCommands"][0].update({
+                "id": "VAL-T002-01",
+                "covers": ["AC-T002-01"],
+                "cwd": "ghost/module",
+            })
+
+            group_file = _write_task_groups(root / "task-groups.json", [task, ghost])
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            data = {"featureId": "alpha", "tasks": [task, ghost]}
+
+            advisories: list[dict] = []
+            errors = _task_set_preflight_errors(
+                feature_dir,
+                data,
+                group_data,
+                [str(repository)],
+                warnings=advisories,
+            )
+
+        reasons = " ".join(str(error.get("reason", "")) for error in errors)
+        self.assertIn("decision", reasons)
+        self.assertIn("code_workspace_contract_mismatch", reasons)
+        self.assertIn("validation_command_noop", reasons)
+        self.assertIn(
+            "split_rationale",
+            " ".join(str(warning.get("reason", "")) for warning in advisories),
+        )
+
+        layers = {error.get("layer") for error in errors}
+        self.assertIn("task_local", layers)
+        self.assertIn("cross_artifact", layers)
+        self.assertIn("runtime", layers)
+        self.assertTrue(all(error.get("severity") == "blocker" for error in errors), errors)
+
+    def test_task_group_ids_are_assigned_by_position(self) -> None:
+        from hooks.plan_writer import _load_task_group_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = _plan_task_body()
+            second = _plan_task_body()
+            second.update({"id": "T005", "title": "second", "deps": ["T001"]})
+            third = _plan_task_body()
+            third.update({"id": "T009", "title": "third", "deps": ["T005"]})
+            group_file = _write_task_groups(root / "task-groups.json", [first, second, third])
+
+            data = _load_task_group_file(group_file, "alpha")
+
+        self.assertEqual([group["id"] for group in data["groups"]], ["T001", "T002", "T003"])
+        self.assertEqual([group["deps"] for group in data["groups"]], [[], ["T001"], ["T002"]])
+
+    def test_duplicate_task_group_ids_are_left_for_the_validators(self) -> None:
+        from hooks.plan_writer import _renumber_task_groups
+
+        data = {
+            "featureId": "alpha",
+            "groups": [{"id": "T001", "deps": []}, {"id": "T001", "deps": []}],
+        }
+
+        self.assertEqual(_renumber_task_groups(data)["groups"], data["groups"])
+
+    def test_unusable_group_list_names_the_layers_it_blocks(self) -> None:
+        from hooks.plan_writer import _task_group_preflight_errors
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir)
+
+            errors = _task_group_preflight_errors(feature_dir, {"featureId": "alpha", "groups": []})
+
+        self.assertEqual(
+            [error["reason"] for error in errors],
+            ["task_groups_missing"],
+        )
+        self.assertEqual(
+            errors[0]["blockedBy"],
+            ["task_local", "cross_artifact", "runtime"],
+        )
+
+
 class JsonWriterTests(unittest.TestCase):
     def test_shell_join_quotes_arguments_on_python_37(self) -> None:
         self.assertEqual(shell_join(["python", "hello world", "plain"]), "python 'hello world' plain")
@@ -718,7 +865,11 @@ class JsonWriterTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("--code-workspace", result.stderr)
+            payload = json.loads(result.stdout)
+            error = payload["errors"][0]
+            self.assertEqual(error["reason"], "plan_writer_argument_invalid")
+            self.assertIn("--code-workspace", error["detail"])
+            self.assertIn("repairSuggestion", error)
             self.assertFalse((feature_dir / ".tmp" / "plan_writer" / "draft" / "lock.json").exists())
 
     def test_plan_writer_builds_and_finalizes_draft_batches_without_task_directory(self) -> None:
@@ -1671,7 +1822,7 @@ class JsonWriterTests(unittest.TestCase):
             self.assertIn("T001.visualSourceRefs_must_be_string_array", result.stdout)
             self.assertIn("T001.frontendRoute_missing", result.stdout)
 
-    def test_plan_writer_grouping_returns_all_invalid_tasks_and_diagnostics(self) -> None:
+    def test_plan_writer_grouping_reports_every_soft_cap_finding_as_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
@@ -1707,12 +1858,14 @@ class JsonWriterTests(unittest.TestCase):
                 str(group_file),
             )
 
-            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            # Crossing the soft cap is advisory: the stage proceeds, and every
+            # finding for every task is reported in the one pass.
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             payload = json.loads(result.stdout)
-            self.assertEqual(payload["validation"]["invalidTaskIds"], ["T001", "T002"])
-            issues = payload["validation"]["issues"]
+            self.assertEqual(payload["errors"], [])
+            warnings = payload["warnings"]
             self.assertEqual(
-                {(issue["taskIds"][0], issue["reason"]) for issue in issues},
+                {(warning["taskId"], warning["reason"]) for warning in warnings},
                 {
                     ("T001", "missing_plan_task_merged_scenario_refs"),
                     ("T001", "missing_plan_task_split_rationale"),
@@ -1720,15 +1873,19 @@ class JsonWriterTests(unittest.TestCase):
                     ("T002", "missing_plan_task_split_rationale"),
                 },
             )
-            merged_issue = next(
-                issue
-                for issue in issues
-                if issue["taskIds"] == ["T001"]
-                and issue["reason"] == "missing_plan_task_merged_scenario_refs"
+            self.assertTrue(
+                all(warning["severity"] == "warning" for warning in warnings),
+                warnings,
             )
-            self.assertEqual(len(merged_issue["diagnostics"]["expectedRefs"]), 6)
+            merged_warning = next(
+                warning
+                for warning in warnings
+                if warning["taskId"] == "T001"
+                and warning["reason"] == "missing_plan_task_merged_scenario_refs"
+            )
+            self.assertEqual(len(merged_warning["expectedRefs"]), 6)
             self.assertEqual(
-                merged_issue["diagnostics"]["violations"][0]["code"],
+                merged_warning["violations"][0]["code"],
                 "merged_scenario_refs_missing",
             )
 

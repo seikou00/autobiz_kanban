@@ -531,6 +531,21 @@ _PLAN: Dict[str, Repair] = {
         problem="specs 中这些 Scenario 没有被任何任务覆盖：{target}",
         action="回到任务分组表，把报错的每个 SCN 分配给实际实现它的任务，再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
     ),
+    "implementation_scope_partition_overlap": Repair(
+        artifact="IMPLEMENTATION_SCOPE.json",
+        problem="这些条目同时被声明为本期实现和延后：{detail}",
+        action="每条只能归属一侧。用 hooks/plan_scope.py set-partition 重写分区，从 included 或 deferred 中删掉重复项。",
+    ),
+    "implementation_scope_unknown_ref": Repair(
+        artifact="IMPLEMENTATION_SCOPE.json",
+        problem="分区里声明了上游产物中不存在的引用：{detail}",
+        action="删除这些条目；确实应当存在的，回上游补回对应 Scenario / Design ID / 来源要求定义。",
+    ),
+    "implementation_scope_partition_must_be_string_array": Repair(
+        artifact="IMPLEMENTATION_SCOPE.json",
+        problem="{detail} 不是字符串数组",
+        action="把该字段写成字符串数组，每项一个 ID 或全限定引用，再用 hooks/plan_scope.py set-partition 重写。",
+    ),
     "invalid_plan_task_scenario_reference": Repair(
         artifact="plan.json",
         problem="{target} 的 specRefs 里 Scenario 引用没有逐条展开或没有全限定",

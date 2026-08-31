@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from hooks.plan_json import task_execution_mode
 from hooks.validation_policy import (
     BEHAVIOR_TASK_VALIDATION_KINDS,
     FRONTEND_COMPILE_VALIDATION_KINDS,
@@ -418,12 +419,15 @@ def validate_plan_task_grouping_item(task: dict[str, Any], *, task_id: str) -> l
     if not threshold_reasons:
         return []
 
+    # Crossing a soft cap is advice about granularity, not a contract breach: the
+    # hard caps above are what actually stop the stage.
     errors: list[dict[str, Any]] = []
     if len(scenario_refs) > PLAN_TASK_MAX_SCENARIOS:
         raw_merged_refs = task.get("mergedScenarioRefs")
         if "mergedScenarioRefs" not in task or raw_merged_refs == []:
             errors.append({
                 "reason": "missing_plan_task_merged_scenario_refs",
+                "severity": "warning",
                 "detail": f"task={task_id} detail=scenarios={len(scenario_refs)}",
                 "taskId": task_id,
                 "field": "mergedScenarioRefs",
@@ -451,6 +455,7 @@ def validate_plan_task_grouping_item(task: dict[str, Any], *, task_id: str) -> l
                     detail_parts.append(f"extraRefs={','.join(extra_refs)}")
                 errors.append({
                     "reason": "invalid_plan_task_merged_scenario_refs",
+                    "severity": "warning",
                     "detail": ";".join(detail_parts),
                     "taskId": task_id,
                     "field": "mergedScenarioRefs",
@@ -472,6 +477,7 @@ def validate_plan_task_grouping_item(task: dict[str, Any], *, task_id: str) -> l
     if not isinstance(rationale, str) or not rationale.strip():
         errors.append({
             "reason": "missing_plan_task_split_rationale",
+            "severity": "warning",
             "detail": f"task={task_id} detail={','.join(threshold_reasons)}",
             "taskId": task_id,
             "field": "splitRationale",
@@ -488,6 +494,7 @@ def validate_plan_task_grouping_item(task: dict[str, Any], *, task_id: str) -> l
         if rationale_violations:
             errors.append({
                 "reason": "invalid_plan_task_split_rationale",
+                "severity": "warning",
                 "detail": f"task={task_id} detail={','.join(threshold_reasons)}",
                 "taskId": task_id,
                 "field": "splitRationale",
@@ -505,6 +512,11 @@ def validate_plan_task_granularity_item(task: dict[str, Any], *, task_id: str) -
         "invalid_plan_task_scenario_reference",
         "oversized_plan_task_must_split",
     } for error in grouping_errors):
+        return grouping_errors
+
+    # external_dependency tasks are forbidden from carrying local
+    # validationCommands, so the matrix rule has no satisfiable form for them.
+    if task_execution_mode(task) == "external_dependency":
         return grouping_errors
 
     scenario_refs = scenario_refs_from_spec_refs(_string_list_value(task.get("specRefs")))

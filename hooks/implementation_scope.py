@@ -97,6 +97,23 @@ def load_scope(feature_dir: Path, *, required: bool = False) -> tuple[str, list[
     return str(payload.get("implementationScope", DEFAULT_SCOPE)), errors
 
 
+OWNED_SCOPE_FIELDS = frozenset({"version", "featureId", "implementationScope", "source"})
+
+
+def _preserved_fields(path: Path) -> dict[str, Any]:
+    """Keep fields other writers own (partition refs) across a scope rewrite."""
+
+    if not path.is_file():
+        return {}
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(existing, dict):
+        return {}
+    return {key: value for key, value in existing.items() if key not in OWNED_SCOPE_FIELDS}
+
+
 def write_scope(feature_dir: Path, scope: str, *, source: str = "user_confirmed") -> Path:
     if scope not in VALID_SCOPES:
         raise ValueError(f"implementationScope must be one of: {', '.join(sorted(VALID_SCOPES))}")
@@ -109,6 +126,9 @@ def write_scope(feature_dir: Path, scope: str, *, source: str = "user_confirmed"
             "featureId": feature_dir.name,
             "implementationScope": scope,
             "source": source,
+            # A scope rewrite must not silently drop the round's included/deferred
+            # partition; see hooks/plan_scope.py.
+            **_preserved_fields(path),
         },
     )
     split_path = scope_split_path(feature_dir)

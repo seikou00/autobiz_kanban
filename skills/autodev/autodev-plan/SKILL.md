@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.9.08311
+version: v1.9.08312
 ---
 
 ## 缺失产物处理
@@ -12,7 +12,9 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 # /autodev-plan - Executable Task Plan
 
-进入 Plan 时读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/IMPLEMENTATION_SCOPE.json`。`backend_only` 只允许生成 `uiRequired=false` 的 backend task；`frontend_only` 只允许生成 `uiRequired=true` 的 frontend task；`full_stack` 保持现有行为。Plan writer 会在分组预检、Draft 和正式计划校验中重复执行该门禁。
+进入 Plan 时读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/IMPLEMENTATION_SCOPE.json`。`backend_only` 只允许生成 `uiRequired=false` 的 backend task；`frontend_only` 只允许生成 `uiRequired=true` 的 frontend task；`full_stack` 保持现有行为。
+
+specs 覆盖的范围大于本期交付时，必须先声明本期的 included/deferred 分区，再生成任务；字段与写入命令见 `add-task-contract.implementationScope`。已声明为 deferred 的 Scenario 与 Design ID 不需要任务覆盖，也不得为它们生成占位任务；未声明分区时全部视为本期实现。
 
 ## explore
 进入设计探索模式。未提供的上游产物根据缺失清单处理。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
@@ -283,7 +285,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress 
 
 生成或修改 `plan.json` / `PLAN.md` 必须使用 `${pluginPath}/hooks/plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
-生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/sourceRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。`sourceRefs` 只列当前任务实际消费的 `SRC-NNN-RNNN`，没有来源要求时写 `[]`；它由分组表投影，task detail 不维护。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
+生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码工作区，为每一个传入 `--code-workspace`；`workspaceRef` 由 writer 派生并在预检失败时列出可用值。前后端或同一 lane 涉及多个工作区时必须全部登记，不得因当前 cwd 位于某一工作区就遗漏其他工作区。再把最终候选分组表写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/sourceRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。`sourceRefs` 只列当前任务实际消费的 `SRC-NNN-RNNN`，没有来源要求时写 `[]`；它由分组表投影，task detail 不维护。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
 候选分组必须先做可验证性判断：backend group 若只产出 Entity/PO/DO/DTO/Mapper、配置或脚手架等结构，且唯一校验是 `compile/build` 或文件存在检查，则不得独立成 TASK；在不跨 workspace/lane 且不突破粒度上限时，合并到最早消费它的下游行为 group，并重排 ID/deps。只有能在不依赖后续 TASK 的情况下，通过真实的 behavior/integration/static 契约测试验证的数据迁移、ORM、序列化或 Schema 契约，才可保留为独立 backend TASK。frontend group 可按 frontend validation profile 使用 compile/build/typecheck 验证页面工程能成功编译，但不得把该命令伪装成 behavior test。此判断必须在 `preflight-task-groups` 和创建 Draft 前完成，不得在 task detail 阶段用空 `validationCommands`、伪 `static_check` 或占位命令兜底。Plan 仍必须生成测试相关的 `validationTestPlan` 和 `testIntent`，但这些内容不表示 Code 阶段创建或执行测试。
 
@@ -301,7 +303,7 @@ writer 自动分组，调用方不指定 batch。`executionLane` 由 writer 根�
 python "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${feature}" --group-file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json"
 ```
 
-分组预检失败时只能修改候选分组，不得准备 Draft。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先在候选分组表证明共享验证闭环，确认这些 SCN 共享同一用户动作、公开 seam 和自动化验证边界，否则按业务闭环继续拆分。
+分组预检失败时只能修改候选分组，不得准备 Draft。必须先按预检结论完成拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先在候选分组表证明共享验证闭环，确认这些 SCN 共享同一用户动作、公开 seam 和自动化验证边界，否则按业务闭环继续拆分。
 
 分组预检成功后立即创建并锁定 Draft Batch；`prepare-task-draft` 会保存 `groupingDigest`，投影全部 group-owned 字段和自动 Batch，不需要也不接受 task 目录。首次准备还会在 Feature 目录写入持久的 `.design-contract.lock.json`，记录已确认 Design 的 SHA；它不在 `.tmp/plan_writer` 下，删除临时 Draft 不能重新铸造 Design 锁。若确实完成了 Design 重新确认，必须显式传 `--design-revision-confirmed --reason <reason>` 刷新该锁。下例以当前项目根为代码仓库；涉及多个仓库时，为每个实际绝对路径重复传入 `--code-workspace`：
 
@@ -332,12 +334,9 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 
 `preflight-task-groups` 和 `preflight-task-draft` 会校验设计引用、任务结构、场景覆盖、workspace/manifest、验证命令、DAG、backend/frontend 顺序、Batch 投影和 Design 双向覆盖。Draft 创建时锁定 design 摘要，之后 design 内容变化会返回 `confirmed_design_changed_after_draft_created`，当前 Plan 不得继续。
 
-失败时读取返回 JSON 的 `validation.issues` 和 `validation.invalidTaskIds`，先处理 `retryable=false` 的终止项；其余 issue 包含：
-- `reason`: 错误类型（机器可读）
-- `repairSuggestion`: 具体修复步骤（中文，直接可执行）
-- `repairTarget`: 修复层级（`design_revision` / `task_group` / `task_detail` / `draft_integrity`）
+失败时读取返回 JSON 的 `validation.issues` 和 `validation.invalidTaskIds`，逐条按其中的 `repairSuggestion` 修复，不要根据编号、标题或数量自行猜测。`errors` 阻断本阶段，`warnings` 只是建议、不阻断推进。
 
-按照 `repairSuggestion` 中的指导执行修复，不要根据编号、标题或数量自行猜测。`repairTarget=design_revision` 表示必须修改 design.md，禁止修改 Plan 来迎合设计。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复。
+`repairTarget=design_revision` 表示必须修改 design.md，禁止修改 Plan 来迎合设计。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复。
 
 finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
 
@@ -411,7 +410,7 @@ UI 任务规则：
 
 4. 只有共享同一验证闭环时才允许合并
    - 多个 SCN/API/PAGE/UIX 合并到一个 task，必须同时满足：同一触发动作、同一公开 seam、同一验证命令或同一组响应/页面断言（frontend 可共享同一编译门禁）、拆开会复制同一验证闭环、没有超过硬上限。
-   - 任务超过软阈值时默认必须继续拆分；`splitRationale` 只允许用于已经按公开入口、用户动作、可观察结果和验证命令拆到最小闭环后，仍因同一请求、同一权限/状态矩阵或同一响应断言无法独立验证的少数例外。
+   - 任务超过软阈值时默认继续拆分；`splitRationale` 只用于已经按公开入口、用户动作、可观察结果和验证命令拆到最小闭环后，仍因同一请求、同一权限/状态矩阵或同一响应断言无法独立验证的少数例外。
    - 普通 group 的 `mergedScenarioRefs` 保持空数组。SCN 超软阈值时使用 `add-task-contract.taskGroupMatrixExceptionExample` 在候选 group 填写 `specRefs`、`mergedScenarioRefs` 与 `splitRationale`；writer 将三者原样投影到 Draft task。对应 detail 必须恰有一个 required 的 `behavior_test`、`integration_test` 或 `e2e_test` 覆盖全部 AC；`splitRationale` 至少点名 3 个相关 SCN，并说明共享请求/响应、权限或状态矩阵与同一验证闭环。
    - API/PAGE/UIX 超软阈值但未超硬上限时仍可用 `splitRationale`，必须点名相关 API/PAGE/UIX ID，并说明为什么无法独立验证。
    - 标记 `可合并(附 splitRationale)` 前必须逐项确认：不同触发动作已拆开；不同公开 seam 已拆开；不同可观察结果已拆开；不同 validation command 已拆开。任一项未满足时不得标记可合并。
@@ -420,17 +419,16 @@ UI 任务规则：
    - 状态/操作矩阵例外示例：`SCN-006、SCN-007、SCN-008、SCN-009、SCN-010、SCN-011、SCN-012 均由同一个操作权限计算入口返回操作集合，并由同一组状态-操作矩阵断言验证；拆开会复制同一验证闭环。`
    - 不合格示例：`这些都是同一个操作权限判断逻辑。`
    - 不得用“同一模块”“同一 capability”“同一页面”“同一列表”“不同组成部分”“实现方便”“一起实现”“顺手一起”等空泛理由。
-   - 硬上限不可豁免：任一维度超过下节两档计数预检列出的硬上限时必须继续拆分，不能用 `splitRationale` 放行。
+   - 硬上限不可豁免：任一维度超过硬上限时必须继续拆分，不能用 `splitRationale` 放行。
 
 5. 写入前两档计数预检
 
-   两档阈值的事实源是 `add-task-contract.matrixException`（`normalScenarioMaximum` / `scenarioMaximum`）与 `preflight-task-groups` 的判定，下面的数字与它们同源，改动以脚本常量为准：
+   软阈值与硬上限的唯一事实源是 `add-task-contract.granularity`，进入本节前读取它，不要凭记忆填数字：
 
-   - `拆分结论=通过` 的候选 task 必须满足：SCN `<=5`、apiIds `<=2`、pageRefs `<=1`、interactionRefs `<=3`、`implementationPoints` 为 2-6 条、至少 1 条可独立运行的 `validationCommands`。
-   - `拆分结论=可合并(附 splitRationale)` 的候选 task 必须满足：未超过硬上限——SCN 数 `>12`、apiIds `>3`、pageRefs `>2`、interactionRefs `>4` 即越界；至少一个维度超过软阈值；分组表已有完整 `splitRationale`；SCN 超软阈值时还必须有完整 `mergedScenarioRefs`。
-   - 最终候选任务分组表不得包含 `拆分结论=需拆分` 的行；超过硬上限、缺少 rationale 或未完成最小闭环确认的候选 task，不得进入 Draft。
-   - `task-groups.json` 的分组预检通过后由 `prepare-task-draft` 锁定 digest；内容结构错误由 `set-draft-task-detail` 当场拒绝。若确需改变分组，运行 `rebuild-task-draft`，不得手工同步 Draft Batch。
-   - 一个候选组只允许一次拆分：若拆分后仍是同一公开 seam 和同一自动化验证边界，且 SCN `<=12`，使用矩阵例外；若超过 `12` 或存在多个独立用户动作、seam 或验证边界，停止并报告规格/规划冲突。不得输出 `v2`、`v3` 等重复分组表，也不得生成 `T012a`、`T012b1` 等临时 taskId。
+   - `拆分结论=通过` 的候选 task 每个维度都不超过软阈值，`implementationPoints` 为 2-6 条，且至少 1 条可独立运行的 `validationCommands`。
+   - `拆分结论=可合并(附 splitRationale)` 的候选 task 必须未超过任一硬上限，至少一个维度超过软阈值，并在分组表中写出完整 `splitRationale`；SCN 超软阈值时还必须有完整 `mergedScenarioRefs`。
+   - 最终候选任务分组表不得包含 `拆分结论=需拆分` 的行；超过硬上限或未完成最小闭环确认的候选 task，不得进入 Draft。
+   - 一个候选组只允许一次拆分：若拆分后仍是同一公开 seam 和同一自动化验证边界且未超硬上限，使用矩阵例外；否则停止并报告规格/规划冲突。不得输出 `v2`、`v3` 等重复分组表，也不得生成 `T012a`、`T012b1` 等临时 taskId。
 
 6. 写入前预检每个 task 内容
 - `specRefs` 至少包含一个真实 `REQ-xxx` 和一个真实 `SCN-xxx`；不同 spec 文件里的 `SCN-001` 是不同场景，必须写完整 `specs/<capability>/spec.md#SCN-001` 路径，不能只写 `#SCN-001` 造成路径级覆盖缺失。
@@ -456,7 +454,7 @@ UI 任务规则：
 - 必须按 DAG 拓扑序编号：当前 task 的 `deps` 只能指向更早的 task。若分组预检报告依赖错误，只修候选表，不补 task detail。
 - `preflight-task-groups` 成功后只运行一次 `prepare-task-draft`，并且必须带真实的 `--code-workspace`。缺少 workspace 时必须先确定业务代码目录，不得创建无 workspace 的 Draft；不得创建独立 `Txxx.json`，不得在每写 5 个 task 后提前 finalize。
 - 不得通过完整 task 的内容校验失败来探索如何拆分；拆分必须在覆盖矩阵、候选任务分组表和 `preflight-task-groups` 阶段完成。
-- 预检失败时读取 `validation.issues`，按每条 issue 的 `repairSuggestion` 执行修复。不要根据 SCN 编号连续性、标题相似度或 API 数量自行猜测应移动哪些 Scenario；若要拆分，必须回到覆盖矩阵按用户动作、公开 seam 和验证边界重新分组。
+- 预检失败时读取 `validation.issues`，按每条 issue 的 `repairSuggestion` 执行修复。不要根据 SCN 编号连续性、标题相似度或 API 数量自行猜测应移动哪些 Scenario；不得把缺失 Scenario 添加到标题相近的任务上凑覆盖，必须回 Scenario 覆盖矩阵定位遗漏并重新分组。
 - 每个 `set-draft-task-detail` 成功后该 task 才进入 ready；失败不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
 - 分组 digest 变化时运行 `rebuild-task-draft`；writer 保留分组投影未变化的 ready task，重置其余 task。不得修改 group 后继续向旧 Draft 写详情。
 - 全部 task ready 后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。可修复项按 `validation.issues` 修复后再预检；`retryable=false` 立即停止。

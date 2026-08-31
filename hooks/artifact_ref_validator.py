@@ -282,11 +282,27 @@ def _design_ids_from_refs(task: dict[str, Any]) -> dict[str, set[str]]:
     return result
 
 
+def design_contract_id_universe(contract: dict[str, Any]) -> set[str]:
+    """Every ID the confirmed Design defines, across all three kinds."""
+
+    return {
+        value
+        for id_kind in ("API", "DATA", "D")
+        for value in contract["ids"][id_kind]
+    }
+
+
 def validate_plan_design_coverage(
     contract: dict[str, Any],
     tasks: list[dict[str, Any]],
+    *,
+    included_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Require every confirmed Design ID to be covered without inventing new IDs."""
+    """Require every in-scope Design ID to be covered without inventing new IDs.
+
+    ``included_ids`` is the slice this round delivers; IDs a later round owns are
+    not missing coverage, so the Design keeps them instead of being edited down.
+    """
 
     covered = {"API": set(), "DATA": set(), "D": set()}
     for task in tasks:
@@ -323,7 +339,8 @@ def validate_plan_design_coverage(
                 "repairable": False,
             })
             continue
-        for value in sorted(known - covered[id_kind]):
+        required = known if included_ids is None else known & included_ids
+        for value in sorted(required - covered[id_kind]):
             errors.append({
                 "reason": f"missing_plan_json_{reason_kind}_coverage",
                 "detail": f"id={value};design_is_source_of_truth;attach_existing_id_to_relevant_task",
@@ -651,11 +668,25 @@ def validate_task_artifact_refs(
     return errors
 
 
+def plan_source_requirement_universe(base: Path) -> set[str]:
+    """Every source requirement routed to Plan or Code, before scope narrowing."""
+
+    data, _ = load_source_context(base)
+    if data is None:
+        return set()
+    return (
+        source_requirement_ids_for_target(data, "plan")
+        | source_requirement_ids_for_target(data, "code")
+    )
+
+
 def validate_plan_source_coverage(
     base: Path,
     tasks: list[dict[str, Any]],
+    *,
+    included_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Ensure every source requirement routed to Plan or Code reaches a task."""
+    """Ensure every in-scope source requirement routed to Plan or Code reaches a task."""
 
     validation_errors = validate_source_context(base)
     data, load_errors = load_source_context(base)
@@ -676,6 +707,8 @@ def validate_plan_source_coverage(
         source_requirement_ids_for_target(data, "plan")
         | source_requirement_ids_for_target(data, "code")
     )
+    if included_ids is not None:
+        expected &= included_ids
     covered = {
         ref
         for task in tasks

@@ -15,6 +15,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.code_task_context import build_context  # noqa: E402
+from hooks.plan_json import _validate_command_workspace_root  # noqa: E402
+from hooks.plan_writer import (  # noqa: E402
+    PlanWriterInputError,
+    _code_workspace_contexts,
+    _draft_task_workspace_roots,
+)
+from hooks.implementation_scope import write_scope  # noqa: E402
+from hooks.plan_scope import write_partition  # noqa: E402
 from hooks.evidence_store import append_evidence, main as evidence_store_main  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
@@ -747,7 +755,7 @@ class BatchedPlanContractTest(unittest.TestCase):
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual([entry["taskIds"] for entry in root["batches"]], [["T001"], ["T002"]])
 
-    def test_plan_writer_rejects_backend_task_after_frontend_collection_started(self) -> None:
+    def test_lane_order_warns_at_task_level_and_blocks_at_batch_level(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             write_plan_state(workspace)
@@ -771,8 +779,21 @@ class BatchedPlanContractTest(unittest.TestCase):
             body.write_text(json.dumps(task("T003", deps=["T001"])), encoding="utf-8")
             added = writer("add-task", "--body-file", str(body))
 
+            # Task-level lane order is advisory; the batch chain still enforces it,
+            # because batch execution order is derived from batch position.
             self.assertNotEqual(added.returncode, 0)
-            self.assertIn("backend_task_after_frontend", added.stdout + added.stderr)
+            payload = json.loads(added.stdout)
+            self.assertEqual(
+                [error["reason"] for error in payload["errors"]],
+                ["backend_batch_after_frontend:B003"],
+            )
+            self.assertEqual(
+                [
+                    (warning["reason"], warning["severity"])
+                    for warning in payload["warnings"]
+                ],
+                [("backend_task_after_frontend", "warning")],
+            )
 
     def test_plan_writer_finalizes_only_after_complete_scenario_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -847,6 +868,111 @@ class BatchedPlanContractTest(unittest.TestCase):
 
             runtime_update = writer("set-status", "--task-id", "T002", "failed")
             self.assertEqual(runtime_update.returncode, 0, runtime_update.stdout + runtime_update.stderr)
+
+    def test_plan_writer_finalizes_with_deferred_scenarios_out_of_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "\n".join(
+                    [
+                        "## ADDED Requirements",
+                        "### Requirement REQ-001: capability",
+                        "#### Scenario SCN-001: happy path",
+                        "#### Scenario SCN-002: next round",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_plan_state(workspace)
+            write_scope(feature_dir, "full_stack")
+            _, partition_errors = write_partition(feature_dir, {
+                "includedScenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                "deferredScenarioRefs": ["specs/cap/spec.md#SCN-002"],
+            })
+            self.assertEqual(partition_errors, [])
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            body = Path(tmp) / "T001.json"
+            body.write_text(json.dumps(task("T001")), encoding="utf-8")
+            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+            self.assertEqual(
+                writer(
+                    "add-batch-validation-command",
+                    "--lane",
+                    "backend",
+                    "--command",
+                    f"{sys.executable} -m compileall -q hooks",
+                    "--kind",
+                    "compile",
+                ).returncode,
+                0,
+            )
+
+            finalized = writer("finalize-task-set")
+
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(root["taskSetStatus"], "finalized")
+            self.assertEqual([item["id"] for item in root["batches"]], ["B001"])
+
+    def test_plan_writer_still_requires_included_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "\n".join(
+                    [
+                        "## ADDED Requirements",
+                        "### Requirement REQ-001: capability",
+                        "#### Scenario SCN-001: happy path",
+                        "#### Scenario SCN-002: also this round",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            write_plan_state(workspace)
+            write_scope(feature_dir, "full_stack")
+            write_partition(feature_dir, {
+                "includedScenarioRefs": [
+                    "specs/cap/spec.md#SCN-001",
+                    "specs/cap/spec.md#SCN-002",
+                ],
+                "deferredScenarioRefs": [],
+            })
+
+            def writer(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(ROOT / "hooks" / "plan_writer.py"), *args, "--workspace", str(workspace), "--feature", "alpha"],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(writer("init").returncode, 0)
+            body = Path(tmp) / "T001.json"
+            body.write_text(json.dumps(task("T001")), encoding="utf-8")
+            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+
+            incomplete = writer("finalize-task-set")
+
+            self.assertNotEqual(incomplete.returncode, 0)
+            self.assertIn("missing_plan_scenario_coverage", incomplete.stdout + incomplete.stderr)
+            self.assertIn("SCN-002", incomplete.stdout + incomplete.stderr)
 
     def test_plan_writer_finalization_scans_all_spec_markdown_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1088,6 +1214,122 @@ class BatchRunnerContractTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("invalid choice: 'start-batch-task-validation'", result.stderr)
+
+class MonorepoWorkspaceTest(unittest.TestCase):
+    """A monorepo registers one workspace per sub-path, not one per git root."""
+
+    @staticmethod
+    def _monorepo(root: Path) -> Path:
+        repo = root / "ruoyi-vue-pro"
+        (repo / "yudao-ui" / "yudao-ui-admin-vue3").mkdir(parents=True)
+        for args in (
+            ("init", "-b", "main"),
+            ("config", "user.email", "test@example.com"),
+            ("config", "user.name", "Test"),
+        ):
+            subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+        return repo
+
+    def test_backend_and_frontend_subpaths_register_together(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._monorepo(Path(tmp))
+            frontend = repo / "yudao-ui" / "yudao-ui-admin-vue3"
+
+            contexts = _code_workspace_contexts([str(repo), str(frontend)])
+
+        self.assertEqual(
+            [(item["repo"], item["workspaceRoot"]) for item in contexts],
+            [
+                ("ruoyi-vue-pro", "."),
+                ("yudao-ui-admin-vue3", "yudao-ui/yudao-ui-admin-vue3"),
+            ],
+        )
+        self.assertEqual(
+            {item["repositoryId"] for item in contexts},
+            {"ruoyi-vue-pro"},
+        )
+
+    def test_lone_submodule_workspace_keeps_the_repository_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._monorepo(Path(tmp))
+            module = repo / "yudao-ui" / "yudao-ui-admin-vue3"
+
+            contexts = _code_workspace_contexts([str(module)])
+
+        self.assertEqual(
+            [(item["repo"], item["workspaceRoot"]) for item in contexts],
+            [("ruoyi-vue-pro", "yudao-ui/yudao-ui-admin-vue3")],
+        )
+
+    def test_repeating_the_same_workspace_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._monorepo(Path(tmp))
+
+            contexts = _code_workspace_contexts([str(repo), str(repo)])
+
+        self.assertEqual([item["repo"] for item in contexts], ["ruoyi-vue-pro"])
+
+    def test_two_paths_claiming_one_ref_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._monorepo(Path(tmp))
+            (repo / "packages" / "yudao-ui-admin-vue3").mkdir(parents=True)
+
+            with self.assertRaises(PlanWriterInputError) as ctx:
+                _code_workspace_contexts([
+                    str(repo / "yudao-ui" / "yudao-ui-admin-vue3"),
+                    str(repo / "packages" / "yudao-ui-admin-vue3"),
+                ])
+
+        self.assertEqual(ctx.exception.reason, "code_workspace_ref_conflict")
+
+    def test_each_lane_keeps_its_own_workspace_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._monorepo(Path(tmp))
+            frontend = repo / "yudao-ui" / "yudao-ui-admin-vue3"
+            contexts = _code_workspace_contexts([str(repo), str(frontend)])
+
+            backend_group = {"id": "T001", "workspaceRef": "ruoyi-vue-pro"}
+            frontend_group = {"id": "T002", "workspaceRef": "yudao-ui-admin-vue3"}
+
+            self.assertEqual(
+                _draft_task_workspace_roots(backend_group, contexts),
+                {"ruoyi-vue-pro": "."},
+            )
+            self.assertEqual(
+                _draft_task_workspace_roots(frontend_group, contexts),
+                {"yudao-ui-admin-vue3": "yudao-ui/yudao-ui-admin-vue3"},
+            )
+
+    def test_validation_command_cwd_still_cannot_leave_its_workspace(self) -> None:
+        workspace_roots = {"yudao-ui-admin-vue3": "yudao-ui/yudao-ui-admin-vue3"}
+        errors: list[str] = []
+
+        _validate_command_workspace_root(
+            errors,
+            {"repo": "yudao-ui-admin-vue3", "cwd": "yudao-module-promotion"},
+            context="T002.validationCommands[0]",
+            workspace_roots=workspace_roots,
+        )
+        self.assertEqual(
+            errors,
+            ["T002.validationCommands[0].cwd_outside_workspace_root:yudao-ui/yudao-ui-admin-vue3"],
+        )
+
+        inside: list[str] = []
+        _validate_command_workspace_root(
+            inside,
+            {"repo": "yudao-ui-admin-vue3", "cwd": "yudao-ui/yudao-ui-admin-vue3"},
+            context="T002.validationCommands[0]",
+            workspace_roots=workspace_roots,
+        )
+        self.assertEqual(inside, [])
+
 
 if __name__ == "__main__":
     unittest.main()

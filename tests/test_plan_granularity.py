@@ -34,6 +34,30 @@ def _task_with_scenarios(count: int) -> dict:
     }
 
 
+def _deferred_scenario_task(count: int) -> dict:
+    """A task whose grouping fields are valid but that carries no local validation."""
+    task = _task_with_scenarios(count)
+    scenario_ids = [f"SCN-{index:03d}" for index in range(1, count + 1)]
+    task["validationCommands"] = []
+    task["mergedScenarioRefs"] = task["specRefs"][1:]
+    task["splitRationale"] = (
+        f"{scenario_ids[0]}、{scenario_ids[2]}、{scenario_ids[-1]} 由同一外部系统回调返回，"
+        "共享同一验证闭环，本地无法独立验证。"
+    )
+    return task
+
+
+def _external_dependency_task(count: int) -> dict:
+    task = _deferred_scenario_task(count)
+    task["executionMode"] = "external_dependency"
+    task["externalDependency"] = {
+        "system": "activity-approval",
+        "owner": "platform-team",
+        "trackingRefs": ["design.md#D-001"],
+    }
+    return task
+
+
 def _reasons(task: dict) -> list[str]:
     return [item["reason"] for item in validate_plan_task_granularity_item(task, task_id="T001")]
 
@@ -203,6 +227,77 @@ class PlanGranularityTests(unittest.TestCase):
             task["specRefs"] = ["specs/capability/spec.md#REQ-001", f"specs/capability/spec.md#{anchor}"]
 
             self.assertIn("invalid_plan_task_scenario_reference", _reasons(task), anchor)
+
+
+class ScenarioReferenceDownstreamTests(unittest.TestCase):
+    """Evidence for the rule registry: what a non-expanded ref breaks downstream."""
+
+    def test_range_reference_creates_false_scenario_coverage(self) -> None:
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from hooks.plan_writer import _scenario_coverage
+
+        with tempfile.TemporaryDirectory() as temp:
+            feature_dir = Path(temp)
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            spec_dir.joinpath("spec.md").write_text(
+                "\n".join([
+                    "## ADDED Requirements",
+                    "### Requirement REQ-001: capability",
+                    "#### Scenario SCN-001: first",
+                    "#### Scenario SCN-002: second",
+                    "#### Scenario SCN-003: third",
+                ]),
+                encoding="utf-8",
+            )
+
+            expected, covered = _scenario_coverage(
+                feature_dir,
+                [{"id": "T001", "specRefs": ["specs/cap/spec.md#SCN-001~SCN-003"]}],
+            )
+
+        # One unexpanded ref silently marks two scenarios covered, so the coverage
+        # gate would pass for scenarios no task actually plans.
+        self.assertEqual(len(expected), 3)
+        self.assertEqual(
+            sorted(covered),
+            ["specs/cap/spec.md#SCN-001", "specs/cap/spec.md#SCN-003"],
+        )
+        self.assertEqual(
+            sorted(expected - covered),
+            ["specs/cap/spec.md#SCN-002"],
+        )
+
+
+class ExternalDependencyGranularityTests(unittest.TestCase):
+    def test_external_dependency_task_passes_without_local_validation(self) -> None:
+        for count in (6, 12):
+            with self.subTest(scenarios=count):
+                self.assertEqual(_reasons(_external_dependency_task(count)), [])
+
+    def test_code_task_without_local_validation_still_fails_matrix(self) -> None:
+        self.assertIn(
+            "invalid_plan_task_matrix_validation",
+            _reasons(_deferred_scenario_task(6)),
+        )
+
+    def test_external_dependency_task_still_obeys_hard_limits(self) -> None:
+        self.assertEqual(
+            _reasons(_external_dependency_task(13)),
+            ["oversized_plan_task_must_split"],
+        )
+
+    def test_external_dependency_task_still_obeys_split_rationale(self) -> None:
+        task = _external_dependency_task(6)
+        task.pop("splitRationale")
+
+        self.assertIn("missing_plan_task_split_rationale", _reasons(task))
 
 
 if __name__ == "__main__":

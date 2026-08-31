@@ -26,6 +26,7 @@ from hooks.evidence_store import (  # noqa: E402
     validate_record,
     write_index,
 )
+from hooks.plan_granularity import validate_plan_task_granularity_item  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
     validate_plan_data,
@@ -381,6 +382,106 @@ class PlanJsonTest(unittest.TestCase):
         self.assertFalse(
             any(error.startswith("T001.validationTestPlan") for error in errors),
             errors,
+        )
+
+    def test_hard_caps_have_no_downstream_contract_behind_them(self) -> None:
+        """Evidence for the rule registry: over-cap tasks are downstream-valid.
+
+        The granularity hard caps are the only thing rejecting these tasks; the
+        task contract every later stage reads accepts them unchanged.
+        """
+        for dimension, over_cap in (("scenarios", 13), ("apis", 4)):
+            with self.subTest(dimension=dimension):
+                plan = valid_plan(status="todo", evidence_ids=[])
+                task = plan["tasks"][0]
+                task["specRefs"] = [
+                    "specs/capability/spec.md#REQ-001",
+                    "specs/capability/spec.md#SCN-001",
+                ]
+                if dimension == "scenarios":
+                    refs = [
+                        f"specs/capability/spec.md#SCN-{index:03d}"
+                        for index in range(1, over_cap + 1)
+                    ]
+                    criteria = [
+                        {
+                            "id": f"AC-T001-{index:02d}",
+                            "text": "the behavior is observable",
+                            "scenarioRefs": [refs[index - 1]],
+                        }
+                        for index in range(1, over_cap + 1)
+                    ]
+                    task["specRefs"] = ["specs/capability/spec.md#REQ-001", *refs]
+                    task["acceptanceCriteria"] = criteria
+                    task["validationCommands"][0]["covers"] = [
+                        item["id"] for item in criteria
+                    ]
+                else:
+                    task["apiIds"] = [f"API-{index:03d}" for index in range(1, over_cap + 1)]
+
+                self.assertEqual(
+                    validate_test_tasks(plan, require_initial_status=True),
+                    [],
+                    f"{dimension} over the hard cap must stay downstream-valid",
+                )
+                self.assertEqual(
+                    [
+                        item["reason"]
+                        for item in validate_plan_task_granularity_item(task, task_id="T001")
+                    ],
+                    ["oversized_plan_task_must_split"],
+                )
+
+    def test_external_dependency_scenario_matrix_has_a_satisfiable_form(self) -> None:
+        """The collection and granularity rules must not deadlock each other."""
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        scenario_refs = [f"specs/capability/spec.md#SCN-{index:03d}" for index in range(1, 7)]
+        task.update({
+            "executionMode": "external_dependency",
+            "externalDependency": {
+                "system": "external-system",
+                "owner": "external-team",
+                "trackingRefs": ["design.md#D-001"],
+            },
+            "completionPolicy": "external_dependency_recorded",
+            "validationCommands": [],
+            "specRefs": ["specs/capability/spec.md#REQ-001", *scenario_refs],
+            "mergedScenarioRefs": scenario_refs,
+            "splitRationale": (
+                "SCN-001、SCN-003、SCN-006 由同一外部系统回调返回，"
+                "共享同一验证闭环，本地无法独立验证。"
+            ),
+            "acceptanceCriteria": [
+                {
+                    "id": f"AC-T001-{index:02d}",
+                    "text": "the behavior is observable",
+                    "scenarioRefs": [scenario_refs[index - 1]],
+                }
+                for index in range(1, 7)
+            ],
+        })
+
+        self.assertEqual(validate_test_tasks(plan, require_initial_status=True), [])
+        self.assertEqual(validate_plan_task_granularity_item(task, task_id="T001"), [])
+
+    def test_external_dependency_local_validation_commands_still_forbidden(self) -> None:
+        plan = valid_plan(status="todo", evidence_ids=[])
+        task = plan["tasks"][0]
+        task.update({
+            "executionMode": "external_dependency",
+            "externalDependency": {
+                "system": "external-system",
+                "owner": "external-team",
+                "trackingRefs": ["design.md#D-001"],
+            },
+            "completionPolicy": "external_dependency_recorded",
+            "validationTestPlan": [],
+        })
+
+        self.assertIn(
+            "T001.external_dependency_validationCommands_forbidden",
+            validate_test_tasks(plan),
         )
 
     def test_defer_to_test_stages_validation_test_plan_schema_is_strict(self) -> None:
