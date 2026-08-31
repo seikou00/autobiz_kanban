@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.12.08311
+version: v1.12.08312
 ---
 
 ## 缺失产物处理
@@ -128,21 +128,14 @@ capability 的变更分类写进 `## Capabilities` 节：
 - `MODIFIED`：已有能力仍然存在，但本轮改变或扩展其外部可观察行为，包括条件、输出、校验、权限、错误码、状态流、异步时机、数据口径、UI 状态或交互分支。给已有流程增加筛选项、字段、按钮、状态、限制条件或兼容逻辑，默认是 `MODIFIED`。
 - `REMOVED`：已有能力、入口、分支或业务结果在本轮后不再支持、不可访问或不再生效；必须说明移除原因、迁移/兼容方式，以及旧入口被触发时的期望行为。
 - 同一用户目标同时包含新增独立能力和修改既有能力时，拆成不同 capability 或同一 spec 内不同 Requirement。
-- 无法判断是否已有行为时，先搜索既有 specs、代码入口、接口、菜单、配置和测试；仍不确定则回到用户确认。
+- 分类前用 `git ls-files` / `git grep` 逐项搜索既有 specs 与代码入口：已有相同外部可观察能力归 `Modified`，没有归 `New`；无法判断时回到用户确认。proposal 只写分类结果。
 - 本轮某个分组无 capability 时该组写 `无`。
-
-`New Capabilities` 每一项下必须写一行 `- **Existing:** <值>`，值只有两种合法形态：
-
-- `none`：已用 `git ls-files` / `git grep` 搜索过，不存在承担该能力的外部可观察入口。
-- `<相对路径>#<符号>`：找到了同名或同职责的存量入口，例如 `src/main/java/.../DcpaController.java#queryProtocolStatus`。写了路径就把该项移到 `Modified Capabilities`，其 spec 的 Requirement 相应写进 `## MODIFIED Requirements`。
-
-近似说法（`无相关代码`、`暂未发现`）不在闭集内。
 
 必须包含：
 
 - **Why**：为什么要做。
 - **What Changes**：用户可见或系统外部可观察变化。
-- **Capabilities**：按 New / Modified / Removed 分组列出本轮能力，名称使用 kebab-case；New 组每项附 `**Existing:**` 断言行。
+- **Capabilities**：按 New / Modified / Removed 分组列出本轮能力，名称使用 kebab-case。
 - **Impact**：影响模块、接口、数据、权限、配置、测试或运维。
 - **Out of Scope**：本轮明确不做的内容。
 - **Decision Log**：本阶段定下的关键取舍，每条一个 `### DEC-NNN`，写决定/为什么/否决/约束。`design.md` 的规格追踪表按 `DEC-NNN` 引用本节，是 specs 阶段决策传到 plan 的唯一通道。记录门槛三者取一，且必须是真实决策不是复述需求：① 结果偏离「直接读代码/需求会得到的显然做法」；② 有真实备选并择一；③ 改变外部可观察行为的边界或口径。显然的、无备选的、需求直接决定的不记；无满足门槛的决策时本节正文只写「无」。

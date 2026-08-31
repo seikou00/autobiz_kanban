@@ -257,28 +257,6 @@ _SPECS: Dict[str, Repair] = {
             "若该能力实际是在改存量，改 proposal.md 把它挪到 Modified / Removed 组。"
         ),
     ),
-    "new_capability_existing_evidence_missing": Repair(
-        artifact="proposal.md",
-        problem="proposal.md 的 New Capabilities 中 capability {target} 没有写 `**Existing:**` 断言",
-        action=(
-            "在 proposal.md `### New Capabilities` 下 {target} 那一项里补一行 "
-            "`- **Existing:** none`（确认代码库中不存在该外部可观察能力），"
-            "或 `- **Existing:** <相对路径>#<符号>`（找到了同名/同职责的存量入口）。"
-            "写路径就说明它不是新增，同时把该项挪到 Modified 组。"
-            "先用 `git ls-files` / `git grep` 实际搜过再写，不要凭印象填 none。"
-        ),
-    ),
-    "new_capability_declares_existing_code": Repair(
-        artifact="proposal.md",
-        problem="capability {target} 列在 New 组，却自己声明存量代码 {existing}",
-        action=(
-            "二选一：确认 {existing} 就是该能力的存量入口，则把 {target} 从 "
-            "`### New Capabilities` 挪到 `### Modified Capabilities`，"
-            "并把 specs/{target}/spec.md 的 Requirement 从「## ADDED Requirements」"
-            "移到「## MODIFIED Requirements」、补写修改后的完整行为；"
-            "或确认 {existing} 与该能力无关，则把这一行改回 `**Existing:** none`。"
-        ),
-    ),
     "missing_specs_review": Repair(
         artifact="SPECS_REVIEW.md",
         problem="SPECS_REVIEW.md 不存在或为空——本阶段回检没有落盘",

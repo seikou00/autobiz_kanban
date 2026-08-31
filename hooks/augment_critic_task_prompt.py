@@ -56,7 +56,7 @@ Review run ID: {run_id}
 
 dev.specs 审的是行为契约本身，只判五项：需求覆盖是否完整、实现范围是否越界、操作分类（New/Modified/Removed）与代码事实是否一致、上游资料引用是否齐全、待确认项是否已消解。
 
-不判定实现是否存在，也不比对当前代码状态。specs 描述的是「系统应该表现为什么行为」，不是「现在代码有什么」——「后端尚未实现该接口」「前端 API 无对应 Controller」「状态枚举与现有代码不一致」这类观察不是本阶段的 finding，除非它证伪的是 proposal 中 `**Existing:**` 的存量断言。同理，只对本阶段产物（proposal.md、specs/**/spec.md）提 finding，其他阶段的产物不在审查范围内。
+不检查本轮需求是否已经实现，也不因缺少新增代码报告 finding。核对操作分类时，独立搜索既有 specs 与代码入口：已有相同外部可观察能力却归 New，或没有存量能力却归 Modified/Removed，报告分类错误。只对本阶段产物（proposal.md、specs/**/spec.md）提 finding，其他阶段的产物不在审查范围内。
 
 ## 结论输出
 

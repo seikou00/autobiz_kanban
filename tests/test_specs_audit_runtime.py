@@ -49,7 +49,6 @@ PROPOSAL = """# Proposal: 导出
 ### New Capabilities
 
 - `order-export`: 导出
-  - **Existing:** none
 
 ### Modified Capabilities
 

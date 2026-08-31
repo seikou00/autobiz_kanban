@@ -18,7 +18,6 @@
 ### New Capabilities
 
 - `[capability-name]`: [能力说明，对应 specs/<capability-name>/spec.md]
-  - **Existing:** [none 或 现有入口的 `相对路径#符号`]
 
 ### Modified Capabilities
 

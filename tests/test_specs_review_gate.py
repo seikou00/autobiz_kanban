@@ -211,7 +211,7 @@ class SpecsReviewWiringTest(unittest.TestCase):
             "specs/**/*.md",
             "IMPLEMENTATION_SCOPE.json",
             "source-context.json",
-            "**Existing:**",
+            "现有 specs 与源码",
         ):
             self.assertIn(material, output)
 

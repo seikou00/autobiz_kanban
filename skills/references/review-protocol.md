@@ -27,7 +27,7 @@
 | `specs/**/*.md` | 全部行为契约，逐 REQ/SCN 核对 | 缺失即阻断 |
 | `IMPLEMENTATION_SCOPE.json` | 本轮实现范围 | 按兼容规则视为 `full_stack`，在结论中注明 |
 | `source-context.json` 与 `sources/SRC-NNN/` | 外部资料要求与快照 | 无外部资料时跳过 |
-| `**Existing:**` 断言指向的源码路径 | 核对 New 组是否真的没有存量入口 | 断言为 `none` 时改为自行搜索该能力的入口 |
+| 现有 specs 与源码 | 独立核对 capability 分类 | 无法读取代码库时注明无法核对 |
 
 ### 必查项
 
@@ -37,11 +37,11 @@
 |--------|--------|----------|
 | 需求覆盖 | PRD 每个功能点是否都有 REQ/SCN 承接，有无遗漏或与 PRD 矛盾的行为 | 功能点与 REQ/SCN 的对应，或缺口所在 |
 | 实现范围符合性 | 逐条 Scenario 是否落在 `IMPLEMENTATION_SCOPE.json` 声明的范围内。`backend_only` 下描述页面布局、点击、展开折叠、下拉、输入框、前端路由跳转的 Scenario 都是越界 | 越界的 `file:SCN-NNN` 与其表述 |
-| 操作分类与代码事实 | `New Capabilities` 每项的 `**Existing:** none` 是否属实——实际去代码库搜该能力的入口。找得到就是分类错，应为 Modified | 搜到的 `路径#符号`，或搜索方式与无结果 |
+| 操作分类与代码事实 | 逐项搜索既有 specs 与代码入口；已有相同外部可观察能力必须归 Modified/Removed，不存在才归 New | 搜到的 `路径#符号`，或搜索方式与无结果 |
 | 上游资料引用 | 每个 `SRC-NNN` 是否被 spec 保留，`targets` 含 `spec` 的要求是否落进 Requirement/Scenario | SRC 编号与落位的 REQ/SCN |
 | 待确认项消解 | `Open Questions` 各行是否真由用户裁定，有无自行写成 `已确认`，有无 TBD/待补充/「以实际文档为准」残留 | 行 ID 与其消解依据 |
 
-预检已经机械判定的东西不在这里重复：ID 格式与唯一性、章节齐全、能力双向对应、`**Existing:**` 字段是否存在，都由「产物契约预检」负责。本节查的是那些字段说的**是不是真的**。
+预检已经机械判定的东西不在这里重复：ID 格式与唯一性、章节齐全、能力双向对应由「产物契约预检」负责。本节独立核对分类是否符合代码事实。
 
 <!-- section: 前提与角色 | stages: dev.plan -->
 ## 前提与角色
