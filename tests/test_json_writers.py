@@ -746,6 +746,44 @@ class JsonWriterTests(unittest.TestCase):
             self.assertNotIn("touches", json.dumps(root, ensure_ascii=False))
             self.assertNotIn("touches", json.dumps(batch, ensure_ascii=False))
 
+    def test_task_group_preflight_rejects_shared_script_multi_owner(self) -> None:
+        """A shared SQL file must be owned before Batch waves are projected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir = _workspace(Path(tmp))
+            _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
+            first = _plan_task_body()
+            second = _plan_task_body()
+            second.update({
+                "id": "T002",
+                "title": "second observable behavior",
+                "specRefs": [
+                    "specs/cap/spec.md#REQ-001",
+                    "specs/cap/spec.md#SCN-002",
+                ],
+            })
+            for task in (first, second):
+                task["workspaceRef"] = "RouYi"
+            group_file = _write_task_groups(Path(tmp) / "task-groups.json", [first, second])
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            group_data["groups"][0]["touches"] = ["RouYi:sql/marketing.sql"]
+            # Both historical spellings must normalize to one physical path.
+            group_data["groups"][1].update({
+                "executionStage": "integration",
+                "touches": ["RouYi/sql/marketing.sql"],
+            })
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+
+            result = _run(
+                "plan_writer.py", "preflight-task-groups", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("shared_write_path_requires_single_owner", result.stdout)
+            self.assertIn("taskIds=T001,T002", result.stdout)
+            self.assertIn("前置 owner Task", result.stdout)
+
     def test_plan_writer_does_not_add_parallel_touch_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir = _workspace(Path(tmp))

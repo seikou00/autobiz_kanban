@@ -1,5 +1,6 @@
 {
   "featureId": "[feature]",
+  "writeOwnershipRule": "同一 workspaceRef 下每个 touches 路径只能由一个自动 Batch 拥有；共享 SQL、路由或全局配置由前置 owner group 一次性修改，消费者只用 deps 依赖它。",
   "groups": [
     {
       "id": "T001",

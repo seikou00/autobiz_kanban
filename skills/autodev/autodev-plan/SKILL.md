@@ -289,6 +289,8 @@ python "${pluginPath}/hooks/plan_writer.py" add-task-contract
 
 writer 自动分组，调用方不指定 batch。`executionLane` 由 writer 根据 `uiRequired` 自动推导：`false=backend`、`true=frontend`，调用方不得自行维护该字段。`task-groups.json` 必须按 DAG 拓扑序排列全部 backend group，再排列全部 frontend group；frontend group 可以依赖更早的 backend group，backend group 不得依赖 frontend group。writer 以第一个 `specRefs` 中 `#` 前的文件路径作为主 capability；只有与紧邻前一批的主 capability 和 execution lane 都相同且该批少于 5 个任务时才合批，否则创建下一 `Bxxx`。因此即使最后一个 backend batch 未满，首个 frontend task 也必须新建 batch。不得伪造 batch ID，也不得通过调整 `specRefs` 顺序伪造分组结果。
 
+**共享写集所有权（硬约束）**：`touches` 是物理写入文件的 owner 声明；同一 `workspaceRef` 下一个路径不得跨多个自动 Batch 声明，`scope.paths` 与 `expectedFiles` 也必须保持这一规则。一个 Batch 内的 TASK 由同一队列顺序执行，但共享 SQL、路由或全局配置仍应优先收敛为该 Batch 的一个前置 owner Task。不得让多个 capability Batch 都写“统一脚本末尾追加”、路由注册表、协议文件或全局配置，再期待 scheduler 自动并行。若多个能力需要同一共享脚本，先生成一个可独立验证的前置 owner Task（数据库/全局配置通常标 `executionStage=global`），让它一次性完成该文件的所有 DDL/seed/配置改动和对应验证；消费者只通过 `deps` 依赖 owner，且不得再在 `touches`、详情路径、预期文件或实现要点中声明修改该文件。writer 会在分组预检、Draft 预检和正式 Bundle 校验中拒绝跨 Batch 的多 owner 写集。
+
 最终候选分组表完成后，先运行只读分组预检。`task-groups.json.uiRequiredExample` / `add-task-contract.taskGroupUiRequiredExample` 是 `uiRequired:true` 的完整分组示例，`task-groups.json.matrixExceptionExample` / `add-task-contract.taskGroupMatrixExceptionExample` 是 6-12 个 SCN 共享同一验证闭环时的分组例外示例；两者都只用于指导，不是 `groups[]` 的实际成员。该命令只校验拆分所需的完整路径级 `specRefs`、SCN/API/Page/UIX/VIS/route、DAG/lane 顺序、`mergedScenarioRefs`、`splitRationale`、`validationBoundary` 和完整 Scenario 覆盖，不要求 goal、scope、AC、decisionIds 或完整 validation command：
 
 ```bash
@@ -322,7 +324,7 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${fe
 python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
-正式 Bundle 发布后，scheduler 会按 `executionStage` 和实际写集生成安全波次。`parallel` 阶段只有同仓库写集不重叠的 Batch 才进入同一波；路径相同或父子目录重叠、写集未知的 Batch 会自动串行。`proto`、`global` 和 `integration` 阶段按单 Batch 串行收口，分别用于协议桩、数据库/全局配置和共享入口文件。候选分组中的 `touches` 是 task-planner 的文件级隔离输入，writer 会把它归一化到最终 `scope.paths`，不会把 `touches` 写入正式计划；无法确认的写集必须保守串行，最终仍应补充真实 `scope.paths` 或 `expectedFiles`。
+正式 Bundle 发布后，scheduler 会按 `executionStage` 和实际写集生成安全波次。`parallel` 阶段只有同仓库写集不重叠的 Batch 才进入同一波；路径相同或父子目录重叠、写集未知的 Batch 会自动串行。`proto`、`global` 和 `integration` 阶段按单 Batch 串行收口，分别用于协议桩、数据库/全局配置和共享入口文件。候选分组中的 `touches` 是 task-planner 的文件级隔离输入，writer 会把它归一化到最终 `scope.paths`，不会把 `touches` 写入正式计划；无法确认的写集必须保守串行，最终仍应补充真实 `scope.paths` 或 `expectedFiles`。共享文件必须在这里已经收敛到唯一 owner，而不是依赖这一层的保守串行兜底。
 
 合并冲突不得通过丢弃一侧改动、`--no-verify`、`ours/theirs` 或跳过提交绕过。合并器会保留冲突 Batch 的插件原生 Worktree，启动单个集成 Agent 在该 Worktree 内对当前主分支执行语义 rebase，逐文件保留双方有效改动并运行 Batch 验证；只有 `resolve` 校验出 clean、无冲突且基于最新主分支的提交后，才会再次执行真实 merge 并释放下游依赖。解决失败则保持 `needs_resolution`，禁止标记完成。
 

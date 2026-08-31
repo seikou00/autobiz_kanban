@@ -24,6 +24,7 @@ from hooks.plan_json import (  # noqa: E402
     load_plan_bundle,
     task_set_digest,
     validate_plan_data,
+    validate_plan_bundle_data,
     write_plan_json,
 )
 
@@ -230,6 +231,29 @@ def write_plan_state(workspace: Path) -> None:
 
 
 class BatchedPlanContractTest(unittest.TestCase):
+    def test_bundle_rejects_shared_write_path_across_tasks(self) -> None:
+        first = task("T001")
+        second = task("T002")
+        first["scope"]["paths"] = ["sql/marketing.sql"]
+        second["expectedFiles"] = ["sql/marketing.sql"]
+        root = root_plan(batches=[
+            batch_entry("B001", ["T001"]),
+            batch_entry("B002", ["T002"]),
+        ])
+
+        errors = validate_plan_bundle_data(
+            root,
+            {
+                "B001": batch_plan("B001", [first]),
+                "B002": batch_plan("B002", [second]),
+            },
+        )
+
+        self.assertIn(
+            "shared_write_path_requires_single_owner:workspace=default:path=sql/marketing.sql:taskIds=T001,T002",
+            errors,
+        )
+
     def test_load_plan_bundle_rejects_task_outside_implementation_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             feature_dir = Path(tmp) / "feature"

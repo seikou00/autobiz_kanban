@@ -30,6 +30,7 @@ from hooks.validation_policy import (
     maven_test_selectors,
     task_validation_kinds_for_lane,
 )
+from hooks.plan_write_ownership import write_ownership_error_codes
 
 
 TASK_ID_RE = re.compile(r"^T\d{3}$")
@@ -2009,6 +2010,14 @@ def _bundle_consistency_errors(
     known_task_ids = set(task_batches)
     batch_order = {str(entry.get("id")): index for index, entry in enumerate(entries)}
     task_by_id = {str(item.get("id")): item for item in all_tasks}
+    # scope.paths/expectedFiles are the scheduler's physical write set.  More
+    # than one Batch claiming a file produces a pseudo-parallel Plan: the DAG
+    # looks concurrent, but conservative scheduling must serialize it.  Reject
+    # that shape at Plan time so a single owner Batch can be introduced instead.
+    errors.extend(write_ownership_error_codes(
+        all_tasks,
+        ownership_scope_by_task=task_batches,
+    ))
     deps_by_task: dict[str, list[str]] = {}
     frontend_batch_seen = False
     for entry in entries:

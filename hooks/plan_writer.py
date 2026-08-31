@@ -75,6 +75,7 @@ from hooks.plan_granularity import (  # noqa: E402
     validate_plan_task_granularity_item,
     validate_plan_task_grouping_item,
 )
+from hooks.plan_write_ownership import write_ownership_violations  # noqa: E402
 from hooks.repository_snapshot import (  # noqa: E402
     RepositorySnapshotError,
     resolve_git_root,
@@ -913,6 +914,35 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
                 "repairSuggestion": f"当前实现范围为 frontend_only，但任务 {task_id} 标记为后端任务（uiRequired=false）。请将该任务的 uiRequired 改为 true，或修改 scope.md 中的实现范围"
             })
         errors.extend(validate_plan_task_grouping_item(group, task_id=task_id))
+    # ``touches`` is the candidate group's ownership declaration.  Validate it
+    # before a Draft exists, otherwise a common SQL/config file only surfaces
+    # later as a surprising sequence of single-Batch waves.
+    group_tasks = [
+        {
+            "id": group.get("id"),
+            "executionMode": group.get("executionMode", "code"),
+            "executionStage": group.get("executionStage", "parallel"),
+            "workspaceRef": group.get("workspaceRef"),
+            "scope": {"paths": group.get("touches", [])},
+            "expectedFiles": [],
+        }
+        for group in _task_groups(data)
+    ]
+    group_scope_data = {
+        "featureId": data.get("featureId"),
+        "tasks": copy.deepcopy(group_tasks),
+    }
+    _, projected_group_batches = _project_batches(group_scope_data)
+    group_scopes = {
+        str(task.get("id")): batch_id
+        for batch_id, batch in projected_group_batches.items()
+        for task in batch.get("tasks", [])
+        if isinstance(task, dict) and isinstance(task.get("id"), str)
+    }
+    errors.extend(write_ownership_violations(
+        group_tasks,
+        ownership_scope_by_task=group_scopes,
+    ))
     if errors:
         return errors
     design_contract, design_errors = load_design_contract(feature_dir)
@@ -2768,6 +2798,19 @@ def _task_set_preflight_errors(
             design_contract=design_contract,
         ))
     errors.extend(validate_plan_design_coverage(design_contract, _tasks(data)))
+    # A task detail may add scope.paths/expectedFiles beyond its group-owned
+    # touches.  Recheck the final write sets before projecting Batches.
+    _, projected_batches = _project_batches(copy.deepcopy(data))
+    projected_scopes = {
+        str(task.get("id")): batch_id
+        for batch_id, batch in projected_batches.items()
+        for task in batch.get("tasks", [])
+        if isinstance(task, dict) and isinstance(task.get("id"), str)
+    }
+    errors.extend(write_ownership_violations(
+        _tasks(data),
+        ownership_scope_by_task=projected_scopes,
+    ))
     errors.extend(_task_set_validation_errors(data))
     errors.extend(_code_workspace_preflight_errors(data, code_workspaces))
     if not errors:
