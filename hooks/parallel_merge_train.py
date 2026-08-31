@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.conflict_types import CandidateStatus, ConflictContext
-from hooks.conflict_resolution_agent import ConflictAnalyzer, ModelBasedResolver, AutoMergeStrategy
+from hooks.conflict_resolution_agent import ModelBasedResolver
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_batch_stage import complete_stage, fail_stage, gate_batch, reset_validation_batch, start_stage
@@ -88,6 +88,68 @@ def _record_key(repository_ref: str, wave: int) -> str:
 def _record(manifest: dict[str, Any], repository_ref: str, wave: int) -> dict[str, Any] | None:
     value = manifest.get("mergeTrains", {}).get(_record_key(repository_ref, wave))
     return value if isinstance(value, dict) else None
+
+
+def _conflict_context_from_record(
+    record: dict[str, Any], repository_ref: str, wave: int
+) -> tuple[ConflictContext | None, str | None]:
+    """Safely restore the JSON conflict context kept on a merge-train record.
+
+    The context is persisted so a later CLI invocation can resolve a conflict,
+    but it must remain bound to the selected merge-train record. Reject a
+    malformed or mismatched context before handing its worktree path to a
+    resolver.
+    """
+    raw = record.get("conflictContext")
+    if not isinstance(raw, dict):
+        return None, "no_conflict_context_in_record"
+
+    required_strings = ("baseSha", "candidateWorktree", "repositoryRef")
+    for field in required_strings:
+        if not isinstance(raw.get(field), str) or not raw[field].strip():
+            return None, f"invalid_conflict_context:{field}"
+
+    batch_ids = raw.get("batchIds")
+    if not isinstance(batch_ids, list) or not batch_ids or not all(isinstance(item, str) and item for item in batch_ids):
+        return None, "invalid_conflict_context:batchIds"
+    conflicted_files = raw.get("conflictedFiles")
+    if not isinstance(conflicted_files, list) or not conflicted_files or not all(
+        isinstance(item, str) and item for item in conflicted_files
+    ):
+        return None, "invalid_conflict_context:conflictedFiles"
+    conflict_markers = raw.get("conflictMarkers", {})
+    if not isinstance(conflict_markers, dict) or not all(
+        isinstance(path, str) and isinstance(content, str) for path, content in conflict_markers.items()
+    ):
+        return None, "invalid_conflict_context:conflictMarkers"
+
+    context_wave = raw.get("wave")
+    attempts = raw.get("attempts", 0)
+    if not isinstance(context_wave, int) or isinstance(context_wave, bool) or context_wave != wave:
+        return None, "invalid_conflict_context:wave"
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+        return None, "invalid_conflict_context:attempts"
+    if raw["repositoryRef"] != repository_ref:
+        return None, "invalid_conflict_context:repositoryRef"
+
+    record_worktree = record.get("worktreePath")
+    if not isinstance(record_worktree, str) or raw["candidateWorktree"] != record_worktree:
+        return None, "invalid_conflict_context:candidateWorktree"
+    error_message = raw.get("errorMessage", "")
+    if not isinstance(error_message, str):
+        return None, "invalid_conflict_context:errorMessage"
+
+    return ConflictContext(
+        base_sha=raw["baseSha"],
+        batch_ids=batch_ids,
+        conflicted_files=conflicted_files,
+        candidate_worktree=raw["candidateWorktree"],
+        conflict_markers=conflict_markers,
+        repository_ref=raw["repositoryRef"],
+        wave=context_wave,
+        attempts=attempts,
+        error_message=error_message,
+    ), None
 
 
 def _candidate_paths(workspace: Path, feature: str, run_id: str, repository_ref: str, wave: int) -> tuple[Path, str]:
@@ -514,22 +576,13 @@ def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
         if record.get("status") != CandidateStatus.CANDIDATE_CONFLICTED.value:
             return {"success": False, "error": f"candidate_not_in_conflicted_state:{record.get('status')}"}
 
-        conflict_context_data = record.get("conflictContext")
-        if not conflict_context_data:
-            return {"success": False, "error": "no_conflict_context_in_record"}
-
-        # Reconstruct ConflictContext
-        conflict_ctx = ConflictContext(
-            base_sha=conflict_context_data["baseSha"],
-            batch_ids=conflict_context_data["batchIds"],
-            conflicted_files=conflict_context_data["conflictedFiles"],
-            candidate_worktree=conflict_context_data["candidateWorktree"],
-            conflict_markers=conflict_context_data.get("conflictMarkers", {}),
-            repository_ref=conflict_context_data["repositoryRef"],
-            wave=conflict_context_data["wave"],
-            attempts=conflict_context_data.get("attempts", 0),
-            error_message=conflict_context_data.get("errorMessage"),
-        )
+        conflict_ctx, context_error = _conflict_context_from_record(record, repository_ref, wave)
+        if context_error:
+            return {"success": False, "error": context_error}
+        assert conflict_ctx is not None
+        # The helper above guarantees the persisted shape; retain the raw map
+        # only to update its attempts count when manual intervention is needed.
+        conflict_context_data = record["conflictContext"]
 
         # Load runtime config for resolution settings
         runtime_config = manifest.get("runtimeConfig", {})
@@ -551,7 +604,10 @@ def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
 
         # Attempt resolution based on configuration
         if enable_auto_resolve:
-            resolver = ModelBasedResolver(max_attempts=max_attempts)
+            resolver = ModelBasedResolver(
+                max_attempts=max_attempts,
+                enable_auto_commit=enable_auto_resolve,
+            )
             resolution_result = resolver.resolve(conflict_ctx)
 
             if resolution_result.status == "resolved":
@@ -565,12 +621,21 @@ def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
                     "candidateSha": candidate_sha,
                     "resolvedAt": utc_now(),
                     "resolutionAttempts": conflict_ctx.attempts,
-                    "resolutionMethod": resolution_result.method,
+                    "resolutionMethod": resolution_result.strategy_used,
                 }
+                updated_record.pop("conflictContext", None)
+                manifest["status"] = "running"
                 manifest["mergeTrains"][_record_key(repository_ref, wave)] = updated_record
                 save_manifest(workspace, feature, run_id, manifest)
-                append_event(workspace, feature, run_id, "merge_train_conflict_resolved",
-                           repositoryRef=repository_ref, wave=wave, method=resolution_result.method)
+                append_event(
+                    workspace,
+                    feature,
+                    run_id,
+                    "merge_train_conflict_resolved",
+                    repositoryRef=repository_ref,
+                    wave=wave,
+                    method=resolution_result.strategy_used,
+                )
 
                 return {
                     "success": True,
@@ -578,14 +643,18 @@ def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
                     "candidateSha": candidate_sha,
                     "repositoryRef": repository_ref,
                     "wave": wave,
-                    "resolutionMethod": resolution_result.method,
+                    "resolutionMethod": resolution_result.strategy_used,
                     "attempts": conflict_ctx.attempts,
                 }
             elif resolution_result.status == "manual_required":
-                # Update attempts but keep conflicted status
+                # Persist the terminal manual-resolution state.  A future
+                # scheduler resume must not silently recreate this candidate
+                # and discard the user's worktree edits.
                 conflict_context_data["attempts"] = conflict_ctx.attempts
                 record["conflictContext"] = conflict_context_data
+                record["status"] = CandidateStatus.NEEDS_RESOLUTION.value
                 manifest["mergeTrains"][_record_key(repository_ref, wave)] = record
+                manifest["status"] = CandidateStatus.NEEDS_RESOLUTION.value
                 save_manifest(workspace, feature, run_id, manifest)
 
                 return {
@@ -598,7 +667,13 @@ def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
                     "worktreePath": conflict_ctx.candidate_worktree,
                 }
         else:
-            # Auto-resolve disabled, return manual required
+            # Auto-resolve disabled, persist a manual-resolution state.
+            conflict_context_data["attempts"] = conflict_ctx.attempts
+            record["conflictContext"] = conflict_context_data
+            record["status"] = CandidateStatus.NEEDS_RESOLUTION.value
+            manifest["mergeTrains"][_record_key(repository_ref, wave)] = record
+            manifest["status"] = CandidateStatus.NEEDS_RESOLUTION.value
+            save_manifest(workspace, feature, run_id, manifest)
             return {
                 "success": False,
                 "status": CandidateStatus.NEEDS_RESOLUTION.value,
@@ -607,6 +682,73 @@ def resolve_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
                 "conflictedFiles": conflict_ctx.conflicted_files,
                 "worktreePath": conflict_ctx.candidate_worktree,
             }
+
+
+def resume_candidate(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
+    """Mark a manually committed candidate as ready for normal verification.
+
+    This command deliberately accepts only a clean worktree with no unmerged
+    entries and no in-progress merge. Besides conflict-resolution states it
+    can explicitly recover a failed candidate whose worktree still exists
+    (for example, after a human fixes a failed validation). It never creates a
+    candidate or rewrites the user's resolution commit.
+    """
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        record = _record(manifest, repository_ref, wave)
+        if not record:
+            return {"success": False, "error": f"no_candidate_record:{repository_ref}:{wave}"}
+        if record.get("status") not in {
+            CandidateStatus.CANDIDATE_CONFLICTED.value,
+            CandidateStatus.NEEDS_RESOLUTION.value,
+            CandidateStatus.FAILED.value,
+        }:
+            return {"success": False, "error": f"candidate_not_resumable:{record.get('status')}"}
+
+        path = Path(str(record.get("worktreePath") or ""))
+        if not path.is_dir():
+            return {"success": False, "error": "candidate_worktree_missing"}
+        unresolved = _git(path, "diff", "--name-only", "--diff-filter=U")
+        if unresolved.returncode != 0:
+            return {"success": False, "error": "candidate_unmerged_check_failed"}
+        if unresolved.stdout.strip():
+            return {"success": False, "error": "candidate_unmerged_files:" + unresolved.stdout.strip()}
+        merge_head = _git(path, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+        if merge_head.returncode == 0:
+            return {"success": False, "error": "candidate_merge_commit_required"}
+        status = git_status_porcelain(path)
+        if status.returncode != 0:
+            return {"success": False, "error": "candidate_status_unavailable"}
+        if status.stdout.strip():
+            return {"success": False, "error": "candidate_worktree_dirty"}
+
+        candidate_sha = _head(path)
+        record.update({
+            "status": CandidateStatus.BUILT.value,
+            "candidateSha": candidate_sha,
+            "resolvedAt": utc_now(),
+            "resolutionMethod": "manual",
+        })
+        manifest.setdefault("mergeTrains", {})[_record_key(repository_ref, wave)] = record
+        manifest["status"] = "running"
+        save_manifest(workspace, feature, run_id, manifest)
+        append_event(
+            workspace,
+            feature,
+            run_id,
+            "merge_train_candidate_resumed",
+            repositoryRef=repository_ref,
+            wave=wave,
+            candidateSha=candidate_sha,
+        )
+        return {
+            "success": True,
+            "status": CandidateStatus.BUILT.value,
+            "repositoryRef": repository_ref,
+            "wave": wave,
+            "candidateSha": candidate_sha,
+            "resolutionMethod": "manual",
+        }
 
 
 def discard_candidate(workspace: Path, feature: str, run_id: str, wave: int, repository_ref: str) -> dict[str, Any]:
@@ -625,14 +767,8 @@ def discard_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
         if status not in {CandidateStatus.CANDIDATE_CONFLICTED.value, CandidateStatus.NEEDS_RESOLUTION.value, "failed"}:
             return {"success": False, "error": f"cannot_discard_status:{status}"}
 
-        # Get repository binding to clean up worktree
-        binding = None
-        for repo in manifest.get("repositories", []):
-            if repo.get("ref") == repository_ref:
-                binding = repo
-                break
-
-        if not binding:
+        binding = manifest.get("repositories", {}).get(repository_ref)
+        if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
             return {"success": False, "error": f"repository_not_found:{repository_ref}"}
 
         repo = Path(binding["gitRoot"]).resolve()
@@ -644,13 +780,13 @@ def discard_candidate(workspace: Path, feature: str, run_id: str, wave: int, rep
             cleanup_errors = _remove_candidate(repo, worktree_path, branch_name)
 
         # Mark as discarded
-        record["status"] = "discarded"
+        record["status"] = CandidateStatus.DISCARDED.value
         record["discardedAt"] = utc_now()
         record["cleanupErrors"] = cleanup_errors
         manifest["mergeTrains"][_record_key(repository_ref, wave)] = record
 
         # Unblock manifest if this was the only blocker
-        if manifest.get("status") == "blocked":
+        if manifest.get("status") in {"blocked", CandidateStatus.NEEDS_RESOLUTION.value}:
             # Check if any other merge trains are still blocked
             other_blockers = any(
                 mt.get("status") in {CandidateStatus.CANDIDATE_CONFLICTED.value, CandidateStatus.NEEDS_RESOLUTION.value, "failed"}
@@ -677,7 +813,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Operate staged parallel Batch Merge Trains")
     sub = parser.add_subparsers(dest="command", required=True)
     promote_parser: argparse.ArgumentParser | None = None
-    for name in ("build-candidate", "verify-candidate", "promote-candidate", "resolve-candidate", "discard-candidate"):
+    for name in ("build-candidate", "verify-candidate", "promote-candidate", "resolve-candidate", "resume-candidate", "discard-candidate"):
         item = sub.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
@@ -711,6 +847,8 @@ def main(argv: list[str] | None = None) -> int:
             result = promote_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "resolve-candidate":
             result = resolve_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
+        elif args.command == "resume-candidate":
+            result = resume_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "discard-candidate":
             result = discard_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "begin-e2e":

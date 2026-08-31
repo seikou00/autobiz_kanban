@@ -175,6 +175,14 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             "workflowHostGitRoot": str(code_workspace.resolve()),
             "maxParallel": 4,
             "timeoutPerBatch": 3600,
+            "runtimeConfig": {
+                "parallelSchedulingMode": "conservative",
+                "maxParallel": 4,
+                "conflictResolution": {
+                    "maxAttempts": 2,
+                    "enableAutoResolve": False,
+                },
+            },
         })
         self.assertEqual(result["codeWorkspaceSource"], "plan_json")
         self.assertEqual(result["workspaceContractPath"], str((feature_dir / "plan.json").resolve()))

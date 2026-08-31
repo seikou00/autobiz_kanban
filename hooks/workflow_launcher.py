@@ -150,19 +150,50 @@ def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[s
 
 
 def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
-    """Load runtime configuration from .autobiz/runtime_config.json"""
-    config_path = artifact_workspace / ".autobiz" / "runtime_config.json"
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
-    # Default: conservative mode
-    return {
+    """Load and validate runtime configuration from .autobiz/runtime_config.json."""
+    defaults: dict[str, Any] = {
         "parallelSchedulingMode": "conservative",
         "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+        "conflictResolution": {
+            "maxAttempts": 2,
+            "enableAutoResolve": False,
+        },
     }
+    config_path = artifact_workspace / ".autobiz" / "runtime_config.json"
+    if not config_path.exists():
+        return defaults
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return defaults
+    if not isinstance(raw, dict):
+        return defaults
+
+    mode = raw.get("parallelSchedulingMode")
+    max_parallel = raw.get("maxParallel")
+    resolution = raw.get("conflictResolution")
+    config = dict(defaults)
+    if mode in {"optimistic", "conservative"}:
+        config["parallelSchedulingMode"] = mode
+    if isinstance(max_parallel, int) and not isinstance(max_parallel, bool) and max_parallel > 0:
+        config["maxParallel"] = max_parallel
+    if isinstance(resolution, dict):
+        max_attempts = resolution.get("maxAttempts")
+        enable_auto_resolve = resolution.get("enableAutoResolve")
+        config["conflictResolution"] = {
+            "maxAttempts": (
+                max_attempts
+                if isinstance(max_attempts, int) and not isinstance(max_attempts, bool) and max_attempts > 0
+                else defaults["conflictResolution"]["maxAttempts"]
+            ),
+            "enableAutoResolve": (
+                enable_auto_resolve
+                if isinstance(enable_auto_resolve, bool)
+                else defaults["conflictResolution"]["enableAutoResolve"]
+            ),
+        }
+    return config
 
 
 def _find_write_set_overlap(batches_in_wave: list[str], by_id: dict[str, Any]) -> list[str]:
@@ -467,14 +498,12 @@ def analyze_batches(
             "canStartWorkflow": True,
             "validation": validation,
         }
+        runtime_config = _load_runtime_config(artifact_workspace)
+        max_parallel = runtime_config["maxParallel"]
         if workspace_contract["repositoryCount"] == 1:
             # This is the complete payload for the platform workflow call.
             # Returning it avoids models reconstructing a workflow or guessing
             # a code workspace from the artifact directory.
-            # Load runtime config and pass to workflow
-            runtime_config = _load_runtime_config(artifact_workspace)
-            max_parallel = runtime_config.get("maxParallel", DEFAULT_WORKFLOW_MAX_PARALLEL)
-
             return {
                 **common_result,
                 "executionMode": "fixed",
@@ -516,8 +545,9 @@ def analyze_batches(
                 "pluginPath": str(script_root),
                 "artifactWorkspace": str(artifact_workspace),
                 "codeWorkspaces": workspace_contract["codeWorkspaces"],
-                "maxParallel": DEFAULT_WORKFLOW_MAX_PARALLEL,
+                "maxParallel": max_parallel,
                 "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+                "runtimeConfig": runtime_config,
             },
             "repositoryCoordinator": {
                 "path": str(coordinator_path),

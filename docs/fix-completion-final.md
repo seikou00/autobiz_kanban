@@ -69,6 +69,11 @@ python hooks/parallel_merge_train.py resolve-candidate \
 python hooks/parallel_merge_train.py discard-candidate \
   --workspace . --feature my-feature --run-id cw-20260830-001 \
   --repository-ref backend --wave 1
+
+# 手工解决冲突，或修复验证失败的 candidate worktree 并提交后，将其恢复为可验证状态
+python hooks/parallel_merge_train.py resume-candidate \
+  --workspace . --feature my-feature --run-id cw-20260830-001 \
+  --repository-ref backend --wave 1
 ```
 
 ---
@@ -185,7 +190,7 @@ workflow 抛出错误并停止，保留 worktree
   2. 手动编辑文件解决冲突
   3. git add . && git commit
 ↓
-重新运行 workflow 或手动调用 verify-candidate + promote-candidate
+运行 `resume-candidate`，再依次调用 `verify-candidate` 与 `promote-candidate`。直接重跑 workflow 会被 `needs_resolution` 门禁拦截，避免覆盖手工解决的 candidate。
 ```
 
 ---
@@ -278,7 +283,7 @@ workflow 抛出错误并停止，保留 worktree
 
 ## 已知限制
 
-1. **Append-only 识别规则宽松**: 当前实现只检查行首关键字（`def`, `class` 等），可能将重复方法或顺序敏感的新增误判为 append-only。建议第一版保守启用 `enableAutoResolve`。
+1. **Append-only 自动解决范围有限**: 仅允许名称不同的 Python/JavaScript 函数声明追加；类、导入、常量、重复名称或其他语言结构一律要求人工解决。建议第一版仅对低风险项目启用 `enableAutoResolve`。
 
 2. **Model-based 解决未完全实现**: `ModelBasedResolver` 对非 append-only 冲突返回 `manual_required`。需要集成实际 AI 模型调用。
 

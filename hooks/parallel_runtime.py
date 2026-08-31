@@ -305,6 +305,7 @@ def create_manifest(
     max_parallel: int = 4,
     timeout_seconds: int = 3600,
     repositories: dict[str, dict[str, Any]] | None = None,
+    runtime_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     bundle = load_plan_bundle(feature_dir(workspace, feature))
     errors = parallel_plan_errors(bundle)
@@ -396,6 +397,18 @@ def create_manifest(
         }
         entries[batch_id] = entry_state
     pipeline = bundle.root["parallelBatchPipeline"]
+    # Prepare runtime configuration with defaults
+    if runtime_config is None:
+        runtime_config = {}
+    final_runtime_config = {
+        "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "conservative"),
+        "maxParallel": max_parallel,  # Use the max_parallel parameter as source of truth
+        "conflictResolution": runtime_config.get("conflictResolution", {
+            "maxAttempts": 2,
+            "enableAutoResolve": False,  # Disabled by default for safety
+        }),
+    }
+
     manifest = {
         "schemaVersion": RUN_SCHEMA_VERSION,
         "runId": run_id,
@@ -410,6 +423,7 @@ def create_manifest(
         "pipeline": pipeline,
         "maxParallel": max(1, int(max_parallel)),
         "timeoutPerBatch": max(1, int(timeout_seconds)),
+        "runtimeConfig": final_runtime_config,  # Add runtime config to manifest
         "batches": entries,
         "validationBatches": {
             "V-INT": {
@@ -724,25 +738,62 @@ def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
 
 
 def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None) -> list[list[str]]:
-    """Build conservative execution waves from stage and physical write sets.
+    """Build execution waves from stage and physical write sets.
+
+    Behavior depends on parallelSchedulingMode in runtime config:
+    - optimistic: Ignores write-set conflicts for parallel stage, groups by maxParallel
+    - conservative (default): Serializes batches with write-set conflicts
 
     Worktrees isolate checkouts, not shared delivery risk.  A batch with an
     unknown write set is therefore serialized with another batch in the same
-    repository.  Known paths conflict when they are equal or one is an
-    ancestor of the other.  Special stages (proto/global/integration) are
-    always single-batch waves and are ordered before ordinary implementation.
+    repository (in conservative mode only).  Known paths conflict when they are
+    equal or one is an ancestor of the other.  Special stages (proto/global/integration)
+    are always single-batch waves and are ordered before ordinary implementation.
     """
     ids = sorted(set(batch_ids or ready_batches(manifest)))
     if not ids:
         return []
+
+    # Load runtime config
+    config = manifest.get("runtimeConfig", {})
+    optimistic_parallel = config.get("parallelSchedulingMode") == "optimistic"
+    max_parallel = config.get("maxParallel", 4)
+
     stages = {"proto": 0, "global": 1, "parallel": 2, "integration": 3}
     by_id = manifest.get("batches", {})
     stage_rank = lambda bid: stages.get(str(by_id.get(bid, {}).get("executionStage", "parallel")), 2)
     frontier_rank = min(stage_rank(batch_id) for batch_id in ids)
     frontier = [batch_id for batch_id in ids if stage_rank(batch_id) == frontier_rank]
+
+    # Critical phases: always single-batch waves
     if frontier_rank != stages["parallel"]:
         return [[batch_id] for batch_id in frontier]
 
+    # Parallel stage
+    if optimistic_parallel:
+        return _optimistic_grouping(frontier, max_parallel)
+    else:
+        return _conservative_grouping(frontier, by_id)
+
+
+def _optimistic_grouping(batch_ids: list[str], max_parallel: int) -> list[list[str]]:
+    """Optimistic grouping: all ready batches grouped by maxParallel limit.
+
+    Ignores write-set conflicts. Conflicts are detected and resolved in Merge Train.
+    """
+    if not isinstance(max_parallel, int) or isinstance(max_parallel, bool) or max_parallel <= 0:
+        raise ValueError("parallel_max_parallel_invalid")
+    waves: list[list[str]] = []
+    for i in range(0, len(batch_ids), max_parallel):
+        waves.append(batch_ids[i:i + max_parallel])
+    return waves
+
+
+def _conservative_grouping(batch_ids: list[str], by_id: dict[str, Any]) -> list[list[str]]:
+    """Conservative grouping: serialize batches with write-set conflicts.
+
+    This is the original behavior, kept for backward compatibility.
+    """
     def normalized_paths(batch_id: str) -> tuple[str, ...]:
         raw = by_id.get(batch_id, {}).get("writeSet")
         if not isinstance(raw, list):
@@ -770,7 +821,7 @@ def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None
         return any(overlaps(path_a, path_b) for path_a in left_paths for path_b in right_paths)
 
     waves: list[list[str]] = []
-    for batch_id in frontier:
+    for batch_id in batch_ids:
         for wave in waves:
             if not any(conflicts(batch_id, existing) for existing in wave):
                 wave.append(batch_id)

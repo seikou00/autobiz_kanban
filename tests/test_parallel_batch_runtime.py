@@ -152,6 +152,66 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(reused["runId"], created["runId"])
             self.assertEqual(reused["scheduledGroups"], [["B001"]])
 
+    def test_create_run_persists_workspace_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            config_dir = workspace / ".autobiz"
+            config_dir.mkdir()
+            (config_dir / "runtime_config.json").write_text(
+                json.dumps(
+                    {
+                        "parallelSchedulingMode": "optimistic",
+                        "maxParallel": 6,
+                        "conflictResolution": {"maxAttempts": 3, "enableAutoResolve": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=6,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+
+            manifest = load_manifest(workspace, "alpha", created["runId"])
+            self.assertEqual(
+                manifest["runtimeConfig"],
+                {
+                    "parallelSchedulingMode": "optimistic",
+                    "maxParallel": 6,
+                    "conflictResolution": {"maxAttempts": 3, "enableAutoResolve": True},
+                },
+            )
+
+    def test_resume_blocks_unresolved_merge_train(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            manifest = load_manifest(workspace, "alpha", created["runId"])
+            manifest["mergeTrains"] = {
+                "default:wave-001": {"status": "needs_resolution"},
+            }
+            save_manifest(workspace, "alpha", created["runId"], manifest)
+
+            resumed = resume_run(workspace, "alpha", created["runId"])
+
+            self.assertEqual(resumed["status"], "needs_resolution")
+            self.assertTrue(resumed["recoveryRequired"])
+            self.assertEqual(resumed["scheduledGroups"], [])
+
     def test_ensure_preserves_needs_resolution_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -397,12 +397,17 @@ def create_run(
             feature=feature,
             allow_bootstrap=allow_bootstrap,
         )
+        # Load runtime config from workspace
+        from hooks.workflow_launcher import _load_runtime_config
+        runtime_config = _load_runtime_config(workspace)
+
         manifest = create_manifest(
             workspace,
             feature,
             max_parallel=max_parallel,
             timeout_seconds=timeout_seconds,
             repositories=repositories,
+            runtime_config=runtime_config,  # Pass runtime config
         )
         manifest["isolation"] = {
             "mode": "native_git_worktrees",
@@ -768,6 +773,29 @@ def resume_run(
                 "mergeableBatches": mergeable_batches(manifest),
                 "recoveryRequired": True,
                 "errors": ["parallel_run_needs_resolution:" + ",".join(unresolved)],
+            }
+        unresolved_trains = [
+            key
+            for key, train in (manifest.get("mergeTrains") or {}).items()
+            if isinstance(train, dict) and train.get("status") in {"candidate_conflicted", "needs_resolution"}
+        ]
+        if unresolved_trains:
+            manifest["status"] = "needs_resolution"
+            save_manifest(workspace, feature, run_id, manifest)
+            append_event(
+                workspace,
+                feature,
+                run_id,
+                "run_resume_blocked_merge_train_resolution",
+                mergeTrains=unresolved_trains,
+            )
+            return {
+                "runId": run_id,
+                "status": "needs_resolution",
+                "scheduledGroups": [],
+                "mergeableBatches": mergeable_batches(manifest),
+                "recoveryRequired": True,
+                "errors": ["parallel_merge_train_needs_resolution:" + ",".join(sorted(unresolved_trains))],
             }
         invalid_deliveries = []
         for batch_id, batch in manifest.get("batches", {}).items():
