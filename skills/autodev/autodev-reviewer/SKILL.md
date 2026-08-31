@@ -1,13 +1,13 @@
 ---
 name: autodev-reviewer
 description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，用 task 工具指定 `reviewer-autodev` 角色核验真实仓库状态，由该角色落盘 REQUIREMENTS_EVAL.md，主 agent 按 verdict 走修复复审闭环。
-version: v1.6.08253
+version: v1.6.08311
 ---
 
 ## 缺失产物处理
 
 ```bash
-python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --feature "${feature}" --plain
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --feature "${feature}" --plain
 ```
 
 
@@ -30,7 +30,7 @@ reviewer 的只读命令白名单、禁止清单、审查流程、finding 准入
 
 ### 1. 准入
 ```bash
-python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 读取 Feature 状态；每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -39,7 +39,7 @@ python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 开始审查前写入进行中状态：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_in_progress
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_in_progress
 ```
 
 ### 2. 写 completion proposal
@@ -91,7 +91,7 @@ FAIL 修复规则：
 verdict 为 `PASS` 或 `PASS_WITH_WARNINGS` 后写入：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_done
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval_done
 ```
 
 ### 6. 最终回复

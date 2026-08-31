@@ -1,12 +1,12 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.12.0831
+version: v1.12.08311
 ---
 
 ## 缺失产物处理
 ```bash
-python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --plain
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --plain
 ```
 
 
@@ -58,7 +58,7 @@ python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature 
 开始生成规格前推进到 `specs_in_progress`：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 ```
 
 ## Explore 协议
@@ -177,7 +177,7 @@ capability 的变更分类写进 `## Capabilities` 节：
 启动回检前先执行结构预检：
 
 ```bash
-python3 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase structure --feature "${feature}"
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase structure --feature "${feature}"
 ```
 
 失败项一次性修完并重跑；structure 通过前不启动回检。
@@ -185,7 +185,7 @@ python3 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase s
 本节完整协议由脚本按阶段渲染，必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节。
 
 ```bash
-python3 "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
+python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
 ```
 
 回检结论必须写进 `SPECS_REVIEW.md`——只输出在回复里不算数。
@@ -197,7 +197,7 @@ python3 "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
 proposal、全部 specs、`SPECS_REVIEW.md` 生成且回检修改完成后执行：
 
 ```bash
-python3 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase final --feature "${feature}"
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase final --feature "${feature}"
 ```
 
 处理流程：
@@ -220,7 +220,7 @@ python3 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase f
 产物契约预检与回检修复均通过后推进 checkpoint：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_done
 ```
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

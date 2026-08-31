@@ -1,7 +1,7 @@
 ---
 name: autodev
 description: Autodev Dev 阶段根路由器。基于 checkpoint 路由到对应子技能；各子技能独立负责准入检查与产物自检。
-version: v1.1.0804
+version: v1.1.08311
 ---
 
 ## autodev
@@ -104,9 +104,9 @@ Dev 阶段的可选步骤由 `${pluginPath}/board_core/board_config.json` 的 `w
 
 1. 根据用户表达判断是否需要在 code 前生成 `DETAIL_DESIGN.md`。
 2. 不需要时，推进到 `code_in_progress`：
-   `python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
+   `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_in_progress --workflow-decision detail_design_before_code=skipped`
 3. 需要时，推进到 `detail_design_in_progress`：
-   `python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled`
+   `python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint detail_design_in_progress --workflow-decision detail_design_before_code=enabled`
 4. `/autodev-detail-design` 生成 `DETAIL_DESIGN.md` 后推进到 `detail_design_done`，根路由器再次刷新状态并进入 `/autodev-code`。
 
 ### 约束

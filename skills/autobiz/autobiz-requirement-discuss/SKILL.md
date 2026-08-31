@@ -1,7 +1,7 @@
 ---
 name: autobiz-requirement-discuss
 description: Biz 阶段需求澄清与正式 PRD 生成技能。
-version: v1.2.0825
+version: v1.2.08311
 ---
 
 # /autobiz-requirement-discuss — Biz 阶段需求澄清与 PRD 生成
@@ -14,7 +14,7 @@ version: v1.2.0825
 
 ### 获取feature状态
 ```bash
-python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前 checkpoint 时，运行上面的脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -24,7 +24,7 @@ python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 开始需求澄清时必须用脚本写入开始态：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
 ```
 ### 缓存检测与清理
 
@@ -41,7 +41,7 @@ python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_in_progress
 角色选择只决定分析关注点，不等于实现范围。用户确认后立即写入：
 
 ```bash
-python3 "${pluginPath}/hooks/implementation_scope.py" set \
+python "${pluginPath}/hooks/implementation_scope.py" set \
   --feature "${feature}" \
   --scope "${implementationScope}" \
   --source user_confirmed
@@ -53,7 +53,7 @@ python3 "${pluginPath}/hooks/implementation_scope.py" set \
 ## 缺失产物处理
 
 ```bash
-python3 "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --plain
+python "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-discuss --feature "${feature}" --plain
 ```
 
 
@@ -100,7 +100,7 @@ python3 "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-disc
 - 从原需求、初始上传与讨论补充资料中提取会约束实现或验收的外部接口文档、原型、数据字典、协议和附件，在 `## 外部资料与实现约束` 建立索引。每项分配稳定 `SRC-NNN`，后续增量只追加，禁止重编号或复用已删除 ID；没有此类资料时正文写“无”。
 - `类型=外部接口` 或 `第三方接口` 的条目必须保留可访问的地址/路径、约束范围与当前状态，`必读阶段` 固定覆盖 `Specs、Plan、Code、Reviewer、E2E`。链接本身不是充分摘要，接口方法、路径、鉴权、请求/响应结构、错误与超时等已知约束仍须写入对应 FR 或验收标准。
 - 存在来源项时完整读取 `${pluginPath}/skills/autobiz/autobiz-requirement-discuss/references/source-context.md`，直接生成 `source-context.json`。逐项保留快照定位、逐字原文、提取要求及多值 `targets`；不生成 `content.txt` 或来源覆盖报告。
-- `source-context.json` 的语义内容由本技能直接生成，不经过 writer。快照 SHA256 使用 `python3 "${pluginPath}/hooks/source_context.py" digest --feature-dir "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}" --path "sources/SRC-NNN/<快照文件>"` 计算；校验脚本只检查，不改写产物。
+- `source-context.json` 的语义内容由本技能直接生成，不经过 writer。快照 SHA256 使用 `python "${pluginPath}/hooks/source_context.py" digest --feature-dir "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}" --path "sources/SRC-NNN/<快照文件>"` 计算；校验脚本只检查，不改写产物。
 
 ### 需求分析
 
@@ -234,7 +234,7 @@ python3 "${pluginPath}/hooks/inspect_skill_contract.py" autobiz-requirement-disc
 ### 更新状态
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
 ```
 
 
@@ -243,7 +243,7 @@ python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint prd_done
 Skill 完成后，必须运行脚本校验：
 
 ```bash
-python3 "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
+python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 
 脚本通过即视为以下清单已完成：

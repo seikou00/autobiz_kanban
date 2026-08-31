@@ -1,13 +1,13 @@
 ---
 name: autoops-archive
 description: Ops 归档阶段技能。
-version: v1.2.0804
+version: v1.2.08311
 author: zhangQiuFeng
 ---
 
 ## 缺失产物处理
 ```bash
-python3 "${pluginPath}/hooks/inspect_skill_contract.py" autoops-archive --feature "${feature}" --plain
+python "${pluginPath}/hooks/inspect_skill_contract.py" autoops-archive --feature "${feature}" --plain
 ```
 
 # /autoops-archive — Feature 过程归档
@@ -22,7 +22,7 @@ python3 "${pluginPath}/hooks/inspect_skill_contract.py" autoops-archive --featur
 调用脚本读取当前 Feature 快照：
 
 ```bash
-python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前 checkpoint 时，运行上面脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -38,7 +38,7 @@ python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 `iter{N}` 的确定规则：
 
-1. 先调用 `python3 "${pluginPath}/read_state_json.py"` 读取全量 JSON，优先取 `STATE.records[${feature}].iteration`；若为有效数字则作为起始候选。
+1. 先调用 `python "${pluginPath}/read_state_json.py"` 读取全量 JSON，优先取 `STATE.records[${feature}].iteration`；若为有效数字则作为起始候选。
 2. 若迭代列为空或不是数字，则从 `1` 开始。
 3. 若 `.autobizdevops/archive/{slug}-iter{N}/` 已存在，递增 N，直到找到不存在的目录。
 4. 禁止覆盖、合并或删除已有归档目录。
@@ -63,7 +63,7 @@ python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 使用统一脚本将当前 Feature 的 checkpoint 推进为 `archived`，并写入归档迭代号：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint archived --iteration "{N}"
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint archived --iteration "{N}"
 ```
 
 只允许更新当前 `{slug}` 对应的 Feature 行，不得删除该行，不得改写其他 Feature 状态。

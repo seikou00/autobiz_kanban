@@ -1,6 +1,7 @@
 ---
 name: route-with-absolute-html
 description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义绝对定位 / 碎片 div / Figma 导出类 HTML 的适用条件、读取顺序、转交给本目录 `deps/html-parser.md` 的时机，以及失败兜底方式。
+version: v1.0.08311
 ---
 
 
@@ -121,14 +122,14 @@ description: 绝对定位高保真 HTML 的独立 route 技能。它负责定义
 2. **默认必跑 `prepare_html_analysis.py`。** 使用完整命令模板，参数齐全后再执行：
    - `SKILL_ROOT` 目录：
      ```
-     python3 route/with-absolute-html/scripts/prepare_html_analysis.py \
+     python route/with-absolute-html/scripts/prepare_html_analysis.py \
        --project-root . \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>
      ```
    - `route/with-absolute-html/` 目录：
      ```
-     python3 scripts/prepare_html_analysis.py \
+     python scripts/prepare_html_analysis.py \
        --project-root ../.. \
        --task-stem <task-stem> \
        --html-file <HTML_PATH>

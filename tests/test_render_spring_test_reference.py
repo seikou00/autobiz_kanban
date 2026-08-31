@@ -224,10 +224,10 @@ class SpringTestReferenceIntegrationContractTest(unittest.TestCase):
 
         self.assertEqual(1, content.count("render_spring_test_reference.py"))
         self.assertIn(
-            'python3 "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>',
+            'python "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>',
             content,
         )
-        self.assertIn("version: v1.2.0825", content)
+        self.assertIn("version: v1.2.08311", content)
         self.assertNotIn("绝不 mock 自己的类或内部协作者", content)
         self.assertNotIn("别走侧信道（如直接查库断言）", content)
 

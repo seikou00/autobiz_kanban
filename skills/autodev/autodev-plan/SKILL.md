@@ -1,13 +1,13 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.9.08271
+version: v1.9.08311
 ---
 
 ## 缺失产物处理
 
 ```bash
-python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "${feature}" --plain
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "${feature}" --plain
 ```
 
 # /autodev-plan - Executable Task Plan
@@ -80,7 +80,7 @@ python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "
 探索开始时，优先确认当前 Feature状态：
 
 ```bash
-python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 - 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。存在 `source-context.json` 时读取其中的来源要求与 `sources/SRC-NNN/` 快照；`snapshot_only` 直接使用快照，不能因为 proposal/specs 已淡化实现细节就重新询问或按现状猜测。
@@ -182,7 +182,7 @@ python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 
 #### 更新状态
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）"
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）"
 ```
 
 #### Runtime 验证契约
@@ -290,7 +290,7 @@ python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress
 每次 Plan 会话准备 Draft 前只执行一次以下只读命令，并以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流；后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
 ```bash
-python3 "${pluginPath}/hooks/plan_writer.py" add-task-contract
+python "${pluginPath}/hooks/plan_writer.py" add-task-contract
 ```
 
 writer 自动分组，调用方不指定 batch。`executionLane` 由 writer 根据 `uiRequired` 自动推导：`false=backend`、`true=frontend`，调用方不得自行维护该字段。`task-groups.json` 必须按 DAG 拓扑序排列全部 backend group，再排列全部 frontend group；frontend group 可以依赖更早的 backend group，backend group 不得依赖 frontend group。writer 以第一个 `specRefs` 中 `#` 前的文件路径作为主 capability；只有与紧邻前一批的主 capability 和 execution lane 都相同且该批少于 5 个任务时才合批，否则创建下一 `Bxxx`。因此即使最后一个 backend batch 未满，首个 frontend task 也必须新建 batch。不得伪造 batch ID，也不得通过调整 `specRefs` 顺序伪造分组结果。
@@ -298,7 +298,7 @@ writer 自动分组，调用方不指定 batch。`executionLane` 由 writer 根�
 最终候选分组表完成后，先运行只读分组预检。`task-groups.json.uiRequiredExample` / `add-task-contract.taskGroupUiRequiredExample` 是 `uiRequired:true` 的完整分组示例，`task-groups.json.matrixExceptionExample` / `add-task-contract.taskGroupMatrixExceptionExample` 是 6-12 个 SCN 共享同一验证闭环时的分组例外示例；两者都只用于指导，不是 `groups[]` 的实际成员。该命令只校验拆分所需的完整路径级 `specRefs`、SCN/API/Page/UIX/VIS/route、DAG/lane 顺序、`mergedScenarioRefs`、`splitRationale`、`validationBoundary` 和完整 Scenario 覆盖，不要求 goal、scope、AC、decisionIds 或完整 validation command：
 
 ```bash
-python3 "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${feature}" --group-file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json"
+python "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${feature}" --group-file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json"
 ```
 
 分组预检失败时只能修改候选分组，不得准备 Draft。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先在候选分组表证明共享验证闭环，确认这些 SCN 共享同一用户动作、公开 seam 和自动化验证边界，否则按业务闭环继续拆分。
@@ -306,7 +306,7 @@ python3 "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${
 分组预检成功后立即创建并锁定 Draft Batch；`prepare-task-draft` 会保存 `groupingDigest`，投影全部 group-owned 字段和自动 Batch，不需要也不接受 task 目录。首次准备还会在 Feature 目录写入持久的 `.design-contract.lock.json`，记录已确认 Design 的 SHA；它不在 `.tmp/plan_writer` 下，删除临时 Draft 不能重新铸造 Design 锁。若确实完成了 Design 重新确认，必须显式传 `--design-revision-confirmed --reason <reason>` 刷新该锁。下例以当前项目根为代码仓库；涉及多个仓库时，为每个实际绝对路径重复传入 `--code-workspace`：
 
 ```bash
-python3 "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feature}" --group-file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json" --code-workspace "<FRONTEND_MODULE>"
+python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feature}" --group-file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json" --code-workspace "<FRONTEND_MODULE>"
 ```
 
 每个候选分组应显式选择 `executionMode=code|verified_existing|external_dependency`，缺省仅兼容为 `code`。`verified_existing` 表示本 Feature 内已有实现，只允许复用现存可执行验证目标；`external_dependency` 表示行为与验证均由 Feature 外的系统或仓库负责，必须同时写 `externalDependency.system/owner/trackingRefs`，不得配置本地验证命令或待创建测试。外部依赖不是本地 no-code 实现，也不得借创建占位测试把它伪装成已验证。
@@ -314,7 +314,7 @@ python3 "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${fea
 按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样；批量修复在任一 patch 不合法时整体不落盘：
 
 ```bash
-python3 "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
+python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
 ```
 
 Plan 阶段生成测试意图和验证命令契约，但不生成测试源码目标。测试目标不在 Code 阶段分配或创建；TASK 的 `testIntent` 供后续 UTest/E2E 阶段决定测试文件归属、复用策略和执行顺序。不得填写或推导 `create_in_code`，也不得依据测试文件是否存在来调整任务拆分。
@@ -324,8 +324,8 @@ Plan 阶段生成测试意图和验证命令契约，但不生成测试源码目
 全部 task ready 后运行一次 Draft 全局预检，再原子发布正式 Bundle：
 
 ```bash
-python3 "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${feature}"
-python3 "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
+python "${pluginPath}/hooks/plan_writer.py" preflight-task-draft --feature "${feature}"
+python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${feature}"
 ```
 
 **预检与修复**：
@@ -339,7 +339,7 @@ python3 "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fe
 
 按照 `repairSuggestion` 中的指导执行修复，不要根据编号、标题或数量自行猜测。`repairTarget=design_revision` 表示必须修改 design.md，禁止修改 Plan 来迎合设计。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复。
 
-finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python3 -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
+finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
 
 
 除 `executionMode=external_dependency` 外，每个 task detail 必须包含非空 `validationCommands`，writer 会据此生成 `validationTestPlan`/`testIntent`。合法 kind、命令禁令与意图字段以 `add-task-contract` 输出为唯一事实源；不得生成 `create_in_code`、测试文件目标或 Code 阶段测试执行计划。不得通过 validator 失败来探索 schema。
@@ -468,7 +468,7 @@ finalize 会把 Runtime capability 投影为每个实际 lane 的 required 编�
 
 Plan 阶段不再生成独立 smoke 计划。每个 Batch 的 Code 收口只落在 `batchValidation.commands` 的 required `kind=compile` 命令中；frontend 命令的 argv 可以是 build/typecheck，但不得执行或串联测试。TASK `validationCommands` 继续投影为 `testIntent`，由后续 UTest/E2E 阶段执行。
 
-完成任务、Batch 和可选项目验证配置后，运行 `python3 "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`。阶段门禁见文末「整体完成条件」；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代它。
+完成任务、Batch 和可选项目验证配置后，运行 `python "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`。阶段门禁见文末「整体完成条件」；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代它。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘
@@ -492,7 +492,7 @@ Plan 阶段不再生成独立 smoke 计划。每个 Batch 的 Code 收口只落�
 design.md、plan.json、PLAN.md 全部生成完成后执行：
 
 ```bash
-python3 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
 ```
 
 处理流程：
@@ -508,7 +508,7 @@ python3 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature 
 本节完整协议由脚本按阶段渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。
 
 ```bash
-python3 "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
+python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
 ```
 
 回检导致产物变化时，重跑一次产物契约预检。
@@ -518,8 +518,8 @@ python3 "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
 ## 完成
 
 ```bash
-python3 "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
+python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_done
 ```
 
 技能完成后，读取并遵循 `${pluginPath}/skills/references/ui-continuation-guide.md`。

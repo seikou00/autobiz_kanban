@@ -1,7 +1,7 @@
 ---
 name: autodev-utest
 description: "Dev 阶段单元测试协调、生成、执行与单测驱动最小修复技能。"
-version: v1.2.0825
+version: v1.2.08311
 ---
 
 ## 插件脚本执行
@@ -11,7 +11,7 @@ version: v1.2.0825
 ## 缺失产物处理
 
 ```bash
-python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "${feature}" --plain
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-utest --feature "${feature}" --plain
 ```
 
 # /autodev-utest - 单测协调与验证
@@ -23,7 +23,7 @@ Plan 已固化每个 TASK 的实现范围，Code 只实现生产代码、不创�
 调用脚本读取当前 Feature 状态：
 
 ```bash
-python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前状态或 checkpoint 时重新运行该脚本，不得直接读取 `.autobizdevops/state.json`、`.autobizdevops/STATE.md`、`hooks.ndjson` 或 Feature 目录内的 `.plan.lock`。
@@ -31,7 +31,7 @@ python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 首次从 `requirements_eval_done` 进入本阶段时写入开始 checkpoint；当前已是 `unit_test_in_progress` 时不重复写入：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_progress
 ```
 
 ## 输入与产物
@@ -39,7 +39,7 @@ python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_in_pro
 测试 assignment 只通过以下脚本生成：
 
 ```bash
-python3 "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
+python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
 每个 assignment 的 `promptContent` 只包含 Batch plan 的绝对路径，以及 TASK `id`、`implementationPoints`、`nonGoals` 和从 `validationCommands` 提取的 `validationLocations.repo/cwd`。派发时原样使用；不得自行打开 plan 补取、转述或拼接 TASK 字段。Plan 命令的 argv 不作为测试命令。
@@ -77,7 +77,7 @@ code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前
 task 工具可用时，主协调器必须使用 `test-engineer-autodev`：
 
 ```bash
-python3 "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
+python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --json
 ```
 
 1. 使用 router 返回的 assignment 顺序。
@@ -101,7 +101,7 @@ task 工具不可用时，不模拟子任务；由主会话按相同 Batch/lane/
 一次检查当前 Feature 的全部 assignment：
 
 ```bash
-python3 "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --record-blocked --json
+python "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --record-blocked --json
 ```
 
 检查器调用 workspace binding 解析器，根据当前 plan 与已验证的 Code 产物自动保存仓库绑定，再用 `validationCommands.cwd` 定位构建根目录；`scope.modules` 仅用于精确定位，无法解析时按检查器返回的 `locationWarnings` 回退 `validationLocations`。模型不得填写 repo、仓库地址、framework 或 cwd，不得直接编辑 `.autobizdevops/workspace-bindings.json`。
@@ -114,7 +114,7 @@ python3 "${pluginPath}/hooks/inspect_test_environment.py" --workspace "${pluginW
 - `contract_gap`、`workspace_binding_missing`、`workspace_binding_invalid`、`conflict`、`unsupported`、`environment_inspection_failed`：确认返回包含 `blockedArtifacts` 且不含 `blockedArtifactError`，推进 `needs_fix` 后立即停止：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 ```
 
 阻断产物写入失败时原样报告 `blockedArtifactError` 并停止，不更新 checkpoint。没有环境变更或用户选择时不重跑检查器。`contract_gap` 只用于 plan/TASK 契约损坏及 `workspaceRef`、`validationCommands.repo/cwd` 的非法或不一致；`scope.modules` 无法解析不是 `contract_gap`。
@@ -122,7 +122,7 @@ python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint needs_fix
 `workspace_binding_ambiguous` 时，用户选定后运行：
 
 ```bash
-python3 "${pluginPath}/hooks/utest_workspace_binding.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --workspace-ref "<RETURNED_WORKSPACE_REF>" --select-candidate "<USER_SELECTED_CANDIDATE_ID>" --json
+python "${pluginPath}/hooks/utest_workspace_binding.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --workspace-ref "<RETURNED_WORKSPACE_REF>" --select-candidate "<USER_SELECTED_CANDIDATE_ID>" --json
 ```
 
 不得由模型选择 candidate，也不得把候选路径改写成参数。已有 persisted binding 或当前没有 pending ambiguity 时不得传 `--select-candidate`。
@@ -140,13 +140,13 @@ ${pluginPath}/skills/autodev/autodev-utest/reference/test-environment-profiles.m
 Spring Boot 2/3 按目标选择 `fundamentals`、`mvc`、`security`、`websocket`、`persistence`：
 
 ```bash
-python3 "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>
+python "${pluginPath}/hooks/render_spring_test_reference.py" --domain <domain>
 ```
 
 Vue3/React 按目标选择 `fundamentals`、`component`、`logic`、`state`、`integration`：
 
 ```bash
-python3 "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|react> --domain <domain>
+python "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue|react> --domain <domain>
 ```
 
 路由：
@@ -199,13 +199,13 @@ python3 "${pluginPath}/hooks/render_frontend_test_reference.py" --framework <vue
 setup 命令：
 
 ```bash
-python3 "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" -- <argv...>
+python "${pluginPath}/hooks/run_utest_command.py" --kind setup --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" -- <argv...>
 ```
 
 test 命令提交 assignment 绑定、生成的测试文件与真实测试 argv：
 
 ```bash
-python3 "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <TEST_ARGV...>
+python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --test-file "<RELATIVE_TEST_FILE>" -- <TEST_ARGV...>
 ```
 
 `--task-id` 取 `promptContent`。`<TEST_ARGV...>` 根据真实 manifest、测试配置与新建测试文件生成，必须实际执行测试。runner 根据当前 plan、绑定、TASK 与测试文件自动选择仓库和构建目录，生成稳定 digest、commandId/targetId，并校验位置、specRefs 与全部 AC。完整输出追加到 `test-output.log`；重跑保留历史 evidence IDs。
@@ -224,7 +224,7 @@ python3 "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${pl
 任何生产修复或 `source_fix_request` 前，先校验失败锚点：
 
 ```bash
-python3 "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --command-id "<GENERATED_COMMAND_ID>" --target-id "<UT_ID>" --task-digest "<RUNNER_RETURNED_TASK_DIGEST>" --evidence-id "<EVIDENCE_ID>"
+python "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --task-id "<TASK_ID>" --command-id "<GENERATED_COMMAND_ID>" --target-id "<UT_ID>" --task-digest "<RUNNER_RETURNED_TASK_DIGEST>" --evidence-id "<EVIDENCE_ID>"
 ```
 
 静态观察、未执行测试或 exit 0 不得分类为 `source_bug`。
@@ -269,8 +269,8 @@ python3 "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${plugin
 报告落盘后，由 writer 从当前 TASK 契约与 Evidence 派生 coverage、target result 和 verdict，并校验稳定 JSON 契约：
 
 ```bash
-python3 "${pluginPath}/hooks/unit_test_result_writer.py" derive-scenario-coverage --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
-python3 "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --structure --gate
+python "${pluginPath}/hooks/unit_test_result_writer.py" derive-scenario-coverage --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}"
+python "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${pluginWorkspace}/${projectDir}" --feature "${feature}" --structure --gate
 ```
 
 ## 分支决策
@@ -284,7 +284,7 @@ python3 "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "$
 - 扩大验证已执行并记录。
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 ```
 
 `test_bug`、`source_bug`、`flaky`、未归因失败或超过修复次数时保持 `unit_test_in_progress`。检查器已落阻断产物的 `contract_gap` / `environment` 推进 `needs_fix`；按 `FIX_REQUEST.json` 执行回流，不直接调用 `/autodev-plan` 修改 finalized Plan。

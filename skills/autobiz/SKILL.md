@@ -1,7 +1,7 @@
 ---
 name: autobiz
 description: Biz 阶段统一入口。负责前置准入校验、流程编排、子技能路由与关键产出物脚本校验。所有 Biz 阶段工作应通过本入口进入。
-version: v1.1.08131
+version: v1.1.08311
 ---
 
 
@@ -15,7 +15,7 @@ version: v1.1.08131
 ### 读取 State
 
 ```bash
-python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
+python "${pluginPath}/read_state_json.py" --feature "${feature}"
 ```
 
 每次需要当前 checkpoint 时，运行上面的脚本读取，不得从 `hooks.ndjson` 等其他文件推断。
@@ -23,7 +23,7 @@ python3 "${pluginPath}/read_state_json.py" --feature "${feature}"
 随后调用动态路由脚本读取 board_config 派生出的下一步：
 
 ```bash
-python3 "${pluginPath}/hooks/resolve_next_skill.py" --json
+python "${pluginPath}/hooks/resolve_next_skill.py" --json
 ```
 
 ## 流程编排
@@ -49,7 +49,7 @@ python3 "${pluginPath}/hooks/resolve_next_skill.py" --json
 
 ```bash
 # PRD 完成后
-set PYTHONIOENCODING=utf-8 && python3 "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
+set PYTHONIOENCODING=utf-8 && python "${pluginPath}/skills/autobiz/hooks/biz_validate.py" prd --feature "${feature}"
 ```
 
 ### 校验不通过时的处理

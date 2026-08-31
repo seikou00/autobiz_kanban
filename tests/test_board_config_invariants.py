@@ -89,7 +89,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             relative_path = Path("skills") / group / skill / "SKILL.md"
             content = (ROOT / relative_path).read_text(encoding="utf-8")
             command = (
-                'python3 "${pluginPath}/hooks/inspect_skill_contract.py" '
+                'python "${pluginPath}/hooks/inspect_skill_contract.py" '
                 f'{skill} --feature "${{feature}}" --plain'
             )
             count = content.count(command)
@@ -296,7 +296,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         skill = (ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        first_command = 'python3 "${pluginPath}/hooks/inspect_skill_contract.py"'
+        first_command = 'python "${pluginPath}/hooks/inspect_skill_contract.py"'
         self.assertIn(execution_rule, skill)
         self.assertIn(first_command, skill)
         self.assertLess(skill.index(execution_rule), skill.index(first_command))
@@ -379,7 +379,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "${pluginPath}/autobiz/hooks/biz_validate.py",
             "python skills/autobiz/hooks/biz_validate.py",
         }
-        required_path = 'python3 "${pluginPath}/skills/autobiz/hooks/biz_validate.py"'
+        required_path = 'python "${pluginPath}/skills/autobiz/hooks/biz_validate.py"'
         files = [
             "skills/autobiz/SKILL.md",
             "skills/autobiz/autobiz-requirement-discuss/SKILL.md",
@@ -490,7 +490,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "task_group_changed_after_draft_created",
             "workspaceRef",
             "失败时不写任何正式产物",
-            "禁止使用 `python3 -c`",
+            "禁止使用 `python -c`",
             "不得通过 validator 失败来探索 schema",
             "不得读取 writer 源码来发现参数或枚举值",
             "required AC 覆盖校验",

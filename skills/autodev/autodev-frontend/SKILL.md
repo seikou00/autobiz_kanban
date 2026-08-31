@@ -1,7 +1,7 @@
 ---
 name: autodev-frontend
 description: Dev 阶段 frontend_before_specs workflow profile 的 HTML 转前端实现节点。用于在行为规格生成前，基于 PRD、HTML、接口说明和现有前端工程完成前端实现；仅保留标准 HTML、绝对定位高保真 HTML 两种实现路线，以及用户确认后的 review 路线。
-version: v1.1.0825
+version: v1.1.08311
 ---
 
 # /autodev-frontend - HTML 转前端实现
@@ -11,7 +11,7 @@ version: v1.1.0825
 ## 输入产物
 
 ```bash
-python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --feature "${feature}" --plain
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --feature "${feature}" --plain
 ```
 
 本技能是 `frontend_before_specs` workflow profile 中的正式 Dev 节点。它只保留两种实现路线：
@@ -28,13 +28,13 @@ python3 "${pluginPath}/hooks/inspect_skill_contract.py" autodev-frontend --featu
 进入本技能前，当前 workflow profile 必须是 `frontend_before_specs`。如果由 `prd_done` 直接进入本技能，先使用统一脚本推进 checkpoint：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_in_progress --workflow-profile frontend_before_specs
 ```
 
 完成前端实现和必要验证后：
 
 ```bash
-python3 "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_done
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint frontend_done
 ```
 
 完成后汇报变更文件、验证命令和未覆盖风险。
