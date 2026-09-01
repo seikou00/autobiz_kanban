@@ -26,7 +26,7 @@ from hooks.parallel_runtime import (
 )
 
 
-VALIDATION_STAGE_BY_BATCH = {"V-INT": "integration_test", "V-E2E": "e2e_test"}
+VALIDATION_STAGE_BY_BATCH = {"V-E2E": "e2e_test"}
 STAGE_STATUSES = {"pending", "running", "passed", "failed", "stale", "skipped", "deferred", "needs_triage"}
 FAILURE_NEXT_STAGE = {
     "implementation": "implement",
@@ -351,7 +351,11 @@ def fail_stage(
             state.update({"status": "pending", "completedAt": None})
             state["failure"]["nextStage"] = stage
             batch["activeStage"] = None
-            batch["status"] = "running"
+            # A UTest agent can fail after it has re-sealed test assets. Keep
+            # that delivery releasable and recoverable rather than downgrading
+            # it to ``running`` and then rejecting `release --final-status
+            # sealed` for the same lease.
+            batch["status"] = "sealed" if batch.get("commitSha") and batch.get("compileStatus") == "passed" else "running"
             next_name = stage
         elif next_name is not None:
             reset = False
@@ -361,7 +365,7 @@ def fail_stage(
                 if reset:
                     states[name].update({"status": "pending", "latestEvidenceId": None, "completedAt": None})
             batch["activeStage"] = None
-            batch["status"] = "running"
+            batch["status"] = "sealed" if batch.get("commitSha") and batch.get("compileStatus") == "passed" else "running"
         else:
             batch["status"] = "blocked" if failure_type == "needs_triage" else "failed"
         save_manifest(workspace, feature, run_id, manifest)
@@ -451,7 +455,18 @@ def gate_batch(workspace: Path, feature: str, run_id: str, batch_id: str) -> dic
         manifest = load_manifest(workspace, feature, run_id)
         batch = _batch(manifest, batch_id)
         states = _ensure_stage_states(batch)
-        missing = [stage for stage in stage_names(batch) if states[stage].get("status") not in {"passed", "skipped", "deferred"}]
+        deferred = [stage for stage in stage_names(batch) if states[stage].get("status") == "deferred"]
+        if deferred:
+            batch["status"] = "blocked"
+            batch["activeStage"] = None
+            save_manifest(workspace, feature, run_id, manifest)
+            return {
+                "success": False,
+                "batchId": batch_id,
+                "error": "parallel_batch_stage_gate_deferred_findings",
+                "deferredStages": deferred,
+            }
+        missing = [stage for stage in stage_names(batch) if states[stage].get("status") not in {"passed", "skipped"}]
         if missing:
             return {"success": False, "batchId": batch_id, "error": "parallel_batch_stage_gate_incomplete", "missingStages": missing}
         if str(batch.get("type") or "delivery") == "validation":

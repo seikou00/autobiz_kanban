@@ -1,19 +1,19 @@
 export const meta = {
   name: "code-batched-execution",
-  description: "Staged Batch DAG with candidate merge-train validation and evidence-only finalization",
+  description: "Staged Batch DAG with per-Batch Review/UTest, merge train, and E2E-only finalization",
   whenToUse: "由 workflow_launcher.py 在存在合法待执行 Batch 时调用",
   phases: [
     { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 波次" },
     { title: "Batch 阶段", detail: "prepare → implement → review → test；仅声明静态检查时追加 quality gate，所有状态和证据持久化" },
-    { title: "候选验证", detail: "Merge Train 在候选 Worktree 上运行 B-INT，验证通过的同一 SHA 才能推广" },
+    { title: "候选验证", detail: "Merge Train 只合成并推广已通过 Batch Review 与 UTest 的候选 SHA" },
     { title: "最终验证", detail: "合并后运行 B-E2E，最终只聚合既有证据、不重复执行命令" }
   ]
 };
 
 const DEFAULT_MAX_PARALLEL = 4;
 const MAX_SCHEDULER_WAVES = 100;
-// Repair review/test findings in their original Batch first.  If the finding
-// persists, preserve it for the final report and let later validation finish.
+// Repair review/test findings in their original Batch first.  A finding that
+// persists remains blocked with its Worktree and can never enter merge train.
 const MAX_DELIVERY_IMPLEMENTATION_REPAIRS = 3;
 const BATCH_RESULT_SCHEMA = {
   type: "object",
@@ -85,6 +85,24 @@ const WORKTREE_SCHEMA = {
   required: ["success", "batchId", "repositoryRef"],
   additionalProperties: false
 };
+const UTEST_STAGE_SCHEMA = {
+  type: "object",
+  properties: {
+    batchId: { type: "string" },
+    status: { enum: ["success", "failed", "timeout"] },
+    worktreePath: { type: "string" },
+    branchName: { type: "string" },
+    commitSha: { type: "string" },
+    testEvidenceIds: { type: "array", items: { type: "string" } },
+    stageEvidenceId: { type: "string" },
+    failureType: { type: "string" },
+    nextStage: { type: "string" },
+    failure: { type: "object" },
+    errorMessage: { type: "string" }
+  },
+  required: ["batchId", "status", "worktreePath", "branchName", "commitSha"],
+  additionalProperties: false
+};
 const MERGED_CLEANUP_SCHEMA = {
   type: "object",
   properties: {
@@ -97,14 +115,60 @@ const MERGED_CLEANUP_SCHEMA = {
   additionalProperties: true
 };
 
+function normalizeStructuredOutput(value) {
+  let normalized = String(value || "").trim();
+  // Some agents prepend their hidden reasoning even when asked for JSON only.
+  // Remove complete think blocks before attempting to parse the actual result.
+  normalized = normalized.replace(/\\?<think\b[^>]*>[\s\S]*?\\?<\/think>\s*/gi, "").trim();
+  const fence = normalized.match(/^```(?:json)?[ \\t]*\\r?\\n([\\s\\S]*?)\\r?\\n?```[ \\t]*$/i);
+  return fence ? fence[1].trim() : normalized;
+}
+
+function parseStructuredOutput(value) {
+  const normalized = normalizeStructuredOutput(value);
+  try {
+    return { parsed: true, value: JSON.parse(normalized) };
+  } catch (_) {
+    // Keep JSON recovery deliberately narrow: only accept one balanced object
+    // or array from surrounding prose, never arbitrary text as a success.
+    for (let start = 0; start < normalized.length; start += 1) {
+      if (normalized[start] !== "{" && normalized[start] !== "[") continue;
+      const opening = normalized[start];
+      const closing = opening === "{" ? "}" : "]";
+      let depth = 0;
+      let quoted = false;
+      let escaped = false;
+      for (let end = start; end < normalized.length; end += 1) {
+        const character = normalized[end];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (character === "\\\\") escaped = true;
+          else if (character === "\"") quoted = false;
+          continue;
+        }
+        if (character === "\"") {
+          quoted = true;
+          continue;
+        }
+        if (character === opening) depth += 1;
+        else if (character === closing) depth -= 1;
+        if (depth !== 0) continue;
+        try {
+          return { parsed: true, value: JSON.parse(normalized.slice(start, end + 1)) };
+        } catch (_) {
+          break;
+        }
+      }
+    }
+    return { parsed: false };
+  }
+}
+
 function unwrap(value) {
   if (value && typeof value === "object" && typeof value.value === "string") return unwrap(value.value);
   if (typeof value === "string") {
-    try {
-      return JSON.parse(value);
-    } catch (_) {
-      return { raw: value };
-    }
+    const parsed = parseStructuredOutput(value);
+    return parsed.parsed ? parsed.value : { raw: value, unparsedStructuredOutput: true };
   }
   return value || {};
 }
@@ -136,7 +200,7 @@ function hasFailureSignal(value) {
 
 function requireSuccess(value, label) {
   const result = unwrap(value);
-  if (!result || hasFailureSignal(result)) {
+  if (!result || result.unparsedStructuredOutput === true || hasFailureSignal(result)) {
     throw new Error(`${label} failed: ${JSON.stringify(result)}`);
   }
   return result;
@@ -253,6 +317,10 @@ const worktreeManagerPath = joinPath(pluginPath, "hooks/worktree_manager.py");
 const lifecyclePath = joinPath(pluginPath, "hooks/parallel_batch_lifecycle.py");
 const stagePath = joinPath(pluginPath, "hooks/parallel_batch_stage.py");
 const stageValidationPath = joinPath(pluginPath, "hooks/parallel_stage_validation.py");
+const utestRouterPath = joinPath(pluginPath, "hooks/utest_assignment_router.py");
+const utestCommandPath = joinPath(pluginPath, "hooks/run_utest_command.py");
+const utestEnvironmentPath = joinPath(pluginPath, "hooks/inspect_test_environment.py");
+const utestSourceBugPath = joinPath(pluginPath, "hooks/validate_utest_source_bug.py");
 const mergeTrainPath = joinPath(pluginPath, "hooks/parallel_merge_train.py");
 const aggregatePath = joinPath(pluginPath, "hooks/parallel_evidence_aggregate.py");
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
@@ -388,7 +456,43 @@ function implementationReworkRequired(batchResult, failedStage, result) {
   };
 }
 
-async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
+function withLatestBatchDelivery(batchResult, result) {
+  const normalized = unwrap(result);
+  return {
+    ...batchResult,
+    worktreePath: usableString(normalized.worktreePath) ? normalized.worktreePath : batchResult.worktreePath,
+    branchName: usableString(normalized.branchName) ? normalized.branchName : batchResult.branchName,
+    commitSha: usableString(normalized.commitSha) ? normalized.commitSha : batchResult.commitSha,
+  };
+}
+
+async function runBatchUtestAndSeal(batchResult) {
+  const batchId = batchResult.batchId;
+  const batchWorktree = batchResult.worktreePath;
+  const batchBranch = batchResult.branchName;
+  const batchWorkspace = batchWorkspaces[batchId] || {};
+  const batchWorkspaceRef = batchWorkspace.workspaceRef;
+  const taskIds = Array.isArray(batchTaskIds[batchId]) ? batchTaskIds[batchId] : [];
+  if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef) || !taskIds.length) {
+    throw new Error("utest_batch_context_missing:" + batchId);
+  }
+  const taskIdArgs = taskIds.map(taskId => "--task-id \"" + taskId + "\"").join(" ");
+  const taskList = JSON.stringify(taskIds);
+  const prompt =
+    "在 Batch " + batchId + " 的原生 Git worktree \"" + batchWorktree + "\"、分支 \"" + batchBranch + "\" 内完成该 Batch 的 UTest。TASK=" + taskList + "。测试点只来自这些 TASK 的 UTEST_ASSIGNMENT/testIntent；不得读取或修改其他 Batch、主 checkout、计划 JSON 或平台产物。\n" +
+    "这是 Code Review 之后的测试阶段：Review 只审业务生产代码；现在由你生成/补齐测试源码、fixture/mock/测试环境配置并运行测试。测试代码必须留在当前 Worktree，并会随本 Batch 再次封存后合并；禁止把测试拆成独立 Batch。\n" +
+    "严格执行：1) cd 到该 Worktree，确认 git 顶层与分支匹配；2) 执行 python \"" + leasePath + "\" acquire --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --ttl-seconds " + timeoutPerBatch + "，保存 lease.ownerToken，并在整个 UTest、seal 期间对同一 token 保持 heartbeat；3) 执行 python \"" + stagePath + "\" start --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test；4) 执行 python \"" + utestRouterPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --json，且只使用其中 batchId=\"" + batchId + "\"、workspaceRef=\"" + batchWorkspaceRef + "\" 的 assignment 原文；5) 执行 python \"" + utestEnvironmentPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" " + taskIdArgs + " --batch-worktree \"" + batchWorktree + "\" --json。环境非 ready 时只按 UTest 协议修测试环境并重新检查，无法解决则 fail stage 为 environment。\n" +
+    "6) 对每个实际 TASK 生成或补齐行为测试：覆盖 implementationPoints 与全部 AC，排除 nonGoals；使用真实工程 runner。每个测试文件落地后，必须执行 python \"" + utestCommandPath + "\" --kind test --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <真实TASK_ID> --batch-worktree \"" + batchWorktree + "\" --test-file <仓库根相对测试文件> -- <真实精确测试 argv>。不得把 Plan validationCommands 的 argv 当作测试 argv。测试自身、fixture、mock、测试配置的问题必须在本阶段修复并重跑。\n" +
+    "7) 若有已执行且非零退出的测试，只能使用该次 run_utest_command JSON 返回的 taskId、commandId、targetId、taskDigest、evidenceId 执行 python \"" + utestSourceBugPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <返回taskId> --command-id <返回commandId> --target-id <返回targetId> --task-digest <返回taskDigest> --evidence-id <返回evidenceId>；仅该命令成功才可判为 source_bug。此时不要直接改生产代码。先用 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 封存新测试资产，再执行 python \"" + stagePath + "\" fail --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --failure-type implementation --message <失败测试锚点与根因>，最后以 final-status sealed 释放 lease，并返回失败 JSON。Workflow 会回到同一 Batch 的生产代码 repair，随后重新编译、封存、Review 和 UTest。\n" +
+    "8) 全部 UTest 通过后，执行 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 取得新的 commitSha；再执行 python \"" + stagePath + "\" complete --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --metadata-json <包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>；最后以 final-status sealed 释放 lease。\n" +
+    "成功只返回 {batchId,status:\"success\",worktreePath,branchName,commitSha,testEvidenceIds,stageEvidenceId}。source_bug 只返回 {batchId,status:\"failed\",worktreePath,branchName,commitSha,failureType:\"implementation\",nextStage:\"implement\",failure:{type:\"implementation\",message,nextStage:\"implement\"}}。环境/契约等不可自动修复问题也必须先 fail stage、释放 lease，再返回 status:\"failed\" 与 failure。不得手工 git add/commit、merge、rebase 或删除 Worktree。";
+  return unwrap(await agent(
+    prompt,
+    { label: "stage-utest-" + batchId, phase: "Batch 阶段", schema: UTEST_STAGE_SCHEMA }
+  ));
+}
+
+async function runDeliveryReviewTestAndGate(batchResult) {
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
   const batchBranch = batchResult.branchName;
@@ -406,35 +510,27 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     { label: `stage-implement-${batchId}`, phase: "Batch 阶段" }
   ), `stage implement ${batchId}`);
   void stageResult;
-  if (!options.skipReview) {
-    const review = unwrap(await agent(
+  const review = unwrap(await agent(
     `对已封存的 Batch ${batchId} 做只读评审。代码只在原生 worktree "${batchWorktree}"，分支 "${batchBranch}"；TASK 范围仅为 ${JSON.stringify(taskIds)}。` +
     `先执行 python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review。` +
-    `评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
+    `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
     `通过后执行 python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
     `发现问题时必须先执行 python "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题>"，再返回该命令的 JSON。` +
     `可由当前 Batch 生产代码修复时，返回 JSON 必须同时包含 status:"failed"、verdict:"FAIL"、failureType:"implementation"、nextStage:"implement" 及 failure；Workflow 会在同一 Worktree 修复、重新编译、重新封存后再次评审。` +
     `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
     { label: `stage-review-${batchId}`, phase: "Batch 阶段" }
-    ));
-    if (requiresImplementationRework(review)) {
-      return implementationReworkRequired(batchResult, "review", review);
-    }
-    requireSuccess(review, `stage review ${batchId}`);
+  ));
+  if (requiresImplementationRework(review)) {
+    return implementationReworkRequired(batchResult, "review", review);
   }
-  if (!options.skipTest) {
-    const test = unwrap(await agent(
-    `执行 Batch ${batchId} 唯一拥有的测试阶段。worktree="${batchWorktree}"，TASK=${JSON.stringify(taskIds)}。` +
-    `执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage test。` +
-    `该命令只解析并运行 Plan 中归属本 Batch/test 的 validationTestPlan 命令，并写入内容绑定 evidence；禁止运行 projectValidationCommands、E2E 或其他 Batch 的命令。` +
-    `失败时它会使用 classifier 记录回流状态；不得修改主 checkout。只返回 JSON。`,
-    { label: `stage-test-${batchId}`, phase: "Batch 阶段" }
-    ));
-    if (requiresImplementationRework(test)) {
-      return implementationReworkRequired(batchResult, "test", test);
-    }
-    requireSuccess(test, `stage test ${batchId}`);
+  requireSuccess(review, `stage review ${batchId}`);
+  const test = await runBatchUtestAndSeal(batchResult);
+  const testedDelivery = withLatestBatchDelivery(batchResult, test);
+  if (requiresImplementationRework(test)) {
+    return implementationReworkRequired(testedDelivery, "test", test);
   }
+  requireSuccess(test, `stage test ${batchId}`);
+  batchResult = testedDelivery;
   if (qualityGateRequired) {
     requireSuccess(await agent(
       `执行 Batch ${batchId} 的静态质量门。执行 python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage quality_gate。` +
@@ -450,7 +546,13 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
       { label: `stage-gate-${batchId}`, phase: "Batch 阶段" }
     ), `stage gate ${batchId}`);
   }
-  return { batchId, status: "ready_to_candidate", commitSha };
+  return {
+    batchId,
+    status: "ready_to_candidate",
+    worktreePath: batchResult.worktreePath,
+    branchName: batchResult.branchName,
+    commitSha: batchResult.commitSha,
+  };
 }
 
 async function reworkDeliveryImplementation(recovery) {
@@ -474,38 +576,20 @@ async function reworkDeliveryImplementation(recovery) {
   ), `implementation rework ${batchId}`);
 }
 
-async function deferImplementationFinding(delivery, staged, disposition) {
+async function blockImplementationFinding(delivery, staged, disposition) {
   const batchId = delivery.batchId;
-  const metadata = JSON.stringify({
-    batchCommit: delivery.commitSha,
-    worktreePath: delivery.worktreePath,
-    branchName: delivery.branchName,
-  });
-  const precedingStages = staged.failedStage === "test"
-    ? ["implement", "review"]
-    : ["implement"];
-  const replay = precedingStages.map(stage =>
-    `python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage ${stage}；` +
-    `python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage ${stage} --metadata-json '${metadata}'；`
-  ).join("");
+  const message = "unresolved_" + staged.failedStage + "_implementation_finding:" + disposition;
   return requireSuccess(await agent(
-    `Batch ${batchId} 的 ${staged.failedStage} 实现问题在受控修复后仍未关闭。不得再修改代码、不得阻断后续验证。` +
-    `先恢复同一封存提交的前置阶段 evidence：${replay}` +
-    `再执行 python "${stagePath}" defer --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage ${staged.failedStage} --disposition ${disposition}。` +
-    `该命令会把原始失败信息写入 run 的 deferredIssues，并将该阶段标为 deferred；只返回 JSON。`,
-    { label: `defer-${staged.failedStage}-finding-${batchId}`, phase: "Batch 阶段" }
-  ), `defer ${staged.failedStage} finding ${batchId}`);
+    "Batch " + batchId + " 的 " + staged.failedStage + " 实现问题在受控修复后仍未关闭。不得将 deferred finding 放行到 merge train。执行 python \"" + schedulerPath + "\" mark-batch --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --status blocked --worktree-path \"" + delivery.worktreePath + "\" --branch-name \"" + delivery.branchName + "\" --error \"" + message + "\"。保留 Worktree 和阶段失败证据，勿修改代码、合并或删除 Worktree；只返回 JSON。",
+    { label: "block-unresolved-" + staged.failedStage + "-" + batchId, phase: "Batch 阶段" }
+  ), "block unresolved " + staged.failedStage + " finding " + batchId);
 }
 
 async function runDeliveryWithImplementationRepair(batchResult) {
   let delivery = batchResult;
   const seenFeedback = new Set();
-  let skipReview = false;
-  let skipTest = false;
   for (let attempt = 0; attempt <= MAX_DELIVERY_IMPLEMENTATION_REPAIRS;) {
-    const staged = await runDeliveryReviewTestAndGate(delivery, { skipReview, skipTest });
-    skipReview = false;
-    skipTest = false;
+    const staged = await runDeliveryReviewTestAndGate(delivery);
     if (staged.status === "ready_to_candidate") return staged;
     if (staged.status !== "implementation_rework_required") {
       throw new Error(`unexpected_delivery_stage_result:${JSON.stringify(staged)}`);
@@ -516,10 +600,8 @@ async function runDeliveryWithImplementationRepair(batchResult) {
         ? "repeated_feedback"
         : null;
     if (disposition) {
-      await deferImplementationFinding(delivery, staged, disposition);
-      skipReview = true;
-      skipTest = staged.failedStage === "test";
-      continue;
+      await blockImplementationFinding(delivery, staged, disposition);
+      throw new Error("delivery_implementation_repair_unresolved:" + delivery.batchId + ":" + staged.failedStage + ":" + disposition);
     }
     seenFeedback.add(staged.reworkFingerprint);
     // review/test -> implement repair -> compile/seal -> review.  The repair
@@ -528,10 +610,8 @@ async function runDeliveryWithImplementationRepair(batchResult) {
     const priorCommitSha = delivery.commitSha;
     const repaired = await reworkDeliveryImplementation(staged.recovery);
     if (!usableString(repaired.commitSha) || repaired.commitSha === priorCommitSha) {
-      await deferImplementationFinding(delivery, staged, "no_new_commit");
-      skipReview = true;
-      skipTest = staged.failedStage === "test";
-      continue;
+      await blockImplementationFinding(delivery, staged, "no_new_commit");
+      throw new Error("delivery_implementation_repair_unresolved:" + delivery.batchId + ":" + staged.failedStage + ":no_new_commit");
     }
     delivery = repaired;
     attempt += 1;
@@ -563,7 +643,7 @@ async function validateAndPromoteWave(batchIds, wave) {
   for (const [repositoryRef, ids] of Object.entries(groups)) {
     const batchArgs = ids.map(batchId => `--batch-id "${batchId}"`).join(" ");
     // A changed main invalidates the entire candidate.  Rebuild from the
-    // current head and repeat B-INT once; never rebase a previously-tested
+    // current head and rebuild the candidate; never rebase a previously-gated
     // candidate, because that would sever the evidence-to-SHA relationship.
     let promotion;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -604,14 +684,9 @@ async function validateAndPromoteWave(batchIds, wave) {
       // Now require success on the built result
       built = requireSuccess(built, `build candidate ${repositoryRef}`);
 
-      const verified = requireSuccess(await agent(
-        `在候选 SHA ${built.candidateSha} 上运行 B-INT。执行 python "${mergeTrainPath}" verify-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
-        `只运行 Plan 的 projectValidationCommands；失败时阻断推广，保留 delivery Worktree，不得直接在 main 修复。只返回 JSON。`,
-        { label: `verify-candidate-${repositoryRef}-${wave}-${attempt}`, phase: "候选验证" }
-      ), `verify candidate ${repositoryRef}`);
       const rawPromotion = unwrap(await agent(
-        `推广已验证候选 SHA ${verified.candidateSha}。执行 python "${mergeTrainPath}" promote-candidate --allow-stale --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
-        `若返回 stale=true，必须停止本次推广；Workflow 会从当前 main 全量重建候选并重跑 B-INT。禁止 rebase 或直接 merge。只返回 JSON。`,
+        `推广已完成业务 Review 与 UTest 的候选 SHA ${built.candidateSha}。执行 python "${mergeTrainPath}" promote-candidate --allow-unverified --allow-stale --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
+        `Batch 已在合并前完成全部业务 Review 与 UTest；合并后唯一的可执行验证是 B-E2E。若返回 stale=true，必须停止本次推广并从当前 main 全量重建候选；禁止 rebase 或直接 merge。只返回 JSON。`,
         { label: `promote-candidate-${repositoryRef}-${wave}-${attempt}`, phase: "候选验证" }
       ));
       if (rawPromotion && rawPromotion.stale === true && attempt < 2) continue;
@@ -627,7 +702,7 @@ async function validateAndPromoteWave(batchIds, wave) {
 // Workflow. Clear those first so a retry never inherits occupied branches.
 await cleanupMergedWorktrees([], "recover-merged-worktree-cleanup");
 
-if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !["verifying", "succeeded", "succeeded_with_issues"].includes(prepared.status) && !prepared.waitingForRepositories && !hasWorkOutsideScope(prepared)) {
+if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !["verifying", "succeeded"].includes(prepared.status) && !prepared.waitingForRepositories && !hasWorkOutsideScope(prepared)) {
   throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: prepared, batchResults, mergeResults }));
 }
 
@@ -744,8 +819,9 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0 || stageRecover
     }
   }
 
-  // Candidate validation is the release barrier. A dependency is unlocked
-  // only after the exact candidate SHA passed B-INT and was fast-forwarded.
+  // Each candidate contains only Batch deliveries whose Review and UTest
+  // evidence passed. A dependency unlocks only after that exact SHA is
+  // fast-forwarded; there is no B-INT candidate execution phase.
   const recovered = await parallel(
     stageRecoveryBatches.map(result => () => continueRecoveredDelivery(result))
   );
@@ -780,7 +856,7 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0 || stageRecover
   stageRecoveryBatches = (resumed.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(result.batchId)));
   batchTaskIds = resumed.batchTaskIds || batchTaskIds;
   batchWorkspaces = resumed.batchWorkspaces || batchWorkspaces;
-  if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !["verifying", "succeeded", "succeeded_with_issues"].includes(resumed.status) && !resumed.waitingForRepositories && !hasWorkOutsideScope(resumed)) {
+if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !["verifying", "succeeded"].includes(resumed.status) && !resumed.waitingForRepositories && !hasWorkOutsideScope(resumed)) {
     throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: resumed, batchResults, mergeResults }));
   }
 }
@@ -801,14 +877,14 @@ if (coordinatorManaged) {
 phase("最终验证");
 const e2eStarted = requireSuccess(await agent(
   `所有 delivery Batch 已推广后，创建 B-E2E。执行 python "${mergeTrainPath}" begin-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-  `此命令只创建 main SHA 绑定的验证状态，不运行重复的 compile 或 project validation。只返回 JSON。`,
+  `此命令只创建 main SHA 绑定的验证状态；它不运行 Batch compile 或 UTest。只返回 JSON。`,
   { label: "begin-e2e-validation", phase: "最终验证" }
 ), "begin e2e");
 const e2e = requireSuccess(await agent(
   `在当前已合并 main 上执行唯一的 B-E2E 验证。Feature=${feature}，runId=${runId}。` +
   `必须只在这些插件创建的临时验证 Worktree 中操作：${JSON.stringify(e2eStarted.worktrees || {})}；不得操作主 checkout。` +
   `先收集可重现环境元数据：environment.version、environment.seedDataDigest、environment.dependencies（对象，含 DB/Redis/MQ 等实际版本或明确的 none），并将其与场景摘要一并作为 JSON metadata。` +
-  `执行 Plan/Feature 定义且未被后续命令覆盖的端到端场景，不得重复执行 Batch test、quality gate 或 projectValidationCommands；随后执行 Plan 唯一归属 V-E2E 的命令：python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "V-E2E" --stage e2e_test --metadata-json '<含上述 environment 与场景摘要的 JSON>'。` +
+  `执行 Plan/Feature 定义且未被 Batch UTest 覆盖的端到端场景；如有 projectValidationCommands，它们现在唯一归属 V-E2E，须在同一临时 Worktree 中由随后命令执行。不得重复执行 Batch test、compile 或 quality gate。随后执行 Plan 唯一归属 V-E2E 的命令：python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "V-E2E" --stage e2e_test --metadata-json '<含上述 environment 与场景摘要的 JSON>'。` +
   `通过后执行 python "${mergeTrainPath}" finish-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --passed true --metadata-json '<同一份含 environment 的 JSON>'。` +
   `失败时使用 --passed false 并记录失败摘要；失败会创建受控修复入口，禁止在 main 直接修复。只返回 JSON。`,
   { label: "run-e2e-validation", phase: "最终验证" }
@@ -829,6 +905,6 @@ return {
   cleanupResults,
   e2e,
   verification,
-  finalStatus: verification.hasDeferredIssues ? "succeeded_with_issues" : "succeeded",
-  deferredIssues: Array.isArray(verification.deferredIssues) ? verification.deferredIssues : [],
+  finalStatus: "succeeded",
+  deferredIssues: [],
 };

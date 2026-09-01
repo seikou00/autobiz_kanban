@@ -22,6 +22,7 @@ from typing import Any, Iterator
 
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, feature_dir
+from hooks.plan_write_ownership import task_write_paths
 from hooks.plan_json import (
     BATCH_ID_RE,
     PARALLEL_EXECUTION_STAGES,
@@ -231,14 +232,7 @@ def batch_write_set(batch: dict[str, Any]) -> tuple[str, ...]:
     for task in batch.get("tasks", []):
         if not isinstance(task, dict):
             continue
-        scope = task.get("scope")
-        if isinstance(scope, dict):
-            raw = scope.get("paths", [])
-            if isinstance(raw, list):
-                paths.update(str(item).replace("\\", "/") for item in raw if isinstance(item, str) and item.strip())
-        raw_expected = task.get("expectedFiles", [])
-        if isinstance(raw_expected, list):
-            paths.update(str(item).replace("\\", "/") for item in raw_expected if isinstance(item, str) and item.strip())
+        paths.update(task_write_paths(task))
     return tuple(sorted(paths))
 
 
@@ -426,26 +420,22 @@ def create_manifest(
         "runtimeConfig": final_runtime_config,  # Add runtime config to manifest
         "batches": entries,
         "validationBatches": {
-            "V-INT": {
-                "batchId": "V-INT",
+            str(item["id"]): {
+                "batchId": str(item["id"]),
                 "type": "validation",
-                "validationStage": "integration_test",
+                "validationStage": str(item["stage"]),
                 "status": "pending",
-                "dependencies": sorted(entries),
+                "dependencies": (
+                    sorted(entries)
+                    if item.get("dependsOn") == "all_delivery"
+                    else list(item.get("dependsOn", []))
+                ),
                 "stageStates": {},
                 "evidence": [],
                 "activeStage": None,
-            },
-            "V-E2E": {
-                "batchId": "V-E2E",
-                "type": "validation",
-                "validationStage": "e2e_test",
-                "status": "pending",
-                "dependencies": ["V-INT"],
-                "stageStates": {},
-                "evidence": [],
-                "activeStage": None,
-            },
+            }
+            for item in pipeline.get("validationBatches", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("stage"), str)
         },
         "mergeTrains": {},
         "costs": {"totalTimeSeconds": 0, "estimatedTokens": 0, "batchCosts": {}},
@@ -516,13 +506,21 @@ def acquire_lease(workspace: Path, feature: str, run_id: str, batch_id: str, *, 
         batch = manifest.get("batches", {}).get(batch_id)
         if not isinstance(batch, dict):
             raise ValueError(f"parallel_batch_not_found:{batch_id}")
-        rework_stage = (
-            (batch.get("stageStates") or {}).get("implement", {}).get("status")
-            if isinstance(batch.get("stageStates"), dict)
-            else None
+        states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+        rework_stage = (states.get("implement") or {}).get("status")
+        review_stage = (states.get("review") or {}).get("status")
+        test_stage = (states.get("test") or {}).get("status")
+        repair_pending = rework_stage == "pending"
+        utest_pending = (
+            review_stage == "passed"
+            and test_stage in {"pending", "running", "failed"}
         )
-        if batch.get("status") not in {"pending", "leased", "sealed"} or (
-            batch.get("status") == "sealed" and rework_stage != "pending"
+        status = batch.get("status")
+        # A sealed delivery normally has no mutable lease. The two controlled
+        # exceptions are production repair after a review/UTest source finding
+        # and UTest work in the same native Worktree after code review passes.
+        if status not in {"pending", "leased"} and not (
+            status in {"sealed", "running"} and (repair_pending or utest_pending)
         ):
             raise ValueError(f"parallel_batch_not_leaseable:{batch_id}:{batch.get('status')}")
         dependencies = batch.get("dependencies", [])

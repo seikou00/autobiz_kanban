@@ -80,9 +80,11 @@ def owned_commands(
             continue
         item = index.get(command_id)
         if item is None:
-            # REVIEW-* is intentionally a human/read-only stage criterion,
-            # not a shell command.  Every executable owner must resolve.
-            if owner.get("kind") == "review":
+            # Review criteria and generated-test intents are deliberately not
+            # shell commands.  The Review/UTest/E2E agents consume those
+            # intents and bind their real commands in stage metadata; only
+            # declared command owners are executable here.
+            if owner.get("kind") in {"review", "test_intent"}:
                 continue
             raise ValueError(f"parallel_owned_command_missing:{command_id}")
         command, command_ref = item

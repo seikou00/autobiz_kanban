@@ -362,7 +362,7 @@ finalize 会重跑同一校验并通过事务一次写入正式根计划、全�
 - `scope.workspaceRoots` 由 writer 根据 `prepare-task-draft --code-workspace` 派生，再按 `workspaceRef` 选择唯一仓库；`scope.paths` 只写相对该 workspace 的提示性路径，**不是实现文件白名单**——runner 会从 start 快照自动统计该 workspace 内全部有效生产代码与生产配置变更，DTO、domain、resources、迁移或配置遗漏在 `scope.paths` 中不会导致 TASK abort；测试文件和跨 workspace 变更仍然拒绝。具名 repo 使用 `repoId:relative/path`，禁止再次包含 workspace 前缀。
 - `validationCommands[].cwd` 保持 Git 根相对路径，必须等于或位于该 TASK 的 workspace root 下；省略时 writer 自动补 repo 与 workspace root。多仓库计划中每个 TASK validation command 的 `repo` 必须等于该 TASK 唯一 `workspaceRef`；project command 按实际执行仓库填写。所有 evidence 文件仍属于 feature 产物目录。
 - 顶层 `compileProfiles` 按实际使用的 lane 配置一条 `kind=compile` 的 required 命令；backend 可使用 `mvn compile`，frontend 可使用 `npm run build`、`pnpm typecheck` 或等价的不执行测试的编译命令。它会投影为每个 Batch 唯一的 `compileCommand`，且只在 implement 阶段执行。顶层 `qualityGateProfiles` 只放 `kind=static_check` 的 lint/静态检查；为空时 Batch 不创建 `quality_gate` 阶段。TASK 的 `validationCommands` 不在 Code 阶段运行。
-- 顶层 `projectValidationCommands` 是 Merge Train 的 B-INT 唯一命令源：每个实际 `workspaceRef` 必须有至少一条 required 的 `integration_test` 或 `static_check` 命令，在候选合并 Worktree 上执行。按 `argv + cwd + repo` 归一化后不得与任何 batch profile 命令重复，也不能替代 TASK 的 AC 覆盖。单仓库可省略 `repo`；多仓库必须为每条命令显式填写对应 `repo`。不得留空数组，也不得把 batch compile/build 复制为 B-INT。
+- 顶层 `projectValidationCommands` 是最终 B-E2E 的可选系统级命令源：它们只在所有 delivery 已合并后的临时 main Worktree 中执行，绝不成为候选 Merge Train 门槛。不得把 batch compile/build 或各 Batch 的 UTest 命令复制进该数组，也不能替代 TASK 的 AC 覆盖。单仓库可留空；多仓库若声明命令，必须为每条命令显式填写对应 `repo`，并确保每个实际 `workspaceRef` 由 E2E intent 或项目命令覆盖。
 - Plan 阶段所有任务初始状态为 `todo`，evidence 相关字段为空或 null，这些运行字段只由 task runner 更新。单 Batch Plan 可初始激活 `B001`；多 Batch Plan 由并行 scheduler 从零入度 Batch 集合启动，不写人为 batch handoff。依赖 Batch 必须等其 `deps` 全部合并后才进入下一调度波次。
 - 每个任务必须追溯到真实 specs 与已确认 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的 ID。四个字段在结构上可以存在但取空数组；任务不涉及对应设计项时必须写 `[]`，禁止为了过校验强行编造或按 Task 编号续写 `API-*` / `DATA-*` / `D-*`。模板中的 API/Data/Decision ID 都是占位示例，生成前必须替换为 Design 中真实 ID；不要为了过校验强行编造，未涉及时使用空数组 `[]`。如果 `design.md` 中存在 API/Data/D 决策，则这些设计项必须被至少一个真正相关的任务覆盖；覆盖缺失时把已有 ID 绑定到正确任务，禁止向 design 新增 ID 迎合 Plan。只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
 - `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
@@ -468,19 +468,19 @@ UI 任务规则：
 
 #### 配置工程命令（Draft 阶段，finalize 之前）
 
-**重要**：工程命令必须在 Draft 阶段配置完成，finalize 会校验工程命令完整性。finalize 后计划进入只读状态；如需修订，先 `reopen-finalized-draft`，再在 Draft 中重新运行对应命令，最后 `finalize-task-draft --force`。同一 lane + workspace 的编译命令和 required B-INT 命令会被替换而非重复追加；质量门默认可追加多个检查，传 `--replace` 才替换该 workspace 的质量门集合。
+**重要**：必需的工程编译命令必须在 Draft 阶段配置完成，finalize 会校验其完整性。项目级 E2E 命令是可选补充，也应在 Draft 阶段声明。finalize 后计划进入只读状态；如需修订，先 `reopen-finalized-draft`，再在 Draft 中重新运行对应命令，最后 `finalize-task-draft --force`。同一 lane + workspace 的编译命令和 required 项目 E2E 命令会被替换而非重复追加；质量门默认可追加多个检查，传 `--replace` 才替换该 workspace 的质量门集合。
 
-为每个实际使用的 lane 添加一条 required 编译命令，并为每个实际 `workspaceRef` 添加一条 required 的 B-INT 集成命令；批次统一使用 `mode=commands`：
+为每个实际使用的 lane 添加一条 required 编译命令。若 Feature 需要系统级命令，可为相应 workspace 添加一条项目 E2E 命令；它不是 finalize 前置条件，批次统一使用 `mode=commands`：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane backend --command "<BACKEND_COMPILE_OR_BUILD>"
 python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane frontend --command "<FRONTEND_COMPILE_OR_BUILD>"
 python "${pluginPath}/hooks/plan_writer.py" add-quality-gate-command --feature "${feature}" --lane backend --command "<BACKEND_LINT_OR_STATIC_CHECK>"
 python "${pluginPath}/hooks/plan_writer.py" add-quality-gate-command --feature "${feature}" --lane backend --command "<REPLACEMENT_STATIC_CHECK>" --replace
-python "${pluginPath}/hooks/plan_writer.py" add-project-validation-command --feature "${feature}" --command "<CANDIDATE_INTEGRATION_COMMAND>" --cwd "<GIT_ROOT_RELATIVE_CWD>" --kind integration_test --repo "<workspaceRef>"
+python "${pluginPath}/hooks/plan_writer.py" add-project-validation-command --feature "${feature}" --command "<FINAL_E2E_COMMAND>" --cwd "<GIT_ROOT_RELATIVE_CWD>" --kind e2e_test --repo "<workspaceRef>"
 ```
 
-工程命令默认复用 `prepare-task-draft` 已锁定的 `--code-workspace`，无需重复传入；仅在需要显式复检某个工作区时传 `--code-workspace`。同一 lane 只使用一个 workspace 时 writer 可自动选择；使用多个仓库时必须为每个 workspace 分别添加 required 编译命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。B-INT 命令同理：单仓库可以省略 `--repo`，多仓库必须每个 repo 一条且显式传 `--repo <workspaceRef>`。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。B-INT 在候选 Worktree、真 merge 前执行，不能留给 Board、CI/CD 或合并后的 E2E 阶段。
+工程命令默认复用 `prepare-task-draft` 已锁定的 `--code-workspace`，无需重复传入；仅在需要显式复检某个工作区时传 `--code-workspace`。同一 lane 只使用一个 workspace 时 writer 可自动选择；使用多个仓库时必须为每个 workspace 分别添加 required 编译命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。可选项目 E2E 命令同理：单仓库可以省略 `--repo`，多仓库必须为每条命令显式传 `--repo <workspaceRef>`。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。项目命令只在所有 Batch 合并后的 B-E2E 临时 Worktree 中执行，绝不成为候选阻塞门。
 
 Plan 阶段不再生成独立 smoke 计划。每个 Batch 的 Code 编译收口只落在 `compileCommand` 的 required `kind=compile` 命令中；frontend 命令的 argv 可以是 build/typecheck，但不得执行或串联测试。只有声明了 `qualityGateCommands` 时，才在 test 后运行对应的 lint/静态检查。TASK `validationCommands` 继续投影为 `testIntent`，由后续 UTest/E2E 阶段执行。
 

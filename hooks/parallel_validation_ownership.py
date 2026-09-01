@@ -2,8 +2,8 @@
 """Plan-owned validation ownership for the staged parallel workflow.
 
 Every executable validation, test intent and review criterion has exactly one
-owner.  The owner is a delivery Batch or one of the two runtime validation
-Batches (``V-INT`` and ``V-E2E``).  This is deliberately Plan data rather than
+owner.  The owner is a delivery Batch or the single post-merge runtime
+validation Batch (``V-E2E``).  This is deliberately Plan data rather than
 an agent convention: the scheduler can reject duplicate execution before a
 worktree is provisioned.
 """
@@ -35,17 +35,10 @@ OPTIONAL_DELIVERY_STAGES = (
 )
 VALIDATION_BATCHES = (
     {
-        "id": "V-INT",
-        "type": "validation",
-        "stage": "integration_test",
-        "dependsOn": "all_delivery",
-        "executionTarget": "merge_candidate",
-    },
-    {
         "id": "V-E2E",
         "type": "validation",
         "stage": "e2e_test",
-        "dependsOn": ["V-INT"],
+        "dependsOn": "all_delivery",
         "executionTarget": "merged_main",
     },
 )
@@ -127,10 +120,12 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
                     continue
                 command_id = str(intent.get("commandId") or intent.get("id") or f"TEST-{task['id']}-{index:02d}")
                 asset_type = str(intent.get("assetType") or "unit_test")
+                # A Batch owns every test intent that can be authored and
+                # exercised in its native worktree.  ``e2e_test`` remains the
+                # sole post-merge validation surface because it requires the
+                # complete promoted system.
                 if asset_type == "e2e_test":
                     owner_batch_id, stage = "V-E2E", "e2e_test"
-                elif asset_type == "integration_test":
-                    owner_batch_id, stage = "V-INT", "integration_test"
                 else:
                     owner_batch_id, stage = batch_id, "test"
                 ownership[command_id] = {
@@ -146,8 +141,10 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
             continue
         command_id = str(command.get("id") or f"PROJECT-VAL-{index:03d}")
         ownership[command_id] = {
-            "ownerBatchId": "V-INT",
-            "stage": "integration_test",
+            # Root-level commands are system checks.  They execute only in
+            # the final E2E worktree, never in a candidate merge barrier.
+            "ownerBatchId": "V-E2E",
+            "stage": "e2e_test",
             "kind": "command",
         }
 
@@ -189,41 +186,16 @@ def validation_ownership_errors(root: dict[str, Any], batches: dict[str, dict[st
     if not isinstance(ownership, dict):
         return [*errors, "parallel_validation_ownership_missing"]
     expected = build_pipeline_contract(root, batches)["validationOwnership"]
-    integration_commands = [item for item in root.get("projectValidationCommands", []) if isinstance(item, dict)]
-    if not integration_commands:
-        errors.append("parallel_batch_pipeline_integration_commands_missing")
+    project_commands = [item for item in root.get("projectValidationCommands", []) if isinstance(item, dict)]
     workspace_refs = {
         str(entry.get("workspaceRef"))
         for entry in root.get("batches", [])
         if isinstance(entry, dict) and isinstance(entry.get("workspaceRef"), str) and entry.get("workspaceRef")
     }
     if len(workspace_refs) > 1:
-        for index, command in enumerate(integration_commands, start=1):
+        for index, command in enumerate(project_commands, start=1):
             if not isinstance(command.get("repo"), str) or not command.get("repo"):
-                errors.append(f"parallel_batch_pipeline_integration_command_repo_missing:{index}")
-    integration_refs = {
-        str(command.get("repo"))
-        for command in integration_commands
-        if isinstance(command.get("repo"), str) and command.get("repo")
-    }
-    if len(workspace_refs) == 1 and integration_commands and not integration_refs:
-        integration_refs = set(workspace_refs)
-    for entry in root.get("batches", []):
-        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
-            continue
-        ref = str(entry.get("workspaceRef") or "")
-        batch = batches.get(entry["id"], {})
-        for task in batch.get("tasks", []) if isinstance(batch, dict) else []:
-            if not isinstance(task, dict):
-                continue
-            intents = task.get("validationTestPlan", [])
-            if isinstance(intents, list) and any(
-                isinstance(item, dict) and item.get("assetType") == "integration_test"
-                for item in intents
-            ):
-                integration_refs.add(ref)
-    for ref in sorted(workspace_refs - integration_refs):
-        errors.append(f"parallel_batch_pipeline_integration_coverage_missing:{ref}")
+                errors.append(f"parallel_batch_pipeline_e2e_command_repo_missing:{index}")
     source_ids: list[str] = []
     for entry in root.get("batches", []):
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):

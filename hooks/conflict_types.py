@@ -15,7 +15,7 @@ class CandidateStatus(Enum):
     VERIFIED = "verified"  # Validation passed, waiting for promotion
     PROMOTED = "promoted"  # Successfully promoted to main
     CANDIDATE_CONFLICTED = "candidate_conflicted"  # Git merge conflict detected
-    VALIDATION_FAILED = "validation_failed"  # B-INT validation failed
+    VALIDATION_FAILED = "validation_failed"  # Reserved legacy validation failure
     NEEDS_RESOLUTION = "needs_resolution"  # Requires manual/Agent intervention
     DISCARDED = "discarded"  # Candidate intentionally removed before promotion
     FAILED = "failed"  # Generic failure

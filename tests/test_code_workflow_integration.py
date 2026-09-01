@@ -78,6 +78,10 @@ def test_fixed_workflow_entrypoint():
         "worktree_manager.py",
         "parallel_merge_train.py",
         "parallel_stage_validation.py",
+        "utest_assignment_router.py",
+        "run_utest_command.py",
+        "inspect_test_environment.py",
+        "validate_utest_source_bug.py",
         "parallel_batch_lifecycle.py",
         "cleanup-merged",
         "merged_worktree_cleanup_incomplete",
@@ -124,10 +128,11 @@ def test_fixed_workflow_entrypoint():
         "--stage review --failure-type",
         "promotions.flatMap(mergedBatchIds)",
         "promotion_batch_ids_missing",
-        "deferImplementationFinding",
-        "deferredIssues",
-        "repeated_feedback",
-        "succeeded_with_issues",
+        "runBatchUtestAndSeal",
+        "blockImplementationFinding",
+        "delivery_implementation_repair_unresolved",
+        "--batch-worktree",
+        "不得因 sealed commit 缺少测试文件而判定 Review 不通过",
         "同一 Worktree 修复、重新编译、重新封存后再次评审",
     ]
     missing = [check for check in checks if check not in content]
@@ -145,9 +150,55 @@ def test_fixed_workflow_entrypoint():
     return True
 
 
+def test_workflow_structured_output_normalization():
+    """Review 的 think 前缀或 Markdown 围栏不得吞掉失败信号。"""
+    print("测试 5: Workflow 结构化输出归一化")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {};
+vm.createContext(context);
+const helperStart = source.indexOf("function normalizeStructuredOutput(");
+const inputStart = source.indexOf("const input = unwrap(args);");
+const reworkStart = source.indexOf("function requiresImplementationRework(");
+const reworkEnd = source.indexOf("function implementationReworkRequired(", reworkStart);
+if (helperStart < 0 || inputStart < 0 || reworkStart < 0 || reworkEnd < 0) process.exit(2);
+vm.runInContext(source.slice(helperStart, inputStart), context);
+vm.runInContext(source.slice(reworkStart, reworkEnd), context);
+const failed = '{"status":"failed","verdict":"FAIL","failureType":"implementation","nextStage":"implement","failure":{"type":"implementation","nextStage":"implement"}}';
+const samples = [
+  `<think>reasoning that must not be part of the protocol</think>\n${failed}`,
+  `\`\`\`json\n${failed}\n\`\`\``
+];
+for (const sample of samples) {
+  const parsed = context.unwrap(sample);
+  if (parsed.status !== "failed" || !context.requiresImplementationRework(sample)) process.exit(3);
+  let rejected = false;
+  try { context.requireSuccess(sample, "review"); } catch (_) { rejected = true; }
+  if (!rejected) process.exit(4);
+}
+const malformed = "review result without JSON";
+let rejectedMalformed = false;
+try { context.requireSuccess(malformed, "review"); } catch (_) { rejectedMalformed = true; }
+if (!rejectedMalformed) process.exit(5);
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ 结构化输出处理错误: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ think 前缀和 JSON 围栏会被正确解析")
+    print("✓ 无法解析的阶段输出会阻断流程")
+    print()
+    return True
+
+
 def test_skill_integration():
     """测试技能集成。"""
-    print("测试 5: 技能集成")
+    print("测试 6: 技能集成")
     print("-" * 60)
 
     skill_file = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
@@ -192,6 +243,7 @@ def main():
     tests = [
         ("Workflow Launcher", test_workflow_launcher),
         ("Fixed Workflow Entrypoint", test_fixed_workflow_entrypoint),
+        ("Structured Output Normalization", test_workflow_structured_output_normalization),
         ("Skill Integration", test_skill_integration),
     ]
 

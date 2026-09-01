@@ -185,6 +185,31 @@ class RunUTestCommandTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(canonical_task_digest(self.task), result["taskDigest"])
 
+    def test_native_batch_worktree_override_runs_and_records_inside_worktree(self):
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Test User"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "add", "test_sample.py"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "test fixture"], check=True)
+        worktree = self.repo.parent / "native-utest-worktree"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-qb", "utest-worktree", str(worktree)],
+            check=True,
+        )
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(worktree)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        )
+
+        result = self._execute(code_workspace=str(worktree))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(str(worktree.resolve()), result["repositoryRoot"])
+        self.assertEqual(["test_sample.py"], self._records()[0]["validation"]["testFiles"])
+
     def test_rerun_appends_history_on_same_plan_target(self):
         first = self._execute()
         second = self._execute()

@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.parallel_runtime import append_event, check_lease, load_manifest, run_dir, run_lock, save_manifest
+from hooks.plan_write_ownership import is_test_asset_path
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
@@ -206,7 +207,7 @@ def seal_parallel_batch(
             manifest, batch, repository_ref, git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        if batch.get("status") != "sealed" or batch.get("compileStatus") != "passed":
+        if batch.get("status") not in {"sealed", "leased"} or batch.get("compileStatus") != "passed":
             return {"success": False, "error": f"parallel_batch_not_ready_to_seal:{batch_id}"}
         raw_worktree = batch.get("worktreePath")
         if not isinstance(raw_worktree, str) or not raw_worktree.strip():
@@ -238,6 +239,21 @@ def seal_parallel_batch(
         if status.returncode != 0:
             return {"success": False, "error": f"parallel_worktree_status_failed:{status.stderr.strip()}"}
         changed = [line[3:] for line in status.stdout.splitlines() if len(line) > 3]
+        stage_states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+        is_utest_reseal = (
+            isinstance(stage_states.get("test"), dict)
+            and stage_states["test"].get("status") == "running"
+            and isinstance(stage_states.get("review"), dict)
+            and stage_states["review"].get("status") == "passed"
+        )
+        if is_utest_reseal:
+            non_test_changes = [path for path in changed if not is_test_asset_path(path)]
+            if non_test_changes:
+                return {
+                    "success": False,
+                    "error": "parallel_utest_production_change_forbidden",
+                    "files": non_test_changes,
+                }
         forbidden = [path for path in changed if path.startswith((".autobizdevops/", ".parallel-runs/"))]
         if forbidden:
             return {"success": False, "error": "parallel_batch_artifact_changes_forbidden", "files": forbidden}
@@ -266,10 +282,25 @@ def seal_parallel_batch(
         sha = _git(worktree, "rev-parse", "HEAD")
         if sha.returncode != 0 or not sha.stdout.strip():
             return {"success": False, "error": "parallel_batch_commit_sha_unavailable"}
+        previous_commit_sha = batch.get("commitSha")
+        batch["status"] = "sealed"
         batch["commitSha"] = sha.stdout.strip()
+        batch["lastSeal"] = {
+            "commitSha": sha.stdout.strip(),
+            "previousCommitSha": previous_commit_sha if isinstance(previous_commit_sha, str) and previous_commit_sha else None,
+            "changedFiles": list(changed),
+            "purpose": "utest" if is_utest_reseal else "implementation",
+        }
         save_manifest(artifact_workspace, feature, run_id, manifest)
     append_event(artifact_workspace, feature, run_id, "batch_sealed", batchId=batch_id, commitSha=sha.stdout.strip(), changedFiles=changed)
-    return {"success": True, "batchId": batch_id, "commitSha": sha.stdout.strip(), "changedFiles": changed}
+    return {
+        "success": True,
+        "batchId": batch_id,
+        "commitSha": sha.stdout.strip(),
+        "previousCommitSha": previous_commit_sha if isinstance(previous_commit_sha, str) and previous_commit_sha else None,
+        "changedFiles": changed,
+        "purpose": "utest" if is_utest_reseal else "implementation",
+    }
 
 
 def remove_parallel_worktree(

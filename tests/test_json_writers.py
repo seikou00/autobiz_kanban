@@ -686,7 +686,6 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertNotEqual(missing_engineering_commands.returncode, 0)
             self.assertIn("missing_backend_compile_command", missing_engineering_commands.stdout)
-            self.assertIn("missing_required_integration_test", missing_engineering_commands.stdout)
             compile_added = _run(
                 "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--lane", "backend",
@@ -2035,15 +2034,15 @@ class JsonWriterTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["projectValidationCommand"]["command"],
-            "add-project-validation-command [--repo <workspaceRef>] --command <integration-command>",
+            "add-project-validation-command [--repo <workspaceRef>] --command <final-e2e-command>",
         )
         self.assertTrue(contract["projectValidationCommand"]["mustNotDuplicateBatchProfile"])
-        self.assertTrue(contract["projectValidationCommand"]["requiredForParallelPipeline"])
+        self.assertFalse(contract["projectValidationCommand"]["requiredForParallelPipeline"])
         self.assertEqual(
             contract["projectValidationCommand"]["requiredPerWorkspaceRef"],
-            "one_candidate_integration_command",
+            "optional_final_e2e_command",
         )
-        self.assertEqual(contract["projectValidationCommand"]["executionTarget"], "merge_candidate")
+        self.assertEqual(contract["projectValidationCommand"]["executionTarget"], "merged_main_e2e")
         self.assertTrue(contract["projectValidationCommand"]["repoRequiredWhenMultipleWorkspaces"])
         self.assertEqual(
             contract["compileCommand"],
@@ -2134,10 +2133,7 @@ class JsonWriterTests(unittest.TestCase):
                 "preflightCommand": "preflight-task-draft",
                 "command": "finalize-task-draft",
                 "coverage": "all_path_qualified_spec_scenarios",
-                "requiredBefore": [
-                    "add-compile-command",
-                    "add-project-validation-command",
-                ],
+                "requiredBefore": ["add-compile-command"],
             },
         )
         self.assertTrue(contract["collectingRepairs"]["atomic"])
@@ -2201,14 +2197,14 @@ class JsonWriterTests(unittest.TestCase):
             {
                 "command": (
                     "add-project-validation-command [--repo <workspaceRef>] "
-                    "--command <integration-command>"
+                    "--command <final-e2e-command>"
                 ),
                 "requiredFields": ["id", "argv", "cwd", "kind", "required"],
                 "allowedKinds": ["e2e_test", "integration_test", "static_check"],
                 "mustNotDuplicateBatchProfile": True,
-                "requiredForParallelPipeline": True,
-                "requiredPerWorkspaceRef": "one_candidate_integration_command",
-                "executionTarget": "merge_candidate",
+                "requiredForParallelPipeline": False,
+                "requiredPerWorkspaceRef": "optional_final_e2e_command",
+                "executionTarget": "merged_main_e2e",
                 "repoRequiredWhenMultipleWorkspaces": True,
             },
         )

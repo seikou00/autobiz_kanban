@@ -180,6 +180,7 @@ def execute_utest_command(
     task_digest=None,
     test_files=None,
     environment_target_id=None,
+    code_workspace=None,
     timeout=600,
 ):
     selected_kind = kind or mode
@@ -210,6 +211,7 @@ def execute_utest_command(
             resolved_feature,
             task_id,
             environment_target_id,
+            code_workspace=code_workspace,
         )
     except (UTestPlanContractError, UTestWorkspaceBindingError) as exc:
         raise UTestCommandError(str(exc))
@@ -404,6 +406,11 @@ def main(argv=None):
     parser.add_argument("--task-digest")
     parser.add_argument("--test-file", action="append")
     parser.add_argument("--environment-target-id")
+    parser.add_argument(
+        "--batch-worktree",
+        dest="code_workspace",
+        help="仅 Workflow 内使用：当前 Batch 的原生 Git Worktree，必须与 Plan 绑定仓库共享 Git common-dir。",
+    )
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--argv-json", "--command-json", dest="argv_json")
     parser.add_argument("command_argv", nargs=argparse.REMAINDER)
@@ -447,6 +454,7 @@ def main(argv=None):
             task_digest=args.task_digest,
             test_files=args.test_file,
             environment_target_id=args.environment_target_id,
+            code_workspace=args.code_workspace,
             timeout=args.timeout,
         )
     except UTestCommandError as exc:

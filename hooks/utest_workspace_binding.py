@@ -81,6 +81,60 @@ def _git_root(raw_path):
     return root if root.is_dir() else None
 
 
+def _git_common_dir(raw_path):
+    root = _git_root(raw_path)
+    if root is None:
+        return None
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return None
+    candidate = Path(completed.stdout.strip())
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return candidate.resolve() if candidate.is_dir() else None
+
+
+def _resolve_execution_repository(binding, code_workspace):
+    """Allow only a native Worktree of the Plan-bound repository.
+
+    The UTest runner normally resolves the primary checkout from the Plan
+    codeWorkspaces field. A Batch may instead need to generate tests in its
+    isolated native Worktree before that Batch is merged. Matching Git common
+    directories proves that the supplied checkout belongs to the same
+    repository without allowing a model to redirect a test command elsewhere.
+    """
+
+    planned_root = Path(binding["root"]).resolve()
+    if code_workspace is None:
+        return planned_root, binding
+    candidate = _git_root(code_workspace)
+    if candidate is None:
+        raise UTestWorkspaceBindingError(
+            "workspace_binding_invalid",
+            "UTest code workspace 不是有效 Git Worktree。修复：使用当前 Batch 的插件原生 Worktree。",
+            "use_batch_native_worktree",
+        )
+    if _git_common_dir(planned_root) != _git_common_dir(candidate):
+        raise UTestWorkspaceBindingError(
+            "workspace_binding_invalid",
+            "UTest code workspace 不属于当前 TASK 的 Plan 绑定仓库。修复：只使用该 Batch 的插件原生 Worktree。",
+            "use_batch_native_worktree",
+        )
+    overridden = dict(binding)
+    overridden["root"] = str(candidate)
+    overridden["source"] = "batch_native_worktree"
+    return candidate, overridden
+
+
 def _matches_workspace_ref(root, workspace_ref):
     return workspace_ref == "default" or root.name == workspace_ref
 
@@ -279,7 +333,14 @@ def _execution_target_id(task_id, repository_root, execution_root):
     return "ENV-{}-{}".format(task_id, digest)
 
 
-def resolve_task_workspace(workspace, feature, task_id, selected_target_id=None):
+def resolve_task_workspace(
+    workspace,
+    feature,
+    task_id,
+    selected_target_id=None,
+    *,
+    code_workspace=None,
+):
     workspace = Path(workspace).resolve()
     feature_dir = workspace / ".autobizdevops" / "features" / feature
     try:
@@ -290,7 +351,7 @@ def resolve_task_workspace(workspace, feature, task_id, selected_target_id=None)
         )
     batch, task = _task_from_plan(plan, task_id)
     binding = resolve_workspace_binding(workspace, feature, task["workspaceRef"])
-    repository_root = Path(binding["root"]).resolve()
+    repository_root, binding = _resolve_execution_repository(binding, code_workspace)
     locations = _location_roots(task, repository_root)
     workspace_root = _workspace_prefix(task)
     modules = _task_modules(task)

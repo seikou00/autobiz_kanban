@@ -2344,7 +2344,7 @@ def validate_plan_json_initial_tasks(ctx: HookContext) -> int:
 
 
 def validate_parallel_batch_pipeline_contract(ctx: HookContext) -> int:
-    """Require a runnable B-INT command before the Plan stage can complete."""
+    """Require the per-Batch UTest plus E2E-only pipeline contract."""
     plan_json = ctx.file("plan.json")
     if not ctx.requires_artifact("plan.json") and not is_nonempty(plan_json):
         info(ctx, "parallel_batch_pipeline_not_in_contract_degrade")

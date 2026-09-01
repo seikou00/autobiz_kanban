@@ -304,7 +304,7 @@ def _batch_execution_plan(
 
     notes = [
         "每个 Batch 依次完成 prepare、implement、review、test；只有声明静态检查命令时才追加 quality gate，随后进入候选合并；成功合并后才释放下游。",
-        "每个 Wave 先在 Merge Train 候选 Worktree 运行 B-INT；只有同一 candidate SHA 通过才 fast-forward 推广并释放下游 Batch。",
+        "每个 Batch 在自己的 Worktree 完成业务 Review 与 UTest；Merge Train 只合成并推广这些已通过的 candidate SHA，成功后才释放下游 Batch。",
         "所有 delivery Batch 推广后，B-E2E 在临时 main Worktree 运行；最终仅聚合证据，绝不重复执行验证命令。",
     ]
 
@@ -328,8 +328,8 @@ def _batch_execution_plan(
         },
         "mergeBarrier": {
             "type": "merge_train",
-            "validationBatch": "V-INT",
-            "rule": "candidate_sha_must_pass_before_fast_forward_promotion",
+            "validationBatch": None,
+            "rule": "batch_review_and_utest_must_pass_before_fast_forward_promotion",
         },
         "postMergeValidation": {
             "validationBatch": "V-E2E",

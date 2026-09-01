@@ -12,11 +12,11 @@ from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_scheduler import create_run, mark_batch, schedule
 from hooks.parallel_batch_stage import complete_stage, defer_stage, fail_stage, gate_batch, start_stage
 from hooks.parallel_evidence_aggregate import aggregate_evidence
-from hooks.parallel_merge_train import begin_e2e, build_candidate, finish_e2e, promote_candidate, verify_candidate
-from hooks.parallel_runtime import load_manifest
+from hooks.parallel_merge_train import begin_e2e, build_candidate, finish_e2e, promote_candidate
+from hooks.parallel_runtime import acquire_lease, load_manifest, release_lease
 from hooks.parallel_stage_validation import owned_commands, run_owned_stage
 from hooks.parallel_validation_ownership import build_pipeline_contract, validation_ownership_errors
-from hooks.worktree_manager import provision_parallel_worktree
+from hooks.worktree_manager import provision_parallel_worktree, seal_parallel_batch
 from tests.test_task_runner import _git, _workspace
 
 
@@ -50,7 +50,7 @@ def _add_validation_intent(feature_dir: Path, *, asset_type: str = "unit_test") 
 
 
 class ParallelStagedPipelineTest(unittest.TestCase):
-    def test_unresolved_review_is_deferred_without_blocking_batch_gate(self) -> None:
+    def test_unresolved_review_deferred_finding_blocks_batch_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))
             _enable_pipeline(feature_dir)
@@ -117,14 +117,17 @@ class ParallelStagedPipelineTest(unittest.TestCase):
 
             start_stage(workspace, "alpha", run_id, "B001", "test")
             complete_stage(workspace, "alpha", run_id, "B001", "test", metadata={"batchCommit": "reviewed-commit"})
-            self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])
+            gated = gate_batch(workspace, "alpha", run_id, "B001")
+            self.assertFalse(gated["success"])
+            self.assertEqual(gated["error"], "parallel_batch_stage_gate_deferred_findings")
             manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(manifest["batches"]["B001"]["status"], "blocked")
             self.assertEqual(manifest["batches"]["B001"]["stageStates"]["review"]["status"], "deferred")
             self.assertEqual(manifest["deferredIssues"][0]["issueId"], "DEFERRED-B001-REVIEW-001")
 
     def test_plan_ownership_is_required_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, feature_dir, _ = _workspace(Path(tmp))
+            workspace, feature_dir, repo = _workspace(Path(tmp))
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             batch = json.loads((feature_dir / root["batches"][0]["path"]).read_text(encoding="utf-8"))
             root.pop("parallelBatchPipeline")
@@ -134,12 +137,9 @@ class ParallelStagedPipelineTest(unittest.TestCase):
 
             root["projectValidationCommands"] = []
             root["parallelBatchPipeline"] = build_pipeline_contract(root, {"B001": batch})
-            self.assertIn(
-                "parallel_batch_pipeline_integration_commands_missing",
-                validation_ownership_errors(root, {"B001": batch}),
-            )
+            self.assertEqual(validation_ownership_errors(root, {"B001": batch}), [])
 
-    def test_candidate_sha_is_verified_promoted_and_evidence_aggregated(self) -> None:
+    def test_batch_utest_gated_candidate_is_promoted_and_e2e_aggregated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))
             _enable_pipeline(feature_dir)
@@ -159,29 +159,26 @@ class ParallelStagedPipelineTest(unittest.TestCase):
                 start_stage(workspace, "alpha", run_id, "B001", stage)
                 complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
             start_stage(workspace, "alpha", run_id, "B001", "review")
-            fail_stage(
-                workspace,
-                "alpha",
-                run_id,
-                "B001",
-                "review",
-                failure_type="implementation",
-                message="known review finding",
-            )
-            start_stage(workspace, "alpha", run_id, "B001", "implement")
-            complete_stage(workspace, "alpha", run_id, "B001", "implement", metadata={"batchCommit": commit})
-            defer_stage(workspace, "alpha", run_id, "B001", "review", disposition="repair_limit_reached")
+            complete_stage(workspace, "alpha", run_id, "B001", "review", metadata={"batchCommit": commit})
+            lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
             start_stage(workspace, "alpha", run_id, "B001", "test")
+            test_file = worktree / "tests" / "test_delivery.py"
+            test_file.parent.mkdir()
+            test_file.write_text("def test_delivery():\n    assert True\n", encoding="utf-8")
+            resealed = seal_parallel_batch(workspace, "alpha", run_id, "B001", worktree, lease["ownerToken"])
+            self.assertTrue(resealed["success"], resealed)
+            self.assertEqual(resealed["purpose"], "utest")
+            self.assertEqual(resealed["changedFiles"], ["tests/test_delivery.py"])
+            commit = resealed["commitSha"]
             complete_stage(workspace, "alpha", run_id, "B001", "test", metadata={"batchCommit": commit})
+            release_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"], final_status="sealed")
             gated = gate_batch(workspace, "alpha", run_id, "B001")
             self.assertTrue(gated["success"], gated)
 
             candidate = build_candidate(workspace, "alpha", run_id, wave=1, batch_ids=["B001"])
             self.assertTrue(candidate["success"])
-            verified = verify_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default")
-            self.assertTrue(verified["success"], verified)
             with patch("hooks.parallel_merge_train.mark_parallel_batch_tasks_merged", return_value=WriterResult(ok=True)):
-                promoted = promote_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default")
+                promoted = promote_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default", allow_unverified=True)
             self.assertTrue(promoted["success"], promoted)
             self.assertEqual(_git_output(repo, "rev-parse", "HEAD"), candidate["candidateSha"])
 
@@ -192,9 +189,64 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             aggregate = aggregate_evidence(workspace, "alpha", run_id)
             self.assertTrue(aggregate["passed"], aggregate["errors"])
             manifest = load_manifest(workspace, "alpha", run_id)
-            self.assertEqual(manifest["status"], "succeeded_with_issues")
-            self.assertTrue(aggregate["hasDeferredIssues"])
-            self.assertEqual(aggregate["deferredIssues"][0]["message"], "known review finding")
+            self.assertEqual(manifest["status"], "succeeded")
+            self.assertFalse(aggregate["hasDeferredIssues"])
+            record = manifest["mergeTrains"]["default:wave-001"]
+            self.assertEqual(record["validation"]["reason"], "batch_utest_gated_e2e_only")
+
+    def test_utest_reseal_rejects_unreviewed_production_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            (worktree / "delivery.txt").write_text("delivery\n", encoding="utf-8")
+            _git(worktree, "add", "delivery.txt")
+            _git(worktree, "commit", "-m", "delivery")
+            commit = _git_output(worktree, "rev-parse", "HEAD")
+            mark_batch(workspace, "alpha", run_id, "B001", "sealed", worktreePath=str(worktree), branchName=provisioned["branchName"], commitSha=commit, compileStatus="passed")
+            for stage in ("prepare", "implement", "review"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
+            lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+            start_stage(workspace, "alpha", run_id, "B001", "test")
+            (worktree / "delivery.txt").write_text("unreviewed production change\n", encoding="utf-8")
+            rejected = seal_parallel_batch(workspace, "alpha", run_id, "B001", worktree, lease["ownerToken"])
+            self.assertFalse(rejected["success"])
+            self.assertEqual(rejected["error"], "parallel_utest_production_change_forbidden")
+            self.assertEqual(rejected["files"], ["delivery.txt"])
+
+    def test_utest_source_bug_releases_resealed_worktree_for_implementation_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            (worktree / "delivery.txt").write_text("delivery\n", encoding="utf-8")
+            _git(worktree, "add", "delivery.txt")
+            _git(worktree, "commit", "-m", "delivery")
+            commit = _git_output(worktree, "rev-parse", "HEAD")
+            mark_batch(workspace, "alpha", run_id, "B001", "sealed", worktreePath=str(worktree), branchName=provisioned["branchName"], commitSha=commit, compileStatus="passed")
+            for stage in ("prepare", "implement", "review"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
+            lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+            start_stage(workspace, "alpha", run_id, "B001", "test")
+            test_file = worktree / "tests" / "test_source_bug.py"
+            test_file.parent.mkdir()
+            test_file.write_text("def test_source_bug():\n    assert False\n", encoding="utf-8")
+            resealed = seal_parallel_batch(workspace, "alpha", run_id, "B001", worktree, lease["ownerToken"])
+            self.assertTrue(resealed["success"], resealed)
+            failure = fail_stage(workspace, "alpha", run_id, "B001", "test", failure_type="implementation", message="failing test proves source bug")
+            self.assertEqual(failure["nextStage"], "implement")
+            release_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"], final_status="sealed")
+            batch = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            self.assertEqual(batch["status"], "sealed")
+            self.assertEqual(batch["stageStates"]["implement"]["status"], "pending")
 
     def test_quality_gate_exists_only_for_declared_static_check_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,7 +300,9 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             self.assertEqual(owners["VAL-T001-01"], {
                 "ownerBatchId": "B001", "stage": "test", "kind": "test_intent", "taskId": "T001", "sourceBatchId": "B001",
             })
-            self.assertEqual(owners["PROJECT-VAL-001"]["ownerBatchId"], "V-INT")
+            self.assertEqual(owners["PROJECT-VAL-001"], {
+                "ownerBatchId": "V-E2E", "stage": "e2e_test", "kind": "command",
+            })
             self.assertEqual(validation_ownership_errors(bundle_root, {"B001": bundle_batch}), [])
 
             created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
@@ -268,7 +322,7 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             self.assertEqual([item["commandId"] for item in tested["commands"]], ["VAL-T001-01"])
             self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])
 
-    def test_failed_validation_creates_review_required_repair_contract(self) -> None:
+    def test_failed_final_e2e_validation_creates_repair_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))
             root_path = feature_dir / "plan.json"
@@ -290,8 +344,13 @@ class ParallelStagedPipelineTest(unittest.TestCase):
                 complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": commit})
             self.assertTrue(gate_batch(workspace, "alpha", run_id, "B001")["success"])
             self.assertTrue(build_candidate(workspace, "alpha", run_id, wave=1, batch_ids=["B001"])["success"])
-            failed = verify_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default")
+            with patch("hooks.parallel_merge_train.mark_parallel_batch_tasks_merged", return_value=WriterResult(ok=True)):
+                self.assertTrue(promote_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default", allow_unverified=True)["success"])
+            self.assertTrue(begin_e2e(workspace, "alpha", run_id)["success"])
+            stage = run_owned_stage(workspace, "alpha", run_id, "V-E2E", "e2e_test")
+            self.assertFalse(stage["success"])
+            failed = finish_e2e(workspace, "alpha", run_id, passed=False, metadata={"message": "project validation failed"})
             self.assertFalse(failed["success"])
-            self.assertEqual(failed["repair"]["repairFor"], "V-INT")
+            self.assertEqual(failed["repair"]["repairFor"], "V-E2E")
             self.assertTrue(failed["repair"]["requireReview"])
             self.assertIn("review", failed["repair"]["stageStates"])

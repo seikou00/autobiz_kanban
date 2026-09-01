@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Build, verify and promote immutable parallel Batch merge candidates.
+"""Build and promote immutable parallel Batch merge candidates.
 
-The candidate worktree is the only checkout used for integration validation.
-Promotion fast-forwards the exact SHA that passed, so a passing test can never
-be accidentally attributed to a later re-merge on the primary checkout.
+Delivery review and UTest are completed in each Batch worktree before a
+candidate is built.  The candidate is therefore an integration boundary, not
+an additional test stage; the only post-merge executable validation is V-E2E.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 import sys
@@ -27,11 +26,8 @@ from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve
 from hooks.parallel_batch_stage import complete_stage, fail_stage, gate_batch, reset_validation_batch, start_stage
 from hooks.parallel_runtime import append_event, load_manifest, mergeable_batches, run_dir, run_lock, save_manifest, utc_now
 from hooks.parallel_repair import create_repair_batch
-from hooks.parallel_stage_validation import owned_commands
-from hooks.plan_json import load_plan_bundle
 from hooks.plan_writer import mark_parallel_batch_tasks_merged
 from hooks.repository_snapshot import git_status_porcelain
-from hooks.task_runner import TaskRunnerError, _run_validation
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -322,100 +318,35 @@ def build_candidate(
             updated = load_manifest(workspace, feature, run_id)
             updated.setdefault("mergeTrains", {})[_record_key(repository_ref, wave)] = record
             save_manifest(workspace, feature, run_id, updated)
-        reset_validation_batch(workspace, feature, run_id, "V-INT", candidate_sha=candidate_sha, candidate_base_sha=current_head, train_id=_record_key(repository_ref, wave), dependency_batch_ids=ids)
         append_event(workspace, feature, run_id, "merge_train_built", repositoryRef=repository_ref, wave=wave, batchIds=ids, candidateSha=candidate_sha)
         return {"success": True, "reused": False, **record}
 
 
 def verify_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, repository_ref: str) -> dict[str, Any]:
-    """Run the Plan-owned B-INT commands only on the immutable candidate."""
+    """Reject the retired candidate-test phase instead of silently running it."""
+    del workspace, feature, run_id, wave, repository_ref
+    raise ValueError("parallel_merge_train_candidate_verification_removed_use_batch_utest_and_e2e")
+
+
+def promote_candidate(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    *,
+    wave: int,
+    repository_ref: str,
+    allow_unverified: bool = False,
+) -> dict[str, Any]:
+    """Fast-forward main to exactly the verified, or explicitly UTest-gated, candidate SHA."""
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         record = _record(manifest, repository_ref, wave)
-        if not record or record.get("status") not in {"built", "verified"}:
-            raise ValueError(f"parallel_merge_train_candidate_not_built:{repository_ref}:{wave}")
-        if record.get("status") == "verified":
-            return {"success": True, "reused": True, **record}
-        path = Path(str(record.get("worktreePath") or ""))
-        if not path.is_dir() or _head(path) != record.get("candidateSha"):
-            raise ValueError("parallel_merge_train_candidate_missing_or_changed")
-        bundle = load_plan_bundle(workspace / ".autobizdevops" / "features" / feature)
-        commands = owned_commands(
-            bundle,
-            batch_id="V-INT",
-            stage="integration_test",
-            source_batch_ids=set(str(item) for item in record.get("batchIds", [])),
-            repository_ref=repository_ref,
-        )
-        repository = manifest.get("repositories", {}).get(repository_ref, {})
-        if not commands:
-            raise ValueError("parallel_merge_train_integration_commands_missing")
-        if not isinstance(repository, dict):
-            raise ValueError(f"parallel_merge_train_repository_missing:{repository_ref}")
-
-    # The V-INT state intentionally survives a failed command, allowing
-    # controlled repair or an explicit retry with a fresh candidate.
-    start_stage(workspace, feature, run_id, "V-INT", "prepare")
-    complete_stage(workspace, feature, run_id, "V-INT", "prepare", metadata={"candidateSha": record["candidateSha"], "trainId": _record_key(repository_ref, wave)})
-    start_stage(workspace, feature, run_id, "V-INT", "integration_test")
-    results: list[dict[str, Any]] = []
-    passed = True
-    for index, owned in enumerate(commands, start=1):
-        command = dict(owned["command"])
-        command_id = str(owned.get("commandId") or command.get("id") or f"PROJECT-VAL-{index:03d}")
-        command.setdefault("repo", repository_ref)
-        try:
-            exit_code, output = _run_validation(command, {repository_ref: path.resolve()}, run_id=run_id, batch_id="V-INT")
-        except (TaskRunnerError, OSError) as exc:
-            exit_code, output = 1, str(exc)
-        item = {"commandId": command_id, "passed": exit_code == 0, "repositoryPath": str(path.resolve()), "commandCwd": command.get("cwd"), "command": {key: command.get(key) for key in ("id", "argv", "cwd", "kind", "repo")}, "outputSha256": hashlib.sha256(output.encode()).hexdigest(), "outputTail": output[-4000:]}
-        results.append(item)
-        passed = passed and item["passed"]
-    metadata = {"candidateSha": record["candidateSha"], "candidateBaseSha": record["baseSha"], "trainId": _record_key(repository_ref, wave), "commands": results}
-    if not passed:
-        failed = fail_stage(workspace, feature, run_id, "V-INT", "integration_test", failure_type="implementation", message="integration_test_failed")
-        with run_lock(workspace, feature, run_id):
-            updated = load_manifest(workspace, feature, run_id)
-            target = _record(updated, repository_ref, wave)
-            if target:
-                target.update({"status": "failed", "validation": metadata, "failedAt": utc_now()})
-            updated["status"] = "blocked"
-            save_manifest(workspace, feature, run_id, updated)
-        repair = create_repair_batch(
-            workspace,
-            feature,
-            run_id,
-            "V-INT",
-            approved_plan_revision=str(manifest.get("pipeline", {}).get("planRevision") or ""),
-            failure_context={
-                "stage": "integration_test",
-                "repositoryRef": repository_ref,
-                "wave": wave,
-                "candidateSha": record["candidateSha"],
-                "deliveryBatchIds": record.get("batchIds", []),
-                "commands": results,
-            },
-        )
-        return {"success": False, "status": "failed", "failure": failed, "repair": repair.get("repair"), "commands": results, "candidateSha": record["candidateSha"]}
-    complete_stage(workspace, feature, run_id, "V-INT", "integration_test", metadata=metadata)
-    gate = gate_batch(workspace, feature, run_id, "V-INT")
-    with run_lock(workspace, feature, run_id):
-        updated = load_manifest(workspace, feature, run_id)
-        target = _record(updated, repository_ref, wave)
-        if target:
-            target.update({"status": "verified", "validation": metadata, "verifiedAt": utc_now()})
-        save_manifest(workspace, feature, run_id, updated)
-    append_event(workspace, feature, run_id, "merge_train_verified", repositoryRef=repository_ref, wave=wave, candidateSha=record["candidateSha"])
-    return {"success": bool(gate.get("success")), "status": "verified", "candidateSha": record["candidateSha"], "commands": results}
-
-
-def promote_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, repository_ref: str) -> dict[str, Any]:
-    """Fast-forward main to exactly the previously verified candidate SHA."""
-    with run_lock(workspace, feature, run_id):
-        manifest = load_manifest(workspace, feature, run_id)
-        record = _record(manifest, repository_ref, wave)
-        if not record or record.get("status") != "verified":
+        allowed_statuses = {"verified"}
+        if allow_unverified:
+            allowed_statuses.add("built")
+        if not record or record.get("status") not in allowed_statuses:
             raise ValueError(f"parallel_merge_train_candidate_not_verified:{repository_ref}:{wave}")
+        utest_gated_promotion = record.get("status") == "built"
         binding = manifest.get("repositories", {}).get(repository_ref)
         if not isinstance(binding, dict) or not isinstance(binding.get("gitRoot"), str):
             raise ValueError(f"parallel_merge_train_repository_missing:{repository_ref}")
@@ -455,6 +386,12 @@ def promote_candidate(workspace: Path, feature: str, run_id: str, *, wave: int, 
         binding["headSha"] = promoted_sha
         if current:
             current.update({"status": "promoted", "promotedSha": promoted_sha, "promotedAt": utc_now()})
+            if utest_gated_promotion:
+                current["validation"] = {
+                    "skipped": True,
+                    "reason": "batch_utest_gated_e2e_only",
+                    "commands": [],
+                }
         manifest["status"] = "running"
         save_manifest(workspace, feature, run_id, manifest)
 
@@ -521,7 +458,24 @@ def finish_e2e(workspace: Path, feature: str, run_id: str, *, passed: bool, meta
     e2e = (manifest.get("validationBatches") or {}).get("V-E2E", {})
     worktrees = e2e.get("worktrees", {}) if isinstance(e2e, dict) else {}
     if not passed:
-        result = fail_stage(workspace, feature, run_id, "V-E2E", "e2e_test", failure_type="implementation", message=str(metadata.get("message") or "e2e_test_failed"))
+        states = e2e.get("stageStates") if isinstance(e2e, dict) and isinstance(e2e.get("stageStates"), dict) else {}
+        state = states.get("e2e_test") if isinstance(states, dict) else None
+        if isinstance(state, dict) and state.get("status") == "running":
+            result = fail_stage(workspace, feature, run_id, "V-E2E", "e2e_test", failure_type="implementation", message=str(metadata.get("message") or "e2e_test_failed"))
+        elif isinstance(state, dict) and state.get("status") in {"failed", "needs_triage"}:
+            # `parallel_stage_validation` records a failed command before the
+            # caller can hand the failure to this lifecycle function.  Reuse
+            # that durable failure instead of trying to fail a non-running
+            # stage a second time.
+            result = {
+                "batchId": "V-E2E",
+                "stage": "e2e_test",
+                "status": state.get("status"),
+                "nextStage": (state.get("failure") or {}).get("nextStage"),
+                "failure": dict(state.get("failure") or {}),
+            }
+        else:
+            raise ValueError("parallel_e2e_stage_not_running_or_failed")
         repair = create_repair_batch(
             workspace,
             feature,
@@ -834,6 +788,7 @@ def main(argv: list[str] | None = None) -> int:
     e2e_finish.add_argument("--metadata-json", default="{}")
     assert promote_parser is not None
     promote_parser.add_argument("--allow-stale", action="store_true")
+    promote_parser.add_argument("--allow-unverified", action="store_true")
     args = parser.parse_args(argv)
     try:
         workspace, feature = resolve_workspace(args.workspace), resolve_feature(args.feature)
@@ -844,7 +799,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify-candidate":
             result = verify_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "promote-candidate":
-            result = promote_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
+            result = promote_candidate(
+                workspace,
+                feature,
+                args.run_id,
+                wave=args.wave,
+                repository_ref=args.repository_ref,
+                allow_unverified=args.allow_unverified,
+            )
         elif args.command == "resolve-candidate":
             result = resolve_candidate(workspace, feature, args.run_id, wave=args.wave, repository_ref=args.repository_ref)
         elif args.command == "resume-candidate":

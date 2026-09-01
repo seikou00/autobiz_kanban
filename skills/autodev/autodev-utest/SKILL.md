@@ -38,9 +38,9 @@ python "${pluginPath}/hooks/utest_assignment_router.py" --workspace "${pluginWor
 
 每个 assignment 的 `promptContent` 只包含 Batch plan 的绝对路径，以及 TASK `id`、`implementationPoints`、`nonGoals` 和从 `validationCommands` 提取的 `validationLocations.repo/cwd`。派发时原样使用；不得自行打开 plan 补取、转述或拼接 TASK 字段。Plan 命令的 argv 不作为测试命令。
 
-code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前逐个 Batch 读取并列出：`batchCompile`（`status`、`failureCategory`、`lastFailure`、`repairAttempts` / `maxRepairAttempts`）、`qualityGateCommands[]` 对应 manifest `quality_gate` 状态（仅命令存在时）、TASK `blockers[]`、根 `deferredValidationIssues[]`。它们是本阶段必须修复的入场缺陷，与 UT target 并列进入修复队列。
+Code 阶段未解决的缺陷会原样留在 plan 里交到本阶段。开工前逐个 Batch 读取并列出：`batchCompile`（`status`、`failureCategory`、`lastFailure`、`repairAttempts` / `maxRepairAttempts`）、`qualityGateCommands[]` 对应 manifest `quality_gate` 状态（仅命令存在时）、TASK `blockers[]`、根 `deferredValidationIssues[]`。测试归属的入场缺陷与 UT target 并列进入 UTest 修复队列；任何生产实现缺陷必须形成 `source_fix_request` 回到同一 Batch 的 implement repair，禁止在 UTest 直接改码。
 
-判定现状以本轮重跑该命令的结果为准，不以字段快照为准：`status=passed` 的条目里 `lastFailure` 只是修复过程记录，重跑通过即不再是缺陷；`status` 非 `passed` 或存在未清空的 `blockers` / `deferredIssues` 时，先重跑确认复现，再按失败分类修复。未经重跑不得直接依据字段动生产代码。
+判定现状以本轮重跑该命令的结果为准，不以字段快照为准：`status=passed` 的条目里 `lastFailure` 只是修复过程记录，重跑通过即不再是缺陷；`status` 非 `passed` 或存在未清空的 `blockers` / `deferredIssues` 时，先重跑确认复现，再按失败分类处理。未经重跑不得直接依据字段动生产代码。
 
 其余输入只用于定位与执行，不用于重新推导测试目标：
 
@@ -196,7 +196,7 @@ python "${pluginPath}/hooks/run_utest_command.py" --kind test --workspace "${plu
 | 类型 | 处置 |
 |------|------|
 | `test_bug` | 测试工程师只修测试、fixture、mock、辅助代码或测试环境配置，重跑原命令 |
-| `source_bug` | 在失败测试锚定下做最小生产修复并重跑原命令；超出 assignment 边界时返回 `source_fix_request` |
+| `source_bug` | 用失败测试锚点生成 `source_fix_request`；不得在 UTest 中改生产代码。固定 Batch Workflow 会回到同一 Worktree 的 implement repair，重新编译、Review、UTest |
 | `contract_gap` | 阻断并回流约束/计划 |
 | `environment` | 记录环境与复现命令；只应用受支持 initProfile |
 | `flaky` | 记录多次重跑结果与根因 |
@@ -212,9 +212,9 @@ python "${pluginPath}/hooks/validate_utest_source_bug.py" --workspace "${pluginW
 
 1. 确认失败测试稳定复现，并通过 source-bug validator 校验当前 plan 覆盖。
 2. 排除测试、命令与环境问题。
-3. 只改让该失败测试通过所必需的最小范围。
+3. 不改生产代码；返回最小 `source_fix_request`，包含 attestation、失败命令、根因和受影响 implementation point。
 
-主协调器收到 `source_fix_request` 后按同样三步处理，再重新派发原 Batch/lane/workspace assignment，复用 UT target 并追加新 Evidence。
+主协调器收到 `source_fix_request` 后，在同一 Batch 原生 Worktree 的 implement repair 中做最小生产修复，重新编译和封存；随后必须重新执行生产代码 Review 和原 Batch/lane/workspace UTest，复用 UT target 并追加新 Evidence。
 
 同一个生产根因最多修复 3 次；仍失败时保留 `unit_test_in_progress` 并记录阻断。
 
@@ -261,7 +261,7 @@ python "${pluginPath}/hooks/unit_test_result_writer.py" validate --workspace "${
 - 全部 P0 UT target PASS。
 - 入场缺陷已全部清零，每项都有重跑通过的 Evidence。
 - 报告、日志、结果 JSON、Evidence 完整且 writer 校验通过。
-- 源码修复均有失败测试锚点和重跑通过 Evidence。
+- 源码修复均有失败测试锚点，并在实现阶段回修后重新经过 Review 与 UTest 的通过 Evidence。
 - 扩大验证已执行并记录。
 
 ```bash
@@ -270,7 +270,7 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint unit_test_done
 
 存在 FAIL、BLOCKED、未归因失败、`contract_gap` 或超过修复次数时保持 `unit_test_in_progress`。
 
-缺陷在本阶段修完，不留给下游。只有两种未修复的合法退出：`environment` 记录环境与复现命令后阻断，`contract_gap` 回流 `/autodev-plan`。`test_bug`、`source_bug`、`flaky` 和入场缺陷都不属于这两类。
+测试归属的 `test_bug`、fixture/mock 与测试环境配置必须在本阶段修完并重跑。`source_bug` 是例外：只能携带 attestation 回到同一 Batch 的 implement repair，之后重新进入 Review 与 UTest；不得以 deferred finding 进入合并。`environment` 记录环境与复现命令后阻断，`contract_gap` 回流 `/autodev-plan`。
 
 ## 质量规则
 

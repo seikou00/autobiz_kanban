@@ -3236,7 +3236,7 @@ def _validate_draft_engineering_commands(data: dict[str, Any]) -> list[dict[str,
 
     按 lane + workspaceRef 校验：
     - 每个 lane 的每个 workspace 需要恰好一条编译命令
-    - 每个实际使用的 workspace 需要至少一条 required 的 B-INT 项目验证命令
+    - 项目级 E2E 命令是可选补充；Batch UTest 意图已提供逐 Batch 测试入口
 
     Returns:
         错误列表，空列表表示通过
@@ -3246,13 +3246,26 @@ def _validate_draft_engineering_commands(data: dict[str, Any]) -> list[dict[str,
     # 收集各 lane 的 code 模式任务及其 workspace
     backend_workspaces: set[str] = set()
     frontend_workspaces: set[str] = set()
-    all_workspaces: set[str] = set()
+
+    def workspace_ref_for_task(task: dict[str, Any]) -> str:
+        """Normalize omitted Draft workspace bindings to the default repository.
+
+        Task-group validation later requires a concrete ``workspaceRef``, but
+        Draft command validation must still correctly match the default compile
+        profile while a caller supplies ``None`` or blank input.
+        """
+        value = task.get("workspaceRef")
+        if value is None:
+            return "default"
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or "default"
+        return str(value)
 
     for task in _tasks(data):
         if task_execution_mode(task) != "code":
             continue
-        workspace_ref = str(task.get("workspaceRef", "default"))
-        all_workspaces.add(workspace_ref)
+        workspace_ref = workspace_ref_for_task(task)
         lane = task_execution_lane(task)
         if lane == "backend":
             backend_workspaces.add(workspace_ref)
@@ -3304,30 +3317,6 @@ def _validate_draft_engineering_commands(data: dict[str, Any]) -> list[dict[str,
             errors.append({
                 "reason": "duplicate_frontend_compile_command",
                 "detail": f"frontend workspace '{workspace_ref}' 有 {len(matching)} 条编译命令，应该恰好一条",
-            })
-
-    # 检查项目验证命令（B-INT）：每个实际 workspace 需要至少一条 required 命令
-    project_commands = data.get("projectValidationCommands", [])
-    if not isinstance(project_commands, list):
-        project_commands = []
-    for workspace_ref in sorted(all_workspaces):
-        matching_required = [
-            cmd for cmd in project_commands
-            if isinstance(cmd, dict)
-            and cmd.get("kind") == "integration_test"
-            and cmd.get("required") is True
-            and cmd.get("repo") == (None if workspace_ref == "default" else workspace_ref)
-        ]
-        if len(matching_required) == 0:
-            errors.append({
-                "reason": "missing_required_integration_test",
-                "detail": f"workspace '{workspace_ref}' 缺少 required 的 integration_test 项目验证命令",
-                "repairSuggestion": (
-                    f"运行 add-project-validation-command --feature <feature> "
-                    f"--command '<INTEGRATION_TEST_COMMAND>' --cwd '<CWD>' "
-                    f"--kind integration_test" +
-                    (f" --repo '{workspace_ref}'" if workspace_ref != "default" else "")
-                ),
             })
 
     return errors
@@ -4133,10 +4122,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "preflightCommand": "preflight-task-draft",
                         "command": "finalize-task-draft",
                         "coverage": "all_path_qualified_spec_scenarios",
-                        "requiredBefore": [
-                            "add-compile-command",
-                            "add-project-validation-command",
-                        ],
+                        "requiredBefore": ["add-compile-command"],
                     },
                     "collectingRepairs": {
                         "replace": "set-draft-task-detail --task-id <id> --body-stdin",
@@ -4198,14 +4184,14 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "projectValidationCommand": {
                         "command": (
                             "add-project-validation-command [--repo <workspaceRef>] "
-                            "--command <integration-command>"
+                            "--command <final-e2e-command>"
                         ),
                         "requiredFields": ["id", "argv", "cwd", "kind", "required"],
                         "allowedKinds": sorted(PROJECT_VALIDATION_KINDS),
                         "mustNotDuplicateBatchProfile": True,
-                        "requiredForParallelPipeline": True,
-                        "requiredPerWorkspaceRef": "one_candidate_integration_command",
-                        "executionTarget": "merge_candidate",
+                        "requiredForParallelPipeline": False,
+                        "requiredPerWorkspaceRef": "optional_final_e2e_command",
+                        "executionTarget": "merged_main_e2e",
                         "repoRequiredWhenMultipleWorkspaces": True,
                     },
                     "compileCommand": {
@@ -4726,9 +4712,9 @@ def _cmd_add_project_validation_command(args: argparse.Namespace) -> int:
             errors=command_errors,
         ))
 
-    # A required integration command is the B-INT contract for its workspace,
-    # so re-applying it is a deterministic replacement. Other optional project
-    # commands remain additive.
+    # A required system command belongs to final B-E2E for its workspace, so
+    # re-applying it is a deterministic replacement. Optional commands remain
+    # additive.
     if command_kind == "integration_test" and command_required:
         existing = next(
             (

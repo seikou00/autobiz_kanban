@@ -142,10 +142,10 @@ class AugmentTestEngineerTaskPromptTest(unittest.TestCase):
         _, stdout, _ = self._augment()
         description = json.loads(stdout.getvalue())["updatedInput"]["description"]
 
-        self.assertIn("minimum current-feature production source", description)
+        self.assertIn("Do not edit dependency manifests, lock files, or production sources", description)
         self.assertIn("machine-validated attestation", description)
         self.assertIn("static observation and exit 0 are invalid", description)
-        self.assertIn("crosses the assignment boundary", description)
+        self.assertIn("compile/reseal, and restart Review", description)
 
     def test_only_target_role_is_modified(self):
         stdout = io.StringIO()

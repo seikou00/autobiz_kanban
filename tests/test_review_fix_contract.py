@@ -189,7 +189,7 @@ class CodeReviewIsReadOnlyTest(unittest.TestCase):
         output = render("dev.code")
 
         self.assertIn("交接下游", output)
-        for target in ("review", "test", "quality_gate", "B-INT", "B-E2E"):
+        for target in ("review", "test", "quality_gate", "B-E2E"):
             self.assertIn(target, output)
 
     def test_code_review_does_not_normalize_severity(self) -> None:

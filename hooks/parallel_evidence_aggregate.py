@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
+from hooks.plan_write_ownership import is_test_asset_path
 from hooks.parallel_runtime import append_event, load_manifest, run_dir, run_lock, save_manifest, utc_now
 
 
@@ -74,7 +75,19 @@ def _evidence_errors(manifest: dict[str, Any], batch_id: str, batch: dict[str, A
         else:
             expected_commit = batch.get("commitSha")
         if expected_commit and inputs.get("batchCommit") != expected_commit:
-            errors.append(f"{batch_id}.{stage}_batch_commit_stale")
+            last_seal = batch.get("lastSeal") if isinstance(batch.get("lastSeal"), dict) else {}
+            valid_utest_reseal = (
+                stage in {"prepare", "implement", "review"}
+                and last_seal.get("purpose") == "utest"
+                and last_seal.get("commitSha") == expected_commit
+                and last_seal.get("previousCommitSha") == inputs.get("batchCommit")
+                and all(
+                    isinstance(path, str) and is_test_asset_path(path)
+                    for path in last_seal.get("changedFiles", [])
+                )
+            )
+            if not valid_utest_reseal:
+                errors.append(f"{batch_id}.{stage}_batch_commit_stale")
         if inputs.get("dependencies") != _dependency_snapshot(manifest, batch):
             errors.append(f"{batch_id}.{stage}_dependency_stale")
         if batch_id == "V-E2E" and stage == "e2e_test":
@@ -102,17 +115,15 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
                 errors.append(f"{batch_id}.not_merged")
             errors.extend(_evidence_errors(manifest, batch_id, batch))
         validations = manifest.get("validationBatches", {})
-        for validation_id in ("V-INT", "V-E2E"):
+        for validation_id in ("V-E2E",):
             batch = validations.get(validation_id) if isinstance(validations, dict) else None
             if not isinstance(batch, dict) or batch.get("status") != "verified":
                 errors.append(f"{validation_id}.not_verified")
                 continue
             errors.extend(_evidence_errors(manifest, validation_id, batch))
-        # ``V-INT`` is reset for every candidate.  Its current evidence alone
-        # therefore proves only the most recent Wave.  The immutable Merge
-        # Train records close that gap: every candidate that contributed code
-        # to main must have passed its own integration command set and been
-        # promoted as that exact SHA.
+        # Each delivery has passed its own Review and UTest before promotion.
+        # The only post-merge executable validation is V-E2E; merge-train
+        # records still prove that main advanced to each exact candidate SHA.
         trains = manifest.get("mergeTrains", {})
         if not isinstance(trains, dict) or not trains:
             errors.append("merge_train_records_missing")
@@ -129,11 +140,12 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
                 if not isinstance(candidate_sha, str) or candidate_sha != promoted_sha:
                     errors.append(f"merge_train_promoted_sha_invalid:{train_id}")
                 validation = record.get("validation")
-                commands = validation.get("commands") if isinstance(validation, dict) else None
-                if not isinstance(commands, list) or not commands:
-                    errors.append(f"merge_train_validation_missing:{train_id}")
-                elif any(not isinstance(item, dict) or item.get("passed") is not True for item in commands):
-                    errors.append(f"merge_train_validation_failed:{train_id}")
+                if not isinstance(validation, dict) or validation.get("skipped") is not True:
+                    commands = validation.get("commands") if isinstance(validation, dict) else None
+                    if not isinstance(commands, list) or not commands:
+                        errors.append(f"merge_train_validation_missing:{train_id}")
+                    elif any(not isinstance(item, dict) or item.get("passed") is not True for item in commands):
+                        errors.append(f"merge_train_validation_failed:{train_id}")
         report = {
             "runId": run_id,
             "createdAt": utc_now(),
@@ -144,12 +156,15 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
             "deferredIssues": list(manifest.get("deferredIssues", [])) if isinstance(manifest.get("deferredIssues"), list) else [],
         }
         report["hasDeferredIssues"] = bool(report["deferredIssues"])
+        if report["hasDeferredIssues"]:
+            # Delivery gates must already have stopped these findings before
+            # merge.  Keep this final check as a defence against old or
+            # externally-edited manifests, rather than reporting success with
+            # known implementation defects.
+            report["errors"] = sorted({*report["errors"], "deferred_implementation_findings_unresolved"})
+            report["passed"] = False
         manifest["finalEvidenceAggregate"] = report
-        manifest["status"] = (
-            "succeeded_with_issues"
-            if report["passed"] and report["hasDeferredIssues"]
-            else "succeeded" if report["passed"] else "blocked"
-        )
+        manifest["status"] = "succeeded" if report["passed"] else "blocked"
         save_manifest(workspace, feature, run_id, manifest)
         atomic_write_json(run_dir(workspace, feature, run_id) / "final-evidence-aggregate.json", report)
     append_event(workspace, feature, run_id, "evidence_aggregate_completed", passed=report["passed"], errors=report["errors"])

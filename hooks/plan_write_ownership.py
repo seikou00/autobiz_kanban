@@ -37,8 +37,38 @@ def normalize_owned_path(value: Any, workspace_ref: Any) -> str | None:
     return raw or None
 
 
+def is_test_asset_path(path: str) -> bool:
+    """Return whether a repository-relative path belongs to UTest ownership."""
+
+    parts = tuple(part for part in path.replace("\\", "/").split("/") if part)
+    basename = parts[-1] if parts else ""
+    root_test_configs = {
+        "pytest.ini",
+        "tox.ini",
+        ".coveragerc",
+        "jest.config.js",
+        "jest.config.cjs",
+        "jest.config.mjs",
+        "jest.config.ts",
+        "vitest.config.js",
+        "vitest.config.mjs",
+        "vitest.config.ts",
+        "karma.conf.js",
+    }
+    return (
+        (parts and parts[0] in {"test", "tests"})
+        or any(parts[index:index + 2] == ("src", "test") for index in range(len(parts) - 1))
+        or (len(parts) == 1 and basename in root_test_configs)
+    )
+
+
 def task_write_paths(task: dict[str, Any]) -> set[str]:
-    """Return all declared physical write paths for one Task."""
+    """Return Code-stage physical write paths for one Task.
+
+    Test assets are generated only after business-code Review by the UTest
+    stage. They cannot serialize Code Batches or be used as a Review
+    completeness requirement.
+    """
 
     workspace_ref = task.get("workspaceRef")
     raw_paths: list[Any] = []
@@ -51,6 +81,7 @@ def task_write_paths(task: dict[str, Any]) -> set[str]:
         path
         for value in raw_paths
         if (path := normalize_owned_path(value, workspace_ref)) is not None
+        and not is_test_asset_path(path)
     }
 
 

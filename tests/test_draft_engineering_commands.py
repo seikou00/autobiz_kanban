@@ -33,10 +33,9 @@ class EngineeringCommandValidationTest(unittest.TestCase):
         }
 
         errors = _validate_draft_engineering_commands(data)
-        self.assertEqual(len(errors), 2)  # Missing compile + missing integration test
+        self.assertEqual(len(errors), 1)  # Missing compile only; E2E command is optional
         reasons = {e["reason"] for e in errors}
         self.assertIn("missing_backend_compile_command", reasons)
-        self.assertIn("missing_required_integration_test", reasons)
 
     def test_multiple_backend_workspaces_require_separate_commands(self):
         """Multiple backend workspaces should each have their own compile command."""
@@ -70,11 +69,8 @@ class EngineeringCommandValidationTest(unittest.TestCase):
 
         errors = _validate_draft_engineering_commands(data)
         missing_compile = [e for e in errors if e["reason"] == "missing_backend_compile_command"]
-        missing_int = [e for e in errors if e["reason"] == "missing_required_integration_test"]
         self.assertEqual(len(missing_compile), 1)
-        self.assertEqual(len(missing_int), 1)
         self.assertIn("backend-b", missing_compile[0]["detail"])
-        self.assertIn("backend-b", missing_int[0]["detail"])
 
     def test_duplicate_compile_commands_rejected(self):
         """Duplicate compile commands for same workspace should be rejected."""
@@ -104,8 +100,8 @@ class EngineeringCommandValidationTest(unittest.TestCase):
         duplicate = [e for e in errors if e["reason"] == "duplicate_backend_compile_command"]
         self.assertEqual(len(duplicate), 1)
 
-    def test_missing_required_integration_test(self):
-        """Each workspace should have at least one required integration test."""
+    def test_project_e2e_command_is_optional(self):
+        """Batch UTest enables finalization without a project-level command."""
         data = {
             "tasks": [
                 {
@@ -124,8 +120,7 @@ class EngineeringCommandValidationTest(unittest.TestCase):
         }
 
         errors = _validate_draft_engineering_commands(data)
-        missing_int = [e for e in errors if e["reason"] == "missing_required_integration_test"]
-        self.assertEqual(len(missing_int), 1)
+        self.assertEqual(errors, [])
 
     def test_external_dependency_tasks_not_checked(self):
         """External dependency tasks should not require compile commands."""
@@ -196,6 +191,40 @@ class EngineeringCommandValidationTest(unittest.TestCase):
 
         errors = _validate_draft_engineering_commands(data)
         self.assertEqual(len(errors), 0)
+
+    def test_none_workspace_ref_uses_default_compile_profile(self):
+        """An omitted Draft binding must not become the literal workspace 'None'."""
+        data = {
+            "tasks": [{
+                "id": "T001",
+                "uiRequired": False,
+                "workspaceRef": None,
+                "executionMode": "code",
+            }],
+            "compileProfiles": {
+                "backend": {"commands": [{"argv": ["mvn", "compile"], "repo": None}]}
+            },
+        }
+
+        self.assertEqual(_validate_draft_engineering_commands(data), [])
+
+    def test_blank_workspace_ref_uses_default_compile_profile(self):
+        """A blank Draft binding must use the default frontend workspace."""
+        for workspace_ref in ("", "   "):
+            with self.subTest(workspace_ref=workspace_ref):
+                data = {
+                    "tasks": [{
+                        "id": "T001",
+                        "uiRequired": True,
+                        "workspaceRef": workspace_ref,
+                        "executionMode": "code",
+                    }],
+                    "compileProfiles": {
+                        "frontend": {"commands": [{"argv": ["npm", "run", "build"], "repo": None}]}
+                    },
+                }
+
+                self.assertEqual(_validate_draft_engineering_commands(data), [])
 
 
 if __name__ == "__main__":

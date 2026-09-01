@@ -110,7 +110,8 @@ The reuse validation also blocks a Batch marked `merged` without a non-empty
 `mergeCommitSha`, a dirty source checkout, or a source HEAD that differs from
 the run's recorded HEAD. In each case it returns the original `runId` with a
 blocked result. A Batch is `merged` only when `parallel_merge_train.py` has
-fast-forwarded the candidate Merge Train's B-INT-verified SHA and written its
+fast-forwarded the candidate Merge Train SHA whose Batch Review and UTest
+evidence already passed, and written its
 merge commit; no worker-facing command may
 set this status.
 
@@ -144,18 +145,19 @@ baseline commit per physical Git root.
    persist its delivery SHA. `lease release --final-status sealed`
    accepts that status only after the persisted SHA is present; an unsealed
    compile result cannot enter the merge frontier.
-4. `parallelBatchPipeline.validationOwnership` assigns each executable
-   validation exactly once: `compileCommand` belongs to implement, unit test
-   intents to delivery test, and `qualityGateCommands` to an optional quality
-   gate. Integration/E2E intents plus project commands belong to B-INT/B-E2E.
-   The Workflow uses
-   `parallel_stage_validation.py` to enforce that table and write evidence.
-5. Each sealed delivery performs `review` and Plan-owned `test`; it performs
-   `quality_gate` only if the Batch declares static-check commands. Only then
-   is it `ready_to_candidate`. The shared Workflow
-   builds a Merge Train candidate, runs B-INT there, and fast-forwards exactly
-   that verified SHA to main. A changed main SHA makes the candidate stale and
-   requires rebuild/retest rather than rebase.
+4. `parallelBatchPipeline.validationOwnership` assigns every test intent to
+   its delivery Batch except `e2e_test`, which belongs to final B-E2E.  Root
+   project commands also belong to B-E2E.  The delivery UTest agent generates
+   and runs its own tests in the native Worktree; `parallel_stage_validation.py`
+   executes only declared command owners and records their evidence.
+5. Each sealed delivery performs production-code-only `review`, then UTest in
+   the same Worktree and re-seals the resulting test assets.  A Review or
+   UTest source bug returns to that Batch's implement repair, after which
+   compile, Review and UTest repeat. It performs `quality_gate` only if the
+   Batch declares static-check commands. Only then is it `ready_to_candidate`.
+   The shared Workflow builds a Merge Train candidate and fast-forwards it
+   directly; no candidate test phase is run. A changed main SHA makes the candidate
+   stale and requires rebuild rather than rebase.
 6. Only after that promotion succeeds does the script call scheduler `resume` to
    calculate the next wave. A dependent Batch never starts from an unmerged
    upstream result.
@@ -216,7 +218,7 @@ state.
   lease CLI's 15-minute default for a Batch allowed to run longer. Stop the
   heartbeat only after sealing, immediately before release; every failure
   path must stop it and release the lease as `failed`.
-- A candidate conflict, failed Batch stage, plan digest change, or failed B-INT/B-E2E
+- A candidate conflict, failed Batch stage, plan digest change, or failed B-E2E
   blocks the run. Do not use `ours`, `theirs`, `git merge -s ours`,
   `--no-verify`, or direct edits in the shared checkout to bypass it.
 - After every successful merge, the fixed Workflow calls
@@ -232,7 +234,7 @@ state.
   or `git clean` to remove them: those commands can destroy user work or the
   Workflow journal needed for recovery.
 - `parallel_merge_train.py` is the integration owner for this workflow. Once it
-  has promoted the B-INT-verified candidate and written `mergeCommitSha`, the fixed Workflow cleans that delivered native
+  has promoted the Batch-UTest-gated candidate and written `mergeCommitSha`, the fixed Workflow cleans that delivered native
   worktree and temporary branch before the scheduler may start a dependent
   Batch. Do not merge a delivery a second time or delete any unresolved
   worktree manually.
