@@ -109,15 +109,34 @@ function unwrap(value) {
   return value || {};
 }
 
+function isFailedVerdict(value) {
+  return typeof value === "string"
+    && ["fail", "failed", "error", "reject", "rejected"].includes(value.trim().toLowerCase());
+}
+
+function isFailedStatus(value) {
+  return typeof value === "string"
+    && ["failed", "error", "timeout", "blocked", "needs_resolution"].includes(value.trim().toLowerCase());
+}
+
+function hasFailureSignal(value) {
+  const result = unwrap(value);
+  const failure = unwrap(result.failure);
+  return [result, failure].some(candidate => (
+    candidate
+    && (
+      candidate.ok === false
+      || candidate.success === false
+      || candidate.passed === false
+      || isFailedVerdict(candidate.verdict)
+      || isFailedStatus(candidate.status)
+    )
+  ));
+}
+
 function requireSuccess(value, label) {
   const result = unwrap(value);
-  if (
-    !result ||
-    result.ok === false ||
-    result.success === false ||
-    result.passed === false ||
-    ["failed", "error", "timeout", "blocked", "needs_resolution"].includes(result.status)
-  ) {
+  if (!result || hasFailureSignal(result)) {
     throw new Error(`${label} failed: ${JSON.stringify(result)}`);
   }
   return result;
@@ -127,6 +146,25 @@ function usableString(value) {
   return typeof value === "string"
     && value.trim().length > 0
     && !["undefined", "null"].includes(value.trim().toLowerCase());
+}
+
+function requireSchedulerResult(value, label) {
+  const result = requireSuccess(value, label);
+  const isObject = candidate => candidate && typeof candidate === "object" && !Array.isArray(candidate);
+  if (
+    !usableString(result.runId)
+    || !usableString(result.status)
+    || !Array.isArray(result.scheduledGroups)
+    || !isObject(result.batchTaskIds)
+    || !isObject(result.batchWorkspaces)
+  ) {
+    throw new Error(JSON.stringify({
+      error: "parallel_scheduler_result_invalid",
+      label,
+      scheduler: result,
+    }));
+  }
+  return result;
 }
 
 function absolutePath(value) {
@@ -250,7 +288,7 @@ function hasWorkOutsideScope(scheduler) {
 }
 
 phase("准备");
-const prepared = requireSuccess(await agent(
+const prepared = requireSchedulerResult(await agent(
   `确保固定 Code DAG run。执行：python "${schedulerPath}" ensure ` +
   `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
   `--max-parallel ${maxParallel} ` +
@@ -286,9 +324,15 @@ async function failBatchAndReclaimLease(batchId, batchWorktree, batchBranch, rea
 
 function mergedBatchIds(mergeResult) {
   return [...new Set(
-    (Array.isArray(mergeResult && mergeResult.merged) ? mergeResult.merged : [])
-      .map(item => item && item.batchId)
-      .filter(batchId => usableString(batchId))
+    [
+      ...(Array.isArray(mergeResult && mergeResult.merged) ? mergeResult.merged.map(item => item && item.batchId) : []),
+      // parallel_merge_train promote-candidate returns batchIds, while older
+      // merge callers returned per-Batch entries in merged.  Cleanup must use
+      // only the durable promotion result, never ready-to-candidate inputs.
+      ...(mergeResult && mergeResult.promoted === true && Array.isArray(mergeResult.batchIds)
+        ? mergeResult.batchIds
+        : []),
+    ].filter(batchId => usableString(batchId))
   )];
 }
 
@@ -318,8 +362,8 @@ function requiresImplementationRework(result) {
   return (
     normalized.nextStage === "implement" ||
     failure.nextStage === "implement" ||
-    (normalized.status === "failed" && normalized.failureType === "implementation") ||
-    (failure.status === "failed" && failure.failureType === "implementation")
+    ((isFailedStatus(normalized.status) || isFailedVerdict(normalized.verdict)) && normalized.failureType === "implementation") ||
+    ((isFailedStatus(failure.status) || isFailedVerdict(failure.verdict)) && (failure.failureType === "implementation" || failure.type === "implementation"))
   );
 }
 
@@ -368,7 +412,8 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     `先执行 python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review。` +
     `评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
     `通过后执行 python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
-    `发现可由当前 Batch 生产代码修复的问题时，用 failure-type=implementation 标记失败并给出具体问题；Workflow 会在同一 Worktree 修复、重新编译、重新封存后再次评审。` +
+    `发现问题时必须先执行 python "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题>"，再返回该命令的 JSON。` +
+    `可由当前 Batch 生产代码修复时，返回 JSON 必须同时包含 status:"failed"、verdict:"FAIL"、failureType:"implementation"、nextStage:"implement" 及 failure；Workflow 会在同一 Worktree 修复、重新编译、重新封存后再次评审。` +
     `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
     { label: `stage-review-${batchId}`, phase: "Batch 阶段" }
     ));
@@ -715,10 +760,17 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0 || stageRecover
     phase("候选验证");
     const promotions = await validateAndPromoteWave(mergeIds, schedulerWaves);
     mergeResults.push({ success: true, wave: schedulerWaves, promotions });
-    await cleanupMergedWorktrees(mergeIds, `cleanup-promoted-wave-${schedulerWaves}`);
+    const promotedBatchIds = promotions.flatMap(mergedBatchIds);
+    const missingPromotionBatchIds = promotions
+      .filter(promotion => promotion && promotion.promoted === true && mergedBatchIds(promotion).length === 0)
+      .map(promotion => promotion.repositoryRef || "unknown");
+    if (missingPromotionBatchIds.length > 0) {
+      throw new Error(`promotion_batch_ids_missing:${missingPromotionBatchIds.join(",")}`);
+    }
+    await cleanupMergedWorktrees(promotedBatchIds, `cleanup-promoted-wave-${schedulerWaves}`);
   }
 
-  const resumed = requireSuccess(await agent(
+  const resumed = requireSchedulerResult(await agent(
     `执行 python "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${workspaceRefArgs}。` +
     `只返回 JSON。下游 Batch 必须仅在依赖已 merged 后才会出现在 scheduledGroups 中。`,
     { label: `schedule-wave-${schedulerWaves + 1}`, phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }

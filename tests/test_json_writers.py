@@ -680,6 +680,24 @@ class JsonWriterTests(unittest.TestCase):
             self.assertEqual(draft_task["validationCommands"][0]["covers"], ["AC-T001-01"])
             self.assertEqual(draft_task["validationCommands"][0]["cwd"], ".")
 
+            missing_engineering_commands = _run(
+                "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertNotEqual(missing_engineering_commands.returncode, 0)
+            self.assertIn("missing_backend_compile_command", missing_engineering_commands.stdout)
+            self.assertIn("missing_required_integration_test", missing_engineering_commands.stdout)
+            compile_added = _run(
+                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend",
+                "--command", f"{sys.executable} -c \"print('compile')\"",
+            )
+            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
+            project_added = _run(
+                "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--command", TEST_PROJECT_COMMAND,
+            )
+            self.assertEqual(project_added.returncode, 0, project_added.stdout + project_added.stderr)
             preflight = _run(
                 "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha",
@@ -733,6 +751,17 @@ class JsonWriterTests(unittest.TestCase):
                 "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
             )
             self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+            compile_added = _run(
+                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend",
+                "--command", f"{sys.executable} -c \"print('compile')\"",
+            )
+            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
+            project_added = _run(
+                "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--command", TEST_PROJECT_COMMAND,
+            )
+            self.assertEqual(project_added.returncode, 0, project_added.stdout + project_added.stderr)
             finalized = _run(
                 "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha",
@@ -938,12 +967,9 @@ class JsonWriterTests(unittest.TestCase):
                     "--body-file", str(detail_path),
                 )
                 self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
-            finalized = _run(
-                "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
-                "--feature", "alpha",
-            )
-            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
 
+            # Add compile commands before finalize (new requirement)
+            # First test that missing --repo is rejected when multiple repos exist
             missing_repo = _run(
                 "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--lane", "backend", "--command", "mvn compile -q",
@@ -951,9 +977,9 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertNotEqual(missing_repo.returncode, 0)
             self.assertIn("compile_command_repository_required", missing_repo.stdout)
-            for index, (repository, code_workspace) in enumerate(
-                (("backend-a", backend_a), ("backend-b", backend_b))
-            ):
+
+            # Then add compile commands for both repositories
+            for repository, code_workspace in (("backend-a", backend_a), ("backend-b", backend_b)):
                 added = _run(
                     "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
                     "--feature", "alpha", "--lane", "backend", "--repo", repository,
@@ -961,16 +987,28 @@ class JsonWriterTests(unittest.TestCase):
                     "--code-workspace", str(code_workspace),
                 )
                 self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
-                if index == 0:
-                    incomplete = _run(
-                        "plan_writer.py", "validate", "--workspace", str(workspace),
-                        "--feature", "alpha", "--initial",
-                    )
-                    self.assertNotEqual(incomplete.returncode, 0)
-                    self.assertIn(
-                        "B002.compileCommand.required_compile_missing",
-                        incomplete.stdout,
-                    )
+                project_added = _run(
+                    "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+                    "--feature", "alpha", "--repo", repository,
+                    "--command", "mvn test -q",
+                )
+                self.assertEqual(project_added.returncode, 0, project_added.stdout + project_added.stderr)
+
+            finalized = _run(
+                "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+
+            # Verify that compile commands cannot be added after finalize
+            post_finalize_add = _run(
+                "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--lane", "backend", "--repo", "backend-a",
+                "--command", "mvn test",
+                "--code-workspace", str(backend_a),
+            )
+            self.assertNotEqual(post_finalize_add.returncode, 0)
+            self.assertIn("task_draft_finalized", post_finalize_add.stdout)
 
             initial = _run(
                 "plan_writer.py", "validate", "--workspace", str(workspace),
@@ -1512,46 +1550,44 @@ class JsonWriterTests(unittest.TestCase):
             _write_specs(feature_dir)
             _write_design(feature_dir)
             _, module = _code_module(root)
-            task_dir = root / "tasks"
-            task_dir.mkdir()
             task = _plan_task_body()
-            task["scope"].update({
-                "workspaceRoots": {"default": "backend/service"},
-                "paths": ["src/main/java/example"],
-            })
+            task["scope"]["paths"] = ["src/main/java/example"]
             task["validationCommands"][0].update({
                 "argv": ["mvn.cmd", "test", "-Dtest=ProtocolCtrlApplyTest", "-q"],
-                "cwd": "backend/service",
             })
-            (task_dir / "T001.json").write_text(json.dumps(task), encoding="utf-8")
             group_file = _write_task_groups(root / "task-groups.json", [task])
 
-            missing_workspace = _run(
-                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
-                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
-            )
-            self.assertNotEqual(missing_workspace.returncode, 0)
-            self.assertIn("code_workspace_preflight_required", missing_workspace.stdout)
-
-            preflight = _run(
-                "plan_writer.py", "preflight-task-set", "--workspace", str(workspace),
-                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
                 "--code-workspace", str(module),
             )
-            self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
-
-            materialized = _run(
-                "plan_writer.py", "materialize-task-set", "--workspace", str(workspace),
-                "--feature", "alpha", "--group-file", str(group_file), "--task-dir", str(task_dir),
-                "--code-workspace", str(module),
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            detail = _draft_detail_body(task)
+            detail["validationCommands"][0].pop("cwd", None)
+            detail_path = root / "T001-detail.json"
+            detail_path.write_text(json.dumps(detail), encoding="utf-8")
+            detailed = _run(
+                "plan_writer.py", "set-draft-task-detail", "--workspace", str(workspace),
+                "--feature", "alpha", "--task-id", "T001", "--body-file", str(detail_path),
             )
-            self.assertEqual(materialized.returncode, 0, materialized.stdout + materialized.stderr)
-            batch_command = _run(
+            self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
+
+            compile_added = _run(
                 "plan_writer.py", "add-compile-command", "--workspace", str(workspace),
                 "--feature", "alpha", "--lane", "backend", "--command", "mvn.cmd compile -q",
-                "--code-workspace", str(module),
             )
-            self.assertEqual(batch_command.returncode, 0, batch_command.stdout + batch_command.stderr)
+            self.assertEqual(compile_added.returncode, 0, compile_added.stdout + compile_added.stderr)
+            project_added = _run(
+                "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
+                "--feature", "alpha", "--command", "mvn.cmd test -q",
+            )
+            self.assertEqual(project_added.returncode, 0, project_added.stdout + project_added.stderr)
+            finalized = _run(
+                "plan_writer.py", "finalize-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha",
+            )
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
             root_plan = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 root_plan["compileProfiles"]["backend"]["commands"][0]["cwd"],
@@ -1863,10 +1899,6 @@ class JsonWriterTests(unittest.TestCase):
                 0,
             )
 
-            project = _run(
-                "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
-                "--feature", "alpha", "--command", TEST_PROJECT_COMMAND,
-            )
             rendered = _run(
                 "plan_writer.py", "render-md", "--workspace", str(workspace), "--feature", "alpha"
             )
@@ -1875,7 +1907,7 @@ class JsonWriterTests(unittest.TestCase):
                 "--skip-reason", "no smoke needed",
             )
 
-            for result in (project, rendered, smoke):
+            for result in (rendered, smoke):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("plan_task_set_not_finalized", result.stdout + result.stderr)
 
@@ -1883,13 +1915,6 @@ class JsonWriterTests(unittest.TestCase):
                 "plan_writer.py", "finalize-task-set", "--workspace", str(workspace), "--feature", "alpha"
             )
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
-            self.assertEqual(
-                _run(
-                    "plan_writer.py", "add-project-validation-command", "--workspace", str(workspace),
-                    "--feature", "alpha", "--command", TEST_PROJECT_COMMAND,
-                ).returncode,
-                0,
-            )
             self.assertEqual(
                 _run("plan_writer.py", "render-md", "--workspace", str(workspace), "--feature", "alpha").returncode,
                 0,
@@ -2008,6 +2033,10 @@ class JsonWriterTests(unittest.TestCase):
             contract["projectValidationCommand"]["allowedKinds"],
             ["e2e_test", "integration_test", "static_check"],
         )
+        self.assertEqual(
+            contract["projectValidationCommand"]["command"],
+            "add-project-validation-command [--repo <workspaceRef>] --command <integration-command>",
+        )
         self.assertTrue(contract["projectValidationCommand"]["mustNotDuplicateBatchProfile"])
         self.assertTrue(contract["projectValidationCommand"]["requiredForParallelPipeline"])
         self.assertEqual(
@@ -2021,7 +2050,7 @@ class JsonWriterTests(unittest.TestCase):
             {
                 "command": (
                     "add-compile-command --lane <backend|frontend> "
-                    "[--repo <workspaceRef>] --command <command> --code-workspace <path>"
+                    "[--repo <workspaceRef>] --command <command>"
                 ),
                 "requiredFields": ["argv", "cwd", "kind", "required"],
                 "requiredPerUsedWorkspaceInLane": "exactly_one",
@@ -2108,7 +2137,6 @@ class JsonWriterTests(unittest.TestCase):
                 "requiredBefore": [
                     "add-compile-command",
                     "add-project-validation-command",
-                    "render-md",
                 ],
             },
         )
@@ -2171,6 +2199,10 @@ class JsonWriterTests(unittest.TestCase):
         self.assertEqual(
             contract["projectValidationCommand"],
             {
+                "command": (
+                    "add-project-validation-command [--repo <workspaceRef>] "
+                    "--command <integration-command>"
+                ),
                 "requiredFields": ["id", "argv", "cwd", "kind", "required"],
                 "allowedKinds": ["e2e_test", "integration_test", "static_check"],
                 "mustNotDuplicateBatchProfile": True,

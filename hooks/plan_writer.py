@@ -231,6 +231,9 @@ DRAFT_BUNDLE_COMMANDS = {
     "reopen-finalized-draft",
     "diagnose-plan-repair",
     "finalize-task-draft",
+    "add-compile-command",
+    "add-quality-gate-command",
+    "add-project-validation-command",
 }
 DRAFT_RUNTIME_GUARDED_COMMANDS = DRAFT_BUNDLE_COMMANDS - {
     "diagnose-plan-repair",
@@ -2779,6 +2782,8 @@ def _task_set_preflight_errors(
     data: dict[str, Any],
     group_data: dict[str, Any],
     code_workspaces: list[str] | None = None,
+    *,
+    require_engineering_commands: bool = False,
 ) -> list[dict[str, Any]]:
     errors = _task_group_preflight_errors(feature_dir, group_data)
     if errors:
@@ -2813,6 +2818,11 @@ def _task_set_preflight_errors(
     ))
     errors.extend(_task_set_validation_errors(data))
     errors.extend(_code_workspace_preflight_errors(data, code_workspaces))
+    if require_engineering_commands:
+        # Report the Draft-facing repair actions first.  Skipping bundle
+        # projection while they are missing avoids duplicating the same issue
+        # as low-level Bxxx profile-projection errors.
+        errors.extend(_validate_draft_engineering_commands(data))
     if not errors:
         root, batches = _project_batches(data)
         bundle_errors = validate_plan_bundle_data(root, batches)
@@ -3193,6 +3203,7 @@ def _apply_draft_task_repairs(
             data,
             group_data,
             code_workspaces,
+            require_engineering_commands=True,
         )
     report = _draft_validation_report(data, remaining_errors)
     return WriterResult(
@@ -3223,56 +3234,101 @@ def _cmd_repair_draft_tasks(args: argparse.Namespace) -> int:
 def _validate_draft_engineering_commands(data: dict[str, Any]) -> list[dict[str, Any]]:
     """校验 Draft 的工程命令是否完整
 
+    按 lane + workspaceRef 校验：
+    - 每个 lane 的每个 workspace 需要恰好一条编译命令
+    - 每个实际使用的 workspace 需要至少一条 required 的 B-INT 项目验证命令
+
     Returns:
         错误列表，空列表表示通过
     """
     errors = []
 
-    # 收集各 lane 的 code 模式任务
-    backend_tasks = [
-        t for t in _tasks(data)
-        if task_execution_lane(t) == "backend"
-        and task_execution_mode(t) == "code"
-    ]
-    frontend_tasks = [
-        t for t in _tasks(data)
-        if task_execution_lane(t) == "frontend"
-        and task_execution_mode(t) == "code"
-    ]
+    # 收集各 lane 的 code 模式任务及其 workspace
+    backend_workspaces: set[str] = set()
+    frontend_workspaces: set[str] = set()
+    all_workspaces: set[str] = set()
 
+    for task in _tasks(data):
+        if task_execution_mode(task) != "code":
+            continue
+        workspace_ref = str(task.get("workspaceRef", "default"))
+        all_workspaces.add(workspace_ref)
+        lane = task_execution_lane(task)
+        if lane == "backend":
+            backend_workspaces.add(workspace_ref)
+        elif lane == "frontend":
+            frontend_workspaces.add(workspace_ref)
+
+    # 检查编译命令：每个 lane 的每个 workspace 需要一条
     compile_profiles = data.get("compileProfiles", {})
-    backend_compile = (
-        isinstance(compile_profiles, dict)
-        and isinstance(compile_profiles.get("backend"), dict)
-        and bool(compile_profiles["backend"].get("commands"))
-    )
-    frontend_compile = (
-        isinstance(compile_profiles, dict)
-        and isinstance(compile_profiles.get("frontend"), dict)
-        and bool(compile_profiles["frontend"].get("commands"))
-    )
 
-    if backend_tasks and not backend_compile:
-        errors.append({
-            "reason": "missing_backend_compile_command",
-            "detail": f"有 {len(backend_tasks)} 个 backend 任务，但缺少编译命令",
-            "repairSuggestion": (
-                "运行 add-compile-command --feature <feature> --lane backend "
-                "--command '<COMPILE_COMMAND>' --cwd '<CWD>' "
-                "[--code-workspace '<WORKSPACE>'] [--repo '<REPO>']"
-            ),
-        })
+    for workspace_ref in sorted(backend_workspaces):
+        backend_commands = compile_profiles.get("backend", {}).get("commands", []) if isinstance(compile_profiles, dict) else []
+        matching = [
+            cmd for cmd in backend_commands
+            if isinstance(cmd, dict) and cmd.get("repo") == (None if workspace_ref == "default" else workspace_ref)
+        ]
+        if len(matching) == 0:
+            errors.append({
+                "reason": "missing_backend_compile_command",
+                "detail": f"backend workspace '{workspace_ref}' 缺少编译命令",
+                "repairSuggestion": (
+                    f"运行 add-compile-command --feature <feature> --lane backend "
+                    f"--command '<COMPILE_COMMAND>' --cwd '<CWD>' "
+                    + (f" --repo '{workspace_ref}'" if workspace_ref != "default" else "")
+                ),
+            })
+        elif len(matching) > 1:
+            errors.append({
+                "reason": "duplicate_backend_compile_command",
+                "detail": f"backend workspace '{workspace_ref}' 有 {len(matching)} 条编译命令，应该恰好一条",
+            })
 
-    if frontend_tasks and not frontend_compile:
-        errors.append({
-            "reason": "missing_frontend_compile_command",
-            "detail": f"有 {len(frontend_tasks)} 个 frontend 任务，但缺少编译命令",
-            "repairSuggestion": (
-                "运行 add-compile-command --feature <feature> --lane frontend "
-                "--command '<COMPILE_COMMAND>' --cwd '<CWD>' "
-                "[--code-workspace '<WORKSPACE>'] [--repo '<REPO>']"
-            ),
-        })
+    for workspace_ref in sorted(frontend_workspaces):
+        frontend_commands = compile_profiles.get("frontend", {}).get("commands", []) if isinstance(compile_profiles, dict) else []
+        matching = [
+            cmd for cmd in frontend_commands
+            if isinstance(cmd, dict) and cmd.get("repo") == (None if workspace_ref == "default" else workspace_ref)
+        ]
+        if len(matching) == 0:
+            errors.append({
+                "reason": "missing_frontend_compile_command",
+                "detail": f"frontend workspace '{workspace_ref}' 缺少编译命令",
+                "repairSuggestion": (
+                    f"运行 add-compile-command --feature <feature> --lane frontend "
+                    f"--command '<COMPILE_COMMAND>' --cwd '<CWD>' "
+                    + (f" --repo '{workspace_ref}'" if workspace_ref != "default" else "")
+                ),
+            })
+        elif len(matching) > 1:
+            errors.append({
+                "reason": "duplicate_frontend_compile_command",
+                "detail": f"frontend workspace '{workspace_ref}' 有 {len(matching)} 条编译命令，应该恰好一条",
+            })
+
+    # 检查项目验证命令（B-INT）：每个实际 workspace 需要至少一条 required 命令
+    project_commands = data.get("projectValidationCommands", [])
+    if not isinstance(project_commands, list):
+        project_commands = []
+    for workspace_ref in sorted(all_workspaces):
+        matching_required = [
+            cmd for cmd in project_commands
+            if isinstance(cmd, dict)
+            and cmd.get("kind") == "integration_test"
+            and cmd.get("required") is True
+            and cmd.get("repo") == (None if workspace_ref == "default" else workspace_ref)
+        ]
+        if len(matching_required) == 0:
+            errors.append({
+                "reason": "missing_required_integration_test",
+                "detail": f"workspace '{workspace_ref}' 缺少 required 的 integration_test 项目验证命令",
+                "repairSuggestion": (
+                    f"运行 add-project-validation-command --feature <feature> "
+                    f"--command '<INTEGRATION_TEST_COMMAND>' --cwd '<CWD>' "
+                    f"--kind integration_test" +
+                    (f" --repo '{workspace_ref}'" if workspace_ref != "default" else "")
+                ),
+            })
 
     return errors
 
@@ -3304,9 +3360,8 @@ def _draft_preflight(
         data,
         group_data,
         code_workspaces,
+        require_engineering_commands=True,
     )
-    # 新增：工程命令完整性校验
-    errors.extend(_validate_draft_engineering_commands(data))
     return lock, data, group_data, errors
 
 
@@ -4081,7 +4136,6 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "requiredBefore": [
                             "add-compile-command",
                             "add-project-validation-command",
-                            "render-md",
                         ],
                     },
                     "collectingRepairs": {
@@ -4142,6 +4196,10 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     },
                     "matrixExceptionExample": _matrix_exception_example(),
                     "projectValidationCommand": {
+                        "command": (
+                            "add-project-validation-command [--repo <workspaceRef>] "
+                            "--command <integration-command>"
+                        ),
                         "requiredFields": ["id", "argv", "cwd", "kind", "required"],
                         "allowedKinds": sorted(PROJECT_VALIDATION_KINDS),
                         "mustNotDuplicateBatchProfile": True,
@@ -4153,8 +4211,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "compileCommand": {
                         "command": (
                             "add-compile-command --lane <backend|frontend> "
-                            "[--repo <workspaceRef>] --command <command> "
-                            "--code-workspace <path>"
+                            "[--repo <workspaceRef>] --command <command>"
                         ),
                         "requiredFields": ["argv", "cwd", "kind", "required"],
                         "requiredPerUsedWorkspaceInLane": "exactly_one",
@@ -4164,8 +4221,8 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "qualityGateCommand": {
                         "command": (
                             "add-quality-gate-command --lane <backend|frontend> "
-                            "[--repo <workspaceRef>] --command <static-check-command> "
-                            "--code-workspace <path>"
+                            "[--repo <workspaceRef>] [--replace] "
+                            "--command <static-check-command>"
                         ),
                         "requiredFields": ["argv", "cwd", "kind", "required"],
                         "allowedKinds": ["static_check"],
@@ -4349,17 +4406,19 @@ def _cmd_add_validation_command(args: argparse.Namespace) -> int:
 
 def _cmd_add_compile_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
-    # Check if plan is already finalized - engineering commands must be configured in Draft
-    if _path(workspace, feature).is_file():
-        return render_result(fail(
-            "plan_already_finalized",
-            "工程命令必须在 Draft 阶段配置。如需修改，请先运行 reopen-finalized-draft",
-            path=_path(workspace, feature),
-        ))
+    # Check Draft status: allow if Draft is ready or reopened, reject if finalized or no Draft
     try:
         lock, data = _load_draft_bundle(workspace, feature)
     except PlanWriterInputError as e:
         return render_result(fail(str(e), path=_draft_plan_path(workspace, feature)))
+
+    # A reopened Draft is marked ready. A finalized lock must never be edited.
+    if lock.get("status") == "finalized":
+        return render_result(fail(
+            "task_draft_finalized",
+            "工程命令必须在 Draft 阶段配置。如需修改已 finalized 的计划，请先运行 reopen-finalized-draft",
+            path=_draft_plan_path(workspace, feature),
+        ))
     lane_workspace_contracts = {
         _batch_workspace_contract(task)
         for task in _tasks(data)
@@ -4419,13 +4478,19 @@ def _cmd_add_compile_command(args: argparse.Namespace) -> int:
         **({"repo": command_repository} if command_repository else {}),
     }
     if workspace_preflight_required:
-        if not args.code_workspace:
+        # Reuse the workspaces locked by prepare-task-draft so callers do not
+        # need to repeat --code-workspace for every engineering command.
+        configured_workspaces = (
+            args.code_workspace
+            or [item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)]
+        )
+        if not configured_workspaces:
             return render_result(fail(
                 "code_workspace_preflight_required",
                 "add-compile-command",
-                path=_path(workspace, feature),
+                path=_draft_plan_path(workspace, feature),
             ))
-        contexts = _code_workspace_contexts(args.code_workspace)
+        contexts = _code_workspace_contexts(configured_workspaces)
         command_errors = _command_workspace_preflight_errors(
             command,
             context_name=f"compileProfiles.{args.lane}",
@@ -4436,7 +4501,7 @@ def _cmd_add_compile_command(args: argparse.Namespace) -> int:
         if command_errors:
             return render_result(WriterResult(
                 ok=False,
-                path=_path(workspace, feature),
+                path=_draft_plan_path(workspace, feature),
                 errors=command_errors,
             ))
     profiles = data.setdefault("compileProfiles", {})
@@ -4448,23 +4513,35 @@ def _cmd_add_compile_command(args: argparse.Namespace) -> int:
     if not isinstance(commands, list):
         commands = []
         profile["commands"] = commands
+
+    # Exactly one compile command is allowed for each lane/workspace pair.
+    # Re-applying the command therefore replaces every prior command for that pair.
+    command_repo = command.get("repo")
+    commands[:] = [
+        existing_cmd
+        for existing_cmd in commands
+        if not isinstance(existing_cmd, dict) or existing_cmd.get("repo") != command_repo
+    ]
     commands.append(command)
+
     return render_result(_write_draft_bundle(workspace, feature, data, lock))
 
 
 def _cmd_add_quality_gate_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
-    # Check if plan is already finalized - engineering commands must be configured in Draft
-    if _path(workspace, feature).is_file():
-        return render_result(fail(
-            "plan_already_finalized",
-            "工程命令必须在 Draft 阶段配置。如需修改，请先运行 reopen-finalized-draft",
-            path=_path(workspace, feature),
-        ))
+    # Check Draft status: allow if Draft is ready or reopened, reject if finalized or no Draft
     try:
         lock, data = _load_draft_bundle(workspace, feature)
     except PlanWriterInputError as e:
         return render_result(fail(str(e), path=_draft_plan_path(workspace, feature)))
+
+    # A reopened Draft is marked ready. A finalized lock must never be edited.
+    if lock.get("status") == "finalized":
+        return render_result(fail(
+            "task_draft_finalized",
+            "工程命令必须在 Draft 阶段配置。如需修改已 finalized 的计划，请先运行 reopen-finalized-draft",
+            path=_draft_plan_path(workspace, feature),
+        ))
     lane_workspace_contracts = {
         _batch_workspace_contract(task)
         for task in _tasks(data)
@@ -4522,23 +4599,27 @@ def _cmd_add_quality_gate_command(args: argparse.Namespace) -> int:
         for task in _tasks(data)
     )
     if workspace_preflight_required:
-        if not args.code_workspace:
+        configured_workspaces = (
+            args.code_workspace
+            or [item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)]
+        )
+        if not configured_workspaces:
             return render_result(fail(
                 "code_workspace_preflight_required",
                 "add-quality-gate-command",
-                path=_path(workspace, feature),
+                path=_draft_plan_path(workspace, feature),
             ))
         command_errors = _command_workspace_preflight_errors(
             command,
             context_name=f"qualityGateProfiles.{args.lane}",
             workspace_roots=workspace_roots,
-            contexts=_code_workspace_contexts(args.code_workspace),
+            contexts=_code_workspace_contexts(configured_workspaces),
             compile_only=False,
         )
         if command_errors:
             return render_result(WriterResult(
                 ok=False,
-                path=_path(workspace, feature),
+                path=_draft_plan_path(workspace, feature),
                 errors=command_errors,
             ))
     profiles = data.setdefault("qualityGateProfiles", {})
@@ -4550,37 +4631,132 @@ def _cmd_add_quality_gate_command(args: argparse.Namespace) -> int:
     if not isinstance(commands, list):
         commands = []
         profile["commands"] = commands
+
+    # Quality profiles may contain multiple checks for one workspace. Appending
+    # keeps that capability; --replace intentionally replaces that workspace's
+    # current quality profile when an operator needs to revise it.
+    command_repo = command.get("repo")
+    if args.replace:
+        commands[:] = [
+            existing_cmd
+            for existing_cmd in commands
+            if not isinstance(existing_cmd, dict) or existing_cmd.get("repo") != command_repo
+        ]
     commands.append(command)
+
     return render_result(_write_draft_bundle(workspace, feature, data, lock))
 
 
 def _cmd_add_project_validation_command(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
-    # Check if plan is already finalized - engineering commands must be configured in Draft
-    if _path(workspace, feature).is_file():
-        return render_result(fail(
-            "plan_already_finalized",
-            "工程命令必须在 Draft 阶段配置。如需修改，请先运行 reopen-finalized-draft",
-            path=_path(workspace, feature),
-        ))
+    # Check Draft status: allow if Draft is ready or reopened, reject if finalized or no Draft
     try:
         lock, data = _load_draft_bundle(workspace, feature)
     except PlanWriterInputError as e:
         return render_result(fail(str(e), path=_draft_plan_path(workspace, feature)))
+
+    # A reopened Draft is marked ready. A finalized lock must never be edited.
+    if lock.get("status") == "finalized":
+        return render_result(fail(
+            "task_draft_finalized",
+            "工程命令必须在 Draft 阶段配置。如需修改已 finalized 的计划，请先运行 reopen-finalized-draft",
+            path=_draft_plan_path(workspace, feature),
+        ))
+    workspace_roots_by_ref: dict[str, str] = {}
+    for task in _tasks(data):
+        if task_execution_mode(task) != "code":
+            continue
+        workspace_ref = task.get("workspaceRef")
+        if not isinstance(workspace_ref, str) or not workspace_ref:
+            continue
+        roots = task_workspace_roots(task)
+        root_key = "default" if "default" in roots else workspace_ref
+        workspace_root = roots.get(root_key)
+        if isinstance(workspace_root, str) and workspace_root:
+            workspace_roots_by_ref.setdefault(workspace_ref, workspace_root)
+    if not workspace_roots_by_ref:
+        return render_result(fail(
+            "project_validation_workspace_unused",
+            path=_draft_plan_path(workspace, feature),
+        ))
+    if len(workspace_roots_by_ref) > 1 and not args.repo:
+        return render_result(fail(
+            "project_validation_repository_required",
+            path=_draft_plan_path(workspace, feature),
+        ))
+    selected_workspace_ref = args.repo or next(iter(workspace_roots_by_ref))
+    workspace_root = workspace_roots_by_ref.get(selected_workspace_ref)
+    if workspace_root is None:
+        return render_result(fail(
+            "project_validation_repository_unknown",
+            f"repo={selected_workspace_ref};available={','.join(sorted(workspace_roots_by_ref))}",
+            path=_draft_plan_path(workspace, feature),
+        ))
+    command_repo = None if selected_workspace_ref == "default" else selected_workspace_ref
     commands = data.setdefault("projectValidationCommands", [])
     if not isinstance(commands, list):
         commands = []
         data["projectValidationCommands"] = commands
-    commands.append(
-        {
-            "id": args.command_id or f"PROJECT-VAL-{len(commands) + 1:03d}",
-            "argv": shlex.split(args.command),
-            "cwd": args.cwd,
-            "kind": args.kind,
-            "required": not args.optional,
-            **({"repo": args.repo} if args.repo else {}),
-        }
+
+    # Build new command
+    command_kind = args.kind
+    command_required = not args.optional
+    new_command = {
+        "id": args.command_id or f"PROJECT-VAL-{len(commands) + 1:03d}",
+        "argv": shlex.split(args.command),
+        "cwd": args.cwd or workspace_root,
+        "kind": command_kind,
+        "required": command_required,
+        **({"repo": command_repo} if command_repo else {}),
+    }
+
+    command_errors = _command_workspace_preflight_errors(
+        new_command,
+        context_name="projectValidationCommands",
+        workspace_roots={selected_workspace_ref: workspace_root},
+        contexts=_code_workspace_contexts([
+            item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)
+        ]),
+        compile_only=False,
     )
+    if command_errors:
+        return render_result(WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=command_errors,
+        ))
+
+    # A required integration command is the B-INT contract for its workspace,
+    # so re-applying it is a deterministic replacement. Other optional project
+    # commands remain additive.
+    if command_kind == "integration_test" and command_required:
+        existing = next(
+            (
+                item for item in commands
+                if isinstance(item, dict)
+                and item.get("kind") == "integration_test"
+                and item.get("required") is True
+                and item.get("repo") == command_repo
+            ),
+            None,
+        )
+        if isinstance(existing, dict) and isinstance(existing.get("id"), str):
+            new_command["id"] = existing["id"]
+        commands[:] = [
+            item
+            for item in commands
+            if not (
+                isinstance(item, dict)
+                and item.get("kind") == "integration_test"
+                and item.get("required") is True
+                and item.get("repo") == command_repo
+            )
+        ]
+        commands.append(new_command)
+    else:
+        # For non-required or non-integration commands, always append
+        commands.append(new_command)
+
     return render_result(_write_draft_bundle(workspace, feature, data, lock))
 
 
@@ -5616,13 +5792,14 @@ def main(argv: list[str] | None = None) -> int:
     quality_gate.add_argument("--cwd")
     quality_gate.add_argument("--repo")
     quality_gate.add_argument("--code-workspace", action="append")
+    quality_gate.add_argument("--replace", action="store_true")
     quality_gate.set_defaults(func=_cmd_add_quality_gate_command)
 
     project_validation = sub.add_parser("add-project-validation-command")
     _common(project_validation)
     project_validation.add_argument("--command-id")
     project_validation.add_argument("--command", required=True)
-    project_validation.add_argument("--cwd", default=".")
+    project_validation.add_argument("--cwd")
     project_validation.add_argument("--repo")
     project_validation.add_argument(
         "--kind",

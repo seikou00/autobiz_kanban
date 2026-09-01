@@ -397,6 +397,28 @@ class BatchedPlanContractTest(unittest.TestCase):
             feature_dir = workspace / ".autobizdevops" / "features" / "alpha"
             feature_dir.mkdir(parents=True)
             write_plan_state(workspace)
+            subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True)
+            spec_dir = feature_dir / "specs" / "cap"
+            spec_dir.mkdir(parents=True)
+            (spec_dir / "spec.md").write_text(
+                "\n".join([
+                    "## ADDED Requirements",
+                    "### Requirement [REQ-001]: capability",
+                    "#### Scenario [SCN-001]: happy path",
+                ]),
+                encoding="utf-8",
+            )
+            (feature_dir / "design.md").write_text(
+                "\n".join([
+                    "# Design",
+                    "- x-auto-no-http-api: true",
+                    "- x-auto-no-sql: true",
+                    "| ID | Decision |",
+                    "|----|----------|",
+                    "| D-001 | implementation choice |",
+                ]),
+                encoding="utf-8",
+            )
 
             def writer(*args: str) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
@@ -415,10 +437,61 @@ class BatchedPlanContractTest(unittest.TestCase):
                     check=False,
                 )
 
-            self.assertEqual(writer("init").returncode, 0)
             body = Path(tmp) / "T001.json"
             body.write_text(json.dumps(task("T001")), encoding="utf-8")
-            self.assertEqual(writer("add-task", "--body-file", str(body)).returncode, 0)
+            group_file = Path(tmp) / "task-groups.json"
+            group_file.write_text(
+                json.dumps({
+                    "featureId": "alpha",
+                    "groups": [{
+                        "id": "T001",
+                        "title": "task T001",
+                        "executionMode": "code",
+                        "deps": [],
+                        "uiRequired": False,
+                        "workspaceRef": "default",
+                        "specRefs": [
+                            "specs/cap/spec.md#REQ-001",
+                            "specs/cap/spec.md#SCN-001",
+                        ],
+                        "mergedScenarioRefs": [],
+                        "apiIds": [],
+                        "validationBoundary": "public behavior seam validated by the task command",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            prepared = writer(
+                "prepare-task-draft",
+                "--group-file", str(group_file),
+                "--code-workspace", str(workspace),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+
+            detail = task("T001")
+            detail["scope"].pop("pages", None)
+            detail = {
+                "goal": detail["goal"],
+                "scope": detail["scope"],
+                "implementationPoints": detail["implementationPoints"],
+                "acceptanceCriteria": [{
+                    "text": detail["acceptanceCriteria"][0]["text"],
+                    "scenarioRefs": ["specs/cap/spec.md#SCN-001"],
+                }],
+                "nonGoals": detail["nonGoals"],
+                "designRefs": detail["designRefs"],
+                "dataIds": detail["dataIds"],
+                "decisionIds": detail["decisionIds"],
+                "validationCommands": [{
+                    **{key: value for key, value in detail["validationCommands"][0].items() if key != "id"},
+                    "covers": [1],
+                }],
+                "expectedFiles": detail["expectedFiles"],
+                "blockers": detail["blockers"],
+            }
+            body.write_text(json.dumps(detail), encoding="utf-8")
+            detailed = writer("set-draft-task-detail", "--task-id", "T001", "--body-file", str(body))
+            self.assertEqual(detailed.returncode, 0, detailed.stdout + detailed.stderr)
 
             added = writer(
                 "add-compile-command",
@@ -429,12 +502,6 @@ class BatchedPlanContractTest(unittest.TestCase):
             )
 
             self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
-            root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
-            batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
-            self.assertEqual(root["compileProfiles"]["backend"]["commands"][0]["kind"], "compile")
-            self.assertEqual(batch["compileCommand"]["id"], "BATCH-B001-COMPILE")
-            self.assertEqual(batch["qualityGateCommands"], [])
-
             quality_added = writer(
                 "add-quality-gate-command",
                 "--lane",
@@ -444,8 +511,18 @@ class BatchedPlanContractTest(unittest.TestCase):
             )
 
             self.assertEqual(quality_added.returncode, 0, quality_added.stdout + quality_added.stderr)
+            project_added = writer(
+                "add-project-validation-command",
+                "--command",
+                f"{sys.executable} -c \"print('project integration')\"",
+            )
+            self.assertEqual(project_added.returncode, 0, project_added.stdout + project_added.stderr)
+            finalized = writer("finalize-task-draft")
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
             root = json.loads((feature_dir / "plan.json").read_text(encoding="utf-8"))
             batch = json.loads(batch_plan_path(feature_dir, "B001").read_text(encoding="utf-8"))
+            self.assertEqual(root["compileProfiles"]["backend"]["commands"][0]["kind"], "compile")
+            self.assertEqual(batch["compileCommand"]["id"], "BATCH-B001-COMPILE")
             self.assertEqual(root["qualityGateProfiles"]["backend"]["commands"][0]["kind"], "static_check")
             self.assertEqual(batch["qualityGateCommands"][0]["id"], "BATCH-B001-QUALITY-001")
     def test_bundle_rejects_project_level_command_in_task_validation(self) -> None:
@@ -798,16 +875,6 @@ class BatchedPlanContractTest(unittest.TestCase):
             second_body = Path(tmp) / "T002.json"
             second_body.write_text(json.dumps(second), encoding="utf-8")
             self.assertEqual(writer("add-task", "--body-file", str(second_body)).returncode, 0)
-            self.assertEqual(
-                writer(
-                    "add-compile-command",
-                    "--lane",
-                    "backend",
-                    "--command",
-                    f"{sys.executable} -m compileall -q hooks",
-                ).returncode,
-                0,
-            )
 
             finalized = writer("finalize-task-set")
             self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)

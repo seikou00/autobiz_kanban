@@ -468,26 +468,30 @@ UI 任务规则：
 
 #### 配置工程命令（Draft 阶段，finalize 之前）
 
-**重要**：工程命令必须在 Draft 阶段配置完成，finalize 会校验工程命令完整性。finalize 后计划进入只读状态，不可再添加工程命令。
+**重要**：工程命令必须在 Draft 阶段配置完成，finalize 会校验工程命令完整性。finalize 后计划进入只读状态；如需修订，先 `reopen-finalized-draft`，再在 Draft 中重新运行对应命令，最后 `finalize-task-draft --force`。同一 lane + workspace 的编译命令和 required B-INT 命令会被替换而非重复追加；质量门默认可追加多个检查，传 `--replace` 才替换该 workspace 的质量门集合。
 
 为每个实际使用的 lane 添加一条 required 编译命令，并为每个实际 `workspaceRef` 添加一条 required 的 B-INT 集成命令；批次统一使用 `mode=commands`：
 
 ```bash
-python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane backend --command "<BACKEND_COMPILE_OR_BUILD>" --code-workspace "<BACKEND_MODULE>"
-python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane frontend --command "<FRONTEND_COMPILE_OR_BUILD>" --code-workspace "<FRONTEND_MODULE>"
-python "${pluginPath}/hooks/plan_writer.py" add-quality-gate-command --feature "${feature}" --lane backend --command "<BACKEND_LINT_OR_STATIC_CHECK>" --code-workspace "<BACKEND_MODULE>"
+python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane backend --command "<BACKEND_COMPILE_OR_BUILD>"
+python "${pluginPath}/hooks/plan_writer.py" add-compile-command --feature "${feature}" --lane frontend --command "<FRONTEND_COMPILE_OR_BUILD>"
+python "${pluginPath}/hooks/plan_writer.py" add-quality-gate-command --feature "${feature}" --lane backend --command "<BACKEND_LINT_OR_STATIC_CHECK>"
+python "${pluginPath}/hooks/plan_writer.py" add-quality-gate-command --feature "${feature}" --lane backend --command "<REPLACEMENT_STATIC_CHECK>" --replace
 python "${pluginPath}/hooks/plan_writer.py" add-project-validation-command --feature "${feature}" --command "<CANDIDATE_INTEGRATION_COMMAND>" --cwd "<GIT_ROOT_RELATIVE_CWD>" --kind integration_test --repo "<workspaceRef>"
 ```
 
-同一 lane 只使用一个 workspace 时 writer 可自动选择；使用多个仓库时必须为每个 workspace 分别添加 required 编译命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。B-INT 命令同理：单仓库可以省略 `--repo`，多仓库必须每个 repo 一条且显式传 `--repo <workspaceRef>`。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。B-INT 在候选 Worktree、真 merge 前执行，不能留给 Board、CI/CD 或合并后的 E2E 阶段。
+工程命令默认复用 `prepare-task-draft` 已锁定的 `--code-workspace`，无需重复传入；仅在需要显式复检某个工作区时传 `--code-workspace`。同一 lane 只使用一个 workspace 时 writer 可自动选择；使用多个仓库时必须为每个 workspace 分别添加 required 编译命令并传 `--repo <workspaceRef>`，writer 只把该命令投影到相同 repo 的 Batch。B-INT 命令同理：单仓库可以省略 `--repo`，多仓库必须每个 repo 一条且显式传 `--repo <workspaceRef>`。未显式传 `--cwd` 时 writer 使用该 TASK/Batch 声明的唯一 workspace 根；显式 `--cwd` 仍是 Git 根相对路径且必须位于 workspace 内。B-INT 在候选 Worktree、真 merge 前执行，不能留给 Board、CI/CD 或合并后的 E2E 阶段。
 
 Plan 阶段不再生成独立 smoke 计划。每个 Batch 的 Code 编译收口只落在 `compileCommand` 的 required `kind=compile` 命令中；frontend 命令的 argv 可以是 build/typecheck，但不得执行或串联测试。只有声明了 `qualityGateCommands` 时，才在 test 后运行对应的 lint/静态检查。TASK `validationCommands` 继续投影为 `testIntent`，由后续 UTest/E2E 阶段执行。
 
 #### Finalize 与产物生成
 
-所有 Draft 配置（任务详情 + 工程命令）完成后，finalize 会一次性物化为正式执行产物。finalize 后不可再修改计划配置，发现问题需要先 reopen。
+所有 Draft 配置（任务详情 + 工程命令）完成后，运行 `finalize-task-draft` 会一次性物化为正式执行产物，包括：
+- 根 `plan.json`
+- 各 Batch `plans/B*/plan.json`
+- `PLAN.md`（自动生成，无需手动 render-md）
 
-完成任务、Batch 和可选项目验证配置后，运行 `python "${pluginPath}/hooks/plan_writer.py" render-md --feature "${feature}"` 投影输出 `PLAN.md`。阶段门禁见文末「整体完成条件」；`plan_writer.py validate --gate` 只是不完整的本产物快检，不能替代它。
+finalize 后计划进入只读状态。发现问题需要先运行 `diagnose-plan-repair`，然后 `reopen-finalized-draft --reason <reason>` 进入可修复状态；修复后使用 `finalize-task-draft --force` 重新物化。
 
 完成条件：
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json` 文件已写入磁盘

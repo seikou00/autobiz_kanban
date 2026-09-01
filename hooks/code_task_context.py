@@ -27,6 +27,7 @@ from hooks.json_writer_common import (  # noqa: E402
 )
 from hooks.plan_json import (  # noqa: E402
     batch_plan_path,
+    defer_to_test_stages_enabled,
     load_plan,
     validate_batch_plan_data,
     validate_plan_data,
@@ -310,6 +311,10 @@ def build_context(
         expected_feature_id=feature,
         expected_batch_id=active_batch_id,
         known_task_ids=known_task_ids,
+        # batch-compile is execution state written by the Code runner.  It is
+        # valid only for the root Plan's deferred-validation policy, which is
+        # also the policy that allows task repair after a sealed Batch.
+        defer_to_test_stages=defer_to_test_stages_enabled(data),
     )
     if batch_errors:
         return WriterResult(
