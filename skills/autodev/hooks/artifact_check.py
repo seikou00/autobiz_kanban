@@ -58,7 +58,7 @@ from hooks.source_context import (  # noqa: E402
     source_ids_for_target,
     source_requirement_ids_for_target,
     source_requirement_index,
-    validate_source_context,
+    validate_source_context_refs,
 )
 from hooks.artifact_ref_validator import (  # noqa: E402
     design_marker_value,
@@ -658,7 +658,7 @@ def _validate_source_requirement_coverage(
 ) -> int:
     """Validate compact source requirement IDs against the actual artifact text."""
 
-    validation_errors = validate_source_context(ctx.feature_dir)
+    validation_errors = validate_source_context_refs(ctx.feature_dir)
     data, load_errors = load_source_context(ctx.feature_dir)
     failures = 0
     for error in (validation_errors or load_errors):
@@ -2818,7 +2818,7 @@ def validate_e2e_cases_contract(ctx: HookContext) -> int:
                 target=",".join(unknown_external),
                 repair="修正 source.external_sources 中的 SRC-NNN；新增来源必须先回 PRD 登记，E2E 不得自行创建来源 ID。",
             )
-    source_context_validation_errors = validate_source_context(ctx.feature_dir)
+    source_context_validation_errors = validate_source_context_refs(ctx.feature_dir)
     source_context, source_context_errors = load_source_context(ctx.feature_dir)
     for error in (source_context_validation_errors or source_context_errors):
         failures += fail_line(

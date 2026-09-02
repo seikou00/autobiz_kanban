@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""正式 PRD 的结构规则与 Markdown 标题解析。"""
+"""正式 PRD 的结构规则与 Markdown 标题解析。
+
+只保留同时满足以下三条的结构约束，其余交给技能正文与人工评审：
+1. 技能正文（SKILL.md / references）能推导出该要求；
+2. 下游阶段真实消费该结构；
+3. 模型能自行完成。
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Union
+from typing import List, Sequence, Union
 
 
-FORMAL_PRD_TITLE = "# 需求正式稿"
-REQUIRED_PRD_SECTIONS = (
-    "用户故事",
-    "验收口径",
-    "验收标准",
-    "关键约束",
-    "外部资料与实现约束",
-)
+# 下游 `extract_source_references()` 按该标题定位来源表，缺失会让 Specs/Plan/Code 全链引用悬空。
+REQUIRED_PRD_SECTIONS = ("外部资料与实现约束",)
 FORMAL_SECTION_MAX_LEVEL = 3
-DISCUSSION_SECTION_TITLES = ("历次讨论记录", "讨论记录")
-PENDING_SECTION_TITLES = ("待确认事项", "待确认项")
-FORBIDDEN_PRD_SECTION_TITLES = (
-    "审理提炼",
-    *PENDING_SECTION_TITLES,
-    "外部依赖",
-    "第三方依赖",
-)
 PENDING_MARKER = "【待确认】"
 
 
@@ -64,5 +56,10 @@ def iter_headings(source: Union[str, Sequence[str]]) -> List[Heading]:
     return headings
 
 
-def heading_matches(heading_text: str, titles: Iterable[str]) -> bool:
-    return any(title in heading_text for title in titles)
+def pending_marker_lines(content: str) -> List[int]:
+    """返回残留 `【待确认】` 的 1-based 行号，供报错直接定位。"""
+    return [
+        index + 1
+        for index, line in enumerate(content.split("\n"))
+        if PENDING_MARKER in line
+    ]

@@ -34,19 +34,16 @@ from hooks.source_context import validate_source_context
 from hooks.source_references import (
     extract_source_references,
     has_source_section,
-    validate_source_reference_section,
+    split_source_reference_section,
 )
 
-# 正式稿标题、禁用标题和必需段落的单一事实源在 prd_rules.py。
+# 必需段落与待确认标记的单一事实源在 prd_rules.py。
 from prd_rules import (  # noqa: F401  （re-export，供外部按原名引用）
-    DISCUSSION_SECTION_TITLES,
-    FORBIDDEN_PRD_SECTION_TITLES,
-    FORMAL_PRD_TITLE,
     FORMAL_SECTION_MAX_LEVEL,
     PENDING_MARKER,
     REQUIRED_PRD_SECTIONS,
-    heading_matches,
     iter_headings,
+    pending_marker_lines,
 )
 
 
@@ -93,15 +90,23 @@ def _skill_contract_or_none(contracts, skill: str) -> Optional[SkillContract]:
         return None
 
 
-def _check_done_checkpoint(record: Dict[str, Any], contract: SkillContract, errors: List[str]) -> None:
+def _check_done_checkpoint(
+    record: Dict[str, Any], contract: SkillContract, warnings: List[str]
+) -> None:
+    """checkpoint 只作提示。
+
+    技能正文要求先写 `*_done` 再跑校验，若把 checkpoint 当阻断项，
+    模型就必须"先声明完成才能验证是否完成"，结构反馈只能出现在最后一轮。
+    """
     expected_cp = next((cp for cp in contract.checkpoints if cp.endswith("_done")), None)
     if not expected_cp:
         return
     feature = record.get("feature", "")
     actual_cp = record.get("checkpoint")
     if actual_cp != expected_cp:
-        errors.append(
-            f"state.json 中 Feature '{feature}' 的 checkpoint 应为 {expected_cp}，当前为: {actual_cp or '未设置'}"
+        warnings.append(
+            f"Feature '{feature}' 的 checkpoint 当前为 {actual_cp or '未设置'}，尚未到 {expected_cp}；"
+            f"修复：产物定稿后运行 update_checkpoint.py --checkpoint {expected_cp}（产物结构本身不受影响）"
         )
 
 
@@ -130,7 +135,10 @@ def _implementation_scope_errors(feature_dir: Path, content: Optional[str] = Non
         return []
     _, errors = load_scope(feature_dir, required=True)
     if content is not None and "当前实现范围" not in content:
-        errors.append("文档缺少必要章节: 当前实现范围")
+        errors.append(
+            "PRD.md 缺少必要章节: 当前实现范围；"
+            "修复：在 PRD.md 增加 `## 当前实现范围` 并写明 full_stack / backend_only / frontend_only"
+        )
     return errors
 
 
@@ -148,13 +156,16 @@ def _ok(message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     return result
 
 
-def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
+def validate_prd(
+    feature: Optional[str], workspace: Path, draft: bool = False
+) -> Dict[str, Any]:
     feature_dir = resolve_feature_dir(feature, workspace)
     if not feature_dir:
         return _fail(f"未找到 feature 目录: feature={feature}")
 
     slug = feature_dir.name
     record, contracts, errors = _resolve_feature_context(slug, workspace)
+    warnings: List[str] = []
     if errors:
         return _fail("prd 阶段产出物校验未通过", {"feature": slug, "errors": errors})
 
@@ -168,17 +179,16 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
     prd_md = exact_file(feature_dir, "PRD.md")
 
     if prd_md is None:
-        errors.append(f"PRD.md 不存在: {feature_dir / 'PRD.md'}")
+        errors.append(
+            f"PRD.md 不存在: {feature_dir / 'PRD.md'}；"
+            "修复：按技能正文的模板在该路径生成 PRD.md 后重跑校验"
+        )
     else:
         content = prd_md.read_text(encoding="utf-8")
         errors.extend(_implementation_scope_errors(feature_dir, content))
-        first_line = content.splitlines()[0].strip() if content.splitlines() else ""
-        if first_line != FORMAL_PRD_TITLE:
-            errors.append(f"PRD.md 必须以 {FORMAL_PRD_TITLE} 开头")
 
         all_headings = iter_headings(content)
-        headings = [heading.text for heading in all_headings]
-        # 必备段落必须是正式章节标题；功能详情里的深层 `###### 验收标准` 不算数
+        # 必备段落必须是正式章节标题；功能详情里的深层同名标题不算数
         section_headings = [
             heading.text for heading in all_headings
             if heading.level <= FORMAL_SECTION_MAX_LEVEL
@@ -187,41 +197,45 @@ def validate_prd(feature: Optional[str], workspace: Path) -> Dict[str, Any]:
         markers = section_headings + bolds
         missing = [s for s in REQUIRED_PRD_SECTIONS if not any(s in m for m in markers)]
         if missing:
-            errors.append(f"PRD.md 缺少必要段落: {', '.join(missing)}")
-
-        discussion_headings = [
-            heading for heading in headings
-            if heading_matches(heading, DISCUSSION_SECTION_TITLES)
-        ]
-        if discussion_headings:
-            errors.append(f"PRD.md 不应包含讨论记录标题: {', '.join(discussion_headings)}")
-
-        forbidden_headings = [
-            heading for heading in headings
-            if heading_matches(heading, FORBIDDEN_PRD_SECTION_TITLES)
-        ]
-        if forbidden_headings:
-            errors.append(f"PRD.md 不应包含正式稿禁用标题: {', '.join(forbidden_headings)}")
-
-        if PENDING_MARKER in content:
             errors.append(
-                f"PRD.md 仍含 {PENDING_MARKER}：请逐项获取用户裁定，"
-                "将具体结论写入 PRD.md 对应正文后移除标记"
+                "PRD.md 缺少必要段落: %s；修复：新增同名章节标题（层级不深于 %d 级），"
+                "没有外部资料时该章节正文写「无」"
+                % (", ".join(missing), FORMAL_SECTION_MAX_LEVEL)
+            )
+
+        pending_lines = pending_marker_lines(content)
+        if pending_lines:
+            shown = "、".join(str(line) for line in pending_lines[:10])
+            more = "" if len(pending_lines) <= 10 else f"（共 {len(pending_lines)} 处）"
+            errors.append(
+                f"PRD.md 第 {shown} 行仍含 {PENDING_MARKER}{more}；"
+                "修复：就地向用户取得裁定，把具体结论写回该处正文后删除标记；"
+                "不得靠删除整段待确认内容通过校验"
             )
         if has_source_section(content):
-            errors.extend(validate_source_reference_section(content))
+            section_errors, section_warnings = split_source_reference_section(content)
+            errors.extend(section_errors)
+            warnings.extend(section_warnings)
             source_ids = {
                 reference.source_id
                 for reference in extract_source_references(content)
             }
             if source_ids:
-                errors.extend(validate_source_context(feature_dir, source_ids))
+                source_errors, source_warnings = validate_source_context(
+                    feature_dir, source_ids
+                )
+                errors.extend(source_errors)
+                warnings.extend(source_warnings)
 
-    _check_done_checkpoint(record, contract, errors)
+    if not draft:
+        _check_done_checkpoint(record, contract, warnings)
 
     if errors:
-        return _fail("prd 阶段产出物校验未通过", {"feature": slug, "errors": errors})
-    return _ok("prd 阶段产出物校验通过", {"feature": slug})
+        return _fail(
+            "prd 阶段产出物校验未通过",
+            {"feature": slug, "errors": errors, "warnings": warnings},
+        )
+    return _ok("prd 阶段产出物校验通过", {"feature": slug, "warnings": warnings})
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -238,6 +252,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--feature", "-f", default=None, help="feature slug（如不传则自动检测）")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON，不输出可读文本")
+    parser.add_argument(
+        "--draft",
+        action="store_true",
+        help="只校验产物结构，跳过 checkpoint 提示；产物成型过程中可随时自检",
+    )
     args = parser.parse_args(raw_args)
 
     try:
@@ -247,7 +266,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     if args.stage == "prd":
-        result = validate_prd(args.feature, workspace)
+        result = validate_prd(args.feature, workspace, draft=args.draft)
     else:
         result = _fail("未知 stage")
 
@@ -260,6 +279,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"   feature: {result['feature']}")
         for err in result.get("errors", []):
             print(f"   - {err}")
+        warnings = result.get("warnings") or []
+        if warnings:
+            print(f"   提示（不阻断，共 {len(warnings)} 条）:")
+            for warning in warnings:
+                print(f"   ~ {warning}")
 
     return 0 if result["ok"] else 1
 

@@ -129,7 +129,7 @@ def resolve_source_requirement_refs(
     feature_dir: Path,
     refs: List[str],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-    validation_errors = validate_source_context(feature_dir) if refs else []
+    validation_errors = validate_source_context_refs(feature_dir) if refs else []
     data, load_errors = load_source_context(feature_dir)
     resolved = []  # type: List[Dict[str, Any]]
     errors = [
@@ -331,25 +331,38 @@ def _safe_snapshot_path(feature_dir: Path, source_id: str, raw_path: Any) -> Tup
 def validate_source_context(
     feature_dir: Path,
     expected_source_ids: Optional[Set[str]] = None,
-) -> List[str]:
-    data, errors = load_source_context(feature_dir)
+) -> Tuple[List[str], List[str]]:
+    """校验 source-context.json，返回 (errors, warnings)。
+
+    errors 只保留会让下游引用悬空的项：ID 可解析、requirement 可被
+    ``SRC-NNN-RNNN`` 引用、targets 可用于阶段过滤、PRD 与 json 的来源集合一致。
+    其余字段下游只做透传渲染，一律降级为 warnings，避免 discuss 阶段的
+    严格度阻断 Plan / Code。逐字原文与表格行覆盖由 ``sync`` 子命令生成，不再校验。
+    """
+    data, load_errors = load_source_context(feature_dir)
+    errors = list(load_errors)  # type: List[str]
+    warnings = []  # type: List[str]
     if data is None:
         if expected_source_ids:
-            errors.append("PRD 登记了外部资料，必须生成 source-context.json")
-        return errors
+            errors.append(
+                "PRD 登记了外部资料，必须生成 source-context.json；"
+                "修复：运行 source_context.py sync --feature-dir <Feature 目录>"
+            )
+        return errors, warnings
 
     if data.get("version") != 1:
-        errors.append("source-context.json.version 必须为 1")
+        errors.append("source-context.json.version 必须为 1；修复：把 version 字段设为整数 1")
     sources = data.get("sources")
     if not isinstance(sources, list) or not sources:
-        errors.append("source-context.json.sources 必须是非空数组")
-        return errors
+        errors.append(
+            "source-context.json.sources 必须是非空数组；"
+            "修复：运行 source_context.py sync --feature-dir <Feature 目录> 依据 PRD 来源表重建"
+        )
+        return errors, warnings
 
     seen_sources = set()  # type: Set[str]
     seen_items = set()  # type: Set[str]
     seen_requirements = set()  # type: Set[str]
-    item_originals_by_source = {}  # type: Dict[str, List[str]]
-    snapshots = {}  # type: Dict[str, Tuple[Optional[str], List[Tuple[str, str]]]]
 
     for source_index, source in enumerate(sources):
         context = "sources[%d]" % source_index
@@ -358,90 +371,102 @@ def validate_source_context(
             continue
         source_id = source.get("id")
         if not isinstance(source_id, str) or SOURCE_ID_RE.fullmatch(source_id) is None:
-            errors.append("%s.id 格式非法" % context)
+            errors.append("%s.id 格式非法；修复：改为 SRC-001 形式的三位编号" % context)
             continue
         if source_id in seen_sources:
-            errors.append("source-context.json 来源 ID 重复: %s" % source_id)
+            errors.append(
+                "source-context.json 来源 ID 重复: %s；修复：保留一条，其余改用未使用的 SRC-NNN"
+                % source_id
+            )
         seen_sources.add(source_id)
+
         name = source.get("name")
         if not isinstance(name, str) or not name.strip():
-            errors.append("%s.name 缺失" % source_id)
+            warnings.append("%s.name 缺失" % source_id)
         availability = source.get("availability")
         if availability not in VALID_AVAILABILITY:
-            errors.append("%s.availability 非法" % source_id)
+            warnings.append(
+                "%s.availability 非法；可选值: %s"
+                % (source_id, "/".join(sorted(VALID_AVAILABILITY)))
+            )
         read_status = source.get("readStatus")
         if read_status not in VALID_READ_STATUS:
-            errors.append("%s.readStatus 非法" % source_id)
+            warnings.append(
+                "%s.readStatus 非法；可选值: %s"
+                % (source_id, "/".join(sorted(VALID_READ_STATUS)))
+            )
         elif availability != "never_provided" and read_status != "complete":
-            errors.append("%s 尚未完整读取；修复：完整读取快照后将 readStatus 设为 complete" % source_id)
-        freshness = source.get("freshness", "unknown")
-        if freshness not in VALID_FRESHNESS:
-            errors.append("%s.freshness 非法" % source_id)
+            warnings.append("%s 尚未完整读取（readStatus=%s）" % (source_id, read_status))
+        if source.get("freshness", "unknown") not in VALID_FRESHNESS:
+            warnings.append(
+                "%s.freshness 非法；可选值: %s"
+                % (source_id, "/".join(sorted(VALID_FRESHNESS)))
+            )
         digest = source.get("sha256")
         if availability != "never_provided" and (
             not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None
         ):
-            errors.append("%s.sha256 必须记录 64 位小写十六进制指纹" % source_id)
+            warnings.append(
+                "%s.sha256 缺失或格式不对；修复：运行 source_context.py sync 自动写入" % source_id
+            )
 
-        snapshot = None  # type: Optional[Path]
         if availability == "never_provided":
-            errors.append("%s 从未提供；修复：提供资料、移除依赖或暂停，不能以默认理解推进" % source_id)
-            if read_status != "unreadable":
-                errors.append("%s 从未提供时 readStatus 必须为 unreadable" % source_id)
-            if source.get("items") != []:
-                errors.append("%s 从未提供时 items 必须为空数组" % source_id)
+            warnings.append(
+                "%s 标记为从未提供；出口只有三个：当场提供资料、移除该依赖、或暂停等待材料"
+                % source_id
+            )
             continue
-        else:
-            snapshot, path_error = _safe_snapshot_path(feature_dir, source_id, source.get("path"))
-            if path_error:
-                errors.append(path_error)
-            elif snapshot is not None:
-                snapshots[source_id] = _read_snapshot(snapshot)
+
+        _, path_error = _safe_snapshot_path(feature_dir, source_id, source.get("path"))
+        if path_error:
+            warnings.append(
+                "%s；修复：运行 source_context.py sync 自动写入快照路径" % path_error
+            )
 
         items = source.get("items")
         if not isinstance(items, list) or not items:
-            errors.append("%s.items 必须是非空数组" % source_id)
+            warnings.append(
+                "%s.items 为空；修复：运行 source_context.py sync 依据快照生成原文条目" % source_id
+            )
             continue
-        originals = []  # type: List[str]
+
+        undecided = 0
         for item_index, item in enumerate(items):
             item_context = "%s.items[%d]" % (source_id, item_index)
             if not isinstance(item, dict):
-                errors.append("%s 必须是对象" % item_context)
+                warnings.append("%s 必须是对象" % item_context)
                 continue
             item_id = item.get("id")
-            if not isinstance(item_id, str) or SOURCE_ITEM_RE.fullmatch(item_id) is None or not item_id.startswith(source_id + "-I"):
-                errors.append("%s.id 格式非法" % item_context)
+            if (
+                not isinstance(item_id, str)
+                or SOURCE_ITEM_RE.fullmatch(item_id) is None
+                or not item_id.startswith(source_id + "-I")
+            ):
+                warnings.append("%s.id 格式非法（应为 %s-Innn）" % (item_context, source_id))
             elif item_id in seen_items:
-                errors.append("source-context.json 原文条目 ID 重复: %s" % item_id)
+                warnings.append("原文条目 ID 重复: %s" % item_id)
             else:
                 seen_items.add(item_id)
-            location = item.get("location")
-            original = item.get("original")
-            if not isinstance(location, str) or not location.strip():
-                errors.append("%s.location 缺失" % item_context)
-            if not isinstance(original, str) or not original.strip():
-                errors.append("%s.original 缺失" % item_context)
-                original = ""
-            else:
-                originals.append(original)
-                extracted_text = snapshots.get(source_id, (None, []))[0]
-                if extracted_text is not None and _normalize_evidence(original) not in _normalize_evidence(extracted_text):
-                    errors.append("%s.original 无法在快照中定位；修复：逐字摘录快照内容并修正 location" % item_context)
+            if not isinstance(item.get("location"), str) or not item.get("location").strip():
+                warnings.append("%s.location 缺失" % item_context)
+            if not isinstance(item.get("original"), str) or not item.get("original").strip():
+                warnings.append("%s.original 缺失" % item_context)
+
             disposition = item.get("disposition")
             if disposition not in VALID_DISPOSITIONS:
-                errors.append("%s.disposition 非法" % item_context)
+                warnings.append(
+                    "%s.disposition 非法；可选值: %s"
+                    % (item_context, "/".join(sorted(VALID_DISPOSITIONS)))
+                )
             requirements = item.get("requirements")
             if not isinstance(requirements, list):
-                errors.append("%s.requirements 必须是数组" % item_context)
+                if requirements is not None:
+                    warnings.append("%s.requirements 必须是数组" % item_context)
                 requirements = []
             if disposition == "requirement" and not requirements:
-                errors.append("%s 是有效要求但未提取 requirements" % item_context)
-            if disposition != "requirement" and requirements:
-                errors.append("%s 非 requirement 条目不得生成 requirements" % item_context)
-            if disposition == "superseded":
-                replaced_by = item.get("replacedBy")
-                if not isinstance(replaced_by, str) or SOURCE_ITEM_RE.fullmatch(replaced_by) is None:
-                    errors.append("%s.replacedBy 缺失或格式非法" % item_context)
+                warnings.append("%s 标为 requirement 但没有提取 requirements" % item_context)
+            if disposition == "superseded" and not isinstance(item.get("replacedBy"), str):
+                warnings.append("%s.replacedBy 缺失" % item_context)
 
             for requirement_index, requirement in enumerate(requirements):
                 requirement_context = "%s.requirements[%d]" % (item_context, requirement_index)
@@ -449,47 +474,234 @@ def validate_source_context(
                     errors.append("%s 必须是对象" % requirement_context)
                     continue
                 requirement_id = requirement.get("id")
-                if not isinstance(requirement_id, str) or SOURCE_REQUIREMENT_RE.fullmatch(requirement_id) is None or not requirement_id.startswith(source_id + "-R"):
-                    errors.append("%s.id 格式非法" % requirement_context)
+                if (
+                    not isinstance(requirement_id, str)
+                    or SOURCE_REQUIREMENT_RE.fullmatch(requirement_id) is None
+                    or not requirement_id.startswith(source_id + "-R")
+                ):
+                    errors.append(
+                        "%s.id 格式非法；修复：改为 %s-R001 形式，下游 task-groups.json 按该 ID 引用"
+                        % (requirement_context, source_id)
+                    )
                 elif requirement_id in seen_requirements:
-                    errors.append("source-context.json 要求 ID 重复: %s" % requirement_id)
+                    errors.append(
+                        "要求 ID 重复: %s；修复：同一 ID 只能出现一次，重复项改用未使用编号"
+                        % requirement_id
+                    )
                 else:
                     seen_requirements.add(requirement_id)
                 text = requirement.get("text")
                 if not isinstance(text, str) or not text.strip():
-                    errors.append("%s.text 缺失" % requirement_context)
+                    errors.append(
+                        "%s.text 缺失；修复：用一句话写明这条要求约束了什么" % requirement_context
+                    )
                 targets = requirement.get("targets")
                 if not isinstance(targets, list) or not targets:
-                    errors.append("%s.targets 必须是非空数组" % requirement_context)
+                    errors.append(
+                        "%s.targets 必须是非空数组；修复：从 %s 中选择该要求需要送达的阶段"
+                        % (requirement_context, "/".join(sorted(VALID_TARGETS)))
+                    )
                 else:
-                    invalid_targets = [target for target in targets if target not in VALID_TARGETS]
+                    invalid_targets = [t for t in targets if t not in VALID_TARGETS]
                     if invalid_targets:
-                        errors.append("%s.targets 非法: %s" % (requirement_context, ",".join(map(str, invalid_targets))))
+                        errors.append(
+                            "%s.targets 非法: %s；可选值: %s"
+                            % (
+                                requirement_context,
+                                ",".join(map(str, invalid_targets)),
+                                "/".join(sorted(VALID_TARGETS)),
+                            )
+                        )
                     if len(targets) != len(set(targets)):
                         errors.append("%s.targets 不得重复" % requirement_context)
-        item_originals_by_source[source_id] = originals
+
+            if disposition == "background" and not requirements:
+                undecided += 1
+        if undecided == len(items):
+            warnings.append(
+                "%s 的 %d 行全部停留在 disposition=background 且无 requirements；"
+                "sync 只生成原文，逐行判定仍需完成" % (source_id, undecided)
+            )
 
     if expected_source_ids is not None:
         missing = sorted(expected_source_ids - seen_sources)
         unknown = sorted(seen_sources - expected_source_ids)
         if missing:
-            errors.append("source-context.json 缺少 PRD 来源: %s" % ", ".join(missing))
-        if unknown:
-            errors.append("source-context.json 存在 PRD 未登记来源: %s" % ", ".join(unknown))
-
-    for source_id, (_, rows) in snapshots.items():
-        originals = [_normalize_evidence(value) for value in item_originals_by_source.get(source_id, [])]
-        missing_rows = []  # type: List[str]
-        for location, row_text in rows:
-            normalized_row = _normalize_evidence(row_text)
-            if normalized_row and not any(normalized_row in original or original in normalized_row for original in originals):
-                missing_rows.append("%s=%s" % (location, row_text[:80]))
-        if missing_rows:
             errors.append(
-                "%s 存在未登记表格/字段行: %s；修复：逐行补充 items，或明确 disposition"
-                % (source_id, "; ".join(missing_rows[:10]))
+                "source-context.json 缺少 PRD 来源: %s；"
+                "修复：运行 source_context.py sync 依据 PRD 来源表补齐" % ", ".join(missing)
             )
+        if unknown:
+            errors.append(
+                "source-context.json 存在 PRD 未登记来源: %s；"
+                "修复：在 PRD 的「外部资料与实现约束」补登记，或从 json 中移除"
+                % ", ".join(unknown)
+            )
+    return errors, warnings
+
+
+def validate_source_context_refs(
+    feature_dir: Path,
+    expected_source_ids: Optional[Set[str]] = None,
+) -> List[str]:
+    """下游门禁用：只返回阻断项，不带 discuss 阶段的提示。"""
+    errors, _ = validate_source_context(feature_dir, expected_source_ids)
     return errors
+
+
+def _snapshot_for_source(feature_dir: Path, source_id: str, declared: Any) -> Optional[Path]:
+    """定位来源快照：优先用已登记的 path，否则取 sources/SRC-NNN/ 下的第一个文件。"""
+    candidate, error = _safe_snapshot_path(feature_dir, source_id, declared)
+    if error is None and candidate is not None:
+        return candidate
+    source_dir = feature_dir / "sources" / source_id
+    if not source_dir.is_dir():
+        return None
+    files = sorted(
+        entry for entry in source_dir.iterdir()
+        if entry.is_file() and not entry.name.startswith(".") and entry.stat().st_size > 0
+    )
+    return files[0] if files else None
+
+
+def _sync_items(
+    source_id: str,
+    rows: List[Tuple[str, str]],
+    existing_items: Any,
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    """按快照行重建 items，按 location 保留模型已填的 disposition / requirements。"""
+    kept = {}  # type: Dict[str, Dict[str, Any]]
+    if isinstance(existing_items, list):
+        for item in existing_items:
+            if isinstance(item, dict) and isinstance(item.get("location"), str):
+                kept[item["location"]] = item
+
+    items = []  # type: List[Dict[str, Any]]
+    reused = 0
+    for index, (location, text) in enumerate(rows, start=1):
+        previous = kept.get(location)
+        item = {
+            "id": "%s-I%03d" % (source_id, index),
+            "location": location,
+            "original": text,
+            "disposition": "background",
+            "requirements": [],
+        }
+        if previous is not None:
+            reused += 1
+            if previous.get("disposition") in VALID_DISPOSITIONS:
+                item["disposition"] = previous["disposition"]
+            if isinstance(previous.get("requirements"), list):
+                item["requirements"] = previous["requirements"]
+            if isinstance(previous.get("replacedBy"), str):
+                item["replacedBy"] = previous["replacedBy"]
+        items.append(item)
+    return items, len(items) - reused, reused
+
+
+def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[int, List[str]]:
+    """依据 PRD 来源表与 sources/ 快照重建 source-context.json 的机械字段。
+
+    模型只需保留两个判断动作：给每行标 disposition，给 requirement 行写 text 与 targets。
+    """
+    try:
+        from hooks.source_references import extract_source_references, has_source_section
+    except ImportError:  # 直接以脚本方式运行时，仓库根目录不在 sys.path 上
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from hooks.source_references import extract_source_references, has_source_section
+
+    messages = []  # type: List[str]
+    prd = feature_dir / "PRD.md"
+    if not prd.is_file():
+        print(
+            "ERROR: 未找到 %s。修复：先生成 PRD.md，再运行 sync。" % prd,
+            file=sys.stderr,
+        )
+        return 1, messages
+    content = prd.read_text(encoding="utf-8")
+    if not has_source_section(content):
+        print(
+            "ERROR: PRD.md 缺少「外部资料与实现约束」章节。"
+            "修复：先在 PRD.md 增加该章节并登记 SRC-NNN，没有外部资料时正文写「无」。",
+            file=sys.stderr,
+        )
+        return 1, messages
+    references = extract_source_references(content)
+    if not references:
+        messages.append("PRD 未登记外部资料，无需生成 source-context.json")
+        return 0, messages
+
+    data, load_errors = load_source_context(feature_dir)
+    if load_errors:
+        print("ERROR: %s 修复：修正 JSON 语法或删除该文件后重跑 sync。" % load_errors[0], file=sys.stderr)
+        return 1, messages
+    existing_by_id = {}  # type: Dict[str, Dict[str, Any]]
+    if isinstance(data, dict) and isinstance(data.get("sources"), list):
+        for source in data["sources"]:
+            if isinstance(source, dict) and isinstance(source.get("id"), str):
+                existing_by_id[source["id"]] = source
+
+    sources = []  # type: List[Dict[str, Any]]
+    pending = 0
+    for reference in references:
+        source_id = reference.source_id
+        if only and source_id != only:
+            if source_id in existing_by_id:
+                sources.append(existing_by_id[source_id])
+            continue
+        previous = existing_by_id.get(source_id, {})
+        snapshot = _snapshot_for_source(feature_dir, source_id, previous.get("path"))
+        source = {
+            "id": source_id,
+            "name": reference.name or previous.get("name") or source_id,
+            "availability": previous.get("availability") or "snapshot_only",
+            "readStatus": previous.get("readStatus") or "complete",
+            "freshness": previous.get("freshness", "unknown"),
+        }
+        if snapshot is None:
+            source["availability"] = "never_provided"
+            source["readStatus"] = "unreadable"
+            source["items"] = []
+            sources.append(source)
+            messages.append(
+                "%s 未找到快照（sources/%s/ 为空）：请提供资料、移除该依赖或暂停" % (source_id, source_id)
+            )
+            continue
+        relative = snapshot.resolve(strict=False).relative_to(feature_dir.resolve(strict=False))
+        source["path"] = "/".join(relative.parts)
+        source["sha256"] = snapshot_sha256(snapshot)
+        _, rows = _read_snapshot(snapshot)
+        if not rows:
+            messages.append(
+                "%s 快照 %s 未解析出表格/字段行，items 保持原样，请人工登记要点"
+                % (source_id, source["path"])
+            )
+            source["items"] = previous.get("items") if isinstance(previous.get("items"), list) else []
+        else:
+            items, added, reused = _sync_items(source_id, rows, previous.get("items"))
+            source["items"] = items
+            undecided = sum(
+                1 for item in items
+                if item["disposition"] == "background" and not item["requirements"]
+            )
+            pending += undecided
+            messages.append(
+                "%s: 共 %d 行（新增 %d，保留判定 %d），待判定 %d 行"
+                % (source_id, len(items), added, reused, undecided)
+            )
+        sources.append(source)
+
+    payload = {"version": 1, "sources": sources}
+    source_context_path(feature_dir).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    messages.append(
+        "已写入 %s。下一步：为每行填写 disposition；标为 requirement 的行补 requirements[].text 与 targets"
+        % source_context_path(feature_dir)
+    )
+    if pending:
+        messages.append("仍有 %d 行 disposition=background 且无 requirements，请逐行判定" % pending)
+    return 0, messages
 
 
 def snapshot_sha256(path: Path) -> str:
@@ -506,7 +718,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     digest_parser = subparsers.add_parser("digest", help="计算已落盘快照的 SHA256")
     digest_parser.add_argument("--feature-dir", required=True)
     digest_parser.add_argument("--path", required=True)
+    sync_parser = subparsers.add_parser(
+        "sync", help="依据 PRD 来源表与 sources/ 快照生成 source-context.json 的机械字段"
+    )
+    sync_parser.add_argument("--feature-dir", required=True)
+    sync_parser.add_argument("--source", default=None, help="只同步指定的 SRC-NNN")
     args = parser.parse_args(argv)
+
+    if args.command == "sync":
+        code, messages = sync_source_context(Path(args.feature_dir), args.source)
+        for message in messages:
+            print(message)
+        return code
 
     if args.command != "digest":
         parser.print_help(sys.stderr)

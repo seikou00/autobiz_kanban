@@ -13,7 +13,7 @@ from hooks.source_context import (
     load_source_context,
     source_requirement_ids_for_target,
     source_requirement_index,
-    validate_source_context,
+    validate_source_context_refs,
 )
 
 
@@ -688,7 +688,7 @@ def validate_plan_source_coverage(
 ) -> list[dict[str, Any]]:
     """Ensure every in-scope source requirement routed to Plan or Code reaches a task."""
 
-    validation_errors = validate_source_context(base)
+    validation_errors = validate_source_context_refs(base)
     data, load_errors = load_source_context(base)
     errors: list[dict[str, Any]] = [
         {

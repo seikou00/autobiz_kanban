@@ -149,28 +149,52 @@ def extract_source_references(text: str) -> list[SourceReference]:
 
 
 def validate_source_reference_section(text: str) -> list[str]:
-    """Validate the PRD-owned source index and return user-facing errors."""
+    """Validate the PRD-owned source index and return blocking errors."""
+
+    return split_source_reference_section(text)[0]
+
+
+def split_source_reference_section(text: str) -> tuple[list[str], list[str]]:
+    """Return ``(errors, warnings)`` for the PRD-owned source index.
+
+    Only the checks that keep downstream ``SRC-NNN`` references resolvable
+    block.  Field completeness on non-interface rows is advisory: the skill
+    text only demands full fields for 外部接口 / 第三方接口 rows.
+    """
 
     body = _section_body(text)
     if body is None:
-        return [f"PRD.md 缺少必要段落: {SOURCE_SECTION_TITLE}"]
+        return (
+            [
+                f"PRD.md 缺少必要段落: {SOURCE_SECTION_TITLE}；"
+                "修复：新增该章节，没有外部资料时正文写「无」"
+            ],
+            [],
+        )
 
     lowered = body.strip().casefold()
     if lowered in _EMPTY_VALUES:
-        return []
+        return [], []
 
     references = extract_source_references(text)
     errors: list[str] = []
+    warnings: list[str] = []
     if not references:
-        return [
-            f"{SOURCE_SECTION_TITLE} 必须写“无”，或使用包含 ID、类型、名称、地址/路径、"
-            "约束范围、必读阶段、状态的表格"
-        ]
+        return (
+            [
+                f"{SOURCE_SECTION_TITLE} 必须写“无”，或使用包含 ID、类型、名称、地址/路径、"
+                "约束范围、必读阶段、状态的表格；修复：补齐表头后每行以 SRC-NNN 开头"
+            ],
+            [],
+        )
 
     ids = [reference.source_id for reference in references]
     duplicates = sorted({source_id for source_id in ids if ids.count(source_id) > 1})
     if duplicates:
-        errors.append(f"外部资料 ID 重复: {', '.join(duplicates)}")
+        errors.append(
+            f"外部资料 ID 重复: {', '.join(duplicates)}；"
+            "修复：SRC-NNN 是跨阶段稳定引用，重复项改用未使用的编号"
+        )
 
     for reference in references:
         missing = []
@@ -186,10 +210,13 @@ def validate_source_reference_section(text: str) -> list[str]:
             missing.append("必读阶段")
         if reference.status.casefold() in _EMPTY_VALUES:
             missing.append("状态")
-        if missing:
-            errors.append(f"{reference.source_id} 缺少字段: {', '.join(missing)}")
 
         if reference.is_external_interface:
+            if missing:
+                errors.append(
+                    f"{reference.source_id} 是外部接口，缺少字段: {', '.join(missing)}；"
+                    "修复：补齐后续阶段据以调用的地址/路径、约束范围与状态"
+                )
             required = ("spec", "plan", "code", "review", "e2e")
             stages = reference.required_stages.casefold()
             missing_stages = [stage for stage in required if stage not in stages]
@@ -198,7 +225,9 @@ def validate_source_reference_section(text: str) -> list[str]:
                     f"{reference.source_id} 是外部接口，必读阶段必须覆盖 Specs、Plan、Code、Reviewer、E2E；"
                     f"当前缺少: {', '.join(missing_stages)}"
                 )
-    return errors
+        elif missing:
+            warnings.append(f"{reference.source_id} 缺少字段: {', '.join(missing)}")
+    return errors, warnings
 
 
 def source_ids(text: str) -> set[str]:

@@ -21,6 +21,7 @@ from hooks.source_context import (  # noqa: E402
     resolve_source_requirement_refs,
     source_ids_for_target,
     source_requirement_ids_for_target,
+    sync_source_context,
     validate_source_context,
 )
 
@@ -102,36 +103,39 @@ class SourceContextTests(unittest.TestCase):
     def test_snapshot_only_context_is_valid_without_digest_blocking(self) -> None:
         self.write_context(source_context())
 
-        errors = validate_source_context(self.feature_dir, {"SRC-001"})
+        errors, warnings = validate_source_context(self.feature_dir, {"SRC-001"})
 
         self.assertEqual(errors, [])
+        self.assertEqual(warnings, [])
 
     def test_stale_marker_is_recorded_without_a_hard_gate(self) -> None:
         data = source_context()
         data["sources"][0]["freshness"] = "stale"
         self.write_context(data)
 
-        errors = validate_source_context(self.feature_dir, {"SRC-001"})
+        errors, _ = validate_source_context(self.feature_dir, {"SRC-001"})
 
         self.assertEqual(errors, [])
 
-    def test_table_rows_must_be_registered_as_original_items(self) -> None:
+    def test_partial_row_coverage_no_longer_blocks(self) -> None:
+        """行覆盖由 sync 生成，不再作为阻断项。"""
         self.write_context(source_context(include_fallback=False))
 
-        errors = validate_source_context(self.feature_dir, {"SRC-001"})
+        errors, _ = validate_source_context(self.feature_dir, {"SRC-001"})
 
-        self.assertIn("未登记表格/字段行", "\n".join(errors))
+        self.assertEqual(errors, [])
 
-    def test_original_must_be_locatable_in_snapshot(self) -> None:
+    def test_original_wording_no_longer_blocks(self) -> None:
+        """逐字原文由 sync 写入，模型改写措辞不再阻断。"""
         data = source_context()
         data["sources"][0]["items"][0]["original"] = "接口永远不会超时"
         self.write_context(data)
 
-        errors = validate_source_context(self.feature_dir, {"SRC-001"})
+        errors, _ = validate_source_context(self.feature_dir, {"SRC-001"})
 
-        self.assertIn("original 无法在快照中定位", "\n".join(errors))
+        self.assertEqual(errors, [])
 
-    def test_never_provided_is_distinct_and_blocks_prd_completion(self) -> None:
+    def test_never_provided_is_reported_as_warning_not_error(self) -> None:
         data = source_context()
         source = data["sources"][0]
         source["availability"] = "never_provided"
@@ -141,9 +145,67 @@ class SourceContextTests(unittest.TestCase):
         source["items"] = []
         self.write_context(data)
 
-        errors = validate_source_context(self.feature_dir, {"SRC-001"})
+        errors, warnings = validate_source_context(self.feature_dir, {"SRC-001"})
 
-        self.assertIn("从未提供", "\n".join(errors))
+        self.assertEqual(errors, [])
+        self.assertIn("从未提供", "\n".join(warnings))
+
+    def test_missing_requirement_targets_still_block(self) -> None:
+        data = source_context()
+        data["sources"][0]["items"][0]["requirements"][0]["targets"] = []
+        self.write_context(data)
+
+        errors, _ = validate_source_context(self.feature_dir, {"SRC-001"})
+
+        self.assertIn("targets 必须是非空数组", "\n".join(errors))
+
+    def test_duplicate_requirement_id_still_blocks(self) -> None:
+        data = source_context()
+        data["sources"][0]["items"][1]["requirements"][0]["id"] = "SRC-001-R001"
+        self.write_context(data)
+
+        errors, _ = validate_source_context(self.feature_dir, {"SRC-001"})
+
+        self.assertIn("要求 ID 重复", "\n".join(errors))
+
+    def test_sync_generates_items_from_snapshot_and_keeps_judgements(self) -> None:
+        prd = self.feature_dir / "PRD.md"
+        prd.write_text(
+            "# 需求摘要\n\n## 外部资料与实现约束\n\n"
+            "| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            "| SRC-001 | 数据字典 | 支付接口文档 | sources/SRC-001/payment.md | 超时 | Specs | 可访问 |\n",
+            encoding="utf-8",
+        )
+
+        code, _ = sync_source_context(self.feature_dir)
+        self.assertEqual(code, 0)
+
+        generated = json.loads((self.feature_dir / "source-context.json").read_text(encoding="utf-8"))
+        source = generated["sources"][0]
+        self.assertEqual(source["id"], "SRC-001")
+        self.assertEqual(source["sha256"], hashlib.sha256(SNAPSHOT.encode("utf-8")).hexdigest())
+        self.assertTrue(source["items"])
+        self.assertTrue(all(item["original"] in SNAPSHOT for item in source["items"]))
+        self.assertTrue(all(item["disposition"] == "background" for item in source["items"]))
+
+        # 模型填入判定后重跑 sync，判定必须保留。
+        source["items"][0]["disposition"] = "requirement"
+        source["items"][0]["requirements"] = [
+            {"id": "SRC-001-R001", "text": "调用超时时间为 3 秒", "targets": ["spec"]}
+        ]
+        self.write_context(generated)
+
+        code, _ = sync_source_context(self.feature_dir)
+        self.assertEqual(code, 0)
+
+        resynced = json.loads((self.feature_dir / "source-context.json").read_text(encoding="utf-8"))
+        first = resynced["sources"][0]["items"][0]
+        self.assertEqual(first["disposition"], "requirement")
+        self.assertEqual(first["requirements"][0]["id"], "SRC-001-R001")
+
+        errors, _ = validate_source_context(self.feature_dir, {"SRC-001"})
+        self.assertEqual(errors, [])
 
     def test_plan_coverage_uses_multi_target_requirement_ids(self) -> None:
         data = source_context()

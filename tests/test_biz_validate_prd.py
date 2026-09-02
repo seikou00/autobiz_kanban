@@ -29,16 +29,39 @@ def sample_record(checkpoint: str = "prd_done") -> dict[str, str]:
     }
 
 
-DISCUSS_DRAFT_INTRO = "本文档为需求讨论中间稿，用于记录需求讨论过程和结论"
+# 技能正文（SKILL.md §讨论沉淀生成 + references/prd_module.md）实际产出的结构。
+# 校验只认技能正文能推导出的约束，其余章节自由。
+VALID_PRD = """# 需求摘要
 
+## 当前实现范围
 
-DISCUSS_WITH_HISTORY = f"""# 需求讨论稿
+- 实现范围：backend_only
 
-{DISCUSS_DRAFT_INTRO}
+## 1.需求概述
 
-## 需求摘要
+### 1.1.背景、痛点、改进思路及价值
 
 审批人需要快速识别异常付款。
+
+## 2.需求解析
+
+### 2.6. 功能清单
+
+| 类型 | 功能名称 | 功能描述 |
+| --- | --- | --- |
+| 新增 | 异常标记 | 审批列表展示异常标记 |
+
+#### 2.6.1. 功能详情
+
+##### FR1: 异常标记
+
+###### 验收标准
+
+- 当单据满足异常条件时，列表展示异常标记。
+
+### 2.7. 外部资料与实现约束
+
+无
 
 ## 当前已确认结论
 
@@ -46,71 +69,45 @@ DISCUSS_WITH_HISTORY = f"""# 需求讨论稿
 
 ## 问题清单与处理状态
 
-- P2: 上线窗口待确认。
+| 序号 | 重要性 | 检查项 | 处理状态 |
+| --- | --- | --- | --- |
+| 1 | P2 - 优化建议 | 上线窗口 | 已确认按建议处理 |
 
 ## 待确认事项
 
-- 待确认上线窗口。
-
-## 外部依赖
-
-- 风控系统提供异常标记字段。
+无（本轮已全部消解）。
 
 ## 假设与风险
 
 - 假设异常标记由后端字段提供。
-- 风险：风控系统字段可能延迟。
 
 ## 历次讨论记录
 
 - 2026-06-03: 用户确认先生成 PRD。
-"""
 
-
-DISCUSS_PREFIX = DISCUSS_WITH_HISTORY.split("## 历次讨论记录", 1)[0]
-FORMAL_PREFIX = DISCUSS_PREFIX.replace("# 需求讨论稿", "# 需求正式稿", 1).replace(
-    f"\n{DISCUSS_DRAFT_INTRO}\n\n",
-    "\n",
-)
-FORMAL_PREFIX = FORMAL_PREFIX.replace("## 待确认事项\n\n- 待确认上线窗口。\n\n", "")
-FORMAL_PREFIX = FORMAL_PREFIX.replace("## 外部依赖\n\n- 风控系统提供异常标记字段。\n\n", "")
-
-
-VALID_PRD = FORMAL_PREFIX + """## 用户故事
-
-- 作为财务审批人，我希望在支付审批列表中识别异常单据，以便优先处理高风险付款。
-
-## 验收口径
-
-- 用户视角：审批人能看到异常标记。
-- 工程视角：接口返回异常标记字段。
-- 回归视角：原有审批状态和分页不受影响。
-
-## 验收标准
-
-- 当单据满足异常条件时，列表展示异常标记。
-- 当按异常标记筛选时，只返回符合条件的单据。
-
-## 关键约束
-
-| 类别 | 约束 | 来源/原因 |
-|------|------|-----------|
-| 数据 | 异常标记由后端字段提供 | 假设与风险 |
-
-## 外部资料与实现约束
+## 讨论补充资料
 
 无
 """
 
 
 PRD_WITH_SOURCE = VALID_PRD.replace(
-    "## 外部资料与实现约束\n\n无",
-    """## 外部资料与实现约束
+    "### 2.7. 外部资料与实现约束\n\n无",
+    """### 2.7. 外部资料与实现约束
 
 | ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
 | SRC-001 | 外部接口 | 支付接口 | sources/SRC-001/payment.md | 支付超时与降级 | Specs、Plan、Code、Reviewer、E2E | snapshot_only |""",
 )
+
+
+def with_source_table(rows: str) -> str:
+    return VALID_PRD.replace(
+        "### 2.7. 外部资料与实现约束\n\n无",
+        "### 2.7. 外部资料与实现约束\n\n"
+        "| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n" + rows,
+    )
 
 
 class BizValidatePrdTests(unittest.TestCase):
@@ -232,54 +229,46 @@ class BizValidatePrdTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(BIZ_VALIDATE_WORKSPACE_ARGUMENT_ERROR, result.stderr)
 
-    def test_accepts_new_prd_sections_without_legacy_template(self) -> None:
+    def test_accepts_prd_written_to_the_skill_template(self) -> None:
+        """技能正文产出的结构（# 需求摘要 + 讨论章节）必须直接通过。"""
         workspace = self.make_workspace(VALID_PRD)
 
         result = validate_prd("alpha", workspace)
 
         self.assertTrue(result["ok"], result)
 
-    def test_accepts_prd_without_pending_and_dependency_sections(self) -> None:
+    def test_discussion_and_pending_sections_are_allowed(self) -> None:
+        """SKILL.md 要求写入的章节不得被校验反过来禁止。"""
         workspace = self.make_workspace(VALID_PRD)
 
         result = validate_prd("alpha", workspace)
 
+        self.assertIn("## 历次讨论记录", VALID_PRD)
+        self.assertIn("## 待确认事项", VALID_PRD)
         self.assertTrue(result["ok"], result)
-        self.assertNotIn("待确认事项", VALID_PRD)
-        self.assertNotIn("外部依赖", VALID_PRD)
 
-    def test_rejects_prd_without_formal_title(self) -> None:
-        workspace = self.make_workspace(VALID_PRD.replace("# 需求正式稿", "# 需求讨论稿", 1))
+    def test_any_h1_title_is_accepted(self) -> None:
+        for title in ("# 需求摘要", "# 需求正式稿", "# 需求讨论稿"):
+            with self.subTest(title=title):
+                workspace = self.make_workspace(VALID_PRD.replace("# 需求摘要", title, 1))
+
+                result = validate_prd("alpha", workspace)
+
+                self.assertTrue(result["ok"], result)
+
+    def test_rejects_missing_source_section(self) -> None:
+        workspace = self.make_workspace(
+            VALID_PRD.replace("### 2.7. 外部资料与实现约束\n\n无\n", "")
+        )
 
         result = validate_prd("alpha", workspace)
 
         self.assertFalse(result["ok"])
-        self.assertIn("# 需求正式稿", "\n".join(result["errors"]))
+        joined = "\n".join(result["errors"])
+        self.assertIn("外部资料与实现约束", joined)
+        self.assertIn("修复：", joined)
 
-    def test_accepts_prd_with_preserved_source_intro(self) -> None:
-        prd_with_intro = VALID_PRD.replace(
-            "# 需求正式稿\n\n## 需求摘要",
-            f"# 需求正式稿\n\n{DISCUSS_DRAFT_INTRO}\n\n## 需求摘要",
-            1,
-        )
-        workspace = self.make_workspace(prd_with_intro)
-
-        result = validate_prd("alpha", workspace)
-
-        self.assertTrue(result["ok"], result)
-
-    def test_rejects_forbidden_formal_prd_headings(self) -> None:
-        for heading in ("审理提炼", "待确认事项", "待确认项", "外部依赖", "第三方依赖"):
-            with self.subTest(heading=heading):
-                prd_content = FORMAL_PREFIX + f"## {heading}\n\n- 不应进入正式 PRD。\n\n" + VALID_PRD[len(FORMAL_PREFIX):]
-                workspace = self.make_workspace(prd_content)
-
-                result = validate_prd("alpha", workspace)
-
-                self.assertFalse(result["ok"])
-                self.assertIn("禁用标题", "\n".join(result["errors"]))
-
-    def test_rejects_pending_marker_after_prd_resolution_gate(self) -> None:
+    def test_rejects_pending_marker_and_reports_line_numbers(self) -> None:
         workspace = self.make_workspace(
             VALID_PRD.replace("审批人需要快速识别异常付款。", "审批人【待确认】需要快速识别异常付款。")
         )
@@ -287,15 +276,28 @@ class BizValidatePrdTests(unittest.TestCase):
         result = validate_prd("alpha", workspace)
 
         self.assertFalse(result["ok"])
-        self.assertIn("逐项获取用户裁定", "\n".join(result["errors"]))
+        joined = "\n".join(result["errors"])
+        expected_line = VALID_PRD.split("\n").index("审批人需要快速识别异常付款。") + 1
+        self.assertIn(f"第 {expected_line} 行", joined)
+        self.assertIn("不得靠删除整段待确认内容通过校验", joined)
 
-    def test_rejects_missing_new_required_section(self) -> None:
-        workspace = self.make_workspace(VALID_PRD.replace("## 关键约束", "## 约束"))
+    def test_checkpoint_mismatch_is_a_warning_not_a_blocker(self) -> None:
+        workspace = self.make_workspace(VALID_PRD)
+        write_state_records(workspace, {"alpha": sample_record("prd_in_progress")})
 
         result = validate_prd("alpha", workspace)
 
-        self.assertFalse(result["ok"])
-        self.assertIn("关键约束", "\n".join(result["errors"]))
+        self.assertTrue(result["ok"], result)
+        self.assertIn("checkpoint", "\n".join(result["warnings"]))
+
+    def test_draft_mode_drops_the_checkpoint_warning(self) -> None:
+        workspace = self.make_workspace(VALID_PRD)
+        write_state_records(workspace, {"alpha": sample_record("prd_in_progress")})
+
+        result = validate_prd("alpha", workspace, draft=True)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["warnings"], [])
 
     def test_accepts_modified_prd_body_when_structure_is_valid(self) -> None:
         workspace = self.make_workspace(
@@ -312,38 +314,16 @@ class BizValidatePrdTests(unittest.TestCase):
         result = validate_prd("alpha", workspace)
 
         self.assertFalse(result["ok"])
-        self.assertIn("必须生成 source-context.json", "\n".join(result["errors"]))
-
-    def test_accepts_required_sections_anywhere_in_prd(self) -> None:
-        discuss_with_section_names = DISCUSS_WITH_HISTORY.replace(
-            "## 假设与风险",
-            "## 用户故事\n\n正式稿正文里的同名章节也算有效章节。\n\n"
-            "## 验收口径\n\n正式稿正文里的同名章节也算有效章节。\n\n"
-            "## 验收标准\n\n正式稿正文里的同名章节也算有效章节。\n\n"
-            "## 关键约束\n\n正式稿正文里的同名章节也算有效章节。\n\n"
-            "## 外部资料与实现约束\n\n无\n\n"
-            "## 假设与风险",
-        )
-        prd_without_suffix_sections = discuss_with_section_names.split("## 历次讨论记录", 1)[0]
-        prd_without_suffix_sections = prd_without_suffix_sections.replace("# 需求讨论稿", "# 需求正式稿", 1)
-        prd_without_suffix_sections = prd_without_suffix_sections.replace(f"\n{DISCUSS_DRAFT_INTRO}\n\n", "\n")
-        prd_without_suffix_sections = prd_without_suffix_sections.replace("## 待确认事项\n\n- 待确认上线窗口。\n\n", "")
-        prd_without_suffix_sections = prd_without_suffix_sections.replace("## 外部依赖\n\n- 风控系统提供异常标记字段。\n\n", "")
-        workspace = self.make_workspace(prd_without_suffix_sections)
-
-        result = validate_prd("alpha", workspace)
-
-        self.assertTrue(result["ok"], result)
+        joined = "\n".join(result["errors"])
+        self.assertIn("必须生成 source-context.json", joined)
+        self.assertIn("source_context.py sync", joined)
 
     def test_accepts_external_interface_source_with_full_stage_contract(self) -> None:
-        source_table = """## 外部资料与实现约束
-
-| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
-| --- | --- | --- | --- | --- | --- | --- |
-| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | REQ-001 支付提交 | Specs、Plan、Code、Reviewer、E2E | 可访问 |
-"""
         workspace = self.make_workspace(
-            VALID_PRD.replace("## 外部资料与实现约束\n\n无", source_table.rstrip())
+            with_source_table(
+                "| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | "
+                "REQ-001 支付提交 | Specs、Plan、Code、Reviewer、E2E | 可访问 |\n"
+            )
         )
         self.write_source_context(workspace)
 
@@ -352,14 +332,11 @@ class BizValidatePrdTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
 
     def test_rejects_external_interface_source_without_downstream_stages(self) -> None:
-        source_table = """## 外部资料与实现约束
-
-| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
-| --- | --- | --- | --- | --- | --- | --- |
-| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | REQ-001 支付提交 | Specs、Plan | 可访问 |
-"""
         workspace = self.make_workspace(
-            VALID_PRD.replace("## 外部资料与实现约束\n\n无", source_table.rstrip())
+            with_source_table(
+                "| SRC-001 | 外部接口 | 支付网关 API | https://example.test/openapi | "
+                "REQ-001 支付提交 | Specs、Plan | 可访问 |\n"
+            )
         )
 
         result = validate_prd("alpha", workspace)
@@ -367,16 +344,25 @@ class BizValidatePrdTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("Code、Reviewer、E2E", "\n".join(result["errors"]))
 
-    def test_rejects_duplicate_external_source_ids(self) -> None:
-        source_table = """## 外部资料与实现约束
-
-| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
-| --- | --- | --- | --- | --- | --- | --- |
-| SRC-001 | 原型 | 列表原型 | /tmp/list.html | REQ-001 | Specs、Plan | 可访问 |
-| SRC-001 | 数据字典 | 付款字典 | /tmp/dict.xlsx | REQ-002 | Specs、Plan | 可访问 |
-"""
+    def test_missing_fields_on_non_interface_source_is_only_a_warning(self) -> None:
         workspace = self.make_workspace(
-            VALID_PRD.replace("## 外部资料与实现约束\n\n无", source_table.rstrip())
+            with_source_table(
+                "| SRC-001 | 原型 | 列表原型 | /tmp/list.html | REQ-001 | Specs、Plan |  |\n"
+            )
+        )
+        self.write_source_context(workspace)
+
+        result = validate_prd("alpha", workspace)
+
+        self.assertTrue(result["ok"], result)
+        self.assertIn("缺少字段", "\n".join(result["warnings"]))
+
+    def test_rejects_duplicate_external_source_ids(self) -> None:
+        workspace = self.make_workspace(
+            with_source_table(
+                "| SRC-001 | 原型 | 列表原型 | /tmp/list.html | REQ-001 | Specs、Plan | 可访问 |\n"
+                "| SRC-001 | 数据字典 | 付款字典 | /tmp/dict.xlsx | REQ-002 | Specs、Plan | 可访问 |\n"
+            )
         )
 
         result = validate_prd("alpha", workspace)
@@ -384,13 +370,20 @@ class BizValidatePrdTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("外部资料 ID 重复", "\n".join(result["errors"]))
 
-    def test_rejects_prd_with_discussion_record_heading(self) -> None:
-        workspace = self.make_workspace(VALID_PRD + "\n## 历次讨论记录\n\n- 不应进入正式 PRD。\n")
+    def test_every_error_carries_a_repair_hint(self) -> None:
+        """AGENTS.md：脚本报错必须打印修复方式，模型才不用去读 .py 源码。"""
+        workspace = self.make_workspace(
+            VALID_PRD.replace("### 2.7. 外部资料与实现约束\n\n无\n", "").replace(
+                "审批人需要快速识别异常付款。", "审批人【待确认】需要快速识别异常付款。"
+            )
+        )
 
         result = validate_prd("alpha", workspace)
 
         self.assertFalse(result["ok"])
-        self.assertIn("不应包含讨论记录标题", "\n".join(result["errors"]))
+        for error in result["errors"]:
+            self.assertIn("修复：", error)
+
 
 if __name__ == "__main__":
     unittest.main()
