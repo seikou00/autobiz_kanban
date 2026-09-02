@@ -21,8 +21,7 @@ PROTECTED_ROOT_FILES = {
     "plan.json",
 }
 PROTECTED_RUNTIME_FILES = {
-    "DECISIONS.jsonl",
-    "REVIEW_FINDINGS.jsonl",
+    "CRITIC_REVIEWS.jsonl",
     "RUN_CONTEXT.json",
     "VALIDATION_CAPABILITIES.json",
 }

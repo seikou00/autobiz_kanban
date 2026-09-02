@@ -24,12 +24,6 @@
         },
         {
           "type": "command",
-          "command": "python hooks/augment_critic_task_prompt.py",
-          "timeout": 30,
-          "persistAfterInterrupt": true
-        },
-        {
-          "type": "command",
           "command": "python hooks/augment_test_engineer_task_prompt.py",
           "timeout": 30,
           "persistAfterInterrupt": true
@@ -127,18 +121,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "python hooks/critic_findings_writer.py",
-          "timeout": 30,
-          "persistAfterInterrupt": true
-        }
-      ]
-    },
-    {
-      "matcher": "request_user_input|RequestUserInput",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "python hooks/decision_ledger_writer.py",
+          "command": "python hooks/critic_review_log_writer.py",
           "timeout": 30,
           "persistAfterInterrupt": true
         }
