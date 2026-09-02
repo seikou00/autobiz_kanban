@@ -146,6 +146,12 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
                         errors.append(f"merge_train_validation_missing:{train_id}")
                     elif any(not isinstance(item, dict) or item.get("passed") is not True for item in commands):
                         errors.append(f"merge_train_validation_failed:{train_id}")
+        deferred_issues = list(manifest.get("deferredIssues", [])) if isinstance(manifest.get("deferredIssues"), list) else []
+        blocking_deferred_issues = [
+            item
+            for item in deferred_issues
+            if not isinstance(item, dict) or item.get("blocksWorkflow") is not False
+        ]
         report = {
             "runId": run_id,
             "createdAt": utc_now(),
@@ -153,10 +159,11 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
             "passed": not errors,
             "errors": sorted(set(errors)),
             "pipelineRevision": (manifest.get("pipeline") or {}).get("planRevision"),
-            "deferredIssues": list(manifest.get("deferredIssues", [])) if isinstance(manifest.get("deferredIssues"), list) else [],
+            "deferredIssues": deferred_issues,
         }
         report["hasDeferredIssues"] = bool(report["deferredIssues"])
-        if report["hasDeferredIssues"]:
+        report["hasBlockingDeferredIssues"] = bool(blocking_deferred_issues)
+        if report["hasBlockingDeferredIssues"]:
             # Delivery gates must already have stopped these findings before
             # merge.  Keep this final check as a defence against old or
             # externally-edited manifests, rather than reporting success with
@@ -164,7 +171,13 @@ def aggregate_evidence(workspace: Path, feature: str, run_id: str) -> dict[str, 
             report["errors"] = sorted({*report["errors"], "deferred_implementation_findings_unresolved"})
             report["passed"] = False
         manifest["finalEvidenceAggregate"] = report
-        manifest["status"] = "succeeded" if report["passed"] else "blocked"
+        manifest["status"] = (
+            "succeeded_with_issues"
+            if report["passed"] and report["hasDeferredIssues"]
+            else "succeeded"
+            if report["passed"]
+            else "blocked"
+        )
         save_manifest(workspace, feature, run_id, manifest)
         atomic_write_json(run_dir(workspace, feature, run_id) / "final-evidence-aggregate.json", report)
     append_event(workspace, feature, run_id, "evidence_aggregate_completed", passed=report["passed"], errors=report["errors"])

@@ -100,7 +100,10 @@ def build_pipeline_contract(root: dict[str, Any], batches: dict[str, dict[str, A
         if isinstance(compile_id, str) and compile_id:
             ownership[compile_id] = {
                 "ownerBatchId": batch_id,
-                "stage": "implement",
+                # The implementation is draft-sealed first.  Its required
+                # production compile happens only after the read-only Review
+                # has passed (or its single repair was accepted).
+                "stage": "review",
                 "kind": "command",
             }
         quality_commands = batch.get("qualityGateCommands") if isinstance(batch, dict) else []

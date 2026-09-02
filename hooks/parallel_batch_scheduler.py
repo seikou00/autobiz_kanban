@@ -505,13 +505,10 @@ def _scoped_batch_ids(manifest: dict[str, Any], batch_ids: list[str], workspace_
 
 def _stage_recovery_failure_context(
     batch: dict[str, Any],
-    next_stage: str | None,
     *,
     test_log_path: Path,
 ) -> dict[str, Any] | None:
     """Return the saved review/UTest finding that caused an implement recovery."""
-    if next_stage != "implement":
-        return None
     states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
     for stage in delivery_stage_names(batch):
         state = states.get(stage)
@@ -618,7 +615,7 @@ def schedule(
                     "worktreePath": batch.get("worktreePath"),
                     "branchName": batch.get("branchName"),
                     "commitSha": batch.get("commitSha"),
-                    "nextStage": next_stage,
+                    "nextStage": "implement" if failure_context is not None else next_stage,
                     **(
                         {"failureContext": failure_context}
                         if failure_context is not None
@@ -641,7 +638,6 @@ def schedule(
                 for failure_context in [
                     _stage_recovery_failure_context(
                         batch,
-                        next_stage,
                         test_log_path=feature_dir(workspace, feature) / "test-output.log",
                     )
                 ]

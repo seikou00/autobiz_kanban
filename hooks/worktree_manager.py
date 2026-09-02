@@ -198,8 +198,12 @@ def seal_parallel_batch(
     batch_id: str,
     repo_path: Path | None,
     owner_token: str,
+    *,
+    purpose: str = "implementation",
 ) -> dict[str, Any]:
-    """Commit a compiled Batch worktree and persist its delivery SHA."""
+    """Commit a Batch worktree for Review or after its required compile."""
+    if purpose not in {"review", "implementation"}:
+        return {"success": False, "error": f"parallel_batch_seal_purpose_invalid:{purpose}"}
     if not check_lease(artifact_workspace, feature, run_id, batch_id, owner_token):
         return {"success": False, "error": f"parallel_batch_lease_invalid:{batch_id}"}
     with run_lock(artifact_workspace, feature, run_id):
@@ -207,7 +211,16 @@ def seal_parallel_batch(
             manifest, batch, repository_ref, git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
-        if batch.get("status") not in {"sealed", "leased"} or batch.get("compileStatus") != "passed":
+        review_draft = purpose == "review"
+        ready_for_review = (
+            batch.get("status") in {"running", "leased", "sealed"}
+            and batch.get("compileStatus") == "pending"
+        )
+        ready_for_delivery = (
+            batch.get("status") in {"sealed", "leased"}
+            and batch.get("compileStatus") == "passed"
+        )
+        if not (ready_for_review if review_draft else ready_for_delivery):
             return {"success": False, "error": f"parallel_batch_not_ready_to_seal:{batch_id}"}
         raw_worktree = batch.get("worktreePath")
         if not isinstance(raw_worktree, str) or not raw_worktree.strip():
@@ -285,11 +298,12 @@ def seal_parallel_batch(
         previous_commit_sha = batch.get("commitSha")
         batch["status"] = "sealed"
         batch["commitSha"] = sha.stdout.strip()
+        seal_purpose = "review" if review_draft else "utest" if is_utest_reseal else "implementation"
         batch["lastSeal"] = {
             "commitSha": sha.stdout.strip(),
             "previousCommitSha": previous_commit_sha if isinstance(previous_commit_sha, str) and previous_commit_sha else None,
             "changedFiles": list(changed),
-            "purpose": "utest" if is_utest_reseal else "implementation",
+            "purpose": seal_purpose,
         }
         save_manifest(artifact_workspace, feature, run_id, manifest)
     append_event(artifact_workspace, feature, run_id, "batch_sealed", batchId=batch_id, commitSha=sha.stdout.strip(), changedFiles=changed)
@@ -299,7 +313,7 @@ def seal_parallel_batch(
         "commitSha": sha.stdout.strip(),
         "previousCommitSha": previous_commit_sha if isinstance(previous_commit_sha, str) and previous_commit_sha else None,
         "changedFiles": changed,
-        "purpose": "utest" if is_utest_reseal else "implementation",
+        "purpose": seal_purpose,
     }
 
 
@@ -434,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     seal.add_argument("--run-id", required=True)
     seal.add_argument("--batch-id", required=True)
     seal.add_argument("--owner-token", required=True)
+    seal.add_argument("--purpose", choices=("review", "implementation"), default="implementation")
     listed = commands.add_parser("list")
     listed.add_argument("--repo", required=True)
     args = parser.parse_args(argv)
@@ -441,7 +456,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "provision":
         result = provision_parallel_worktree(Path(args.artifact_workspace), args.feature, args.run_id, args.batch_id)
     elif args.command == "seal":
-        result = seal_parallel_batch(Path(args.artifact_workspace), args.feature, args.run_id, args.batch_id, Path(args.repo) if args.repo else None, args.owner_token)
+        result = seal_parallel_batch(
+            Path(args.artifact_workspace),
+            args.feature,
+            args.run_id,
+            args.batch_id,
+            Path(args.repo) if args.repo else None,
+            args.owner_token,
+            purpose=args.purpose,
+        )
     else:
         result = list_worktrees(Path(args.repo))
 

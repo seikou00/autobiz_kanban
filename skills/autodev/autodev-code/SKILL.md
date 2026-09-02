@@ -235,7 +235,7 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 
 `batch-compile` 是 Code 阶段唯一构建命令，只编译生产代码，不运行 TASK 测试，也不创建测试资产。长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
 
-- 返回 `compileStatus=passed` 后，parallel Batch 的 TASK 保持 `implemented`，已提交 Worktree 状态为 `sealed`。Batch 必须依次通过只审生产实现的 `review`、在同一 Worktree 生成并执行的 UTest（随后重新 `seal`），以及仅在声明 `qualityGateCommands` 时存在的 `quality_gate`，才进入 `ready_to_candidate`；`parallel_merge_train.py` 只会 fast-forward 推广该批已经完成 Review/UTest 的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
+- 返回 `compileStatus=passed` 后，parallel Batch 的 TASK 保持 `implemented`，已提交 Worktree 状态为 `sealed`。Batch 必须完成只审生产实现的 `review`、在同一 Worktree 生成并执行的 UTest（随后重新 `seal`），以及仅在声明 `qualityGateCommands` 时存在的 `quality_gate`，才进入 `ready_to_candidate`；UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
 - 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码。推荐先执行下列命令建立 repair run，再修改代码：
 
 ```bash
@@ -356,8 +356,8 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 - Workflow 启动时先执行 scheduler `ensure`：没有活动 run 时创建一个；已有交付物完整的活动 run 时复用同一个 runId；`needs_resolution` 或缺失已密封交付物时 fail-closed 并保留现场。随后 scheduler 只选择依赖已经 `merged` 的 pending Batch；因此初始波次就是所有无依赖 Batch。
 - scheduler 会先按 Batch 的 `executionStage` 和物理写集计算安全波次：`proto`、`global` 阶段逐 Batch 串行，普通 `parallel` 阶段按同一 Git 根的 `scope.paths`/`expectedFiles` 做文件级隔离（相同或父子路径、写集未知时串行）。同一安全波内受 `maxParallel` 限制并行执行；插件为每个 Batch 从冻结提交创建原生 linked Worktree，并持久化路径、分支、lease 与 `commitSha`。每个 Batch 在同一 Worktree 内完整运行 `prepare → implement → review → UTest → reseal`；UTest 在此时生成测试源码并执行真实 runner，只有有静态检查命令的 Batch 才追加 `quality_gate`。
-- `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：implement 只拥有 `compileCommand`，delivery `test` 拥有该 Batch 的 unit/integration 测试意图，`qualityGateCommands` 只属于可选的 `quality_gate`；仅 `e2e_test` 意图和顶层 `projectValidationCommands` 归属最终 B-E2E。Review 只检查业务生产代码，不得因 sealed production commit 尚无测试文件而失败。Review 或 UTest 已经由失败测试锚定的 `source_bug` 必须回到同一 Batch 的 production repair；测试自身、fixture、mock、测试配置问题只在 UTest 中修复并重跑。
-- Wave 中的 `ready_to_candidate` Batch 由 `parallel_merge_train.py` 在临时候选 Worktree 合成。候选不执行额外测试：其前置条件就是每个 Batch 的 Review、UTest、re-seal 和可选质量门均已有通过 evidence。随后只允许 `git merge --ff-only` 推广该同一 SHA；main SHA 变化会使候选 stale，必须全量重建，禁止 rebase。推广后立刻用 `parallel_batch_lifecycle.py cleanup-merged` 清除 delivery Worktree、临时分支与 lease；未关闭缺陷与修复中的 Worktree 保留。
+- `parallelBatchPipeline.validationOwnership` 是验证意图唯一归属表：implement 只拥有 `compileCommand`，delivery `test` 拥有该 Batch 的 unit/integration 测试意图，`qualityGateCommands` 只属于可选的 `quality_gate`；仅 `e2e_test` 意图和顶层 `projectValidationCommands` 归属最终 B-E2E。Review 只检查业务生产代码，不得因 sealed production commit 尚无测试文件而失败。Review 已经由失败测试锚定的 `source_bug` 可回到同一 Batch 的 production repair；UTest 的最终失败（包括 `source_bug`）必须保留真实 Evidence 与结构化 issue，并继续后续流程；测试自身、fixture、mock、测试配置问题仍先在 UTest 中修复并重跑。
+- Wave 中的 `ready_to_candidate` Batch 由 `parallel_merge_train.py` 在临时候选 Worktree 合成。候选不执行额外测试：其前置条件就是每个 Batch 的 Review、UTest（通过或失败已记录）、re-seal 和可选质量门均已有证据。随后只允许 `git merge --ff-only` 推广该同一 SHA；main SHA 变化会使候选 stale，必须全量重建，禁止 rebase。推广后立刻用 `parallel_batch_lifecycle.py cleanup-merged` 清除 delivery Worktree、临时分支与 lease；未关闭缺陷与修复中的 Worktree 保留。
 - 所有 delivery 合并后，B-E2E 是唯一的 post-merge 可执行验证，使用临时验证 Worktree；通过即清理，失败保留至修复。`parallel_evidence_aggregate.py`/`parallel_final_verify.py` 仅校验已有 evidence 的内容摘要，绝不重跑编译、Batch UTest 或 E2E。若固定 Workflow 无法启动，必须停止并报告，禁止手工顺序执行 Batch 或在共享工作区继续写代码。
 - Workflow 只接受 launcher 返回的完整 `workflowArgs`；`feature`、`pluginPath`、artifact workspace 和每个 code workspace 都必须是非空、非 `undefined` 的绝对路径。Workflow host 仅为平台审计元数据，可为空或与业务仓库不同。任一代码路径无效时在创建 Batch agent 前阻断，禁止生成临时 workflow 或手工创建分支绕过插件 Worktree 管理器。
 

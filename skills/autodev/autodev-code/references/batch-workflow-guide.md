@@ -151,10 +151,12 @@ baseline commit per physical Git root.
    and runs its own tests in the native Worktree; `parallel_stage_validation.py`
    executes only declared command owners and records their evidence.
 5. Each sealed delivery performs production-code-only `review`, then UTest in
-   the same Worktree and re-seals the resulting test assets.  A Review or
-   UTest source bug returns to that Batch's implement repair, after which
-   compile, Review and UTest repeat. It performs `quality_gate` only if the
-   Batch declares static-check commands. Only then is it `ready_to_candidate`.
+   the same Worktree and re-seals the resulting test assets. A Review source
+   bug may return to that Batch's implement repair. Any final UTest failure is
+   retained with its runner Evidence as a non-blocking issue and proceeds to
+   later stages without restarting implementation, Review, or UTest. It
+   performs `quality_gate` only if the Batch declares static-check commands.
+   Only then is it `ready_to_candidate`.
    The shared Workflow builds a Merge Train candidate and fast-forwards it
    directly; no candidate test phase is run. A changed main SHA makes the candidate
    stale and requires rebuild rather than rebase.

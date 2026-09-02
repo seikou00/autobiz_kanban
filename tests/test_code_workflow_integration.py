@@ -110,7 +110,7 @@ def test_fixed_workflow_entrypoint():
         "--ttl-seconds ${timeoutPerBatch}",
         "heartbeat",
         "heartbeatDirectory",
-        "后续实现、编译和 seal 全程保持 heartbeat 运行",
+        "后续编码和草稿封存全程保持 heartbeat 运行",
         "Start-Process",
         "仅 valid=true 才可继续",
         "停止 heartbeat",
@@ -133,10 +133,19 @@ def test_fixed_workflow_entrypoint():
         "delivery_implementation_repair_unresolved",
         "--batch-worktree",
         "不得因 sealed commit 缺少测试文件而判定 Review 不通过",
-        "同一 Worktree 修复、重新编译、重新封存后再次评审",
+        "修复、编译和封存一次，然后直接进入 UTest，不会再次执行 Review",
         "failureContext",
         "本次打回的精确问题如下",
         "targetId、commandId、evidenceId、test-output.log 路径",
+        "record-test-failure",
+        'testStatus:\\"deferred\\"',
+        "--purpose review",
+        "compileAndSealDelivery",
+        "revalidate-batch-compile",
+        "SINGLE_REPAIRABLE_STAGES",
+        "recordSingleRepairResolution",
+        "single_repair_accepted",
+        "if (!reviewResolvedByRepair && !testResolvedByRepair)",
     ]
     missing = [check for check in checks if check not in content]
     if missing:
@@ -146,6 +155,11 @@ def test_fixed_workflow_entrypoint():
     task_prompt = content.find("以 taskContract.uiRequired 为唯一条件")
     if route_start < 0 or task_prompt < 0 or route_start < task_prompt:
         print("✗ Route resolver 未绑定到前端 Task Agent 协议")
+        return False
+    review_prompt = content.find("对已草稿封存、尚未编译的 Batch")
+    compile_prompt = content.find("已通过业务 Review，现在才执行本 Batch 的首次编译")
+    if review_prompt < 0 or compile_prompt < 0:
+        print("✗ Review 与编译的固定顺序缺失")
         return False
     print("✓ 多 Batch 使用固定 workflow 脚本")
     print("✓ 每个波次完成后合并并重新调度")

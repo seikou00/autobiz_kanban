@@ -57,11 +57,12 @@ TASK 测试的静态检查。
 | `batchCompile` | 运行时 | 编译执行状态、失败分类及修复次数；不是命令配置。 |
 | `mergeCommitSha`、`deliveryRunId` | 运行时 | Merge Train 推广后的提交与运行引用。 |
 
-`compileCommand` 在每个 Batch 的 `implement` 收口时仅执行一次。它是生产
-编译，不运行 TASK 测试。
+`compileCommand` 在每个 Batch 的 `review` 通过后（或 Review 的一次定向修复
+完成后）首次执行。它是生产编译，不运行 TASK 测试；若 Review 修复了生产代码，
+必须使用重新验证命令实际再编译，不能复用原先的通过缓存。
 
 `qualityGateCommands` 不得用于补跑编译、单测或 E2E。数组为空时，运行时
-不会创建 `quality_gate` 状态或空证据；数组非空时，在 `test` 通过后逐条
+不会创建 `quality_gate` 状态或空证据；数组非空时，在 `test` 通过或失败已记录后逐条
 运行这些命令。
 
 ## 验证阶段和命令归属
@@ -69,9 +70,9 @@ TASK 测试的静态检查。
 | 阶段 | 拥有的命令/工作 | 是否每 Batch 都有 |
 |---|---|---:|
 | `prepare` | Worktree 与交付准备 | 是 |
-| `implement` | TASK 实现和 `compileCommand` | 是 |
-| `review` | 代码评审 | 是 |
-| `test` | TASK 的 unit/behavior test intent | 是 |
+| `implement` | TASK 实现与草稿封存 | 是 |
+| `review` | 代码评审；通过后首次生产编译与正式封存 | 是 |
+| `test` | 生产编译/正式封存后的 TASK unit/behavior test intent | 是 |
 | `quality_gate` | `qualityGateCommands` | 仅有静态检查时 |
 | `V-INT` | 临时合并候选上的 `projectValidationCommands` 与 integration intent | 每个 Merge Train |
 | `V-E2E` | 所有 delivery Batch 推广后的一次 E2E | 每个 Feature Run 一次 |
@@ -86,17 +87,17 @@ delivery Batch 先完成上述阶段，再进入 Merge Train。B-INT 在临时�
 上通过后，才允许 fast-forward 推广同一候选 SHA。所有 delivery Batch 合并
 后才执行 B-E2E；它不会在每个 Batch 完成时运行。
 
-`review` 或 Batch `test` 发现可由当前 Batch 修复的生产代码问题时，必须以
-`implementation` 分类回流：在原 Worktree、原分支中修复，重新执行该 Batch
-的编译和封存，再从 `review` 重新开始。只有重新评审通过后才可以继续 `test`
-或进入 Merge Train；回流次数受 Workflow 的上限保护，超限时保留 Worktree 并
-不再重复修复。修复未产生新的 Batch commit、同一条结构化评审反馈再次出现，或
-达到修复上限时，Workflow 会把原始 finding 写入 run 的 `deferredIssues`，以
-`deferred` 状态继续后续 test、Merge Train 和 E2E。最终结果为
-`succeeded_with_issues`，并返回全部待用户处理的问题；不得把它们伪装为 review
-通过或从最终报告中省略。
+每个 Batch 先编码并草稿封存，随后执行 `review`；只有 Review 通过（或其一次
+定向修复完成）后，才执行该 Batch 的首次编译和正式封存，再进入 Batch `test`。
+`review` 发现可由当前 Batch 修复的生产代码问题时，必须以 `implementation`
+分类回流：在原 Worktree、原分支中按失败上下文修复一次，实际
+重新编译和封存，并以 `single_repair_accepted` 记录该检查已被定向修复。Review
+修复后直接进入 `test`，不会重新执行同一检查形成循环。Batch `test` 的任何最终
+失败都会保留真实 runner Evidence 和非阻断 issue，然后继续质量门、Merge Train 与
+E2E；最终无其他阻断错误时标记为 `succeeded_with_issues`，不得将失败伪装为通过或
+从最终报告中省略。
 
-review/test 以 `implementation` 分类回流后，Batch 会临时处于 `running`，但其
+review 以 `implementation` 分类回流后，Batch 会临时处于 `running`，但其
 封存 commit 与 Worktree 仍有效。scheduler 必须把这种“有 commit、后置阶段未
 完成”的 `running` Batch 作为 stage recovery 返回，恢复 implement 或记录
 deferred finding；不得直接调 test，也不得因它不再是 `sealed` 而停滞。

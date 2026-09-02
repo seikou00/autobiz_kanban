@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace
-from hooks.parallel_batch_stage import complete_stage, fail_stage, start_stage
+from hooks.parallel_batch_stage import complete_stage, fail_stage, record_test_failure, start_stage
 from hooks.parallel_failure_classifier import classify_failure
 from hooks.parallel_runtime import load_manifest
 from hooks.plan_json import PlanBundle, load_plan_bundle
@@ -185,6 +185,25 @@ def run_owned_stage(
         return {"success": True, "batchId": batch_id, "stage": stage, "commands": results, "completion": completed}
     logs = "\n".join(str(item["outputTail"]) for item in results if not item["passed"])
     classified = classify_failure(stage, logs)
+    if stage == "test":
+        recorded = record_test_failure(
+            workspace,
+            feature,
+            run_id,
+            batch_id,
+            failure_type=str(classified["failureType"]),
+            message="owned_validation_failed",
+            metadata={"commands": results, "commandCount": len(results)},
+        )
+        return {
+            "success": True,
+            "batchId": batch_id,
+            "stage": stage,
+            "testStatus": "deferred",
+            "commands": results,
+            "classification": classified,
+            "recordedFailure": recorded,
+        }
     failed = fail_stage(
         workspace,
         feature,
