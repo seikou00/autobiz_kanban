@@ -440,6 +440,17 @@ function implementationReworkRequired(batchResult, failedStage, result) {
   const failure = unwrap(normalized.failure);
   const failureType = failure.type || normalized.failureType || "implementation";
   const failureMessage = failure.message || normalized.message || normalized.error || "";
+  if (!usableString(failureMessage)) {
+    throw new Error(`implementation_rework_failure_message_missing:${batchResult.batchId}:${failedStage}`);
+  }
+  // Keep the finding next to the recovery coordinates.  The implementer must
+  // receive this exact context, rather than inferring a newly-found defect
+  // from a prior implementation evidence record.
+  const failureContext = {
+    failedStage,
+    failureType,
+    message: failureMessage,
+  };
   return {
     batchId: batchResult.batchId,
     status: "implementation_rework_required",
@@ -452,6 +463,7 @@ function implementationReworkRequired(batchResult, failedStage, result) {
       branchName: batchResult.branchName,
       commitSha: batchResult.commitSha,
       nextStage: "implement",
+      failureContext,
     },
   };
 }
@@ -483,7 +495,7 @@ async function runBatchUtestAndSeal(batchResult) {
     "这是 Code Review 之后的测试阶段：Review 只审业务生产代码；现在由你生成/补齐测试源码、fixture/mock/测试环境配置并运行测试。测试代码必须留在当前 Worktree，并会随本 Batch 再次封存后合并；禁止把测试拆成独立 Batch。\n" +
     "严格执行：1) cd 到该 Worktree，确认 git 顶层与分支匹配；2) 执行 python \"" + leasePath + "\" acquire --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --ttl-seconds " + timeoutPerBatch + "，保存 lease.ownerToken，并在整个 UTest、seal 期间对同一 token 保持 heartbeat；3) 执行 python \"" + stagePath + "\" start --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test；4) 执行 python \"" + utestRouterPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --json，且只使用其中 batchId=\"" + batchId + "\"、workspaceRef=\"" + batchWorkspaceRef + "\" 的 assignment 原文；5) 执行 python \"" + utestEnvironmentPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" " + taskIdArgs + " --batch-worktree \"" + batchWorktree + "\" --json。环境非 ready 时只按 UTest 协议修测试环境并重新检查，无法解决则 fail stage 为 environment。\n" +
     "6) 对每个实际 TASK 生成或补齐行为测试：覆盖 implementationPoints 与全部 AC，排除 nonGoals；使用真实工程 runner。每个测试文件落地后，必须执行 python \"" + utestCommandPath + "\" --kind test --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <真实TASK_ID> --batch-worktree \"" + batchWorktree + "\" --test-file <仓库根相对测试文件> -- <真实精确测试 argv>。不得把 Plan validationCommands 的 argv 当作测试 argv。测试自身、fixture、mock、测试配置的问题必须在本阶段修复并重跑。\n" +
-    "7) 若有已执行且非零退出的测试，只能使用该次 run_utest_command JSON 返回的 taskId、commandId、targetId、taskDigest、evidenceId 执行 python \"" + utestSourceBugPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <返回taskId> --command-id <返回commandId> --target-id <返回targetId> --task-digest <返回taskDigest> --evidence-id <返回evidenceId>；仅该命令成功才可判为 source_bug。此时不要直接改生产代码。先用 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 封存新测试资产，再执行 python \"" + stagePath + "\" fail --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --failure-type implementation --message <失败测试锚点与根因>，最后以 final-status sealed 释放 lease，并返回失败 JSON。Workflow 会回到同一 Batch 的生产代码 repair，随后重新编译、封存、Review 和 UTest。\n" +
+    "7) 若有已执行且非零退出的测试，只能使用该次 run_utest_command JSON 返回的 taskId、commandId、targetId、taskDigest、evidenceId 执行 python \"" + utestSourceBugPath + "\" --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --task-id <返回taskId> --command-id <返回commandId> --target-id <返回targetId> --task-digest <返回taskDigest> --evidence-id <返回evidenceId>；仅该命令成功才可判为 source_bug。此时不要直接改生产代码。先用 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 封存新测试资产，再执行 python \"" + stagePath + "\" fail --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --failure-type implementation --message \"<必须包含 targetId、commandId、evidenceId、test-output.log 路径、失败断言的 expected/actual 或 stdout/stderr 根因>\"，最后以 final-status sealed 释放 lease，并返回失败 JSON。Workflow 会将该具体失败原因传给同一 Batch 的生产代码 repair，随后重新编译、封存、Review 和 UTest。\n" +
     "8) 全部 UTest 通过后，执行 python \"" + worktreeManagerPath + "\" --json seal --artifact-workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --repo \"" + batchWorktree + "\" --owner-token <真实token> 取得新的 commitSha；再执行 python \"" + stagePath + "\" complete --workspace \"" + artifactWorkspace + "\" --feature \"" + feature + "\" --run-id \"" + runId + "\" --batch-id \"" + batchId + "\" --stage test --metadata-json <包含 batchCommit、新 commitSha、testEvidenceIds、worktreePath、branchName 的对象>；最后以 final-status sealed 释放 lease。\n" +
     "成功只返回 {batchId,status:\"success\",worktreePath,branchName,commitSha,testEvidenceIds,stageEvidenceId}。source_bug 只返回 {batchId,status:\"failed\",worktreePath,branchName,commitSha,failureType:\"implementation\",nextStage:\"implement\",failure:{type:\"implementation\",message,nextStage:\"implement\"}}。环境/契约等不可自动修复问题也必须先 fail stage、释放 lease，再返回 status:\"failed\" 与 failure。不得手工 git add/commit、merge、rebase 或删除 Worktree。";
   return unwrap(await agent(
@@ -515,7 +527,7 @@ async function runDeliveryReviewTestAndGate(batchResult) {
     `先执行 python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review。` +
     `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
     `通过后执行 python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
-    `发现问题时必须先执行 python "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题>"，再返回该命令的 JSON。` +
+    `发现问题时必须先执行 python "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题：file:line、期望与实际行为、影响及建议修复>"，再返回该命令的 JSON。` +
     `可由当前 Batch 生产代码修复时，返回 JSON 必须同时包含 status:"failed"、verdict:"FAIL"、failureType:"implementation"、nextStage:"implement" 及 failure；Workflow 会在同一 Worktree 修复、重新编译、重新封存后再次评审。` +
     `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
     { label: `stage-review-${batchId}`, phase: "Batch 阶段" }
@@ -565,8 +577,20 @@ async function reworkDeliveryImplementation(recovery) {
   if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef) || !taskIds.length) {
     throw new Error(`implementation_rework_context_missing:${batchId}`);
   }
+  const failureContext = recovery && typeof recovery.failureContext === "object" && recovery.failureContext !== null
+    ? recovery.failureContext
+    : null;
+  const testLogPath = failureContext && failureContext.failedStage === "test"
+    ? (usableString(failureContext.testLogPath)
+      ? failureContext.testLogPath
+      : artifactWorkspace + "/.autobizdevops/features/" + feature + "/test-output.log")
+    : null;
+  const repairBrief = failureContext
+    ? `本次打回的精确问题如下（必须作为修复基线，不能重新猜测原因）：${JSON.stringify(failureContext)}。` +
+      (testLogPath ? `这是 UTest 打回；先读取失败原始日志 "${testLogPath}"，并用 failure message 中的 target/command/evidence 锚定问题。` : "")
+    : "这是未完成 implement 的中断恢复，没有 review/test 打回上下文；按原 TASK 恢复执行。";
   return requireSuccess(await agent(
-    `恢复 Batch ${batchId} 的 implement 阶段；之前的 review/test 失败已使该阶段的旧 evidence 失效。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。` +
+    `恢复 Batch ${batchId} 的 implement 阶段；之前的 review/test 失败已使该阶段的旧 evidence 失效。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。${repairBrief}` +
     `依次执行：1) 用 batch_lease_manager.py acquire 获取真实 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"），随后 mark-batch 为 running；` +
     `2) 对需要修复的 TASK（仅 ${JSON.stringify(taskIds)}）读取其 latestImplementationEvidenceId，并使用 task_runner.py start-task-repair --prior-evidence-id <该真实 ID> --parallel-run-id "${runId}" --lease-token <真实 token> --code-workspace "${batchWorktree}" --workspace-ref "${batchWorkspaceRef}"；` +
     `3) 修复生产代码后，用 finish-implementation --repair-mode 和该 start 返回的真实 task run-id 记录新的 implementation evidence；` +

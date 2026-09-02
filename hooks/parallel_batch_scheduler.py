@@ -503,6 +503,35 @@ def _scoped_batch_ids(manifest: dict[str, Any], batch_ids: list[str], workspace_
     ]
 
 
+def _stage_recovery_failure_context(
+    batch: dict[str, Any],
+    next_stage: str | None,
+    *,
+    test_log_path: Path,
+) -> dict[str, Any] | None:
+    """Return the saved review/UTest finding that caused an implement recovery."""
+    if next_stage != "implement":
+        return None
+    states = batch.get("stageStates") if isinstance(batch.get("stageStates"), dict) else {}
+    for stage in delivery_stage_names(batch):
+        state = states.get(stage)
+        failure = state.get("failure") if isinstance(state, dict) else None
+        if not isinstance(failure, dict) or failure.get("nextStage") != "implement":
+            continue
+        message = failure.get("message")
+        if not isinstance(message, str) or not message.strip():
+            continue
+        context: dict[str, Any] = {
+            "failedStage": stage,
+            "failureType": str(failure.get("type") or "implementation"),
+            "message": message,
+        }
+        if stage == "test":
+            context["testLogPath"] = str(test_log_path)
+        return context
+    return None
+
+
 def schedule(
     workspace: Path,
     feature: str,
@@ -586,20 +615,36 @@ def schedule(
             "stageRecoveryBatches": [
                 {
                     "batchId": batch_id,
-                    "worktreePath": manifest["batches"][batch_id].get("worktreePath"),
-                    "branchName": manifest["batches"][batch_id].get("branchName"),
-                    "commitSha": manifest["batches"][batch_id].get("commitSha"),
-                    "nextStage": next(
-                        (
-                            stage
-                            for stage in delivery_stage_names(manifest["batches"][batch_id])
-                            if not isinstance((manifest["batches"][batch_id].get("stageStates") or {}).get(stage), dict)
-                            or (manifest["batches"][batch_id].get("stageStates") or {}).get(stage, {}).get("status") not in {"passed", "skipped"}
-                        ),
-                        None,
+                    "worktreePath": batch.get("worktreePath"),
+                    "branchName": batch.get("branchName"),
+                    "commitSha": batch.get("commitSha"),
+                    "nextStage": next_stage,
+                    **(
+                        {"failureContext": failure_context}
+                        if failure_context is not None
+                        else {}
                     ),
                 }
                 for batch_id in scoped_stage_recovery
+                for batch in [manifest["batches"][batch_id]]
+                for next_stage in [
+                    next(
+                        (
+                            stage
+                            for stage in delivery_stage_names(batch)
+                            if not isinstance((batch.get("stageStates") or {}).get(stage), dict)
+                            or (batch.get("stageStates") or {}).get(stage, {}).get("status") not in {"passed", "skipped"}
+                        ),
+                        None,
+                    )
+                ]
+                for failure_context in [
+                    _stage_recovery_failure_context(
+                        batch,
+                        next_stage,
+                        test_log_path=feature_dir(workspace, feature) / "test-output.log",
+                    )
+                ]
             ],
             "allStageRecoveryBatches": stage_recovery_batches(manifest),
             "parallelGroups": scoped_groups,

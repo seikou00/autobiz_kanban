@@ -134,6 +134,9 @@ def test_fixed_workflow_entrypoint():
         "--batch-worktree",
         "不得因 sealed commit 缺少测试文件而判定 Review 不通过",
         "同一 Worktree 修复、重新编译、重新封存后再次评审",
+        "failureContext",
+        "本次打回的精确问题如下",
+        "targetId、commandId、evidenceId、test-output.log 路径",
     ]
     missing = [check for check in checks if check not in content]
     if missing:
@@ -165,7 +168,7 @@ vm.createContext(context);
 const helperStart = source.indexOf("function normalizeStructuredOutput(");
 const inputStart = source.indexOf("const input = unwrap(args);");
 const reworkStart = source.indexOf("function requiresImplementationRework(");
-const reworkEnd = source.indexOf("function implementationReworkRequired(", reworkStart);
+const reworkEnd = source.indexOf("function withLatestBatchDelivery(", reworkStart);
 if (helperStart < 0 || inputStart < 0 || reworkStart < 0 || reworkEnd < 0) process.exit(2);
 vm.runInContext(source.slice(helperStart, inputStart), context);
 vm.runInContext(source.slice(reworkStart, reworkEnd), context);
@@ -185,6 +188,22 @@ const malformed = "review result without JSON";
 let rejectedMalformed = false;
 try { context.requireSuccess(malformed, "review"); } catch (_) { rejectedMalformed = true; }
 if (!rejectedMalformed) process.exit(5);
+const repaired = context.implementationReworkRequired(
+  { batchId: "B001", worktreePath: "/tmp/worktree", branchName: "batch", commitSha: "sha" },
+  "review",
+  { status: "failed", failureType: "implementation", failure: { type: "implementation", message: "src/auth.js:42 expected authorization before write", nextStage: "implement" } }
+);
+if (repaired.recovery.failureContext.message !== "src/auth.js:42 expected authorization before write") process.exit(6);
+if (repaired.recovery.failureContext.failedStage !== "review") process.exit(7);
+let missingMessageRejected = false;
+try {
+  context.implementationReworkRequired(
+    { batchId: "B001", worktreePath: "/tmp/worktree", branchName: "batch", commitSha: "sha" },
+    "test",
+    { status: "failed", failureType: "implementation", failure: { type: "implementation", nextStage: "implement" } }
+  );
+} catch (_) { missingMessageRejected = true; }
+if (!missingMessageRejected) process.exit(8);
 '''
     result = run_command(["node", "-e", script, str(workflow_script)])
     if result["returncode"] != 0:

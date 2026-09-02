@@ -100,6 +100,14 @@ class ParallelStagedPipelineTest(unittest.TestCase):
                 [(item["batchId"], item["nextStage"]) for item in recovery["stageRecoveryBatches"]],
                 [("B001", "implement")],
             )
+            self.assertEqual(
+                recovery["stageRecoveryBatches"][0]["failureContext"],
+                {
+                    "failedStage": "review",
+                    "failureType": "implementation",
+                    "message": "missing authorization check",
+                },
+            )
 
             start_stage(workspace, "alpha", run_id, "B001", "implement")
             complete_stage(workspace, "alpha", run_id, "B001", "implement", metadata={"batchCommit": "reviewed-commit"})
@@ -124,6 +132,49 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             self.assertEqual(manifest["batches"]["B001"]["status"], "blocked")
             self.assertEqual(manifest["batches"]["B001"]["stageStates"]["review"]["status"], "deferred")
             self.assertEqual(manifest["deferredIssues"][0]["issueId"], "DEFERRED-B001-REVIEW-001")
+
+    def test_utest_failure_recovery_includes_message_and_test_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "sealed",
+                worktreePath=provisioned["worktreePath"],
+                branchName=provisioned["branchName"],
+                commitSha="tested-commit",
+            )
+            for stage in ("prepare", "implement", "review"):
+                start_stage(workspace, "alpha", run_id, "B001", stage)
+                complete_stage(workspace, "alpha", run_id, "B001", stage, metadata={"batchCommit": "tested-commit"})
+            start_stage(workspace, "alpha", run_id, "B001", "test")
+            fail_stage(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "test",
+                failure_type="implementation",
+                message="targetId=UT-001 evidenceId=ev_0042 expected=200 actual=500",
+            )
+
+            recovery = schedule(workspace, "alpha", run_id)["stageRecoveryBatches"]
+            self.assertEqual(len(recovery), 1)
+            self.assertEqual(
+                recovery[0]["failureContext"],
+                {
+                    "failedStage": "test",
+                    "failureType": "implementation",
+                    "message": "targetId=UT-001 evidenceId=ev_0042 expected=200 actual=500",
+                    "testLogPath": str(feature_dir / "test-output.log"),
+                },
+            )
 
     def test_plan_ownership_is_required_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
