@@ -257,7 +257,48 @@ def validate_frontend_write(workspace: Path, feature: str) -> int:
     return 0
 
 
-def validate_code_task_run_write(workspace: Path, feature: str) -> int:
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _active_runs_for_write_target(
+    active_runs: list[tuple[Path, dict]],
+    target_path: Path | None,
+) -> list[tuple[Path, dict]]:
+    """Return the most-specific active runs that own ``target_path``.
+
+    Native Git worktrees for parallel Batches can live below the primary
+    checkout.  A simple ancestor match could therefore select both a legacy
+    primary-checkout run and the Batch run.  Keep only the deepest matching
+    ``codeWorkspace`` so a write in one worktree is authorized by its own
+    task run, never by a sibling Batch or a parent checkout.
+    """
+    if target_path is None:
+        return active_runs
+    matches: list[tuple[Path, dict, Path]] = []
+    for run_path, run in active_runs:
+        raw_workspace = run.get("codeWorkspace")
+        if not isinstance(raw_workspace, str) or not raw_workspace.strip():
+            continue
+        code_workspace = Path(raw_workspace).expanduser().resolve(strict=False)
+        if _path_within(target_path, code_workspace):
+            matches.append((run_path, run, code_workspace))
+    if not matches:
+        return []
+    deepest = max(len(item[2].parts) for item in matches)
+    return [(run_path, run) for run_path, run, root in matches if len(root.parts) == deepest]
+
+
+def validate_code_task_run_write(
+    workspace: Path,
+    feature: str,
+    *,
+    target_path: Path | None = None,
+) -> int:
     target = feature_dir(workspace, feature)
     active_runs: list[tuple[Path, dict]] = []
     for path in (target / ".task-runs").glob("T*/*.json"):
@@ -267,13 +308,16 @@ def validate_code_task_run_write(workspace: Path, feature: str) -> int:
             and payload.get("status") not in {"implemented", "done", "failed", "aborted"}
         ):
             active_runs.append((path, payload))
-    if len(active_runs) != 1:
+    authorized_runs = _active_runs_for_write_target(active_runs, target_path)
+    if len(authorized_runs) != 1:
+        location = f" for write target {target_path}" if target_path is not None else ""
         return block(
-            "business code write requires exactly one active task run: "
-            f"found={len(active_runs)}; next=run task_runner.py start",
+            "business code write requires exactly one active task run"
+            f"{location}: found={len(authorized_runs)}; totalActive={len(active_runs)}; "
+            "next=run task_runner.py start",
             system_message="业务代码写入前必须存在一个由 task_runner 创建的活动 run。",
         )
-    run_path, run = active_runs[0]
+    run_path, run = authorized_runs[0]
     integrity_error = strict_task_run_integrity_error(run)
     if integrity_error is not None:
         return block(
@@ -327,7 +371,7 @@ def main() -> int:
             if result:
                 return result
         if is_business_code_path(target_path):
-            result = validate_code_task_run_write(workspace, feature)
+            result = validate_code_task_run_write(workspace, feature, target_path=target_path)
             if result:
                 return result
     return 0
