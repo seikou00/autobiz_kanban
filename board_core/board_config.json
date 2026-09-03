@@ -266,7 +266,7 @@
           },
            "subagentConfig": {
             "disabledBuiltinSubagents": ["Explore","critic"],
-            "customSubagentFiles": ["agents/explore.md","agents/critic.md"]
+            "customSubagentFiles": ["agents/explore.md","agents/critic_autodev_zh.md","agents/specs-gate-fixer.md"]
           }
         },
         "description": "生成 proposal 与行为规格 \n 产物：proposal.md（变更提案：本轮目标、范围与非目标）、specs/**/*.md（行为规格：各能力 Requirement/Scenario 契约）",

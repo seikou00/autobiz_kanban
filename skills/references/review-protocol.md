@@ -14,9 +14,9 @@
 
 `dev.specs` structure gate 已通过后再启动回检。
 
-使用 task 工具，指定 `critic-autodev` 角色，对比上游需求与本阶段产物进行严格审查：spec 是否已完全覆盖需求范围，是否有违反需求的地方。
+使用 task 工具，指定 `critic-autodev-zh` 角色，对比上游需求与本阶段产物进行严格审查：spec 是否已完全覆盖需求范围，是否有违反需求的地方。
 
-启动时必须在 task prompt 中写全下面两份清单。任缺一项，回检就只覆盖模型当时想到的部分——遗漏不会以失败的形式出现，只会以「没提」的形式消失。
+启动时必须在 task prompt 中写全 feature 目录的绝对路径与下面两份清单。任缺一项，回检就只覆盖模型当时想到的部分——遗漏不会以失败的形式出现，只会以「没提」的形式消失。
 
 ### 输入材料清单
 
@@ -73,7 +73,7 @@
 <!-- section: 严重度词表 | stages: dev.specs,dev.plan -->
 ## 严重度词表
 
-使用 `critic-autodev` 的原文分节名，不要改写成别的词：
+使用回检角色的原文分节名，不要改写成别的词：
 
 - `Critical Findings` 与 `Major Findings` 下的每一条都必须落入下方分类表的一个分类，不得省略。
 - `Minor Findings` 与 `Open Questions (unscored)` 不单独触发改产物。其中涉及取舍的按「需用户裁定」处理，其余归「仅列出」。
@@ -169,7 +169,7 @@
 
 - `## Verdict`：`PASS` / `PASS_WITH_WARNINGS` / `FAIL` / `DEGRADED` 取一。只有 `PASS` 与 `PASS_WITH_WARNINGS` 能推进。
 - `## Findings`：每条结论一行，写清结论、证据与处置。本轮无结论时正文写「无」。
-- `## Unresolved`：仍待用户裁定、尚未拿到答复的条目；有条目就不能推进 `specs_done`。裁定完成后把该条移出本节，并在 Findings 的处置列写下裁定结果。
+- `## Unresolved`：只承载用户已明确暂停的条目，本阶段就此停下。其余「需用户裁定」条目必须在写本文件之前裁定完，结果写进 Findings 的处置列，本节写「无」。
 
 <!-- section: 分类取值 | stages: dev.specs -->
 本阶段 `分类` 允许取值：`产物可修` | `需用户裁定` | `回流上游` | `仅列出` | `结论不成立`。
@@ -198,9 +198,9 @@
 <!-- section: 收口 | stages: dev.specs -->
 ## 收口
 
-按结论改完 proposal/specs 后重跑 structure gate，写 `SPECS_REVIEW.md`，再运行 final gate。
+按结论改完 proposal/specs 后重跑 structure gate，逐条裁定「需用户裁定」条目，再一次写成 `SPECS_REVIEW.md`，最后运行 final gate。裁定在写本文件之前完成，不靠 final gate 发现。
 
-处置 finding 造成的修改由主模型自行收口，不必重新调用 critic。只有当修改本身改变了行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）时才重跑一轮回检。仍有未裁定的「需用户裁定」条目时不推进 `specs_done`。
+处置 finding 造成的修改由主模型自行收口，不必重新调用 critic。只有当修改本身改变了行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）时才重跑一轮回检。
 
 <!-- section: 收口 | stages: dev.plan -->
 ## 收口

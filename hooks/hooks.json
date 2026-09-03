@@ -27,6 +27,12 @@
           "command": "python hooks/augment_test_engineer_task_prompt.py",
           "timeout": 30,
           "persistAfterInterrupt": true
+        },
+        {
+          "type": "command",
+          "command": "python hooks/augment_specs_gate_fixer_task_prompt.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
         }
       ]
     },

@@ -195,6 +195,24 @@ class SpecsReviewWiringTest(unittest.TestCase):
         ):
             self.assertIn(item, output)
 
+    def test_protocol_adjudicates_before_the_review_is_written(self) -> None:
+        """裁定发生在写 SPECS_REVIEW.md 之前，不靠 final gate 反弹回来。"""
+        output = render("dev.specs")
+
+        self.assertIn("裁定在写本文件之前完成", output)
+        self.assertNotIn("尚未拿到答复的条目", output)
+
+        writing = output.index("一次写成 `SPECS_REVIEW.md`")
+        self.assertLess(output.index("逐条裁定「需用户裁定」条目"), writing)
+        self.assertLess(writing, output.index("最后运行 final gate"))
+
+    def test_skill_puts_the_same_ordering_where_the_review_is_written(self) -> None:
+        """技能正文里「写进 SPECS_REVIEW.md」那句是模型建立错误顺序的地方。"""
+        skill = (ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("写之前先把「需用户裁定」条目逐条裁定完，本文件一次写成。", skill)
+
     def test_protocol_does_not_force_a_rerun_on_every_edit(self) -> None:
         """critic 提出的问题由主模型收口；只有行为契约变了才重跑回检。"""
         output = render("dev.specs")

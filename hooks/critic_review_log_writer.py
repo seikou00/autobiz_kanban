@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""PostToolUse(task): archive the raw critic-autodev response as an optional log."""
+"""PostToolUse(task): archive the raw review-agent response as an optional log."""
 
 from __future__ import print_function
 
@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 from hooks.specs_hook_context import feature_dir_from_env, is_specs_in_progress  # noqa: E402
 
 
-TARGET_SUBAGENT_TYPE = "critic-autodev"
+TARGET_SUBAGENT_TYPES = ("critic-autodev", "critic-autodev-zh")
 
 
 def _as_dict(value):
@@ -35,7 +35,7 @@ def _is_target(payload):
     return (
         tool_name == "task"
         and isinstance(subagent, str)
-        and subagent.strip().lower() == TARGET_SUBAGENT_TYPE
+        and subagent.strip().lower() in TARGET_SUBAGENT_TYPES
     )
 
 

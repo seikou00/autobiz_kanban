@@ -1,6 +1,6 @@
 # Specs Review
 
-来源: critic-autodev 回检结论 + 主 agent 逐条复核
+来源: 回检角色结论 + 主 agent 逐条复核
 创建时间: [ISO 日期时间]
 
 ## Verdict

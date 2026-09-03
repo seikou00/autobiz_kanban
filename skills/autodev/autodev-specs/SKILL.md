@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.12.08312
+version: v1.15.0903
 ---
 
 ## 缺失产物处理
@@ -165,15 +165,28 @@ capability 的变更分类写进 `## Capabilities` 节：
 - 某个操作段无内容时保留段标题，段下不写 Requirement。
 - 对未确认且影响行为的内容，必须回到用户确认；不要把猜测写进 specs。
 
+## 门禁修复派发
+
+structure 与 final 两道门禁走同一条修复通道，主流程不自己跑「校验—修复—重跑」循环。先检查当前平台是否提供 task 工具，然后二选一执行：
+
+- **`independent_task`**：task 工具可用时，使用 task 工具指定 `specs-gate-fixer-autodev` 角色，task prompt 写明 `phase`（`structure` 或 `final`）与当前 feature。
+- **`inline_main_agent`**：task 工具被平台禁用或不可用时，主 agent 读取 `${pluginPath}/agents/specs-gate-fixer.md`，按其修复循环内联执行。
+
+拿到 `PASS` 即继续后续步骤。`BLOCKED` 时按「需主代理处理」表逐项收口，收口后重新执行：
+
+- `ask_user`：按 `${pluginPath}/skills/references/ask-user-question.md` 逐条裁定，禁止自行填值。
+- `return_specs` / `return_plan`：停止本阶段并回流。
+- 需要改动行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）的失败项：由主流程改完再执行。
+
 ## 回检与修复
 
-启动回检前先执行结构预检：
+回检前必须先通过结构预检：
 
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase structure --feature "${feature}"
 ```
 
-失败项一次性修完并重跑；structure 通过前不启动回检。
+按「门禁修复派发」执行，PASS 前不启动回检。
 
 本节完整协议由脚本按阶段渲染，必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节。
 
@@ -181,7 +194,7 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase st
 python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
 ```
 
-回检结论必须写进 `SPECS_REVIEW.md`——只输出在回复里不算数。
+回检结论必须写进 `SPECS_REVIEW.md`——只输出在回复里不算数。写之前先把「需用户裁定」条目逐条裁定完，本文件一次写成。
 
 回检提出的问题由主模型复核、修复并收口。修改本身改变了行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）时才重跑一轮回检；其余修改直接进入产物契约预检。
 
@@ -193,12 +206,7 @@ proposal、全部 specs、`SPECS_REVIEW.md` 生成且回检修改完成后执行
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase final --feature "${feature}"
 ```
 
-处理流程：
-
-1. 等命令完整结束后读取全部失败项。
-2. 按 `route` 分流：`fix_current` 在本阶段修；`return_specs` / `return_plan` 停止本阶段并回流；`ask_user` 回到用户确认，禁止自行填值。
-3. 将本轮全部 `fix_current` 按 `artifact` 归组，同一产物一次性改完；每项按 `target` / `action` 修复。
-4. 本轮失败清单清零后重跑预检；通过前不得推进 checkpoint。
+按「门禁修复派发」执行，PASS 前不得推进 checkpoint。
 
 不以 `update_checkpoint.py` 代替产物契约预检。
 
