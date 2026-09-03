@@ -35,64 +35,6 @@ from hooks.plan_json import (  # noqa: E402
     write_plan_json,
 )
 
-def refresh_exploration_cache(
-    feature_dir: Path,
-    code: Path,
-    *,
-    task_id: str = "T001",
-    batch_id: str = "B001",
-) -> None:
-    """写入一份 fresh 探索缓存，满足 task_runner start 的探索闸门。
-
-    与 tests/test_task_runner.py 的同名 fixture 保持一致：闸门要求首个 TASK start
-    前已有当前仓库快照对应的缓存，否则返回 code_exploration_not_ready。
-    """
-    from hooks.code_exploration import SCHEMA_VERSION, utc_now
-    from hooks.repository_snapshot import capture_repository_snapshot
-
-    batch = json.loads(
-        (feature_dir / "plans" / batch_id / "plan.json").read_text(encoding="utf-8")
-    )
-    captured_at = utc_now()
-    lane = str(batch.get("executionLane", "backend"))
-    cache_path = feature_dir / "cache" / "code-exploration" / code.name / f"{lane}.json"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot = capture_repository_snapshot(code)
-    cache_path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": SCHEMA_VERSION,
-                "featureId": "alpha",
-                "repository": {"id": code.name, "root": str(code.resolve())},
-                "executionLane": lane,
-                "capturedAt": captured_at,
-                "capturedBatchId": str(batch.get("batchId", batch_id)),
-                "capturedTaskId": task_id,
-                "gitSnapshot": snapshot,
-                "findings": {
-                    "moduleMap": [],
-                    "conventions": [],
-                    "integrationPoints": [],
-                    "testEntrypoints": [],
-                    "validationPatterns": [],
-                },
-                "exploredPaths": sorted(snapshot["files"]),
-                "sharedPaths": [],
-                "evidenceCoverage": {
-                    "explainedTaskIds": [],
-                    "completionEvidenceIds": [],
-                    "lastExplainedBatchId": None,
-                    "lastExplainedAt": captured_at,
-                },
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 def task(
     task_id: str,
     *,

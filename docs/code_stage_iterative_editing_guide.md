@@ -178,7 +178,7 @@ A: 不会，所有 evidence 都保留在 `implementationEvidenceIds` 中。
 A: 不能，必须使用 `start-batch-compile-repair` 启动受控修复。
 
 **Q: 修改后需要重新运行 code-context 吗？**  
-A: 不需要，exploration cache 会在 `start` 时自动检查。
+A: 仅在需要重新读取任务契约或规格引用时运行；`start` 不依赖预先扫描产物。
 
 ## 集成到对话流程
 

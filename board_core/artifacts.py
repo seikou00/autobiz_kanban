@@ -8,10 +8,6 @@ from board_core.artifact_paths import has_glob, resolve_exact_relative_path
 
 GLOB_ARTIFACT_CONTRACTS = {
     "specs": {"path": "specs/**/*.md", "suffix": ".md"},
-    "code_exploration_cache": {
-        "path": "cache/code-exploration/**/*.json",
-        "suffix": ".json",
-    },
     "e2e_diagnostics": {
         "path": "e2e-diagnostics/**/*",
         "suffix": None,
