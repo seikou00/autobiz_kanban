@@ -2900,6 +2900,30 @@ def _run_batch_compile(
         None,
     )
 
+    if batch.get("executionLane") == "frontend":
+        # Frontend batch compilation is temporarily disabled. Ignore legacy
+        # commands as well as new empty batch profiles.
+        requested_paths = [str(path.resolve()) for path in requested_workspaces]
+        workspace_state = _repository_state(repositories)
+        return {
+            "compileStatus": "passed",
+            "commandId": None,
+            "skipped": True,
+            "skipReason": "frontend_batch_compile_disabled",
+            "requestedCodeWorkspaces": requested_paths,
+            "workspaceSnapshotSha256": _repository_state_sha256(workspace_state),
+            "workspaceState": workspace_state,
+            "implementationEvidenceByTask": {
+                str(task.get("id")): str(task.get("latestImplementationEvidenceId"))
+                for task in batch_tasks
+                if isinstance(task, dict) and isinstance(task.get("id"), str)
+            },
+            "implementationRevisionByTask": {
+                str(task.get("id")): int(task.get("implementationRevision", 0))
+                for task in batch_tasks
+                if isinstance(task, dict) and isinstance(task.get("id"), str)
+            },
+        }
     if not compile_command:
         raise TaskRunnerError(
             f"batch_compile_command_not_found:{batch_id}",
@@ -3140,6 +3164,7 @@ def _integrate_batch_compile_result(
             }
             return {
                 "compileStatus": "passed",
+                "batchCompileSkipped": compile_result.get("skipped", False),
                 "requiredAction": continuation["action"],
                 "batchId": batch_id,
                 "batchHandoff": batch_handoff,
@@ -3152,6 +3177,7 @@ def _integrate_batch_compile_result(
         continuation = _code_session_unlocked(workspace, feature)
         return {
             "compileStatus": "passed",
+            "batchCompileSkipped": compile_result.get("skipped", False),
             "requiredAction": continuation.get("action", "batch_compile_passed"),
             "batchId": batch_id,
             "continuation": continuation,

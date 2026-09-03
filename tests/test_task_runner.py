@@ -406,6 +406,48 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_frontend_empty_batch_compile_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            batch = _read_batch(feature_dir)
+            batch["executionLane"] = "frontend"
+            batch["tasks"][0]["uiRequired"] = True
+            batch["tasks"][0]["uiRefs"] = {
+                "pageRefs": ["PAGE-001"],
+                "interactionRefs": ["UIX-001"],
+                "visualSourceRefs": [],
+                "frontendRoute": "spec-driven-ui",
+            }
+            batch["tasks"][0]["scope"]["pages"] = ["PAGE-001"]
+            batch["batchValidation"]["profile"] = "frontend"
+            batch["batchValidation"]["mode"] = "commands"
+            batch["batchValidation"]["commands"] = []
+            _write_batch(feature_dir, batch)
+            root_path = feature_dir / "plan.json"
+            root_plan = json.loads(root_path.read_text(encoding="utf-8"))
+            root_plan["batches"][0]["executionLane"] = "frontend"
+            root_plan["batchValidationProfiles"]["frontend"] = {
+                "mode": "commands",
+                "commands": [],
+            }
+            root_path.write_text(json.dumps(root_plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code), "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            compiled = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            self.assertTrue(json.loads(compiled.stdout)["batchCompileSkipped"])
+            self.assertIsNone(_read_batch(feature_dir)["batchCompile"]["commandId"])
+
     def test_revalidate_batch_compile_reruns_a_passed_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
