@@ -25,6 +25,7 @@ Icon
 *.jar
 *.war
 *.ear
+node_modules/
 
 # JVM crash logs
 hs_err_pid*

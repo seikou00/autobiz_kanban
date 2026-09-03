@@ -167,6 +167,26 @@ def _list_deploy_units(
     return list(dict.fromkeys(item.strip() for item in payload))
 
 
+def list_supported_deploy_units(
+    collector_script: str,
+    *,
+    knowledge_path: str,
+    node_command: str = "node",
+    npm_command: str = "npm",
+) -> List[str]:
+    """安装 collector 依赖并读取其支持的部署单元。"""
+    npm_error = _npm_install(collector_script, npm_command=npm_command)
+    try:
+        return _list_deploy_units(
+            collector_script,
+            knowledge_path=knowledge_path,
+            node_command=node_command,
+        )
+    except KnowledgeCollectorError as exc:
+        reason = f"{npm_error}；{exc}" if npm_error else str(exc)
+        raise KnowledgeCollectorError(reason) from exc
+
+
 def _deploy_unit_prompt(
     collector_script: str,
     deploy_unit_id: str,
@@ -320,20 +340,19 @@ def render(
     resolved_knowledge_path = (knowledge_path or "").strip() or str(
         get_agents_root(plugin_root).resolve()
     )
-    npm_error = _npm_install(collector_script, npm_command=npm_command)
     try:
         supported_units = set(
-            _list_deploy_units(
+            list_supported_deploy_units(
                 collector_script,
                 knowledge_path=resolved_knowledge_path,
                 node_command=node_command,
+                npm_command=npm_command,
             )
         )
     except KnowledgeCollectorError as exc:
-        reason = f"{npm_error}；{exc}" if npm_error else str(exc)
         return _legacy_result(
             selected,
-            reason,
+            str(exc),
             plugin_root=plugin_root,
             session_workspace_path=session_workspace_path,
             platform=platform,

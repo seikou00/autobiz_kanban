@@ -167,6 +167,10 @@ class RunSuccessPathTest(unittest.TestCase):
             sync_agents,
             "build_sync_payload",
             side_effect=lambda *, repo_info: {"ok": True, "repo": repo_info},
+        ), mock.patch.object(
+            sync_agents,
+            "_collector_supported_units",
+            return_value=["U1"],
         ):
             result = sync_agents.run(None, None)
 
@@ -186,6 +190,129 @@ class RunSuccessPathTest(unittest.TestCase):
                 "transport": "ssh",
             },
         )
+
+    def test_collector_units_replace_manifest_units(self):
+        config = '{"agentsRepo": {"url": "https://git/x.git", "ref": "main"}}'
+        manifest_payload = {
+            "ok": True,
+            "message": "清单解析完成",
+            "supported_deploy_units": ["MANIFEST-1"],
+            "systems": [],
+        }
+        with _temp_board_config(config), mock.patch.object(
+            sync_agents,
+            "sync_repo",
+            return_value={"commit": "abc123", "transport": "https"},
+        ), mock.patch.object(
+            sync_agents,
+            "_collector_supported_units",
+            return_value=["JS-1", "JS-2"],
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            return_value=manifest_payload,
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["JS-1", "JS-2"], result["supported_deploy_units"])
+        self.assertEqual("collect-knowledge.js", result["supported_deploy_units_source"])
+        self.assertIn("识别 2 个支持的部署单元", result["message"])
+
+    def test_collector_failure_falls_back_to_manifest_units(self):
+        config = '{"agentsRepo": {"url": "https://git/x.git", "ref": "main"}}'
+        with _temp_board_config(config), mock.patch.object(
+            sync_agents,
+            "sync_repo",
+            return_value={"commit": "abc123", "transport": "https"},
+        ), mock.patch.object(
+            sync_agents,
+            "_collector_supported_units",
+            side_effect=sync_agents.KnowledgeCollectorError("node failed"),
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            return_value={
+                "ok": True,
+                "message": "清单解析完成",
+                "supported_deploy_units": ["MANIFEST-1"],
+                "systems": [],
+            },
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["MANIFEST-1"], result["supported_deploy_units"])
+        self.assertEqual("agents.manifest.json", result["supported_deploy_units_source"])
+        self.assertEqual("node failed", result["collectorWarning"])
+        self.assertIn("已回退清单解析", result["message"])
+
+    def test_empty_collector_result_does_not_erase_manifest_units(self):
+        config = '{"agentsRepo": {"url": "https://git/x.git", "ref": "main"}}'
+        with _temp_board_config(config), mock.patch.object(
+            sync_agents,
+            "sync_repo",
+            return_value={"commit": "abc123", "transport": "https"},
+        ), mock.patch.object(
+            sync_agents,
+            "_collector_supported_units",
+            return_value=[],
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            return_value={
+                "ok": True,
+                "message": "清单解析完成",
+                "supported_deploy_units": ["MANIFEST-1"],
+                "systems": [],
+            },
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertEqual(["MANIFEST-1"], result["supported_deploy_units"])
+        self.assertEqual("agents.manifest.json", result["supported_deploy_units_source"])
+
+    def test_collector_can_supply_units_without_manifest(self):
+        config = '{"agentsRepo": {"url": "https://git/x.git", "ref": "main"}}'
+        with _temp_board_config(config), mock.patch.object(
+            sync_agents,
+            "sync_repo",
+            return_value={"commit": "abc123", "transport": "https"},
+        ), mock.patch.object(
+            sync_agents,
+            "_collector_supported_units",
+            return_value=["JS-1"],
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            side_effect=sync_agents.AgentsManifestError("missing manifest"),
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["JS-1"], result["supported_deploy_units"])
+        self.assertEqual([], result["systems"])
+
+    def test_collector_and_manifest_failure_returns_error(self):
+        config = '{"agentsRepo": {"url": "https://git/x.git", "ref": "main"}}'
+        with _temp_board_config(config), mock.patch.object(
+            sync_agents,
+            "sync_repo",
+            return_value={"commit": "abc123", "transport": "https"},
+        ), mock.patch.object(
+            sync_agents,
+            "_collector_supported_units",
+            side_effect=sync_agents.KnowledgeCollectorError("node failed"),
+        ), mock.patch.object(
+            sync_agents,
+            "build_sync_payload",
+            side_effect=sync_agents.AgentsManifestError("missing manifest"),
+        ):
+            result = sync_agents.run(None, None)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("node failed", result["message"])
+        self.assertIn("missing manifest", result["message"])
 
 
 def _git(args, cwd):
