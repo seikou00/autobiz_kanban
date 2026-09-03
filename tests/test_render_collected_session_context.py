@@ -211,6 +211,8 @@ class CollectedSessionContextTest(unittest.TestCase):
                 "--knowledge-path ${{pluginPath}}{0}sys".format(separator),
                 command,
             )
+        self.assertTrue((ROOT / "hooks" / "collect-knowledge.js").is_file())
+        self.assertTrue((ROOT / "hooks" / "package.json").is_file())
 
 
 if __name__ == "__main__":

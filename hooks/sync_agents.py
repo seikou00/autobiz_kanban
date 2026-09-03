@@ -15,8 +15,9 @@ board_config.json 注册::
     }
 
 行为：每次都删掉旧 ``<pluginPath>/sys/``（已 .gitignore）再重新克隆，始终拿到远端
-最新内容；HTTPS 的两种 clone 方式都失败时，以 ``sshUrl`` 兜底重试相同 ref。仓库内含
-``agents.manifest.json`` 与 ``<systemId>/AGENTS.md``。随后把清单整形为 stdout JSON。
+最新内容；HTTPS 的两种 clone 方式都失败时，以 ``sshUrl`` 兜底重试相同 ref。同步完成后
+优先调用 ``collect-knowledge.js --listDeployUnits`` 获取部署单元；调用失败时回退解析
+``agents.manifest.json``。清单仍用于补充系统信息。
 
 输出（stdout，宿主据此把 supported_deploy_units 合并进 board.json）::
 
@@ -62,8 +63,13 @@ from hooks.agents_repo import (  # noqa: E402
     platform_key,
 )
 from board_core.contracts import BoardConfigError, load_board_config  # noqa: E402
+from hooks.render_collected_session_context import (  # noqa: E402
+    KnowledgeCollectorError,
+    list_supported_deploy_units,
+)
 
 BOARD_CONFIG_PATH = ROOT / "board_core" / "board_config.json"
+KNOWLEDGE_COLLECTOR_PATH = ROOT / "hooks" / "collect-knowledge.js"
 DEFAULT_REF = "main"
 HTTPS_CLONE_TIMEOUT_SECONDS = 20
 
@@ -231,6 +237,31 @@ def sync_repo(url: str, ref: str, dest: Path, ssh_url: Optional[str] = None) -> 
     return {"commit": commit, "transport": _transport_for_url(url)}
 
 
+def _collector_supported_units(knowledge_path: Path) -> List[str]:
+    return list_supported_deploy_units(
+        str(KNOWLEDGE_COLLECTOR_PATH),
+        knowledge_path=str(knowledge_path),
+    )
+
+
+def _collector_payload(
+    units: List[str],
+    *,
+    repo_info: dict,
+    knowledge_path: Path,
+) -> dict:
+    return {
+        "ok": True,
+        "schemaVersion": SYNC_SCHEMA_VERSION,
+        "message": f"agents 仓库已同步：collect-knowledge.js 识别 {len(units)} 个部署单元",
+        "repo": repo_info,
+        "knowledge_path": str(knowledge_path),
+        "supported_deploy_units": units,
+        "supported_deploy_units_source": "collect-knowledge.js",
+        "systems": [],
+    }
+
+
 def run(
     repo_url: Optional[str],
     ref: Optional[str],
@@ -264,14 +295,65 @@ def run(
         "ref": resolved_ref,
         **repo_info,
     }
+    collector_units: Optional[List[str]] = None
+    collector_error = ""
     try:
-        payload = build_sync_payload(repo_info=repo_info)
+        collector_units = _collector_supported_units(dest)
+    except KnowledgeCollectorError as exc:
+        collector_error = str(exc)
+
+    manifest_payload: Optional[dict] = None
+    manifest_error = ""
+    try:
+        manifest_payload = build_sync_payload(repo_info=repo_info)
     except AgentsManifestError as exc:
-        result = _fail(f"仓库已拉取但清单不可用: {exc}")
-        result["repo"] = repo_info
-        result["knowledge_path"] = str(dest)  # 已克隆，给出落盘路径（与 repo 同级）
-        return result
-    return payload
+        manifest_error = str(exc)
+
+    if collector_units is not None:
+        manifest_units = (
+            manifest_payload.get("supported_deploy_units", [])
+            if isinstance(manifest_payload, dict)
+            else []
+        )
+        if collector_units or not manifest_units:
+            payload = manifest_payload or _collector_payload(
+                collector_units,
+                repo_info=repo_info,
+                knowledge_path=dest,
+            )
+            payload["supported_deploy_units"] = collector_units
+            payload["supported_deploy_units_source"] = "collect-knowledge.js"
+            collector_message = (
+                f"collect-knowledge.js 识别 {len(collector_units)} 个支持的部署单元"
+            )
+            base_message = str(payload.get("message", "") or "")
+            payload["message"] = (
+                f"{base_message}；{collector_message}"
+                if base_message
+                else collector_message
+            )
+            return payload
+        collector_error = "collect-knowledge.js 未识别到部署单元"
+
+    if manifest_payload is not None:
+        manifest_payload["supported_deploy_units_source"] = "agents.manifest.json"
+        manifest_payload["collectorWarning"] = collector_error
+        fallback_message = (
+            f"collect-knowledge.js 不可用，已回退清单解析: {collector_error}"
+        )
+        base_message = str(manifest_payload.get("message", "") or "")
+        manifest_payload["message"] = (
+            f"{base_message}；{fallback_message}"
+            if base_message
+            else fallback_message
+        )
+        return manifest_payload
+
+    detail = f"collect-knowledge.js: {collector_error}；agents.manifest.json: {manifest_error}"
+    result = _fail(f"仓库已拉取但部署单元不可用: {detail}")
+    result["repo"] = repo_info
+    result["knowledge_path"] = str(dest)
+    return result
 
 
 def merge_supported_units_into_board_config(
@@ -366,7 +448,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--write-board-config",
         dest="write_board_config",
         action="store_true",
-        help="同步成功后把 supported_deploy_units 定点写回 board_config.json（打包前 bake 用；UI 常规拉取不必带）",
+        help="同步成功后把 supported_deploy_units 定点写回 board_config.json（pull_knowledge 已带此参数）",
     )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
