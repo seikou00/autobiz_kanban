@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from hooks.conflict_types import ConflictContext, ConflictType, ResolutionResult
+from hooks.commit_message import CommitMessageError, build_commit_message
 
 
 class ConflictAnalyzer:
@@ -255,6 +256,19 @@ class ModelBasedResolver:
         worktree_path = Path(conflict_context.candidate_worktree)
         resolved_files = []
         unresolved_files = []
+        try:
+            commit_message = build_commit_message(
+                conflict_context.task_card_id,
+                f"解决冲突 {', '.join(conflict_context.batch_ids)}",
+            )
+        except CommitMessageError as exc:
+            return ResolutionResult(
+                status="manual_required",
+                resolved_files=[],
+                unresolved_files=list(conflict_context.conflicted_files),
+                reason=f"Failed to build commit message: {exc}",
+                strategy_used="auto_merge_append_only",
+            )
 
         for file_path, content in conflict_context.conflict_markers.items():
             try:
@@ -294,7 +308,7 @@ class ModelBasedResolver:
                     "commit",
                     "--no-edit",
                     "-m",
-                    f"Auto-resolve conflicts in {', '.join(conflict_context.batch_ids)}",
+                    commit_message,
                 ],
                 cwd=worktree_path,
                 capture_output=True,
@@ -321,7 +335,7 @@ class ModelBasedResolver:
                 status="manual_required",
                 resolved_files=resolved_files,
                 unresolved_files=[],
-                reason=f"Failed to commit: {e.stderr}",
+                reason=f"Failed to commit: {getattr(e, 'stderr', str(e))}",
                 strategy_used="auto_merge_append_only",
             )
 

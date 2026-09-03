@@ -274,6 +274,7 @@ const feature = input.feature;
 const pluginPath = input.pluginPath;
 const artifactWorkspace = input.artifactWorkspace || input.workspace;
 const codeWorkspaces = input.codeWorkspaces || (input.codeWorkspace ? { default: input.codeWorkspace } : null);
+const taskCardId = input.taskCardId;
 const workflowHostGitRoot = input.workflowHostGitRoot;
 const repositoryRefs = Array.isArray(input.repositoryRefs)
   ? input.repositoryRefs.filter(ref => usableString(ref))
@@ -302,6 +303,9 @@ if (
 }
 if (Object.values(codeWorkspaces).some(path => !absolutePath(path))) {
   throw new Error("invalid_code_workspace_path");
+}
+if (!usableString(taskCardId) || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskCardId.trim())) {
+  throw new Error("invalid_task_card_id");
 }
 // The workflow host can be an artifact directory. Native worktrees are
 // provisioned by the plugin from the repository paths in codeWorkspaces.
@@ -366,6 +370,7 @@ phase("准备");
 const prepared = requireSchedulerResult(await agent(
   `确保固定 Code DAG run。执行：python "${schedulerPath}" ensure ` +
   `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
+  `--task-card-id "${taskCardId.trim()}" ` +
   `--max-parallel ${maxParallel} ` +
   `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs} ${workspaceRefArgs}。` +
   `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。` +

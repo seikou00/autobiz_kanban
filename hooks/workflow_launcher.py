@@ -22,14 +22,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import feature_dir, resolve_workspace  # noqa: E402
+from hooks.commit_message import normalize_task_card_id  # noqa: E402
 from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E402
-from hooks.parallel_runtime import batch_workspace_ref, batch_write_set, plan_digest, resource_groups  # noqa: E402
+from hooks.parallel_runtime import (  # noqa: E402
+    batch_workspace_ref,
+    batch_write_set,
+    plan_digest,
+    resource_groups,
+)
 from hooks.plan_json import BATCH_ID_RE, load_plan_bundle, plan_json_path  # noqa: E402
 from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root  # noqa: E402
 
 
 WORKFLOW_SCRIPT_NAME = "code-batched-execution.workflow.js"
-WORKFLOW_RUNTIME_RELATIVE_PATH = ".cmbdevclaw/workflows/" + WORKFLOW_SCRIPT_NAME
+WORKFLOW_RUNTIME_DIRECTORY = Path(".cmbdevclaw") / "workflows"
 DEFAULT_WORKFLOW_MAX_PARALLEL = 4
 DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 3600
 
@@ -120,8 +126,8 @@ def resolve_code_workspace_contract(
     }
 
 
-def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[str, str]:
-    """Materialize an audit copy and return the inline source for the host."""
+def materialize_workflow_script(source: Path, artifact_workspace: str, feature: str) -> dict[str, str]:
+    """Copy the fixed workflow into its Feature-owned artifact runtime path."""
     target_root = Path(artifact_workspace).expanduser().resolve()
     if not target_root.is_dir():
         raise ValueError(f"workflow_artifact_workspace_missing:{target_root}")
@@ -131,10 +137,10 @@ def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[s
         raise ValueError(f"fixed_workflow_script_unreadable:{source}:{exc}") from exc
     digest = hashlib.sha256(source_bytes).hexdigest()
     try:
-        source_text = source_bytes.decode("utf-8")
+        source_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"fixed_workflow_script_not_utf8:{source}:{exc}") from exc
-    target = target_root / WORKFLOW_RUNTIME_RELATIVE_PATH
+    target = target_root / WORKFLOW_RUNTIME_DIRECTORY / feature / WORKFLOW_SCRIPT_NAME
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
@@ -145,7 +151,6 @@ def materialize_workflow_script(source: Path, artifact_workspace: str) -> dict[s
         "workflowScript": str(target),
         "workflowScriptSource": str(source),
         "workflowScriptSha256": digest,
-        "workflowScriptContent": source_text,
     }
 
 
@@ -358,8 +363,10 @@ def analyze_batches(
     feature: str,
     plugin_path: Path | None = None,
     workspace: Path | None = None,
+    task_card_id: str | None = None,
 ) -> dict:
     """Return the fixed workflow entrypoint for every valid pending Batch."""
+    selected_task_card_id = normalize_task_card_id(task_card_id)
     try:
         script_root = (plugin_path or ROOT).expanduser().resolve()
         artifact_workspace = resolve_workspace(workspace)
@@ -474,6 +481,7 @@ def analyze_batches(
         runtime_script = materialize_workflow_script(
             workflow_script,
             str(artifact_workspace),
+            feature,
         )
         common_result = {
             "useWorkflow": True,
@@ -516,6 +524,7 @@ def analyze_batches(
                     "maxParallel": max_parallel,
                     "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
                     "runtimeConfig": runtime_config,  # Pass full config to workflow
+                    "taskCardId": selected_task_card_id,
                 },
                 "reason": f"fixed_workflow_for_pending_batches:{len(valid_batches)}",
                 "requiredAction": "start_fixed_workflow",
@@ -548,6 +557,7 @@ def analyze_batches(
                 "maxParallel": max_parallel,
                 "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
                 "runtimeConfig": runtime_config,
+                "taskCardId": selected_task_card_id,
             },
             "repositoryCoordinator": {
                 "path": str(coordinator_path),
@@ -577,6 +587,7 @@ def main() -> int:
     parser.add_argument("--feature", required=True, help="Feature ID")
     parser.add_argument("--plugin-path", help="Plugin source path; defaults to this repository")
     parser.add_argument("--workspace", help="Artifact workspace containing .autobizdevops/state.json")
+    parser.add_argument("--task-card-id", required=True, help="task card selected before starting the workflow")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
     args = parser.parse_args()
 
@@ -584,6 +595,7 @@ def main() -> int:
         args.feature,
         Path(args.plugin_path) if args.plugin_path else None,
         Path(args.workspace) if args.workspace else None,
+        args.task_card_id,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from hooks.json_writer_common import atomic_write_json
 from hooks.json_writer_common import WriterResult
-from hooks.parallel_batch_scheduler import create_run, mark_batch, schedule
+from hooks.parallel_batch_scheduler import create_run as _create_run, mark_batch, schedule
 from hooks.parallel_batch_stage import complete_stage, defer_stage, fail_stage, gate_batch, record_test_failure, start_stage
 from hooks.parallel_evidence_aggregate import aggregate_evidence
 from hooks.parallel_merge_train import begin_e2e, build_candidate, finish_e2e, promote_candidate
@@ -18,6 +18,12 @@ from hooks.parallel_stage_validation import owned_commands, run_owned_stage
 from hooks.parallel_validation_ownership import build_pipeline_contract, validation_ownership_errors
 from hooks.worktree_manager import provision_parallel_worktree, seal_parallel_batch
 from tests.test_task_runner import _git, _workspace
+
+
+def create_run(workspace: Path, feature: str, **kwargs):
+    """Create a workflow run with the production commit context in tests."""
+    kwargs.setdefault("task_card_id", "Z990692-294")
+    return _create_run(workspace, feature, **kwargs)
 
 
 def _git_output(repo: Path, *args: str) -> str:
@@ -88,7 +94,12 @@ class ParallelStagedPipelineTest(unittest.TestCase):
                 metadata={"batchCommit": commit, "testEvidenceIds": ["UTEST-T001-001"]},
             )
             gated = gate_batch(workspace, "alpha", run_id, "B001")
-            self.assertTrue(build_candidate(workspace, "alpha", run_id, wave=1, batch_ids=["B001"])["success"])
+            candidate = build_candidate(workspace, "alpha", run_id, wave=1, batch_ids=["B001"])
+            self.assertTrue(candidate["success"])
+            self.assertEqual(
+                _git_output(Path(candidate["worktreePath"]), "log", "-1", "--format=%s"),
+                "Z990692-294 #comment 合并候选 default wave-001 B001",
+            )
             with patch("hooks.parallel_merge_train.mark_parallel_batch_tasks_merged", return_value=WriterResult(ok=True)):
                 self.assertTrue(promote_candidate(workspace, "alpha", run_id, wave=1, repository_ref="default", allow_unverified=True)["success"])
             self.assertTrue(begin_e2e(workspace, "alpha", run_id)["success"])

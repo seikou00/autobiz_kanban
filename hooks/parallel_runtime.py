@@ -300,6 +300,7 @@ def create_manifest(
     timeout_seconds: int = 3600,
     repositories: dict[str, dict[str, Any]] | None = None,
     runtime_config: dict[str, Any] | None = None,
+    task_card_id: str | None = None,
 ) -> dict[str, Any]:
     bundle = load_plan_bundle(feature_dir(workspace, feature))
     errors = parallel_plan_errors(bundle)
@@ -418,6 +419,9 @@ def create_manifest(
         "maxParallel": max(1, int(max_parallel)),
         "timeoutPerBatch": max(1, int(timeout_seconds)),
         "runtimeConfig": final_runtime_config,  # Add runtime config to manifest
+        # The workflow start gate owns this value. Keeping it at run scope
+        # makes every native worktree and recovery path use the same card.
+        "taskCardId": task_card_id,
         "batches": entries,
         "validationBatches": {
             str(item["id"]): {

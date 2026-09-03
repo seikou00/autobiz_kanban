@@ -332,6 +332,10 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint code_done
 
 当 Code 阶段存在合法待执行 Batch 时，只启动仓库固定的 `workflows/code-batched-execution.workflow.js`。每个可写 Batch 先由插件调用 `worktree_manager.py provision`，从对应物理 Git 根的冻结提交创建并登记原生 linked Git worktree；平台 `agent()` 只负责在该明确路径中运行实现，不提供也不承担 Worktree 隔离。插件负责 Worktree 的创建、校验、提交、合并和清理。不得生成、持久化、校验或以内联脚本替换 workflow 控制流。
 
+### 看板 ID 提交上下文
+
+启动某个 Feature 的固定 Workflow 前，先按 `${pluginPath}/skills/references/ask-user-question.md` 使用 `request_user_input` 直接询问用户本次看板 ID。用户只需在该次启动前提供一次；将该值作为唯一 `taskCardId` 传给 launcher，插件写入 `.parallel-runs/<runId>/manifest.json` 并用于本次 Run 的全部提交。恢复同一 Run 时直接使用 manifest 中已保存的 ID，不再询问、回查平台或比较新旧 ID。必须校验 ID 仅由字母、数字、`.`、`_`、`-` 组成；未拿到有效 ID 时不得调用 launcher 或创建 Workflow。向用户说明所有插件托管提交将使用：`<看板ID> #comment <提交说明>`。
+
 先调用 launcher：
 
 ```bash
@@ -339,6 +343,7 @@ launcher_result=$(python "${pluginPath}/hooks/workflow_launcher.py" \
   --feature "${feature}" \
   --plugin-path "${pluginPath}" \
   --workspace "${pluginWorkspace}/${projectDir}" \
+  --task-card-id "<用户已选择的看板ID>" \
   --json)
 ```
 
@@ -346,11 +351,11 @@ launcher 必须从根 `plan.json` 的 `codeWorkspaces` 读取 `workspaceRef -> �
 
 在调用平台 `workflow` 前，必须把 launcher 返回的 `batchExecutionPlan` 展示给用户：逐 Batch 列出 ID、标题、TASK 数、执行 lane、代码仓库、依赖和写集，并按 `waves` 展示每一波会并行或串行执行的 Batch。必须同时说明这是依据当前 Plan 的预览，实际后续 Wave 只会在上游合并成功后释放；同仓库重叠写集会串行。展示是执行前的可见性步骤，不额外等待确认，除非用户明确要求审批后再执行。
 
-单一物理 Git 根时，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`、`requiredAction=start_fixed_workflow` 且校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`，才使用 launcher 返回的固定脚本内容启动 Workflow。多个物理 Git 根时，只有 `executionMode=repository_coordinated`、`requiredAction=start_repository_coordinator` 且 `canStartWorkflow=true`，才执行协调器的 `prepare`/`next` 协议并启动其返回的子 Workflow；全部 delivery 推广后，协调器同样必须执行 `begin-e2e → finish-e2e → final-verify`，不得跳过 B-E2E 而直接聚合 evidence。launcher 会把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/` 作为审计副本，并返回 `workflowScriptContent`、`workflowScriptSha256`、`workflowScriptSource` 与可直接透传的 `workflowArgs`；`workflowScript` / `workflowScriptPath` 仅是审计路径，不得传给平台做 `scriptPath`。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排或改写 workflow。
+单一物理 Git 根时，只有 `useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true`、`requiredAction=start_fixed_workflow` 且校验结果为 `parallel_plan_valid` 或 `single_batch_workflow_valid`，才使用 launcher 返回的固定脚本路径启动 Workflow。多个物理 Git 根时，只有 `executionMode=repository_coordinated`、`requiredAction=start_repository_coordinator` 且 `canStartWorkflow=true`，才执行协调器的 `prepare`/`next` 协议并启动其返回的子 Workflow；执行 `prepare` 时同样必须传入 `--task-card-id "<launcher.workflowArgs.taskCardId>"`。全部 delivery 推广后，协调器同样必须执行 `begin-e2e → finish-e2e → final-verify`，不得跳过 B-E2E 而直接聚合 evidence。launcher 会先把插件内固定脚本复制到 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/`，再返回该 Feature 专属副本的 `workflowScriptPath`、`workflowScriptSha256`、`workflowScriptSource` 与可直接透传的 `workflowArgs`。Code 回退会归档该目录及其中的 journal、state、toolstream 和锁文件；不得把不同 Feature 共用一个目录。任何其他结果都必须停止或回流 `/autodev-plan` 修复 Plan，禁止让模型临时编排、改写或以内联脚本替换 workflow。
 
-调用平台 `workflow` 的唯一允许形式是 `script=launcher.workflowScriptContent` 且 `args=JSON.stringify(launcher.workflowArgs)`。禁止自行拼接 JavaScript、禁止增删 phase、禁止从 launcher 输出以外重建参数。使用内联脚本是为了让平台把固定脚本持久化到当前对话 workspace；不得把 artifact workspace、业务仓库或插件目录的绝对路径作为平台 `scriptPath`。
+调用平台 `workflow` 的唯一允许形式是 `scriptPath=launcher.workflowScriptPath` 且 `args=JSON.stringify(launcher.workflowArgs)`。禁止自行拼接 JavaScript、禁止增删 phase、禁止从 launcher 输出以外重建参数。调用前必须由 launcher 将固定脚本物化到 artifact workspace；不得改用插件源码、业务仓库路径或内联脚本。
 
-单一物理 Git 根的启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace` 和以逻辑 `workspaceRef` 为 key 的 `codeWorkspaces`；`workflowHostGitRoot` 仅作为可选审计元数据，不再决定 Worktree 来源。插件会在创建 scheduler run 后校验每个绑定的真实 Git 根并调用 `worktree_manager.py provision` 创建原生 Worktree。当前平台没有在单个 `agent()` 调用中指定其他 Git 隔离源的接口，因此不依赖平台 Worktree；若 `codeWorkspaces` 指向多个独立 Git 根，launcher 返回 `executionMode=repository_coordinated`、`requiredAction=start_repository_coordinator` 和协调器命令，不直接启动多根 Workflow。协调器 `prepare` 必须向共享 scheduler 传递 `allow_bootstrap=True`，使受控的脏仓库基线提交策略与单仓库固定 Workflow 一致；仍只排除平台运行时文件，并为每个物理 Git 根记录一个明确的基线提交。协调器只创建一个共享 scheduler run，并按当前 DAG 波次的物理 Git 根返回 `repositoryWorkflows`；调用方必须用同一份固定脚本内容并行启动这些子 Workflow，子 Workflow 的启动参数只包含本仓库映射、`repositoryRefs` 和 `batchIds`。所有子 Workflow 完成后调用协调器 `next`，重复到 `allMerged=true`，再由协调器创建 B-E2E Worktree、接收其结果并执行最后一次 evidence aggregate。不得把多仓库映射强行塞进一个平台 Workflow，也不得为每个仓库创建独立 scheduler run。
+单一物理 Git 根的启动参数必须包含 `feature`、`pluginPath`、launcher 返回的 `artifactWorkspace` 和以逻辑 `workspaceRef` 为 key 的 `codeWorkspaces`；`workflowHostGitRoot` 仅作为可选审计元数据，不再决定 Worktree 来源。插件会在创建 scheduler run 后校验每个绑定的真实 Git 根并调用 `worktree_manager.py provision` 创建原生 Worktree。当前平台没有在单个 `agent()` 调用中指定其他 Git 隔离源的接口，因此不依赖平台 Worktree；若 `codeWorkspaces` 指向多个独立 Git 根，launcher 返回 `executionMode=repository_coordinated`、`requiredAction=start_repository_coordinator` 和协调器命令，不直接启动多根 Workflow。协调器 `prepare` 必须向共享 scheduler 传递 `allow_bootstrap=True`，使受控的脏仓库基线提交策略与单仓库固定 Workflow 一致；仍只排除平台运行时文件，并为每个物理 Git 根记录一个明确的基线提交。协调器只创建一个共享 scheduler run，并按当前 DAG 波次的物理 Git 根返回 `repositoryWorkflows`；调用方必须用 launcher 返回的同一 `workflowScriptPath` 并行启动这些子 Workflow，子 Workflow 的启动参数只包含本仓库映射、`repositoryRefs` 和 `batchIds`。所有子 Workflow 完成后调用协调器 `next`，重复到 `allMerged=true`，再由协调器创建 B-E2E Worktree、接收其结果并执行最后一次 evidence aggregate。不得把多仓库映射强行塞进一个平台 Workflow，也不得为每个仓库创建独立 scheduler run。
 
 固定脚本按以下顺序执行：
 

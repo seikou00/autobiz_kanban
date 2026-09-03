@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import feature_dir, resolve_feature, resolve_workspace
+from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.evidence_kernel import FileLock
 from hooks.parallel_runtime import (
     append_event,
@@ -123,6 +124,7 @@ def _bootstrap_repository(
     git_root: Path,
     feature: str,
     *,
+    task_card_id: str,
     initialized: bool,
     ignore_additions: list[str],
     allow_bootstrap: bool,
@@ -151,7 +153,7 @@ def _bootstrap_repository(
     if add.returncode != 0:
         raise ValueError(f"parallel_code_workspace_bootstrap_stage_failed:{add.stderr.strip()}")
     reason = "unborn_head" if before_head is None else "dirty_worktree"
-    message = f"autodev: bootstrap {feature} baseline"
+    message = build_commit_message(task_card_id, f"初始化 {feature} 工作流基线")
     commit = _git(
         git_root,
         "-c",
@@ -183,8 +185,10 @@ def resolve_repository_bindings(
     *,
     feature: str = "feature",
     allow_bootstrap: bool = False,
+    task_card_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve `workspaceRef=/path` arguments into immutable repository bindings."""
+    normalized_task_card_id = normalize_task_card_id(task_card_id)
     refs = sorted({
         str(item.get("workspaceRef"))
         for batch in bundle.batches.values()
@@ -223,6 +227,7 @@ def resolve_repository_bindings(
         bootstrap = _bootstrap_repository(
             git_root,
             feature,
+            task_card_id=normalized_task_card_id,
             initialized=initialized,
             ignore_additions=ignore_additions,
             allow_bootstrap=allow_bootstrap,
@@ -373,11 +378,13 @@ def create_run(
     code_workspaces: list[str] | None = None,
     workflow_workspace: Path | None = None,
     allow_bootstrap: bool = False,
+    task_card_id: str | None = None,
 ) -> dict[str, Any]:
     # Kept as an ignored Python API compatibility parameter for older callers.
     # The CLI and fixed Workflow no longer expose it: platform workspace identity
     # must not constrain one or more business repositories.
     _ = workflow_workspace
+    normalized_task_card_id = normalize_task_card_id(task_card_id)
     verdict = validate_plan_for_parallel(workspace, feature)
     if not verdict["canParallel"]:
         raise ValueError(f"parallel_not_available:{verdict['reason']}")
@@ -396,6 +403,7 @@ def create_run(
             code_workspaces,
             feature=feature,
             allow_bootstrap=allow_bootstrap,
+            task_card_id=normalized_task_card_id,
         )
         # Load runtime config from workspace
         from hooks.workflow_launcher import _load_runtime_config
@@ -408,6 +416,7 @@ def create_run(
             timeout_seconds=timeout_seconds,
             repositories=repositories,
             runtime_config=runtime_config,  # Pass runtime config
+            task_card_id=normalized_task_card_id,
         )
         manifest["isolation"] = {
             "mode": "native_git_worktrees",
@@ -893,6 +902,7 @@ def ensure_run(
     code_workspaces: list[str] | None = None,
     allow_bootstrap: bool = False,
     workspace_refs: list[str] | None = None,
+    task_card_id: str | None = None,
 ) -> dict[str, Any]:
     """Create one scheduler run or safely resume the existing durable run."""
     active_run_id = get_active_run(workspace, feature)
@@ -905,6 +915,7 @@ def ensure_run(
                 timeout_seconds=timeout_seconds,
                 code_workspaces=code_workspaces,
                 allow_bootstrap=allow_bootstrap,
+                task_card_id=task_card_id,
             )
             if workspace_refs:
                 result = schedule(workspace, feature, str(result["runId"]), workspace_refs=workspace_refs)
@@ -970,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--timeout-seconds", type=int, default=3600)
             item.add_argument("--code-workspace", action="append", required=True, help="workspaceRef=/path; single-ref runs may pass /path")
             item.add_argument("--allow-bootstrap", action="store_true", help="explicitly allow Git initialization or a baseline commit for a dirty source repository")
+            item.add_argument("--task-card-id", required=True, help="task card selected before the workflow starts")
         if name in {"status", "resume", "ensure"}:
             item.add_argument("--workspace-ref", action="append", dest="workspace_refs", help="only schedule batches for these workspaceRef values")
     mark = subparsers.add_parser("mark-batch")
@@ -1000,6 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
                     timeout_seconds=args.timeout_seconds,
                     code_workspaces=args.code_workspace,
                     allow_bootstrap=args.allow_bootstrap,
+                    task_card_id=args.task_card_id,
                 ),
             )
         if args.command == "ensure":
@@ -1013,6 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
                     code_workspaces=args.code_workspace,
                     allow_bootstrap=args.allow_bootstrap,
                     workspace_refs=args.workspace_refs,
+                    task_card_id=args.task_card_id,
                 ),
             )
         if args.command == "status":

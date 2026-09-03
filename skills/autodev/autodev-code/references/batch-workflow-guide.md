@@ -17,7 +17,7 @@ python "${pluginPath}/hooks/workflow_launcher.py" \
   --json
 ```
 
-For a single physical Git root, start the returned fixed script content only
+For a single physical Git root, start the returned fixed script path only
 when all of these are true. For multiple physical Git roots, require
 `executionMode=repository_coordinated` and
 `requiredAction=start_repository_coordinator`: run the coordinator `prepare`,
@@ -26,11 +26,10 @@ launch every returned `repositoryWorkflows` entry from its own
 the coordinator `next`. Repeat until `allMerged=true`, then invoke coordinator
 `begin-e2e`, run B-E2E only in its returned temporary worktrees, invoke
 `finish-e2e`, and finally invoke `final-verify` exactly once. The launcher copies the fixed plugin script into
-`artifactWorkspace/.cmbdevclaw/workflows/` as an audit copy and returns
-`workflowScriptContent` plus `workflowScriptSha256`. `workflowScriptSource`,
-`workflowScript`, and `workflowScriptPath` are audit fields; do not pass those
-paths to the Workflow host. `workflowArgs` is the complete argument object for
-the Workflow call; do not reconstruct it.
+`artifactWorkspace/.cmbdevclaw/workflows/<feature>/` before the platform call and returns
+its `workflowScriptPath` plus `workflowScriptSha256`.
+`workflowScriptSource` identifies the immutable source. `workflowArgs` is the
+complete argument object for the Workflow call; do not reconstruct it.
 
 - `useWorkflow=true`
 - `canStartWorkflow=true`
@@ -72,15 +71,14 @@ The Workflow tool invocation is fixed too:
 
 ```javascript
 workflow({
-  script: launcher.workflowScriptContent,
+  scriptPath: launcher.workflowScriptPath,
   args: JSON.stringify(launcher.workflowArgs)
 })
 ```
 
-Do not pass `scriptPath` for the artifact or plugin path. The inline content is
-the unchanged repository-owned fixed script; the host persists it under the
-current conversation workspace and then applies its normal workflow controls.
-When resuming an existing run, pass only `resumeFromRunId` and do not resolve the
+The launcher must materialize the copied artifact script before this call. Do
+not use the plugin source, business repository path, or inline content. When
+resuming an existing run, pass only `resumeFromRunId` and do not resolve the
 artifact path again.
 
 The Workflow host workspace is not a Worktree source contract. The plugin

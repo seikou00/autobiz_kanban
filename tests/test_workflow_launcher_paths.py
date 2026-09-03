@@ -42,6 +42,8 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                         "api=/srv/api",
                         "--code-workspace",
                         "web=/srv/web",
+                        "--task-card-id",
+                        "Z990692-294",
                     ]
                 )
 
@@ -53,6 +55,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             timeout_seconds=3600,
             code_workspaces=["api=/srv/api", "web=/srv/web"],
             allow_bootstrap=True,
+            task_card_id="Z990692-294",
         )
 
     def test_repository_coordinator_groups_batches_by_physical_git_root(self) -> None:
@@ -94,7 +97,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 "hooks.workflow_launcher.load_plan_bundle",
                 side_effect=ValueError("B001.completedTaskCount_mismatch"),
             ):
-                result = analyze_batches("broken", workspace=artifact_workspace)
+                result = analyze_batches("broken", workspace=artifact_workspace, task_card_id="Z990692-294")
 
         self.assertFalse(result["useWorkflow"])
         self.assertEqual(result["strategy"], "blocked")
@@ -138,9 +141,15 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 "hooks.workflow_launcher.validate_plan_for_parallel",
                 return_value={"canParallel": True, "reason": "parallel_plan_valid"},
             ) as validate:
-                result = analyze_batches("three-paths", plugin_path, artifact_workspace)
+                result = analyze_batches("three-paths", plugin_path, artifact_workspace, "Z990692-294")
             self.assertTrue(
-                (artifact_workspace / ".cmbdevclaw" / "workflows" / "code-batched-execution.workflow.js").is_file()
+                (
+                    artifact_workspace
+                    / ".cmbdevclaw"
+                    / "workflows"
+                    / "three-paths"
+                    / "code-batched-execution.workflow.js"
+                ).is_file()
             )
 
         self.assertTrue(result["useWorkflow"])
@@ -149,11 +158,17 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertTrue(result["canStartWorkflow"])
         self.assertEqual(result["requiredAction"], "start_fixed_workflow")
         self.assertEqual(result["artifactWorkspace"], str(artifact_workspace.resolve()))
-        runtime_script = artifact_workspace / ".cmbdevclaw" / "workflows" / "code-batched-execution.workflow.js"
+        runtime_script = (
+            artifact_workspace
+            / ".cmbdevclaw"
+            / "workflows"
+            / "three-paths"
+            / "code-batched-execution.workflow.js"
+        )
         self.assertEqual(result["workflowScript"], str(runtime_script.resolve()))
         self.assertEqual(result["workflowScriptPath"], str(runtime_script.resolve()))
         self.assertEqual(result["workflowScriptSource"], str(script.resolve()))
-        self.assertEqual(result["workflowScriptContent"], "export const meta = {};")
+        self.assertNotIn("workflowScriptContent", result)
         self.assertEqual(
             result["workflowScriptSha256"],
             hashlib.sha256(b"export const meta = {};").hexdigest(),
@@ -183,6 +198,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                     "enableAutoResolve": False,
                 },
             },
+            "taskCardId": "Z990692-294",
         })
         self.assertEqual(result["codeWorkspaceSource"], "plan_json")
         self.assertEqual(result["workspaceContractPath"], str((feature_dir / "plan.json").resolve()))
@@ -231,7 +247,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 "hooks.workflow_launcher.validate_plan_for_parallel",
                 return_value={"canParallel": True, "reason": "parallel_plan_valid"},
             ):
-                result = analyze_batches("multi", plugin_path, artifact_workspace)
+                result = analyze_batches("multi", plugin_path, artifact_workspace, "Z990692-294")
 
         self.assertTrue(result["useWorkflow"])
         self.assertEqual(result["strategy"], "repository_coordinated")
@@ -245,6 +261,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             "api": str(api.resolve()),
             "web": str(web.resolve()),
         })
+        self.assertEqual(result["workflowArgs"]["taskCardId"], "Z990692-294")
 
     def test_launcher_blocks_without_code_workspace_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,7 +289,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 "hooks.workflow_launcher.validate_plan_for_parallel",
                 return_value={"canParallel": True, "reason": "single_batch_workflow_valid"},
             ):
-                result = analyze_batches("missing-map", plugin_path, artifact_workspace)
+                result = analyze_batches("missing-map", plugin_path, artifact_workspace, "Z990692-294")
 
         self.assertFalse(result["useWorkflow"])
         self.assertEqual(result["requiredAction"], "provide_code_workspace_mapping")
@@ -298,7 +315,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 "hooks.workflow_launcher.validate_plan_for_parallel",
                 return_value={"canParallel": True, "reason": "single_batch_workflow_valid"},
             ):
-                result = analyze_batches("fixed", plugin_path, artifact_workspace)
+                result = analyze_batches("fixed", plugin_path, artifact_workspace, "Z990692-294")
 
         self.assertFalse(result["useWorkflow"])
         self.assertEqual(result["reason"], "fixed_workflow_script_not_found")

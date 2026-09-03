@@ -34,6 +34,7 @@ class ConflictContext:
     wave: int  # Wave number
     attempts: int = 0  # Number of resolution attempts
     error_message: str = ""  # Original error message from Git
+    task_card_id: str = ""  # Workflow-scoped production commit context
 
 
 @dataclass

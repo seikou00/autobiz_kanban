@@ -75,7 +75,7 @@ Code 回退不支持批次级目标。只要清理范围包含 `dev.code`，就�
 
 - 清理 Code 及其后续阶段产物、完整 `evidence/`、`.task-runs/` 和 `.parallel-runs/`；这些 Feature 目录内的运行时数据会归档到 rollback history，不能只删除 `EVIDENCE.index.json` 而遗留证据流。
 - `.parallel-runs/` 下的调度 manifest、lease、错误 run 目录（例如只有 `.lock` 没有 `manifest.json` 的目录）都属于同一 Code Session 的运行态，回退后不得继续保留或被下一次 `ensure` 复用。
-- 回退成功后检查业务仓库的 `.cmbdevclaw/workflows/`、平台动态 worktree 注册和孤立 worktree 记录；没有活动 Workflow 时，清理失败 Workflow journal/toolstream、执行 `git worktree prune`，并移除已确认不再注册的孤立 Batch worktree。不得删除仍被活动 Workflow 或 Git worktree registry 引用的目录。
+- 回退会归档产物工作区中 Feature 专属的 `.cmbdevclaw/workflows/<feature>/`，包括 launcher 拷贝的固定脚本及其 journal、state、toolstream 和锁文件。回退成功后仍须检查业务仓库的 `.cmbdevclaw/workflows/`、平台动态 worktree 注册和孤立 worktree 记录；没有活动 Workflow 时，才可清理以明确 runId/path 识别的失败 journal/toolstream、执行 `git worktree prune`，并移除已确认不再注册的孤立 Batch worktree。不得删除仍被活动 Workflow、其他 Feature 或 Git worktree registry 引用的目录。
 - 重置全部 Code task、implementation/completion evidence 引用、批次编译状态和 active batch；保留任务契约、依赖和验收标准。
 - 默认 `--code-source keep`，不修改业务 Git 仓库，只报告源码变化。
 - 只有用户明确确认且存在基线时才使用 `--code-source restore`。源码恢复前会校验当前 hash 是否仍等于该 Feature 的最终 Code 快照；不一致时阻断，不覆盖外部修改。

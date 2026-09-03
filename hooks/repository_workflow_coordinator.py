@@ -87,6 +87,7 @@ def _repository_requests(
                 "repositoryRefs": ordered_refs,
                 "batchIds": item["batchIds"],
                 "coordinatorManaged": True,
+                "taskCardId": manifest.get("taskCardId"),
                 "maxParallel": int(manifest.get("maxParallel", 4)),
                 "timeoutPerBatch": int(manifest.get("timeoutPerBatch", 3600)),
             },
@@ -137,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--code-workspace", action="append")
+    parser.add_argument("--task-card-id")
     parser.add_argument("--passed", choices=("true", "false"))
     parser.add_argument("--metadata-json", default="{}")
     args = parser.parse_args(argv)
@@ -146,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare":
             if not _parse_workspaces(args.code_workspace):
                 raise ValueError("repository_coordinator_code_workspace_required")
+            if not args.task_card_id:
+                raise ValueError("parallel_task_card_id_required")
             scheduler = ensure_run(
                 workspace,
                 feature,
@@ -158,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
                 # be committed as an explicit bootstrap baseline before
                 # child worktrees are provisioned.
                 allow_bootstrap=True,
+                task_card_id=args.task_card_id,
             )
         elif args.command == "next":
             if not args.run_id:

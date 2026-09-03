@@ -78,6 +78,7 @@ ROLLBACK_STATE_MODES = (
 )
 _PLATFORM_RUNTIME_EXCLUDE = ":(exclude).cmbdevclaw/**"
 _PLATFORM_RUNTIME_PREFIX = ".cmbdevclaw/"
+_WORKFLOW_ARTIFACT_RUNTIME_DIRECTORY = Path(".cmbdevclaw") / "workflows"
 _GIT_OBJECT_ID_LENGTHS = frozenset({40, 64})
 CODE_SESSION_BASELINE_VERSION = 2
 
@@ -119,6 +120,7 @@ class RollbackResult:
     ok: bool
     plan: RollbackPlan
     deleted_artifacts: tuple[str, ...] = ()
+    archived_workflow_runtime: str | None = None
     restored_active_dir: bool = False
     errors: tuple[str, ...] = ()
 
@@ -1337,6 +1339,27 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
+def _feature_workflow_runtime_dir(workspace: Path, feature: str) -> Path:
+    """Return the Feature-owned Workflow host runtime directory.
+
+    The feature is validated by ``prepare_stage_rollback`` before execution,
+    allowing a Code rollback to archive only its copied script and platform
+    sidecars without touching another Feature's Workflow state.
+    """
+    return workspace / _WORKFLOW_ARTIFACT_RUNTIME_DIRECTORY / feature
+
+
+def _prune_empty_runtime_parents(workspace: Path, path: Path) -> None:
+    """Remove empty runtime parents, stopping before the artifact root."""
+    current = path.parent
+    while current != workspace:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+
 def prune_rollback_history(
     *,
     workspace: Path,
@@ -1584,6 +1607,8 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
     source_backup_manifest: dict[str, Any] | None = None
     active_session_backup = transaction_dir / "active-session.json"
     active_session_path = _active_session_path(plan.workspace, plan.feature)
+    workflow_runtime_dir = _feature_workflow_runtime_dir(plan.workspace, plan.feature)
+    workflow_runtime_backup = transaction_dir / "workflow-runtime"
     if active_session_path.is_file():
         _copy_path(active_session_path, active_session_backup)
     atomic_write_json(
@@ -1601,6 +1626,7 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
     )
     atomic_write_json(transaction_dir / "state-before.json", plan.old_records)
     moved_artifacts: list[Path] = []
+    moved_workflow_runtime = False
     moved_to_active = False
     restored_source_files: tuple[str, ...] = ()
     parallel_cleanup: list[dict[str, Any]] = []
@@ -1611,6 +1637,15 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
         # branches, and leases and verified the cleanup completed.
         if plan.code_in_scope:
             parallel_cleanup = cleanup_feature_runs_for_code_rollback(plan.workspace, plan.feature)
+            # The launcher materializes the fixed script below a
+            # Feature-owned artifact path. Archive that script with platform
+            # journals, sidecars, and lock files created alongside it. Never
+            # remove the shared .cmbdevclaw root because another Feature may
+            # still have an active Workflow there.
+            if workflow_runtime_dir.exists() or workflow_runtime_dir.is_symlink():
+                workflow_runtime_backup.parent.mkdir(parents=True, exist_ok=True)
+                workflow_runtime_dir.replace(workflow_runtime_backup)
+                moved_workflow_runtime = True
         plan_backup_paths = _backup_plan_bundle(plan.workspace, plan.feature, plan_backup_dir)
         source_plan = (
             prepare_code_source_restore(plan.workspace, plan.feature, feature_dir)
@@ -1667,6 +1702,11 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
                 "restoredSourceFiles": list(restored_source_files),
                 "codeResetTasks": list(plan.code_reset_tasks),
                 "parallelRunCleanup": parallel_cleanup,
+                "archivedWorkflowRuntime": (
+                    str(workflow_runtime_dir.relative_to(plan.workspace))
+                    if moved_workflow_runtime
+                    else None
+                ),
             },
         )
     except (Exception, KeyboardInterrupt) as exc:
@@ -1681,6 +1721,12 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
             _restore_moved_artifacts(feature_dir, artifact_backup_dir, moved_artifacts)
         except (Exception, KeyboardInterrupt) as recovery_exc:
             recovery_errors.append(f"产物恢复失败: {recovery_exc}")
+        if moved_workflow_runtime and (workflow_runtime_backup.exists() or workflow_runtime_backup.is_symlink()):
+            try:
+                workflow_runtime_dir.parent.mkdir(parents=True, exist_ok=True)
+                workflow_runtime_backup.replace(workflow_runtime_dir)
+            except (Exception, KeyboardInterrupt) as recovery_exc:
+                recovery_errors.append(f"Workflow 运行态恢复失败: {recovery_exc}")
         if source_backup_manifest is not None:
             try:
                 _restore_source_backup(source_backup_dir, source_backup_manifest)
@@ -1738,6 +1784,8 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
         for path in plan.artifact_paths
     )
     _prune_empty_parents(effective_feature_dir, effective_deleted_paths)
+    if moved_workflow_runtime:
+        _prune_empty_runtime_parents(plan.workspace, workflow_runtime_dir)
     deleted = tuple(
         path.relative_to(effective_feature_dir).as_posix()
         for path in effective_deleted_paths
@@ -1761,6 +1809,11 @@ def _execute_stage_rollback_locked(plan: RollbackPlan) -> RollbackResult:
         ok=True,
         plan=plan,
         deleted_artifacts=deleted,
+        archived_workflow_runtime=(
+            str(workflow_runtime_dir.relative_to(plan.workspace))
+            if moved_workflow_runtime
+            else None
+        ),
         restored_active_dir=moved_to_active,
         errors=(),
     )
@@ -1795,6 +1848,7 @@ def _result_payload(
         "dryRun": dry_run,
         "plannedArtifacts": planned_artifacts,
         "deletedArtifacts": list(result.deleted_artifacts),
+        "archivedWorkflowRuntime": result.archived_workflow_runtime,
         "restoredActiveDir": result.restored_active_dir,
         "rollbackId": plan.rollback_id,
         "codeInScope": plan.code_in_scope,
@@ -2024,6 +2078,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         for path in result.deleted_artifacts:
             print(f"  - deleted {path}")
+        if result.archived_workflow_runtime:
+            print(f"  - archived {result.archived_workflow_runtime}")
     return 0 if result.ok else 1
 
 

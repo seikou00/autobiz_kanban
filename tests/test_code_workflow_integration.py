@@ -42,6 +42,7 @@ def test_workflow_launcher():
         "python3",
         str(ROOT / "hooks" / "workflow_launcher.py"),
         "--feature", "non-existent-feature",
+        "--task-card-id", "Z990692-294",
         "--json"
     ])
 

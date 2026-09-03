@@ -57,6 +57,7 @@ def _git(repo: Path, *args: str) -> str:
 
 def create_run(workspace: Path, feature: str, **kwargs):
     """Create a fixed-workflow scheduler run for runtime tests."""
+    kwargs.setdefault("task_card_id", "Z990692-294")
     return _create_run(workspace, feature, **kwargs)
 
 
@@ -151,6 +152,39 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(reused["reused"])
             self.assertEqual(reused["runId"], created["runId"])
             self.assertEqual(reused["scheduledGroups"], [["B001"]])
+
+    def test_run_requires_task_card_id_only_when_creating_a_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+
+            with self.assertRaisesRegex(ValueError, "parallel_task_card_id_required"):
+                _create_run(
+                    workspace,
+                    "alpha",
+                    max_parallel=4,
+                    timeout_seconds=60,
+                    code_workspaces=[str(repo)],
+                )
+
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            reused = ensure_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+                task_card_id="Z990692-295",
+            )
+            self.assertTrue(reused["reused"])
+            self.assertEqual(load_manifest(workspace, "alpha", created["runId"])["taskCardId"], "Z990692-294")
 
     def test_create_run_persists_workspace_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -409,6 +443,10 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             mark_batch(workspace, "alpha", run_id, "B001", "sealed", compileStatus="passed")
             sealed = _seal_native_worktree(workspace, "alpha", run_id, "B001", tree, lease["ownerToken"])
             self.assertTrue(sealed["success"], sealed)
+            self.assertEqual(
+                _git(tree, "log", "-1", "--format=%s", sealed["commitSha"]),
+                "Z990692-294 #comment 实现 alpha B001",
+            )
             committed_files = _git(tree, "show", "--format=", "--name-only", sealed["commitSha"]).splitlines()
             self.assertIn("delivery.txt", committed_files)
             self.assertNotIn(".cmbdevclaw/workflows/batch.journal", committed_files)
@@ -511,6 +549,35 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertNotIn(str(delivery_path), cleanup["retainedWorktrees"])
             self.assertTrue(any(Path(path).resolve() == delivery_path.resolve() for path in cleanup["removedWorktrees"]))
             self.assertFalse(delivery_path.exists())
+
+    def test_full_rollback_uses_the_run_task_card_id_in_its_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=1,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            (repo / "delivered.txt").write_text("delivery\n", encoding="utf-8")
+            task_runner_git(repo, "add", "delivered.txt")
+            task_runner_git(repo, "commit", "-m", "delivery fixture")
+            delivered_sha = _git(repo, "rev-parse", "HEAD")
+            manifest = load_manifest(workspace, "alpha", scheduled["runId"])
+            manifest["batches"]["B001"].update({"status": "merged", "mergeCommitSha": delivered_sha})
+            save_manifest(workspace, "alpha", scheduled["runId"], manifest)
+
+            rollback = rollback_run(workspace, "alpha", scheduled["runId"], mode="full", confirm=True)
+
+            self.assertEqual(rollback["status"], "rolled_back")
+            self.assertFalse((repo / "delivered.txt").exists())
+            self.assertEqual(
+                _git(repo, "log", "-1", "--format=%s"),
+                f"Z990692-294 #comment 回滚工作流 alpha {delivered_sha}",
+            )
 
     def test_scheduler_does_not_bind_a_run_to_the_workflow_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -771,7 +838,10 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
 
             self.assertEqual(git_status_porcelain(repo).stdout, "")
             self.assertIn("?? .cmbdevclaw/", _git(repo, "status", "--porcelain"))
-            self.assertEqual(_git(repo, "show", "-s", "--format=%s", "HEAD"), "autodev: bootstrap alpha baseline")
+            self.assertEqual(
+                _git(repo, "show", "-s", "--format=%s", "HEAD"),
+                "Z990692-294 #comment 初始化 alpha 工作流基线",
+            )
             self.assertNotIn(".cmbdevclaw/setup-state.json", _git(repo, "show", "--format=", "--name-only", "HEAD"))
             manifest = load_manifest(workspace, "alpha", scheduled["runId"])
             bootstrap = manifest["repositories"]["default"]["bootstrap"]

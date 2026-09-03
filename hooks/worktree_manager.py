@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.parallel_runtime import append_event, check_lease, load_manifest, run_dir, run_lock, save_manifest
+from hooks.commit_message import CommitMessageError, build_commit_message, normalize_task_card_id
 from hooks.plan_write_ownership import is_test_asset_path
 from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
@@ -211,6 +212,10 @@ def seal_parallel_batch(
             manifest, batch, repository_ref, git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
+        try:
+            task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
+        except CommitMessageError as exc:
+            return {"success": False, "error": str(exc)}
         review_draft = purpose == "review"
         ready_for_review = (
             batch.get("status") in {"running", "leased", "sealed"}
@@ -285,7 +290,7 @@ def seal_parallel_batch(
                 worktree,
                 "commit",
                 "-m",
-                f"autodev: implement {feature} {batch_id}",
+                build_commit_message(task_card_id, f"实现 {feature} {batch_id}"),
                 "--",
                 ".",
                 f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",

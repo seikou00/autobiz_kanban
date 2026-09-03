@@ -85,6 +85,7 @@ class AutoMergeTest(unittest.TestCase):
                 conflict_markers={"service.py": conflict},
                 repository_ref="default",
                 wave=1,
+                task_card_id="Z990692-294",
             )
 
             result = ModelBasedResolver(enable_auto_commit=True).resolve(context)
@@ -96,6 +97,10 @@ class AutoMergeTest(unittest.TestCase):
             self.assertIn("method_b", resolved)
             self.assertNotIn("<<<<<<<", resolved)
             self.assertEqual(_git(repo, "status", "--porcelain").stdout, "")
+            self.assertEqual(
+                _git(repo, "log", "-1", "--format=%s").stdout.strip(),
+                "Z990692-294 #comment 解决冲突 B001, B002",
+            )
 
 
 class CandidateRecoveryTest(unittest.TestCase):

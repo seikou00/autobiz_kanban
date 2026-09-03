@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.conflict_types import CandidateStatus, ConflictContext
 from hooks.conflict_resolution_agent import ModelBasedResolver
+from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.evidence_kernel import FileLock
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace
 from hooks.parallel_batch_stage import complete_stage, fail_stage, gate_batch, reset_validation_batch, start_stage
@@ -145,6 +146,7 @@ def _conflict_context_from_record(
         wave=context_wave,
         attempts=attempts,
         error_message=error_message,
+        task_card_id=str(raw.get("taskCardId") or ""),
     ), None
 
 
@@ -185,6 +187,7 @@ def build_candidate(
         raise ValueError("parallel_merge_train_batch_ids_required")
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
         eligible = set(mergeable_batches(manifest))
         invalid = [batch_id for batch_id in ids if batch_id not in eligible]
         if invalid:
@@ -233,7 +236,11 @@ def build_candidate(
                 source = str(manifest["batches"][batch_id].get("branchName") or "")
                 if not source:
                     raise ValueError(f"parallel_merge_train_source_branch_missing:{batch_id}")
-                result = _git(path, "merge", "--no-ff", "--no-edit", source)
+                commit_message = build_commit_message(
+                    task_card_id,
+                    f"合并候选 {repository_ref} wave-{wave:03d} {batch_id}",
+                )
+                result = _git(path, "merge", "--no-ff", "-m", commit_message, source)
                 if result.returncode != 0:
                     # Detect if it's a conflict or other error
                     conflict_detected = "CONFLICT" in result.stdout or "CONFLICT" in result.stderr
@@ -273,6 +280,7 @@ def build_candidate(
                     "wave": wave,
                     "attempts": 0,
                     "errorMessage": failure,
+                    "taskCardId": manifest.get("taskCardId"),
                 }
                 with run_lock(workspace, feature, run_id):
                     updated = load_manifest(workspace, feature, run_id)

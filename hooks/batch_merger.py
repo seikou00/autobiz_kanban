@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace  # noqa: E402
+from hooks.commit_message import build_commit_message, normalize_task_card_id  # noqa: E402
 from hooks.parallel_runtime import (  # noqa: E402
     append_event,
     lease_path,
@@ -180,7 +181,15 @@ def preflight_merge(repo_path: Path, *, base_sha: str | None = None) -> dict[str
     return {"ok": True, "head": head}
 
 
-def merge_worktree_to_main(repo_path: Path, worktree_name: str, target_branch: str | None = None, *, base_sha: str | None = None) -> dict[str, Any]:
+def merge_worktree_to_main(
+    repo_path: Path,
+    worktree_name: str,
+    target_branch: str | None = None,
+    *,
+    base_sha: str | None = None,
+    task_card_id: str | None = None,
+    commit_summary: str | None = None,
+) -> dict[str, Any]:
     try:
         repo = resolve_git_root(repo_path)
         preflight = preflight_merge(repo, base_sha=base_sha)
@@ -195,7 +204,13 @@ def merge_worktree_to_main(repo_path: Path, worktree_name: str, target_branch: s
             return {"success": False, "mergedFiles": [], "conflicts": [], "error": f"worktree_branch_not_found:{branch}"}
         changed = _git(repo, "diff", "--name-only", "HEAD", branch).stdout.splitlines()
         target = target_branch or current_git_branch(repo) or ""
-        merge_args = ["merge", "--no-ff", "--no-edit", branch]
+        merge_args = [
+            "merge",
+            "--no-ff",
+            "-m",
+            build_commit_message(task_card_id, commit_summary or f"合并工作树 {branch}"),
+            branch,
+        ]
         if target and target != "HEAD":
             if current_git_branch(repo) != target:
                 return {"success": False, "mergedFiles": [], "conflicts": [], "error": f"target_branch_mismatch:{target}"}
@@ -240,6 +255,7 @@ def merge_run(
         raise ValueError("parallel_conflict_mode_native_rebase_required")
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
+        task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
         plan_path = workspace / ".autobizdevops" / "features" / feature
         from hooks.plan_json import load_plan_bundle
         from hooks.parallel_runtime import mergeable_batches, plan_digest, ready_batches
@@ -433,6 +449,8 @@ def merge_run(
                 root,
                 str(batch.get("worktreePath") or batch_id),
                 base_sha=record["headSha"],
+                task_card_id=task_card_id,
+                commit_summary=f"合并 Batch {batch_id}",
             )
             if not result.get("success"):
                 failed.append({

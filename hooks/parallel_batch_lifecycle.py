@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.json_writer_common import resolve_feature, resolve_workspace
+from hooks.commit_message import build_commit_message, normalize_task_card_id
 from hooks.parallel_runtime import (
     append_event,
     get_active_run,
@@ -363,6 +364,7 @@ def rollback_run(workspace: Path, feature: str, run_id: str, *, mode: str = "par
         manifest = load_manifest(workspace, feature, run_id)
         reverted: list[str] = []
         if mode == "full":
+            task_card_id = normalize_task_card_id(manifest.get("taskCardId"))
             commits_by_repository: dict[str, dict[str, Any]] = {}
             for item in manifest.get("batches", {}).values():
                 if isinstance(item, dict) and isinstance(item.get("mergeCommitSha"), str):
@@ -380,10 +382,22 @@ def rollback_run(workspace: Path, feature: str, run_id: str, *, mode: str = "par
                 commits = record["commits"]
                 refs = sorted(set(record["refs"]))
                 for commit in reversed(commits):
-                    result = _git(root, "revert", "--no-edit", commit)
+                    result = _git(root, "revert", "--no-commit", commit)
                     if result.returncode != 0:
                         _git(root, "revert", "--abort")
                         raise ValueError(f"rollback_revert_failed:{','.join(refs)}:{commit}:{result.stderr.strip()}")
+                    revert_commit = _git(
+                        root,
+                        "commit",
+                        "-m",
+                        build_commit_message(task_card_id, f"回滚工作流 {feature} {commit}"),
+                    )
+                    if revert_commit.returncode != 0:
+                        _git(root, "revert", "--abort")
+                        raise ValueError(
+                            f"rollback_revert_commit_failed:{','.join(refs)}:{commit}:"
+                            f"{revert_commit.stderr.strip() or revert_commit.stdout.strip()}"
+                        )
                     reverted.append(f"{','.join(refs)}:{commit}")
         else:
             # Partial rollback preserves successful work and only abandons the
