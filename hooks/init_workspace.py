@@ -344,7 +344,7 @@ def main() -> None:
     parser.add_argument(
         "--workflow-template",
         default=BASE_WORKFLOW_TEMPLATE,
-        help="Workflow template for createFeature: standard | lean",
+        help="Workflow template for createFeature: standard",
     )
     parser.add_argument(
         "--workflow-nodes",

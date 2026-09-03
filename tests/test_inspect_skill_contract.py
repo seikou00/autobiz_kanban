@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from board_core.state_store import write_state_records
 from hooks.init_workspace import create_feature, init_workspace
 from hooks.inspect_skill_contract import (
     ROOT,
@@ -25,6 +26,20 @@ class InspectSkillContractPlainTest(unittest.TestCase):
 
     def _create_feature(self, feature: str, *, workflow_template: str = "standard") -> None:
         create_feature(self.workspace, feature, workflow_template=workflow_template)
+
+    def _create_legacy_lean_feature(self, feature: str) -> None:
+        (self.workspace / ".autobizdevops" / "features" / feature).mkdir(parents=True)
+        write_state_records(
+            self.workspace,
+            {
+                feature: {
+                    "checkpoint": "specs_in_progress",
+                    "workflowProfile": "standard",
+                    "workflowDecisions": {},
+                    "workflowTemplate": "lean",
+                }
+            },
+        )
 
     def _plain(self, skill: str, feature: str) -> str:
         contract, workflow_context, extra_skipped_inputs = _find_feature_contract(
@@ -60,9 +75,9 @@ class InspectSkillContractPlainTest(unittest.TestCase):
             "## 输入产物（state: `ready`）\n- 无\n",
         )
 
-    def test_plain_lean_workflow_marks_dropped_entry_inputs_as_skipped(self) -> None:
+    def test_plain_legacy_lean_workflow_marks_dropped_entry_inputs_as_skipped(self) -> None:
         feature = "lean-entry"
-        self._create_feature(feature, workflow_template="lean")
+        self._create_legacy_lean_feature(feature)
 
         output = self._plain("autodev-specs", feature)
 
@@ -72,20 +87,20 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertNotIn("无 PRD 时基于用户描述直接澄清行为契约", output)
         self.assertNotIn("自动降级", output)
 
-    def test_plain_lean_archive_reports_nothing_to_handle(self) -> None:
+    def test_plain_legacy_lean_archive_reports_nothing_to_handle(self) -> None:
         # ops.archive's only input is produced by ops.cicd, which lean drops from
         # the chain: it can never exist here, so it is not a missing artifact.
         feature = "lean-archive"
-        self._create_feature(feature, workflow_template="lean")
+        self._create_legacy_lean_feature(feature)
 
         self.assertEqual(
             self._plain("autoops-archive", feature),
             "## 输入产物（state: `ready`）\n- 无\n",
         )
 
-    def test_plain_lean_code_omits_inputs_of_dropped_upstream_nodes(self) -> None:
+    def test_plain_legacy_lean_code_omits_inputs_of_dropped_upstream_nodes(self) -> None:
         feature = "lean-code"
-        self._create_feature(feature, workflow_template="lean")
+        self._create_legacy_lean_feature(feature)
 
         output = self._plain("autodev-code", feature)
 

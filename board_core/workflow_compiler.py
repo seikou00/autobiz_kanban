@@ -13,6 +13,8 @@ LEGACY_BASE_WORKFLOW_PROFILE = "base"
 BASE_WORKFLOW_TEMPLATE = "standard"
 LEGACY_CUSTOM_WORKFLOW_TEMPLATE = "custom"
 LEGACY_CUSTOM_REQUIRED_NODES = ("dev.code", "ops.archive")
+LEGACY_LEAN_WORKFLOW_TEMPLATE = "lean"
+LEGACY_LEAN_NODES = ("dev.specs", "dev.code", "ops.archive")
 ALLOWED_TEMPLATE_KINDS = frozenset({"profile", "nodeSubset", "custom"})
 # 对外展示的模板类型名（内部 kind 保留编译语义，profile 对外呈现为 classical）。
 TEMPLATE_TYPE_BY_KIND = {"profile": "classical"}
@@ -162,6 +164,19 @@ def _legacy_custom_template_spec(template: str) -> dict | None:
     }
 
 
+def _legacy_lean_template_spec(template: str) -> dict | None:
+    if template != LEGACY_LEAN_WORKFLOW_TEMPLATE:
+        return None
+    return {
+        "id": LEGACY_LEAN_WORKFLOW_TEMPLATE,
+        "kind": "nodeSubset",
+        "label": "精简路线（暂时下架）",
+        "description": "兼容已创建的 lean 流程；暂不作为新建模板展示。",
+        "nodes": list(LEGACY_LEAN_NODES),
+        "requiredNodes": [],
+    }
+
+
 def workflow_template_uses_nodes(base_config: dict, template: str | None) -> bool:
     """Whether this template stores a per-record workflowNodes list.
 
@@ -265,7 +280,7 @@ def configured_template_options(base_config: dict) -> list[dict[str, object]]:
             "description": template["description"],
             "nodes": _display_nodes(template),
         }
-        # 固定链模板（standard/lean）用 nodes 即可；只有 custom 需要锁定项。
+        # 固定链模板用 nodes 即可；只有 custom 需要锁定项。
         if template["kind"] == "custom":
             option["requiredNodes"] = list(template.get("requiredNodes", []))
         options.append(option)
@@ -288,6 +303,8 @@ def resolve_template_subset(
     spec = registry.get(template)
     if spec is None:
         spec = _legacy_custom_template_spec(template)
+    if spec is None:
+        spec = _legacy_lean_template_spec(template)
     if spec is None:
         known = ", ".join(sorted(registry))
         raise WorkflowCompileError(f"unknown workflow template: {template}; known: {known}")

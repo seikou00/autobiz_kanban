@@ -67,12 +67,6 @@
         "kind": "profile",
         "label": "标准",
         "description": "完整主干流程（Biz→Dev→Ops），不含可选动态节点；动态节点可在流程中按需开启。"
-      },
-      "lean": {
-        "kind": "nodeSubset",
-        "label": "精简路线",
-        "description": "修接口 / 小需求：specs（轻量）→ code → 归档；契约不含 design/PLAN，code 直接从 proposal 与 specs 推导任务。",
-        "nodes": ["dev.specs", "dev.code", "ops.archive"]
       }
     },
     "profiles": {
