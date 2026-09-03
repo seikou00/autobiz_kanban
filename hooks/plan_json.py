@@ -890,9 +890,14 @@ def validate_batch_plan_data(
         else None
     )
     batch_commands = commands if isinstance(commands, list) else []
-    if require_initial_status and mode == "commands" and not any(
-        isinstance(command, dict) and command.get("required") is True
-        for command in batch_commands
+    if (
+        require_initial_status
+        and data.get("executionLane") != "frontend"
+        and mode == "commands"
+        and not any(
+            isinstance(command, dict) and command.get("required") is True
+            for command in batch_commands
+        )
     ):
         errors.append(f"{batch_id}.batchValidation.required_command_missing")
     for index, command in enumerate(batch_commands):
@@ -1215,6 +1220,7 @@ def _validate_batch_profiles(
             errors.append(f"batchValidationProfiles.{lane}.mode_invalid")
         if (
             require_backend_compile
+            and lane != "frontend"
             and mode == "commands"
             and not any(
                 isinstance(command, dict)
@@ -1250,6 +1256,10 @@ def _validate_batch_profiles(
                     for command in commands
                 )
             )
+            # Frontend batch compilation is temporarily disabled. An explicit
+            # empty profile keeps the batch lifecycle while running no command.
+            if lane == "frontend" and mode == "commands" and commands == []:
+                configured = True
             if not configured:
                 errors.append(f"batchValidationProfiles_missing_lane:{lane}")
 
@@ -1300,6 +1310,7 @@ def _validate_batch_validation(
         errors.append(f"{batch_id}.batchValidation.commands_mode_coverage_must_be_empty")
     if (
         require_backend_compile
+        and data.get("executionLane") != "frontend"
         and mode == "commands"
         and isinstance(commands, list)
         and not any(
@@ -1359,7 +1370,7 @@ def _validate_batch_compile(
         and command.get("kind") == "compile"
         and command.get("required") is True
     ]
-    if not compile_commands and (
+    if data.get("executionLane") != "frontend" and not compile_commands and (
         require_all_done or data.get("taskSetStatus") == "finalized"
     ):
         errors.append(f"{batch_id}.batchCompile.required_compile_command_missing")
@@ -1384,7 +1395,8 @@ def _validate_batch_compile(
         errors.append(f"{batch_id}.batchCompile.repairAttempts_exceeded")
 
     command_id = compile_state.get("commandId")
-    if status in {"failed", "passed", "repairing"} and (
+    frontend_compile_skipped = data.get("executionLane") == "frontend"
+    if status in {"failed", "passed", "repairing"} and not frontend_compile_skipped and (
         not isinstance(command_id, str) or not command_id.strip()
     ):
         errors.append(f"{batch_id}.batchCompile.commandId_missing")

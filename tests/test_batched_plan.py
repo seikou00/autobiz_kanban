@@ -23,6 +23,7 @@ from hooks.plan_json import (  # noqa: E402
     load_and_validate_plan,
     load_plan_bundle,
     task_set_digest,
+    validate_plan_bundle_data,
     validate_plan_data,
     write_plan_json,
 )
@@ -278,6 +279,25 @@ class BatchedPlanContractTest(unittest.TestCase):
         errors = validate_plan_data(root, require_backend_compile=True)
 
         self.assertIn("batchValidationProfiles.backend.backend_compile_command_missing", errors)
+
+    def test_frontend_batch_allows_empty_compile_profile(self) -> None:
+        frontend_task = task("T001", ui_required=True)
+        root = root_plan(batches=[batch_entry("B001", ["T001"], execution_lane="frontend")])
+        root["batchValidationProfiles"]["frontend"]["mode"] = "commands"
+        root["batchValidationProfiles"]["frontend"]["commands"] = []
+        batch = batch_plan("B001", [frontend_task], execution_lane="frontend")
+        batch["batchValidation"]["mode"] = "commands"
+        batch["batchValidation"]["commands"] = []
+
+        self.assertEqual(
+            validate_plan_bundle_data(
+                root,
+                {"B001": batch},
+                require_initial_status=True,
+                require_backend_compile=True,
+            ),
+            [],
+        )
 
     def test_explicit_commands_mode_preserves_legacy_task_set_digest(self) -> None:
         root = root_plan(batches=[batch_entry("B001", ["T001"])])

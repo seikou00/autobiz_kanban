@@ -1179,6 +1179,11 @@ def _project_batches(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, di
             if isinstance(command, dict)
             and _batch_profile_command_matches_workspace(command, workspace_contract)
         ]
+        # Frontend batch compilation is temporarily disabled. Keep the profile
+        # shape, but project no per-batch command so the runner has nothing to
+        # execute.
+        if execution_lane == "frontend":
+            profile_commands = []
         effective_commands = [
             {**command, "id": f"BATCH-{batch_id}-VAL-{command_index:03d}"}
             for command_index, command in enumerate(profile_commands, start=1)
@@ -4494,7 +4499,12 @@ def update_batch_compile_status(
         command_id = compile_result.get("commandId")
         batch_validation = batch_plan.get("batchValidation")
         commands = batch_validation.get("commands", []) if isinstance(batch_validation, dict) else []
-        if not any(
+        frontend_compile_skipped = (
+            batch_plan.get("executionLane") == "frontend"
+            and command_id is None
+            and compile_status == "passed"
+        )
+        if not frontend_compile_skipped and not any(
             isinstance(command, dict)
             and command.get("kind") == "compile"
             and command.get("required") is True
@@ -4742,7 +4752,11 @@ def mark_batch_tasks_done_after_compile(
         command_id = batch_compile.get("commandId")
         batch_validation = batch_plan.get("batchValidation")
         commands = batch_validation.get("commands", []) if isinstance(batch_validation, dict) else []
-        if not any(
+        frontend_compile_skipped = (
+            batch_plan.get("executionLane") == "frontend"
+            and command_id is None
+        )
+        if not frontend_compile_skipped and not any(
             isinstance(command, dict)
             and command.get("kind") == "compile"
             and command.get("required") is True
