@@ -34,6 +34,7 @@ from hooks.result_writer_common import (  # noqa: E402
     empty_coverage,
     ui_summary_from_coverage,
 )
+from hooks.candidate_digest import compute as compute_candidate_digest  # noqa: E402
 
 
 FILE_NAME = "VERIFY_DECISION.json"
@@ -167,6 +168,8 @@ def _sync_summary(feature_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
 
 def _write(workspace: Path, feature: str, data: dict[str, Any]) -> WriterResult:
     data = _sync_summary(_feature_dir(workspace, feature), data)
+    if (_feature_dir(workspace, feature) / ".runtime" / "RUN_CONTEXT.json").is_file():
+        data["diffDigest"] = compute_candidate_digest(workspace, feature)
     changed = atomic_write_json(_path(workspace, feature), data)
     return WriterResult(ok=True, path=_path(workspace, feature), changed=changed)
 
@@ -213,10 +216,13 @@ def _cmd_update_scenario(args: argparse.Namespace) -> int:
 
 
 def _cmd_set_verdict(args: argparse.Namespace) -> int:
-    workspace, feature = _resolve(args)
-    data = _load(workspace, feature)
-    data["verdict"] = args.verdict
-    return render_result(_write(workspace, feature, data))
+    del args
+    return render_result(
+        fail(
+            "verify_verdict_is_coverage_authoritative",
+            "修复：用 derive-scenario-coverage 或 update-scenario 记录证据绑定的逐项结论。",
+        )
+    )
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -229,6 +235,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         errors.append({"reason": "invalid_verify_decision_transition"})
     if not isinstance(data.get("scenarioCoverage"), list):
         errors.append({"reason": "invalid_scenario_coverage"})
+    if (_feature_dir(workspace, feature) / ".runtime" / "RUN_CONTEXT.json").is_file():
+        current_digest = compute_candidate_digest(workspace, feature)
+        if data.get("diffDigest") != current_digest:
+            errors.append({"reason": "verify_diff_digest_stale"})
     return render_result(WriterResult(ok=not errors, path=_path(workspace, feature), errors=errors))
 
 

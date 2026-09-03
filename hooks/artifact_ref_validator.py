@@ -9,6 +9,13 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hooks.source_context import (
+    load_source_context,
+    source_requirement_ids_for_target,
+    source_requirement_index,
+    validate_source_context_refs,
+)
+
 
 ANCHOR_RE = re.compile(r"^(REQ|SCN|API|DATA|D)-\d{3}$")
 DESIGN_API_DEF_RE = re.compile(r"^\|\s*(API-\d{3})\s*\|", re.MULTILINE)
@@ -275,11 +282,27 @@ def _design_ids_from_refs(task: dict[str, Any]) -> dict[str, set[str]]:
     return result
 
 
+def design_contract_id_universe(contract: dict[str, Any]) -> set[str]:
+    """Every ID the confirmed Design defines, across all three kinds."""
+
+    return {
+        value
+        for id_kind in ("API", "DATA", "D")
+        for value in contract["ids"][id_kind]
+    }
+
+
 def validate_plan_design_coverage(
     contract: dict[str, Any],
     tasks: list[dict[str, Any]],
+    *,
+    included_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Require every confirmed Design ID to be covered without inventing new IDs."""
+    """Require every in-scope Design ID to be covered without inventing new IDs.
+
+    ``included_ids`` is the slice this round delivers; IDs a later round owns are
+    not missing coverage, so the Design keeps them instead of being edited down.
+    """
 
     covered = {"API": set(), "DATA": set(), "D": set()}
     for task in tasks:
@@ -316,7 +339,8 @@ def validate_plan_design_coverage(
                 "repairable": False,
             })
             continue
-        for value in sorted(known - covered[id_kind]):
+        required = known if included_ids is None else known & included_ids
+        for value in sorted(required - covered[id_kind]):
             errors.append({
                 "reason": f"missing_plan_json_{reason_kind}_coverage",
                 "detail": f"id={value};design_is_source_of_truth;attach_existing_id_to_relevant_task",
@@ -423,9 +447,15 @@ def _find_unique_anchor_file(base: Path, anchor: str, *, design: bool) -> Path:
 def _extract_spec_snippet(text: str, anchor: str) -> str | None:
     """Extract spec snippet for REQ/SCN anchors."""
     if anchor.startswith("REQ-"):
-        start_re = re.compile(rf"^###\s+Requirement\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
+        start_re = re.compile(
+            rf"^###\s+Requirement\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
+            re.MULTILINE,
+        )
     elif anchor.startswith("SCN-"):
-        start_re = re.compile(rf"^####\s+Scenario\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
+        start_re = re.compile(
+            rf"^####\s+Scenario\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
+            re.MULTILINE,
+        )
     else:
         return None
 
@@ -598,7 +628,110 @@ def validate_task_artifact_refs(
                 "repairTarget": "task_group",
             })
 
+    source_refs = task.get("sourceRefs", [])
+    data, source_context_errors = load_source_context(base)
+    for error in source_context_errors:
+        errors.append({
+            "reason": "invalid_source_context",
+            "detail": error,
+            "taskIds": [task_id],
+            "field": "sourceRefs",
+            "repairTarget": "source_context",
+            "repairSuggestion": "按 source-context.json 校验错误修正来源、快照、原文条目或要求定义后重试",
+        })
+    source_index = source_requirement_index(data)
+    if source_refs and data is None:
+        errors.append({
+            "reason": "missing_source_context",
+            "detail": f"task={task_id};file=source-context.json",
+            "taskIds": [task_id],
+            "field": "sourceRefs",
+            "repairTarget": "source_context",
+            "repairSuggestion": "先在 Feature 目录生成 source-context.json，再引用其中已有的 SRC-NNN-RNNN",
+        })
+    if isinstance(source_refs, list):
+        for index, ref in enumerate(source_refs):
+            if isinstance(ref, str) and ref not in source_index:
+                errors.append({
+                    "reason": "unknown_source_requirement_ref",
+                    "detail": f"task={task_id};ref={ref}",
+                    "taskIds": [task_id],
+                    "field": f"sourceRefs[{index}]",
+                    "currentValue": ref,
+                    "repairTarget": "task_group",
+                    "repairSuggestion": "修正 task-groups.json 的 sourceRefs，只引用 source-context.json 中已有的 SRC-NNN-RNNN",
+                })
+
     if contract is not None:
         errors.extend(validate_task_design_contract(contract, task))
 
+    return errors
+
+
+def plan_source_requirement_universe(base: Path) -> set[str]:
+    """Every source requirement routed to Plan or Code, before scope narrowing."""
+
+    data, _ = load_source_context(base)
+    if data is None:
+        return set()
+    return (
+        source_requirement_ids_for_target(data, "plan")
+        | source_requirement_ids_for_target(data, "code")
+    )
+
+
+def validate_plan_source_coverage(
+    base: Path,
+    tasks: list[dict[str, Any]],
+    *,
+    included_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Ensure every in-scope source requirement routed to Plan or Code reaches a task."""
+
+    validation_errors = validate_source_context_refs(base)
+    data, load_errors = load_source_context(base)
+    errors: list[dict[str, Any]] = [
+        {
+            "reason": "invalid_source_context",
+            "detail": error,
+            "field": "sourceRefs",
+            "repairTarget": "source_context",
+            "repairSuggestion": "按 source-context.json 校验错误修正来源、快照、原文条目或要求定义后重试",
+        }
+        for error in (validation_errors or load_errors)
+    ]
+    if data is None:
+        return errors
+    known = set(source_requirement_index(data))
+    expected = (
+        source_requirement_ids_for_target(data, "plan")
+        | source_requirement_ids_for_target(data, "code")
+    )
+    if included_ids is not None:
+        expected &= included_ids
+    covered = {
+        ref
+        for task in tasks
+        if isinstance(task, dict)
+        for ref in task.get("sourceRefs", [])
+        if isinstance(ref, str)
+    }
+    missing = sorted(expected - covered)
+    unknown = sorted(covered - known)
+    if missing:
+        errors.append({
+            "reason": "missing_plan_source_requirement_coverage",
+            "detail": f"ids={','.join(missing)}",
+            "field": "sourceRefs",
+            "repairTarget": "task_group",
+            "repairSuggestion": "在 task-groups.json 中把缺失的 SRC-NNN-RNNN 分配给实际实施这些要求的任务组",
+        })
+    if unknown:
+        errors.append({
+            "reason": "unknown_plan_source_requirement_ref",
+            "detail": f"ids={','.join(unknown)}",
+            "field": "sourceRefs",
+            "repairTarget": "task_group",
+            "repairSuggestion": "修正 task-groups.json 的 sourceRefs，只引用 source-context.json 中已有的 SRC-NNN-RNNN",
+        })
     return errors

@@ -23,6 +23,7 @@ from hooks.inspect_test_environment import (  # noqa: E402
     inspect_feature_environments,
     main,
 )
+from hooks.utest_workspace_binding import UTestWorkspaceBindingError  # noqa: E402
 
 
 class InspectTestEnvironmentTest(unittest.TestCase):
@@ -319,23 +320,45 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertEqual("workspace_binding_missing", payload["status"])
         self.assertEqual("utest_workspace_binding", payload["owner"])
 
-    def test_missing_scope_module_is_contract_gap_with_task_repair(self):
+    def test_semantic_scope_module_blocks_without_fallback(self):
         root = self._root()
         workspace = root / "output"
         repo = root / "ruoyi-vue-pro"
         repo.mkdir()
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        (repo / "pom.xml").write_text("<project/>", encoding="utf-8")
-        self._feature(workspace, repo, modules=["missing-module"])
-        stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            exit_code = main(["--workspace", str(workspace), "--feature", "alpha"])
+        (repo / "pom.xml").write_text(
+            "<artifactId>spring-boot-starter-test</artifactId>", encoding="utf-8"
+        )
+        self._feature(workspace, repo, modules=["AiReview 评分模块"])
 
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(2, exit_code)
-        self.assertEqual("contract_gap", payload["status"])
-        self.assertIn("T001", payload["errors"][0])
-        self.assertIn("scope.modules", payload["errors"][0])
+        with self.assertRaises(UTestWorkspaceBindingError) as caught:
+            inspect_feature_environments(workspace, "alpha")
+
+        self.assertEqual("SCOPE_UNRESOLVED", caught.exception.code)
+
+    def test_mixed_physical_and_semantic_modules_block_whole_task(self):
+        root = self._root()
+        workspace = root / "output"
+        repo = root / "ruoyi-vue-pro"
+        module = repo / "yudao-module-mkt"
+        module.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "pom.xml").write_text(
+            "<artifactId>spring-boot-starter-test</artifactId>", encoding="utf-8"
+        )
+        (module / "pom.xml").write_text(
+            "<artifactId>spring-boot-starter-test</artifactId>", encoding="utf-8"
+        )
+        self._feature(
+            workspace,
+            repo,
+            modules=["yudao-module-mkt", "会员积分模块"],
+        )
+
+        with self.assertRaises(UTestWorkspaceBindingError) as caught:
+            inspect_feature_environments(workspace, "alpha")
+
+        self.assertEqual("SCOPE_UNRESOLVED", caught.exception.code)
 
     def test_invalid_plan_location_is_contract_gap_not_environment_failure(self):
         root = self._root()
@@ -357,6 +380,50 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         self.assertEqual(2, exit_code)
         self.assertEqual("contract_gap", payload["status"])
         self.assertEqual("repair_plan_task_location", payload["requiredAction"])
+
+    def test_record_blocked_persists_plan_bound_handoff(self):
+        root = self._root()
+        workspace = root / "output"
+        repo = root / "ruoyi-vue-pro"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        feature_dir = self._feature(workspace, repo)
+        batch_path = feature_dir / "plans" / "B001" / "plan.json"
+        batch = json.loads(batch_path.read_text(encoding="utf-8"))
+        batch["tasks"][0]["validationCommands"][0]["cwd"] = "missing-project"
+        batch_path.write_text(json.dumps(batch), encoding="utf-8")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--workspace",
+                    str(workspace),
+                    "--feature",
+                    "alpha",
+                    "--record-blocked",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(2, exit_code)
+        self.assertEqual("contract_gap", payload["status"])
+        self.assertNotIn("blockedArtifactError", payload)
+        self.assertEqual("needs_fix", payload["blockedArtifacts"]["nextCheckpoint"])
+        result = json.loads((feature_dir / "UNIT_TEST_RESULT.json").read_text(encoding="utf-8"))
+        self.assertEqual("BLOCKED", result["verdict"])
+        self.assertEqual("blocked", result["checks"][0]["status"])
+        self.assertEqual("contract_gap", result["unverifiedChecks"][0]["reasonCode"])
+        fix_request = json.loads((feature_dir / "FIX_REQUEST.json").read_text(encoding="utf-8"))
+        self.assertEqual("plan_contract_gap", fix_request["rootCause"])
+        self.assertEqual("plan_in_progress", fix_request["suggestedCheckpoint"])
+        self.assertEqual("rollback_plan_keep_source", fix_request["repairStrategy"])
+        self.assertTrue((feature_dir / "UNIT_TEST_REPORT.md").is_file())
+        self.assertIn(
+            "## 未验证项及原因",
+            (feature_dir / "UNIT_TEST_REPORT.md").read_text(encoding="utf-8"),
+        )
+        self.assertTrue((feature_dir / "test-output.log").is_file())
 
 
 if __name__ == "__main__":

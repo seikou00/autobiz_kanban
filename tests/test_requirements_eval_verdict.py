@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from artifact_check import (  # noqa: E402
     HookContext,
     requirements_eval_baseline_rows,
     requirements_eval_has_blockers,
+    requirements_eval_has_warnings,
     requirements_eval_verdict,
     validate_requirements_eval_verdict,
 )
@@ -34,7 +36,12 @@ BASELINE_TEMPLATE_ROWS = "\n".join(
 )
 
 
-def eval_report(verdict: str, blockers: str = "- none", baseline: str = BASELINE_ROW) -> str:
+def eval_report(
+    verdict: str,
+    blockers: str = "- none",
+    baseline: str = BASELINE_ROW,
+    warnings: str = "- none",
+) -> str:
     return "\n".join(
         [
             "# Requirements Evaluation",
@@ -53,7 +60,7 @@ def eval_report(verdict: str, blockers: str = "- none", baseline: str = BASELINE
             "",
             "## Warnings",
             "",
-            "- none",
+            warnings,
             "",
         ]
     )
@@ -76,6 +83,16 @@ class RequirementsEvalVerdictTest(unittest.TestCase):
             with self.subTest(blockers=blockers):
                 self.assertFalse(requirements_eval_has_blockers(eval_report("PASS", blockers)))
         self.assertTrue(requirements_eval_has_blockers(eval_report("PASS", "- 订单金额精度未校验")))
+
+    def test_distinguishes_empty_and_real_warnings(self) -> None:
+        for warnings in ("- none", "- 无", "- 暂无"):
+            with self.subTest(warnings=warnings):
+                self.assertFalse(requirements_eval_has_warnings(eval_report("PASS", warnings=warnings)))
+        self.assertTrue(
+            requirements_eval_has_warnings(
+                eval_report("PASS_WITH_WARNINGS", warnings="- ID: W-001\n  风险: 缺少浏览器兼容性验证")
+            )
+        )
 
     def test_counts_only_real_baseline_rows(self) -> None:
         self.assertEqual(requirements_eval_baseline_rows(eval_report("PASS")), 1)
@@ -103,11 +120,17 @@ class RequirementsEvalGateTest(unittest.TestCase):
             failures = validate_requirements_eval_verdict(self.ctx)
         return failures, output.getvalue()
 
-    def test_accepts_terminal_report_without_blockers(self) -> None:
-        for verdict in ("PASS", "PASS_WITH_WARNINGS"):
-            with self.subTest(verdict=verdict):
-                failures, output = self.validate(eval_report(verdict))
-                self.assertEqual(failures, 0, output)
+    def test_accepts_terminal_verdicts_matching_finding_sections(self) -> None:
+        failures, output = self.validate(eval_report("PASS"))
+        self.assertEqual(failures, 0, output)
+
+        failures, output = self.validate(
+            eval_report(
+                "PASS_WITH_WARNINGS",
+                warnings="- ID: W-001\n  风险: 缺少浏览器兼容性验证",
+            )
+        )
+        self.assertEqual(failures, 0, output)
 
     def test_rejects_missing_non_terminal_and_blocked_reports(self) -> None:
         failures, output = self.validate(None)
@@ -127,6 +150,103 @@ class RequirementsEvalGateTest(unittest.TestCase):
         failures, output = self.validate(eval_report("PASS", baseline=BASELINE_TEMPLATE_ROWS))
         self.assertGreater(failures, 0)
         self.assertIn("missing_requirements_eval_baseline", output)
+
+    def test_rejects_terminal_verdict_warning_mismatch(self) -> None:
+        failures, output = self.validate(
+            eval_report("PASS", warnings="- ID: W-001\n  风险: 缺少浏览器兼容性验证")
+        )
+        self.assertGreater(failures, 0)
+        self.assertIn("warning_with_plain_pass_requirements_eval_verdict", output)
+
+        failures, output = self.validate(eval_report("PASS_WITH_WARNINGS"))
+        self.assertGreater(failures, 0)
+        self.assertIn("missing_warning_for_pass_with_warnings_verdict", output)
+
+    def test_requires_external_interface_coverage_for_feature_prd(self) -> None:
+        (self.feature_dir / "PRD.md").write_text(
+            """# 需求正式稿
+
+## 外部资料与实现约束
+
+| ID | 类型 | 名称 | 地址/路径 | 约束范围 | 必读阶段 | 状态 |
+|---|---|---|---|---|---|---|
+| SRC-001 | 外部接口 | 支付 API | https://example.test/openapi | REQ-001 | Specs、Plan、Code、Reviewer、E2E | 可访问 |
+""",
+            encoding="utf-8",
+        )
+
+        failures, output = self.validate(eval_report("PASS"))
+        self.assertGreater(failures, 0)
+        self.assertIn("missing_requirements_eval_external_interface_section", output)
+
+        incomplete_report = eval_report("PASS") + """## External Interface Coverage
+
+| Source ID | Source Contract Evidence | Design | Implementation | Verification | Status |
+|---|---|---|---|---|---|
+| SRC-001 | POST /payments | API-001 | src/payment.py | 无 | covered |
+"""
+        failures, output = self.validate(incomplete_report)
+        self.assertGreater(failures, 0)
+        self.assertIn("incomplete_requirements_eval_external_interface_coverage", output)
+
+        report = eval_report("PASS") + """## External Interface Coverage
+
+| Source ID | Source Contract Evidence | Design | Implementation | Verification | Status |
+|---|---|---|---|---|---|
+| SRC-001 | POST /payments | API-001 | src/payment.py | gateway integration test | covered |
+"""
+        failures, output = self.validate(report)
+        self.assertEqual(failures, 0, output)
+
+    def test_requires_reviewer_targeted_source_requirements(self) -> None:
+        snapshot = self.feature_dir / "sources" / "SRC-001" / "payment.md"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text("支付接口调用超时时间为 3 秒。", encoding="utf-8")
+        (self.feature_dir / "source-context.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "sources": [
+                        {
+                            "id": "SRC-001",
+                            "name": "支付接口",
+                            "path": "sources/SRC-001/payment.md",
+                            "availability": "snapshot_only",
+                            "readStatus": "complete",
+                            "freshness": "unknown",
+                            "sha256": "0" * 64,
+                            "items": [
+                                {
+                                    "id": "SRC-001-I001",
+                                    "location": "第 1 行",
+                                    "original": "支付接口调用超时时间为 3 秒。",
+                                    "disposition": "requirement",
+                                    "requirements": [
+                                        {
+                                            "id": "SRC-001-R001",
+                                            "text": "支付接口调用超时时间为 3 秒",
+                                            "targets": ["reviewer"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        failures, output = self.validate(eval_report("PASS"))
+
+        self.assertGreater(failures, 0)
+        self.assertIn("requirements_eval_source_requirement_missing", output)
+
+        failures, output = self.validate(
+            eval_report("PASS") + "\n## Source Requirement Evidence\n\n- SRC-001-R001: 已核对实现与快照。\n"
+        )
+        self.assertEqual(failures, 0, output)
 
 
 if __name__ == "__main__":

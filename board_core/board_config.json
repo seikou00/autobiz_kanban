@@ -31,7 +31,7 @@
       "dynamic_workflow": "python3 ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python3 ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform darwin --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path ${pluginPath}/sys"
     },
     "linux": {
       "knowledge_path": "${pluginPath}/sys",
@@ -45,7 +45,7 @@
       "dynamic_workflow": "python ${pluginPath}/hooks/inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}/hooks/skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python3 ${pluginPath}/hooks/sync_agents.py --write-board-config",
-      "session_context_inject": "python3 ${pluginPath}/hooks/render_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+      "session_context_inject": "python3 ${pluginPath}/hooks/render_collected_session_context.py --platform linux --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path ${pluginPath}/sys"
     },
     "win32": {
       "knowledge_path": "${pluginPath}\\sys",
@@ -59,7 +59,7 @@
       "dynamic_workflow": "python ${pluginPath}\\hooks\\inspect_workflow_templates.py",
       "skip_node": "python ${pluginPath}\\hooks\\skip_node.py --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --skip-node ${nodeId}",
       "pull_knowledge": "python ${pluginPath}\\hooks\\sync_agents.py --write-board-config",
-      "session_context_inject": "python ${pluginPath}\\hooks\\render_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath}"
+      "session_context_inject": "python ${pluginPath}\\hooks\\render_collected_session_context.py --platform win32 --plugin-workspace ${pluginWorkspace} --project ${projectDir} --feature ${feature} --selected-deployUnit ${selectedDeployUnits} --session-workspace-path ${sessionWorkspacePath} --knowledge-collector ${pluginPath}\\hooks\\collect-knowledge.js --knowledge-path ${pluginPath}\\sys"
     }
   },
   "workflow": {
@@ -240,6 +240,7 @@
           "specs_in_progress",
           "plan_in_progress",
           "code_in_progress",
+          "unit_test_in_progress",
           "cicd_in_progress"
         ],
         "archived": []
@@ -282,7 +283,7 @@
             }
           }
         },
-        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）、UI_CONTEXT.json（UI 范围机器事实源）",
+        "description": "澄清需求并生成正式 PRD 文档 \n 产物：PRD.md（产品需求文档：业务目标、用户场景与验收标准）、UI_CONTEXT.json（UI 范围机器事实源）；存在外部资料时生成 sources/ 快照与 source-context.json",
         "states": [
           {
             "nodeStatus": "not_started",
@@ -332,7 +333,8 @@
               "artifactType": "json",
               "path": "UI_CONTEXT.json",
               "required": true
-            }
+            },
+            { "id": "source_context", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false }
           ]
         },
         "validators": [
@@ -368,6 +370,7 @@
             "customSubagentFiles": [
               "agents/explore.md",
               "agents/critic.md"
+              ,"agents/critic_autodev_zh.md","agents/specs-gate-fixer.md"
             ]
           }
         },
@@ -415,6 +418,10 @@
               "required": true,
               "extract": {
                 "degrade": "无 PRD 时基于用户描述直接澄清行为契约，沉淀到 proposal 与 specs"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时 targets 含 spec 的要求必须进入 Requirement 或 Scenario"
               }
             },
             {
@@ -449,14 +456,16 @@
               "artifactType": "json",
               "path": "UI_CONTEXT.json",
               "required": true
-            }
+            },
+            { "id": "specs_review", "label": "规格回检结论", "artifactType": "file", "path": "SPECS_REVIEW.md", "required": true }
           ]
         },
         "validators": [
           "proposal_contract",
           "specs_contract",
           "capability_spec_correspondence",
-          "ui_context_json"
+          "ui_context_json",
+          "specs_review_verdict"
         ]
       },
       {
@@ -473,14 +482,8 @@
             }
           },
           "subagentConfig": {
-            "disabledBuiltinSubagents": [
-              "Explore",
-              "critic"
-            ],
-            "customSubagentFiles": [
-              "agents/explore.md",
-              "agents/critic.md"
-            ]
+            "disabledBuiltinSubagents": ["Explore","critic"],
+            "customSubagentFiles": ["agents/explore.md","agents/critic_autodev_plan_zh.md"]
           }
         },
         "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、PLAN.md（执行计划：任务 DAG 与各任务依据/验证/状态）",
@@ -548,7 +551,15 @@
               "extract": {
                 "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 任务"
               }
-            }
+            },
+            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
+              "extract": {
+                "degrade": "无 PRD 时以 proposal/specs 设计；存在来源快照时以 source-context.json 与 sources/ 为准，只有从未取得资料时才阻断"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时按 targets 写入 design，并把 plan/code 要求绑定到 task sourceRefs"
+              } }
           ],
           "outputs": [
             {
@@ -671,24 +682,16 @@
               "required": true,
               "extract": {
                 "degrade": "无 specs 时以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
-              }
-            },
-            {
-              "id": "prd_optional",
-              "label": "PRD参考",
-              "artifactType": "file",
-              "path": "PRD.md",
-              "required": false,
+              } },
+            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时，以已有产物理解需求;如果都没有则根据用户直供需求作为范围依据"
-              }
-            },
-            {
-              "id": "design",
-              "label": "技术设计",
-              "artifactType": "file",
-              "path": "design.md",
-              "required": true,
+                "degrade": "无 PRD 时以已有产物理解需求；存在来源上下文时按当前 TASK 的 resolvedSourceRefs 与快照实现"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时只使用当前 task 的 resolvedSourceRefs，不从摘要反查或重新索取已有快照"
+              } },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
                 "degrade": "无 design 时基于 已有产物 与现有代码模式自行做最小实现决策，并在完成摘要中记录关键决策"
               }
@@ -833,24 +836,16 @@
               "required": true,
               "extract": {
                 "degrade": "无 specs 时对照 proposal 与用户确认的行为预期评审，并在报告中标注基准缺失"
-              }
-            },
-            {
-              "id": "prd_optional",
-              "label": "PRD参考",
-              "artifactType": "file",
-              "path": "PRD.md",
-              "required": false,
+              } },
+            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时直接跳过"
-              }
-            },
-            {
-              "id": "design",
-              "label": "技术设计",
-              "artifactType": "file",
-              "path": "design.md",
-              "required": true,
+                "degrade": "无 PRD 时直接跳过；存在来源上下文时 reviewer 以 source-context.json 与 sources/ 快照逐项核对"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时 reviewer 必须逐项核对 targets 含 reviewer 的要求 ID"
+              } },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
                 "degrade": "无 design 时按现有代码模式评审实现合理性，并在报告中记录设计基准缺失"
               }
@@ -1074,6 +1069,7 @@
         "validators": [
           "ui_context_json",
           "unit_test_result_json",
+          "fix_request_json",
           "evidence_integrity"
         ]
       },
@@ -1149,24 +1145,16 @@
               "required": true,
               "extract": {
                 "degrade": "无 specs 时与用户确认主链路预期后生成用例"
-              }
-            },
-            {
-              "id": "prd_optional",
-              "label": "PRD参考",
-              "artifactType": "file",
-              "path": "PRD.md",
-              "required": false,
+              } },
+            { "id": "prd_optional", "label": "PRD外部资料索引", "artifactType": "file", "path": "PRD.md", "required": false,
               "extract": {
-                "degrade": "无 PRD 时直接跳过"
-              }
-            },
-            {
-              "id": "design",
-              "label": "技术设计",
-              "artifactType": "file",
-              "path": "design.md",
-              "required": true,
+                "degrade": "无 PRD 时直接跳过；存在来源上下文时 E2E 以 source-context.json 与 sources/ 快照生成用例"
+              } },
+            { "id": "source_context_optional", "label": "外部资料要求索引", "artifactType": "json", "path": "source-context.json", "required": false,
+              "extract": {
+                "degrade": "无外部资料时跳过；存在时 targets 含 e2e 的要求必须进入 E2E 用例来源"
+              } },
+            { "id": "design", "label": "技术设计", "artifactType": "file", "path": "design.md", "required": true,
               "extract": {
                 "degrade": "无 design 时从现有路由/入口探索驱动方式"
               }

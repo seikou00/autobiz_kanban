@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.json_writer_common import WriterError, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.utest_plan_contract import UTestPlanContractError, load_utest_plan  # noqa: E402
+from hooks.utest_blocked_writer import BLOCKING_STATUSES, record_utest_block  # noqa: E402
 from hooks.utest_workspace_binding import (  # noqa: E402
     UTestWorkspaceBindingError,
     path_within,
@@ -125,7 +126,7 @@ def _inspect_spring(root, framework):
         return result
     if not pom.is_file() and not present_gradle:
         result["errors"].append(
-            "自动定位的模块未发现 pom.xml 或 build.gradle(.kts)。修复：在 /autodev-plan 修正 scope.modules。"
+            "validationCommands.cwd 对应目录未发现 pom.xml 或 build.gradle(.kts)。修复：修正验证目录或补齐项目真实使用的构建清单。"
         )
         return result
 
@@ -259,7 +260,7 @@ def _inspect_frontend(root, framework):
     package_path = root / "package.json"
     if not package_path.is_file():
         result["errors"].append(
-            "自动定位的模块未发现 package.json。修复：在 /autodev-plan 修正 scope.modules。"
+            "validationCommands.cwd 对应目录未发现 package.json。修复：修正验证目录或补齐项目真实使用的构建清单。"
         )
         return result
 
@@ -371,7 +372,7 @@ def inspect_environment(workspace, framework):
     normalized = str(framework or "").strip().lower()
     if not root.is_dir():
         raise TestEnvironmentError(
-            "自动解析的 projectRoot 不存在或不是目录：{}。修复：重新运行 workspace binding 解析，并检查 plan 的 scope.modules。".format(
+            "自动解析的 projectRoot 不存在或不是目录：{}。修复：重新运行 workspace binding 解析，并检查 validationCommands.cwd。".format(
                 root
             )
         )
@@ -463,9 +464,13 @@ def inspect_feature_environments(workspace, feature, task_ids=None):
     inspected = {}
     task_targets = []
     bindings = {}
+    location_warnings = []
     for task_id in selected_task_ids:
         context = resolve_task_workspace(artifact_workspace, feature, task_id)
         bindings[context["workspaceRef"]] = context["binding"]
+        for warning in context.get("locationWarnings", []):
+            if warning not in location_warnings:
+                location_warnings.append(warning)
         for target in context["targets"]:
             execution_root = Path(target["executionRoot"])
             repository_root = Path(target["repositoryRoot"])
@@ -474,7 +479,7 @@ def inspect_feature_environments(workspace, feature, task_ids=None):
             if framework is None:
                 inspection = _base_result("unknown")
                 inspection["errors"].append(
-                    "{} 未发现受支持的测试工程清单。修复：在 /autodev-plan 修正 scope.modules，或补齐该模块真实使用的构建清单。".format(
+                    "{} 的 validationCommands.cwd 未发现受支持的测试工程清单。修复：修正验证目录，或补齐项目真实使用的构建清单。".format(
                         task_id
                     )
                 )
@@ -509,32 +514,58 @@ def inspect_feature_environments(workspace, feature, task_ids=None):
         "bindings": bindings,
         "targets": targets,
         "taskTargets": task_targets,
+        "locationWarnings": location_warnings,
         "warnings": warnings,
         "errors": errors,
     }
 
 
+def _record_blocked_if_requested(args, payload):
+    if args is None or not args.record_blocked or payload.get("status") not in BLOCKING_STATUSES:
+        return payload
+    result = dict(payload)
+    try:
+        result["blockedArtifacts"] = record_utest_block(args.workspace, args.feature, result)
+    except (UTestPlanContractError, WriterError, ValueError, OSError) as exc:
+        result["blockedArtifactError"] = (
+            "阻断产物写入失败：{}。修复：修复当前 Plan/产物契约后重新运行同一环境检查命令。".format(
+                exc
+            )
+        )
+        result["requiredAction"] = "repair_utest_blocked_artifacts"
+    return result
+
+
 def main(argv=None):
-    parser = RepairArgumentParser(description="按当前 plan 自动定位并只读检查单测环境")
+    parser = RepairArgumentParser(description="按当前 plan 自动定位单测环境，并可落盘阻断交接")
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--feature", required=True)
     parser.add_argument("--task-id", action="append")
     parser.add_argument("--json", action="store_true", help="输出稳定 JSON（默认格式）")
+    parser.add_argument(
+        "--record-blocked",
+        action="store_true",
+        help="对 contract_gap/environment 终态写入 BLOCKED 产物与 FIX_REQUEST",
+    )
+    args = None
     try:
         args = parser.parse_args(argv)
         result = inspect_feature_environments(args.workspace, args.feature, args.task_id)
     except UTestWorkspaceBindingError as exc:
-        print(json.dumps(exc.payload(), ensure_ascii=False, indent=2, sort_keys=False))
+        payload = _record_blocked_if_requested(args, exc.payload())
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False))
         return 2
     except TestEnvironmentError as exc:
+        payload = {
+            "status": "environment_inspection_failed",
+            "owner": "inspect_test_environment",
+            "requiredAction": "repair_environment_inspection_input",
+            "errors": [str(exc)],
+        }
+        payload = _record_blocked_if_requested(args, payload)
         print(
             json.dumps(
-                {
-                    "status": "environment_inspection_failed",
-                    "owner": "inspect_test_environment",
-                    "requiredAction": "repair_environment_inspection_input",
-                    "errors": [str(exc)],
-                },
+                payload,
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=False,
@@ -542,25 +573,30 @@ def main(argv=None):
         )
         return 2
     except (WriterError, ValueError, OSError) as exc:
+        payload = {
+            "status": "environment_inspection_failed",
+            "owner": "inspect_test_environment",
+            "requiredAction": "repair_environment_inspection_artifacts",
+            "errors": [
+                "环境检查失败：{}。修复：检查产物 workspace、Feature 和 workspace binding 后重试。".format(
+                    exc
+                )
+            ],
+        }
+        payload = _record_blocked_if_requested(args, payload)
         print(
             json.dumps(
-                {
-                    "status": "environment_inspection_failed",
-                    "owner": "inspect_test_environment",
-                    "requiredAction": "repair_environment_inspection_artifacts",
-                    "errors": [
-                        "环境检查失败：{}。修复：检查产物 workspace、Feature 和 workspace binding 后重试。".format(
-                            exc
-                        )
-                    ],
-                },
+                payload,
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=False,
             )
         )
         return 2
+    result = _record_blocked_if_requested(args, result)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=False))
+    if args.record_blocked and result.get("status") in BLOCKING_STATUSES:
+        return 2
     return 0
 
 

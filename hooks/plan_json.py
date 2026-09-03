@@ -35,6 +35,7 @@ TASK_ID_RE = re.compile(r"^T\d{3}$")
 BATCH_ID_RE = re.compile(r"^B\d{3}$")
 REQ_ID_RE = re.compile(r"\bREQ-\d{3}\b")
 SCN_ID_RE = re.compile(r"\bSCN-\d{3}\b")
+SOURCE_REQUIREMENT_ID_RE = re.compile(r"^SRC-\d{3}-R\d{3}$")
 API_ID_RE = re.compile(r"^API-\d{3}$")
 DATA_ID_RE = re.compile(r"^DATA-\d{3}$")
 # 技术决策：plan 阶段写进 design 技术决策表，任务用 `decisionIds` 引用。
@@ -501,6 +502,15 @@ def _validate_tasks_container(
         if spec_refs and not any(SCN_ID_RE.search(ref) for ref in spec_refs):
             errors.append(f"{task_id}.specRefs_missing_scenario_id")
 
+        if "sourceRefs" in raw_task:
+            _validate_string_list(
+                errors,
+                raw_task,
+                task_id,
+                "sourceRefs",
+                required=False,
+                item_re=SOURCE_REQUIREMENT_ID_RE,
+            )
         _validate_string_list(errors, raw_task, task_id, "designRefs", required=False)
         if "mergedScenarioRefs" in raw_task:
             _validate_string_list(errors, raw_task, task_id, "mergedScenarioRefs", required=False)
@@ -603,7 +613,19 @@ def _validate_tasks_container(
                 errors.append(f"{task_id}.latestPassEvidenceId_not_completion_evidence:{latest_pass}")
             elif isinstance(latest_pass, str) and latest_pass != completion_evidence_ids[-1]:
                 errors.append(f"{task_id}.latestPassEvidenceId_not_latest:{latest_pass}")
-        _validate_string_list(errors, raw_task, task_id, "expectedFiles", required=False)
+        expected_files = _validate_string_list(
+            errors, raw_task, task_id, "expectedFiles", required=False
+        )
+        for expected_file in expected_files:
+            expected_path = Path(expected_file.replace("\\", "/"))
+            if (
+                expected_path.is_absolute()
+                or ".." in expected_path.parts
+                or expected_file.startswith("./")
+                or expected_file.endswith("/")
+                or expected_file == "."
+            ):
+                errors.append(f"{task_id}.expectedFiles_path_invalid:{expected_file}")
         blockers = _validate_string_list(errors, raw_task, task_id, "blockers", required=False)
         if require_all_done and blockers:
             errors.append(f"{task_id}.blockers_unresolved")
@@ -612,6 +634,8 @@ def _validate_tasks_container(
         is_ui_required = ui_required is True
         if ui_required is not None and not isinstance(ui_required, bool):
             errors.append(f"{task_id}.uiRequired_must_be_bool")
+        if is_ui_required and not expected_files:
+            errors.append(f"{task_id}.expectedFiles_missing_for_ui")
         ui_refs = raw_task.get("uiRefs")
         if ui_refs is None:
             if is_ui_required:

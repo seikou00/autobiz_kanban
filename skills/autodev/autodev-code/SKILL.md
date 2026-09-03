@@ -63,6 +63,8 @@ python "{PLUGIN_ROOT}/hooks/resolve_frontend_html_route.py" --feature "{FEATURE_
 
 进入 Code 前读取 Feature 的 `IMPLEMENTATION_SCOPE.json`。`backend_only` 只执行 backend task，`frontend_only` 只执行 frontend task；如果计划中存在相反 lane 的任务，停止并回到 `/autodev-plan` 修复，不得通过手工修改 `uiRequired` 绕过范围门禁。
 
+当前 TASK 存在 `sourceRefs` 时只使用 `code_task_context.py` 返回的 `resolvedSourceRefs`：逐项读取要求、逐字原文、快照路径和定位后再编码。`snapshot_only` 的快照是本 Feature 依据，不得要求用户重新提供；只有 `never_provided` 且要求仍阻断实现时才能回流提问。不得从 specs/design 摘要反查来源，也不得猜测 method/path、鉴权、请求响应、错误或超时约定。
+
 使用任何 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。
 
 ## 缺失产物处理

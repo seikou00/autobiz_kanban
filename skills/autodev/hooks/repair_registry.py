@@ -64,7 +64,8 @@ _ENTRY: Dict[str, Repair] = {
         problem="本阶段的必备产物缺失或为空：{target}",
         action=(
             "先把缺失产物生成出来再重跑预检。proposal.md / specs/<capability>/spec.md 由 "
-            "/autodev-specs 生成；design.md 由 /autodev-plan 生成；plan.json 与 PLAN.md 一律"
+            "/autodev-specs 生成；SPECS_REVIEW.md 是 /autodev-specs 回检段的落盘产物，"
+            "按回检协议跑完回检后写入；design.md 由 /autodev-plan 生成；plan.json 与 PLAN.md 一律"
             "通过 hooks/plan_writer.py 生成，" + PLAN_NO_HAND_EDIT
         ),
     ),
@@ -91,6 +92,11 @@ _ENTRY: Dict[str, Repair] = {
 # --------------------------------------------------------------------------
 
 _SPECS: Dict[str, Repair] = {
+    "invalid_source_context": Repair(
+        artifact="source-context.json / sources/",
+        problem="来源要求索引或快照不合法：{target}",
+        action="按预检详情修正 source-context.json 的来源、快照路径、原文条目或要求定义后重跑；已有快照时不要改成 never_provided。",
+    ),
     "missing_proposal": Repair(
         artifact="proposal.md",
         problem="proposal.md 不存在或为空",
@@ -124,27 +130,34 @@ _SPECS: Dict[str, Repair] = {
     "invalid_spec_missing_requirement": Repair(
         artifact="{target}",
         problem="{target} 没有任何合法 Requirement",
-        action="按「### Requirement [REQ-NNN]: <标题>」写出 Requirement（NNN 三位数字，方括号不能省）。",
+        action="按「### Requirement REQ-NNN: <标题>」写出 Requirement，NNN 使用三位数字。",
     ),
     "invalid_spec_missing_scenario": Repair(
         artifact="{target}",
         problem="{target} 没有任何合法 Scenario",
-        action="按「#### Scenario [SCN-NNN]: <标题>」补 Scenario，并归属到本文件已有的 Requirement 下。",
+        action="按「#### Scenario SCN-NNN: <标题>」补 Scenario，并归属到本文件已有的 Requirement 下。",
     ),
     "spec_contract_heading_malformed": Repair(
         artifact="{target}",
         problem="{target} 中的契约标题写法不规范，索引器读不到：{headings}",
         action=(
-            "把报错的标题改成规范写法：「### Requirement [REQ-NNN]: <标题>」/"
-            "「#### Scenario [SCN-NNN]: <标题>」。NNN 是三位数字，方括号和层级都不能省——"
-            "索引器只认这一种写法，其余写法会被静默跳过，该 Requirement 对下游覆盖检查等于不存在。"
+            "把报错的标题改成「### Requirement REQ-NNN: <标题>」/"
+            "「#### Scenario SCN-NNN: <标题>」。NNN 是三位数字，ID 外的方括号可有可无。"
+        ),
+    ),
+    "spec_id_width_invalid": Repair(
+        artifact="{target}",
+        problem="{target} 中的规格 ID {id} 不是三位数字",
+        action=(
+            "把 {id} 改为 {suggested}，并同步本文件 Source References 及其他引用。"
+            "该错误只处理位数，不要改操作分组或 Requirement 内容。"
         ),
     ),
     "spec_requirement_without_scenario": Repair(
         artifact="{target}",
         problem="{target} 中这些 Requirement 自身块内没有 Scenario：{requirements}",
         action=(
-            "为报错的每个 Requirement 补至少一个「#### Scenario [SCN-NNN]: <标题>」；"
+            "为报错的每个 Requirement 补至少一个「#### Scenario SCN-NNN: <标题>」；"
             "REMOVED Requirement 用 Scenario 描述旧入口被触发时的期望响应。"
         ),
     ),
@@ -152,16 +165,8 @@ _SPECS: Dict[str, Repair] = {
         artifact="{target}",
         problem="{target} 中这些 Scenario 不归属任何 Requirement：{scenarios}",
         action=(
-            "把报错的每个 Scenario 移到它所属的「### Requirement [REQ-NNN]:」标题之下；"
+            "把报错的每个 Scenario 移到它所属的「### Requirement REQ-NNN:」标题之下；"
             "Scenario 出现在首个 Requirement 之前或操作段标题正下方时不归属任何 Requirement。"
-        ),
-    ),
-    "spec_id_out_of_order": Repair(
-        artifact="{target}",
-        problem="{target} 中这些 REQ/SCN 编号没有按文档顺序递增：{ids}",
-        action=(
-            "按文档顺序重排 REQ/SCN 编号，使其数值递增。"
-            "允许跳号（删除后 ID 不复用会留下空档），但后出现的编号不得小于先出现的。"
         ),
     ),
     "removed_requirement_missing_field": Repair(
@@ -177,16 +182,36 @@ _SPECS: Dict[str, Repair] = {
         problem="{target} 中残留模板槽位：{placeholders}",
         action=(
             "把报错的模板槽位替换成实际内容。"
-            "`[REQ-NNN]` / `[SCN-NNN]` 是 ID 语法不算槽位，Markdown 链接也不算。"
+            "`REQ-NNN` / `SCN-NNN` 必须替换成三位数字 ID；Markdown 链接不算槽位。"
+        ),
+    ),
+    "spec_source_reference_missing": Repair(
+        artifact="specs/**/spec.md",
+        problem="这些含 spec 目标要求的来源未被任何 spec 保留：{target}",
+        action=(
+            "在相关 spec 的 `## Source References / 外部资料引用` 表补齐 SRC-NNN 与 REQ/SCN 映射；"
+            "并把对应 SRC-NNN-RNNN 落入 Requirement/Scenario。"
+        ),
+    ),
+    "spec_source_reference_unknown": Repair(
+        artifact="specs/**/spec.md",
+        problem="spec 引用了 PRD 外部资料索引中不存在的来源：{target}",
+        action="修正或移除这些 SRC-NNN；确有新资料时先回 PRD 登记稳定 ID，再重新生成 specs。",
+    ),
+    "spec_source_reference_incomplete": Repair(
+        artifact="specs/**/spec.md",
+        problem="这些来源引用缺少 Requirement/Scenario 映射或 Usage：{target}",
+        action=(
+            "含 spec 目标要求的来源补齐 REQ/SCN 与 Usage；无 spec 要求的来源可删除该行，"
+            "或保留 `-` 映射并填写 Usage。"
         ),
     ),
     "duplicate_spec_id_across_specs": Repair(
         artifact="specs/**/spec.md",
         problem="{target} 在多个 spec 中重复定义：{files}",
         action=(
-            "ID 在同一 feature 内必须全局唯一——覆盖检查按扁平 ID 集合判定，"
-            "重号会让覆盖其中一个就算覆盖全部。给其中一处换一个未使用的编号，"
-            "并同步所有引用它的地方。"
+            "保留 {keep} 的 {target}；按以下 replacement map 修改其他 owner，并同步各文件内引用："
+            "{replacements}。建议值已避开本 feature 全部已用 ID，不要另行猜号。"
         ),
     ),
     "duplicate_requirement_id": Repair(
@@ -231,6 +256,43 @@ _SPECS: Dict[str, Repair] = {
             "把 {operations} 段下的 Requirement 移到「## ADDED Requirements」（段标题可以保留，留空即可）；"
             "若该能力实际是在改存量，改 proposal.md 把它挪到 Modified / Removed 组。"
         ),
+    ),
+    "missing_specs_review": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 不存在或为空——本阶段回检没有落盘",
+        action=(
+            "先按 hooks/render_review_protocol.py --stage dev.specs 完整跑完回检，"
+            "再把结论写进 SPECS_REVIEW.md，章节为 Verdict / Findings / Unresolved。"
+        ),
+    ),
+    "invalid_specs_review_verdict": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 的 `## Verdict` 段没有唯一结论",
+        action="在独立的 `## Verdict` 段写入唯一结论：PASS、PASS_WITH_WARNINGS、FAIL 或 DEGRADED。",
+    ),
+    "non_terminal_specs_review_verdict": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 的结论是 {verdict}，不是终态",
+        action="把 blocker 改完并重写结论；只有 PASS 或 PASS_WITH_WARNINGS 可以推进 specs_done。",
+    ),
+    "missing_specs_review_findings": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 缺 `## Findings` 段或该段为空",
+        action="补 `## Findings` 段，逐条写下 critic 的结论与处置；本轮无结论时正文写「无」。",
+    ),
+    "missing_specs_review_unresolved": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 缺 `## Unresolved` 段或该段为空",
+        action="补 `## Unresolved` 段，列出仍待用户裁定的条目；没有时正文写「无」。",
+    ),
+    "unresolved_specs_review_finding": Repair(
+        artifact="SPECS_REVIEW.md",
+        problem="SPECS_REVIEW.md 的 `## Unresolved` 段仍有未裁定条目",
+        action=(
+            "「需用户裁定」的条目必须按 ask-user-question.md 协议逐条问过用户再落盘；"
+            "裁定后把该条从 Unresolved 移走、在 Findings 的处置列写下裁定结果，本段写「无」。"
+        ),
+        route=ROUTE_ASK_USER,
     ),
 }
 
@@ -289,6 +351,32 @@ _DESIGN: Dict[str, Repair] = {
             "或把该单元格改成实际存在的编号／「无」。只认该节内的定义，写在 proposal 别处不算。"
             "技术决策用 Design Coverage 列的 D-NNN，不要写进 Decision 列。"
         ),
+    ),
+    "design_source_reference_missing": Repair(
+        artifact="design.md",
+        problem="design.md 的 External Source Coverage 未覆盖 PRD 来源：{target}",
+        action="逐项打开 PRD 登记的原始地址/路径，在 External Source Coverage 补齐设计覆盖与消费证据；资料不可访问时停止 Plan，不得假装已消费。",
+    ),
+    "design_source_reference_unknown": Repair(
+        artifact="design.md",
+        problem="design.md 的 External Source Coverage 引用了 PRD 未定义的来源：{target}",
+        action="修正或移除这些 SRC-NNN；新资料必须先回 PRD 登记稳定 ID，不能由 design 私自创建来源编号。",
+    ),
+    "design_external_interface_api_reference_missing": Repair(
+        artifact="design.md",
+        problem="这些 PRD 外部接口来源没有关联到 API Decisions：{target}",
+        action="在 API Decisions 的 Source Refs 列关联对应 SRC-NNN，并按原接口资料核对 method/path、鉴权、请求响应、错误和超时。",
+    ),
+    "design_source_consumption_evidence_missing": Repair(
+        artifact="design.md",
+        problem="这些来源只有 ID，没有完整的关联需求、设计覆盖或原件消费证据：{target}",
+        action="打开每个 SRC-NNN 原件，在 External Source Coverage 补齐关联 REQ/SCN、API/DATA/D 设计项与可核对的地址/版本/契约事实。",
+    ),
+    "design_source_consumption_blocked": Repair(
+        artifact="design.md",
+        problem="这些来源仍处于阻断或不可访问状态：{target}",
+        action="停止 Plan；取得可访问原件或由用户移除该实现依赖后，重新完成 External Source Coverage。",
+        route=ROUTE_ASK_USER,
     ),
     "duplicate_design_api_id": Repair(
         artifact="design.md",
@@ -490,6 +578,21 @@ _PLAN: Dict[str, Repair] = {
         artifact="plan.json",
         problem="specs 中这些 Scenario 没有被任何任务覆盖：{target}",
         action="回到任务分组表，把报错的每个 SCN 分配给实际实现它的任务，再用 hooks/plan_writer.py 重建 Draft。" + PLAN_NO_HAND_EDIT,
+    ),
+    "implementation_scope_partition_overlap": Repair(
+        artifact="IMPLEMENTATION_SCOPE.json",
+        problem="这些条目同时被声明为本期实现和延后：{detail}",
+        action="每条只能归属一侧。用 hooks/plan_scope.py set-partition 重写分区，从 included 或 deferred 中删掉重复项。",
+    ),
+    "implementation_scope_unknown_ref": Repair(
+        artifact="IMPLEMENTATION_SCOPE.json",
+        problem="分区里声明了上游产物中不存在的引用：{detail}",
+        action="删除这些条目；确实应当存在的，回上游补回对应 Scenario / Design ID / 来源要求定义。",
+    ),
+    "implementation_scope_partition_must_be_string_array": Repair(
+        artifact="IMPLEMENTATION_SCOPE.json",
+        problem="{detail} 不是字符串数组",
+        action="把该字段写成字符串数组，每项一个 ID 或全限定引用，再用 hooks/plan_scope.py set-partition 重写。",
     ),
     "invalid_plan_task_scenario_reference": Repair(
         artifact="plan.json",

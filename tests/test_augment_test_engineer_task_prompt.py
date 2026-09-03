@@ -228,7 +228,7 @@ class UTestRoleRegistrationTest(unittest.TestCase):
         registrations = [item for item in config["PreToolUse"] if item.get("matcher") == "task|Task"]
         commands = [hook.get("command") for hook in registrations[0]["hooks"]]
 
-        self.assertIn("python3 hooks/augment_test_engineer_task_prompt.py", commands)
+        self.assertIn("python hooks/augment_test_engineer_task_prompt.py", commands)
 
 
 if __name__ == "__main__":

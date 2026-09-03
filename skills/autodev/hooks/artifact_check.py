@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterable, NamedTuple
 
 from common import (
     HookCheckError,
@@ -43,10 +44,27 @@ from hooks.e2e_trust_common import (  # noqa: E402
     validate_scan_current,
 )
 from hooks.implementation_scope import load_scope, scope_path  # noqa: E402
+from hooks.candidate_digest import compute as compute_candidate_digest  # noqa: E402
+from hooks.source_references import (  # noqa: E402
+    SOURCE_ID_RE,
+    extract_source_references,
+    external_interface_ids as prd_external_interface_ids,
+    has_source_section,
+    source_ids as referenced_source_ids,
+)
+from hooks.source_context import (  # noqa: E402
+    load_source_context,
+    referenced_source_requirement_ids,
+    source_ids_for_target,
+    source_requirement_ids_for_target,
+    source_requirement_index,
+    validate_source_context_refs,
+)
 from hooks.artifact_ref_validator import (  # noqa: E402
     design_marker_value,
     load_design_contract,
     validate_plan_design_coverage,
+    validate_plan_source_coverage,
     validate_task_artifact_refs,
 )
 from hooks.plan_json import (  # noqa: E402
@@ -83,8 +101,22 @@ SCN_ID = re.compile(r"\bSCN-\d{3}\b")
 TASK_ID = re.compile(r"\bT\d{3}\b")
 EVIDENCE_ID = re.compile(r"\bev_\d{4}\b")
 FRONTEND_REVIEW_PASS = {"passed", "has-suggestions", "skipped-by-user"}
-SPEC_REQUIREMENT_DEF_RE = re.compile(r"^###\s+Requirement\s+\[(REQ-\d{3})\]:\s+.+$", re.MULTILINE)
-SPEC_SCENARIO_DEF_RE = re.compile(r"^####\s+Scenario\s+\[(SCN-\d{3})\]:\s+.+$", re.MULTILINE)
+SPEC_REQUIREMENT_DEF_RE = re.compile(
+    r"^###\s+Requirement\s+(?=\[?(REQ-\d{3})\]?:\s+.+$)(?:\[REQ-\d{3}\]|REQ-\d{3}):\s+.+$",
+    re.MULTILINE,
+)
+SPEC_SCENARIO_DEF_RE = re.compile(
+    r"^####\s+Scenario\s+(?=\[?(SCN-\d{3})\]?:\s+.+$)(?:\[SCN-\d{3}\]|SCN-\d{3}):\s+.+$",
+    re.MULTILINE,
+)
+SPEC_REQUIREMENT_NUMERIC_RE = re.compile(
+    r"^###\s+Requirement\s+(?=\[?(REQ-(?P<digits>\d+))\]?:\s+.+$)(?:\[REQ-\d+\]|REQ-\d+):\s+.+$",
+    re.MULTILINE,
+)
+SPEC_SCENARIO_NUMERIC_RE = re.compile(
+    r"^####\s+Scenario\s+(?=\[?(SCN-(?P<digits>\d+))\]?:\s+.+$)(?:\[SCN-\d+\]|SCN-\d+):\s+.+$",
+    re.MULTILINE,
+)
 # 带 REQ-/SCN- 记号的标题行；与上面两个正则的差集就是索引器看不见的写法
 CONTRACT_HEADING_CANDIDATE = re.compile(r"^#{1,6}[ \t]+.*?\b(?:REQ|SCN)-\S")
 # 二级标题（操作段）；`###` 不算，否则 Requirement 标题会被当成段边界
@@ -96,12 +128,16 @@ REMOVED_SECTION = re.compile(
 REMOVED_FIELD = re.compile(
     r"^\*\*(?P<name>Reason|Migration)[:：]\*\*(?P<value>.*)$", re.MULTILINE
 )
-# `[能力名]` 这类待填槽位。排除 `[REQ-001]`/`[SCN-001]`（真 ID 语法）、
+# `[能力名]` 这类待填槽位。排除所有纯数字 REQ/SCN 记号；位数是否合法由
+# ``spec_id_width_invalid`` 单独判定，避免一个四位 ID 同时报模板残留。
+# `REQ-NNN` / `SCN-NNN` 是模板槽位，由 ``PLACEHOLDER_WORD`` 统一捕获。
 # Markdown 链接 `[文字](url)`、以及任务勾选框 `[ ]` / `[x]`。
 PLACEHOLDER_BRACKET = re.compile(
-    r"\[(?!(?:REQ|SCN)-\d{3}\])(?![ xX]\])(?P<slot>[^\]\n]{1,40})\](?!\()"
+    r"\[(?!(?:REQ|SCN)-(?:\d+|NNN)\])(?![ xX]\])(?P<slot>[^\]\n]{1,40})\](?!\()"
 )
-PLACEHOLDER_WORD = re.compile(r"TBD|待补充|待提供|待定|占位", re.IGNORECASE)
+PLACEHOLDER_WORD = re.compile(
+    r"\b(?:REQ|SCN)-NNN\b|TBD|待补充|待提供|待定|占位", re.IGNORECASE
+)
 PLACEHOLDER_TEXT = re.compile(r"\[[^\]\n]*\]|TBD|待补充|待提供|待定|占位", re.IGNORECASE)
 # 规格决策 DEC-NNN：specs 阶段在 proposal `## Decision Log` 定义，design 追踪表引用。
 # 与技术决策 `D-NNN`（plan 阶段自产，见 hooks/plan_json.TECH_DECISION_ID_RE）不是一回事，
@@ -225,12 +261,17 @@ def validate_no_template_guidance(
 
 TERMINAL_PASS = {"PASS", "PASS_WITH_WARNINGS"}
 REVIEW_VERDICTS = {"PASS", "PASS_WITH_WARNINGS", "FAIL", "DEGRADED"}
-REQUIREMENTS_EVAL_VERDICT_SECTION = re.compile(
+# `## Verdict` 段：REQUIREMENTS_EVAL.md 与 SPECS_REVIEW.md 共用同一形状
+REVIEW_VERDICT_SECTION = re.compile(
     r"^##\s+Verdict\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 REQUIREMENTS_EVAL_BLOCKERS_SECTION = re.compile(
     r"^##\s+Blockers?\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+REQUIREMENTS_EVAL_WARNINGS_SECTION = re.compile(
+    r"^##\s+Warnings?\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 REQUIREMENTS_EVAL_BASELINE_SECTION = re.compile(
@@ -470,6 +511,14 @@ def validate_specs_contract(ctx: HookContext) -> int:
         return fail_line(ctx, "missing_specs")
 
     failures = _report_implementation_scope_errors(ctx)
+    # Renumbering suggestions have to clear every ID the feature already owns,
+    # not just the ones in the file being repaired -- a file-local suggestion
+    # walks straight into `duplicate_spec_id_across_specs`.
+    taken: set[str] = set()
+    for spec in specs:
+        spec_text = read_text(spec)
+        taken.update(SPEC_REQUIREMENT_DEF_RE.findall(spec_text))
+        taken.update(SPEC_SCENARIO_DEF_RE.findall(spec_text))
     for spec in specs:
         text = read_text(spec)
         rel = spec.relative_to(ctx.feature_dir)
@@ -479,9 +528,25 @@ def validate_specs_contract(ctx: HookContext) -> int:
             failures += fail_line(ctx, reason, f" file={rel}", target=str(rel))
         if not re.search(r"^##\s+(ADDED|MODIFIED|REMOVED|RENAMED)\s+Requirements\b", text, re.MULTILINE):
             failures += fail_line(ctx, "invalid_spec_missing_operation_header", f" file={rel}", target=str(rel))
-        if not re.search(r"^###\s+Requirement\s+\[REQ-\d{3}\]:\s+.+", text, re.MULTILINE):
+        width_errors = contract_id_width_errors(text, taken)
+        for width_error in width_errors:
+            if width_error.suggested:
+                taken.add(width_error.suggested)
+            failures += fail_line(
+                ctx,
+                "spec_id_width_invalid",
+                f" file={rel} id={width_error.current} suggested={width_error.suggested or 'NONE'}",
+                target=str(rel),
+                fields={
+                    "id": width_error.current,
+                    "suggested": width_error.suggested or "三位 ID 空间已耗尽",
+                },
+            )
+        has_requirement_candidate = SPEC_REQUIREMENT_NUMERIC_RE.search(text) is not None
+        has_scenario_candidate = SPEC_SCENARIO_NUMERIC_RE.search(text) is not None
+        if not has_requirement_candidate:
             failures += fail_line(ctx, "invalid_spec_missing_requirement", f" file={rel}", target=str(rel))
-        if not re.search(r"^####\s+Scenario\s+\[SCN-\d{3}\]:\s+.+", text, re.MULTILINE):
+        if not has_scenario_candidate:
             failures += fail_line(ctx, "invalid_spec_missing_scenario", f" file={rel}", target=str(rel))
         malformed = malformed_contract_headings(text)
         if malformed:
@@ -510,15 +575,6 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 target=str(rel),
                 fields={"scenarios": ",".join(orphans)},
             )
-        disordered = out_of_order_ids(text)
-        if disordered:
-            failures += fail_line(
-                ctx,
-                "spec_id_out_of_order",
-                f" file={rel} ids={','.join(disordered)}",
-                target=str(rel),
-                fields={"ids": ",".join(disordered)},
-            )
         missing_fields = removed_requirements_missing_fields(text)
         if missing_fields:
             failures += fail_line(
@@ -538,6 +594,126 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 fields={"placeholders": "; ".join(sorted(set(residue))[:8])},
             )
     failures += _duplicate_ids_across_specs(ctx, specs)
+    failures += _validate_specs_source_references(ctx, specs)
+    failures += _validate_source_requirement_coverage(
+        ctx,
+        [read_text(spec) for spec in specs],
+        "spec",
+        "spec_source_requirement_missing",
+        "spec_source_requirement_unknown",
+    )
+    return failures
+
+
+def _validate_specs_source_references(ctx: HookContext, specs: list[Path]) -> int:
+    """Keep PRD-owned source IDs visible at the behavior-contract boundary."""
+
+    prd = ctx.file("PRD.md")
+    if not is_nonempty(prd):
+        return 0
+    prd_text = read_text(prd)
+    if not has_source_section(prd_text):
+        return 0
+
+    defined = {reference.source_id for reference in extract_source_references(prd_text)}
+    source_context, _ = load_source_context(ctx.feature_dir)
+    required = (
+        defined
+        if source_context is None
+        else defined & source_ids_for_target(source_context, "spec")
+    )
+    cited: set[str] = set()
+    rows: dict[str, list[str]] = {}
+    for spec in specs:
+        source_section = _markdown_section_body(
+            read_text(spec),
+            "Source References / 外部资料引用",
+        )
+        if source_section is not None:
+            section_rows = _source_table_rows(source_section)
+            rows.update(section_rows)
+            cited.update(section_rows)
+
+    failures = 0
+    missing = sorted(required - cited)
+    if missing:
+        failures += fail_line(
+            ctx,
+            "spec_source_reference_missing",
+            f" ids={','.join(missing)}",
+            target=",".join(missing),
+        )
+    unknown = sorted(cited - defined)
+    if unknown:
+        failures += fail_line(
+            ctx,
+            "spec_source_reference_unknown",
+            f" ids={','.join(unknown)}",
+            target=",".join(unknown),
+        )
+    incomplete = sorted(
+        source_id
+        for source_id, cells in rows.items()
+        if len(cells) < 3
+        or _coverage_cell_is_empty(cells[2])
+        or (source_id in required and _coverage_cell_is_empty(cells[1]))
+    )
+    if incomplete:
+        failures += fail_line(
+            ctx,
+            "spec_source_reference_incomplete",
+            f" ids={','.join(incomplete)}",
+            target=",".join(incomplete),
+        )
+    return failures
+
+
+def _validate_source_requirement_coverage(
+    ctx: HookContext,
+    texts: list[str],
+    target: str,
+    missing_reason: str,
+    unknown_reason: str,
+) -> int:
+    """Validate compact source requirement IDs against the actual artifact text."""
+
+    validation_errors = validate_source_context_refs(ctx.feature_dir)
+    data, load_errors = load_source_context(ctx.feature_dir)
+    failures = 0
+    for error in (validation_errors or load_errors):
+        failures += fail_line(
+            ctx,
+            "invalid_source_context",
+            f" detail={error}",
+            target="source-context.json",
+            repair="按错误提示修正 source-context.json 及对应 sources/ 快照后重试。",
+        )
+    if data is None:
+        return failures
+
+    known = set(source_requirement_index(data))
+    expected = source_requirement_ids_for_target(data, target)
+    cited: set[str] = set()
+    for text in texts:
+        cited.update(referenced_source_requirement_ids(text))
+    missing = sorted(expected - cited)
+    unknown = sorted(cited - known)
+    if missing:
+        failures += fail_line(
+            ctx,
+            missing_reason,
+            f" ids={','.join(missing)}",
+            target=",".join(missing),
+            repair=f"在当前 {target} 产物中引用缺失的 SRC-NNN-RNNN，并落实对应要求。",
+        )
+    if unknown:
+        failures += fail_line(
+            ctx,
+            unknown_reason,
+            f" ids={','.join(unknown)}",
+            target=",".join(unknown),
+            repair="修正来源要求 ID，只引用 source-context.json 中已有的 SRC-NNN-RNNN。",
+        )
     return failures
 
 
@@ -558,55 +734,90 @@ def _duplicate_ids_across_specs(ctx: HookContext, specs: list[Path]) -> int:
             for spec_id in set(pattern.findall(text)):
                 owners.setdefault(spec_id, []).append(rel)
 
+    reserved = set(owners)
     failures = 0
     for spec_id, files in sorted(owners.items()):
         if len(files) > 1:
+            sorted_files = sorted(files)
+            prefix = spec_id.split("-", 1)[0]
+            replacements: list[str] = []
+            for owner in sorted_files[1:]:
+                suggested = _next_free_spec_id(prefix, 0, reserved)
+                if suggested:
+                    reserved.add(suggested)
+                    replacements.append(f"{owner}:{spec_id}->{suggested}")
+                else:
+                    replacements.append(f"{owner}:{spec_id}->三位 ID 空间已耗尽")
             failures += fail_line(
                 ctx,
                 "duplicate_spec_id_across_specs",
-                f" id={spec_id} files={','.join(sorted(files))}",
+                f" id={spec_id} keep={sorted_files[0]} replacements={';'.join(replacements)}",
                 target=spec_id,
-                fields={"files": ",".join(sorted(files))},
+                fields={
+                    "files": ",".join(sorted_files),
+                    "keep": sorted_files[0],
+                    "replacements": "; ".join(replacements),
+                },
             )
     return failures
 
 
 def malformed_contract_headings(text: str) -> list[str]:
-    """Heading lines carrying a REQ-/SCN- token that the ID indexer will not see.
-
-    The indexer accepts exactly one spelling. A heading one bracket or one ``#``
-    away from it is not a syntax error anywhere — it simply vanishes, and the
-    Requirement it names drops out of every downstream coverage check while the
-    file still passes because its *other* headings are well formed. That silent
-    partial loss is why this has to be caught at the spec itself.
-    """
+    """Heading lines carrying a REQ-/SCN- token that the ID indexer will not see."""
     malformed: list[str] = []
     for line in text.splitlines():
         if not CONTRACT_HEADING_CANDIDATE.match(line):
             continue
         if SPEC_REQUIREMENT_DEF_RE.match(line) or SPEC_SCENARIO_DEF_RE.match(line):
             continue
+        if "REQ-NNN" in line or "SCN-NNN" in line:
+            continue
+        # 数字 ID 的标题形状正确但位数错误时，由 ``spec_id_width_invalid``
+        # 给唯一根因和替换值；这里不再重复报 malformed。
+        if SPEC_REQUIREMENT_NUMERIC_RE.match(line) or SPEC_SCENARIO_NUMERIC_RE.match(line):
+            continue
         malformed.append(line.strip())
     return malformed
 
 
-def out_of_order_ids(text: str) -> list[str]:
-    """REQ/SCN IDs whose number does not exceed every ID before it in the file.
+class SpecIdWidth(NamedTuple):
+    current: str
+    suggested: str
 
-    The rule is ascending, not contiguous. "删除后 ID 不复用" guarantees gaps
-    (delete REQ-002 and 001/003 remain), so requiring contiguity would fire on
-    exactly the state the other rule mandates. Equal numbers are left to the
-    duplicate check so one mistake is not reported twice.
-    """
-    violations: list[str] = []
-    for pattern in (SPEC_REQUIREMENT_DEF_RE, SPEC_SCENARIO_DEF_RE):
+
+def contract_id_width_errors(text: str, taken: Iterable[str] = ()) -> list[SpecIdWidth]:
+    """Well-shaped numeric contract headings whose ID is not exactly three digits."""
+
+    reserved = set(taken)
+    reserved.update(SPEC_REQUIREMENT_DEF_RE.findall(text))
+    reserved.update(SPEC_SCENARIO_DEF_RE.findall(text))
+    errors: list[SpecIdWidth] = []
+    for prefix, pattern in (
+        ("REQ", SPEC_REQUIREMENT_NUMERIC_RE),
+        ("SCN", SPEC_SCENARIO_NUMERIC_RE),
+    ):
         highest = 0
         for match in pattern.finditer(text):
-            number = int(match.group(1).rsplit("-", 1)[1])
-            if number < highest:
-                violations.append(match.group(1))
-            highest = max(highest, number)
-    return violations
+            digits = match.group("digits")
+            current = match.group(1)
+            if len(digits) == 3:
+                highest = max(highest, int(digits))
+                continue
+            suggested = _next_free_spec_id(prefix, highest, reserved)
+            if suggested:
+                reserved.add(suggested)
+                highest = int(suggested.rpartition("-")[2])
+            errors.append(SpecIdWidth(current, suggested))
+    return errors
+
+
+def _next_free_spec_id(prefix: str, floor: int, reserved: set[str]) -> str:
+    """Lowest ``<prefix>-NNN`` above ``floor`` that nothing else in the feature owns."""
+    for number in range(floor + 1, 1000):
+        candidate = f"{prefix}-{number:03d}"
+        if candidate not in reserved:
+            return candidate
+    return ""
 
 
 def scenarios_without_requirement(text: str) -> list[str]:
@@ -663,9 +874,9 @@ def removed_requirements_missing_fields(text: str) -> list[str]:
 def placeholder_residue(text: str) -> list[str]:
     """Template placeholders left in a generated artifact.
 
-    ``[REQ-001]`` / ``[SCN-001]`` are the real ID syntax and Markdown links are
-    ordinary prose, so both are excluded -- what is left is a slot the author
-    was supposed to fill.
+    Numeric ``[REQ-...]`` / ``[SCN-...]`` tokens are left to the dedicated ID
+    validators. ``REQ-NNN`` / ``SCN-NNN`` and bracketed prose are template
+    slots; Markdown links are ordinary prose.
     """
     residue = [match.group(0) for match in PLACEHOLDER_BRACKET.finditer(text)]
     residue += [match.group(0) for match in PLACEHOLDER_WORD.finditer(text)]
@@ -738,6 +949,121 @@ def validate_design_contract(ctx: HookContext) -> int:
             target=f"{len(pending)} 处",
         )
     failures += _unresolved_decision_refs(ctx, text)
+    failures += _validate_design_source_references(ctx, text)
+    failures += _validate_source_requirement_coverage(
+        ctx,
+        [text],
+        "design",
+        "design_source_requirement_missing",
+        "design_source_requirement_unknown",
+    )
+    return failures
+
+
+def _markdown_section_body(text: str, title: str) -> str | None:
+    heading = re.compile(rf"^ {{0,3}}(?P<marks>#{{1,6}})\s+.*{re.escape(title)}.*$", re.MULTILINE)
+    match = heading.search(text)
+    if match is None:
+        return None
+    level = len(match.group("marks"))
+    next_heading = re.compile(rf"^ {{0,3}}#{{1,{level}}}\s+\S", re.MULTILINE)
+    end_match = next_heading.search(text, match.end())
+    end = end_match.start() if end_match else len(text)
+    return text[match.end():end]
+
+
+def _source_table_rows(section: str) -> dict[str, list[str]]:
+    rows: dict[str, list[str]] = {}
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or not stripped.endswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells or SOURCE_ID_RE.fullmatch(cells[0]) is None:
+            continue
+        rows[cells[0]] = cells
+    return rows
+
+
+def _coverage_cell_is_empty(value: str) -> bool:
+    return value.strip().casefold() in {"", "-", "—", "无", "none", "n/a", "na"}
+
+
+def _validate_design_source_references(ctx: HookContext, design_text: str) -> int:
+    prd = ctx.file("PRD.md")
+    if not is_nonempty(prd):
+        return 0
+    prd_text = read_text(prd)
+    references = extract_source_references(prd_text)
+    if not references:
+        return 0
+
+    coverage = _markdown_section_body(design_text, "External Source Coverage")
+    if coverage is None:
+        return fail_line(
+            ctx,
+            "invalid_design_missing_section",
+            " section='External Source Coverage / 外部资料覆盖'",
+            target="External Source Coverage / 外部资料覆盖",
+        )
+
+    failures = 0
+    defined = {reference.source_id for reference in references}
+    coverage_rows = _source_table_rows(coverage)
+    covered = set(coverage_rows)
+    missing = sorted(defined - covered)
+    if missing:
+        failures += fail_line(
+            ctx,
+            "design_source_reference_missing",
+            f" ids={','.join(missing)}",
+            target=",".join(missing),
+        )
+    unknown = sorted(covered - defined)
+    if unknown:
+        failures += fail_line(
+            ctx,
+            "design_source_reference_unknown",
+            f" ids={','.join(unknown)}",
+            target=",".join(unknown),
+        )
+    incomplete = sorted(
+        source_id
+        for source_id, cells in coverage_rows.items()
+        if len(cells) < 5
+        or _coverage_cell_is_empty(cells[1])
+        or _coverage_cell_is_empty(cells[2])
+        or _coverage_cell_is_empty(cells[3])
+    )
+    if incomplete:
+        failures += fail_line(
+            ctx,
+            "design_source_consumption_evidence_missing",
+            f" ids={','.join(incomplete)}",
+            target=",".join(incomplete),
+        )
+    blocked = sorted(
+        source_id
+        for source_id, cells in coverage_rows.items()
+        if len(cells) >= 5 and re.search(r"阻断|不可访问|inaccessible|blocked", cells[4], re.IGNORECASE)
+    )
+    if blocked:
+        failures += fail_line(
+            ctx,
+            "design_source_consumption_blocked",
+            f" ids={','.join(blocked)}",
+            target=",".join(blocked),
+        )
+
+    api_section = _markdown_section_body(design_text, "API Decisions") or ""
+    missing_api_refs = sorted(prd_external_interface_ids(prd_text) - referenced_source_ids(api_section))
+    if missing_api_refs:
+        failures += fail_line(
+            ctx,
+            "design_external_interface_api_reference_missing",
+            f" ids={','.join(missing_api_refs)}",
+            target=",".join(missing_api_refs),
+        )
     return failures
 
 
@@ -1236,8 +1562,9 @@ def _check_verify_scenario_decisions(
     return failures
 
 
-def requirements_eval_verdict(text: str) -> str | None:
-    section = REQUIREMENTS_EVAL_VERDICT_SECTION.search(text)
+def review_verdict(text: str) -> str | None:
+    """`## Verdict` 段首个非空行上的唯一合法结论；含糊或多值时返回 None。"""
+    section = REVIEW_VERDICT_SECTION.search(text)
     if section is None:
         return None
     for line in section.group("body").splitlines():
@@ -1248,6 +1575,10 @@ def requirements_eval_verdict(text: str) -> str | None:
         unique = sorted({token for token in tokens if token in REVIEW_VERDICTS})
         return unique[0] if len(unique) == 1 else None
     return None
+
+
+def requirements_eval_verdict(text: str) -> str | None:
+    return review_verdict(text)
 
 
 def requirements_eval_baseline_rows(text: str) -> int:
@@ -1266,8 +1597,8 @@ def requirements_eval_baseline_rows(text: str) -> int:
     return rows
 
 
-def requirements_eval_has_blockers(text: str) -> bool:
-    section = REQUIREMENTS_EVAL_BLOCKERS_SECTION.search(text)
+def _requirements_eval_section_has_items(text: str, section_pattern: re.Pattern[str]) -> bool:
+    section = section_pattern.search(text)
     if section is None:
         return False
     for match in REVIEW_BLOCKER_ITEM.finditer(section.group("body")):
@@ -1275,6 +1606,84 @@ def requirements_eval_has_blockers(text: str) -> bool:
         if item and not REVIEW_BLOCKER_EMPTY.match(item):
             return True
     return False
+
+
+def requirements_eval_has_blockers(text: str) -> bool:
+    return _requirements_eval_section_has_items(text, REQUIREMENTS_EVAL_BLOCKERS_SECTION)
+
+
+def requirements_eval_has_warnings(text: str) -> bool:
+    return _requirements_eval_section_has_items(text, REQUIREMENTS_EVAL_WARNINGS_SECTION)
+
+
+SPECS_REVIEW_FINDINGS_SECTION = re.compile(
+    r"^##\s+Findings\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+SPECS_REVIEW_UNRESOLVED_SECTION = re.compile(
+    r"^##\s+Unresolved\s*$\n(?P<body>.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def specs_review_section_is_empty(text: str, section_pattern: "re.Pattern[str]") -> bool:
+    """段存在但正文什么都没有——模板槽位不算内容。"""
+    section = section_pattern.search(text)
+    if section is None:
+        return True
+    body = section.group("body")
+    return not any(
+        line.strip() and not placeholder_residue(line)
+        for line in body.splitlines()
+    )
+
+
+def specs_review_has_unresolved(text: str) -> bool:
+    return _requirements_eval_section_has_items(text, SPECS_REVIEW_UNRESOLVED_SECTION)
+
+
+def validate_specs_review_verdict(ctx: HookContext) -> int:
+    """回检结论必须落盘，机器只判三件事：verdict、findings、unresolved。
+
+    这一段的内容质量由 critic 负责。机器不核对必查项表格、不校验分类措辞，
+    也不比对严重度——那些换个说法就能过，只会推着模型改词，不会提高审查质量。
+    """
+    review_path = ctx.file("SPECS_REVIEW.md")
+    if not is_nonempty(review_path):
+        return fail_line(
+            ctx,
+            "missing_specs_review",
+            target="SPECS_REVIEW.md",
+        )
+
+    text = read_text(review_path)
+    failures = 0
+
+    verdict = review_verdict(text)
+    if verdict is None:
+        failures += fail_line(ctx, "invalid_specs_review_verdict", target="SPECS_REVIEW.md")
+    elif verdict not in TERMINAL_PASS:
+        failures += fail_line(
+            ctx,
+            "non_terminal_specs_review_verdict",
+            f" verdict={verdict}",
+            target="SPECS_REVIEW.md",
+            fields={"verdict": verdict},
+        )
+
+    if specs_review_section_is_empty(text, SPECS_REVIEW_FINDINGS_SECTION):
+        failures += fail_line(ctx, "missing_specs_review_findings", target="SPECS_REVIEW.md")
+
+    if specs_review_section_is_empty(text, SPECS_REVIEW_UNRESOLVED_SECTION):
+        failures += fail_line(ctx, "missing_specs_review_unresolved", target="SPECS_REVIEW.md")
+    elif specs_review_has_unresolved(text):
+        failures += fail_line(
+            ctx,
+            "unresolved_specs_review_finding",
+            target="SPECS_REVIEW.md",
+        )
+
+    return failures
 
 
 def validate_requirements_eval_verdict(ctx: HookContext) -> int:
@@ -1322,7 +1731,85 @@ def validate_requirements_eval_verdict(ctx: HookContext) -> int:
             target="REQUIREMENTS_EVAL.md",
             repair="Blockers 段仍有条目时将 verdict 记为 FAIL；修复并复审后再写 PASS 类结论。",
         )
-    return 0
+    has_warnings = requirements_eval_has_warnings(text)
+    if verdict == "PASS" and has_warnings:
+        return fail_line(
+            ctx,
+            "warning_with_plain_pass_requirements_eval_verdict",
+            target="REQUIREMENTS_EVAL.md",
+            repair="Warnings 段仍有条目时将 verdict 记为 PASS_WITH_WARNINGS。",
+        )
+    if verdict == "PASS_WITH_WARNINGS" and not has_warnings:
+        return fail_line(
+            ctx,
+            "missing_warning_for_pass_with_warnings_verdict",
+            target="REQUIREMENTS_EVAL.md",
+            repair="没有真实 warning 时将 verdict 记为 PASS；否则在 Warnings 段写出可定位的非阻塞 finding。",
+        )
+    prd = ctx.file("PRD.md")
+    external_ids = prd_external_interface_ids(read_text(prd)) if is_nonempty(prd) else set()
+    if external_ids:
+        coverage = _markdown_section_body(text, "External Interface Coverage")
+        if coverage is None:
+            return fail_line(
+                ctx,
+                "missing_requirements_eval_external_interface_section",
+                target="REQUIREMENTS_EVAL.md",
+                repair="增加 `## External Interface Coverage`，逐项核对 PRD 外部接口 SRC-NNN 的原契约、设计、实现与验证证据。",
+            )
+        coverage_rows = _source_table_rows(coverage)
+        missing = sorted(external_ids - set(coverage_rows))
+        if missing:
+            return fail_line(
+                ctx,
+                "missing_requirements_eval_external_interface_coverage",
+                f" ids={','.join(missing)}",
+                target=",".join(missing),
+                repair="在 External Interface Coverage 表逐项补齐这些 SRC-NNN；已有快照时以快照为准，无法读取快照时 verdict 必须为 DEGRADED，契约或实现不符时必须为 FAIL。",
+            )
+        incomplete = sorted(
+            source_id
+            for source_id in external_ids
+            if source_id in coverage_rows
+            and (
+                len(coverage_rows[source_id]) < 6
+                or any(_coverage_cell_is_empty(cell) for cell in coverage_rows[source_id][1:5])
+            )
+        )
+        if incomplete:
+            return fail_line(
+                ctx,
+                "incomplete_requirements_eval_external_interface_coverage",
+                f" ids={','.join(incomplete)}",
+                target=",".join(incomplete),
+                repair="补齐每个 SRC-NNN 的快照契约、design、实现与验证证据；这些列为空时不能给出 PASS 类结论。",
+            )
+        non_covered = sorted(
+            source_id
+            for source_id in external_ids
+            if source_id in coverage_rows
+            and len(coverage_rows[source_id]) >= 6
+            and re.search(
+                r"mismatch|inaccessible|missing|blocked|不一致|不可访问|缺失|阻断",
+                coverage_rows[source_id][5],
+                re.IGNORECASE,
+            )
+        )
+        if non_covered:
+            return fail_line(
+                ctx,
+                "non_covered_requirements_eval_external_interface",
+                f" ids={','.join(non_covered)}",
+                target=",".join(non_covered),
+                repair="External Interface Coverage 仍有 mismatch/inaccessible/missing/blocked 时，verdict 必须为 FAIL 或 DEGRADED，不能以 PASS 类结论收口。",
+            )
+    return _validate_source_requirement_coverage(
+        ctx,
+        [text],
+        "reviewer",
+        "requirements_eval_source_requirement_missing",
+        "requirements_eval_source_requirement_unknown",
+    )
 
 
 def validate_unit_test_result_json(ctx: HookContext) -> int:
@@ -1333,6 +1820,12 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
     )
     if data is None:
         return failures
+    report_path = ctx.file("UNIT_TEST_REPORT.md")
+    if ctx.requires_artifact("UNIT_TEST_REPORT.md"):
+        if not is_nonempty(report_path):
+            failures += fail_line(ctx, "missing_required_artifact", " item=UNIT_TEST_REPORT.md")
+        elif "## 未验证项及原因" not in report_path.read_text(encoding="utf-8", errors="replace"):
+            failures += fail_line(ctx, "unit_test_report_unverified_section_missing")
     for reason in validate_result_against_plan(ctx.feature_dir, data):
         failures += fail_line(
             ctx,
@@ -1345,8 +1838,13 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
     verdict = data.get("verdict")
     if not isinstance(verdict, str) or verdict.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED"}:
         failures += fail_line(ctx, "invalid_unit_test_result_verdict")
-    elif ctx.requires_artifact("UNIT_TEST_RESULT.json") and verdict.upper() not in TERMINAL_PASS:
-        failures += fail_line(ctx, "non_terminal_unit_test_result_verdict")
+    elif ctx.requires_artifact("UNIT_TEST_RESULT.json"):
+        normalized_verdict = verdict.upper()
+        if ctx.target_checkpoint == "needs_fix":
+            if normalized_verdict != "BLOCKED":
+                failures += fail_line(ctx, "non_blocked_unit_test_needs_fix_verdict")
+        elif normalized_verdict not in TERMINAL_PASS:
+            failures += fail_line(ctx, "non_terminal_unit_test_result_verdict")
     targets = data.get("targets")
     if not isinstance(targets, list) or not targets:
         return failures + fail_line(ctx, "invalid_unit_test_targets")
@@ -1356,7 +1854,13 @@ def validate_unit_test_result_json(ctx: HookContext) -> int:
             failures += fail_line(ctx, "invalid_unit_test_target", f" item={context}")
             continue
         failures += _check_string_field(ctx, target, "targetId", context=context)
-        _, _, trace_failures = _check_trace_refs(ctx, target, context=context, require_task=True, require_evidence=True)
+        _, _, trace_failures = _check_trace_refs(
+            ctx,
+            target,
+            context=context,
+            require_task=True,
+            require_evidence=ctx.target_checkpoint != "needs_fix",
+        )
         failures += trace_failures
         result = target.get("result")
         if not isinstance(result, str) or result.upper() not in {"PASS", "PASS_WITH_WARNINGS", "FAIL", "BLOCKED", "SKIP"}:
@@ -1732,6 +2236,15 @@ def validate_verify_decision_json(ctx: HookContext) -> int:
         return failures
     if data.get("version") != 1:
         failures += fail_line(ctx, "invalid_verify_decision_version")
+    run_context_path = ctx.feature_dir / ".runtime" / "RUN_CONTEXT.json"
+    if run_context_path.is_file():
+        try:
+            current_diff_digest = compute_candidate_digest(ctx.root, ctx.slug)
+        except ValueError as exc:
+            failures += fail_line(ctx, "verify_diff_digest_unresolved", f" detail={exc}")
+        else:
+            if data.get("diffDigest") != current_diff_digest:
+                failures += fail_line(ctx, "verify_diff_digest_stale")
     verdict = data.get("verdict")
     if not isinstance(verdict, str) or verdict.lower() not in {"pass", "fail", "manual"}:
         failures += fail_line(ctx, "invalid_verify_decision_verdict")
@@ -1855,6 +2368,9 @@ def validate_fix_request_json(ctx: HookContext) -> int:
         "environment_issue",
         "permission_issue",
         "dependency_issue",
+        "plan_contract_gap",
+        "workspace_binding_invalid",
+        "evidence_integrity_issue",
         "unknown",
     }:
         failures += fail_line(ctx, "invalid_fix_request_root_cause")
@@ -2176,6 +2692,8 @@ def _validate_plan_json_traceability(ctx: HookContext, data: dict) -> int:
             "missing_design_data_id": "Data Decisions",
         }.get(reason, "plan.json")
         failures += _emit_artifact_issue(ctx, issue, fallback)
+    for issue in validate_plan_source_coverage(ctx.feature_dir, raw_tasks):
+        failures += _emit_artifact_issue(ctx, issue, "source-context.json")
     return failures
 
 
@@ -2577,6 +3095,73 @@ def validate_e2e_cases_contract(ctx: HookContext) -> int:
         failures += fail_line(ctx, "missing_e2e_execution_mode")
     if "ui_required:" not in cases_text:
         failures += fail_line(ctx, "missing_e2e_ui_required")
+    prd = ctx.file("PRD.md")
+    external_ids = prd_external_interface_ids(read_text(prd)) if is_nonempty(prd) else set()
+    if external_ids:
+        if "external_sources:" not in cases_text:
+            failures += fail_line(
+                ctx,
+                "missing_e2e_external_sources_field",
+                repair="在 E2E_TEST_CASES.yaml 的 source 下增加 external_sources，并为每个相关用例列出 SRC-NNN。",
+            )
+        declared_external = _yaml_external_source_ids(cases_text)
+        missing_external = sorted(external_ids - declared_external)
+        if missing_external:
+            failures += fail_line(
+                ctx,
+                "e2e_external_source_coverage_missing",
+                f" ids={','.join(missing_external)}",
+                target=",".join(missing_external),
+                repair="为每个外部接口 SRC-NNN 增加安全环境下的 E2E 用例；无法执行时保留用例并给出 blocked/missing 结论，不得静默省略。",
+            )
+        unknown_external = sorted(declared_external - referenced_source_ids(read_text(prd)))
+        if unknown_external:
+            failures += fail_line(
+                ctx,
+                "e2e_external_source_unknown",
+                f" ids={','.join(unknown_external)}",
+                target=",".join(unknown_external),
+                repair="修正 source.external_sources 中的 SRC-NNN；新增来源必须先回 PRD 登记，E2E 不得自行创建来源 ID。",
+            )
+    source_context_validation_errors = validate_source_context_refs(ctx.feature_dir)
+    source_context, source_context_errors = load_source_context(ctx.feature_dir)
+    for error in (source_context_validation_errors or source_context_errors):
+        failures += fail_line(
+            ctx,
+            "invalid_source_context",
+            f" detail={error}",
+            target="source-context.json",
+            repair="按错误提示修正 source-context.json 及对应 sources/ 快照后重试。",
+        )
+    if source_context is not None:
+        expected_requirements = source_requirement_ids_for_target(source_context, "e2e")
+        if expected_requirements and "source_requirements:" not in cases_text:
+            failures += fail_line(
+                ctx,
+                "missing_e2e_source_requirements_field",
+                repair="在 E2E_TEST_CASES.yaml 的 source 下增加 source_requirements，并列出相关 SRC-NNN-RNNN。",
+            )
+        declared_requirements = _yaml_source_requirement_ids(cases_text)
+        missing_requirements = sorted(expected_requirements - declared_requirements)
+        unknown_requirements = sorted(
+            declared_requirements - set(source_requirement_index(source_context))
+        )
+        if missing_requirements:
+            failures += fail_line(
+                ctx,
+                "e2e_source_requirement_coverage_missing",
+                f" ids={','.join(missing_requirements)}",
+                target=",".join(missing_requirements),
+                repair="为 targets 含 e2e 的来源要求补充用例来源；无法执行时保留用例并给出 blocked/missing 结论。",
+            )
+        if unknown_requirements:
+            failures += fail_line(
+                ctx,
+                "e2e_source_requirement_unknown",
+                f" ids={','.join(unknown_requirements)}",
+                target=",".join(unknown_requirements),
+                repair="修正 source.source_requirements；E2E 不得自行创建来源要求 ID。",
+            )
     yaml_case_ids = set(E2E_ID.findall(cases_text))
     result_path = ctx.file("E2E_RESULT.json")
     if is_nonempty(result_path):
@@ -2608,6 +3193,55 @@ def validate_e2e_cases_contract(ctx: HookContext) -> int:
     return failures
 
 
+def _yaml_external_source_ids(text: str) -> set[str]:
+    """Extract IDs only from YAML ``external_sources`` fields.
+
+    E2E case files can contain one case, a list, or multiple documents.  A
+    small indentation-aware scan is enough for inline and block-list forms and
+    avoids treating an ID mentioned in a title/comment as source coverage.
+    """
+
+    lines = text.splitlines()
+    found: set[str] = set()
+    field_re = re.compile(r"^(?P<indent>\s*)external_sources\s*:\s*(?P<inline>.*)$")
+    for index, line in enumerate(lines):
+        match = field_re.match(line)
+        if match is None:
+            continue
+        found.update(referenced_source_ids(match.group("inline")))
+        base_indent = len(match.group("indent"))
+        for following in lines[index + 1 :]:
+            stripped = following.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(following) - len(following.lstrip())
+            if indent <= base_indent:
+                break
+            found.update(referenced_source_ids(following))
+    return found
+
+
+def _yaml_source_requirement_ids(text: str) -> set[str]:
+    lines = text.splitlines()
+    found: set[str] = set()
+    field_re = re.compile(r"^(?P<indent>\s*)source_requirements\s*:\s*(?P<inline>.*)$")
+    for index, line in enumerate(lines):
+        match = field_re.match(line)
+        if match is None:
+            continue
+        found.update(referenced_source_requirement_ids(match.group("inline")))
+        base_indent = len(match.group("indent"))
+        for child in lines[index + 1:]:
+            stripped = child.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            child_indent = len(child) - len(child.lstrip())
+            if child_indent <= base_indent:
+                break
+            found.update(referenced_source_requirement_ids(child))
+    return found
+
+
 VALIDATORS = {
     "e2e_cases_contract": validate_e2e_cases_contract,
     "proposal_contract": validate_proposal_contract,
@@ -2627,6 +3261,7 @@ VALIDATORS = {
     "evidence_detail_quality": validate_evidence_detail_quality,
     "code_done_gate": validate_code_done_gate,
     "evidence_integrity": validate_evidence_integrity,
+    "specs_review_verdict": validate_specs_review_verdict,
     "requirements_eval_verdict": validate_requirements_eval_verdict,
     "unit_test_result_json": validate_unit_test_result_json,
     "e2e_result_json": validate_e2e_result_json,
@@ -2735,6 +3370,9 @@ def run_postcheck(
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: dict[str, str] | None = None,
     workflow_record: dict | None = None,
+    target_checkpoint: str | None = None,
+    validators_override: Iterable[str] | None = None,
+    required_outputs_override: Iterable[str] | None = None,
 ) -> tuple[int, str]:
     try:
         config = load_artifact_config(
@@ -2745,8 +3383,24 @@ def run_postcheck(
             workflow_decisions=workflow_decisions,
             workflow_record=workflow_record,
         )
-        validate_required_files(workspace_root, slug, config.required_outputs)
-        for validator in config.validators:
+        required_outputs = list(
+            required_outputs_override
+            if required_outputs_override is not None
+            else config.required_outputs
+        )
+        validators = list(
+            validators_override if validators_override is not None else config.validators
+        )
+        if (
+            required_outputs_override is None
+            and skill == "autodev-utest"
+            and target_checkpoint == "needs_fix"
+            and "fix_request_json" in validators
+            and "FIX_REQUEST.json" not in required_outputs
+        ):
+            required_outputs.append("FIX_REQUEST.json")
+        validate_required_files(workspace_root, slug, required_outputs)
+        for validator in validators:
             if validator not in VALIDATORS:
                 raise HookCheckError("unknown_validator", f"{skill}:{validator}")
     except HookCheckError as error:
@@ -2768,10 +3422,11 @@ def run_postcheck(
         slug=slug,
         root=workspace_root,
         required_inputs=config.required_inputs,
-        required_outputs=config.required_outputs,
+        required_outputs=tuple(required_outputs),
+        target_checkpoint=target_checkpoint,
     )
     failures = 0
-    for validator in config.validators:
+    for validator in validators:
         failures += VALIDATORS[validator](ctx)
     if failures:
         return 1, f"POST_SKILL_FAIL skill={skill} failures={failures}"

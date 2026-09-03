@@ -145,7 +145,6 @@ class NeedsFixStateTest(unittest.TestCase):
             "--evidence-id",
             record["evidenceId"],
         )
-        self._run_verify_writer("set-verdict", "fail")
 
     def test_checkpoint_update_persists_and_clears_needs_fix_source(self) -> None:
         self._set_checkpoint("verify_in_progress")
@@ -235,6 +234,23 @@ class NeedsFixStateTest(unittest.TestCase):
         self.assertEqual(statuses["dev.utest"], "done")
         self.assertEqual(statuses["dev.e2e"], "blocked")
         self.assertEqual(statuses["dev.verify"], "not_started")
+
+    def test_utest_source_marks_utest_blocked_without_recommending_utest(self) -> None:
+        self._set_checkpoint("needs_fix", needs_fix_from="unit_test_in_progress")
+
+        payload = _capture_json(run_mode, self.project, self.feature, _load_board_config())
+        run = payload["run"]
+        statuses = {node["id"]: node["nodeStatus"] for node in run["nodes"]}
+        self.assertEqual(run["currentNodeId"], "dev.utest")
+        self.assertEqual(statuses["dev.utest"], "blocked")
+        self.assertEqual(statuses["dev.e2e"], "not_started")
+
+        route, exit_code = resolve_route(self.project, self.feature)
+        self.assertEqual(0, exit_code)
+        self.assertEqual("needs_fix", route["checkpoint"])
+        self.assertEqual("", route["recommendedNextSkill"])
+        self.assertIn("plan_in_progress", route["allowedNextCheckpoints"])
+        self.assertIn("unit_test_in_progress", route["allowedNextCheckpoints"])
 
     def test_manual_needs_fix_without_source_uses_unique_stage(self) -> None:
         self._set_checkpoint("needs_fix", stage="Specs")

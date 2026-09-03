@@ -50,6 +50,7 @@ IN_SCOPE_VALIDATORS = (
     "validate_proposal_contract",
     "validate_specs_contract",
     "validate_capability_spec_correspondence",
+    "validate_specs_review_verdict",
     "validate_design_contract",
     "validate_plan_json_contract",
     "validate_plan_json_initial_tasks",
@@ -346,7 +347,7 @@ PROPOSAL_MISSING_DECISION_LOG = """# Proposal: 导出
 
 SPEC_MALFORMED_HEADING = """## ADDED Requirements
 
-### Requirement REQ-001: 缺方括号
+### Requirement [REQ-001: 方括号未闭合
 
 The system SHALL 支持导出。
 
@@ -448,7 +449,8 @@ class RepresentativeSpecsFailuresTest(unittest.TestCase):
             errors = self._errors(validate_specs_contract, project)
             error = self._assert_actionable(errors, "spec_contract_heading_malformed")
             self.assertIn("order-export", error["target"])
-            self.assertIn("[REQ-NNN]", error["action"])
+            self.assertIn("REQ-NNN", error["action"])
+            self.assertIn("方括号可有可无", error["action"])
 
     def test_requirement_without_scenario_is_actionable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

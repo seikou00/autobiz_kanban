@@ -9,8 +9,7 @@
    至少有一个 SCN」，三个 Requirement 共用一个 Scenario 照样放行。
 3. proposal 必须有 `Open Questions` 节。
 4. proposal 的 New/Modified/Removed 分组要和 spec 实际用的操作段对上。
-5. 标题必须写成索引器认的那一种；差一个方括号不会报错，只会让该
-   Requirement 从所有下游覆盖检查里消失。
+5. 标题必须能被索引器识别；Requirement/Scenario ID 外的方括号可有可无。
 
 全都是关于文件的机械事实，因此本文件钉的是：正例放行、反例拦住、
 以及缺 proposal 时不重复报错（那是 proposal_contract 的责任）。
@@ -35,8 +34,8 @@ if str(HOOKS) not in sys.path:
 
 from artifact_check import (  # noqa: E402
     HookContext,
+    contract_id_width_errors,
     malformed_contract_headings,
-    out_of_order_ids,
     placeholder_residue,
     proposal_capabilities,
     proposal_capability_groups,
@@ -82,9 +81,14 @@ PROPOSAL_TAIL = """
 """
 
 
-def proposal_text(new: list[str], modified: list[str] = (), removed: list[str] = ()) -> str:
+def proposal_text(
+    new: list[str],
+    modified: list[str] = (),
+    removed: list[str] = (),
+) -> str:
     def group(title: str, names: list[str]) -> str:
-        body = "\n".join(f"- `{name}`: 说明" for name in names) or "- 无"
+        lines = [f"- `{name}`: 说明" for name in names]
+        body = "\n".join(lines) or "- 无"
         return f"\n### {title}\n\n{body}\n"
 
     return (
@@ -380,29 +384,27 @@ class CapabilityOperationConsistencyTest(SpecContractValidatorTestBase):
                 self.assertIn(f"## {operation} Requirements", template)
 
     def test_specs_skill_teaches_the_group_to_operation_rule(self) -> None:
-        """规则与校验器不得分叉：SKILL 教的写法必须正是校验器放行的写法。"""
+        """规则与校验器不得分叉：SKILL 教的写法必须正是校验器放行的写法。
+
+        SKILL 只写产物形态，不点校验器名字——validator 是脚本的实现细节，
+        写进技能只会让模型去猜脚本内部逻辑。
+        """
         skill = (ROOT / "skills/autodev/autodev-specs/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("capability_spec_correspondence", skill)
+        self.assertNotIn("capability_spec_correspondence", skill)
         self.assertIn("ADDED Requirements", skill)
         self.assertIn("不得有 Requirement", skill)
         self.assertIn("段下不写 Requirement", skill)
 
 
 class MalformedContractHeadingTest(SpecContractValidatorTestBase):
-    """索引器只认一种写法，差一个方括号的标题不会报错——它会消失。
-
-    消失的后果是该 Requirement 对 plan 拆分、scenario 覆盖、verify 裁定全部
-    不存在，而文件因为**别的**标题写对了仍然通过。`malformed_contract_headings`
-    在 2026-07-31 `a6868a2` 随 D 式清理被删，此后这条通道一直是敞开的。
-    """
+    """索引器接受有无方括号两种写法，并拦截其余畸形标题。"""
 
     MALFORMED = [
-        "### Requirement REQ-002: 缺方括号",
-        "#### Scenario SCN-002: 缺方括号",
+        "### Requirement [REQ-002: 方括号未闭合",
+        "#### Scenario SCN-002]: 多余右方括号",
         "### REQ-order-export-001: 已废除的 capability 前缀式",
         "#### SCN-order-export-001-01: 已废除的 capability 前缀式",
         "### [REQ-002]: 缺 Requirement 字样",
-        "### Requirement [REQ-2]: 位数不足",
         "## Requirement [REQ-001]: 标题层级错",
         "### Scenario [SCN-001]: 标题层级错",
     ]
@@ -410,6 +412,8 @@ class MalformedContractHeadingTest(SpecContractValidatorTestBase):
     WELL_FORMED = [
         "### Requirement [REQ-001]: 正常",
         "#### Scenario [SCN-001]: 正常",
+        "### Requirement REQ-002: 无方括号",
+        "#### Scenario SCN-002: 无方括号",
         "## ADDED Requirements",
         "## 稳定 ID 规范",
         "- Requirement ID 统一使用 `REQ-001`、`REQ-002`",
@@ -426,6 +430,13 @@ class MalformedContractHeadingTest(SpecContractValidatorTestBase):
             with self.subTest(line=line):
                 self.assertEqual(malformed_contract_headings(line), [])
 
+    def test_numeric_width_error_has_one_dedicated_diagnostic(self) -> None:
+        line = "### Requirement [REQ-1001]: 位数过长"
+        self.assertEqual(malformed_contract_headings(line), [])
+        errors = contract_id_width_errors(line)
+        self.assertEqual([error.current for error in errors], ["REQ-1001"])
+        self.assertEqual(errors[0].suggested, "REQ-001")
+
     def test_spec_template_is_clean(self) -> None:
         template = ROOT / "skills/autodev/autodev-specs/templates/spec.md"
         self.assertEqual(
@@ -436,7 +447,7 @@ class MalformedContractHeadingTest(SpecContractValidatorTestBase):
 
     def test_one_malformed_heading_blocks_an_otherwise_valid_spec(self) -> None:
         """一个合法 REQ 就让整个文件通过——这正是旧检查删除后打开的口子。"""
-        body = SPEC_ONE_REQ + "\n### Requirement REQ-002: 畸形\n\n#### Scenario SCN-002: 也畸形\n"
+        body = SPEC_ONE_REQ + "\n### Requirement [REQ-002: 畸形\n\n#### Scenario SCN-002]: 也畸形\n"
         with tempfile.TemporaryDirectory() as tmp:
             project, feature_dir = self._feature(tmp)
             self._write_spec(feature_dir, "order-export", body)
@@ -462,7 +473,28 @@ class SpecIdIntegrityTest(SpecContractValidatorTestBase):
             self.assertGreaterEqual(failures, 1)
             self.assertIn("duplicate_spec_id_across_specs", output)
             self.assertIn("REQ-001", output)
+            self.assertIn("order-export/spec.md:REQ-001->REQ-002", output)
+            self.assertIn("order-export/spec.md:SCN-001->SCN-002", output)
             self.assertIn("POST_SKILL_REPAIR", output)
+
+    def test_four_digit_ids_only_report_width_with_replacements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project, feature_dir = self._feature(tmp)
+            body = SPEC_ONE_REQ.replace("REQ-001", "REQ-1001").replace(
+                "SCN-001", "SCN-1001"
+            )
+            self._write_spec(feature_dir, "order-export", body)
+            failures, output = self._run(validate_specs_contract, project)
+            self.assertEqual(failures, 2, output)
+            fail_lines = [
+                line for line in output.splitlines()
+                if "POST_SKILL_FAIL" in line and "reason=spec_id_width_invalid" in line
+            ]
+            self.assertEqual(len(fail_lines), 2)
+            self.assertNotIn("invalid_spec_missing_requirement", output)
+            self.assertNotIn("invalid_spec_missing_scenario", output)
+            self.assertNotIn("spec_contract_heading_malformed", output)
+            self.assertNotIn("spec_placeholder_residue", output)
 
     def test_distinct_ids_across_specs_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -479,40 +511,26 @@ class SpecIdIntegrityTest(SpecContractValidatorTestBase):
             failures, output = self._run(validate_specs_contract, project)
             self.assertEqual(failures, 0, output)
 
-    def test_ascending_order_allows_gaps_but_not_descent(self) -> None:
-        """跳号合法——「删除后 ID 不复用」必然留空档；逆序不合法。"""
-        self.assertEqual(
-            out_of_order_ids(
-                "### Requirement [REQ-001]: a\n### Requirement [REQ-003]: c\n"
-            ),
-            [],
-        )
-        self.assertEqual(
-            out_of_order_ids(
-                "### Requirement [REQ-003]: c\n### Requirement [REQ-002]: b\n"
-            ),
-            ["REQ-002"],
-        )
-        self.assertEqual(
-            out_of_order_ids(
-                "#### Scenario [SCN-005]: a\n#### Scenario [SCN-002]: b\n"
-            ),
-            ["SCN-002"],
-        )
+    def test_mid_file_insertion_needs_no_renumbering(self) -> None:
+        """在中间插入一个更大的编号是合法的，不再要求文档顺序递增。
 
-    def test_out_of_order_id_is_blocked(self) -> None:
+        递增检查换来的只是观感，代价却是级联重编：往中间插一条 Requirement，
+        它后面每一个 REQ/SCN 都得改号，所有下游引用跟着失效。唯一性由
+        duplicate_* 保证，可追溯性由 ID 本身保证，顺序不承担任何契约含义。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             project, feature_dir = self._feature(tmp)
-            body = SPEC_ONE_REQ.replace("REQ-001", "REQ-003") + (
-                "\n### Requirement [REQ-002]: 编号回退\n\n"
+            body = SPEC_ONE_REQ + (
+                "\n### Requirement [REQ-009]: 后插入的能力\n\n"
                 "The system SHALL 做另一件事。\n\n"
-                "#### Scenario [SCN-002]: s\n\n- **WHEN** a\n- **THEN** b\n"
+                "#### Scenario [SCN-009]: s\n\n- **WHEN** a\n- **THEN** b\n"
+                "\n### Requirement [REQ-002]: 原本就在后面的能力\n\n"
+                "The system SHALL 做第三件事。\n\n"
+                "#### Scenario [SCN-002]: t\n\n- **WHEN** a\n- **THEN** b\n"
             )
             self._write_spec(feature_dir, "order-export", body)
             failures, output = self._run(validate_specs_contract, project)
-            self.assertGreaterEqual(failures, 1)
-            self.assertIn("spec_id_out_of_order", output)
-            self.assertIn("REQ-002", output)
+            self.assertEqual(failures, 0, output)
 
     def test_scenario_before_any_requirement_is_orphaned(self) -> None:
         self.assertEqual(
@@ -583,7 +601,7 @@ class RemovedRequirementFieldsTest(SpecContractValidatorTestBase):
 
 
 class PlaceholderResidueTest(SpecContractValidatorTestBase):
-    """模板槽位留在产物里就是没写完；ID 语法和 Markdown 链接不是槽位。"""
+    """模板槽位留在产物里就是没写完；具体 ID 和 Markdown 链接不是槽位。"""
 
     def test_id_syntax_is_not_a_placeholder(self) -> None:
         self.assertEqual(placeholder_residue(SPEC_ONE_REQ), [])
@@ -597,6 +615,14 @@ class PlaceholderResidueTest(SpecContractValidatorTestBase):
     def test_template_slot_is_reported(self) -> None:
         self.assertEqual(
             placeholder_residue("### Requirement [REQ-001]: [能力名]\n"), ["[能力名]"]
+        )
+
+    def test_id_template_slots_are_reported(self) -> None:
+        self.assertEqual(
+            placeholder_residue(
+                "### Requirement [REQ-NNN]: 标题\n映射：REQ-NNN / SCN-NNN\n"
+            ),
+            ["REQ-NNN", "REQ-NNN", "SCN-NNN"],
         )
 
     def test_tbd_words_are_reported(self) -> None:

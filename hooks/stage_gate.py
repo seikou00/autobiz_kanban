@@ -32,6 +32,14 @@ from hooks.json_writer_common import (  # noqa: E402
 )
 
 
+SPECS_STRUCTURE_VALIDATORS = (
+    "proposal_contract",
+    "specs_contract",
+    "capability_spec_correspondence",
+)
+SPECS_STRUCTURE_OUTPUTS = ("proposal.md", "specs/**/*.md")
+
+
 def _stage_skill(workspace: Path, record: dict[str, Any], stage: str) -> str:
     try:
         contracts = load_record_workflow_contracts(ROOT, record, workspace=workspace)
@@ -46,7 +54,7 @@ def _stage_skill(workspace: Path, record: dict[str, Any], stage: str) -> str:
     raise ValueError(f"未知 workflow node: {stage}")
 
 
-def validate_stage(*, workspace: Path, feature: str, stage: str) -> WriterResult:
+def validate_stage(*, workspace: Path, feature: str, stage: str, phase: str = "final") -> WriterResult:
     state = load_state_json_records_result(workspace)
     if not state.exists:
         return fail("missing_state_json", str(workspace / ".autobizdevops" / "state.json"))
@@ -59,8 +67,22 @@ def validate_stage(*, workspace: Path, feature: str, stage: str) -> WriterResult
         skill = _stage_skill(workspace, record, stage)
     except ValueError as exc:
         return fail("invalid_stage", str(exc))
+    if phase not in {"structure", "final"}:
+        return fail("invalid_phase", phase)
+    if phase == "structure" and stage != "dev.specs":
+        return fail("invalid_phase", "structure 只适用于 dev.specs")
 
     def _run() -> tuple[int, str]:
+        if phase == "structure":
+            return run_postcheck(
+                ROOT,
+                workspace,
+                skill,
+                feature,
+                workflow_record=record,
+                validators_override=SPECS_STRUCTURE_VALIDATORS,
+                required_outputs_override=SPECS_STRUCTURE_OUTPUTS,
+            )
         return run_postcheck(
             ROOT,
             workspace,
@@ -88,6 +110,7 @@ def validate_stage(*, workspace: Path, feature: str, stage: str) -> WriterResult
         errors=errors,
         data={
             "stage": stage,
+            "phase": phase,
             "skill": skill,
             "feature": feature,
             "message": message,
@@ -106,7 +129,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         feature = resolve_feature(args.feature)
     except Exception as exc:
         return render_result(fail("path_resolution_failed", str(exc)))
-    return render_result(validate_stage(workspace=workspace, feature=feature, stage=args.stage))
+    return render_result(
+        validate_stage(
+            workspace=workspace,
+            feature=feature,
+            stage=args.stage,
+            phase=args.phase,
+        )
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
 
     validate = subparsers.add_parser("validate")
     validate.add_argument("--stage", required=True, help="Workflow node id, e.g. dev.plan")
+    validate.add_argument("--phase", choices=("structure", "final"), default="final")
     validate.add_argument("--feature")
     validate.add_argument("--workspace")
     validate.set_defaults(func=_cmd_validate)

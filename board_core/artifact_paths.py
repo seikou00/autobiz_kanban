@@ -40,21 +40,62 @@ def is_nonempty_file_exact(root: Path, relative_path: str | Path) -> bool:
     return target is not None and target.is_file() and target.stat().st_size > 0
 
 
-def artifact_exists_exact(feature_dir: Path, artifact_path: str) -> bool:
-    if has_glob(artifact_path):
-        for match in feature_dir.glob(artifact_path):
-            try:
-                relative_match = match.relative_to(feature_dir)
-            except ValueError:
-                continue
-            exact_match = resolve_exact_relative_path(feature_dir, relative_match)
-            if exact_match is not None and exact_match.is_file() and exact_match.stat().st_size > 0:
-                return True
+def _is_within(root: Path, target: Path) -> bool:
+    try:
+        target.relative_to(root)
+    except ValueError:
         return False
+    return True
 
-    target = resolve_exact_relative_path(feature_dir, artifact_path)
-    if target is None:
-        return False
-    if target.is_dir():
-        return any(child.is_file() and child.stat().st_size > 0 for child in target.rglob("*"))
-    return target.is_file() and target.stat().st_size > 0
+
+def _resolved_nonempty_file(root: Path, candidate: Path) -> Path | None:
+    try:
+        relative_candidate = candidate.relative_to(root)
+    except ValueError:
+        return None
+    exact_candidate = resolve_exact_relative_path(root, relative_candidate)
+    if exact_candidate is None or not exact_candidate.is_file():
+        return None
+    try:
+        resolved = exact_candidate.resolve()
+        if not _is_within(root, resolved) or resolved.stat().st_size <= 0:
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return resolved
+
+
+def resolve_artifact_files_exact(feature_dir: Path, artifact_path: str) -> tuple[Path, ...]:
+    """Resolve an artifact contract to sorted, non-empty files inside the feature dir."""
+    try:
+        root = feature_dir.resolve()
+    except (OSError, RuntimeError):
+        return ()
+    relative = Path(artifact_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return ()
+
+    if has_glob(artifact_path):
+        candidates = root.glob(artifact_path)
+    else:
+        target = resolve_exact_relative_path(root, relative)
+        if target is None:
+            return ()
+        try:
+            resolved_target = target.resolve()
+        except (OSError, RuntimeError):
+            return ()
+        if not _is_within(root, resolved_target):
+            return ()
+        candidates = resolved_target.rglob("*") if resolved_target.is_dir() else (resolved_target,)
+
+    resolved_by_path: dict[str, Path] = {}
+    for candidate in candidates:
+        resolved = _resolved_nonempty_file(root, candidate)
+        if resolved is not None:
+            resolved_by_path[str(resolved)] = resolved
+    return tuple(resolved_by_path[path] for path in sorted(resolved_by_path))
+
+
+def artifact_exists_exact(feature_dir: Path, artifact_path: str) -> bool:
+    return bool(resolve_artifact_files_exact(feature_dir, artifact_path))

@@ -1,12 +1,12 @@
 ---
 name: autobizdevops
 description: 完成项目研发的全流程，按 biz / dev / ops 三个可独立起步的阶段组织
-version: v1.1.2609
+version: v1.1.08311
 ---
 
 # 核心工作原则
 
-- 根工作目录总入口，分为 `biz`、`dev`、`ops` 三个阶段。完整链路 `biz -> dev -> ops`，每个阶段执行完成后必须由用户确认后继续执行。
+- 根工作目录总入口，分为 `biz`、`dev`、`ops` 三个阶段。用户请求完整链路时，`biz -> dev -> ops` 按状态自动续跑，不因内部阶段切换反复确认；仅在存在关键歧义、真实方案取舍、外部授权或不可逆操作时暂停。用户明确只请求某个阶段时，完成该阶段后直接汇报，不追问是否继续。
 - Dev 阶段除 `/autodev-reviewer` 可启动独立只读 reviewer 外，其余阶段均由当前会话内联执行，不得委派给下级 agent。
 
 ## 目录结构与路径约定
@@ -25,7 +25,7 @@ version: v1.1.2609
 
 ### 用户交互协议
 
-任何技能准备使用 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。业务技能中定义的问题、选项和阶段门继续有效；工具字段、问题数量、Other 处理、自动继续和文本降级方式以该共享协议为准。
+任何技能准备使用 `request_user_input` 前，必须先读取并遵循 `${pluginPath}/skills/references/ask-user-question.md`。业务技能中定义的问题和选项继续有效；阶段门只有在符合共享协议的必要提问条件时才生效。工具字段、问题数量、Other 处理、自动继续和文本降级方式以该共享协议为准。
 
 以下三个为 `autobizdevops` 的唯一直接入口。所有 Biz / Dev / Ops 阶段工作均应通过这些统一入口进入，各阶段内部子技能由对应入口按 checkpoint 路由，不允许跳过前置准入直接调用子技能。
 

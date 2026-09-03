@@ -2,20 +2,26 @@
 
 ## 输入优先级
 
-1. `proposal.md`
-2. `specs/**/*.md`
-3. `design.md`
-4. `UNIT_TEST_REPORT.md` / `test-output.log`
-5. `PLAN.md`
-6. 直接相关的代码与配置
+1. `source-context.json` 中 `targets` 含 `e2e` 的要求及其 `sources/` 快照
+2. `PRD.md` 的 `外部资料与实现约束`
+3. `proposal.md`
+4. `specs/**/*.md`
+5. `design.md`
+6. `REQUIREMENTS_EVAL.md` 的 `External Interface Coverage` / `E2E Focus`
+7. `UNIT_TEST_REPORT.md` / `test-output.log`
+8. `PLAN.md`
+9. 直接相关的代码与配置
 
 各输入用途：
 
+- `source-context.json` 与快照：提取 `SRC-NNN-RNNN` 要求，核对其逐字证据、位置和测试落点
+- `PRD.md`：确认来源范围与业务背景
 - `proposal.md`：提取能力边界、影响面、非目标
 - `specs/**/*.md`：提取 Requirement / Scenario 行为契约，作为 pass/fail 的主要行为依据
 - `design.md`：提取接口决策、数据决策、成功与失败路径
 - `UNIT_TEST_REPORT.md` / `test-output.log`：提取当前单测覆盖、失败历史、轻量单测命令线索和回归优先级
 - `PLAN.md`：只提供任务顺序和已有验证提示
+- `REQUIREMENTS_EVAL.md`：继承 reviewer 已识别的外部接口实现证据与 E2E 风险，但仍需自行读取原始资料
 - 代码与配置：补充路由、入口 URL、测试数据、稳定断言点
 
 `PLAN.md` 和代码上下文可以影响优先级与可执行性，但永远不是 pass/fail 依据。行为是否通过以 `specs/**/*.md` 为准。
@@ -28,6 +34,9 @@
 - 必须为 `specs/**/*.md` 中每个用户可见 Requirement / Scenario 生成最少一条用例
 - proposal 中每个本轮能力边界必须能追溯到至少一个 specs 场景，或明确标记不适合 E2E
 - `specs/**/*.md` 中每个属于用户主链路的 Requirement / Scenario 至少要被一条用例覆盖；API Decision 或 Data Decision 作为执行和断言上下文
+- `targets` 含 `e2e` 的每个来源要求必须至少映射到一条用例的 `source.source_requirements`；用例必须实际验证对应契约，不能只挂 ID
+- 没有安全测试环境或凭据时，仍保留对应用例并形成 BLOCKED/missing 结论；`snapshot_only` 直接读取快照
+- 有副作用的外部调用只允许测试/沙箱环境；生产环境除非用户明确授权，否则只能做只读验证
 - 每个用例必须标注 `execution_mode: browser | api | mixed | database_assisted`
 - 每个用例必须标注 `ui_required: true | false`
 - 当 Requirement / Scenario 涉及页面、按钮、点击、弹窗、跳转、表单、前端组件、路由或用户可见流程时，必须设置 `ui_required: true`
@@ -72,6 +81,10 @@ ui_required: true | false
 
 source:
   feature: {slug}
+  external_sources:
+    - SRC-001
+  source_requirements:
+    - SRC-001-R001
   proposal_capability:
     - comments
   design_contract:
@@ -142,6 +155,8 @@ cleanup:
 `source` 用于建立用例和 feature 输入之间的追溯关系。
 
 - `feature`：必填
+- `external_sources`：必填；填写该用例实际消费的 PRD `SRC-NNN` 列表，没有外部来源时写 `[]`
+- `source_requirements`：必填；填写该用例实际消费的 `SRC-NNN-RNNN` 列表，没有来源要求时写 `[]`
 - `proposal_capability`：建议填写
 - `specs_contract`：建议填写，指向 specs 文件、Requirement 和 Scenario
 - `design_contract`：涉及 HTTP/API 或数据变更时建议填写 API/Data Decision
@@ -192,6 +207,7 @@ cleanup:
 
 - 目标是用户可见或外部可观察行为
 - 用例能追溯到 specs Requirement / Scenario、API operation 或当前风险点
+- `targets` 含 `e2e` 的每个来源要求都被至少一条用例真实消费，且断言与快照证据一致
 - 前置条件和测试数据写清楚了
 - 每一步都有可执行断言
 - 用例足够聚焦，失败时有单一主要原因
@@ -210,6 +226,8 @@ execution_mode: mixed
 ui_required: true
 source:
   feature: comments
+  external_sources:
+    - SRC-001
   proposal_capability:
     - comments
   specs_contract:

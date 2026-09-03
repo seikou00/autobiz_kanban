@@ -1,7 +1,7 @@
 ---
 name: autoops-archive
 description: Ops 归档阶段技能。
-version: v1.2.0804
+version: v1.2.08311
 author: zhangQiuFeng
 ---
 

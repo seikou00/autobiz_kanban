@@ -1,6 +1,7 @@
 ---
 name: autobizdevops-rollback
 description: 安全回退 Feature 到指定 Biz、Dev 或 Ops 阶段，清理后续产物并重置 Code 执行态；在需要主动回退、清理运行时数据或恢复 Code Session 源码时使用。
+version: v1.0.08311
 ---
 
 # /autobizdevops-rollback - Feature 阶段回退

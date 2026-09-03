@@ -461,6 +461,7 @@ def check_stage_outputs(
     workflow_profile: str = BASE_WORKFLOW_PROFILE,
     workflow_decisions: dict[str, str] | None = None,
     workflow_record: dict | None = None,
+    target_checkpoint: str | None = None,
 ) -> str | None:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
@@ -472,6 +473,7 @@ def check_stage_outputs(
             workflow_profile=workflow_profile,
             workflow_decisions=workflow_decisions,
             workflow_record=workflow_record,
+            target_checkpoint=target_checkpoint,
         )
     if code != 0:
         detail = output.getvalue().strip()
@@ -524,6 +526,7 @@ def validate_lifecycle(
                     workflow_profile=workflow_profile,
                     workflow_decisions=workflow_decisions,
                     workflow_record=record or None,
+                    target_checkpoint=new_checkpoint,
                 )
                 if error:
                     errors.append(error)

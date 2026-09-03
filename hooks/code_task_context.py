@@ -31,6 +31,13 @@ from hooks.plan_json import (  # noqa: E402
     validate_batch_plan_data,
     validate_plan_data,
 )
+from hooks.repository_snapshot import (  # noqa: E402
+    REQUIRED_IGNORED_RUNTIME_PATHS,
+    RepositorySnapshotError,
+    resolve_repositories,
+    unignored_runtime_artifact_paths,
+)
+from hooks.source_context import resolve_source_requirement_refs  # noqa: E402
 
 
 PLAN_FILE = "plan.json"
@@ -99,12 +106,21 @@ def _resolve_path(base: Path, ref: str, anchor: str, *, design: bool) -> Path:
 
 
 def _extract_spec_snippet(text: str, anchor: str) -> tuple[str, int] | None:
+    end_re = re.compile(
+        r"^(?:####\s+Scenario\s+(?:\[SCN-\d{3}\]|SCN-\d{3})|"
+        r"###\s+Requirement\s+(?:\[REQ-\d{3}\]|REQ-\d{3})):",
+        re.MULTILINE,
+    )
     if anchor.startswith("REQ-"):
-        start_re = re.compile(rf"^###\s+Requirement\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
-        end_re = re.compile(r"^(####\s+Scenario\s+\[|###\s+Requirement\s+\[)", re.MULTILINE)
+        start_re = re.compile(
+            rf"^###\s+Requirement\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
+            re.MULTILINE,
+        )
     elif anchor.startswith("SCN-"):
-        start_re = re.compile(rf"^####\s+Scenario\s+\[{re.escape(anchor)}\].*$", re.MULTILINE)
-        end_re = re.compile(r"^(####\s+Scenario\s+\[|###\s+Requirement\s+\[)", re.MULTILINE)
+        start_re = re.compile(
+            rf"^####\s+Scenario\s+(?:\[{re.escape(anchor)}\]|{re.escape(anchor)}):.*$",
+            re.MULTILINE,
+        )
     else:
         return None
 
@@ -271,6 +287,9 @@ def build_context(
         return fail("task_not_found", task_id, path=plan_path)
 
     resolved_specs, resolved_design, errors = resolve_task_refs(base, task)
+    source_refs = [ref for ref in task.get("sourceRefs", []) if isinstance(ref, str)]
+    resolved_sources, source_errors = resolve_source_requirement_refs(base, source_refs)
+    errors.extend(source_errors)
 
     data_out = {
         "feature": feature,
@@ -291,6 +310,7 @@ def build_context(
             "base": "artifactFeatureDir",
             "specRefs": "relative-to-artifactFeatureDir",
             "designRefs": "relative-to-artifactFeatureDir",
+            "sourceRefs": "requirement-ids-in-source-context.json",
             "codeWorkspace": "current working directory / project repository",
         },
         "task": task,
@@ -304,9 +324,11 @@ def build_context(
             "nonGoals": task.get("nonGoals"),
             "splitRationale": task.get("splitRationale", ""),
             "validationCommands": task.get("validationCommands"),
+            "sourceRefs": task.get("sourceRefs"),
         },
         "resolvedSpecRefs": resolved_specs,
         "resolvedDesignRefs": resolved_design,
+        "resolvedSourceRefs": resolved_sources,
     }
     data_out["implementationAllowed"] = not errors
     data_out["startAllowed"] = not errors

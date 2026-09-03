@@ -1,4 +1,17 @@
 {
+  "UserPromptSubmit": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/run_context.py inject",
+          "timeout": 30,
+          "persistAfterInterrupt": true
+        }
+      ]
+    }
+  ],
   "PreToolUse": [
     {
       "matcher": "task|Task",
@@ -14,12 +27,29 @@
           "command": "python hooks/augment_test_engineer_task_prompt.py",
           "timeout": 30,
           "persistAfterInterrupt": true
+        },
+        {
+          "type": "command",
+          "command": "python hooks/augment_specs_gate_fixer_task_prompt.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
         }
       ]
     },
     {
-      "matcher": "write_file|edit_file",
+      "matcher": "write_file|edit_file|apply_patch",
       "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/runtime_artifact_guard.py",
+          "timeout": 30,
+          "onBlock": {
+            "reason": "Runtime-owned 产物禁止直接编辑",
+            "systemMessage": "请使用对应 Runtime writer 或 runner",
+            "additionalContext": "不要手改判决产物"
+          },
+          "persistAfterInterrupt": true
+        },
         {
           "type": "command",
           "command": "python hooks/state_checkpoint.py state-done",
@@ -77,6 +107,17 @@
       "hooks": [
         {
           "type": "command",
+          "command": "python hooks/runtime_artifact_guard.py",
+          "timeout": 30,
+          "onBlock": {
+            "reason": "Runtime-owned 产物禁止通过 shell 修改",
+            "systemMessage": "请使用对应 Runtime writer 或 runner",
+            "additionalContext": "不要绕过产物 writer"
+          },
+          "persistAfterInterrupt": true
+        },
+        {
+          "type": "command",
           "command": "python hooks/performance_checker.py",
           "timeout": 7200,
           "persistAfterInterrupt": true
@@ -92,8 +133,36 @@
   ],
   "PostToolUse": [
     {
+      "matcher": "task|Task",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/critic_review_log_writer.py",
+          "timeout": 30,
+          "persistAfterInterrupt": true
+        }
+      ]
+    },
+    {
+      "matcher": "write_file|edit_file|apply_patch",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/verified_digest_guard.py",
+          "timeout": 300,
+          "persistAfterInterrupt": true
+        }
+      ]
+    },
+    {
       "matcher": "execute",
       "hooks": [
+        {
+          "type": "command",
+          "command": "python hooks/verified_digest_guard.py",
+          "timeout": 300,
+          "persistAfterInterrupt": true
+        },
         {
           "type": "command",
           "command": "python hooks/artifact_sync_execute_hook.py",

@@ -1,7 +1,7 @@
 ---
 name: autodev-reviewer
 description: 对单个 feature 的完成声明做独立需求评审。Dev 实现完成后使用：主 agent 写 completion-proposal.json，用 task 工具指定 `reviewer-autodev` 角色核验真实仓库状态，由该角色落盘 REQUIREMENTS_EVAL.md，主 agent 按 verdict 走修复复审闭环。
-version: v1.5.0814
+version: v1.6.08311
 ---
 
 ## 缺失产物处理
@@ -15,7 +15,7 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-reviewer --featur
 
 使用此技能来避免执行者自证完成。主 agent 负责写完成声明、按失败审查结论修复问题并重新发起审查；独立 reviewer 只负责用真实仓库状态核验声明并落盘需求评估。
 
-reviewer 没有隐式用户对话上下文。所有可审查上下文必须来自 completion proposal、feature 目录产物（proposal.md、specs/**/*.md、design.md、PLAN.md）、可选 PRD、启动 prompt 和真实 repo 状态。跨仓库任务中，当前 workspace 是协调仓库，业务仓库由 proposal 的 `affected_repositories` 显式列出。
+reviewer 没有隐式用户对话上下文。所有可审查上下文必须来自 completion proposal、feature 目录产物（proposal.md、specs/**/*.md、design.md、PLAN.md、存在时的 PRD.md、source-context.json 与 sources/ 快照）、启动 prompt 和真实 repo 状态。跨仓库任务中，当前 workspace 是协调仓库，业务仓库由 proposal 的 `affected_repositories` 显式列出。
 
 ## 严格职责边界
 
@@ -24,7 +24,7 @@ reviewer 没有隐式用户对话上下文。所有可审查上下文必须来�
 | 主 agent / Executor | 写 completion-proposal.json；启动 reviewer；FAIL 时修复 blockers 并重新 review；最后摘要 verdict | 在同一回合同时执行 reviewer 与 executor 角色；替 reviewer 改评估；未经重新 review 就宣称完成 |
 | `reviewer-autodev`  | 通过 shell/git/read/search 独立核验 proposal；只允许写 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/REQUIREMENTS_EVAL.md` | 修改源码、测试、配置、依赖、锁文件；运行任何写操作命令；修复问题 |
 
-reviewer 的只读命令白名单、禁止清单、审查流程和评分标准由 `reviewer-autodev` 角色自带，主 agent 不重复下发。如果 reviewer 无法用 shell/git 获取真实状态、无法访问 required 仓库或无法写报告文件，本次 review 不成立，verdict 记 `DEGRADED`。平台禁用 task 工具时允许主 agent 内联执行 reviewer 角色，但必须显式记录 `inline_main_agent` 模式并通过用户确认把 reviewer 与 executor 分隔到不同回合；不得把该模式包装成独立 review。
+reviewer 的只读命令白名单、禁止清单、审查流程、finding 准入和 verdict 规则由 `reviewer-autodev` 角色自带，主 agent 不重复下发。如果 reviewer 无法用 shell/git 获取真实状态、无法访问 required 仓库或无法写报告文件，本次 review 不成立，verdict 记 `DEGRADED`。平台禁用 task 工具时允许主 agent 内联执行 reviewer 角色，但必须显式记录 `inline_main_agent` 模式并通过用户确认把 reviewer 与 executor 分隔到不同回合；不得把该模式包装成独立 review。
 
 ## 执行步骤
 
@@ -46,7 +46,8 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval
 
 按 references/schemas.md 创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/completion-proposal.json`，描述任务、规格输入、受影响仓库、改动、声称的验证、已知限制和未完成事项。两个输入入口：
 
-- **PRD（可选，不是前置条件）**：用户提供 PRD 路径时（如"参考 .autobizdevops/features/feat-demo/PRD.md 做完成审查"），把路径原样写入 `prd_references`，支持多个；没有则写空数组。不要用自己总结的 PRD 内容替代文件路径，也不要提前判断实现是否满足 PRD——PRD 验收由 reviewer 独立完成。
+- **PRD**：Feature 目录存在 `PRD.md` 时，无论用户是否在当前回合再次点名，都必须自动写入 `prd_references`；用户另外提供的 PRD 路径也逐项原样写入，支持多个。所有路径只记录文件位置与说明，不用主 agent 摘要替代原件。Feature PRD 的 `外部资料与实现约束` 是 reviewer 的强制来源索引，不因 specs 只保留 WHAT 而降级为可选背景；Feature PRD 不存在且用户也未提供时才写空数组。
+- **来源上下文**：存在 `source-context.json` 时，读取 `targets` 含 `reviewer` 的要求及对应 `sources/` 快照。每个要求 ID 必须出现在 `REQUIREMENTS_EVAL.md` 的来源契约证据或 finding 中；`snapshot_only` 直接以快照为准。
 - **跨仓库**：跨仓库任务必须写 `affected_repositories`（字段规则和示例见 references/schemas.md），且 `files_changed` 每项带 `repository_id`；单仓库任务省略，reviewer 会把当前 cwd 当作唯一仓库。用户主动输入的仓库必须以 `source: "user_input"` 记录并转写依据到 `source_evidence`。
 
 ### 3. 启动 reviewer 角色
@@ -56,11 +57,12 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint requirements_eval
 - **`independent_task`**：task 工具可用时，使用 task 工具指定 `reviewer-autodev` 角色。reviewer 返回后，主 agent 在同一回合继续执行第 4 步。
 - **`inline_main_agent`**：task 工具被平台禁用或不可用时，主 agent 读取 `${pluginPath}/agents/reviewer.md`，按其审查流程切换为 source-read-only reviewer 角色内联完成审查。`REQUIREMENTS_EVAL.md` 落盘后必须停止当前回合，明确告知用户本次为主 agent 内联 review，并请用户确认是否切回 executor 角色继续。未获得确认前，不得在同一回合读取 verdict 分支、修复问题或推进 checkpoint。
 
-审查流程、只读边界和评分标准由角色自带，task prompt 不要粘贴角色指令，只附带：
+审查流程、只读边界、finding 准入和 verdict 规则由角色自带，task prompt 不要粘贴角色指令，只附带：
 
 - `Feature directory:` `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}`。
 - `Review execution mode:` `independent_task` 或 `inline_main_agent`。
-- `User PRD references:` 用户提供的原始 PRD 路径列表；没有则写 none。
+- `Stage contract:` Review 位于 Code 之后、UTest/E2E 之前；PLAN 中 TASK 的 `validationCommands` 与 `validationTestPlan` 是下游生成测试代码时的验证契约。reviewer 不执行这些命令，不检查目标测试目录或测试文件是否存在，不因测试资产尚未生成将其记为验证错误、`test_gap`、`requirement_gap` 或 `unfinished_work`，也不形成 blocker、warning 或交给 executor 修复。只核对验证意图是否完整对应 specs 的 Requirement / Scenario。completion proposal 声称已执行的测试、lint、build 仍必须核验真实证据。
+- `PRD references:` completion proposal 中的 Feature PRD 与用户提供 PRD 路径列表；没有则写 none。
 - `User repository references:`（可选）仅当流程需要 reviewer 核对用户主动输入的仓库是否被 proposal 遗漏时附带；否则省略，reviewer 只以 proposal 和真实仓库状态为依据。
 
 reviewer 自己通过工具获取真实仓库状态并直接写 `REQUIREMENTS_EVAL.md`；不要替它预生成 diff snapshot 或规格摘要。
@@ -78,6 +80,7 @@ reviewer 自己通过工具获取真实仓库状态并直接写 `REQUIREMENTS_EV
 
 FAIL 修复规则：
 
+- finding 若仅因 PLAN 的测试验证命令当前缺少 UTest/E2E 尚未生成的测试资产而成立，该 verdict 违反 `Stage contract`；不修改源码、PLAN 或测试，携带原 `Stage contract` 重新启动 reviewer 一次。同一结论再次出现时停止，报告 reviewer 契约失败，不记为代码 blocker。
 - 只修复 `REQUIREMENTS_EVAL.md` 中使 verdict 变为 FAIL 的 blockers 或明确 must fix 项。
 - 不要替 reviewer 改写 `REQUIREMENTS_EVAL.md`；修复后必须重新指定 `reviewer-autodev` 角色生成新版评估。
 - 每轮修复后必须更新 `completion-proposal.json`，使 files_changed、behavior_changed、verification、known_limitations 与真实状态一致。

@@ -141,7 +141,7 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
         template = (ROOT / "skills/autodev/autodev-plan/templates/design.md").read_text(
             encoding="utf-8"
         )
-        traceability = template.split("## 3. Spec Traceability")[1].split("## 4.")[0]
+        traceability = template.split("## 4. Spec Traceability")[1].split("## 5.")[0]
         self.assertIn("DEC-001", traceability)
 
     def test_both_skills_wire_the_channel(self) -> None:

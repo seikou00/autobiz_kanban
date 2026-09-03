@@ -1,7 +1,7 @@
 ---
 name: ZA21-encrypt
 description: 调用内部密码加密服务，将明文密码转换为 BEE_ENC_COMMON_ 加密格式。支持单条或批量密码加密。
-version: v1.0.0804
+version: v1.0.08311
 ---
 
 # ZA21密码加密工具

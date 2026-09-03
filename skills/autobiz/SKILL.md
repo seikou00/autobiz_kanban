@@ -1,7 +1,7 @@
 ---
 name: autobiz
 description: Biz 阶段统一入口。负责前置准入校验、流程编排、子技能路由与关键产出物脚本校验。所有 Biz 阶段工作应通过本入口进入。
-version: v1.1.08131
+version: v1.1.08311
 ---
 
 

@@ -48,15 +48,17 @@ class RenderContractPlainStateTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
 
-    def test_present_input_is_omitted_yielding_empty_output(self) -> None:
+    def test_present_input_is_always_rendered_with_absolute_read_path(self) -> None:
         self.write("proposal.md")
         contract = make_contract(inputs=(spec("proposal.md", required=True),))
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        # A present input needs no runtime instruction; with nothing missing the
-        # command returns empty output.
-        self.assertEqual(text, "")
+        self.assertIn("state: `ready`", text)
+        self.assertIn("`proposal.md`：proposal.md 标签（必需，status: `present`）", text)
+        self.assertIn(f"读取：`{(self.feature_dir / 'proposal.md').resolve()}`", text)
+        self.assertNotIn("降级", text)
+        self.assertNotIn("缺失处理", text)
 
     def test_missing_required_input_uses_its_degrade(self) -> None:
         contract = make_contract(
@@ -65,11 +67,11 @@ class RenderContractPlainStateTests(unittest.TestCase):
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        # Required inputs draw their handling text from extract.degrade too — not
-        # a hardcoded stop message; the header carries no flag and no marker.
         self.assertEqual(
             text,
-            "## 缺失产物处理\n1. design.md：design.md 标签\n   缺失处理：回到设计阶段补齐后再执行\n",
+            "## 输入产物（state: `blocked`）\n"
+            "- `design.md`：design.md 标签（必需，status: `missing`）\n"
+            "   缺失处理：回到设计阶段补齐后再执行\n",
         )
 
     def test_missing_optional_input_uses_its_degrade(self) -> None:
@@ -81,7 +83,9 @@ class RenderContractPlainStateTests(unittest.TestCase):
 
         self.assertEqual(
             text,
-            "## 缺失产物处理\n1. PRD.md：PRD.md 标签\n   缺失处理：无 PRD 时直接跳过\n",
+            "## 输入产物（state: `ready`）\n"
+            "- `PRD.md`：PRD.md 标签（可选，status: `missing`）\n"
+            "   自动降级：无 PRD 时直接跳过\n",
         )
 
     def test_empty_degrade_falls_back_to_hardcoded_default(self) -> None:
@@ -95,12 +99,12 @@ class RenderContractPlainStateTests(unittest.TestCase):
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("1. a.md：A 标签", text)
+        self.assertIn("`a.md`：A 标签（必需，status: `missing`）", text)
         self.assertIn("缺失处理：停止——必需输入未生成，回流上游补齐后再执行", text)
-        self.assertIn("2. b.md：B 标签", text)
-        self.assertIn("缺失处理：直接跳过，不影响执行", text)
+        self.assertIn("`b.md`：B 标签（可选，status: `missing`）", text)
+        self.assertIn("自动降级：直接跳过，不影响执行", text)
 
-    def test_only_missing_inputs_listed_and_renumbered(self) -> None:
+    def test_present_and_missing_inputs_are_both_rendered(self) -> None:
         self.write("PRD.md")
         contract = make_contract(
             inputs=(
@@ -111,24 +115,30 @@ class RenderContractPlainStateTests(unittest.TestCase):
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        # Present input dropped; the remaining missing one is renumbered to 1.
-        self.assertNotIn("PRD.md", text)
-        self.assertIn("1. design.md：design.md 标签", text)
+        self.assertIn("`PRD.md`：PRD.md 标签（必需，status: `present`）", text)
+        self.assertIn("`design.md`：design.md 标签（必需，status: `missing`）", text)
+        self.assertIn("state: `blocked`", text)
 
-    def test_glob_input_present_is_omitted(self) -> None:
-        self.write("specs/cap/a.md")
+    def test_glob_input_resolves_every_file_in_sorted_order(self) -> None:
+        self.write("specs/zeta/z.md")
+        self.write("specs/alpha/a.md")
         contract = make_contract(inputs=(spec("specs/**/*.md", required=True),))
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertEqual(text, "")
+        alpha = str((self.feature_dir / "specs/alpha/a.md").resolve())
+        zeta = str((self.feature_dir / "specs/zeta/z.md").resolve())
+        self.assertIn("`specs/**/*.md`：specs/**/*.md 标签（必需，status: `present`）", text)
+        self.assertIn(f"读取：`{alpha}`、`{zeta}`", text)
+        self.assertLess(text.index(alpha), text.index(zeta))
 
     def test_glob_input_missing_when_no_match(self) -> None:
         contract = make_contract(inputs=(spec("specs/**/*.md", required=True, degrade="回流上游"),))
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("specs/**/*.md：", text)
+        self.assertIn("`specs/**/*.md`：", text)
+        self.assertIn("status: `missing`", text)
 
     def test_empty_file_counts_as_missing(self) -> None:
         self.write("plan.json", body="")
@@ -136,23 +146,26 @@ class RenderContractPlainStateTests(unittest.TestCase):
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        self.assertIn("plan.json：", text)
+        self.assertIn("`plan.json`：", text)
+        self.assertIn("status: `missing`", text)
 
-    def test_header_carries_no_flag_no_marker_no_frame(self) -> None:
+    def test_output_does_not_restore_the_old_contract_frame(self) -> None:
         contract = make_contract(inputs=(spec("design.md", required=True, degrade="回流上游"),))
 
         text = render_contract_plain(contract, feature_dir=self.feature_dir)
 
-        # No 必需/可选 flag, no 未生成 marker, and none of the old checklist frame
-        # (title / node / boundary / outputs / validators).
+        # The compact input projection does not restore the old node, boundary,
+        # output, or validator sections.
         self.assertEqual(
             text,
-            "## 缺失产物处理\n1. design.md：design.md 标签\n   缺失处理：回流上游\n",
+            "## 输入产物（state: `blocked`）\n"
+            "- `design.md`：design.md 标签（必需，status: `missing`）\n"
+            "   缺失处理：回流上游\n",
         )
 
 
 class RenderContractPlainBaselineTests(unittest.TestCase):
-    def test_baseline_previews_every_input_handling(self) -> None:
+    def test_baseline_lists_inputs_with_unknown_status_without_degrade(self) -> None:
         contract = make_contract(
             inputs=(
                 spec("proposal.md", required=True, degrade="回流上游"),
@@ -162,21 +175,23 @@ class RenderContractPlainBaselineTests(unittest.TestCase):
 
         text = render_contract_plain(contract)
 
-        # Existence unknown → all inputs previewed, each with its degrade text and
-        # no per-input status.
         self.assertEqual(
             text,
-            "## 缺失产物处理\n"
-            "1. proposal.md：proposal.md 标签\n"
-            "   缺失处理：回流上游\n"
-            "2. PRD.md：PRD.md 标签\n"
-            "   缺失处理：无 PRD 时跳过\n",
+            "## 输入产物（state: `unknown`）\n"
+            "- `proposal.md`：proposal.md 标签（必需，status: `unknown`）\n"
+            "- `PRD.md`：PRD.md 标签（可选，status: `unknown`）\n",
         )
 
-    def test_contract_without_inputs_renders_empty(self) -> None:
-        self.assertEqual(render_contract_plain(make_contract()), "")
+    def test_contract_without_inputs_reports_ready_when_feature_is_known(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                render_contract_plain(make_contract(), feature_dir=Path(tmp)),
+                "## 输入产物（state: `ready`）\n- 无\n",
+            )
 
-    def test_workflow_context_is_accepted_but_not_rendered(self) -> None:
+    def test_workflow_context_adds_no_standalone_section(self) -> None:
+        # Workflow context only ever surfaces as one skipped input's reason;
+        # with nothing dropped it stays out of the output entirely.
         contract = make_contract(inputs=(spec("design.md", required=True, degrade="回流上游"),))
 
         text = render_contract_plain(
@@ -186,6 +201,56 @@ class RenderContractPlainBaselineTests(unittest.TestCase):
 
         self.assertNotIn("上下文", text)
         self.assertNotIn("feature=alpha", text)
+        self.assertNotIn("工作流模板", text)
+
+
+class SkippedInputReasonTests(unittest.TestCase):
+    """A skipped input must say why, so it never reads as a missing one."""
+
+    def render(self, workflow_context: dict | None) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            return render_contract_plain(
+                make_contract(),
+                workflow_context,
+                Path(tmp),
+                extra_skipped_inputs=(spec("PRD.md", required=True),),
+            )
+
+    def test_node_subset_template_is_named_as_the_reason(self) -> None:
+        text = self.render({"workflowTemplate": "lean"})
+
+        self.assertIn(
+            "- `PRD.md`：PRD.md 标签（裁剪前必需，status: `skipped` "
+            "— 工作流模板 `lean` 未包含产出该产物的节点）",
+            text,
+        )
+
+    def test_explicitly_skipped_nodes_are_named_as_the_reason(self) -> None:
+        text = self.render({"workflowTemplate": "standard", "workflowSkippedNodes": ["biz.prd"]})
+
+        self.assertIn("status: `skipped` — 上游节点 `biz.prd` 已跳过", text)
+
+    def test_both_causes_are_reported_together(self) -> None:
+        text = self.render(
+            {"workflowTemplate": "lean", "workflowSkippedNodes": ["biz.prd", "dev.plan"]}
+        )
+
+        self.assertIn(
+            "status: `skipped` — 工作流模板 `lean` 未包含产出该产物的节点；"
+            "上游节点 `biz.prd`、`dev.plan` 已跳过",
+            text,
+        )
+
+    def test_reason_falls_back_when_no_workflow_context_is_supplied(self) -> None:
+        text = self.render(None)
+
+        self.assertIn("status: `skipped` — 产出该产物的节点不在当前工作流链路中", text)
+
+    def test_skipped_input_never_carries_missing_handling(self) -> None:
+        text = self.render({"workflowTemplate": "lean"})
+
+        self.assertNotIn("缺失处理", text)
+        self.assertNotIn("自动降级", text)
 
 
 class PlainCliTests(unittest.TestCase):

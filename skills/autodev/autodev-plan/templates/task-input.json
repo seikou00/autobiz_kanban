@@ -34,6 +34,7 @@
     "specs/[capability]/spec.md#REQ-001",
     "specs/[capability]/spec.md#SCN-001"
   ],
+  "sourceRefs": [],
   "mergedScenarioRefs": [],
   "matrixExceptionExample": {
     "when": "task covers 6-12 scenarios that share one request/response or state-matrix validation loop",
@@ -62,6 +63,6 @@
       "covers": ["AC-T001-01"]
     }
   ],
-  "expectedFiles": [],
+  "expectedFiles": ["[production artifact path; required for UI tasks]"],
   "blockers": []
 }

@@ -12,17 +12,60 @@
 <!-- section: 前提与角色 | stages: dev.specs -->
 ## 前提与角色
 
-使用 task 工具，指定 `critic-autodev` 角色，对比 `PRD.md` 与 `proposal.md`、`specs/**/*.md` 进行严格审查：spec 是否已完全覆盖需求范围，是否有违反需求的地方。
+`dev.specs` structure gate 已通过后再启动回检。
+
+使用 task 工具，指定 `critic-autodev-zh` 角色，对比上游需求与本阶段产物进行严格审查：spec 是否已完全覆盖需求范围，是否有违反需求的地方。
+
+启动时必须在 task prompt 中写全 feature 目录的绝对路径与下面两份清单。任缺一项，回检就只覆盖模型当时想到的部分——遗漏不会以失败的形式出现，只会以「没提」的形式消失。
+
+### 输入材料清单
+
+| 材料 | 用途 | 缺失时 |
+|------|------|--------|
+| `PRD.md` | 需求来源，逐功能点核对覆盖 | 说明无 PRD，改以用户确认的行为描述为准 |
+| `proposal.md` | Capabilities 分组、Decision Log、Open Questions | 缺失即阻断，先回本阶段生成 |
+| `specs/**/*.md` | 全部行为契约，逐 REQ/SCN 核对 | 缺失即阻断 |
+| `IMPLEMENTATION_SCOPE.json` | 本轮实现范围 | 按兼容规则视为 `full_stack`，在结论中注明 |
+| `source-context.json` 与 `sources/SRC-NNN/` | 外部资料要求与快照 | 无外部资料时跳过 |
+| 现有 specs 与源码 | 独立核对 capability 分类 | 无法读取代码库时注明无法核对 |
+
+### 必查项
+
+五项逐项给结论，不合并、不省略，每项写清结论与证据。这五项由 critic 判定，不进入机器校验。
+
+| 必查项 | 查什么 | 证据形态 |
+|--------|--------|----------|
+| 需求覆盖 | PRD 每个功能点是否都有 REQ/SCN 承接，有无遗漏或与 PRD 矛盾的行为 | 功能点与 REQ/SCN 的对应，或缺口所在 |
+| 实现范围符合性 | 逐条 Scenario 是否落在 `IMPLEMENTATION_SCOPE.json` 声明的范围内。`backend_only` 下描述页面布局、点击、展开折叠、下拉、输入框、前端路由跳转的 Scenario 都是越界 | 越界的 `file:SCN-NNN` 与其表述 |
+| 操作分类与代码事实 | 逐项搜索既有 specs 与代码入口；已有相同外部可观察能力必须归 Modified/Removed，不存在才归 New | 搜到的 `路径#符号`，或搜索方式与无结果 |
+| 上游资料引用 | 每个 `SRC-NNN` 是否被 spec 保留，`targets` 含 `spec` 的要求是否落进 Requirement/Scenario | SRC 编号与落位的 REQ/SCN |
+| 待确认项消解 | `Open Questions` 各行是否真由用户裁定，有无自行写成 `已确认`，有无 TBD/待补充/「以实际文档为准」残留 | 行 ID 与其消解依据 |
+
+预检已经机械判定的东西不在这里重复：ID 格式与唯一性、章节齐全、能力双向对应由「产物契约预检」负责。本节独立核对分类是否符合代码事实。
 
 <!-- section: 前提与角色 | stages: dev.plan -->
 ## 前提与角色
 
-使用 task 工具，指定 `critic-autodev` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md`、`PLAN.json` 进行严格审查，从四个维度核查：
+使用 task 工具，指定 `critic-autodev-plan-zh` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md`、`plan.json` 进行严格审查，从四个维度核查：
 
 1. 技术选择是否合理；
 2. 规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对）；
 3. 测试是否合理和完备；
 4. 引用与事实是否相符（Code Evidence 各条与代码实际一致，Spec Traceability 引用的 REQ/SCN/D-xxx 在上游真实存在）。
+
+启动时必须在 task prompt 中写全 feature 目录的绝对路径与下面这份清单。回检角色不搜索工作区、不执行任何命令，路径没给它就直接退回。
+
+### 输入材料清单
+
+| 材料 | 用途 | 缺失时 |
+|------|------|--------|
+| `specs/**/*.md` | 行为契约基线，逐 REQ/SCN 核对覆盖 | 缺失即阻断，回 `/autodev-specs` |
+| `proposal.md` | Capabilities 分组与 `DEC-NNN` 取舍 | 缺失即阻断 |
+| `design.md` | 本阶段主产物，含 Code Evidence 表 | 缺失即阻断 |
+| `plan.json` 与 `PLAN.md` | 本阶段主产物，逐 TASK 核对 | 缺失即阻断 |
+| `IMPLEMENTATION_SCOPE.json` | 本轮范围与 included/deferred 分区 | 按 `full_stack` 视为全部本期实现，在结论中注明 |
+
+读码入口只有 design.md 的 Code Evidence 表，逐条 EVD 核对；不要在 prompt 里另外要求它评估代码质量或探索现状。
 
 <!-- section: 前提与角色 | stages: dev.code -->
 ## 前提与角色
@@ -44,7 +87,7 @@
 <!-- section: 严重度词表 | stages: dev.specs,dev.plan -->
 ## 严重度词表
 
-使用 `critic-autodev` 的原文分节名，不要改写成别的词：
+使用回检角色的原文分节名，不要改写成别的词：
 
 - `Critical Findings` 与 `Major Findings` 下的每一条都必须落入下方分类表的一个分类，不得省略。
 - `Minor Findings` 与 `Open Questions (unscored)` 不单独触发改产物。其中涉及取舍的按「需用户裁定」处理，其余归「仅列出」。
@@ -131,6 +174,17 @@
 - 每条结论都必须落到一个 `分类`，不允许留空或自造取值。
 - 无结论时写：`【回检结论】本轮回检无结论`。
 
+<!-- section: 结论落盘 | stages: dev.specs -->
+## 结论落盘
+
+回复中的结论块只是给用户看的即时视图，不是产物。同一份内容必须同时写进 `SPECS_REVIEW.md`。
+
+按 `autodev-specs` 技能 `templates/specs-review.md` 的形状输出，三节都必填：
+
+- `## Verdict`：`PASS` / `PASS_WITH_WARNINGS` / `FAIL` / `DEGRADED` 取一。只有 `PASS` 与 `PASS_WITH_WARNINGS` 能推进。
+- `## Findings`：每条结论一行，写清结论、证据与处置。本轮无结论时正文写「无」。
+- `## Unresolved`：只承载用户已明确暂停的条目，本阶段就此停下。其余「需用户裁定」条目必须在写本文件之前裁定完，结果写进 Findings 的处置列，本节写「无」。
+
 <!-- section: 分类取值 | stages: dev.specs -->
 本阶段 `分类` 允许取值：`产物可修` | `需用户裁定` | `回流上游` | `仅列出` | `结论不成立`。
 
@@ -158,7 +212,9 @@
 <!-- section: 收口 | stages: dev.specs -->
 ## 收口
 
-改完重跑「产物契约预检（机器校验）」；仍有未裁定的「需用户裁定」条目时不推进 `specs_done`。
+按结论改完 proposal/specs 后重跑 structure gate，逐条裁定「需用户裁定」条目，再一次写成 `SPECS_REVIEW.md`，最后运行 final gate。裁定在写本文件之前完成，不靠 final gate 发现。
+
+处置 finding 造成的修改由主模型自行收口，不必重新调用 critic。只有当修改本身改变了行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）时才重跑一轮回检。
 
 <!-- section: 收口 | stages: dev.plan -->
 ## 收口

@@ -33,6 +33,10 @@
 3. 受保护路由有程序化认证准备或明确 `storageState`。
 4. 乐观 UI 写操作有请求完成或持久结果证据。
 5. fixture 数据不会被组件渲染 guard 静默过滤。
+6. PRD 每个外部接口 `SRC-NNN` 都在用例 `source.external_sources` 中出现，并已打开原始资料。
+7. 测试实际请求的 method/path、鉴权、请求/响应断言、错误和超时处理与 `SRC-NNN` 原契约一致。
+8. 有副作用调用只指向测试/沙箱环境；生产只读验证必须有明确授权和无副作用证据。
+9. reviewer 的 External Interface Coverage / E2E Focus 中每个外部接口风险都有用例或明确 BLOCKED/missing 结论。
 
 新发现以 `semantic:<name>` 规则登记为 `confirmed`，并把实际读过的产品源文件加入扫描输入。
 

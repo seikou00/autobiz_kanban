@@ -30,6 +30,6 @@
       "covers": [1]
     }
   ],
-  "expectedFiles": [],
+  "expectedFiles": ["[production artifact path; required for UI tasks]"],
   "blockers": []
 }

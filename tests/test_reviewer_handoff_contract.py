@@ -36,12 +36,67 @@ class ReviewerHandoffContractTest(unittest.TestCase):
         self.assertIn("通过用户确认把 reviewer 与 executor 分隔到不同回合", skill)
         self.assertIn("未获得确认前", skill)
 
+    def test_reviewer_receives_pre_utest_stage_contract(self) -> None:
+        skill = REVIEWER_SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("Review 位于 Code 之后、UTest/E2E 之前", skill)
+        self.assertIn("不执行这些命令", skill)
+        self.assertIn("不检查目标测试目录或测试文件是否存在", skill)
+        self.assertIn("验证错误、`test_gap`、`requirement_gap` 或 `unfinished_work`", skill)
+        self.assertIn("不形成 blocker、warning 或交给 executor 修复", skill)
+        self.assertIn("completion proposal 声称已执行", skill)
+
+    def test_parent_does_not_repair_invalid_pre_utest_finding(self) -> None:
+        skill = REVIEWER_SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("该 verdict 违反 `Stage contract`", skill)
+        self.assertIn("不修改源码、PLAN 或测试", skill)
+        self.assertIn("重新启动 reviewer 一次", skill)
+        self.assertIn("不记为代码 blocker", skill)
+
     def test_report_discloses_review_execution_mode(self) -> None:
         schema = REVIEWER_SCHEMA.read_text(encoding="utf-8")
 
         self.assertIn("## Review Mode", schema)
         self.assertIn("independent_task | inline_main_agent", schema)
         self.assertIn("inline_main_agent` 不得表述为独立子代理审查", schema)
+
+    def test_reviewer_reads_complete_review_scope_including_untracked_files(self) -> None:
+        prompt = REVIEWER_AGENT.read_text(encoding="utf-8")
+        schema = REVIEWER_SCHEMA.read_text(encoding="utf-8")
+
+        for contract in (
+            "proposal.files_changed",
+            "git status --short",
+            "--untracked-files=all",
+            "git diff --cached --name-only",
+            "untracked 文件没有 diff，必须直接读取完整内容",
+            "excluded paths",
+            "AGENTS.md",
+            "仓库明确规范优先于通用偏好",
+        ):
+            self.assertIn(contract, prompt)
+        self.assertIn("Review file set", schema)
+        self.assertIn("Untracked Files", schema)
+
+    def test_findings_require_evidence_and_verdict_is_deterministic(self) -> None:
+        prompt = REVIEWER_AGENT.read_text(encoding="utf-8")
+        schema = REVIEWER_SCHEMA.read_text(encoding="utf-8")
+
+        for contract in (
+            "Finding 准入",
+            "requirement_gap",
+            "confidence",
+            "触发条件",
+            "blocker 必须为 `HIGH`",
+            "不使用 1–5 主观评分",
+            "否则存在至少一个 blocker 时使用 `FAIL`",
+            "否则存在至少一个 warning 时使用 `PASS_WITH_WARNINGS`",
+        ):
+            self.assertIn(contract, prompt)
+        self.assertNotIn("claim_accuracy: 1-5", prompt)
+        for field in ("Severity:", "Category:", "Confidence:", "Location:", "触发条件:"):
+            self.assertIn(field, schema)
 
 
 class ReviewerRoleIsResolvableTest(unittest.TestCase):

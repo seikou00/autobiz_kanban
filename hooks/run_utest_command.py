@@ -307,6 +307,7 @@ def execute_utest_command(
         "repositoryRoot": str(code_workspace),
         "executionCwd": execution_target["executionCwd"],
         "environmentTargetId": execution_target["environmentTargetId"],
+        "locationWarnings": list(workspace_context.get("locationWarnings", [])),
     }
     if selected_kind == "setup":
         return response

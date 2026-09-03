@@ -77,6 +77,31 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             + ", ".join(offenders),
         )
 
+    def test_every_workflow_skill_invokes_its_input_contract_once(self) -> None:
+        offenders: list[str] = []
+        skills = {
+            node.get("skill")
+            for _, node in _iter_nodes(_board_config())
+            if isinstance(node, dict) and isinstance(node.get("skill"), str)
+        }
+        for skill in sorted(skills):
+            group = skill.split("-", 1)[0]
+            relative_path = Path("skills") / group / skill / "SKILL.md"
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            command = (
+                'python "${pluginPath}/hooks/inspect_skill_contract.py" '
+                f'{skill} --feature "${{feature}}" --plain'
+            )
+            count = content.count(command)
+            if count != 1:
+                offenders.append(f"{relative_path}: invocation_count={count}")
+        self.assertEqual(
+            offenders,
+            [],
+            "every workflow skill must load its board input contract exactly once: "
+            + ", ".join(offenders),
+        )
+
     def test_workflow_skills_index_shared_completion_guide(self) -> None:
         index_line = (
             "技能完成后，读取并遵循 "
@@ -296,6 +321,28 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             skill,
         )
 
+    def test_utest_skill_has_deterministic_blocked_exit(self) -> None:
+        skill = (ROOT / "skills" / "autodev" / "autodev-utest" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        required = [
+            "--record-blocked",
+            "locationWarnings",
+            "blockedArtifacts",
+            "blockedArtifactError",
+            "--checkpoint needs_fix",
+            "没有环境变更或用户选择时不重跑检查器",
+            "`scope.modules` 无法解析不是 `contract_gap`",
+            "当前没有 pending ambiguity 时不得传 `--select-candidate`",
+        ]
+        missing = [phrase for phrase in required if phrase not in skill]
+        self.assertEqual(missing, [])
+
+        config = _board_config()
+        transitions = config["workflow"]["checkpoints"]["transitions"]
+        self.assertIn("needs_fix", transitions["unit_test_in_progress"])
+        self.assertIn("unit_test_in_progress", transitions["needs_fix"])
+
     def test_skill_output_sections_never_declare_global_state_files(self) -> None:
         state_files = (".autobizdevops/state.json", ".autobizdevops/STATE.md")
         offenders: list[str] = []
@@ -469,8 +516,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         required = [
             "validation.issues",
             "validation.invalidTaskIds",
-            "repairTarget=task_detail",
-            "repairTarget=task_group",
             "repair-draft-task",
             "repair-draft-tasks",
             "批量修复在任一 patch 不合法时整体不落盘",
@@ -564,10 +609,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "可合并(附 splitRationale)",
             "splitRationale 草稿",
             "必须先在候选分组表证明共享验证闭环",
-            "任务超过软阈值时默认必须继续拆分",
-            "SCN `<=5`",
-            "SCN `<=12`",
-            "SCN 数 `>12`",
+            "任务超过软阈值时默认继续拆分",
             "mergedScenarioRefs",
             "taskGroupMatrixExceptionExample",
             "uiRequiredExample",
@@ -580,9 +622,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "基础能力可以单独成 task",
             "validationCommands` 必须验证下游公开 seam",
             "只有共享同一验证闭环时才允许合并",
-            "oversized_plan_task_must_split",
-            "missing_plan_task_split_rationale",
-            "invalid_plan_task_split_rationale",
             "不得通过完整 task 的内容校验失败来探索如何拆分",
             "必须按 DAG 拓扑序编号",
             "`preflight-task-groups` 成功后只运行一次 `prepare-task-draft`",

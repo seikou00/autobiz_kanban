@@ -121,4 +121,5 @@ __pycache__/
 .agents
 .codex
 AGENTS.md
+CLAUDE.md
 outputs/
