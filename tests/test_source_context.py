@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -77,8 +75,6 @@ def source_context(*, include_fallback: bool = True) -> dict:
                 "availability": "snapshot_only",
                 "readStatus": "complete",
                 "freshness": "unknown",
-                # The digest is recorded for traceability, not compared as a hard gate.
-                "sha256": "0" * 64,
                 "items": items,
             }
         ],
@@ -100,7 +96,7 @@ class SourceContextTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_snapshot_only_context_is_valid_without_digest_blocking(self) -> None:
+    def test_snapshot_only_context_is_valid(self) -> None:
         self.write_context(source_context())
 
         errors, warnings = validate_source_context(self.feature_dir, {"SRC-001"})
@@ -141,7 +137,6 @@ class SourceContextTests(unittest.TestCase):
         source["availability"] = "never_provided"
         source["readStatus"] = "unreadable"
         source["path"] = None
-        source["sha256"] = None
         source["items"] = []
         self.write_context(data)
 
@@ -178,13 +173,17 @@ class SourceContextTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        code, _ = sync_source_context(self.feature_dir)
+        code, messages = sync_source_context(self.feature_dir)
         self.assertEqual(code, 0)
+        output = "\n".join(messages)
+        self.assertNotIn("待判定", output)
+        self.assertNotIn("逐行判定", output)
+        self.assertIn("不要求逐条生成下游要求", output)
 
         generated = json.loads((self.feature_dir / "source-context.json").read_text(encoding="utf-8"))
         source = generated["sources"][0]
         self.assertEqual(source["id"], "SRC-001")
-        self.assertEqual(source["sha256"], hashlib.sha256(SNAPSHOT.encode("utf-8")).hexdigest())
+        self.assertNotIn("sha256", source)
         self.assertTrue(source["items"])
         self.assertTrue(all(item["original"] in SNAPSHOT for item in source["items"]))
         self.assertTrue(all(item["disposition"] == "background" for item in source["items"]))
@@ -248,43 +247,6 @@ class SourceContextTests(unittest.TestCase):
         )
         self.assertEqual(source_ids_for_target(data, "spec"), {"SRC-001"})
         self.assertEqual(source_ids_for_target(data, "unknown"), set())
-
-    def test_digest_cli_only_reads_feature_snapshot(self) -> None:
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "hooks" / "source_context.py"),
-                "digest",
-                "--feature-dir",
-                str(self.feature_dir),
-                "--path",
-                "sources/SRC-001/payment.md",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), hashlib.sha256(SNAPSHOT.encode("utf-8")).hexdigest())
-
-        invalid = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "hooks" / "source_context.py"),
-                "digest",
-                "--feature-dir",
-                str(self.feature_dir),
-                "--path",
-                "../payment.md",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertNotEqual(invalid.returncode, 0)
-        self.assertIn("修复", invalid.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

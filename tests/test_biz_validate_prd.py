@@ -144,7 +144,6 @@ class BizValidatePrdTests(unittest.TestCase):
                     "availability": "snapshot_only",
                     "readStatus": "complete",
                     "freshness": "unknown",
-                    "sha256": "0" * 64,
                     "items": [
                         {
                             "id": "SRC-001-I001",

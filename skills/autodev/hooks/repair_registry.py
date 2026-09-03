@@ -190,7 +190,15 @@ _SPECS: Dict[str, Repair] = {
         problem="这些含 spec 目标要求的来源未被任何 spec 保留：{target}",
         action=(
             "在相关 spec 的 `## Source References / 外部资料引用` 表补齐 SRC-NNN 与 REQ/SCN 映射；"
-            "并把对应 SRC-NNN-RNNN 落入 Requirement/Scenario。"
+            "同一来源的一组语义约束可映射到同一个 REQ/SCN。"
+        ),
+    ),
+    "spec_source_requirement_in_body": Repair(
+        artifact="{target}",
+        problem="{target} 的 Requirement/Scenario 正文堆放了来源要求 ID：{ids}",
+        action=(
+            "从行为正文移除 SRC-NNN-RNNN；在 Source References 表用 SRC-NNN 映射实际 REQ/SCN，"
+            "正文只保留对应的可验证行为。"
         ),
     ),
     "spec_source_reference_unknown": Repair(

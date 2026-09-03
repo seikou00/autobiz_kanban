@@ -1,7 +1,7 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.15.0903
+version: v1.16.09032
 ---
 
 ## 缺失产物处理
@@ -150,8 +150,8 @@ capability 的变更分类写进 `## Capabilities` 节：
 - 按规格清单统一生成全部 spec，再进入校验；不得生成一个、校验一个、修复一个。
 - **列入即生成**：`Capabilities` 中每一项（正文「无」除外）都必须有对应的 `specs/<capability>/spec.md`，反过来每个 `specs/*/spec.md` 也必须能在 `Capabilities` 中找到出处。若认为某 capability 不值得单独成 spec，回到 proposal 将其移除或并入其他 capability。
 - specs 定义 **WHAT**，不得写实现步骤、类名、SQL 细节或任务拆分。
-- `source-context.json` 中 `targets` 含 `spec` 的 `SRC-NNN` 必须进入 spec 的 `Source References / 外部资料引用` 表并映射 REQ/SCN；`background` 等无 spec 要求的来源无需列入，保留时映射写 `-` 并填写 Usage。只能引用 PRD 已定义的 ID；PRD 无来源项时该节正文写「无」。
-- `targets` 含 `spec` 的每个 `SRC-NNN-RNNN` 必须写入对应 Requirement 或 Scenario；一条要求同时约束设计时仍保留同一 ID。
+- `source-context.json` 中 `targets` 含 `spec` 的 `SRC-NNN` 必须进入 spec 的 `Source References / 外部资料引用` 表并映射 REQ/SCN；同一来源或一组模板约束可映射到同一个 REQ/SCN。`background`、`duplicate` 等无 spec 要求的来源无需列入，保留时映射写 `-` 并填写 Usage。只能引用 PRD 已定义的 `SRC-NNN`；PRD 无来源项时该节正文写「无」。
+- Source References 表承担来源追溯；Requirement 与 Scenario 正文只写可验证行为，不得堆放 `SRC-NNN-RNNN` 列表。
 - 外部接口资料至少核对 method/path、鉴权、请求/响应、错误和超时中与本期有关的内容；资料与用户已确认行为矛盾时回流澄清，不得自行选择一个版本。
 - Requirement 使用 `### Requirement REQ-NNN: <标题>`，Scenario 使用四级标题 `#### Scenario SCN-NNN: <标题>` 并写在所属 Requirement 标题之下；ID 外的方括号可有可无。
 - `NNN` 是三位数字；ID 在同一 feature 内全局唯一，跨 spec 文件也不得重号。改标题不改 ID，删除后 ID 不复用。新增时取一个未使用的编号即可，允许跳号，不要求与文档顺序一致——不得为了顺序重排已有 ID。
