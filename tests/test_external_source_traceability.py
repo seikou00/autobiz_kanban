@@ -120,7 +120,6 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
                             "availability": "snapshot_only",
                             "readStatus": "complete",
                             "freshness": "unknown",
-                            "sha256": "0" * 64,
                             "items": [
                                 {
                                     "id": "SRC-001-I001",
@@ -167,7 +166,7 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
         self.assertEqual(failures, 0, output)
 
-    def test_specs_must_consume_requirements_targeted_to_spec(self) -> None:
+    def test_specs_map_spec_sources_without_copying_requirement_ids_into_body(self) -> None:
         self._write_source_context(["spec"])
         spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
         source_row = "| Source ID | Requirement / Scenario | Usage |\n|---|---|---|\n| SRC-001 | REQ-001 / SCN-001 | 支付网关行为约束 |"
@@ -175,9 +174,12 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
 
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
 
-        self.assertGreater(failures, 0)
-        self.assertIn("spec_source_requirement_missing", output)
+        self.assertEqual(failures, 0, output)
 
+    def test_specs_reject_source_requirement_ids_in_behavior_body(self) -> None:
+        self._write_source_context(["spec"])
+        spec_path = self.feature_dir / "specs" / "payment" / "spec.md"
+        source_row = "| Source ID | Requirement / Scenario | Usage |\n|---|---|---|\n| SRC-001 | REQ-001 / SCN-001 | 支付网关行为约束 |"
         spec_path.write_text(
             SPEC.format(source_rows=source_row).replace(
                 "The system SHALL 按网关契约提交支付。",
@@ -186,7 +188,8 @@ class ExternalSourceTraceabilityTest(unittest.TestCase):
             encoding="utf-8",
         )
         failures, output = self._run(validate_specs_contract, skill="autodev-specs")
-        self.assertEqual(failures, 0, output)
+        self.assertGreater(failures, 0)
+        self.assertIn("spec_source_requirement_in_body", output)
 
     def test_background_source_without_spec_requirements_needs_no_fake_mapping(self) -> None:
         self._write_source_context(None)

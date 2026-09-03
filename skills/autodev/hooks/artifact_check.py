@@ -593,15 +593,26 @@ def validate_specs_contract(ctx: HookContext) -> int:
                 target=str(rel),
                 fields={"placeholders": "; ".join(sorted(set(residue))[:8])},
             )
+        source_section = _markdown_section_body(
+            text,
+            "Source References / 外部资料引用",
+        )
+        behavior_text = (
+            text
+            if source_section is None
+            else text.replace(source_section, "", 1)
+        )
+        source_requirement_ids = sorted(referenced_source_requirement_ids(behavior_text))
+        if source_requirement_ids:
+            failures += fail_line(
+                ctx,
+                "spec_source_requirement_in_body",
+                f" file={rel} ids={','.join(source_requirement_ids)}",
+                target=str(rel),
+                fields={"ids": ",".join(source_requirement_ids)},
+            )
     failures += _duplicate_ids_across_specs(ctx, specs)
     failures += _validate_specs_source_references(ctx, specs)
-    failures += _validate_source_requirement_coverage(
-        ctx,
-        [read_text(spec) for spec in specs],
-        "spec",
-        "spec_source_requirement_missing",
-        "spec_source_requirement_unknown",
-    )
     return failures
 
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import re
 import shutil
@@ -22,7 +21,6 @@ SOURCE_CONTEXT_FILE = "source-context.json"
 SOURCE_REQUIREMENT_RE = re.compile(r"\bSRC-\d{3}-R\d{3}\b")
 SOURCE_ITEM_RE = re.compile(r"^SRC-\d{3}-I\d{3}$")
 SOURCE_ID_RE = re.compile(r"^SRC-\d{3}$")
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VALID_AVAILABILITY = {"live", "snapshot_only", "never_provided"}
 VALID_READ_STATUS = {"complete", "partial", "unreadable"}
 VALID_FRESHNESS = {"current", "stale", "unknown"}
@@ -402,14 +400,6 @@ def validate_source_context(
                 "%s.freshness 非法；可选值: %s"
                 % (source_id, "/".join(sorted(VALID_FRESHNESS)))
             )
-        digest = source.get("sha256")
-        if availability != "never_provided" and (
-            not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None
-        ):
-            warnings.append(
-                "%s.sha256 缺失或格式不对；修复：运行 source_context.py sync 自动写入" % source_id
-            )
-
         if availability == "never_provided":
             warnings.append(
                 "%s 标记为从未提供；出口只有三个：当场提供资料、移除该依赖、或暂停等待材料"
@@ -519,8 +509,8 @@ def validate_source_context(
                 undecided += 1
         if undecided == len(items):
             warnings.append(
-                "%s 的 %d 行全部停留在 disposition=background 且无 requirements；"
-                "sync 只生成原文，逐行判定仍需完成" % (source_id, undecided)
+                "%s 当前没有下游语义要求；若原件只含背景、布局或重复结构可保持现状，"
+                "否则仅为独立影响行为、实现或验收的条目补 requirement" % source_id
             )
 
     if expected_source_ids is not None:
@@ -642,7 +632,7 @@ def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[
                 existing_by_id[source["id"]] = source
 
     sources = []  # type: List[Dict[str, Any]]
-    pending = 0
+    background_count = 0
     for reference in references:
         source_id = reference.source_id
         if only and source_id != only:
@@ -669,7 +659,6 @@ def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[
             continue
         relative = snapshot.resolve(strict=False).relative_to(feature_dir.resolve(strict=False))
         source["path"] = "/".join(relative.parts)
-        source["sha256"] = snapshot_sha256(snapshot)
         _, rows = _read_snapshot(snapshot)
         if not rows:
             messages.append(
@@ -684,9 +673,9 @@ def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[
                 1 for item in items
                 if item["disposition"] == "background" and not item["requirements"]
             )
-            pending += undecided
+            background_count += undecided
             messages.append(
-                "%s: 共 %d 行（新增 %d，保留判定 %d），待判定 %d 行"
+                "%s: 共 %d 个证据条目（新增 %d，保留判定 %d），background %d 个"
                 % (source_id, len(items), added, reused, undecided)
             )
         sources.append(source)
@@ -696,28 +685,18 @@ def sync_source_context(feature_dir: Path, only: Optional[str] = None) -> Tuple[
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     messages.append(
-        "已写入 %s。下一步：为每行填写 disposition；标为 requirement 的行补 requirements[].text 与 targets"
+        "已写入 %s。仅为独立影响行为、实现或验收的语义约束生成 requirement；"
+        "布局和重复结构保留为 background 或 duplicate"
         % source_context_path(feature_dir)
     )
-    if pending:
-        messages.append("仍有 %d 行 disposition=background 且无 requirements，请逐行判定" % pending)
+    if background_count:
+        messages.append("当前有 %d 个 background 证据条目，不要求逐条生成下游要求" % background_count)
     return 0, messages
-
-
-def snapshot_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="外部资料快照辅助工具")
     subparsers = parser.add_subparsers(dest="command")
-    digest_parser = subparsers.add_parser("digest", help="计算已落盘快照的 SHA256")
-    digest_parser.add_argument("--feature-dir", required=True)
-    digest_parser.add_argument("--path", required=True)
     sync_parser = subparsers.add_parser(
         "sync", help="依据 PRD 来源表与 sources/ 快照生成 source-context.json 的机械字段"
     )
@@ -725,35 +704,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     sync_parser.add_argument("--source", default=None, help="只同步指定的 SRC-NNN")
     args = parser.parse_args(argv)
 
-    if args.command == "sync":
-        code, messages = sync_source_context(Path(args.feature_dir), args.source)
-        for message in messages:
-            print(message)
-        return code
-
-    if args.command != "digest":
+    if args.command != "sync":
         parser.print_help(sys.stderr)
         return 2
-
-    relative = Path(args.path)
-    parts = relative.parts
-    if relative.is_absolute() or len(parts) < 3 or parts[0] != "sources" or SOURCE_ID_RE.fullmatch(parts[1]) is None:
-        print(
-            "ERROR: --path 必须是 sources/SRC-NNN/ 下的 Feature 相对路径。"
-            " 修复：先把原件或快照放入对应来源目录，再传入该相对路径。",
-            file=sys.stderr,
-        )
-        return 1
-    snapshot, error = _safe_snapshot_path(Path(args.feature_dir), parts[1], args.path)
-    if error or snapshot is None:
-        print(
-            "ERROR: %s 修复：确认快照已写入 Feature 的 sources/SRC-NNN/ 且文件非空。"
-            % (error or "快照不可读取"),
-            file=sys.stderr,
-        )
-        return 1
-    print(snapshot_sha256(snapshot))
-    return 0
+    code, messages = sync_source_context(Path(args.feature_dir), args.source)
+    for message in messages:
+        print(message)
+    return code
 
 
 if __name__ == "__main__":
