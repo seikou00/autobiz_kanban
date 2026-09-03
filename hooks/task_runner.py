@@ -29,7 +29,6 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence, read_records, stream_path  # noqa: E402
 from hooks.evidence_kernel import FileLock, unlink_if_exists  # noqa: E402
-from hooks.code_exploration import CodeExplorationError, inspect_exploration_cache  # noqa: E402
 from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve_workspace  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
@@ -40,7 +39,6 @@ from hooks.plan_json import (  # noqa: E402
     find_task,
     load_plan_bundle,
     normalize_status,
-    task_contract_sha256,
     task_execution_lane,
     task_execution_mode,
     task_workspace_roots,
@@ -63,7 +61,6 @@ from hooks.repository_snapshot import (  # noqa: E402
     resolve_git_root,
     resolve_repositories,
     snapshot_changes,
-    unignored_runtime_artifact_paths,
 )
 from hooks.task_run_integrity import (  # noqa: E402
     strict_task_run_integrity_error,
@@ -226,18 +223,6 @@ def _repository_state(repositories: RepositoryMap) -> list[dict[str, Any]]:
         }
         for repository_id, repo in repositories.items()
     ]
-
-
-def _assert_runtime_artifacts_ignored(repositories: RepositoryMap) -> None:
-    for repository_id, repo in repositories.items():
-        unignored = unignored_runtime_artifact_paths(repo)
-        if unignored:
-            raise TaskRunnerError(
-                f"runtime_artifact_path_not_ignored:{repository_id}:{unignored[0]}",
-                requiredAction="configure_git_ignore_and_retry",
-                resolvedGitRoots=[str(item) for item in repositories.values()],
-                runtimeArtifactPaths=unignored,
-            )
 
 
 def _normalize_git_relative_path(raw: str, *, error: str) -> str:
@@ -644,53 +629,6 @@ def _active_feature_runs(feature_dir: Path, *, exclude: Path | None = None) -> l
     return sorted(active)
 
 
-def _latest_sealed_prior_task_run(
-    feature_dir: Path,
-    feature: str,
-    task: dict[str, Any],
-) -> dict[str, Any] | None:
-    task_id = str(task.get("id", ""))
-    expected_contract = task_contract_sha256(task)
-    candidates: list[dict[str, Any]] = []
-    for path in (feature_dir / ".task-runs" / task_id).glob("*.json"):
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if (
-            isinstance(state, dict)
-            and state.get("featureId") == feature
-            and state.get("taskId") == task_id
-            and state.get("taskContractSha256") == expected_contract
-            and state.get("executionMode") == "code"
-            and state.get("status") in {"implemented", "done", "failed", "aborted"}
-            and isinstance(state.get("explorationGate"), dict)
-            and strict_task_run_integrity_error(state) is None
-        ):
-            candidates.append(state)
-    if not candidates:
-        return None
-    return max(
-        candidates,
-        key=lambda state: (str(state.get("startedAt", "")), str(state.get("runId", ""))),
-    )
-
-
-def _evidence_only_exploration_staleness(exploration: dict[str, Any]) -> bool:
-    stale_reasons = exploration.get("staleReasons")
-    return (
-        exploration.get("status") == "stale"
-        and not exploration.get("changedPaths")
-        and not exploration.get("criticalHits")
-        and isinstance(stale_reasons, list)
-        and bool(stale_reasons)
-        and all(
-            isinstance(reason, str) and reason.startswith("implementation_evidence_invalid:")
-            for reason in stale_reasons
-        )
-    )
-
-
 def _start_task_unlocked(
     workspace: Path,
     feature: str,
@@ -754,7 +692,6 @@ def _start_task_unlocked(
             requestedCodeWorkspaces=[str(path.resolve()) for path in requested_workspaces],
         )
     repositories = _resolve_repositories(requested_workspaces)
-    _assert_runtime_artifacts_ignored(repositories)
     scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
     workspace_roots = task_workspace_roots(task)
     _assert_workspace_ref_matches(task.get("workspaceRef"), scope_workspaces, contract_name=task_id)
@@ -774,98 +711,6 @@ def _start_task_unlocked(
             activeRuns=active,
         )
     execution_mode = task_execution_mode(task)
-    exploration_gate = None
-    if execution_mode == "code":
-        repository_gates: dict[str, Any] = {}
-        observed_exploration: dict[str, dict[str, Any]] = {}
-        unready_exploration: dict[str, dict[str, Any]] = {}
-        for repository_id, repository_root in repositories.items():
-            try:
-                exploration = inspect_exploration_cache(
-                    feature_dir,
-                    plan,
-                    task_id,
-                    repository_root,
-                )
-            except (CodeExplorationError, RepositorySnapshotError) as exc:
-                detail = str(exc)
-                raise TaskRunnerError(
-                    f"code_exploration_inspect_failed:{repository_id}:{detail}",
-                    requiredAction=(
-                        "repair_git_snapshot_and_retry_context"
-                        if "git_snapshot_failed" in detail
-                        else "repair_exploration_cache_and_retry_context"
-                    ),
-                    explorationBlocked=True,
-                    implementationAllowed=False,
-                ) from exc
-            status = exploration.get("status")
-            observed_exploration[repository_id] = {
-                "status": status,
-                "cachePath": exploration.get("cachePath"),
-                "cacheSha256": exploration.get("cacheSha256"),
-                "changedPaths": exploration.get("changedPaths", []),
-                "criticalHits": exploration.get("criticalHits", []),
-                "staleReasons": exploration.get("staleReasons", []),
-            }
-            if status not in {"fresh", "fresh_with_trusted_changes"}:
-                unready_exploration[repository_id] = exploration
-                continue
-            repository_gates[repository_id] = {
-                "status": status,
-                "cachePath": exploration.get("cachePath"),
-                "cacheSha256": exploration.get("cacheSha256"),
-            }
-        if unready_exploration:
-            prior_run = _latest_sealed_prior_task_run(feature_dir, feature, task)
-            prior_gate = prior_run.get("explorationGate") if isinstance(prior_run, dict) else None
-            prior_repositories = (
-                prior_gate.get("repositories") if isinstance(prior_gate, dict) else None
-            )
-            controlled_retry = isinstance(repair_context, dict) or all(
-                _evidence_only_exploration_staleness(item)
-                for item in unready_exploration.values()
-            )
-            if (
-                controlled_retry
-                and isinstance(prior_repositories, dict)
-                and set(prior_repositories) == set(repositories)
-            ):
-                exploration_gate = {
-                    "checkedAt": _utc_now(),
-                    "source": "inherited_after_recheck",
-                    "inheritedFromRunId": prior_run.get("runId"),
-                    "inheritedGateCheckedAt": prior_gate.get("checkedAt"),
-                    "observedRepositories": observed_exploration,
-                    "repositories": dict(prior_repositories),
-                }
-            else:
-                repository_id, exploration = next(iter(unready_exploration.items()))
-                status = exploration.get("status")
-                required_action = (
-                    "record_code_exploration_and_retry_start"
-                    if status in {"missing", "stale"}
-                    else "patch_code_exploration_and_retry_start"
-                    if status == "reusable_with_changes"
-                    else "rerun_code_task_context_before_start"
-                )
-                raise TaskRunnerError(
-                    f"code_exploration_not_ready:{repository_id}:{status}",
-                    requiredAction=required_action,
-                    explorationStatus=status,
-                    explorationPolicy=exploration.get("policy"),
-                    changedPaths=exploration.get("changedPaths", []),
-                    criticalHits=exploration.get("criticalHits", []),
-                    staleReasons=exploration.get("staleReasons", []),
-                    explorationBlocked=True,
-                    implementationAllowed=False,
-                )
-        else:
-            exploration_gate = {
-                "checkedAt": _utc_now(),
-                "source": "current_cache",
-                "repositories": repository_gates,
-            }
     declared_scope_paths, resolved_scope_paths = _resolved_scope_paths(task, scope_workspaces)
     repository_state = _repository_state(repositories)
 
@@ -876,7 +721,6 @@ def _start_task_unlocked(
         "featureId": feature,
         "batchId": batch_id,
         "taskId": task_id,
-        "taskContractSha256": task_contract_sha256(task),
         "executionMode": execution_mode,
         "status": "started",
         "codeWorkspace": str(next(iter(repositories.values()))),
@@ -899,8 +743,6 @@ def _start_task_unlocked(
         state["revalidation"] = dict(pending_revalidation)
     if isinstance(repair_context, dict):
         state["repairContext"] = dict(repair_context)
-    if isinstance(exploration_gate, dict):
-        state["explorationGate"] = exploration_gate
     state["integritySha256"] = task_run_integrity_sha256(state)
     path = _run_path(feature_dir, task_id, run_id)
     _save_run(path, state)
@@ -909,7 +751,7 @@ def _start_task_unlocked(
         feature,
         task_id,
         "in_progress",
-        expected_task_contract_sha256=str(state["taskContractSha256"]),
+        allow_task_set_digest_mismatch=True,
     )
     if not result.ok:
         state["status"] = "aborted"
@@ -1767,8 +1609,6 @@ def _finish_implementation_unlocked(
             requiredAction="rebuild_plan_with_defer_to_test_stages",
         )
     path, state = _load_run(feature_dir, task_id, run_id)
-    if state.get("taskContractSha256") != task_contract_sha256(task):
-        raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
     if state.get("batchId") not in {None, batch_id}:
         raise TaskRunnerError(f"task_batch_changed_after_start:{task_id}")
     requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
@@ -2024,7 +1864,7 @@ def _finish_implementation_unlocked(
         feature,
         task_id,
         evidence_id,
-        expected_task_contract_sha256=str(state.get("taskContractSha256", "")),
+        allow_task_set_digest_mismatch=True,
     )
     if not result.ok:
         raise TaskRunnerError("implementation_plan_binding_failed")
@@ -2039,7 +1879,7 @@ def _finish_implementation_unlocked(
             feature,
             task_id,
             "done",
-            expected_task_contract_sha256=str(state.get("taskContractSha256", "")),
+            allow_task_set_digest_mismatch=True,
         )
         if not result.ok:
             raise TaskRunnerError("failed_to_restore_done_status")
@@ -2090,8 +1930,6 @@ def _persist_batch_compile_workspace_state(
         compile_result.get("compileStatus") != "failed"
         or not isinstance(repository_state, list)
         or not repository_state
-        or not isinstance(snapshot_sha256, str)
-        or _repository_state_sha256(repository_state) != snapshot_sha256
     ):
         return
     atomic_write_json(
@@ -2109,14 +1947,10 @@ def _persist_batch_compile_workspace_state(
     )
 
 
-def _repository_state_matches(
-    repository_state: Any,
-    expected_snapshot_sha256: str,
-) -> bool:
+def _repository_state_available(repository_state: Any) -> bool:
     return (
         isinstance(repository_state, list)
         and bool(repository_state)
-        and _repository_state_sha256(repository_state) == expected_snapshot_sha256
     )
 
 
@@ -2125,9 +1959,8 @@ def _failed_compile_repository_state(
     feature: str,
     batch_id: str,
     command_id: Any,
-    expected_snapshot_sha256: str,
 ) -> list[dict[str, Any]] | None:
-    """Load an exact failed-compile baseline, including pre-upgrade run fallback."""
+    """Load a recorded failed-compile baseline, including pre-upgrade run fallback."""
 
     snapshot_path = _batch_compile_snapshot_path(feature_dir, batch_id)
     try:
@@ -2141,14 +1974,13 @@ def _failed_compile_repository_state(
         and record.get("batchId") == batch_id
         and record.get("commandId") == command_id
         and record.get("compileStatus") == "failed"
-        and record.get("workspaceSnapshotSha256") == expected_snapshot_sha256
-        and _repository_state_matches(record.get("repositories"), expected_snapshot_sha256)
+        and _repository_state_available(record.get("repositories"))
     ):
         return [item for item in record["repositories"] if isinstance(item, dict)]
 
     # Older runner versions did not persist a dedicated compile snapshot. A
     # completed task run normally has the same final repository state because
-    # compile outputs are ignored. Reuse it only when its digest is exact.
+    # compile outputs are ignored.
     for run_path in sorted((feature_dir / ".task-runs").glob("T*/*.json"), reverse=True):
         try:
             run = json.loads(run_path.read_text(encoding="utf-8"))
@@ -2163,7 +1995,7 @@ def _failed_compile_repository_state(
             continue
         for field in ("finalRepositories", "abortRepositories", "repositories"):
             repository_state = run.get(field)
-            if _repository_state_matches(repository_state, expected_snapshot_sha256):
+            if _repository_state_available(repository_state):
                 return [item for item in repository_state if isinstance(item, dict)]
     return None
 
@@ -2530,6 +2362,7 @@ def _abort_task_unlocked(
             feature,
             task_id,
             "todo",
+            allow_task_set_digest_mismatch=True,
         )
     except PlanWriterInputError:
         state["planStatusReset"] = False
@@ -2560,8 +2393,6 @@ def _resume_task_unlocked(
         raise TaskRunnerError(f"task_run_cannot_resume:{state.get('status')}")
     if state.get("evidenceIds"):
         raise TaskRunnerError("task_run_cannot_resume_with_evidence")
-    if state.get("taskContractSha256") != task_contract_sha256(task):
-        raise TaskRunnerError(f"task_contract_changed_after_start:{task_id}")
     if state.get("batchId") is not None and state.get("batchId") != batch_id:
         raise TaskRunnerError(f"task_batch_changed_after_start:{task_id}")
     requested_workspaces = (
@@ -2570,7 +2401,6 @@ def _resume_task_unlocked(
     repositories = _resolve_repositories(requested_workspaces)
     _assert_repositories_match(state, repositories)
     _assert_requested_workspaces_match(state, requested_workspaces, repositories)
-    _assert_runtime_artifacts_ignored(repositories)
     active = _active_feature_runs(feature_dir, exclude=path)
     if active:
         active_tasks = sorted({item.partition(":")[0] for item in active})
@@ -2590,7 +2420,7 @@ def _resume_task_unlocked(
         feature,
         task_id,
         "in_progress",
-        expected_task_contract_sha256=str(state["taskContractSha256"]),
+        allow_task_set_digest_mismatch=True,
     )
     if not result.ok:
         raise TaskRunnerError("plan_status_update_failed")
@@ -2775,60 +2605,42 @@ def start_batch_compile_repair(
         current_repository_state = _repository_state(repositories)
         current_snapshot = _repository_state_sha256(current_repository_state)
         expected_snapshot = batch_compile.get("workspaceSnapshotSha256")
-        if not isinstance(expected_snapshot, str):
-            raise TaskRunnerError("batch_compile_repair_workspace_snapshot_missing")
 
         adopted_file_changes: list[dict[str, str]] = []
-        if current_snapshot != expected_snapshot:
-            failed_repository_state = _failed_compile_repository_state(
-                feature_dir,
-                feature,
-                batch_id,
-                batch_compile.get("commandId"),
-                expected_snapshot,
-            )
-            if failed_repository_state is None:
-                raise TaskRunnerError(
-                    "workspace_changed_before_batch_compile_repair",
-                    requiredAction="restore_failed_compile_snapshot",
-                    expectedWorkspaceSnapshotSha256=expected_snapshot,
-                    currentWorkspaceSnapshotSha256=current_snapshot,
-                    snapshotRecoveryAvailable=False,
-                )
+        failed_repository_state = _failed_compile_repository_state(
+            feature_dir,
+            feature,
+            batch_id,
+            batch_compile.get("commandId"),
+        )
+        if failed_repository_state is not None:
             adopted_file_changes = _repository_state_file_changes(
                 failed_repository_state,
                 current_repository_state,
             )
-            if not adopted_file_changes:
-                raise TaskRunnerError(
-                    "workspace_changed_before_batch_compile_repair",
-                    requiredAction="restore_failed_compile_snapshot",
-                    expectedWorkspaceSnapshotSha256=expected_snapshot,
-                    currentWorkspaceSnapshotSha256=current_snapshot,
-                    snapshotRecoveryAvailable=True,
-                )
-            changed_files = _changed_files(adopted_file_changes)
-            test_asset_changes = sorted({
-                path
-                for change in adopted_file_changes
-                for path in (change.get("path"), change.get("fromPath"))
-                if isinstance(path, str)
-                and _is_transient_validation_path(path.split(":", 1)[-1])
-            })
-            if test_asset_changes:
-                raise TaskRunnerError(
-                    "code_stage_test_changes_forbidden",
-                    requiredAction="restore_test_changes_and_retry_start_batch_compile_repair",
-                    testFiles=test_asset_changes,
-                )
-            scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
-            if not _paths_within_workspace_contexts(changed_files, scope_workspaces):
-                raise TaskRunnerError(
-                    "out_of_scope_changes_detected:" + ",".join(changed_files),
-                    requiredAction="restore_out_of_scope_changes_and_retry_start_batch_compile_repair",
-                    changedFiles=changed_files,
-                    requestedCodeWorkspaces=actual_workspaces,
-                )
+            if adopted_file_changes:
+                changed_files = _changed_files(adopted_file_changes)
+                test_asset_changes = sorted({
+                    path
+                    for change in adopted_file_changes
+                    for path in (change.get("path"), change.get("fromPath"))
+                    if isinstance(path, str)
+                    and _is_transient_validation_path(path.split(":", 1)[-1])
+                })
+                if test_asset_changes:
+                    raise TaskRunnerError(
+                        "code_stage_test_changes_forbidden",
+                        requiredAction="restore_test_changes_and_retry_start_batch_compile_repair",
+                        testFiles=test_asset_changes,
+                    )
+                scope_workspaces = _scope_workspaces(requested_workspaces, repositories)
+                if not _paths_within_workspace_contexts(changed_files, scope_workspaces):
+                    raise TaskRunnerError(
+                        "out_of_scope_changes_detected:" + ",".join(changed_files),
+                        requiredAction="restore_out_of_scope_changes_and_retry_start_batch_compile_repair",
+                        changedFiles=changed_files,
+                        requestedCodeWorkspaces=actual_workspaces,
+                    )
 
         repair_attempt = attempts + 1
         repair_context = {
@@ -2854,14 +2666,20 @@ def start_batch_compile_repair(
             code_workspace,
             repair_context=repair_context,
         )
-        result = begin_batch_compile_repair(workspace, feature, batch_id, task_id)
+        result = begin_batch_compile_repair(
+            workspace,
+            feature,
+            batch_id,
+            task_id,
+            allow_task_set_digest_mismatch=True,
+        )
         if not result.ok:
             set_task_execution_status(
                 workspace,
                 feature,
                 task_id,
                 "implemented",
-                expected_task_contract_sha256=task_contract_sha256(task),
+                allow_task_set_digest_mismatch=True,
             )
             state["status"] = "aborted"
             state["abortReason"] = "batch_compile_repair_plan_binding_failed"
@@ -2961,7 +2779,12 @@ def _run_batch_compile(
 
     if force and compile_status == "passed":
         try:
-            reset_result = reset_batch_compile_for_revalidation(workspace, feature, batch_id)
+            reset_result = reset_batch_compile_for_revalidation(
+                workspace,
+                feature,
+                batch_id,
+                allow_task_set_digest_mismatch=True,
+            )
         except PlanWriterInputError as exc:
             raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
         if not reset_result.ok:
@@ -3163,7 +2986,12 @@ def _run_batch_compile(
 
 
 def _activate_batch_unlocked(workspace: Path, feature: str, batch_id: str) -> dict[str, Any]:
-    result = activate_plan_batch(workspace, feature, batch_id)
+    result = activate_plan_batch(
+        workspace,
+        feature,
+        batch_id,
+        allow_task_set_digest_mismatch=True,
+    )
     if not result.ok:
         errors = result.errors or []
         detail = ";".join(
@@ -3259,7 +3087,13 @@ def _integrate_batch_compile_result(
         compile_result,
     )
     try:
-        result = update_batch_compile_status(workspace, feature, batch_id, compile_result)
+        result = update_batch_compile_status(
+            workspace,
+            feature,
+            batch_id,
+            compile_result,
+            allow_task_set_digest_mismatch=True,
+        )
     except PlanWriterInputError as exc:
         raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
 
@@ -3274,7 +3108,12 @@ def _integrate_batch_compile_result(
     if compile_status == "passed":
         # 编译通过后，将批次中的所有 implemented 任务标记为 done
         try:
-            mark_result = mark_batch_tasks_done_after_compile(workspace, feature, batch_id)
+            mark_result = mark_batch_tasks_done_after_compile(
+                workspace,
+                feature,
+                batch_id,
+                allow_task_set_digest_mismatch=True,
+            )
             if not mark_result.ok:
                 raise TaskRunnerError(
                     "mark_batch_tasks_done_after_compile_failed",

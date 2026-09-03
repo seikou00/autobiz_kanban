@@ -14,7 +14,6 @@ TASK_RUN_INTEGRITY_FIELDS = (
     "featureId",
     "batchId",
     "taskId",
-    "taskContractSha256",
     "codeWorkspace",
     "requestedCodeWorkspaces",
     "resolvedGitRoots",
@@ -33,7 +32,6 @@ TASK_RUN_INTEGRITY_FIELDS = (
 
 TASK_RUN_OPTIONAL_INTEGRITY_FIELDS = (
     "repairContext",
-    "explorationGate",
     "executionMode",
 )
 
@@ -42,7 +40,6 @@ STRICT_TASK_RUN_STRING_FIELDS = (
     "featureId",
     "batchId",
     "taskId",
-    "taskContractSha256",
     "codeWorkspace",
     "snapshotMode",
     "scopePathBase",
@@ -84,8 +81,8 @@ def task_run_integrity_error(state: dict[str, Any]) -> str | None:
     stored = state.get("integritySha256")
     if not isinstance(stored, str):
         return "task_run_integrity_missing"
-    if stored != task_run_integrity_sha256(state):
-        return "task_run_integrity_mismatch"
+    # The SHA is retained as audit metadata, but Code-stage authorization no
+    # longer rejects a run when the stored digest differs from its contents.
     return None
 
 

@@ -184,14 +184,6 @@ def _paths_from_runtime_payload(data, workspace_ref):
 def _feature_candidates(workspace, feature, workspace_ref):
     feature_dir = Path(workspace) / ".autobizdevops" / "features" / feature
     candidates = {}
-    cache_root = feature_dir / "cache" / "code-exploration"
-    if cache_root.is_dir():
-        for path in sorted(cache_root.glob("*/*.json")):
-            data = _read_json(path)
-            if not isinstance(data, dict) or data.get("schemaVersion") != "autodev.code-exploration.v1":
-                continue
-            for raw_path in _paths_from_runtime_payload(data, workspace_ref):
-                _add_candidate(candidates, raw_path, workspace_ref, "feature_code_exploration")
     runs_root = feature_dir / ".task-runs"
     if runs_root.is_dir():
         for path in sorted(runs_root.glob("**/*.json")):
@@ -212,18 +204,6 @@ def _cross_feature_candidates(workspace, feature, workspace_ref):
     features_root = Path(workspace) / ".autobizdevops" / "features"
     if not features_root.is_dir():
         return candidates
-    for other in sorted(features_root.iterdir()):
-        if not other.is_dir() or other.name == feature:
-            continue
-        cache_root = other / "cache" / "code-exploration"
-        if not cache_root.is_dir():
-            continue
-        for path in sorted(cache_root.glob("*/*.json")):
-            data = _read_json(path)
-            if not isinstance(data, dict) or data.get("schemaVersion") != "autodev.code-exploration.v1":
-                continue
-            for raw_path in _paths_from_runtime_payload(data, workspace_ref):
-                _add_candidate(candidates, raw_path, workspace_ref, "project_code_exploration")
     return candidates
 
 

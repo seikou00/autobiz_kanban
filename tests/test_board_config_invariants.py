@@ -644,18 +644,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "code_done_ready",
             "stop_and_open_new_conversation",
             "不得在同一对话再次调用 `code-session`",
-            "协议层约束",
-            "explorationCaches",
-            "full_bounded_explore",
-            "task_scope_only",
-            "targeted_reread",
-            "requiresRecord",
-            "requiresPatch",
-            "changedPaths + 1-hop 依赖 + 当前 Task scope",
-            "fresh/reusable_with_changes 时禁止无边界全仓探索",
-            "code_exploration_writer.py",
-            "explorationPolicy.status=unavailable",
-            "必须停止并补传 `--code-workspace`",
+            "task_runner.py\" start",
         ]
         missing = [phrase for phrase in required if phrase not in content]
         self.assertEqual(
@@ -683,7 +672,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
     def test_code_skill_protects_task_runner_snapshot_baseline(self) -> None:
         content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
         required = [
-            ".cmbdevclaw/large_tool_results/",
             "task_runner.py\" resume",
             "staging / unstaging",
             "同一个 run",
@@ -715,29 +703,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "autodev-code must define transient validation file handling: " + ", ".join(missing),
         )
 
-    def test_code_skill_defines_batch_level_exploration_cache_policy(self) -> None:
-        content = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
-        required = [
-            "batchExplorationScope",
-            "explorationDirective",
-            "batch_bootstrap",
-            "task_guard",
-            "fullExplorationAllowed=false",
-            "首个 TASK run 启动前",
-            "fresh_with_trusted_changes",
-            "同一 active batch",
-            "implementation Evidence",
-            "批次边界",
-            "shared/integration",
-            "deferredCacheUpdate",
-        ]
-        missing = [phrase for phrase in required if phrase not in content]
-        self.assertEqual(
-            missing,
-            [],
-            "autodev-code must define batch-level exploration cache policy: " + ", ".join(missing),
-        )
-
     def test_plan_and_code_skills_define_requested_workspace_scope_base(self) -> None:
         plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
         code = (ROOT / "skills/autodev/autodev-code/SKILL.md").read_text(encoding="utf-8")
@@ -764,17 +729,6 @@ class BoardConfigInvariantsTest(unittest.TestCase):
             "Plan and Code must share the requested-workspace scope contract: "
             + ", ".join(missing),
         )
-
-    def test_code_exploration_cache_is_an_optional_code_output(self) -> None:
-        code = next(
-            item
-            for context, item in _iter_nodes(_board_config())
-            if context == "workflow.nodes" and item.get("id") == "dev.code"
-        )
-        outputs = code["artifacts"]["outputs"]
-        matches = [item for item in outputs if item.get("path") == "cache/code-exploration/**/*.json"]
-        self.assertEqual(len(matches), 1)
-        self.assertFalse(matches[0]["required"])
 
     def test_plan_skill_points_batch_resume_to_code_session(self) -> None:
         content = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
