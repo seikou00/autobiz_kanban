@@ -310,7 +310,7 @@
           },
           "subagentConfig": {
             "disabledBuiltinSubagents": ["Explore","critic"],
-            "customSubagentFiles": ["agents/explore.md","agents/critic.md"]
+            "customSubagentFiles": ["agents/explore.md","agents/critic_autodev_plan_zh.md"]
           }
         },
         "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、PLAN.md（执行计划：任务 DAG 与各任务依据/验证/状态）",

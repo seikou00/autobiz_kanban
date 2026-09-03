@@ -46,12 +46,26 @@
 <!-- section: 前提与角色 | stages: dev.plan -->
 ## 前提与角色
 
-使用 task 工具，指定 `critic-autodev` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md`、`PLAN.json` 进行严格审查，从四个维度核查：
+使用 task 工具，指定 `critic-autodev-plan-zh` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md`、`plan.json` 进行严格审查，从四个维度核查：
 
 1. 技术选择是否合理；
 2. 规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对）；
 3. 测试是否合理和完备；
 4. 引用与事实是否相符（Code Evidence 各条与代码实际一致，Spec Traceability 引用的 REQ/SCN/D-xxx 在上游真实存在）。
+
+启动时必须在 task prompt 中写全 feature 目录的绝对路径与下面这份清单。回检角色不搜索工作区、不执行任何命令，路径没给它就直接退回。
+
+### 输入材料清单
+
+| 材料 | 用途 | 缺失时 |
+|------|------|--------|
+| `specs/**/*.md` | 行为契约基线，逐 REQ/SCN 核对覆盖 | 缺失即阻断，回 `/autodev-specs` |
+| `proposal.md` | Capabilities 分组与 `DEC-NNN` 取舍 | 缺失即阻断 |
+| `design.md` | 本阶段主产物，含 Code Evidence 表 | 缺失即阻断 |
+| `plan.json` 与 `PLAN.md` | 本阶段主产物，逐 TASK 核对 | 缺失即阻断 |
+| `IMPLEMENTATION_SCOPE.json` | 本轮范围与 included/deferred 分区 | 按 `full_stack` 视为全部本期实现，在结论中注明 |
+
+读码入口只有 design.md 的 Code Evidence 表，逐条 EVD 核对；不要在 prompt 里另外要求它评估代码质量或探索现状。
 
 <!-- section: 前提与角色 | stages: dev.code -->
 ## 前提与角色

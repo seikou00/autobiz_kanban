@@ -33,6 +33,7 @@ PLAN_SKILL = ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md"
 SIMPLIFIER_AGENT = ROOT / "agents" / "code-simplifier.md"
 EXPLORE_AGENT = ROOT / "agents" / "explore.md"
 VERIFICATION_AGENT = ROOT / "agents" / "verification.md"
+PLAN_CRITIC_AGENT = ROOT / "agents" / "critic_autodev_plan_zh.md"
 BOARD_CONFIG = ROOT / "board_core" / "board_config.json"
 PROTOCOL = ROOT / "skills" / "references" / "review-protocol.md"
 
@@ -47,12 +48,16 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _dev_code_subagents() -> dict:
+def _node_subagents(node_id: str) -> dict:
     config = json.loads(_read(BOARD_CONFIG))
     for node in config["workflow"]["nodes"]:
-        if node.get("id") == "dev.code":
+        if node.get("id") == node_id:
             return node["runtimePolicy"]["subagentConfig"]
-    raise AssertionError("board_config 中找不到 dev.code 节点")
+    raise AssertionError(f"board_config 中找不到 {node_id} 节点")
+
+
+def _dev_code_subagents() -> dict:
+    return _node_subagents("dev.code")
 
 
 class ProtocolIsSingleSourceTest(unittest.TestCase):
@@ -265,6 +270,70 @@ class BatchValidationRoleIsResolvableTest(unittest.TestCase):
 
         self.assertIn("agents/verification.md", subagents["customSubagentFiles"])
         self.assertIn("verification", subagents["disabledBuiltinSubagents"])
+
+
+class PlanCriticRoleIsResolvableTest(unittest.TestCase):
+    """dev.plan 的回检角色是精简版 critic：读码入口收敛到 EVD，且必须能被宿主解析。"""
+
+    def test_protocol_dispatches_the_plan_specific_role(self) -> None:
+        output = render("dev.plan")
+
+        self.assertIn("critic-autodev-plan-zh", output)
+        # 通用 critic 会自主探索代码库，dev.plan 不再派发它。
+        self.assertNotIn("`critic-autodev`", output)
+
+    def test_agent_name_matches_the_protocol_directive(self) -> None:
+        self.assertIn("name: critic-autodev-plan-zh", _read(PLAN_CRITIC_AGENT))
+
+    def test_dev_plan_injects_the_plan_critic_agent(self) -> None:
+        """agents/ 下放了文件还不够：节点的 customSubagentFiles 没列上就加载不到。"""
+        subagents = _node_subagents("dev.plan")
+
+        self.assertIn("agents/critic_autodev_plan_zh.md", subagents["customSubagentFiles"])
+        self.assertIn("critic", subagents["disabledBuiltinSubagents"])
+
+    def test_code_reading_entry_is_bounded_to_code_evidence(self) -> None:
+        """augment hook 删除后没有运行时注入通道，读码边界只能写在代理定义里。"""
+        agent = _read(PLAN_CRITIC_AGENT)
+
+        self.assertIn("Code Evidence", agent)
+        self.assertIn("追调用方", agent)
+        self.assertIn("git blame", agent)
+
+    def test_agent_never_reads_plugin_source_or_runs_commands(self) -> None:
+        """弱模型会去翻门禁脚本找修法；可读范围必须是白名单，且明确禁执行。"""
+        agent = _read(PLAN_CRITIC_AGENT)
+
+        self.assertIn("## 可读范围", agent)
+        self.assertIn("只有两类文件可读", agent)
+        self.assertIn("不执行任何命令", agent)
+
+    def test_artifact_paths_come_from_the_dispatch_prompt(self) -> None:
+        """没有 augment hook，绝对路径只能由派发点写进 prompt；缺了就退回，不自己搜。"""
+        agent = _read(PLAN_CRITIC_AGENT)
+        self.assertIn("feature 目录绝对路径", agent)
+        self.assertIn("不要自己去搜工作区", agent)
+
+        output = render("dev.plan")
+        self.assertIn("feature 目录的绝对路径", output)
+        self.assertIn("输入材料清单", output)
+
+    def test_agent_is_read_only_and_terminal(self) -> None:
+        agent = _read(PLAN_CRITIC_AGENT)
+
+        self.assertIn("disallowedTools", agent.split("---")[1])
+        self.assertIn("不得再派发任何子代理", agent)
+
+    def test_agent_keeps_the_section_names_the_protocol_binds_to(self) -> None:
+        agent = _read(PLAN_CRITIC_AGENT)
+
+        for section in (
+            "Critical Findings",
+            "Major Findings",
+            "Minor Findings",
+            "Open Questions (unscored)",
+        ):
+            self.assertIn(section, agent)
 
 
 if __name__ == "__main__":
