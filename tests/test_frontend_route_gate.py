@@ -228,12 +228,6 @@ def sealed_task_run(*, execution_mode: str = "code") -> dict:
         "startedAt": "2026-07-30T00:00:00Z",
         "snapshot": {},
     }
-    if execution_mode == "code":
-        run["explorationGate"] = {
-            "checkedAt": "2026-07-30T00:00:00Z",
-            "source": "current_cache",
-            "repositories": {"code": {"status": "fresh", "cacheSha256": "cache"}},
-        }
     run["integritySha256"] = task_run_integrity_sha256(run)
     return run
 
@@ -266,7 +260,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertEqual(payload["route"], ROUTE_NONE)
         self.assertFalse(payload["uiRequired"])
 
-    def test_frontend_exploration_write_blocks_without_active_task_run(self) -> None:
+    def test_frontend_code_write_blocks_without_active_task_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             output = io.StringIO()
@@ -274,7 +268,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
 
             with contextlib.redirect_stdout(output):
                 with contextlib.redirect_stderr(error):
-                    result = frontend_route_write_guard.validate_frontend_exploration_write(
+                    result = frontend_route_write_guard.validate_frontend_code_write(
                         workspace,
                         "alpha",
                     )
@@ -283,19 +277,33 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertIn("exactly one active task run", error.getvalue())
         self.assertIn("block", output.getvalue())
 
-    def test_frontend_exploration_write_allows_sealed_fresh_run(self) -> None:
+    def test_frontend_code_write_allows_sealed_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             write_task_run(workspace, sealed_task_run())
 
-            result = frontend_route_write_guard.validate_frontend_exploration_write(
+            result = frontend_route_write_guard.validate_frontend_code_write(
                 workspace,
                 "alpha",
             )
 
         self.assertEqual(result, 0)
 
-    def test_frontend_exploration_write_rejects_legacy_run_with_repair_context(self) -> None:
+    def test_frontend_code_write_allows_integrity_digest_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            run = sealed_task_run()
+            run["taskContractSha256"] = "changed-contract"
+            write_task_run(workspace, run)
+
+            result = frontend_route_write_guard.validate_frontend_code_write(
+                workspace,
+                "alpha",
+            )
+
+        self.assertEqual(result, 0)
+
+    def test_frontend_code_write_rejects_legacy_run_with_repair_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             run = sealed_task_run()
@@ -306,7 +314,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
             error = io.StringIO()
 
             with contextlib.redirect_stderr(error):
-                result = frontend_route_write_guard.validate_code_exploration_write(
+                result = frontend_route_write_guard.validate_business_code_write(
                     workspace,
                     "alpha",
                 )
@@ -314,7 +322,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
         self.assertEqual(result, frontend_route_write_guard.BLOCK_EXIT_CODE)
         self.assertIn("task_run_version_invalid", error.getvalue())
 
-    def test_frontend_exploration_write_rejects_missing_task_id_with_repair_context(self) -> None:
+    def test_frontend_code_write_rejects_missing_task_id_with_repair_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = make_workspace(Path(tmp))
             run = sealed_task_run()
@@ -325,7 +333,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
             error = io.StringIO()
 
             with contextlib.redirect_stderr(error):
-                result = frontend_route_write_guard.validate_code_exploration_write(
+                result = frontend_route_write_guard.validate_business_code_write(
                     workspace,
                     "alpha",
                 )
@@ -340,7 +348,7 @@ class FrontendRouteResolverTests(unittest.TestCase):
             error = io.StringIO()
 
             with contextlib.redirect_stderr(error):
-                result = frontend_route_write_guard.validate_code_exploration_write(
+                result = frontend_route_write_guard.validate_business_code_write(
                     workspace,
                     "alpha",
                 )

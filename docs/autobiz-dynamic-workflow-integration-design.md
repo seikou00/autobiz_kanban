@@ -765,7 +765,7 @@ interface HumanStepRequest {
 | `dev.specs`         | `autodev-specs`                             | `proposal.md`、`specs/**/*.md`                 | 仅契约冲突时确认                      | Specs 与 UI Context gate 通过           |
 | `dev.plan`          | `autodev-plan` 拆分 Activity                | `design.md`、`plan.json`、`PLAN.md`            | 探索决策、设计裁决、总体设计确认      | Plan 全部 validator 通过且设计确认      |
 | `dev.detail_design` | `autodev-detail-design`                     | `DETAIL_DESIGN.md`                             | 是否启用动态节点                      | 产物校验通过或明确跳过                  |
-| `dev.code`          | `autodev-code` + Task Runner                | `EVIDENCE.jsonl`、探索缓存、业务代码           | 仅 scope/契约变化时确认               | 所有 Batch compile 通过且 evidence 完整 |
+| `dev.code`          | `autodev-code` + Task Runner                | `EVIDENCE.jsonl`、业务代码                     | 仅 scope/契约变化时确认               | 所有 Batch compile 通过且 evidence 完整 |
 | `dev.review`        | `autodev-reviewer`                          | `REQUIREMENTS_EVAL.md`、`REVIEW_FINDINGS.json` | 默认无                                | Review Findings 合法                    |
 | `dev.utest`         | `autodev-utest`                             | `UNIT_TEST_RESULT.json`、报告和日志            | 默认无                                | 测试结果与 evidence 合法                |
 | `dev.e2e`           | `autodev-e2e`                               | `E2E_RESULT.json`、Cases、诊断、Fix Request    | 缺环境或人工场景时确认                | 结果合法，失败时 Fix Request 合法       |
@@ -2202,7 +2202,7 @@ interface HumanStepRequest {
 | `dev.specs`         | `autodev-specs`                             | `proposal.md`、`specs/**/*.md`                 | 仅契约冲突时确认                      | Specs 与 UI Context gate 通过           |
 | `dev.plan`          | `autodev-plan` 拆分 Activity                | `design.md`、`plan.json`、`PLAN.md`            | 探索决策、设计裁决、总体设计确认      | Plan 全部 validator 通过且设计确认      |
 | `dev.detail_design` | `autodev-detail-design`                     | `DETAIL_DESIGN.md`                             | 是否启用动态节点                      | 产物校验通过或明确跳过                  |
-| `dev.code`          | `autodev-code` + Task Runner                | `EVIDENCE.jsonl`、探索缓存、业务代码           | 仅 scope/契约变化时确认               | 所有 Batch compile 通过且 evidence 完整 |
+| `dev.code`          | `autodev-code` + Task Runner                | `EVIDENCE.jsonl`、业务代码                     | 仅 scope/契约变化时确认               | 所有 Batch compile 通过且 evidence 完整 |
 | `dev.review`        | `autodev-reviewer`                          | `REQUIREMENTS_EVAL.md`、`REVIEW_FINDINGS.json` | 默认无                                | Review Findings 合法                    |
 | `dev.utest`         | `autodev-utest`                             | `UNIT_TEST_RESULT.json`、报告和日志            | 默认无                                | 测试结果与 evidence 合法                |
 | `dev.e2e`           | `autodev-e2e`                               | `E2E_RESULT.json`、Cases、诊断、Fix Request    | 缺环境或人工场景时确认                | 结果合法，失败时 Fix Request 合法       |

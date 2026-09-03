@@ -62,13 +62,13 @@ class InspectTestEnvironmentTest(unittest.TestCase):
             json.dumps({"batches": [{"id": "B001", "path": "plans/B001/plan.json"}]}),
             encoding="utf-8",
         )
-        cache_path = feature_dir / "cache" / "code-exploration" / repo.name / "backend.json"
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(
+        run_path = feature_dir / ".task-runs" / "T001" / "run.json"
+        run_path.parent.mkdir(parents=True, exist_ok=True)
+        run_path.write_text(
             json.dumps(
                 {
-                    "schemaVersion": "autodev.code-exploration.v1",
-                    "repository": {"id": repo.name, "root": str(repo)},
+                    "status": "done",
+                    "repositories": [{"id": repo.name, "path": str(repo)}],
                 }
             ),
             encoding="utf-8",
@@ -310,17 +310,6 @@ class InspectTestEnvironmentTest(unittest.TestCase):
         repo = root / "missing-repo"
         repo.mkdir()
         self._feature(workspace, repo)
-        cache = (
-            workspace
-            / ".autobizdevops"
-            / "features"
-            / "alpha"
-            / "cache"
-            / "code-exploration"
-            / repo.name
-            / "backend.json"
-        )
-        cache.unlink()
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             exit_code = main(["--workspace", str(workspace), "--feature", "alpha"])

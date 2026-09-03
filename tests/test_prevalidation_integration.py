@@ -23,8 +23,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.plan_json import task_contract_sha256
-
 
 def _state_record(checkpoint: str = "plan_in_progress") -> dict:
     return {

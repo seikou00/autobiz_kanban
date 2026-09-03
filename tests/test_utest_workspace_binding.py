@@ -35,22 +35,13 @@ class UTestWorkspaceBindingTest(unittest.TestCase):
         )
         self.first = self._git_repo(root / "first" / "business-repo")
         self.second = self._git_repo(root / "second" / "business-repo")
-        cache = (
-            self.feature_dir
-            / "cache"
-            / "code-exploration"
-            / "business-repo"
-            / "backend.json"
-        )
-        cache.parent.mkdir(parents=True)
-        cache.write_text(
+        first_run_path = self.feature_dir / ".task-runs" / "T000" / "run.json"
+        first_run_path.parent.mkdir(parents=True)
+        first_run_path.write_text(
             json.dumps(
                 {
-                    "schemaVersion": "autodev.code-exploration.v1",
-                    "repository": {
-                        "id": "business-repo",
-                        "root": str(self.first),
-                    }
+                    "status": "done",
+                    "repositories": [{"id": "business-repo", "path": str(self.first)}],
                 }
             ),
             encoding="utf-8",

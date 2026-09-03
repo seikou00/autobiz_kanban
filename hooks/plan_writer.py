@@ -60,7 +60,6 @@ from hooks.plan_json import (  # noqa: E402
     normalize_status,
     task_execution_lane,
     task_execution_mode,
-    task_contract_sha256,
     task_set_digest,
     task_workspace_roots,
     validation_command_manifest_names,
@@ -497,7 +496,12 @@ def _initial(feature: str) -> dict[str, Any]:
     }
 
 
-def _load(workspace: Path, feature: str) -> dict[str, Any]:
+def _load(
+    workspace: Path,
+    feature: str,
+    *,
+    allow_task_set_digest_mismatch: bool = False,
+) -> dict[str, Any]:
     path = _path(workspace, feature)
     if not path.is_file() or path.stat().st_size <= 0:
         return _initial(feature)
@@ -547,7 +551,11 @@ def _load(workspace: Path, feature: str) -> dict[str, Any]:
                 task_items.append(task)
                 if isinstance(task.get("id"), str):
                     assignments[str(task["id"])] = batch_id
-    if data.get("taskSetDigest") is not None and data.get("taskSetDigest") != task_set_digest(data, batch_plans):
+    if (
+        not allow_task_set_digest_mismatch
+        and data.get("taskSetDigest") is not None
+        and data.get("taskSetDigest") != task_set_digest(data, batch_plans)
+    ):
         raise PlanWriterInputError(
             "task_set_digest_mismatch",
             "formal plan artifacts were modified outside plan_writer",
@@ -4286,18 +4294,17 @@ def set_task_execution_status(
     task_id: str,
     status: str,
     *,
-    expected_task_contract_sha256: str | None = None,
+    allow_task_set_digest_mismatch: bool = False,
 ) -> WriterResult:
     """Internal task-runner API; public CLI cannot set a task to done."""
 
     with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
+        data = _load(
+            workspace,
+            feature,
+            allow_task_set_digest_mismatch=allow_task_set_digest_mismatch,
+        )
         task = _find_task(data, task_id)
-        if (
-            expected_task_contract_sha256 is not None
-            and task_contract_sha256(task) != expected_task_contract_sha256
-        ):
-            return fail("task_contract_changed_after_start", task_id, path=_path(workspace, feature))
         task["status"] = status
         batch_id = _batch_for_task(data, task_id)
         batch_plans = data.get("_batchPlans")
@@ -4318,17 +4325,19 @@ def record_task_implementation(
     task_id: str,
     evidence_id: str,
     *,
-    expected_task_contract_sha256: str,
+    allow_task_set_digest_mismatch: bool = False,
 ) -> WriterResult:
     """Bind implementation evidence without running or completing task validation."""
 
     with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
+        data = _load(
+            workspace,
+            feature,
+            allow_task_set_digest_mismatch=allow_task_set_digest_mismatch,
+        )
         if not defer_to_test_stages_enabled(data):
             return fail("defer_to_test_stages_not_enabled", task_id, path=_path(workspace, feature))
         task = _find_task(data, task_id)
-        if task_contract_sha256(task) != expected_task_contract_sha256:
-            return fail("task_contract_changed_after_start", task_id, path=_path(workspace, feature))
         if normalize_status(task.get("status")) != "in_progress":
             return fail("task_not_in_progress", task_id, path=_path(workspace, feature))
         task["evidenceIds"] = _append_unique(
@@ -4437,6 +4446,8 @@ def update_batch_compile_status(
     feature: str,
     batch_id: str,
     compile_result: dict[str, Any],
+    *,
+    allow_task_set_digest_mismatch: bool = False,
 ) -> WriterResult:
     """
     更新批次编译状态。
@@ -4449,7 +4460,11 @@ def update_batch_compile_status(
     }
     """
     with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
+        data = _load(
+            workspace,
+            feature,
+            allow_task_set_digest_mismatch=allow_task_set_digest_mismatch,
+        )
         if not defer_to_test_stages_enabled(data):
             return fail("defer_to_test_stages_not_enabled", batch_id, path=_path(workspace, feature))
 
@@ -4538,11 +4553,17 @@ def reset_batch_compile_for_revalidation(
     workspace: Path,
     feature: str,
     batch_id: str,
+    *,
+    allow_task_set_digest_mismatch: bool = False,
 ) -> WriterResult:
     """Reset a passed batch compile gate before running a fresh compile."""
 
     with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
+        data = _load(
+            workspace,
+            feature,
+            allow_task_set_digest_mismatch=allow_task_set_digest_mismatch,
+        )
         if not defer_to_test_stages_enabled(data):
             return fail("defer_to_test_stages_not_enabled", batch_id, path=_path(workspace, feature))
 
@@ -4586,11 +4607,17 @@ def begin_batch_compile_repair(
     feature: str,
     batch_id: str,
     task_id: str,
+    *,
+    allow_task_set_digest_mismatch: bool = False,
 ) -> WriterResult:
     """Reserve one model repair attempt and move the compile gate to repairing."""
 
     with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
+        data = _load(
+            workspace,
+            feature,
+            allow_task_set_digest_mismatch=allow_task_set_digest_mismatch,
+        )
         if not defer_to_test_stages_enabled(data):
             return fail("defer_to_test_stages_not_enabled", batch_id, path=_path(workspace, feature))
         batch_plans = data.get("_batchPlans")
@@ -4688,13 +4715,19 @@ def mark_batch_tasks_done_after_compile(
     workspace: Path,
     feature: str,
     batch_id: str,
+    *,
+    allow_task_set_digest_mismatch: bool = False,
 ) -> WriterResult:
     """
     编译通过后，将批次中所有 implemented 状态的任务标记为 done。
     仅在 defer_to_test_stages 策略下使用。
     """
     with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
+        data = _load(
+            workspace,
+            feature,
+            allow_task_set_digest_mismatch=allow_task_set_digest_mismatch,
+        )
         if not defer_to_test_stages_enabled(data):
             return fail("defer_to_test_stages_not_enabled", batch_id, path=_path(workspace, feature))
 
@@ -4805,16 +4838,17 @@ def update_task_evidence_only(
     task_id: str,
     evidence_id: str,
     *,
-    expected_task_contract_sha256: str,
+    allow_task_set_digest_mismatch: bool = False,
 ) -> WriterResult:
     """仅更新任务的 evidence 记录，不改变 status 和其他状态。用于 repair 模式追加新证据。"""
 
     with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
+        data = _load(
+            workspace,
+            feature,
+            allow_task_set_digest_mismatch=allow_task_set_digest_mismatch,
+        )
         task = _find_task(data, task_id)
-        if task_contract_sha256(task) != expected_task_contract_sha256:
-            return fail("task_contract_changed_after_start", task_id, path=_path(workspace, feature))
-
         # 只更新 evidenceIds 和 implementationEvidenceIds，不改变其他状态
         task["evidenceIds"] = _append_unique(
             task.get("evidenceIds") if isinstance(task.get("evidenceIds"), list) else [],
@@ -4833,9 +4867,19 @@ def update_task_evidence_only(
         return _write(workspace, feature, data)
 
 
-def activate_batch(workspace: Path, feature: str, batch_id: str) -> WriterResult:
+def activate_batch(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    *,
+    allow_task_set_digest_mismatch: bool = False,
+) -> WriterResult:
     with _plan_lock(workspace, feature):
-        data = _load(workspace, feature)
+        data = _load(
+            workspace,
+            feature,
+            allow_task_set_digest_mismatch=allow_task_set_digest_mismatch,
+        )
         if data.get("status") != "awaiting_next_conversation":
             return fail("feature_not_awaiting_next_conversation", str(data.get("status")), path=_path(workspace, feature))
         if data.get("nextBatchId") != batch_id:

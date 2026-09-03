@@ -73,27 +73,17 @@ class RunUTestCommandTest(unittest.TestCase):
             encoding="utf-8",
         )
         self._write_plan()
-        cache_path = (
-            self.feature_dir
-            / "cache"
-            / "code-exploration"
-            / self.repo.name
-            / "backend.json"
-        )
-        cache_path.parent.mkdir(parents=True)
-        cache_path.write_text(
+        run_path = self.feature_dir / ".task-runs" / "T001" / "run.json"
+        run_path.parent.mkdir(parents=True)
+        run_path.write_text(
             json.dumps(
                 {
-                    "schemaVersion": "autodev.code-exploration.v1",
-                    "repository": {
-                        "id": self.repo.name,
-                        "root": str(self.repo),
-                    }
+                    "status": "done",
+                    "repositories": [{"id": self.repo.name, "path": str(self.repo)}],
                 }
             ),
             encoding="utf-8",
         )
-
     def _task(self, task_id="T001", argv=None, behavior="fixed amount discount"):
         command_id = "VAL-{}-01".format(task_id)
         criterion_id = "AC-{}-01".format(task_id)
