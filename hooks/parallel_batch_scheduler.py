@@ -51,6 +51,7 @@ _BOOTSTRAP_IGNORE_RULES = (
     ".cmbdevclaw/large_tool_results/",
     ".autobizdevops/features/*/.parallel-runs/",
 )
+MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS = 2
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -652,6 +653,16 @@ def schedule(
                 ]
             ],
             "allStageRecoveryBatches": stage_recovery_batches(manifest),
+            "blockedBatches": sorted(
+                str(batch_id)
+                for batch_id, batch in manifest.get("batches", {}).items()
+                if isinstance(batch, dict) and batch.get("status") == "blocked"
+            ),
+            "retryPendingBatches": sorted(
+                str(batch_id)
+                for batch_id, batch in manifest.get("batches", {}).items()
+                if isinstance(batch, dict) and batch.get("status") == "retry_pending"
+            ),
             "parallelGroups": scoped_groups,
             "allParallelGroups": groups,
             "scheduledGroups": selected,
@@ -688,7 +699,7 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
     # plan-state update. Worker-facing status changes may never unlock deps.
     if status == "merged":
         raise ValueError(f"parallel_batch_merge_owner_required:{batch_id}")
-    allowed = {"pending", "leased", "running", "compile_failed", "sealed", "ready_to_candidate", "needs_resolution", "failed", "blocked", "cancelled"}
+    allowed = {"pending", "leased", "running", "compile_failed", "sealed", "ready_to_candidate", "needs_resolution", "retry_pending", "failed", "blocked", "cancelled"}
     if status not in allowed:
         raise ValueError(f"parallel_batch_status_invalid:{status}")
     with run_lock(workspace, feature, run_id):
@@ -698,7 +709,11 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
             raise ValueError(f"parallel_batch_not_found:{batch_id}")
         previous = batch.get("status")
         terminal = {"merged", "failed", "blocked", "cancelled"}
-        if previous in terminal and previous != status:
+        # `failed` was emitted by older workers before retry_pending existed.
+        # Permit it (and a retry-exhausted block) to re-enter the controlled
+        # recovery path; only a real merged/cancelled delivery stays immutable.
+        retrying_terminal = previous in {"failed", "blocked"} and status == "retry_pending"
+        if previous in terminal and previous != status and not retrying_terminal:
             raise ValueError(f"parallel_batch_terminal:{batch_id}:{previous}")
         if status in {"running", "sealed", "ready_to_candidate"}:
             candidate = details.get("worktreePath") or batch.get("worktreePath")
@@ -714,6 +729,29 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
         for key in ("worktreePath", "branchName", "commitSha", "compileStatus", "mergeCommitSha", "error"):
             if key in details:
                 batch[key] = details[key]
+        if status == "retry_pending":
+            previous_recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+            retry_attempts = (
+                1
+                if previous == "blocked" and previous_recovery.get("status") == "retry_exhausted"
+                else int(previous_recovery.get("retryAttempts", 0)) + 1
+            )
+            resume_status = (
+                "ready_to_candidate"
+                if previous == "ready_to_candidate"
+                else "sealed"
+                if batch.get("commitSha")
+                else "pending"
+            )
+            batch["recovery"] = {
+                **previous_recovery,
+                "retryAttempts": retry_attempts,
+                "lastFailureAt": manifest.get("updatedAt"),
+                "lastError": str(details.get("error") or batch.get("error") or "batch_execution_failed"),
+                "resumeStatus": resume_status,
+                "status": "pending_retry",
+            }
+            batch["completedAt"] = None
         if status == "running" and not batch.get("startedAt"):
             batch["startedAt"] = details.get("startedAt") or manifest.get("updatedAt")
         if status in terminal:
@@ -854,6 +892,19 @@ def resume_run(
             if batch.get("mergeCommitSha"):
                 batch["status"] = "merged"
                 continue
+            # Keep an explicitly retryable Batch untouched until the recovery
+            # pass below can select its correct resume state.
+            if batch.get("status") == "retry_pending":
+                continue
+            # A delivery that has already completed every stage remains a
+            # Merge Train candidate across an interrupted Workflow. Validate
+            # its immutable delivery before retaining that state.
+            if batch.get("status") == "ready_to_candidate":
+                delivery_error = _sealed_delivery_error(manifest, str(batch_id))
+                if delivery_error:
+                    batch.update({"status": "blocked", "error": delivery_error})
+                    invalid_deliveries.append(delivery_error)
+                continue
             if batch.get("commitSha"):
                 delivery_error = _sealed_delivery_error(manifest, str(batch_id))
                 if delivery_error:
@@ -887,10 +938,52 @@ def resume_run(
                 "recoveryRequired": True,
                 "errors": invalid_deliveries,
             }
+        retry_resumed: list[str] = []
+        retry_exhausted: list[str] = []
+        for batch_id, batch in manifest.get("batches", {}).items():
+            if not isinstance(batch, dict) or batch.get("status") != "retry_pending":
+                continue
+            recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+            retry_attempts = int(recovery.get("retryAttempts", 0))
+            if retry_attempts >= MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS:
+                batch["status"] = "blocked"
+                batch["activeStage"] = None
+                batch["recovery"] = {
+                    **recovery,
+                    "status": "retry_exhausted",
+                    "maxAutomaticAttempts": MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS,
+                }
+                retry_exhausted.append(str(batch_id))
+                continue
+            # A Merge Train retry must retain its ready-to-candidate state;
+            # otherwise its completed stage evidence would be stranded.  A
+            # sealed draft goes through per-Batch stage recovery, while an
+            # implementation failure before any seal restarts as normal
+            # pending work in the same native Worktree.
+            batch["status"] = (
+                "ready_to_candidate"
+                if recovery.get("resumeStatus") == "ready_to_candidate"
+                else "sealed"
+                if batch.get("commitSha")
+                else "pending"
+            )
+            batch["recovery"] = {
+                **recovery,
+                "status": "rescheduled",
+                "rescheduledAt": manifest.get("updatedAt"),
+            }
+            retry_resumed.append(str(batch_id))
         manifest["status"] = "running"
         save_manifest(workspace, feature, run_id, manifest)
         append_event(workspace, feature, run_id, "run_resumed")
-    return schedule(workspace, feature, run_id, workspace_refs=workspace_refs)
+    for batch_id in retry_resumed:
+        append_event(workspace, feature, run_id, "batch_retry_rescheduled", batchId=batch_id)
+    for batch_id in retry_exhausted:
+        append_event(workspace, feature, run_id, "batch_retry_exhausted", batchId=batch_id)
+    result = schedule(workspace, feature, run_id, workspace_refs=workspace_refs)
+    result["rescheduledRetryBatches"] = retry_resumed
+    result["retryExhaustedBatches"] = retry_exhausted
+    return result
 
 
 def ensure_run(

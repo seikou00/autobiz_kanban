@@ -130,14 +130,14 @@ the bootstrap still excludes platform runtime files and records one explicit
 baseline commit per physical Git root.
 
 1. The scheduler selects pending Batches whose dependencies are all `merged`.
-   The Workflow first calls `worktree_manager.py provision` for every selected
-   Batch; the plugin creates and records a native linked Worktree from the
-   frozen repository head. The first wave therefore contains all no-dependency
-   Batches.
-2. The current wave runs concurrently with `parallel()` up to `maxParallel`.
-   Every Batch leases the plugin-assigned linked Worktree and records its actual
-   path and branch in the scheduler manifest. Each agent receives an explicit
-   checkout path; any overlap is handled as a real merge conflict at the barrier.
+   That frontier is not a global delivery barrier: each selected Batch provisions
+   or reuses its own native linked Worktree from the frozen repository head.
+2. The current frontier runs concurrently with `parallel()` up to
+   `maxParallel`. Every Batch independently runs code → Review → compile/seal
+   → UTest → quality gate → Merge Train promotion. A fast Batch may therefore
+   review, test, and merge while another Batch in the same frontier is still
+   coding. Every Batch records its actual Worktree path and branch in the
+   scheduler manifest; any overlap is handled as a real merge conflict.
 3. Each Batch acquires a lease, implements only its assigned TASKs, then
    invokes `worktree_manager.py seal --purpose review` to create an uncompiled
    Review draft. It must not run `batch-compile` at this point. The draft is
@@ -160,9 +160,9 @@ baseline commit per physical Git root.
    The shared Workflow builds a Merge Train candidate and fast-forwards it
    directly; no candidate test phase is run. A changed main SHA makes the candidate
    stale and requires rebuild rather than rebase.
-6. Only after that promotion succeeds does the script call scheduler `resume` to
-   calculate the next wave. A dependent Batch never starts from an unmerged
-   upstream result.
+6. After Batch lifecycles settle, the script calls scheduler `resume` to
+   calculate newly unlocked work. A dependent Batch never starts from an
+   unmerged upstream result, but unrelated Batches do not wait for a failed peer.
 7. The merge hook writes `mergeCommitSha` and only then marks the Batch TASKs
    `done`. A compile-passed delivery remains `implemented` / `sealed`
    until this source-branch integration succeeds.
@@ -175,6 +175,15 @@ baseline commit per physical Git root.
 Independent Batches run in parallel, including independent Batches in the same
 repository. A dependency chain naturally advances one merged wave at a time,
 which is the required serial behavior.
+
+An execution-stage failure is recorded as `retry_pending`, not terminal
+`failed`. Scheduler `resume` reclaims its lease and reschedules the Batch in
+its existing Worktree while unrelated Batches continue. After the bounded
+automatic retry budget is exhausted, that Batch becomes `blocked`; only its
+dependent branch stops, and the Workflow returns `partial_blocked` without
+starting B-E2E. After diagnostics are addressed, an operator may explicitly
+mark that Batch `retry_pending` and resume the same run; it is never stranded
+as an irrecoverable `failed` record.
 
 ## Batch Agent Boundaries
 

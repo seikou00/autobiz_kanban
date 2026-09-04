@@ -131,7 +131,12 @@ def test_fixed_workflow_entrypoint():
         "promotion_batch_ids_missing",
         "runBatchUtestAndSeal",
         "blockImplementationFinding",
-        "delivery_implementation_repair_unresolved",
+        "deferBatchForRetry",
+        "retry_pending",
+        "runInitialBatchLifecycle",
+        "runRecoveredBatchLifecycle",
+        "promoteReadyBatch",
+        "partial_blocked",
         "--batch-worktree",
         "不得因 sealed commit 缺少测试文件而判定 Review 不通过",
         "修复、编译和封存一次，然后直接进入 UTest，不会再次执行 Review",
@@ -163,7 +168,7 @@ def test_fixed_workflow_entrypoint():
         print("✗ Review 与编译的固定顺序缺失")
         return False
     print("✓ 多 Batch 使用固定 workflow 脚本")
-    print("✓ 每个波次完成后合并并重新调度")
+    print("✓ 每个 Batch 独立完成 review、UTest、合并并重新调度")
     print()
     return True
 

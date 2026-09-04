@@ -350,6 +350,149 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "parallel_batch_merge_owner_required:B001"):
                 mark_batch(workspace, "alpha", created["runId"], "B001", "merged")
 
+    def test_retry_pending_resumes_without_blocking_independent_batches(self) -> None:
+        """A transient Batch failure must not terminate its independent peer."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            _add_second_compile_only_batch(feature_dir)
+            second_path = feature_dir / "plans" / "B002" / "plan.json"
+            second = json.loads(second_path.read_text(encoding="utf-8"))
+            second["tasks"][0]["deps"] = []
+            second_path.write_text(json.dumps(second), encoding="utf-8")
+            root_path = feature_dir / "plan.json"
+            plan = json.loads(root_path.read_text(encoding="utf-8"))
+            next(entry for entry in plan["batches"] if entry["id"] == "B002")["deps"] = []
+            root_path.write_text(json.dumps(plan), encoding="utf-8")
+            _refresh_parallel_pipeline(feature_dir)
+            config_dir = workspace / ".autobiz"
+            config_dir.mkdir()
+            (config_dir / "runtime_config.json").write_text(
+                json.dumps({"parallelSchedulingMode": "optimistic", "maxParallel": 4}),
+                encoding="utf-8",
+            )
+
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            self.assertEqual(created["scheduledGroups"], [["B001", "B002"]])
+
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "retry_pending",
+                error="transient_worker_failure",
+            )
+            first_resume = resume_run(workspace, "alpha", run_id)
+            first_manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(first_resume["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(first_manifest["batches"]["B001"]["status"], "pending")
+            self.assertEqual(first_manifest["batches"]["B001"]["recovery"]["retryAttempts"], 1)
+            self.assertEqual(first_manifest["status"], "running")
+            self.assertEqual(first_resume["scheduledGroups"], [["B001", "B002"]])
+
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "retry_pending",
+                error="repeat_worker_failure",
+            )
+            exhausted = resume_run(workspace, "alpha", run_id)
+            exhausted_manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(exhausted["retryExhaustedBatches"], ["B001"])
+            self.assertEqual(exhausted_manifest["batches"]["B001"]["status"], "blocked")
+            self.assertEqual(exhausted_manifest["batches"]["B002"]["status"], "pending")
+            self.assertEqual(exhausted["blockedBatches"], ["B001"])
+            self.assertEqual(exhausted["scheduledGroups"], [["B002"]])
+
+            # An operator can explicitly requeue a retry-exhausted Batch after
+            # addressing its diagnostics; it is no longer a permanently
+            # terminal `failed` record.
+            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="operator_retry")
+            requeued = resume_run(workspace, "alpha", run_id)
+            self.assertEqual(requeued["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
+
+    def test_retry_pending_restores_a_merge_candidate(self) -> None:
+        """A failed promotion retry must not strand completed stage evidence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            lease = acquire_lease(workspace, "alpha", run_id, "B001")
+            delivery = _create_native_worktree(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                repo,
+                lease["ownerToken"],
+            )
+            self.assertTrue(delivery["success"], delivery)
+            tree = Path(delivery["worktreePath"])
+            (tree / "delivery.txt").write_text("candidate\n", encoding="utf-8")
+            mark_batch(workspace, "alpha", run_id, "B001", "sealed", compileStatus="passed")
+            sealed = _seal_native_worktree(workspace, "alpha", run_id, "B001", tree, lease["ownerToken"])
+            self.assertTrue(sealed["success"], sealed)
+            release_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"], final_status="sealed")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "ready_to_candidate",
+                worktreePath=delivery["worktreePath"],
+                branchName=delivery["branchName"],
+                commitSha=sealed["commitSha"],
+            )
+            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="promotion_transport_failure")
+
+            resumed = resume_run(workspace, "alpha", run_id)
+
+            self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "ready_to_candidate")
+            self.assertEqual(resumed["mergeableBatches"], ["B001"])
+
+    def test_legacy_failed_batch_can_enter_retry_pending(self) -> None:
+        """An old worker's terminal failed marker must no longer strand a run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            mark_batch(workspace, "alpha", run_id, "B001", "failed", error="legacy_worker_failure")
+            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="recover_legacy_failure")
+
+            resumed = resume_run(workspace, "alpha", run_id)
+
+            self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+            manifest = load_manifest(workspace, "alpha", run_id)
+            self.assertEqual(manifest["status"], "running")
+            self.assertEqual(manifest["batches"]["B001"]["status"], "pending")
+
     def test_resume_preserves_conflicting_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
