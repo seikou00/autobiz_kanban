@@ -196,6 +196,35 @@ def _assert_parallel_context(
                 raise TaskRunnerError(str(exc), batchId=batch_id) from exc
 
 
+def _assert_parallel_compile_after_review(
+    workspace: Path,
+    feature: str,
+    parallel_run_id: str | None,
+    batch_id: str,
+) -> None:
+    """Allow a normal parallel batch compile only after Review has passed."""
+    if parallel_run_id is None:
+        return
+    try:
+        manifest = load_manifest(workspace, feature, parallel_run_id)
+    except ValueError as exc:
+        raise TaskRunnerError(str(exc), batchId=batch_id) from exc
+    batch = manifest.get("batches", {}).get(batch_id)
+    if not isinstance(batch, dict):
+        raise TaskRunnerError(f"parallel_batch_not_found:{batch_id}")
+    stage_states = batch.get("stageStates")
+    stage_states = stage_states if isinstance(stage_states, dict) else {}
+    review = stage_states.get("review")
+    review_status = review.get("status") if isinstance(review, dict) else "pending"
+    if review_status != "passed":
+        raise TaskRunnerError(
+            f"parallel_batch_compile_requires_review_passed:{batch_id}:{review_status}",
+            batchId=batch_id,
+            reviewStatus=review_status,
+            requiredAction="complete_review_before_compile",
+        )
+
+
 def _active_parallel_batch_runs(feature_dir: Path, parallel_run_id: str, batch_id: str) -> list[str]:
     active: list[str] = []
     for path in (feature_dir / ".task-runs").glob("T*/*.json"):
@@ -789,7 +818,7 @@ def _start_task_unlocked(
         if normalize_status(task.get("status")) == "implemented" and not is_compile_repair and not is_task_repair:
             raise TaskRunnerError(
                 f"task_implementation_already_ready:{task_id}",
-                requiredAction="run_batch_compile",
+                requiredAction="await_review" if parallel_run_id is not None else "run_batch_compile",
             )
     if task.get("blockers"):
         raise TaskRunnerError(f"task_has_blockers:{task_id}")
@@ -3244,7 +3273,10 @@ def run_batch_compile(
     workspace_ref: str | None = None,
 ) -> dict[str, Any]:
     """
-    公共 API：在批次完成后执行编译验证。
+    公共 API：在批次完成后的规定阶段执行编译验证。
+
+    并行 Workflow 的首次编译必须在 Review 通过后执行；Review 打回的
+    修复使用 ``revalidate_batch_compile``，不复用这个初始编译入口。
 
     返回: {
         "compileStatus": "passed" | "failed",
@@ -3259,6 +3291,7 @@ def run_batch_compile(
         raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
     _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
     _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
+    _assert_parallel_compile_after_review(workspace, feature, parallel_run_id, batch_id)
     # Compilation is intentionally outside the feature metadata lock: a lease
     # serializes a batch, while independent worktrees may compile concurrently.
     compile_result = _run_batch_compile(
@@ -3381,7 +3414,7 @@ def _integrate_batch_compile_result(
             )
             return {
                 "compileStatus": "passed",
-                "requiredAction": "review_and_test",
+                "requiredAction": "run_utest",
                 "batchId": batch_id,
                 "parallelRunId": parallel_run_id,
             }

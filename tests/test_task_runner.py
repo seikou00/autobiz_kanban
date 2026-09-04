@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done  # noqa: E402
-from hooks.plan_json import task_set_digest  # noqa: E402
+from hooks.plan_json import task_contract_sha256, task_set_digest  # noqa: E402
 from hooks import evidence_integrity_gate as evidence_integrity_gate_module  # noqa: E402
 from hooks import plan_writer as plan_writer_module  # noqa: E402
 from hooks import task_runner as task_runner_module  # noqa: E402
@@ -420,6 +420,36 @@ def _add_second_compile_only_batch(feature_dir: Path) -> None:
 
 
 class TaskRunnerTest(unittest.TestCase):
+    def test_parallel_implementation_waits_for_review_before_compile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, _code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            started = plan_writer_module.set_task_execution_status(
+                workspace, "alpha", "T001", "in_progress", parallel=True
+            )
+            self.assertTrue(started.ok, started.errors)
+            task = next(item for item in _read_batch(feature_dir)["tasks"] if item["id"] == "T001")
+
+            recorded = plan_writer_module.record_task_implementation(
+                workspace,
+                "alpha",
+                "T001",
+                "ev_0001",
+                expected_task_contract_sha256=task_contract_sha256(task),
+                parallel=True,
+            )
+
+            self.assertTrue(recorded.ok, recorded.errors)
+            self.assertEqual(
+                recorded.data["batchCompile"],
+                {
+                    "requiredAction": "await_review",
+                    "activeBatchId": "B001",
+                    "taskIds": ["T001"],
+                    "status": "awaiting_review",
+                },
+            )
+
     def test_parallel_task_run_lock_only_blocks_unfinished_tasks_in_its_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, _code = _workspace(Path(tmp))
@@ -669,7 +699,7 @@ class TaskRunnerTest(unittest.TestCase):
                     parallel_run_id="cw-test-001",
                 )
 
-            self.assertEqual(result["requiredAction"], "review_and_test")
+            self.assertEqual(result["requiredAction"], "run_utest")
             mark_parallel.assert_called_once()
             compiled_batch = _read_batch(feature_dir)
             self.assertEqual(compiled_batch["batchCompile"]["status"], "passed")
@@ -686,6 +716,32 @@ class TaskRunnerTest(unittest.TestCase):
             completed_batch = _read_batch(feature_dir)
             self.assertEqual(completed_batch["tasks"][0]["status"], "done")
             self.assertEqual(completed_batch["mergeCommitSha"], "a" * 40)
+
+    def test_parallel_batch_compile_requires_a_passed_review(self) -> None:
+        pending_manifest = {
+            "batches": {
+                "B001": {"stageStates": {"review": {"status": "pending"}}}
+            }
+        }
+        with patch("hooks.task_runner.load_manifest", return_value=pending_manifest):
+            with self.assertRaisesRegex(
+                task_runner_module.TaskRunnerError,
+                "parallel_batch_compile_requires_review_passed:B001:pending",
+            ) as caught:
+                task_runner_module._assert_parallel_compile_after_review(
+                    Path("/workspace"), "alpha", "run-001", "B001"
+                )
+        self.assertEqual(caught.exception.details["requiredAction"], "complete_review_before_compile")
+
+        reviewed_manifest = {
+            "batches": {
+                "B001": {"stageStates": {"review": {"status": "passed"}}}
+            }
+        }
+        with patch("hooks.task_runner.load_manifest", return_value=reviewed_manifest):
+            task_runner_module._assert_parallel_compile_after_review(
+                Path("/workspace"), "alpha", "run-001", "B001"
+            )
 
     def test_batch_compile_repair_does_not_adopt_test_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

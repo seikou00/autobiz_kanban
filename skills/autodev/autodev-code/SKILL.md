@@ -195,7 +195,7 @@ Batch 同样只能包含同一 lane 且同一 `workspaceRef` 的 TASK；前后�
 5. 实现并自检：
    - 不得为通过验证削弱校验、安全、日志、错误处理。
    - 最小 patch：只实现 `scope` / `implementationPoints` / `acceptanceCriteria` 指向的业务范围；`scope.paths` 只是相对 workspace 的文件提示，不是逐文件白名单，因实现需要新增的 DTO/domain/resources/迁移/配置会由 runner 自动归集。不得实现 `nonGoals` 中列出的内容。观察局部风格保持一致，不重排、不格式化无关代码；完成前查本轮 diff，无关格式变化先还原。
-   - 只读取 `validationTestPlan[].testIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。TASK 实现期间不执行测试、compile/build/typecheck/lint，批次结束只由 runner 执行一次 `batch-compile`。
+   - 只读取 `validationTestPlan[].testIntent` 理解后续测试意图，不创建、不修改、不补齐任何测试资产；runner 返回 `code_stage_test_changes_forbidden` 时必须恢复测试文件变更。TASK 实现期间不执行测试、compile/build/typecheck/lint；批次结束先草稿封存并完成 Review，只有 Review 通过后才由 Workflow 执行一次 `batch-compile`。
 6. 补必要注释：重要业务逻辑、非显然分支、边界、权限/租户/审计/幂等/状态流说明"为什么"；新增/改的 PO/DTO/Entity/VO 按既有风格补注释；不给自解释代码加噪音注释。
 7. **实现差异协议**：实现中遇到以下任一情况，停下用 `request_user_input` 单次确认，展示「design/spec 说 X，代码/实现是 Y」，拿到裁定前不得继续，也不得先调用 `finish-implementation` 收口：
    - **`EVD` / design 依据与代码现实不符** → 裁定后回写 `artifactFeatureDir` 下 `design.md` 的对应行（注明「code 阶段修订」）再继续；不得改写业务代码仓库 cwd 下的同名文件。
@@ -223,19 +223,21 @@ python "${pluginPath}/hooks/task_runner.py" finish-implementation --feature "${f
 
 `--supporting-file` 必须是仓库根相对路径；多仓库时使用 `repoId:relative/path`。`--no-code-change-why` 只用于 start 前已经存在且经行为验证确认满足契约的实现，不得用它绕过误 abort、重启 run 或 staging 操作造成的空 diff；runner 会拒绝与历史 aborted run 变更冲突的 no-code claim。
 
-`finish-implementation` 成功后，把该 TASK 在 `write_todos` 标记为“实现已就绪/待编译”，不是完成；返回 `continue_active_batch`、`continueCurrentBatch=true` 和 `nextTaskId` 时，同批仍有可执行任务时禁止询问用户是否继续，立即进入下一个 Task。最后一个 TASK 后只接受 `run_batch_compile` 并进入下方批次编译。
+`finish-implementation` 成功后，把该 TASK 在 `write_todos` 标记为“实现已就绪/待 Review”，不是完成；返回 `continue_active_batch`、`continueCurrentBatch=true` 和 `nextTaskId` 时，同批仍有可执行任务时禁止询问用户是否继续，立即进入下一个 Task。最后一个 TASK 完成后，固定 Workflow 只允许草稿封存并进入 Review；并行返回的 `requiredAction=await_review` 不是让实现 Agent 执行编译。
 
-### 批次只编译与模型修复
+### Review 后的批次编译与模型修复
 
-固定 Workflow 判定当前批次全部 TASK 为 `implemented` 后执行：
+固定 Workflow 在当前批次全部 TASK 为 `implemented` 后先草稿封存并执行只读 Review。实现 Agent 此时不得调用 `batch-compile`；runner 也会拒绝 Review 未通过的并行编译请求。
+
+只有 Review 通过后，Workflow 的专用编译步骤才执行：
 
 ```bash
 python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}" --batch-id "<BATCH_ID>" --code-workspace "<BUSINESS_REPO>"
 ```
 
-`batch-compile` 是 Code 阶段唯一构建命令，只编译生产代码，不运行 TASK 测试，也不创建测试资产。长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
+`batch-compile` 只编译生产代码，不运行 TASK 测试，也不创建测试资产。它属于 Review 后的交付步骤，不属于实现阶段；长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
 
-- 返回 `compileStatus=passed` 后，parallel Batch 的 TASK 保持 `implemented`，已提交 Worktree 状态为 `sealed`。Batch 必须完成只审生产实现的 `review`、在同一 Worktree 生成并执行的 UTest（随后重新 `seal`），以及仅在声明 `qualityGateCommands` 时存在的 `quality_gate`，才进入 `ready_to_candidate`；UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
+- 返回 `compileStatus=passed` 后，parallel Batch 的 TASK 保持 `implemented`，已提交 Worktree 状态为 `sealed`，下一步是 UTest，绝不重新执行 Review。Batch 在同一 Worktree 生成并执行 UTest（随后重新 `seal`），并仅在声明 `qualityGateCommands` 时执行 `quality_gate`，才进入 `ready_to_candidate`；UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
 - 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码。推荐先执行下列命令建立 repair run，再修改代码：
 
 ```bash

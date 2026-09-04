@@ -4908,11 +4908,15 @@ def record_task_implementation(
         if not result.ok:
             return result
         if all_implemented:
+            # In a fixed parallel Workflow, implementation produces an
+            # uncompiled Review draft.  Only the Workflow may advance that
+            # delivery to compilation after the read-only Review has passed.
+            required_action = "await_review" if parallel else "run_batch_compile"
             return with_result_data(result, batchCompile={
-                "requiredAction": "run_batch_compile",
+                "requiredAction": required_action,
                 "activeBatchId": batch_id,
                 "taskIds": [str(item.get("id")) for item in batch_tasks],
-                "status": "ready",
+                "status": "awaiting_review" if parallel else "ready",
             })
 
         return result
