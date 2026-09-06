@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -327,6 +328,73 @@ def generate_mapping_table(
     }
 
 
+def copy_assets_to_project(
+    mappings: list[dict[str, Any]],
+    project_root: Path,
+    html_dir: Path,
+) -> dict[str, Any]:
+    """Copy assets marked as 'copyToProject' to project directories."""
+    copied_files = []
+    failed_files = []
+
+    for mapping in mappings:
+        if mapping["decision"] != "copyToProject":
+            continue
+
+        original_file = mapping["originalFile"]
+        target_path = mapping["targetPath"]
+
+        # Resolve source file path (relative to HTML directory)
+        if original_file.startswith("./"):
+            source_path = html_dir / original_file[2:]
+        else:
+            source_path = html_dir / original_file
+
+        # Resolve target path (relative to project root)
+        if target_path.startswith("src/"):
+            target_full_path = project_root / target_path
+        elif target_path.startswith("public/"):
+            target_full_path = project_root / target_path
+        else:
+            # Default to src/assets if no prefix
+            target_full_path = project_root / "src" / target_path
+
+        # Check if source file exists
+        if not source_path.exists():
+            failed_files.append({
+                "originalFile": original_file,
+                "targetPath": target_path,
+                "reason": f"Source file not found: {source_path}",
+            })
+            continue
+
+        # Create target directory
+        target_full_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Copy file
+        try:
+            shutil.copy2(source_path, target_full_path)
+            copied_files.append({
+                "originalFile": original_file,
+                "sourcePath": str(source_path),
+                "targetPath": str(target_full_path.relative_to(project_root)),
+                "importStatement": mapping["importStatement"],
+            })
+        except Exception as e:
+            failed_files.append({
+                "originalFile": original_file,
+                "targetPath": target_path,
+                "reason": f"Copy failed: {str(e)}",
+            })
+
+    return {
+        "copiedCount": len(copied_files),
+        "failedCount": len(failed_files),
+        "copiedFiles": copied_files,
+        "failedFiles": failed_files,
+    }
+
+
 def write_mapping_table(output_path: Path, mapping: dict[str, Any]) -> None:
     """Write mapping table to JSON file."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -395,8 +463,15 @@ def main() -> int:
         print(f"Error: HTML files not found:\n" + "\n".join(missing), file=sys.stderr)
         return 1
 
+    # Determine HTML directory (assume all HTML files are in the same directory)
+    html_dir = html_files[0].parent
+
     # Generate mapping table
     mapping = generate_mapping_table(args.task_stem, html_files, project_root)
+
+    # Copy assets to project
+    copy_result = copy_assets_to_project(mapping["mappings"], project_root, html_dir)
+    mapping["assetsCopyResult"] = copy_result
 
     # Write to output
     output_path = output_dir / f"{args.task_stem}-assets-mapping.json"
@@ -405,6 +480,17 @@ def main() -> int:
     # Print summary
     print_summary(mapping)
 
+    # Print copy result
+    if copy_result["copiedCount"] > 0:
+        print(f"\n✅ 已复制 {copy_result['copiedCount']} 个文件到项目目录")
+        for item in copy_result["copiedFiles"]:
+            print(f"  {item['originalFile']} -> {item['targetPath']}")
+
+    if copy_result["failedCount"] > 0:
+        print(f"\n❌ 复制失败 {copy_result['failedCount']} 个文件")
+        for item in copy_result["failedFiles"]:
+            print(f"  {item['originalFile']}: {item['reason']}")
+
     # Output result for caller
     print(json.dumps({
         "mappingPath": str(output_path),
@@ -412,6 +498,8 @@ def main() -> int:
         "retentionRate": mapping["retentionRate"],
         "retentionCheck": mapping["retentionCheck"],
         "decisions": mapping["decisions"],
+        "copiedCount": copy_result["copiedCount"],
+        "failedCount": copy_result["failedCount"],
     }, ensure_ascii=False))
 
     return 0

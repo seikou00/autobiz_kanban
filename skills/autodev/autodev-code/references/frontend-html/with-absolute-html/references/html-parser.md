@@ -265,13 +265,14 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | 阶段 | 目标 | 主要动作 | 输出 |
 | --- | --- | --- | --- |
 | Stage 1 | 先恢复整页视觉与结构 | 定住主壳层、主分栏、分区顺序、内容完整性；原始 HTML 是主依据 | 稳定页面骨架 |
-| Stage 2 | 再替换已证明安全的组件槽位 | 逐槽位组件化，优先处理 `Tabs`、`Timeline`、`Table`、`Pagination`、`Upload` 等成熟结构，并为高风险槽位补齐 props、样式与细节收尾 | 最终项目代码 |
+| Stage 2 | 再替换已证明安全的组件槽位 | 逐槽位组件化，优先处理 `Tabs`、`Timeline`、`Table`、`Pagination`、`Upload` 等成熟结构，并为高风险槽位补齐 props、样式与细节收尾；**读取并应用 assets 映射表** | 最终项目代码 |
 
 | Stage 共通规则 | 说明 |
 | --- | --- |
 | Stage 1 先行 | 如果 Stage 1 结果与原稿还有明显结构偏差，禁止继续做 Stage 2 组件化 |
 | 同页多片段 | 先统一页面壳层、分区边界和共享数据语义，再决定哪些区域拆成局部组件 |
 | 主线抽取 | 在主线里完成局部组件、函数、常量、helper / type / hook / 图表配置抽取 |
+| Assets 映射表应用 | Stage 2 开始前必须读取 `.frontend/html-analysis/<task-stem>-assets-mapping.json`，严格按照映射表中的决策处理每个图标和图片：`useAntdIcon` → 使用 Ant Design 图标组件；`useCss` → 使用 CSS 实现；`copyToProject` → 使用已复制到项目的文件并正确 import |
 | Stage 2 收尾 | Stage 2 结束前必须再做一轮样式细节收尾，不得把明显的 padding、边框、圆角、阴影、字色、字号、文本内容、间距、对齐问题留到后续 `/autodev-reviewer` |
 | 最终交付 | 直接写入项目目标目录 |
 | write_todos 贯穿 | Stage 1 先列页面级模块清单，并单独列脚本清单；Stage 2 再按清单逐项完成模块落盘，防止实现遗漏 |
@@ -286,6 +287,37 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | 4 | 主页面保留页面壳层、路由入口、状态编排、数据获取和分区装配 |
 | 5 | 清晰分区拆成同目录局部组件，而不是拆成多个伪页面目录 |
 | 6 | 同页复用的函数、常量、状态映射、列定义、图表配置、局部 helper / type 就近抽取 |
+
+### 9.1.1 Assets 映射表应用规则
+
+**执行时机：** Stage 2 代码生成阶段开始前，必须先读取并理解 assets 映射表。
+
+**映射表位置：** `.frontend/html-analysis/<task-stem>-assets-mapping.json`
+
+**应用规则：**
+
+| 决策类型 | 处理方式 | 代码示例 |
+| --- | --- | --- |
+| `useAntdIcon` | 使用映射表中的 `replacement` 字段，引入对应的 Ant Design 图标组件 | `import { RightOutlined } from '@ant-design/icons';`<br/>`<RightOutlined className="text-[#5C69FF]" />` |
+| `useCss` | 使用映射表中的 `replacement` 字段，用 CSS 实现 | `<div className="w-full h-px bg-gray-300" />` |
+| `copyToProject` | 使用映射表中的 `importStatement` 字段，正确引入已复制到项目的文件 | `import AIIcon from '@/assets/icons/AI.svg';`<br/>`<img src={AIIcon} alt="AI" className="w-6 h-6" />` |
+
+**强制约束：**
+
+1. **必须读取映射表**：Stage 2 开始前，必须读取映射表并理解每个 asset 的处理决策
+2. **严格遵循决策**：不得擅自改变映射表中的决策（例如把 `useAntdIcon` 改成直接使用原始 SVG 文件）
+3. **验证文件存在**：对于 `copyToProject` 类型，生成代码前应验证映射表中的 `targetPath` 文件确实存在
+4. **保持颜色和尺寸**：使用 Ant Design 图标替代时，必须通过 `className` 或 `style` 保持原稿的颜色和尺寸
+5. **完整覆盖**：映射表中的每个 asset 都必须在最终代码中被正确处理，不得遗漏
+
+**检查清单：**
+
+- [ ] 已读取 `.frontend/html-analysis/<task-stem>-assets-mapping.json`
+- [ ] 映射表中标记为 `copyToProject` 的文件都已存在于项目目录
+- [ ] 代码中所有图标和图片引用都来自映射表的决策
+- [ ] Ant Design 图标的颜色和尺寸与原稿一致
+- [ ] CSS 实现的几何图形与原稿视觉一致
+- [ ] 项目 assets 的 import 路径与映射表中的 `importStatement` 一致
 
 ### 9.2 低置信度执行模式
 
@@ -365,7 +397,8 @@ Assets 处理总结将作为后续"编码前简报"的输入材料。映射表�
 | JSX 注释 | JSX 中没有 HTML 注释 |
 | 分区数量 | 与原稿一致或可解释 |
 | 字段/按钮 | 必填字段和按钮文案没有丢失 |
-| 图标 | 图标导入与引用可解析；纯图标按钮补 `Tooltip` 和 `aria-label` |
+| 图标 | 图标导入与引用可解析；纯图标按钮补 `Tooltip` 和 `aria-label`；**所有图标处理都严格遵循 assets 映射表的决策** |
+| Assets 映射表应用 | 已读取映射表；映射表中的每个 asset 都在代码中被正确处理；`useAntdIcon` 使用了图标组件；`useCss` 使用了 CSS 实现；`copyToProject` 使用了正确的 import 语句 |
 | 图表 | 图表容器、数据结构、类型映射自洽；不退回假图表；sparkline 也是真图表；线性图表的趋势线 / series 数量与高保真一致 |
 | 多图表完整度 | 同一局部区域内的多图表 / 复合图表都已保留，没有漏掉小图表、辅助图、对比图或其中某条趋势 |
 | 高风险组件 | 没有发生模式误判，例如 dot status -> Tag、line progress -> circle progress、vertical plain detail -> default Descriptions |
