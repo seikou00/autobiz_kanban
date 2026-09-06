@@ -77,7 +77,24 @@ description: 统一负责绝对定位高保真 HTML 路线的整页还原、结�
 | 项目组件源码 | 只有需要证据时再读 |
 | HTML URL | 如果拿不到实际内容，则停止并要求用户补 HTML |
 
-### 4.1 脚本 / manifest 口径
+### 4.1 Assets 资源处理
+
+执行 `../../references/assets-processing-guide.md` 中定义的完整流程：
+
+1. 检查并扫描 assets 目录
+2. 提取 HTML 中所有 assets 引用（仅处理被引用的文件）
+3. 对每个被引用的 asset 执行四级优先级判定
+4. 创建 assets 使用映射表并写入 `.frontend/html-analysis/<task-stem>-assets-mapping.json`
+5. 复制必要的 assets 到项目目录
+6. 输出 assets 处理总结
+
+**映射表位置：** `.frontend/html-analysis/<task-stem>-assets-mapping.json`
+
+Assets 处理总结将作为后续"编码前简报"的输入材料。映射表中包含每个 asset 的处理决策、替代方案和理由。
+
+### 4.2 脚本 / manifest 口径
+
+### 4.2 脚本 / manifest 口径
 
 | 项 | 规则 |
 | --- | --- |
@@ -85,7 +102,7 @@ description: 统一负责绝对定位高保真 HTML 路线的整页还原、结�
 | 脚本定位 | 分析加速器，不是最终视觉判官 |
 | 主要作用 | 内容盘点、分区辅助、多片段聚合、组件候选与 replacement slots 识别 |
 | 产物用途 | handoff / checklist / json 负责：盘点内容、标记候选区域、暴露图标 / 图表 / 交互 / 组件信号 |
-| 使用边界 | manifest 的作用是“盘点和识别”，不是“替代原始 HTML 做最终视觉判断” |
+| 使用边界 | manifest 的作用是”盘点和识别”，不是”替代原始 HTML 做最终视觉判断” |
 | 错判处理 | 如果 manifest 对页面语义、左右栏边界、图标 / 图表、组件槽位的判断明显不对，就把它降级为辅助点查材料 |
 | 保守模式 | 如果 `summary.componentizationMode.mode=conservative`，则脚本产物只能用于 whole-section 保留、缺项检查和局部候选提示，不能驱动大块结构重写 |
 

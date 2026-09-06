@@ -498,6 +498,28 @@ def main() -> int:
         cmd.append("--emit-reference-html")
     subprocess.run(cmd, check=True)
 
+    # Run assets processing
+    assets_script = Path(__file__).with_name("process_assets.py")
+    assets_cmd = [
+        sys.executable,
+        "-B",
+        str(assets_script),
+        "--project-root",
+        str(project_root),
+        "--task-stem",
+        args.task_stem,
+        "--output-dir",
+        str(analysis_dir),
+    ]
+    for html_file in html_files:
+        assets_cmd.extend(["--html-file", str(html_file)])
+
+    try:
+        subprocess.run(assets_cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(f"Warning: Assets processing failed: {exc}", file=sys.stderr)
+        print("Continuing without assets mapping table", file=sys.stderr)
+
     manifest_path = analysis_dir / f"{args.task_stem}.json"
     handoff_md_path = analysis_dir / f"{args.task_stem}.md"
     checklist_md_path = analysis_dir / f"{args.task_stem}-checklist.md"
@@ -523,6 +545,23 @@ def main() -> int:
         full_manifest=full_manifest,
     )
     write_checklist_md(checklist_md_path, checklist)
+
+    # Check for assets mapping
+    assets_mapping_path = analysis_dir / f"{args.task_stem}-assets-mapping.json"
+    assets_info = {}
+    if assets_mapping_path.exists():
+        try:
+            assets_mapping = json.loads(assets_mapping_path.read_text(encoding="utf-8"))
+            assets_info = {
+                "assetsMappingPath": str(assets_mapping_path),
+                "totalAssets": assets_mapping.get("totalAssets", 0),
+                "retentionRate": assets_mapping.get("retentionRate", 0.0),
+                "retentionCheck": assets_mapping.get("retentionCheck", ""),
+                "decisions": assets_mapping.get("decisions", {}),
+            }
+        except Exception as exc:
+            print(f"Warning: Failed to read assets mapping: {exc}", file=sys.stderr)
+
     print(json.dumps({
         "taskStem": args.task_stem,
         "handoffMarkdown": str(handoff_md_path),
@@ -538,6 +577,7 @@ def main() -> int:
         "sectionHtmlPolicy": checklist["sectionHtmlPolicy"],
         "wholeSections": [item["ownerPath"] for item in checklist["mustRenderWholeSections"]],
         "sourceActionTexts": checklist["sourceActionTexts"],
+        "assetsProcessing": assets_info,
     }, ensure_ascii=False))
     return 0
 
