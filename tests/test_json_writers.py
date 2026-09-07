@@ -19,6 +19,7 @@ if str(AUTODEV_HOOKS) not in sys.path:
     sys.path.insert(0, str(AUTODEV_HOOKS))
 
 from hooks.json_writer_common import parse_postcheck_output, shell_join  # noqa: E402
+from hooks.design_contract_lock import sync_design_contract_lock  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
     MAX_BATCH_TASKS,
@@ -134,6 +135,9 @@ def _write_design(feature_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+    result = sync_design_contract_lock(feature_dir.parents[2], feature_dir.name)
+    if not result.ok:
+        raise AssertionError(result.errors)
 
 
 def _write_plan(feature_dir: Path, *, include_second: bool = False) -> None:
@@ -2356,6 +2360,9 @@ class JsonWriterTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            # Plan must consume the Design lock and not re-run the upstream
+            # design.md validator.
+            (feature_dir / "design.md").write_text("not a Design contract\n", encoding="utf-8")
 
             result = validate_stage(workspace=workspace, feature="alpha", stage="dev.plan")
             output = io.StringIO()
@@ -2391,7 +2398,7 @@ class JsonWriterTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 code, _ = run_postcheck(ROOT, workspace, "autodev-plan", "alpha", workflow_record=_state_record())
             self.assertNotEqual(code, 0)
-            self.assertIn("missing_ref_anchor", output.getvalue())
+            self.assertIn("unknown_plan_json_api_ref", output.getvalue())
 
     def test_plan_structure_passes_while_stage_gate_fails_on_missing_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3271,6 +3278,75 @@ class JsonWriterTests(unittest.TestCase):
             self.assertIn("missing_unit_target_trace_args", unit.stdout)
             self.assertNotEqual(e2e.returncode, 0)
             self.assertIn("required", e2e.stderr)
+
+class PlanWriterBatchDetailCommitTest(unittest.TestCase):
+    def test_batch_detail_commit_is_atomic_and_requires_every_draft_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir, second=True)
+            _write_design(feature_dir)
+            first = _plan_task_body()
+            second = _plan_task_body()
+            second.update({"id": "T002", "title": "second behavior", "deps": ["T001"]})
+            second["specRefs"] = ["specs/cap/spec.md#REQ-001", "specs/cap/spec.md#SCN-002"]
+            second["acceptanceCriteria"][0].update({
+                "id": "AC-T002-01",
+                "scenarioRefs": ["specs/cap/spec.md#SCN-002"],
+            })
+            second["validationCommands"][0].update({
+                "id": "VAL-T002-01",
+                "covers": ["AC-T002-01"],
+            })
+            group_file = _write_task_groups(root / "task-groups.json", [first, second])
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+
+            first_detail = _draft_detail_body(first)
+            second_detail = _draft_detail_body(second)
+            for detail in (first_detail, second_detail):
+                for command in detail["validationCommands"]:
+                    command.pop("cwd", None)
+                    command.pop("covers", None)
+            invalid_second = dict(second_detail)
+            invalid_second["acceptanceCriteria"] = []
+            body_file = root / "batch-details.json"
+            body_file.write_text(json.dumps({
+                "details": [
+                    {"taskId": "T001", "detail": first_detail},
+                    {"taskId": "T002", "detail": invalid_second},
+                ]
+            }), encoding="utf-8")
+
+            rejected = _run(
+                "plan_writer.py", "set-draft-task-details", "--workspace", str(workspace),
+                "--feature", "alpha", "--body-file", str(body_file),
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("draft", rejected.stdout)
+            draft_batch = json.loads(
+                (feature_dir / ".tmp" / "plan_writer" / "draft" / "plans" / "B001" / "plan.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(next(item for item in draft_batch["tasks"] if item["id"] == "T001")["goal"], "")
+
+            body_file.write_text(json.dumps({
+                "details": [
+                    {"taskId": "T001", "detail": first_detail},
+                    {"taskId": "T002", "detail": second_detail},
+                ]
+            }), encoding="utf-8")
+            committed = _run(
+                "plan_writer.py", "set-draft-task-details", "--workspace", str(workspace),
+                "--feature", "alpha", "--body-file", str(body_file),
+            )
+            self.assertEqual(committed.returncode, 0, committed.stdout + committed.stderr)
+            payload = json.loads(committed.stdout)
+            self.assertEqual(payload["taskIds"], ["T001", "T002"])
+            self.assertEqual(payload["draft"]["readyTaskIds"], ["T001", "T002"])
 
 
 if __name__ == "__main__":

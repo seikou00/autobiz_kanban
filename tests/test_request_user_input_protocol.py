@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 PROTOCOL = SKILLS / "references" / "ask-user-question.md"
 DISCUSS_SKILL = SKILLS / "autobiz" / "autobiz-requirement-discuss" / "SKILL.md"
-PLAN_SKILL = SKILLS / "autodev" / "autodev-plan" / "SKILL.md"
+DESIGN_SKILL = SKILLS / "autodev" / "autodev-design" / "SKILL.md"
 SPECS_SKILL = SKILLS / "autodev" / "autodev-specs" / "SKILL.md"
 PRD_SKILL = DISCUSS_SKILL
 
@@ -83,16 +83,26 @@ class RequestUserInputProtocolTest(unittest.TestCase):
         self.assertNotIn("**选项2**：补充其他问题", content)
         self.assertNotIn("引导用户补充说明", content)
 
-    def test_plan_adjudication_gate_forbids_placeholder_options(self) -> None:
-        content = PLAN_SKILL.read_text(encoding="utf-8")
+    def test_design_adjudication_gate_forbids_placeholder_options(self) -> None:
+        content = DESIGN_SKILL.read_text(encoding="utf-8")
 
         missing = missing_rules(content, extra=("裁定即消解", "信息实体"))
-        self.assertEqual(missing, [], "plan 裁定门缺少条款: " + ", ".join(missing))
+        self.assertEqual(missing, [], "design 裁定门缺少条款: " + ", ".join(missing))
 
         self.assertNotIn("「以假设固化：<假设>」", content)
 
         protocol = PROTOCOL.read_text(encoding="utf-8")
         self.assertIn("逐条裁定环节禁止使用延后类预设选项", protocol)
+
+    def test_design_completion_does_not_ask_for_plan_entry_confirmation(self) -> None:
+        content = DESIGN_SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("--checkpoint design_done", content)
+        self.assertIn("design_contract_lock.py\" sync", content)
+        self.assertNotIn("整体确认门", content)
+        self.assertNotIn("确认设计，进入 PLAN 生成", content)
+        self.assertIn("不得添加用于进入下游阶段的额外交互门", content)
+        self.assertIn("不得把它记为「Plan 首件事」", content)
 
     def test_prd_and_specs_gates_match_plan_strictness(self) -> None:
         for skill in (PRD_SKILL, SPECS_SKILL):

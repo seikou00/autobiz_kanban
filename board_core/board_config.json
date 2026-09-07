@@ -171,6 +171,7 @@
       "initial": [
         "prd_in_progress",
         "specs_in_progress",
+        "design_in_progress",
         "plan_in_progress",
         "cicd_in_progress"
       ],
@@ -185,6 +186,12 @@
           "specs_done"
         ],
         "specs_done": [
+          "design_in_progress"
+        ],
+        "design_in_progress": [
+          "design_done"
+        ],
+        "design_done": [
           "plan_in_progress"
         ],
         "plan_in_progress": [
@@ -208,6 +215,7 @@
         "needs_fix": [
           "prd_in_progress",
           "specs_in_progress",
+          "design_in_progress",
           "plan_in_progress",
           "code_in_progress",
           "cicd_in_progress"
@@ -219,6 +227,8 @@
         "prd_done": "Biz / PRD",
         "specs_in_progress": "Specs",
         "specs_done": "Specs 完成",
+        "design_in_progress": "技术设计",
+        "design_done": "技术设计完成",
         "plan_in_progress": "Plan",
         "plan_done": "Plan 完成",
         "code_in_progress": "Code",
@@ -357,9 +367,9 @@
             "nodeStatus": "done",
             "label": "已完成",
             "nextAction": {
-              "slashSkill": "autodev-plan",
-              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：技术设计与计划。"
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
             }
           }
         ],
@@ -422,10 +432,10 @@
         ]
       },
       {
-        "id": "dev.plan",
-        "label": "技术设计与计划",
+        "id": "dev.design",
+        "label": "技术设计",
         "group": "Dev",
-        "skill": "autodev-plan",
+        "skill": "autodev-design",
         "order": 40,
         "runtimePolicy": {
           "agentMode": "multi",
@@ -445,39 +455,39 @@
             ]
           }
         },
-        "description": "生成技术设计和执行计划 \n 产物：design.md（技术设计：API/数据/技术决策与模块边界）、PLAN.md（执行计划：任务 DAG 与各任务依据/验证/状态）",
+        "description": "探索并生成技术设计 \n 产物：design.md 与 .design-contract.lock.json（已校验的 API/数据/技术决策快照）",
         "states": [
           {
             "nodeStatus": "not_started",
             "label": "未开始",
             "nextAction": {
-              "slashSkill": "autodev-plan",
-              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：技术设计与计划。"
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
             }
           },
           {
             "nodeStatus": "in_progress",
             "label": "进行中",
             "nextAction": {
-              "slashSkill": "autodev-plan",
-              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：技术设计与计划。"
+              "slashSkill": "autodev-design",
+              "userMessage": "请使用 /autodev-design 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：技术设计。"
             }
           },
           {
             "nodeStatus": "done",
             "label": "已完成",
             "nextAction": {
-              "slashSkill": "autodev-code",
-              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
-              "dialogTips": "当前阶段：代码实现。如果需要code前的详细设计，可以先使用/autodev-detail-design生成详细设计方案。"
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
             }
           }
         ],
         "checkpoints": [
-          "plan_in_progress",
-          "plan_done"
+          "design_in_progress",
+          "design_done"
         ],
         "artifacts": {
           "inputs": [
@@ -508,7 +518,7 @@
               "path": "UI_CONTEXT.json",
               "required": true,
               "extract": {
-                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 任务"
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 范围"
               }
             }
           ],
@@ -520,6 +530,133 @@
               "path": "design.md",
               "required": true
             },
+            {
+              "id": "design_contract_lock",
+              "label": "设计契约锁",
+              "artifactType": "json",
+              "path": ".design-contract.lock.json",
+              "required": true
+            }
+          ]
+        },
+        "validators": [
+          "design_contract",
+          "design_contract_lock",
+          "ui_context_json"
+        ]
+      },
+      {
+        "id": "dev.plan",
+        "label": "执行计划",
+        "group": "Dev",
+        "skill": "autodev-plan",
+        "order": 50,
+        "runtimePolicy": {
+          "agentMode": "multi",
+          "toolCustomConfig": {
+            "task": {
+              "enabled": true
+            }
+          },
+          "subagentConfig": {
+            "disabledBuiltinSubagents": [
+              "Explore",
+              "critic"
+            ],
+            "customSubagentFiles": [
+              "agents/explore.md",
+              "agents/critic.md"
+            ]
+          }
+        },
+        "description": "基于已确认设计生成可执行任务计划 \n 产物：plan.json（任务 DAG 机器事实源）、PLAN.md（执行计划投影视图）",
+        "states": [
+          {
+            "nodeStatus": "not_started",
+            "label": "未开始",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          },
+          {
+            "nodeStatus": "in_progress",
+            "label": "进行中",
+            "nextAction": {
+              "slashSkill": "autodev-plan",
+              "userMessage": "请使用 /autodev-plan 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：执行计划。"
+            }
+          },
+          {
+            "nodeStatus": "done",
+            "label": "已完成",
+            "nextAction": {
+              "slashSkill": "autodev-code",
+              "userMessage": "请使用 /autodev-code 继续推进当前 Feature。",
+              "dialogTips": "当前阶段：代码实现。如果需要code前的详细设计，可以先使用/autodev-detail-design生成详细设计方案。"
+            }
+          }
+        ],
+        "checkpoints": [
+          "plan_in_progress",
+          "plan_done"
+        ],
+        "artifacts": {
+          "inputs": [
+            {
+              "id": "proposal",
+              "label": "变更提案",
+              "artifactType": "file",
+              "path": "proposal.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 proposal 时回到 /autodev-design 补齐设计依据，再重新生成计划"
+              }
+            },
+            {
+              "id": "specs",
+              "label": "行为规格",
+              "artifactType": "file",
+              "path": "specs/**/*.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 specs 时回到 /autodev-specs 补齐行为契约，不能只凭 design.md 拆任务"
+              }
+            },
+            {
+              "id": "ui_context_json",
+              "label": "UI范围",
+              "artifactType": "json",
+              "path": "UI_CONTEXT.json",
+              "required": true,
+              "extract": {
+                "degrade": "无 UI_CONTEXT.json 时回到 /autodev-specs 补齐并锁定，不能自行推断 UI 任务"
+              }
+            },
+            {
+              "id": "design",
+              "label": "已确认技术设计",
+              "artifactType": "file",
+              "path": "design.md",
+              "required": true,
+              "extract": {
+                "degrade": "无 design.md 时回到 /autodev-design 生成并确认技术设计，不能直接生成计划"
+              }
+            },
+            {
+              "id": "design_contract_lock",
+              "label": "Design 已锁定契约",
+              "artifactType": "json",
+              "path": ".design-contract.lock.json",
+              "required": true,
+              "extract": {
+                "degrade": "缺少设计契约锁说明 /autodev-design 未完成；回到 Design 校验并生成锁后再进入 Plan"
+              }
+            }
+          ],
+          "outputs": [
             {
               "id": "plan",
               "label": "执行计划",
@@ -537,18 +674,17 @@
           ]
         },
         "validators": [
-          "design_contract",
           "ui_context_json",
           "plan_json_contract",
           "plan_json_initial_tasks",
           "parallel_batch_pipeline_contract",
-          "plan_ref_resolution",
           "plan_task_granularity",
           "plan_scenario_coverage"
         ],
         "rollback": {
           "archive": [
-            "plans"
+            "plans",
+            ".tmp/plan_generation"
           ]
         }
       },
@@ -557,7 +693,7 @@
         "label": "代码实现",
         "group": "Dev",
         "skill": "autodev-code",
-        "order": 50,
+        "order": 60,
         "runtimePolicy": {
           "agentMode": "multi",
           "toolCustomConfig": {
@@ -875,9 +1011,20 @@
         }
       },
       {
-        "id": "specs-to-plan",
+        "id": "specs-to-design",
         "from": {
           "nodeId": "dev.specs",
+          "state": "done"
+        },
+        "to": {
+          "nodeId": "dev.design",
+          "state": "in_progress"
+        }
+      },
+      {
+        "id": "design-to-plan",
+        "from": {
+          "nodeId": "dev.design",
           "state": "done"
         },
         "to": {

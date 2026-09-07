@@ -1,11 +1,11 @@
 # 回检协议
 
-本文件是 dev.specs / dev.plan / dev.code 三个阶段回检段规则。
+本文件是 dev.specs / dev.design / dev.plan / dev.code 四个阶段回检段规则。
 
 编辑规则：
 
 - 每个小节由 `<!-- section: <名称> | stages: <取值> -->` 开始，到下一个同类标记或文件末尾为止。
-- `stages: *` 表示三个阶段都输出；否则写逗号分隔的节点 ID（`dev.specs` / `dev.plan` / `dev.code`）。
+- `stages: *` 表示四个阶段都输出；否则写逗号分隔的节点 ID（`dev.specs` / `dev.design` / `dev.plan` / `dev.code`）。
 - 小节在输出中的顺序 = 它们在本文件中的顺序。要调整输出顺序就调整本文件顺序。
 - 通用文字只允许写在 `stages: *` 的小节里。若发现同一句话被复制进多个阶段小节，说明它应该上移到通用小节。
 
@@ -14,15 +14,20 @@
 
 使用 task 工具，指定 `critic-autodev` 角色，对比 `PRD.md` 与 `proposal.md`、`specs/**/*.md` 进行严格审查：spec 是否已完全覆盖需求范围，是否有违反需求的地方。
 
-<!-- section: 前提与角色 | stages: dev.plan -->
+<!-- section: 前提与角色 | stages: dev.design -->
 ## 前提与角色
 
-使用 task 工具，指定 `critic-autodev` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md`、`PLAN.json` 进行严格审查，从四个维度核查：
+使用 task 工具，指定 `critic-autodev` 角色，对比 `specs/**/*.md`、`proposal.md` 与 `design.md` 进行严格审查，从四个维度核查：
 
 1. 技术选择是否合理；
 2. 规格是否完全覆盖（Contract Coverage 逐 REQ/SCN 核对）；
-3. 测试是否合理和完备；
+3. 验证边界是否可执行；
 4. 引用与事实是否相符（Code Evidence 各条与代码实际一致，Spec Traceability 引用的 REQ/SCN/D-xxx 在上游真实存在）。
+
+<!-- section: 前提与角色 | stages: dev.plan -->
+## 前提与角色
+
+使用 task 工具，指定 `critic-autodev` 角色，对比 `specs/**/*.md`、`design.md` 与 `plan.json`、`PLAN.md` 进行严格审查：任务拆分是否覆盖全部 REQ/SCN 与设计决策，DAG、代码仓库、写集、验证命令和测试意图是否能真实执行。
 
 <!-- section: 前提与角色 | stages: dev.code -->
 ## 前提与角色
@@ -41,7 +46,7 @@
 
 子代理若仍然改了文件（它有写权限，约束只在 prompt 层），不要自行还原——本阶段无法重验，静默还原可能覆盖用户自己的改动。改为在结论块中把「子代理已直接修改 <文件清单>，未经任何验证」作为一条 `仅列出` 结论如实记录，交由用户处置。
 
-<!-- section: 严重度词表 | stages: dev.specs,dev.plan -->
+<!-- section: 严重度词表 | stages: dev.specs,dev.design,dev.plan -->
 ## 严重度词表
 
 使用 `critic-autodev` 的原文分节名，不要改写成别的词：
@@ -90,20 +95,34 @@
 - 稳定 ID 不重排、不复用；`Status=已确认` 的 `Open Questions` 行不因回检改写。
 - 不得靠删 Requirement/Scenario 或缩小 `Capabilities` 消除覆盖类结论。
 
-<!-- section: 分类表 | stages: dev.plan -->
+<!-- section: 分类表 | stages: dev.design -->
 ## 分类表
 
 | 分类 | 判定 | 动作                                                |
 |------|------|---------------------------------------------------|
-| 产物可修 | 技术方案、接口/数据形态、任务拆分、覆盖缺口、验证方法不足 | 技术结论改 design.md，执行结论改 PLAN.json，两边受影响处同步          |
+| 产物可修 | 技术方案、接口/数据形态、设计覆盖缺口、验证边界不足 | 只改 design.md 中被指出的条目          |
 | 引用与事实不符 | Code Evidence 与代码不一致，或引用的 REQ/SCN/D-xxx 不存在 | 更新 EVD-xxx 与引用；与 spec/D-xxx 冲突记 R-xxx（Type=读码差异）走裁定门 |
 | 需用户裁定 | 有真实备选且改变实现路径，或与 design.md 中 `Status=已确认` 的 API/DATA/D 决策冲突 | 记 R-xxx（Type=待确认），按「design.md 确认规则」第一步逐条裁定         |
-| 回流上游 | 行为契约本身缺失或矛盾 | 停止并建议回 `/autodev-specs`，不在本阶段补写行为契约               |
+| 回流上游 | 行为契约本身缺失或矛盾（例如缺 REQ/SCN） | 停止并回 `/autodev-specs`，不在本阶段补写，也不得列为 Plan 待办 |
 | 仅列出 | 成立但不足以改产物 | 不改产物，在结论块中列出                                      |
 | 结论不成立 | 复核后与产物、代码实际不符 | 不改产物，在结论块中引 file:line 或产物原文说明                     |
 
-- 只改被指出的条目；TASK/EVD/R/API/DATA/D 稳定 ID 不重排、不复用，已裁定行不因回检改写。
-- 不得靠删任务、缩小 Contract Coverage 或加「无需实现」豁免消除覆盖类结论。
+- 只改被指出的条目；TASK/EVD/R/API/DATA/D 稳定 ID 不重排、不复用，已裁定行不因回检改写。需求契约缺口必须在 Specs 收口后才能推进 `design_done`，不能移交给 Plan 或 Code。
+- 不得靠缩小 Contract Coverage 或加「无需实现」豁免消除覆盖类结论。
+
+<!-- section: 分类表 | stages: dev.plan -->
+## 分类表
+
+| 分类 | 判定 | 动作 |
+|------|------|------|
+| 产物可修 | 任务拆分、DAG、覆盖缺口、写集或验证方法不足 | 只改候选分组、Draft 或由 writer 生成的计划，不改写 design.md |
+| 引用与事实不符 | 任务引用的 REQ/SCN/API/DATA/D 不存在或与设计不符 | 修正任务引用；若设计本身需要改变，回 `/autodev-design` |
+| 需用户裁定 | 有真实备选且改变任务边界、执行顺序或验证策略 | 停止并向用户裁定；不得借 Draft 默认选择 |
+| 回流上游 | 行为或技术设计契约缺失、矛盾 | 分别回 `/autodev-specs` 或 `/autodev-design`，不在本阶段补写 |
+| 仅列出 | 成立但不足以改产物 | 不改产物，在结论块中列出 |
+| 结论不成立 | 复核后与产物、代码实际不符 | 不改产物，在结论块中引 file:line 或产物原文说明 |
+
+- TASK 稳定 ID 不重排、不复用；不得靠删任务、缩小 Contract Coverage 或加「无需实现」豁免消除覆盖类结论。
 
 <!-- section: 分类表 | stages: dev.code -->
 ## 分类表
@@ -134,13 +153,13 @@
 <!-- section: 分类取值 | stages: dev.specs -->
 本阶段 `分类` 允许取值：`产物可修` | `需用户裁定` | `回流上游` | `仅列出` | `结论不成立`。
 
-<!-- section: 分类取值 | stages: dev.plan -->
+<!-- section: 分类取值 | stages: dev.design,dev.plan -->
 本阶段 `分类` 允许取值：`产物可修` | `引用与事实不符` | `需用户裁定` | `回流上游` | `仅列出` | `结论不成立`。
 
 <!-- section: 分类取值 | stages: dev.code -->
 本阶段 `分类` 允许取值：`交接下游` | `需用户裁定` | `回流上游` | `仅列出` | `结论不成立`。
 
-<!-- section: 与机器预检的分工 | stages: dev.specs,dev.plan -->
+<!-- section: 与机器预检的分工 | stages: dev.specs,dev.design,dev.plan -->
 ## 与机器预检的分工
 
 「产物契约预检（机器校验）」只判定机械事实（必备产物与章节、格式结构、稳定 ID、引用解析、可机械判定的覆盖关系），本协议只判定它判不了的：需求语义、方案合理性、测试策略、代码事实。同一件事不要两边都报。
@@ -159,6 +178,11 @@
 ## 收口
 
 改完重跑「产物契约预检（机器校验）」；仍有未裁定的「需用户裁定」条目时不推进 `specs_done`。
+
+<!-- section: 收口 | stages: dev.design -->
+## 收口
+
+改完重跑「产物契约预检（机器校验）」并完成受影响未决项的裁定；仍有未裁定的「需用户裁定」或存在「回流上游」条目时不推进 `design_done`。满足条件后直接推进 `design_done`，不再增加用于进入下游阶段的交互门。
 
 <!-- section: 收口 | stages: dev.plan -->
 ## 收口

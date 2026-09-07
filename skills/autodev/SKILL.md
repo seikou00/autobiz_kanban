@@ -11,6 +11,7 @@ version: v1.1.0804
 |------|------------|------------|
 | Frontend（`frontend_before_specs` profile） | `/autodev-frontend`（内部按标准 HTML / 绝对定位 HTML 分流，用户确认后可 review） | `autodev/autodev-frontend/SKILL.md` |
 | Specs | `/autodev-specs` | `autodev/autodev-specs/SKILL.md` |
+| Technical Design | `/autodev-design` | `autodev/autodev-design/SKILL.md` |
 | Plan | `/autodev-plan` | `autodev/autodev-plan/SKILL.md` |
 | Detail Design（dynamic stage） | `/autodev-detail-design` | `autodev/autodev-detail-design/SKILL.md` |
 | Code | `/autodev-code` | `autodev/autodev-code/SKILL.md` |
@@ -30,6 +31,8 @@ prd_done → resolve_next_skill.py --json
                                              ↓
                                       /autodev-specs
                                              ↓
+	                                      /autodev-design
+	                                             ↓
 	                                      /autodev-plan
 	                                             ↓
 	                         plan_done → detail_design_before_code choice

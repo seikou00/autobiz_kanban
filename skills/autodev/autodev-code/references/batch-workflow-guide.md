@@ -69,11 +69,13 @@ older format is not migrated and must be cleared before recapturing.
 
 The Workflow tool invocation is fixed too:
 
+Use the top-level Workflow tool with this native parameter object (not from a wrapper workflow):
+
 ```javascript
-workflow({
+{
   scriptPath: launcher.workflowScriptPath,
-  args: JSON.stringify(launcher.workflowArgs)
-})
+  args: launcher.workflowArgs
+}
 ```
 
 The launcher must materialize the copied artifact script before this call. Do

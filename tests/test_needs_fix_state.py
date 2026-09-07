@@ -262,6 +262,7 @@ class NeedsFixStateTest(unittest.TestCase):
         statuses = {node["id"]: node["nodeStatus"] for node in payload["run"]["nodes"]}
         self.assertEqual(statuses["biz.prd"], "done")
         self.assertEqual(statuses["dev.specs"], "blocked")
+        self.assertEqual(statuses["dev.design"], "not_started")
         self.assertEqual(statuses["dev.plan"], "not_started")
 
         repaired = prepare_checkpoint_update(

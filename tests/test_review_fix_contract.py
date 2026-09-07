@@ -30,6 +30,7 @@ from hooks.render_review_protocol import (  # noqa: E402
 CODE_SKILL = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
 SPECS_SKILL = ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md"
 PLAN_SKILL = ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md"
+DESIGN_SKILL = ROOT / "skills" / "autodev" / "autodev-design" / "SKILL.md"
 SIMPLIFIER_AGENT = ROOT / "agents" / "code-simplifier.md"
 EXPLORE_AGENT = ROOT / "agents" / "explore.md"
 VERIFICATION_AGENT = ROOT / "agents" / "verification.md"
@@ -38,6 +39,7 @@ PROTOCOL = ROOT / "skills" / "references" / "review-protocol.md"
 
 SKILL_BY_STAGE = {
     "dev.specs": SPECS_SKILL,
+    "dev.design": DESIGN_SKILL,
     "dev.plan": PLAN_SKILL,
     "dev.code": CODE_SKILL,
 }
@@ -139,7 +141,7 @@ class ReviewSkeletonIsUnifiedTest(unittest.TestCase):
 
     def test_upstream_stages_bind_to_critic_section_names(self) -> None:
         """严重度必须用 critic 的原文分节名，否则与 code-reviewer 的词表混淆。"""
-        for stage in ("dev.specs", "dev.plan"):
+        for stage in ("dev.specs", "dev.design", "dev.plan"):
             with self.subTest(stage=stage):
                 output = render(stage)
 

@@ -169,6 +169,41 @@ class BoardConfigInvariantsTest(unittest.TestCase):
                 offenders.append(f"{context}[dev.plan]")
         self.assertEqual(offenders, [], "dev.plan must keep plan_json_initial_tasks gate")
 
+    def test_design_and_plan_are_separate_workflow_nodes(self) -> None:
+        nodes = {
+            node.get("id"): node
+            for _, node in _iter_nodes(_board_config())
+            if isinstance(node, dict)
+        }
+        design = nodes["dev.design"]
+        plan = nodes["dev.plan"]
+
+        self.assertEqual(design.get("skill"), "autodev-design")
+        self.assertEqual(design.get("checkpoints"), ["design_in_progress", "design_done"])
+        self.assertEqual(
+            [item.get("path") for item in design["artifacts"]["outputs"]],
+            ["design.md", ".design-contract.lock.json"],
+        )
+        self.assertIn("design_contract", design.get("validators", []))
+        self.assertIn("design_contract_lock", design.get("validators", []))
+
+        self.assertEqual(plan.get("skill"), "autodev-plan")
+        self.assertEqual(plan.get("checkpoints"), ["plan_in_progress", "plan_done"])
+        self.assertEqual(
+            [item.get("path") for item in plan["artifacts"]["outputs"]],
+            ["PLAN.md", "plan.json"],
+        )
+        design_input = next(item for item in plan["artifacts"]["inputs"] if item.get("path") == "design.md")
+        self.assertTrue(design_input.get("required"))
+        lock_input = next(
+            item for item in plan["artifacts"]["inputs"]
+            if item.get("path") == ".design-contract.lock.json"
+        )
+        self.assertTrue(lock_input.get("required"))
+        self.assertNotIn("design_contract", plan.get("validators", []))
+        self.assertNotIn("plan_ref_resolution", plan.get("validators", []))
+        self.assertIn("plan_json_contract", plan.get("validators", []))
+
     def test_batch_pipeline_stages_are_not_duplicated_as_board_nodes(self) -> None:
         config = _board_config()
         node_ids = {node.get("id") for _, node in _iter_nodes(config)}
@@ -179,7 +214,7 @@ class BoardConfigInvariantsTest(unittest.TestCase):
         transitions = config["workflow"]["transitions"]
         transition_ids = {transition["id"] for transition in transitions}
         self.assertEqual(
-            {"prd-to-specs", "specs-to-plan", "plan-to-code", "code-to-cicd", "cicd-to-archive"},
+            {"prd-to-specs", "specs-to-design", "design-to-plan", "plan-to-code", "code-to-cicd", "cicd-to-archive"},
             transition_ids,
         )
 

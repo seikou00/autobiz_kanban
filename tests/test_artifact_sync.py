@@ -23,6 +23,7 @@ EXPECTED_OUTPUT_METADATA = {
     "proposal.md": ("behavior_proposal", "final"),
     "specs/**/*.md": ("behavior_spec", "final"),
     "design.md": ("technical_design", "process"),
+    ".design-contract.lock.json": ("technical_design_contract", "process"),
     "PLAN.md": ("implementation_plan", "process"),
     "plan.json": ("implementation_plan", "final"),
     "DETAIL_DESIGN.md": ("technical_detail", "process"),
@@ -214,14 +215,13 @@ class ArtifactCatalogContractTest(unittest.TestCase):
             self.assertEqual(event["source_stage"], "dev.plan")
             self.assertEqual(
                 [item["path"] for item in event["artifacts"]],
-                ["PLAN.md", "design.md", "plan.json", artifact_sync.CATALOG_FILE_NAME],
+                ["PLAN.md", "plan.json", artifact_sync.CATALOG_FILE_NAME],
             )
             for item in event["artifacts"]:
                 self.assertTrue(item["upload_path"].startswith("P001/DEV/Features/alpha"))
 
             catalog = json.loads((feature_dir / artifact_sync.CATALOG_FILE_NAME).read_text(encoding="utf-8"))
             catalog_entries = {item["path"]: item for item in catalog["artifacts"]}
-            self.assertEqual(catalog_entries["design.md"]["category"], "technical_design")
             self.assertEqual(catalog_entries["PLAN.md"]["category"], "implementation_plan")
             self.assertEqual(catalog_entries["plan.json"]["category"], "implementation_plan")
 

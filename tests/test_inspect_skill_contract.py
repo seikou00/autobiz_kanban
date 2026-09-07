@@ -57,6 +57,32 @@ class InspectSkillContractPlainTest(unittest.TestCase):
         self.assertEqual(extra_missing, ())
         self.assertEqual(self._plain("autobiz-requirement-discuss", feature), "")
 
+    def test_standard_design_and_plan_contracts_have_a_hard_handoff(self) -> None:
+        feature = "design-plan-handoff"
+        self._create_feature(feature)
+
+        design, _, _ = _find_feature_contract(
+            ROOT,
+            skill="autodev-design",
+            feature=feature,
+            workspace=self.workspace,
+        )
+        plan, _, _ = _find_feature_contract(
+            ROOT,
+            skill="autodev-plan",
+            feature=feature,
+            workspace=self.workspace,
+        )
+
+        self.assertEqual(design.node_id, "dev.design")
+        self.assertEqual(design.checkpoints, ("design_in_progress", "design_done"))
+        self.assertEqual(design.required_outputs, ("design.md", ".design-contract.lock.json"))
+        self.assertEqual(plan.node_id, "dev.plan")
+        self.assertEqual(plan.checkpoints, ("plan_in_progress", "plan_done"))
+        self.assertEqual(plan.required_outputs, ("PLAN.md", "plan.json"))
+        self.assertIn("design.md", plan.required_inputs)
+        self.assertIn(".design-contract.lock.json", plan.required_inputs)
+
     def test_plain_lean_workflow_requires_prd_only(self) -> None:
         feature = "lean-entry"
         self._create_feature(feature, workflow_template="lean")

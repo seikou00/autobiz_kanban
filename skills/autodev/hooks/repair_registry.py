@@ -64,7 +64,7 @@ _ENTRY: Dict[str, Repair] = {
         problem="本阶段的必备产物缺失或为空：{target}",
         action=(
             "先把缺失产物生成出来再重跑预检。proposal.md / specs/<capability>/spec.md 由 "
-            "/autodev-specs 生成；design.md 由 /autodev-plan 生成；plan.json 与 PLAN.md 一律"
+            "/autodev-specs 生成；design.md 由 /autodev-design 生成；plan.json 与 PLAN.md 一律"
             "通过 hooks/plan_writer.py 生成，" + PLAN_NO_HAND_EDIT
         ),
     ),
@@ -236,7 +236,7 @@ _SPECS: Dict[str, Repair] = {
 
 
 # --------------------------------------------------------------------------
-# dev.plan — design.md
+# dev.design — design.md
 # --------------------------------------------------------------------------
 
 _DESIGN: Dict[str, Repair] = {

@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.code_task_context import build_context  # noqa: E402
+from hooks.design_contract_lock import sync_design_contract_lock  # noqa: E402
 from hooks.evidence_store import append_evidence, main as evidence_store_main  # noqa: E402
 from hooks.plan_json import (  # noqa: E402
     BATCH_STRATEGY,
@@ -419,6 +420,8 @@ class BatchedPlanContractTest(unittest.TestCase):
                 ]),
                 encoding="utf-8",
             )
+            lock_result = sync_design_contract_lock(workspace, "alpha")
+            self.assertTrue(lock_result.ok, lock_result.errors)
 
             def writer(*args: str) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(

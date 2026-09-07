@@ -138,7 +138,7 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
         self.assertEqual(SPEC_DECISION_HEADING.findall(template), ["DEC-001"])
 
     def test_design_template_cites_dec_not_d(self) -> None:
-        template = (ROOT / "skills/autodev/autodev-plan/templates/design.md").read_text(
+        template = (ROOT / "skills/autodev/autodev-design/templates/design.md").read_text(
             encoding="utf-8"
         )
         traceability = template.split("## 3. Spec Traceability")[1].split("## 4.")[0]
@@ -146,7 +146,7 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
 
     def test_both_skills_wire_the_channel(self) -> None:
         specs = (ROOT / "skills/autodev/autodev-specs/SKILL.md").read_text(encoding="utf-8")
-        plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        plan = (ROOT / "skills/autodev/autodev-design/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("Decision Log", specs)
         self.assertIn("DEC-NNN", specs)
         self.assertIn("DEC-NNN", plan)
@@ -161,7 +161,7 @@ class TemplateAndSkillWiringTest(unittest.TestCase):
 
         只钉「两个 ID 都出现、且 D 带了限定词」这条主线，具体怎么行文不管。
         """
-        plan = (ROOT / "skills/autodev/autodev-plan/SKILL.md").read_text(encoding="utf-8")
+        plan = (ROOT / "skills/autodev/autodev-design/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("DEC-001", plan, "必须点出规格决策 DEC-001 的存在")
         self.assertNotIn(
             "Decision `D-001`", plan, "D-001 不能裸称 Decision——那个词现在也指 DEC"

@@ -91,10 +91,13 @@ from hooks.validation_policy import (  # noqa: E402
 )
 from hooks.artifact_ref_validator import (  # noqa: E402
     design_contract_snapshot,
-    load_design_contract,
     validate_plan_design_coverage,
     validate_task_artifact_refs,
     validate_task_group_design_contract,
+)
+from hooks.design_contract_lock import (  # noqa: E402
+    DESIGN_CONTRACT_LOCK_FILE,
+    load_confirmed_design_contract,
 )
 from hooks.parallel_validation_ownership import build_pipeline_contract  # noqa: E402
 from board_core.state_store import load_state_json_records_result  # noqa: E402
@@ -120,7 +123,6 @@ DRAFT_RELATIVE_DIR = ".tmp/plan_writer/draft"
 DRAFT_LOCK_FILE = "lock.json"
 DRAFT_PLAN_FILE = "plan.json"
 DRAFT_TRANSACTION_FILE = ".draft-write-transaction.json"
-DESIGN_CONTRACT_LOCK_FILE = ".design-contract.lock.json"
 DRAFT_GROUP_OWNED_FIELDS = {
     "id",
     "title",
@@ -223,6 +225,7 @@ DRAFT_BUNDLE_COMMANDS = {
     "prepare-task-draft",
     "import-task-directory",
     "set-draft-task-detail",
+    "set-draft-task-details",
     "repair-draft-task",
     "repair-draft-tasks",
     "preflight-task-draft",
@@ -242,6 +245,7 @@ DRAFT_RUNTIME_GUARDED_COMMANDS = DRAFT_BUNDLE_COMMANDS - {
 }
 PLAN_REOPEN_ALLOWED_CHECKPOINTS = {
     "specs_done",
+    "design_done",
     "plan_in_progress",
     "plan_done",
     "detail_design_in_progress",
@@ -292,72 +296,10 @@ def _utc_now() -> str:
 
 
 def _current_design_contract(feature_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    return load_design_contract(feature_dir)
-
-
-def _ensure_persistent_design_contract_lock(
-    feature_dir: Path,
-    feature: str,
-    contract: dict[str, Any],
-    *,
-    revision_confirmed: bool = False,
-    reason: str = "",
-) -> list[dict[str, Any]]:
-    """Keep Design confirmation independent from the disposable Draft tree."""
-    path = feature_dir / DESIGN_CONTRACT_LOCK_FILE
-    snapshot = design_contract_snapshot(contract)
-    if not path.is_file():
-        atomic_write_json(path, {
-            "version": 1,
-            "featureId": feature,
-            "designContract": snapshot,
-            "confirmedAt": _utc_now(),
-            "confirmationReason": "initial_plan_prepare",
-        })
-        return []
-    try:
-        stored = load_json(path)
-    except (OSError, ValueError, TypeError):
-        return [{
-            "reason": "persistent_design_contract_lock_invalid",
-            "repairTarget": "design_revision",
-            "repairable": False,
-        }]
-    stored_contract = stored.get("designContract") if isinstance(stored, dict) else None
-    stored_sha = stored_contract.get("sha256") if isinstance(stored_contract, dict) else None
-    if not isinstance(stored_sha, str):
-        return [{
-            "reason": "persistent_design_contract_lock_invalid",
-            "repairTarget": "design_revision",
-            "repairable": False,
-        }]
-    if stored_sha == snapshot.get("sha256"):
-        return []
-    if not revision_confirmed:
-        return [{
-            "reason": "confirmed_design_changed_without_reconfirmation",
-            "detail": (
-                f"expected={stored_sha};actual={snapshot.get('sha256')};"
-                "pass --design-revision-confirmed --reason after Design confirmation"
-            ),
-            "repairTarget": "design_revision",
-            "repairable": False,
-            "designMutationAllowed": False,
-        }]
-    if not reason.strip():
-        return [{
-            "reason": "design_revision_confirmation_reason_required",
-            "repairTarget": "design_revision",
-            "repairable": False,
-        }]
-    atomic_write_json(path, {
-        "version": 1,
-        "featureId": feature,
-        "designContract": snapshot,
-        "confirmedAt": _utc_now(),
-        "confirmationReason": reason.strip(),
-    })
-    return []
+    # Plan deliberately consumes the snapshot produced by dev.design instead
+    # of re-opening design.md.  A Design edit must re-run its own completion
+    # gate and refresh this snapshot before Plan can start.
+    return load_confirmed_design_contract(feature_dir, feature_dir.name)
 
 
 def _draft_design_contract_errors(
@@ -381,7 +323,7 @@ def _draft_design_contract_errors(
             "reason": "confirmed_design_changed_after_draft_created",
             "detail": (
                 f"expected={expected};actual={actual};"
-                "plan_cannot_redefine_design;explicit_design_revision_required"
+                "design_contract_lock_changed;explicit_design_revision_required"
             ),
             "repairTarget": "design_revision",
             "repairable": False,
@@ -948,7 +890,7 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
     ))
     if errors:
         return errors
-    design_contract, design_errors = load_design_contract(feature_dir)
+    design_contract, design_errors = _current_design_contract(feature_dir)
     errors.extend(design_errors)
     if design_errors:
         return errors
@@ -2792,7 +2734,7 @@ def _task_set_preflight_errors(
     if contract_errors:
         return contract_errors
     errors = []
-    design_contract, design_errors = load_design_contract(feature_dir)
+    design_contract, design_errors = _current_design_contract(feature_dir)
     errors.extend(design_errors)
     if design_errors:
         return errors
@@ -2801,6 +2743,7 @@ def _task_set_preflight_errors(
             feature_dir,
             task,
             design_contract=design_contract,
+            check_design_artifact=False,
         ))
     errors.extend(validate_plan_design_coverage(design_contract, _tasks(data)))
     # A task detail may add scope.paths/expectedFiles beyond its group-owned
@@ -2895,15 +2838,6 @@ def _cmd_prepare_task_draft(args: argparse.Namespace) -> int:
             path=_draft_plan_path(workspace, feature),
             errors=[{"reason": error} for error in scope_errors],
         ))
-    persistent_lock_errors = _ensure_persistent_design_contract_lock(
-        feature_dir,
-        feature,
-        design_contract,
-        revision_confirmed=args.design_revision_confirmed is True,
-        reason=args.reason or "",
-    )
-    if persistent_lock_errors:
-        return render_result(WriterResult(ok=False, path=group_file, errors=persistent_lock_errors))
     data["implementationScope"] = implementation_scope
     data["codeWorkspaces"] = _code_workspace_bindings(
         workspace_contexts,
@@ -2965,18 +2899,6 @@ def _cmd_import_task_directory(args: argparse.Namespace) -> int:
             ok=False,
             path=_draft_plan_path(workspace, feature),
             errors=design_errors,
-        ))
-    persistent_lock_errors = _ensure_persistent_design_contract_lock(
-        feature_dir,
-        feature,
-        design_contract,
-        revision_confirmed=False,
-    )
-    if persistent_lock_errors:
-        return render_result(WriterResult(
-            ok=False,
-            path=_draft_plan_path(workspace, feature),
-            errors=persistent_lock_errors,
         ))
     workspace_contexts = _code_workspace_contexts(args.code_workspace)
     code_workspaces = [
@@ -3056,6 +2978,7 @@ def _cmd_set_draft_task_detail(args: argparse.Namespace) -> int:
         candidate,
         cache=None,
         design_contract=design_contract,
+        check_design_artifact=False,
     )
     if ref_errors:
         return render_result(WriterResult(
@@ -3082,6 +3005,159 @@ def _cmd_set_draft_task_detail(args: argparse.Namespace) -> int:
         taskStatus="ready",
         draft=_draft_summary(lock, data),
     ))
+
+
+def _draft_detail_entries(args: argparse.Namespace) -> list[tuple[str, dict[str, Any]]]:
+    """Parse a complete, ordered set of Draft task detail bodies.
+
+    The Workflow prepares detail proposals concurrently, but they must be
+    committed as one writer transaction.  Keep the public shape deliberately
+    small so callers cannot smuggle group-owned fields or arbitrary Draft data
+    through the batch path::
+
+        {"details": [{"taskId": "T001", "detail": {...}}, ...]}
+    """
+
+    body = _draft_detail_body(args)
+    unknown = sorted(set(body) - {"details"})
+    if unknown:
+        raise PlanWriterInputError(
+            "draft_task_details_field_unknown",
+            f"fields={','.join(unknown)}",
+        )
+    raw_entries = body.get("details")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise PlanWriterInputError("draft_task_details_missing")
+
+    entries: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_entries, start=1):
+        if not isinstance(raw, dict):
+            raise PlanWriterInputError("draft_task_detail_entry_must_be_object", f"index={index}")
+        entry_unknown = sorted(set(raw) - {"taskId", "detail"})
+        if entry_unknown:
+            raise PlanWriterInputError(
+                "draft_task_detail_entry_field_unknown",
+                f"index={index};fields={','.join(entry_unknown)}",
+            )
+        task_id = raw.get("taskId")
+        detail = raw.get("detail")
+        if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
+            raise PlanWriterInputError("draft_task_detail_task_id_invalid", f"index={index};task={task_id}")
+        if task_id in seen:
+            raise PlanWriterInputError("draft_task_detail_task_id_duplicate", f"task={task_id}")
+        if not isinstance(detail, dict):
+            raise PlanWriterInputError("draft_task_detail_must_be_object", f"task={task_id}")
+        seen.add(task_id)
+        entries.append((task_id, detail))
+    return entries
+
+
+def _apply_draft_task_details(
+    workspace: Path,
+    feature: str,
+    entries: list[tuple[str, dict[str, Any]]],
+) -> WriterResult:
+    """Validate every full detail against one Draft snapshot, then commit once.
+
+    No task is marked ready and no Draft file is changed when even one entry is
+    invalid.  This preserves the all-or-nothing boundary required by the Plan
+    generation Workflow while reusing the same validation semantics as the
+    single-task command.
+    """
+
+    lock, data = _load_draft_bundle(workspace, feature)
+    if lock.get("status") == "finalized":
+        return fail("task_draft_finalized", path=_draft_plan_path(workspace, feature))
+    _draft_group_data(lock, feature)
+    feature_dir = _path(workspace, feature).parent
+    design_lock_errors = _draft_design_contract_errors(feature_dir, lock)
+    if design_lock_errors:
+        return WriterResult(ok=False, path=_draft_plan_path(workspace, feature), errors=design_lock_errors)
+    design_contract, design_errors = _current_design_contract(feature_dir)
+    if design_errors:
+        return WriterResult(ok=False, path=_draft_plan_path(workspace, feature), errors=design_errors)
+
+    candidate_data = copy.deepcopy(data)
+    code_workspaces = [item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)]
+    errors: list[dict[str, Any]] = []
+    ready_task_ids: list[str] = []
+    for task_id, detail in entries:
+        try:
+            task = _find_task(candidate_data, task_id)
+            candidate = _normalize_draft_task_detail(task, detail)
+            candidate = _annotate_validation_test_plan(candidate, code_workspaces, candidate_data)
+
+            # Preserve the single-detail command's error precedence: callers
+            # first receive detail/granularity issues, then artifact references.
+            task_errors = _draft_task_validation_errors(
+                feature,
+                candidate,
+                code_workspaces,
+                defer_to_test_stages=defer_to_test_stages_enabled(candidate_data),
+            )
+            if not task_errors:
+                task_errors = validate_task_artifact_refs(
+                    feature_dir,
+                    candidate,
+                    cache=None,
+                    design_contract=design_contract,
+                    check_design_artifact=False,
+                )
+            if task_errors:
+                errors.extend(task_errors)
+                continue
+            task_items = _tasks(candidate_data)
+            task_items[task_items.index(task)] = candidate
+            ready_task_ids.append(task_id)
+        except PlanWriterInputError as exc:
+            detail_message = exc.detail or f"task={task_id}"
+            if "task=" not in detail_message:
+                detail_message = f"task={task_id};{detail_message}"
+            errors.append({"reason": exc.reason, "detail": detail_message})
+
+    expected_ids = {str(item.get("id")) for item in _tasks(data)}
+    provided_ids = {task_id for task_id, _ in entries}
+    missing_ids = sorted(expected_ids - provided_ids)
+    unexpected_ids = sorted(provided_ids - expected_ids)
+    if missing_ids:
+        errors.append({
+            "reason": "draft_task_details_incomplete",
+            "detail": f"taskIds={','.join(missing_ids)}",
+            "taskIds": missing_ids,
+        })
+    if unexpected_ids:
+        errors.append({
+            "reason": "draft_task_details_unknown_task",
+            "detail": f"taskIds={','.join(unexpected_ids)}",
+            "taskIds": unexpected_ids,
+        })
+    if errors:
+        report = _draft_validation_report(data, errors)
+        return WriterResult(
+            ok=False,
+            path=_draft_plan_path(workspace, feature),
+            errors=report["issues"],
+            data={"validation": report, "draft": _draft_summary(lock, data)},
+        )
+
+    ordered_ids = [str(item.get("id")) for item in _tasks(candidate_data)]
+    if set(ordered_ids) != provided_ids:
+        return fail("draft_task_details_task_set_mismatch", path=_draft_plan_path(workspace, feature))
+    lock["readyTaskIds"] = ordered_ids
+    lock["status"] = "ready"
+    write_result = _write_draft_bundle(workspace, feature, candidate_data, lock)
+    return with_result_data(
+        write_result,
+        taskIds=ordered_ids,
+        draft=_draft_summary(lock, candidate_data),
+    )
+
+
+def _cmd_set_draft_task_details(args: argparse.Namespace) -> int:
+    workspace, feature = _resolve(args)
+    entries = _draft_detail_entries(args)
+    return render_result(_apply_draft_task_details(workspace, feature, entries))
 
 
 def _draft_repair_entries(args: argparse.Namespace, *, single_task: bool) -> list[tuple[str, dict[str, Any]]]:
@@ -3158,6 +3234,7 @@ def _apply_draft_task_repairs(
                 feature_dir,
                 candidate,
                 design_contract=design_contract,
+                check_design_artifact=False,
             )
             task_errors.extend(_draft_task_validation_errors(
                 feature,
@@ -3547,19 +3624,6 @@ def _cmd_reopen_finalized_draft(args: argparse.Namespace) -> int:
         "previousFinalizedAt": previous_finalized_at,
     })
     if design_changed:
-        persistent_lock_errors = _ensure_persistent_design_contract_lock(
-            _path(workspace, feature).parent,
-            feature,
-            design_contract,
-            revision_confirmed=True,
-            reason=reason,
-        )
-        if persistent_lock_errors:
-            return render_result(WriterResult(
-                ok=False,
-                path=_draft_plan_path(workspace, feature),
-                errors=persistent_lock_errors,
-            ))
         lock["designContract"] = design_contract_snapshot(design_contract)
         lock["designRevisionConfirmedAt"] = _utc_now()
         lock["designRevisionConfirmationReason"] = reason
@@ -3897,6 +3961,15 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "taskTemplateStatus": "deprecated_legacy_import_only",
                     "taskDetailTemplate": TASK_DETAIL_TEMPLATE_RELATIVE_PATH,
                     "taskDetailInputExample": _task_detail_input_example(),
+                    "atomicDetailBatch": {
+                        "command": "set-draft-task-details --body-stdin",
+                        "body": {
+                            "details": [
+                                {"taskId": "T001", "detail": "<task-detail-input object>"},
+                            ],
+                        },
+                        "semantics": "all_detail_entries_validate_before_any_draft_write",
+                    },
                     "taskGroupTemplate": TASK_GROUP_TEMPLATE_RELATIVE_PATH,
                     "taskGroupInputExample": _task_group_example(),
                     "taskGroupMatrixExceptionExample": _task_group_matrix_exception_example(),
@@ -3980,7 +4053,7 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     },
                     "fieldRules": {
                         "designTraceability": {
-                            "sourceOfTruth": "confirmed design.md",
+                            "sourceOfTruth": "dev.design .design-contract.lock.json snapshot",
                             "direction": "design_to_plan_only",
                             "unknownIdRepairTarget": "plan_task_or_task_group",
                             "designMutationFromPlanErrorAllowed": False,
@@ -4145,7 +4218,11 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                         "groupLock": "groupingDigest",
                         "designLock": "designContract.sha256",
                         "persistentDesignLock": DESIGN_CONTRACT_LOCK_FILE,
-                        "designRevisionConfirmation": "prepare-task-draft --design-revision-confirmed --reason <reason>",
+                        "persistentDesignLockOwner": "dev.design",
+                        "designRevisionConfirmation": (
+                            "autodev-design refreshes .design-contract.lock.json; "
+                            "reopen-finalized-draft --design-revision-confirmed --reason <reason> only rebinds Draft"
+                        ),
                         "designChangeError": "confirmed_design_changed_after_draft_created",
                         "groupChangeError": "task_group_changed_after_draft_created",
                         "detailWriteMode": "validate_then_atomic_replace",
@@ -5593,12 +5670,6 @@ def main(argv: list[str] | None = None) -> int:
     prepare_task_draft.add_argument("--group-file", required=True)
     prepare_task_draft.add_argument("--code-workspace", required=True, action="append")
     prepare_task_draft.add_argument("--force", action="store_true")
-    prepare_task_draft.add_argument(
-        "--design-revision-confirmed",
-        action="store_true",
-        help="仅在 Design 已重新确认后刷新 Feature 级 Design 锁",
-    )
-    prepare_task_draft.add_argument("--reason", default="")
     prepare_task_draft.set_defaults(func=_cmd_prepare_task_draft)
 
     import_task_directory = sub.add_parser("import-task-directory")
@@ -5616,6 +5687,14 @@ def main(argv: list[str] | None = None) -> int:
     draft_detail_input.add_argument("--body-stdin", action="store_true")
     draft_detail_input.add_argument("--body-json")
     draft_detail.set_defaults(func=_cmd_set_draft_task_detail)
+
+    draft_details = sub.add_parser("set-draft-task-details")
+    _common(draft_details)
+    draft_details_input = draft_details.add_mutually_exclusive_group(required=True)
+    draft_details_input.add_argument("--body-file")
+    draft_details_input.add_argument("--body-stdin", action="store_true")
+    draft_details_input.add_argument("--body-json")
+    draft_details.set_defaults(func=_cmd_set_draft_task_details)
 
     repair_draft_task = sub.add_parser("repair-draft-task")
     _task_selector(repair_draft_task)
@@ -5648,7 +5727,11 @@ def main(argv: list[str] | None = None) -> int:
     reopen_finalized_draft = sub.add_parser("reopen-finalized-draft")
     _common(reopen_finalized_draft)
     reopen_finalized_draft.add_argument("--reason", required=True)
-    reopen_finalized_draft.add_argument("--design-revision-confirmed", action="store_true")
+    reopen_finalized_draft.add_argument(
+        "--design-revision-confirmed",
+        action="store_true",
+        help="仅在 /autodev-design 已重新锁定契约后，将 Draft 绑定到新快照",
+    )
     reopen_finalized_draft.set_defaults(func=_cmd_reopen_finalized_draft)
 
     rebuild_task_draft = sub.add_parser("rebuild-task-draft")

@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
-description: Dev 阶段技术设计与执行计划生成。
-version: v1.9.08051
+description: Dev 阶段执行计划生成。
+version: v2.2.0906
 ---
 
 ## 缺失产物处理
@@ -12,276 +12,93 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "$
 
 # /autodev-plan - Executable Task Plan
 
-进入 Plan 时读取 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/IMPLEMENTATION_SCOPE.json`。`backend_only` 只允许生成 `uiRequired=false` 的 backend task；`frontend_only` 只允许生成 `uiRequired=true` 的 frontend task；`full_stack` 保持现有行为。Plan writer 会在分组预检、Draft 和正式计划校验中重复执行该门禁。
+本技能只负责 Plan 流程的后半段：基于已确认的 `design.md` 拆分任务，并生成 `plan.json`、全部 Batch `plans/Bxxx/plan.json` 与 `PLAN.md`。探索、接口/数据/技术决策和 `design.md` 的生成、裁定由上一节点 `/autodev-design` 负责。
 
-## explore
-进入设计探索模式。未提供的上游产物根据缺失清单处理。隐性知识需要理解现有系统代码完成探索，并将隐性知识与用户讨论，再进入 Plan 生成。
-
-> 进入本技能时先使用`write_todos`工具建立覆盖宏观流程的任务清单：`探索澄清（自由进行，不强制子项）` / `生成 design.md` / `生成 plan.json` / `推进 plan_done`，并随阶段推进实时更新状态（待做 / 进行中 / 完成）。用户在结束探索时若选"暂不生成"，后续条目保持待做即可。
-
-**重要：探索模式用于澄清和调研，不用于实现。** 你可以读取已有的设计文档和相关代码，可以搜索代码库、理解现有架构、确认接口/数据模型/验证方式的边界；但不得编写业务代码、修改实现文件、创建迁移脚本，或把未经确认的 API/SQL/鉴权/租户/审计规则写成硬约束。如果用户要求直接实现，提醒用户本阶段只做探索和计划。
-
-**这是一种工作姿态，不是固定流程。** 没有必须照搬的问题清单，也没有强制产物。你的任务是作为技术设计伙伴，把 specs 中的行为契约变成可实现、可验证的设计上下文：明确接口、数据、模块边界、风险、待确认项，以及后续 Plan 可以使用的结论。
-
----
-
-### 探索姿态
-使用task工具进行探索，指定Explore-autodev角色，探索必须要读<AGENTS_INSTRUCTIONS></AGENTS_INSTRUCTIONS>里面提到的文件，再按下面列举的要求，最后需要返回完整详尽的结构化文档结果让主代理参考。
-- **好奇而不武断** - 顺着用户表达、proposal 和 specs 自然追问，不预设唯一答案。
-- **展开线索而不审问** - 同时呈现几个值得看的方向，让用户选择最相关的，不要把对话压成机械问卷。
-- **扎根现实** - 优先读取 proposal、specs、已有代码、现有接口、数据表、测试和约定；不要只做抽象讨论，也不要假装理解——不清楚就查代码或追问。
-- **质疑假设** - 包括用户的假设和你自己的推断。
-- **适度可视化** - 当结构复杂时，用 ASCII 图、列表或表格澄清模块关系、数据流、状态流、任务边界。
-- **允许不确定** - 未确认的业务语义、字段、权限、异常分支要标成待确认，不要替用户补齐。
-- **为设计和计划服务** - 探索的目标不是产出漂亮分析，而是为 `design.md` 与 `plan.json` 提供可靠依据；可以自由展开，但结尾要能喂给 Plan。
-
----
-
-### 你可能会做什么
-
-根据输入和上下文，你可能会：
-
-**探索问题空间**
-
-- 梳理 proposal 的目标、范围、影响面，以及 specs 中的 Reqrement / Scenario
-- 找出 specs 中描述模糊、互相冲突、缺少边界的行为
-- 将 specs 映射到接口、数据模型、权限、配置、前端交互或验证方式
-- 如果发现行为契约本身不准确，停止
-
-**调查代码库**
-
-- 读取项目约定
-- 查找相关模块、路由、接口、schema、数据库访问、测试和已有任务模板
-- 找到最可能的集成点和受影响文件
-- 识别现有命名、错误体、分页、鉴权、租户、审计、日志等风格
-- 隐性知识你需要理解现有系统完成探索，并将隐性知识与我讨论
-- 任务、需求和设计决策都必须使用稳定 ID：Task `T001`、Requirement `REQ-001`、Scenario `SCN-001`、API `API-001`、Data `DATA-001`、技术决策 `D-001`。`D-NNN` 由本阶段写进 design 技术决策表；任务只引用与自身实现真正相关的决策，没有适用技术决策时 `decisionIds` 写空数组，禁止按 Task 编号生成 `D-NNN`。design 里的每条 `D-NNN` 仍必须被至少一个真正相关的任务引用，全局覆盖由 `plan_json_contract` 判定。
-- 规格决策 `DEC-001` ：由 specs 阶段在 proposal 的 `## Decision Log` 节定义，本阶段只在 design 追踪表的 `Decision` 列引用、不新增，该 Requirement 无此类决策时写「无」。`design_contract` 只判引用能否在该节内解析，不要求每个 Requirement 都有。两者都叫「决策」，区别是 `D` 本阶段产出且引用强制，`DEC` 上游输入且可为空。
-
-**比较选项**
-
-- 在多个方案都合理时，对比影响面、复杂度、风险和验证成本
-- 推荐更贴合现有系统的方向，但把假设和待确认项说清楚
-- 对 API、数据和任务拆分只形成设计/计划依据，不在探索阶段写业务实现
-
-**可视化**
-
-- 结构复杂时用 ASCII 图 / 列表 / 表格澄清模块关系、状态机、数据流、接口边界、依赖图、覆盖矩阵；模板与样例见 `${pluginPath}/skills/autodev/autodev-plan/templates/EXPLORE.md`。
-
-**揭示风险和未知点**
-- 识别需求、技术、数据、权限、兼容性、测试方面的风险
-- 标出必须追问用户或必须查证代码的点
-- 建议 spike/调研任务，但不得在本阶段实现
-
----
-
-### autodev-plan 上下文感知
-
-探索开始时，优先确认当前 Feature状态：
+进入本技能时读取当前状态与输入契约：
 
 ```bash
 python "${pluginPath}/read_state_json.py" --feature "${feature}"
+python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-plan --feature "${feature}" --plain
 ```
 
-- 读取上游产物原件、用户补充说明、已有 `design.md`、`plan.json`（如果存在）。
-- 读取本 Feature 相关的代码/测试/配置，用于理解现有约束。
-- 如果已有 Plan 产物，只把它们作为上下文来讨论；除非用户明确要求进入 Plan 写入阶段，不要自动改写。
+- 只读取已经确认的 `proposal.md`、`specs/**/*.md`、`UI_CONTEXT.json`、`design.md`、`.design-contract.lock.json` 与实际代码仓库；不重写行为契约或技术设计。
+- `.design-contract.lock.json` 是 Design 完成时生成的唯一机器契约。Plan 只消费其中的 API / Data / D ID 与标记，绝不重新解析或校验 `design.md`；缺锁或锁无效说明上游 Design 未完成，停止并回到 `/autodev-design`。`x-auto-no-http-api: true` 与 `x-auto-no-sql: true` 代表对应设计项不存在，任务只能据此写空引用数组，不能补造 ID。
+- 若当前为 `design_done`，先进入本节点；已有 Feature 处于旧的 `plan_in_progress` 时如缺少 Design 锁，必须先回 `/autodev-design` 补齐，不能在 Plan 兼容生成。
+- 进入时使用 `write_todos` 建立：`建立覆盖矩阵与候选分组` / `生成 Draft 任务详情` / `生成 plan.json 与 PLAN.md` / `推进 plan_done`。本阶段不生成业务代码、测试、迁移或配置。
 
-当探索发现不同类型的信息时，按下面方式准备给 Plan 使用：
-
-| 探索发现                     | 后续沉淀位置                                                 |
-| ---------------------------- | ------------------------------------------------------------ |
-| 需求目标、范围、非目标变化   | 回到 `proposal.md`，或在 `design.md` 记录影响与风险           |
-| 新增或变化的外部可观察行为   | 回到 `specs/**/*.md`，不得只写入 `design.md`                  |
-| 新增或变化的 HTTP 行为       | `design.md` 的 API Decisions；无 API 写 `x-auto-no-http-api: true` |
-| 数据表/字段/索引/迁移需求    | `design.md` 的 Data Decisions；无数据变更写 `x-auto-no-sql: true` |
-| 技术方案、模块边界、集成点   | `design.md` 的 Technical Design                              |
-| 实现切分、涉及文件、验证方法 | `plan.json` 的任务 DAG、任务详情和覆盖矩阵；`PLAN.md` 以plan.json为准 |
-| 未确认业务语义或技术假设     | `design.md` 与 `plan.json` 的风险与待确认项，并回到用户确认；`PLAN.md` 以plan.json为准 |
-
-接口/数据决策讨论触发：
-
-- 如果新增或修改 HTTP/API、函数入口、请求响应、错误码、权限、租户、审计、幂等、分页、异步行为，但接口形态还不准确，先进入 API Decisions 讨论，不要直接生成 PLAN。
-- 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据决策还不准确，先进入 Data Decisions 讨论，不要直接生成 PLAN。
-- 讨论时只提出会影响实现路径的关键问题，并给出当前建议、备选方案和影响面；不要把用户带进机械问卷。
-- 已确认的决策沉淀为 `design.md` 中的 `已确认`；仍不确定但不影响实现路径的内容可标为 `待确认` 并进入风险；会影响实现路径的 `待确认` 必须先和用户讨论清楚。
-- 如果仍有 `待确认` 且会影响接口形态、数据模型、权限/租户/审计、幂等、分页、异步、状态流、迁移或验收结果，不要结束探索进入 Plan 生成。
-
-讨论输出建议：
-
-```markdown
-## 接口与数据决策待确认
-
-我不建议现在直接生成 PLAN，因为以下决策会影响实现路径：
-
-| ID | 类型 | 决策点 | 当前建议 | 备选方案 | 影响 | 需要确认 |
-|----|------|--------|----------|----------|------|----------|
-| API-001 | API | [接口入口/请求响应/错误码] | [建议] | [备选] | [影响任务/验收] | [问题] |
-| DATA-001 | Data | [表/字段/状态/约束] | [建议] | [备选] | [影响任务/验收] | [问题] |
-```
-
-约束：探索阶段可以提出“建议写入哪里”，但不要自动捕捉或落盘，除非用户明确确认进入 Plan 生成/更新。行为契约变更必须回到 `/autodev-specs`，不要在 Plan 阶段偷偷改写 specs。
-
-
-### 你不必做的事情
-
-- 照本宣科
-- 每次都问同样的问题
-- 产出特定产物
-- 得出结论
-- 死守主题（有价值的支线可以展开）
-- 刻意简短（这是思考时间）
-
----
-
-### 处理不同的切入点
-
-不同切入点（模糊想法 / 具体问题 / 中途卡住 / 比较选项）的完整对话样例见 `${pluginPath}/skills/autodev/autodev-plan/templates/EXPLORE.md`。核心姿态：先展开可选边界，再落到 specs 与代码现状，把关键分歧标成待确认项喂给 Plan。
-
----
-
-### 结束探索
-
-没有固定结局。探索可能会：
-
-- **进入 Plan 生成**："这些信息已经足够生成 Plan，要我继续吗？"
-- **补充既有计划**："这个决策会影响 design.md 的接口/数据决策和 plan.json 的任务拆分，要不要更新？"
-- **停在澄清结果**：用户已经得到判断，暂不生成文件。
-- **稍后继续**："我们可以之后从这些待确认项继续。"
-
-当判断探索已经足够进入 Plan 时，必须先给出简短探索结论，并询问用户是否结束探索、进入 Plan 生成/更新：
-
-```
-## 探索结论
-
-**需求目标：** [当前理解]
-
-**影响范围：** [模块/API/数据/权限/前端/配置]
-
-**已确认：** [用户、proposal 或 specs 已明确的信息]
-
-**待确认：** [必须追问或在 Plan 中标注的事项]
-
-**生成依据：**
-- specs/**/*.md: [行为契约和验收场景]
-- design.md: [API 决策/数据决策/技术设计需要覆盖什么]
-- plan.json: [只说明进入 Plan 后将按覆盖矩阵与候选任务分组表拆分；未输出完整矩阵和最终分组表前，不得预估“3-4 个任务”这类固定任务数]
-
-```
-## explore 结束
-**结束决策**：当你判断 explore 已足够支撑 Plan 时，必须询问用户是否结束探索并进入 Plan 生成/更新。
-
-- 提出上面的结束询问时，用 `request_user_input`发起选择，选项至少含 `进入 Plan 生成/更新 (Recommended)` / `继续探索` / `暂不生成、停在澄清结果` / `其他`；
-- **自由表达即退出结构化**：若用户不点选项、而是直接给出实质回复（补需求、改约束、抛新问题），
-  当作普通文本吸收、更新探索结论后继续探索，**不得机械重复同一结构化选择**；下一轮再择机重发该门。
-- 未拿到明确答复前，不得写入 `plan_in_progress`，也不得生成 design.md / plan.json。
-
-用户确认后，才进入 `PLAN阶段`。
-
----
-
-### PLAN阶段
-先生成 `design.md`，再基于这些输入与 design 生成 `plan.json`，并同步生成 `PLAN.md` 。
-
-#### 更新状态
 ```bash
-python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "Plan（来源: Specs）"
+python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint plan_in_progress --stage "执行计划（来源: 技术设计）"
 ```
 
----
-
-#### 生成 design.md
-
-本阶段必须生成 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md`。`design.md` 是稳定技术设计契约，承载 API、数据、架构、迁移和风险决策；行为契约以 `specs/**/*.md` 为准，不在 design.md 中重复维护完整 specs。
-
-按 `${pluginPath}/skills/autodev/autodev-plan/templates/design.md` 的结构输出，并满足：
-
-- **Context / 输入上下文**：引用 proposal 和 specs，说明当前代码现状和约束。
-- **Spec Traceability / 规格追踪**：列出本设计覆盖的 capability、Requirement、Scenario。`Decision` 列填 proposal `## Decision Log` 里对应的 `DEC-NNN`——那是 specs 阶段为该 Requirement 定下的取舍及其否决项，实现遇阻要偏离时先看这里有没有权衡过；该 Requirement 无此类决策时写「无」。技术决策是 `Design Coverage` 列的 `D-NNN`，不要混进 `Decision` 列。`design_contract` 判定引用的 `DEC-NNN` 在 proposal 中真实存在。
-- **API Decisions / 接口决策**：
-  - 不再生成独立接口契约文件。
-  - 如本轮不涉及 HTTP/API，必须写 `x-auto-no-http-api: true` 并说明原因。
-  - 如涉及 HTTP/API，用结构化表格记录 Method、Path/Entry、Request、Response、Errors、Auth/Tenant/Audit、Status。
-  - 不得把未确认的鉴权、租户、审计字段写成硬约束；必须标为待确认。
-- **Data Decisions / 数据决策**：
-  - 不再生成独立 SQL 设计文件。
-  - 如本轮不涉及数据库或持久化，必须写 `x-auto-no-sql: true` 并说明原因。
-  - 如涉及数据变更，记录表/模型、字段、索引、迁移、回滚和状态。
-  - specs 明确涉及数据但字段/类型/索引缺失时，必须回到用户追问或标为待确认；不得凭空发明字段。
-- **Technical Design / 技术设计**：记录现状、决策、备选方案、集成点和涉及路径。
-- **Risks / Open Questions**：所有未确认业务语义、技术假设、兼容风险必须落在这里。
-
-完成条件：
-- [ ] design.md 包含 Context、Spec Traceability、API Decisions、Data Decisions、Technical Design、Risks / Open Questions
-- [ ] API Decisions 明确写出 `x-auto-no-http-api: true/false`
-- [ ] Data Decisions 明确写出 `x-auto-no-sql: true/false`
-- [ ] 未确认项没有进入硬约束，已标注为待确认
-
----
-
-#### design.md 确认规则
-
-**「文件已写入」不等于「已向用户展示」**：用户不会自动去读 design.md。写入 design.md 之后、进入 PLAN 生成之前，必须把其中的 API Decisions 表格、Data Decisions 表格和影响实现路径的关键 Technical Decisions 摘录到对话里，让用户直接看到接口形态、字段变更、索引/迁移和回滚方式。展示格式：
-
-```markdown
-## 技术设计确认（design.md）
-
-**API Decisions**（x-auto-no-http-api: true/false）
-[摘录 API Decisions 表格；无 API 时一句话说明原因]
-
-**Data Decisions**（x-auto-no-sql: true/false）
-[摘录 Data Decisions 表格；无数据变更时一句话说明原因]
-
-**关键技术决策**
-[D-xxx 中影响实现路径的决策及备选方案]
-
-**待确认项**
-[所有待确认条目：API-xxx / DATA-xxx / D-xxx 中 Status 为「待确认」的行，以及 R-xxx 中 Type 为「待确认」或「读码差异」的行；逐条说明影响，读码差异条目按「spec/D-xxx 说 X，代码是 Y（EVD-xxx）」呈现。]
+```text
+design_done
+    ↓
+/autodev-plan
+    ↓
+plan.json + PLAN.md
+    ↓
+plan_done
 ```
 
-展示后按以下两步确认，顺序不可颠倒：
+## 固定并行 Plan Workflow（强制）
 
-**待确认项逐条裁定**
+进入 `/autodev-plan` 后，无论 capability 或候选 Task 数量是多少，**必须立即由仓库固定的 `plan-generation.workflow.js` 调度整个 Plan 产物生成**。它覆盖候选分组、Draft 创建、Task detail、工程命令、Draft 预检和正式发布；并行只发生在候选分组/Task detail 提案，Draft 与正式计划仍由 Workflow 内的唯一 coordinator 串行、原子写入。
 
-- 范围：API-xxx / DATA-xxx / D-xxx 中 Status 为「待确认」的行，以及 R-xxx 中 Type 为「待确认」或「读码差异」的行；没有待裁定条目时跳过本步，直接进入第二步。读码差异条目的选项闭集同样适用：裁定结果只能是「spec 基线过时，按代码现实修订（结果回写 spec/design 对应处）」「plan 读码有误，修正 Evidence」「行为契约需要变更，回 /autodev-specs」三者之一的具体化，不存在「按代码先做」的默认出口。
-- 消解定义：裁定即消解。一个条目被消解 = design.md 对应行 Status/Type 回写「已确认」，**且**裁定产生的具体内容（采纳的方案、用户提供的链接/字段）已写进对应行或章节。每个预设选项选中后必须能立即达成消解或明确暂停推进；两者之外的选项非法。
-- 协议：按共享 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项（对应协议中「逐项裁定」条款）；`id` 与条目 ID 对应（如 `pending_r_001`）。这是阶段门的组成部分，不设置 `autoResolutionMs`，必须等待明确答复。
-- 选项闭集：每条给 2–3 个互斥选项，语义只能从以下四类中取——①「按当前设计确认 (Recommended)」：采纳设计中已写出的方案；②「采纳备选：<方案>」：选项自身携带具体替代方案；③「需要调整」：用户将给出修改意见，吸收后更新章节、重新展示、该条重新裁定；④「暂停，拿到材料后继续」：仅信息缺口型条目可用，保留在 plan 阶段、不推进。
-- 信息缺口型条目（缺接口文档 url、字段定义、外部约定等）：`question` 中直接写「若现在能提供，请在『其他』中粘贴链接或具体内容」；预设选项只从「调整设计移除该依赖」「暂停，拿到材料后继续」中取。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口——该出口已从选项闭集移除，不得以任何措辞重新引入。用户在「其他」提供内容 → 内容写进 design.md → 回写「已确认」。共享协议第 3 节的「后续补充并继续」模板在这个阶段禁止搬进裁定门。
-- 回写：拿到裁定后立即回写 design.md 对应行——回写「已确认」的前提是信息实体落地：用户答复中给出的链接/字段/方案必须先写进对应行或章节。**声称拥有 ≠ 提供**：用户仅声称「我有 / 稍后给」而未提供实体时，该条**未消解**：追问一次索取内容，仍未提供则按「调整设计移除该依赖 / 暂停」重发裁定。不得有延后选择，后续阶段不会检查待确认；裁定改变设计内容时更新对应章节并重新展示变更部分。
-- 消解自查：全部裁定回写后、发起第二步之前，自查 design.md 各表单元格无「待确认」「读码差异」、回写内容无 TBD/待补充/待提供/占位 等词、无对缺失材料的引用（「根据实际文档」「以实际接口为准」「编码阶段补充」等）；任一命中回到第一步。plan_done 的 postcheck 会机械校验残留单元格，绕过自查也无法推进。
-- 顺序硬约束：所有待确认条目都拿到用户裁定之前，禁止发起第二步的整体确认门。
+父会话只允许执行四件事：推进 `plan_in_progress`、解析实际代码 workspace、准备并启动 Workflow、在 Workflow 成功后运行 Plan 阶段门和推进 `plan_done`。父会话不得手工调用 `plan_writer.py`、`plan_generation_launcher.py` 来生成或修复任何 Plan 产物，也不存在串行回退路径。先准备固定脚本，得到 `workflowScriptPath` 和完整 `workflowArgs`：
 
-**整体确认门**
+```bash
+python "${pluginPath}/hooks/plan_workflow_launcher.py" \
+  --workspace "${pluginWorkspace}" --feature "${feature}" \
+  --code-workspace "<ACTUAL_CODE_WORKSPACE>" --max-parallel 3 --json
+```
 
-- **发起阶段门**：按共享 `ask-user-question.md` 协议用 `request_user_input` 发起选择，选项为 `确认设计，进入 PLAN 生成 (Recommended)` / `需要调整设计` / `暂停，稍后继续`；这是阶段门，不设置 `autoResolutionMs`，必须等待明确答复。
-- **自由表达即退出结构化**：用户不点选项、直接给出修改意见时，当作普通文本吸收，更新 design.md 对应章节并重新展示变更部分，再择机重发确认门。
+只有 launcher 返回 `ok=true`、`useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true` 且 `requiredAction=start_fixed_plan_generation_workflow` 时才能启动。将它**直接作为顶层 Workflow tool** 启动；传入的是该 tool 的原生参数对象，`args` 必须是 launcher 返回的完整对象，绝不能 `JSON.stringify`：
 
-整体确认通过后，`design.md` 成为 Plan 的只读事实源。Plan 只能从其中选择已确认的 `API-NNN` / `DATA-NNN` / `D-NNN`，不得根据候选 Task 反向新增、续编或改写 design ID。任务分组或详情出现未知 ID 时，只能修 `task-groups.json` 或 Draft task；若规格本身确实要求修改 Design，必须退出当前 Plan 生成，重新展示 Design 变更并再次通过整体确认门，不能把 Plan 校验错误当作 Design 修订依据。已 finalized 且未开始执行的 Draft 如确实完成了独立 Design 修订，必须显式使用 `reopen-finalized-draft --design-revision-confirmed --reason <reason>` 更新 Design 锁；普通 reopen 不得接受 Design 漂移。
+```javascript
+// Workflow tool parameters — not JavaScript to run inside another workflow.
+{
+  scriptPath: launcher.workflowScriptPath,
+  args: launcher.workflowArgs
+}
+```
 
-反模式（禁止）：
+不得创建 wrapper Workflow 再启动 Plan Workflow。若确实是在某个 workflow 脚本中调用子 workflow，平台签名是 `await workflow({ scriptPath: "…" }, childArgs)`；把 `args` 放进第一个 `{ scriptPath, args }` 对象会被忽略，但本阶段不允许这种 wrapper。
 
-- 只问「以上技术设计是否满足需求？」「是否可以继续？」这类未展示具体内容的笼统问题。
-- 以「内容已经写在 design.md 里」为由省略对话内展示。
-- 未拿到明确确认就开始生成 PLAN.json。
-- 把待确认项在展示块中逐条列出后，未逐条以 `request_user_input` 提问就直接发起整体确认门；展示不等于裁定。
-- 自行判断某待确认项「编码阶段参考接口文档即可」「不影响主路径」而跳过提问；「延后处理」不能出现。
-- 选项 label/description 含「待确认」「先占位」「后续补充」「稍后提供」「编码阶段再」「编码阶段根据实际文档补充」「实现时参考文档」「字段以实际接口为准」等延后语义——凡选中后条目仍处于待确认状态的选项都是非法选项。延后判定按语义不按字面。
-- 「已确认，我有 url/文档」这类仅声称拥有信息、不当场收集内容的选项，需要继续发起一次追问。
+`plan-generation.workflow.js` 是由 launcher 物化到 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/` 的唯一执行体。不得调用 Python launcher 代替 Workflow、不得改用插件源码路径、不得内联 JavaScript、不得重建或删改 `workflowArgs`；任一启动条件不满足时停止并处理 launcher 返回的恢复动作。
 
----
+Workflow 返回 `{ok:true, finalStatus:"finalized"}` 前，父会话不得执行本技能后续任何 `plan_writer.py`、`stage_gate.py` 或 `update_checkpoint.py --checkpoint plan_done` 命令。它返回 `needs_repair`、输入摘要失效或启动条件不满足时，保留 run/Draft/worker proposal；在修复上游输入或对应 proposal 后，以同一 launcher 输出重新启动**同一固定 Workflow**，由 `ensure` 复用可恢复的 run。禁止改为父会话串行补写。
+
+固定脚本按以下边界执行：
+
+1. Launcher 锁定 `design.md`、全部 specs、每个代码仓库 Git SHA/工作区状态和 writer/template 摘要，创建或恢复 `.tmp/plan_generation/<runId>/manifest.json`。
+2. 分组 worker 按 capability 并行，只向 `group-proposals/` 登记带 `snapshotDigest` 的提案；单一 reducer 收口 Scenario 覆盖、DAG、workspace、写集 owner 与稳定 Task ID，随后由 launcher 运行 `preflight-task-groups` 和 `prepare-task-draft`。
+3. Detail worker 按已经冻结的 `Txxx` 并行，只向 `detail-proposals/` 登记完整详情；launcher 使用 `set-draft-task-details` 对全部详情一次校验、一次提交。任一 detail 不合法时，Draft 保持原样。
+4. 单一 coordinator 配置工程命令、运行 Draft 预检与 `finalize-task-draft`；只有这一段可以生成正式 `plan.json`、Batch 计划和 `PLAN.md`。
+
+每次 worker 最多重试两次。超时或 worker 失败只重跑相应 partition / `Txxx`；`status` 可查看 pending 项，复用同一输入摘要时再次启动固定 Workflow 会继续原 `runId`。Design、spec、代码仓库或 writer/template 摘要变化时 run 变为 `invalidated`，禁止复用旧 proposal，必须回到相应上游阶段。预检/finalize 失败会保留 Draft 并进入 `needs_repair`，修复后恢复同一 run；禁止删除 Draft 或直接改正式 JSON。
+
+运行控制命令仅用于查看、取消或显式恢复，不直接写计划：
+
+```bash
+python "${pluginPath}/hooks/plan_generation_launcher.py" status --workspace "${pluginWorkspace}" --feature "${feature}" --run-id "<runId>"
+python "${pluginPath}/hooks/plan_generation_launcher.py" cancel --workspace "${pluginWorkspace}" --feature "${feature}" --run-id "<runId>" --lease-token "<leaseToken>"
+```
+
+## Workflow 内部的 Plan 生成契约
+
+以下拆分算法、writer 命令和修复规则是固定 Workflow 的 worker/coordinator 必须遵守的内部协议，供其 Agent 调用；**不是父会话可替代 Workflow 逐条执行的步骤**。
 
 #### 生成 plan.json + PLAN.md
 
-本阶段必须一次性生成完整的 plan.json + PLAN.md，并同时生成全部 `plans/Bxxx/plan.json`。不得只生成第一批并等待 Code 跑完后再规划下一批。`plan.json` 只保存 feature 状态、任务集封口状态、批次索引、批次状态、lane 级 `compileProfiles`、可选 `qualityGateProfiles` 和跨批次项目验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约、task 状态、投影后的唯一 `compileCommand` 与可选 `qualityGateCommands`。`PLAN.md` 是从 `plan.json` 投影，并包含全部批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
+本阶段必须生成完整的 plan.json + PLAN.md，并同时生成全部 `plans/Bxxx/plan.json`。不得只生成第一批并等待 Code 跑完后再规划下一批。`plan.json` 只保存 feature 状态、任务集封口状态、批次索引、批次状态、lane 级 `compileProfiles`、可选 `qualityGateProfiles` 和跨批次项目验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约、task 状态、投影后的唯一 `compileCommand` 与可选 `qualityGateCommands`。`PLAN.md` 是从 `plan.json` 投影，并包含全部批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
-生成或修改 `plan.json` / `PLAN.md` 必须使用 `${pluginPath}/hooks/plan_writer.py`。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
+生成或修改 `plan.json` / `PLAN.md` 必须由 Workflow 内部使用 `${pluginPath}/hooks/plan_writer.py` 完成。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
 生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
 候选分组必须先做可验证性判断：backend group 若只产出 Entity/PO/DO/DTO/Mapper、配置或脚手架等结构，且唯一校验是 `compile/build` 或文件存在检查，则不得独立成 TASK；在不跨 workspace/lane 且不突破粒度上限时，合并到最早消费它的下游行为 group，并重排 ID/deps。只有能在不依赖后续 TASK 的情况下，通过真实的 behavior/integration/static 契约测试验证的数据迁移、ORM、序列化或 Schema 契约，才可保留为独立 backend TASK。frontend group 可按 frontend validation profile 使用 compile/build/typecheck 验证页面工程能成功编译，但不得把该命令伪装成 behavior test。此判断必须在 `preflight-task-groups` 和创建 Draft 前完成，不得在 task detail 阶段用空 `validationCommands`、伪 `static_check` 或占位命令兜底。Plan 仍必须生成测试相关的 `validationTestPlan` 和 `testIntent`，但这些内容不表示 Code 阶段创建或执行测试。
 
-每次 Plan 会话准备 Draft 前只执行一次以下只读命令，并以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流；后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
+每次 Plan 会话准备 Draft 前只执行一次以下只读命令；该操作仅由固定 Workflow 的 coordinator 执行，并以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流。后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" add-task-contract
@@ -299,7 +116,7 @@ python "${pluginPath}/hooks/plan_writer.py" preflight-task-groups --feature "${f
 
 分组预检失败时只能修改候选分组，不得准备 Draft。`oversized_plan_task_must_split` 必须先拆分；不得先补 AC、VAL、decisionIds、scope 或 implementationPoints。禁止看到 6-12 个 SCN 就为所有 group 自动补 `mergedScenarioRefs` / `splitRationale`，也禁止按连续 SCN 编号机械切块；必须先在候选分组表证明共享验证闭环，确认这些 SCN 共享同一用户动作、公开 seam 和自动化验证边界，否则按业务闭环继续拆分。
 
-分组预检成功后立即创建并锁定 Draft Batch；`prepare-task-draft` 会保存 `groupingDigest`，投影全部 group-owned 字段和自动 Batch，不需要也不接受 task 目录。首次准备还会在 Feature 目录写入持久的 `.design-contract.lock.json`，记录已确认 Design 的 SHA；它不在 `.tmp/plan_writer` 下，删除临时 Draft 不能重新铸造 Design 锁。若确实完成了 Design 重新确认，必须显式传 `--design-revision-confirmed --reason <reason>` 刷新该锁。下例以当前项目根为代码仓库；涉及多个仓库时，为每个实际绝对路径重复传入 `--code-workspace`：
+分组预检成功后立即创建并锁定 Draft Batch；`prepare-task-draft` 会保存 `groupingDigest`，投影全部 group-owned 字段和自动 Batch，不需要也不接受 task 目录。`.design-contract.lock.json` 已由 Design 阶段写入且不在 `.tmp/plan_writer` 下；删除临时 Draft 不会影响它，Plan 也无权生成或刷新它。Design 变更必须先回 `/autodev-design` 完成重锁，再重建或重开 Draft。下例以当前项目根为代码仓库；涉及多个仓库时，为每个实际绝对路径重复传入 `--code-workspace`：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feature}" --group-file "${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json" --code-workspace "<FRONTEND_MODULE>"
@@ -307,10 +124,11 @@ python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feat
 
 每个候选分组应显式选择 `executionMode=code|verified_existing|external_dependency`，缺省仅兼容为 `code`。`verified_existing` 表示本 Feature 内已有实现，只允许复用现存可执行验证目标；`external_dependency` 表示行为与验证均由 Feature 外的系统或仓库负责，必须同时写 `externalDependency.system/owner/trackingRefs`，不得配置本地验证命令或待创建测试。外部依赖不是本地 no-code 实现，也不得借创建占位测试把它伪装成已验证。
 
-按 Task ID 逐个把 `task-detail-input.json` 结构通过 stdin 交给 writer。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验，失败时当前 Draft task 保持原样；批量修复在任一 patch 不合法时整体不落盘：
+父会话不得使用串行模式按 Task ID 逐个写入详情。固定 Workflow 必须使用 `set-draft-task-details`，传入所有冻结 Task 的完整详情并作为一次原子提交。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验；Workflow 的原子提交会在全部 task 合格前保持整个 Draft 不变：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
+python "${pluginPath}/hooks/plan_writer.py" set-draft-task-details --feature "${feature}" --body-stdin
 ```
 
 Plan 阶段生成测试意图和验证命令契约，但不生成测试源码目标。测试目标不在 Code 阶段分配或创建；TASK 的 `testIntent` 供后续 UTest/E2E 阶段决定测试文件归属、复用策略和执行顺序。不得填写或推导 `create_in_code`，也不得依据测试文件是否存在来调整任务拆分。
@@ -330,14 +148,14 @@ python "${pluginPath}/hooks/plan_writer.py" finalize-task-draft --feature "${fea
 
 **预检与修复**：
 
-`preflight-task-groups` 和 `preflight-task-draft` 会校验设计引用、任务结构、场景覆盖、workspace/manifest、验证命令、DAG、backend/frontend 顺序、Batch 投影和 Design 双向覆盖。Draft 创建时锁定 design 摘要，之后 design 内容变化会返回 `confirmed_design_changed_after_draft_created`，当前 Plan 不得继续。
+`preflight-task-groups` 和 `preflight-task-draft` 会依据 Design 锁快照校验任务引用、任务结构、场景覆盖、workspace/manifest、验证命令、DAG、backend/frontend 顺序、Batch 投影和 Design 双向覆盖；不会重新校验 `design.md`。Draft 创建时记录所消费的锁摘要，Design 重新锁定后会返回 `confirmed_design_changed_after_draft_created`，当前 Plan 不得继续。
 
 失败时读取返回 JSON 的 `validation.issues` 和 `validation.invalidTaskIds`，每条 issue 包含：
 - `reason`: 错误类型（机器可读）
 - `repairSuggestion`: 具体修复步骤（中文，直接可执行）
 - `repairTarget`: 修复层级（`design_revision` / `task_group` / `task_detail` / `draft_integrity`）
 
-按照 `repairSuggestion` 中的指导执行修复，不要根据编号、标题或数量自行猜测。`repairTarget=design_revision` 表示必须修改 design.md，禁止修改 Plan 来迎合设计；`repairTarget=task_group` 只修候选分组，`repairTarget=task_detail` 只修对应任务详情。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复。
+按照 `repairSuggestion` 中的指导执行修复，不要根据编号、标题或数量自行猜测。`repairTarget=design_revision` 表示停止本阶段并回到 `/autodev-design` 修订、确认 design.md，禁止用 Plan 迎合设计；`repairTarget=task_group` 只修候选分组，`repairTarget=task_detail` 只修对应任务详情。不得因为 task detail 错误就删除 Draft 或全量重填 task：调用 `repair-draft-task` / `repair-draft-tasks` 后重复 preflight。批量修复在任一 patch 不合法时整体不落盘。不得删除 `.tmp/plan_writer` 来规避局部错误；若临时 Draft 丢失，必须保留 Feature 级 Design 锁并按错误提示恢复。
 
 finalize 会重跑同一校验并通过事务一次写入正式根计划、全部 Batch 和 `PLAN.md`；失败时不写任何正式产物。正式计划已存在时默认拒绝覆盖；需要修改已 finalized 但尚未执行的计划时，先运行 `diagnose-plan-repair`，再运行 `reopen-finalized-draft --reason <reason>`，随后局部 repair、preflight，最后 `finalize-task-draft --force` 重新物化并重算摘要。若诊断返回 `plan_revision_required`，说明已有执行状态或证据，必须回到计划修订流程；只有返回 `full_rebuild_required`（Draft 缺失或不可校验）时才允许删除并重建 Draft。不得删除 Draft 或全量重填 task。禁止使用 `python -c` 构造 Python dict 或 JSON，也不得混用 Python 的 `True/False/None` 与 JSON 的 `true/false/null`。
 
@@ -364,18 +182,17 @@ finalize 会重跑同一校验并通过事务一次写入正式根计划、全�
 - 顶层 `compileProfiles` 按实际使用的 lane 配置一条 `kind=compile` 的 required 命令；backend 可使用 `mvn compile`，frontend 可使用 `npm run build`、`pnpm typecheck` 或等价的不执行测试的编译命令。它会投影为每个 Batch 唯一的 `compileCommand`，且只在 implement 阶段执行。顶层 `qualityGateProfiles` 只放 `kind=static_check` 的 lint/静态检查；为空时 Batch 不创建 `quality_gate` 阶段。TASK 的 `validationCommands` 不在 Code 阶段运行。
 - 顶层 `projectValidationCommands` 是最终 B-E2E 的可选系统级命令源：它们只在所有 delivery 已合并后的临时 main Worktree 中执行，绝不成为候选 Merge Train 门槛。不得把 batch compile/build 或各 Batch 的 UTest 命令复制进该数组，也不能替代 TASK 的 AC 覆盖。单仓库可留空；多仓库若声明命令，必须为每条命令显式填写对应 `repo`，并确保每个实际 `workspaceRef` 由 E2E intent 或项目命令覆盖。
 - Plan 阶段所有任务初始状态为 `todo`，evidence 相关字段为空或 null，这些运行字段只由 task runner 更新。单 Batch Plan 可初始激活 `B001`；多 Batch Plan 由并行 scheduler 从零入度 Batch 集合启动，不写人为 batch handoff。依赖 Batch 必须等其 `deps` 全部合并后才进入下一调度波次。
-- 每个任务必须追溯到真实 specs 与已确认 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的 ID。四个字段在结构上可以存在但取空数组；任务不涉及对应设计项时必须写 `[]`，禁止为了过校验强行编造或按 Task 编号续写 `API-*` / `DATA-*` / `D-*`。模板中的 API/Data/Decision ID 都是占位示例，生成前必须替换为 Design 中真实 ID；不要为了过校验强行编造，未涉及时使用空数组 `[]`。如果 `design.md` 中存在 API/Data/D 决策，则这些设计项必须被至少一个真正相关的任务覆盖；覆盖缺失时把已有 ID 绑定到正确任务，禁止向 design 新增 ID 迎合 Plan。只有整轮都不涉及 HTTP/API 或 SQL/持久化时，才在 design.md 写 `x-auto-no-http-api: true` / `x-auto-no-sql: true`。
+- 每个任务必须追溯到真实 specs 与已确认 design：`specRefs` 至少覆盖一个 `REQ-xxx` 和一个 `SCN-xxx`；`designRefs`/`apiIds`/`dataIds`/`decisionIds` 只引用 `design.md` 中真实定义的 ID。四个字段在结构上可以存在但取空数组；任务不涉及对应设计项时必须写 `[]`，禁止为了过校验强行编造或按 Task 编号续写 `API-*` / `DATA-*` / `D-*`。模板中的 API/Data/Decision ID 都是占位示例，生成前必须替换为 Design 中真实 ID；不要为了过校验强行编造，未涉及时使用空数组 `[]`。如果 `design.md` 中存在 API/Data/D 决策，则这些设计项必须被至少一个真正相关的任务覆盖；覆盖缺失时把已有 ID 绑定到正确任务，禁止向 design 新增 ID 迎合 Plan。`x-auto-no-http-api` / `x-auto-no-sql` 必须已由 `/autodev-design` 依据真实范围写入；缺失或需要改变时回到设计阶段。
 - `specRefs` / `designRefs` 是 feature 产物目录下的逻辑相对引用，必须写成 `specs/<capability>/spec.md#SCN-001`、`design.md#API-001` 这类形式；不要写业务代码仓库相对路径，也不要把绝对产物路径固化进 `plan.json`。Code 阶段会通过 `${pluginPath}/hooks/code_task_context.py` 按 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}` 解析这些引用。
 - `validationCommands` 是 task 级测试意图契约，必须窄、快、可追溯；不能确定真实文件时不要凭空填写 `expectedFiles`。Code 阶段不运行 TASK 验证；`executionMode=external_dependency` 仍由后续阶段处理。
 
 用户补充信息沉淀规则：
-- 如果用户在对话中谈论了计划实现方式、模块拆分、技术方案、接口设计思路、数据库设计思路、验证方式、风险点，或额外提供了任何技术细节，必须先同步沉淀到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/design.md` 对应章节，再把执行相关部分同步到 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/plan.json`；同步更新`PLAN.md`。
+- 用户补充的任务边界、模块拆分、验证方式或风险，写入候选分组、Draft 与 `plan.json`，并由 writer 同步更新 `PLAN.md`。
+- 用户补充接口设计、数据库设计、API/DATA/D 决策或任何会改变 `design.md` 的内容时，停止本阶段并回到 `/autodev-design`。设计重新确认后才能重建或继续 Draft；不得在 Plan 阶段直接改写 design.md。
 - 必须在 `plan.json` 对应任务或风险字段中记录用户补充说明 / 技术细节； `PLAN.md`同步新增或更新「用户补充说明 / 技术细节」章节。
 - `PLAN.md` 必须从 `plan.json` 投影，任务 id / deps / status / workspaceRef / specRefs / designRefs / validationCommands / evidenceIds 不能漂移；任务的「做什么」「代码工作区」「涉及范围」「执行要点」「验收标准」「不做什么」只能来自 `goal` / `workspaceRef` / `scope` / `implementationPoints` / `acceptanceCriteria` / `nonGoals`，不得在 `PLAN.md` 独写机器事实源没有的内容。
-- 用户明确确认的内容，标记为「已确认」。
-- 用户表达为建议、可能、待定、需要评估的内容，标记为「待确认」。
 - 如果用户补充内容影响任务拆分、验证方法或风险，应同步更新对应任务。
-- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，必须在 design.md 与 plan.json 的风险/阻断字段中记录，并回到用户确认，不得擅自覆盖 specs； `PLAN.md`同步更新。
+- 如果用户补充内容与 specs、design.md 或既有系统约束冲突，记录 Plan 阻断原因并回到对应的 `/autodev-specs` 或 `/autodev-design`，不得擅自覆盖上游产物。
 - 用户补充的实现细节只能作为计划依据，不得在 Plan 阶段创建或修改业务代码文件。
 
 UI 任务规则：
@@ -460,7 +277,7 @@ UI 任务规则：
 - `preflight-task-groups` 成功后只运行一次 `prepare-task-draft`，并且必须带真实的 `--code-workspace`。缺少 workspace 时必须先确定业务代码目录，不得创建无 workspace 的 Draft；不得创建独立 `Txxx.json`，不得在每写 5 个 task 后提前 finalize。遇到 `missing_plan_task_split_rationale` 或 `invalid_plan_task_split_rationale` 时，回 Scenario 覆盖矩阵定位遗漏并重新分组。
 - 不得通过完整 task 的内容校验失败来探索如何拆分；拆分必须在覆盖矩阵、候选任务分组表和 `preflight-task-groups` 阶段完成。
 - 预检失败时读取 `validation.issues`，按每条 issue 的 `repairSuggestion` 执行修复。不要根据 SCN 编号连续性、标题相似度或 API 数量自行猜测应移动哪些 Scenario；不得把缺失 Scenario 添加到标题相近的任务；若要拆分，必须回到覆盖矩阵定位遗漏并重新分组。
-- 每个 `set-draft-task-detail` 成功后该 task 才进入 ready；失败不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
+- 串行 `set-draft-task-detail` 成功后对应 task 才进入 ready；Workflow 的 `set-draft-task-details` 只在全部 task 成功时统一进入 ready。两种写入失败均不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
 - 分组 digest 变化时运行 `rebuild-task-draft`；writer 保留分组投影未变化的 ready task，重置其余 task。不得修改 group 后继续向旧 Draft 写详情。
 - 全部 task ready 后，**在 finalize 之前**必须配置工程命令（见下节），然后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。若预检失败，先按 `validation.issues` 定位并修复 Draft，再重新预检，不删除 Draft。
 - 对 finalized 计划不原地解封、不直接编辑 JSON（不得绕过 Draft lock 修改正式 Bundle）。先运行 `diagnose-plan-repair`：未开始执行且 Draft 完整时，运行 `reopen-finalized-draft --reason <reason>` 进入可修复状态；修复后使用 `finalize-task-draft --force` 重新物化并重算 `taskSetDigest`、`taskContractSha256ByTask`。若已开始执行，禁止覆盖正式计划并转入计划修订；只有 Draft 缺失或不可校验时才清理并全量重建。
@@ -498,13 +315,13 @@ finalize 后计划进入只读状态。发现问题需要先运行 `diagnose-pla
 - [ ] `plans/B001/plan.json` 起的批次计划已写入磁盘，每批最多 5 个任务，根 plan 不含 tasks
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘，且从 `plan.json` 投影生成
 - [ ] 根 `plan.json` 与各批次计划共同作为任务 DAG 机器事实源，状态投影一致
-- [ ] 每个任务已通过 `set-draft-task-detail`，详情符合 `templates/task-detail-input.json`，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果
+- [ ] 每个任务已通过 `set-draft-task-detail` 或原子 `set-draft-task-details`，详情符合 `templates/task-detail-input.json`，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果
 - [ ] 任务按用户可观察 vertical slice 拆分，不按代码层或文件层机械拆分；超过 15 个 task 时已检查是否误拆到代码步骤，没有为了压低任务数合并独立场景
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx）
 - [ ] 每个任务的「验证命令」都能直接运行并自行判读，没有任何需要人参与的步骤
 - [ ] specs 中每个 Requirement / Scenario 至少被一个任务覆盖
 - [ ] design.md 中每个接口/数据/技术决策至少被一个实现任务和一个验证方法覆盖，或明确标注无需实现
-- [ ] 在 Plan 阶段额外提供了实现细节或技术约束，design.md 与 plan.json 已同步记录，并更新相关任务或风险项。
+- [ ] Plan 阶段额外提供的实现细节已写入 plan.json 并更新相关任务或风险项；若它改变技术设计，已回到 `/autodev-design` 完成重新确认。
 
 #### 产物契约预检（机器校验）
 
@@ -512,7 +329,7 @@ finalize 后计划进入只读状态。发现问题需要先运行 `diagnose-pla
 
 它**不**判定需求语义是否完整、方案是否合理、测试策略是否充分、代码事实是否属实——那些由回检子代理负责，两者职责不重叠。
 
-design.md、plan.json、PLAN.md 全部生成完成后执行：
+确认已有 design.md 未变更且 plan.json、PLAN.md 全部生成完成后执行：
 
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
@@ -539,6 +356,8 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
 ---
 
 ## 完成
+
+只有固定 Workflow 已返回 `{ok:true, finalStatus:"finalized"}`，才由父会话执行以下最终阶段门与 checkpoint 推进。任何可恢复失败都回到同一 Workflow，不得补跑这些命令或手工修改计划。
 
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"

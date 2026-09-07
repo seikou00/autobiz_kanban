@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hooks.plan_json import task_contract_sha256
+from hooks.design_contract_lock import sync_design_contract_lock
 
 
 def _state_record(checkpoint: str = "plan_in_progress") -> dict:
@@ -92,6 +93,9 @@ def _write_design(feature_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+    result = sync_design_contract_lock(feature_dir.parents[2], feature_dir.name)
+    if not result.ok:
+        raise AssertionError(result.errors)
 
 
 def _plan_task_body(task_id: str = "T001", *, scenario: str = "SCN-001") -> dict:
@@ -328,7 +332,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             self.assertFalse(issue["designMutationAllowed"])
             self.assertEqual(issue["currentValue"], "API-999")
 
-    def test_prepare_cannot_remint_design_lock_after_tmp_draft_is_deleted(self) -> None:
+    def test_prepare_consumes_design_lock_without_rechecking_design_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir = _workspace(root)
@@ -351,15 +355,39 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 "--feature", "alpha", "--group-file", str(group_file),
                 "--code-workspace", str(ROOT),
             )
-            self.assertNotEqual(second.returncode, 0)
-            self.assertIn("confirmed_design_changed_without_reconfirmation", second.stdout)
-            confirmed = _run(
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertFalse((feature_dir / ".design-contract.lock.json").read_text(encoding="utf-8").find("initial_plan_prepare") >= 0)
+
+            shutil.rmtree(feature_dir / ".tmp" / "plan_writer")
+            result = sync_design_contract_lock(workspace, "alpha")
+            self.assertTrue(result.ok, result.errors)
+            refreshed = _run(
                 "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha", "--group-file", str(group_file),
-                "--code-workspace", str(ROOT), "--design-revision-confirmed",
-                "--reason", "Design revision confirmed in plan gate",
+                "--code-workspace", str(ROOT),
             )
-            self.assertEqual(confirmed.returncode, 0, confirmed.stdout + confirmed.stderr)
+            self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+
+    def test_prepare_refuses_missing_design_lock_without_reminting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            _write_design(feature_dir)
+            lock_path = feature_dir / ".design-contract.lock.json"
+            lock_path.unlink()
+            task = _plan_task_body()
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+
+            result = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(ROOT),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("design_contract_lock_missing", result.stdout)
+            self.assertFalse(lock_path.exists())
 
     def test_detail_rejects_unknown_data_and_decision_but_allows_empty_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -463,7 +491,7 @@ class PrevalidationIntegrationTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("missing_ref_anchor", result.stdout)
+            self.assertIn("unknown_plan_json_api_ref", result.stdout)
 
     def test_set_draft_task_detail_allows_shared_test_selector_as_intent(self) -> None:
         """Test-stage ownership is deferred, so Plan may preserve shared selectors as intent."""
@@ -586,6 +614,8 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 design_path.read_text(encoding="utf-8").replace("D-001", "D-002"),
                 encoding="utf-8",
             )
+            lock_result = sync_design_contract_lock(workspace, "alpha")
+            self.assertTrue(lock_result.ok, lock_result.errors)
             preflight = _run(
                 "plan_writer.py", "preflight-task-draft", "--workspace", str(workspace),
                 "--feature", "alpha",
@@ -742,6 +772,8 @@ class PrevalidationIntegrationTests(unittest.TestCase):
                 design_path.read_text(encoding="utf-8").replace("D-001", "D-002"),
                 encoding="utf-8",
             )
+            lock_result = sync_design_contract_lock(workspace, "alpha")
+            self.assertTrue(lock_result.ok, lock_result.errors)
 
             diagnosis = _run(
                 "plan_writer.py", "diagnose-plan-repair", "--workspace", str(workspace),
