@@ -357,6 +357,8 @@ function hasWorkOutsideScope(scheduler) {
     scheduler.allMergeableBatches,
     scheduler.allStageRecoveryBatches,
     scheduler.allParallelGroups,
+    scheduler.retryPendingBatches,
+    scheduler.blockedBatches,
   ];
   return candidates.some(value => {
     const ids = Array.isArray(value)
@@ -366,8 +368,15 @@ function hasWorkOutsideScope(scheduler) {
   });
 }
 
+function retryPendingInScope(scheduler) {
+  const retryPending = scheduler && Array.isArray(scheduler.retryPendingBatches)
+    ? scheduler.retryPendingBatches
+    : [];
+  return retryPending.filter(batchId => usableString(batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(batchId)));
+}
+
 phase("准备");
-const prepared = requireSchedulerResult(await agent(
+let prepared = requireSchedulerResult(await agent(
   `确保固定 Code DAG run。执行：python "${schedulerPath}" ensure ` +
   `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
   `--task-card-id "${taskCardId.trim()}" ` +
@@ -380,9 +389,24 @@ const prepared = requireSchedulerResult(await agent(
 ), "scheduler ensure");
 
 const runId = prepared.runId;
+
+async function recoverPendingRetries(scheduler, label) {
+  if (!retryPendingInScope(scheduler).length) return scheduler;
+  // A normal ensure/resume already performs this transition.  One immediate,
+  // explicit retry makes the Workflow resilient to an interrupted lease
+  // handoff while still letting the scheduler remain the sole state owner.
+  return requireSchedulerResult(await agent(
+    `执行 python "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${workspaceRefArgs}。` +
+    `恢复所有 retry_pending Batch，并在返回前清理其残留 lease；只返回 JSON。`,
+    { label, phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
+  ), label);
+}
+
+prepared = await recoverPendingRetries(prepared, "recover-pending-retries-after-ensure");
 let scheduledGroups = scopeGroups(prepared.scheduledGroups || []);
 let mergeableBatches = (prepared.mergeableBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
 let stageRecoveryBatches = (prepared.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(result.batchId)));
+let retryPendingBatches = retryPendingInScope(prepared);
 let batchTaskIds = prepared.batchTaskIds || {};
 let batchWorkspaces = prepared.batchWorkspaces || {};
 const batchResults = [];
@@ -920,6 +944,20 @@ async function runMergeableBatchLifecycle(batchId) {
 // Workflow. Clear those first so a retry never inherits occupied branches.
 await cleanupMergedWorktrees([], "recover-merged-worktree-cleanup");
 
+if (retryPendingBatches.length > 0) {
+  return {
+    ok: false,
+    feature,
+    runId,
+    batchResults,
+    mergeResults,
+    cleanupResults,
+    retryPendingBatches,
+    finalStatus: "partial_retry_pending",
+    nextAction: "resume_retry_pending_batches",
+  };
+}
+
 if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !blockedBatches.length && !["verifying", "succeeded"].includes(prepared.status) && !prepared.waitingForRepositories && !hasWorkOutsideScope(prepared)) {
   throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: prepared, batchResults, mergeResults }));
 }
@@ -948,17 +986,32 @@ while (scheduledGroups.length > 0 || mergeableBatches.length > 0 || stageRecover
   ];
   await parallel(lifecycleJobs);
 
-  const resumed = requireSchedulerResult(await agent(
+  let resumed = requireSchedulerResult(await agent(
     `执行 python "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${workspaceRefArgs}。` +
     `只返回 JSON。下游 Batch 必须仅在依赖已 merged 后才会出现在 scheduledGroups 中。`,
     { label: `schedule-wave-${schedulerWaves + 1}`, phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
   ), "scheduler resume");
+  resumed = await recoverPendingRetries(resumed, `recover-pending-retries-after-wave-${schedulerWaves}`);
   scheduledGroups = scopeGroups(resumed.scheduledGroups || []);
   mergeableBatches = (resumed.mergeableBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
   stageRecoveryBatches = (resumed.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(result.batchId)));
+  retryPendingBatches = retryPendingInScope(resumed);
   batchTaskIds = resumed.batchTaskIds || batchTaskIds;
   batchWorkspaces = resumed.batchWorkspaces || batchWorkspaces;
   blockedBatches = (resumed.blockedBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
+  if (retryPendingBatches.length > 0) {
+    return {
+      ok: false,
+      feature,
+      runId,
+      batchResults,
+      mergeResults,
+      cleanupResults,
+      retryPendingBatches,
+      finalStatus: "partial_retry_pending",
+      nextAction: "resume_retry_pending_batches",
+    };
+  }
   if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !blockedBatches.length && !["verifying", "succeeded"].includes(resumed.status) && !resumed.waitingForRepositories && !hasWorkOutsideScope(resumed)) {
     throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: resumed, batchResults, mergeResults }));
   }

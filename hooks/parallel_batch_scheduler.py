@@ -26,6 +26,7 @@ from hooks.parallel_runtime import (
     create_manifest,
     delivery_stage_names,
     get_active_run,
+    lease_path,
     list_runs,
     load_manifest,
     parallel_plan_errors,
@@ -52,6 +53,31 @@ _BOOTSTRAP_IGNORE_RULES = (
     ".autobizdevops/features/*/.parallel-runs/",
 )
 MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS = 2
+
+
+def _clear_retry_lease_locked(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    batch: dict[str, Any],
+) -> bool:
+    """Clear lease authority while the caller owns the run lock.
+
+    ``retry_pending`` means that the worker which held this Batch's lease has
+    already yielded control.  Keeping either the lease file or the manifest
+    lease metadata would make a resumed ``ready_to_candidate`` delivery
+    permanently non-mergeable, or make a resumed ``pending`` delivery reject
+    its next worker with ``parallel_batch_lease_held``.  Do this as part of
+    the durable state transition rather than depending on a best-effort
+    Workflow cleanup prompt.
+    """
+    path = lease_path(workspace, feature, run_id, batch_id)
+    had_lease = path.is_file() or batch.get("lease") is not None
+    with FileLock(path.with_suffix(".lock")):
+        path.unlink(missing_ok=True)
+    batch["lease"] = None
+    return had_lease
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -702,6 +728,7 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
     allowed = {"pending", "leased", "running", "compile_failed", "sealed", "ready_to_candidate", "needs_resolution", "retry_pending", "failed", "blocked", "cancelled"}
     if status not in allowed:
         raise ValueError(f"parallel_batch_status_invalid:{status}")
+    retry_lease_cleared = False
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = manifest.get("batches", {}).get(batch_id)
@@ -752,6 +779,13 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
                 "status": "pending_retry",
             }
             batch["completedAt"] = None
+            retry_lease_cleared = _clear_retry_lease_locked(
+                workspace,
+                feature,
+                run_id,
+                batch_id,
+                batch,
+            )
         if status == "running" and not batch.get("startedAt"):
             batch["startedAt"] = details.get("startedAt") or manifest.get("updatedAt")
         if status in terminal:
@@ -764,6 +798,16 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
         elif status in {"failed", "blocked"}:
             manifest["status"] = "blocked"
         save_manifest(workspace, feature, run_id, manifest)
+        if retry_lease_cleared:
+            append_event(
+                workspace,
+                feature,
+                run_id,
+                "lease_reclaimed",
+                batchId=batch_id,
+                force=True,
+                reason="retry_pending",
+            )
         append_event(workspace, feature, run_id, "batch_status_changed", batchId=batch_id, previous=previous, status=status)
         return manifest
 
@@ -808,6 +852,26 @@ def resume_run(
         manifest = load_manifest(workspace, feature, run_id)
         if manifest.get("status") in {"cleaned", "rolled_back"}:
             return {"runId": run_id, "status": manifest.get("status"), "skipped": "terminal_run"}
+        # Older runs (and an interrupted Workflow cleanup) can have reached
+        # ``retry_pending`` before their lease handoff completed.  Repair that
+        # invariant before deciding whether the preserved delivery is sealed,
+        # mergeable, or ready to be scheduled again.
+        retry_leases_cleared: list[str] = []
+        for batch_id, batch in manifest.get("batches", {}).items():
+            if not isinstance(batch, dict) or batch.get("status") != "retry_pending":
+                continue
+            if _clear_retry_lease_locked(workspace, feature, run_id, str(batch_id), batch):
+                retry_leases_cleared.append(str(batch_id))
+        for batch_id in retry_leases_cleared:
+            append_event(
+                workspace,
+                feature,
+                run_id,
+                "lease_reclaimed",
+                batchId=batch_id,
+                force=True,
+                reason="retry_resume_repair",
+            )
         invalid_deliveries: list[str] = []
         for batch_id, batch in manifest.get("batches", {}).items():
             if not isinstance(batch, dict):

@@ -17,6 +17,7 @@ from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import (
     acquire_lease,
     check_lease,
+    lease_path,
     load_manifest,
     plan_digest,
     reclaim_lease,
@@ -423,6 +424,75 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(requeued["rescheduledRetryBatches"], ["B001"])
             self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
 
+    def test_retry_pending_transition_clears_lease_before_reschedule(self) -> None:
+        """A retry marker must take lease authority away from a failed worker."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+            self.assertTrue(check_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"]))
+
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "retry_pending",
+                error="empty_agent_output",
+            )
+
+            marked = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            self.assertEqual(marked["status"], "retry_pending")
+            self.assertIsNone(marked["lease"])
+            self.assertFalse(lease_path(workspace, "alpha", run_id, "B001").exists())
+
+            resumed = resume_run(workspace, "alpha", run_id)
+
+            self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
+            self.assertEqual(resumed["scheduledGroups"], [["B001"]])
+
+    def test_resume_repairs_legacy_retry_pending_lease(self) -> None:
+        """Resume must repair retry records written before atomic lease cleanup."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+            manifest = load_manifest(workspace, "alpha", run_id)
+            manifest["batches"]["B001"].update({
+                "status": "retry_pending",
+                "recovery": {
+                    "retryAttempts": 1,
+                    "resumeStatus": "pending",
+                    "status": "pending_retry",
+                },
+            })
+            save_manifest(workspace, "alpha", run_id, manifest)
+
+            resumed = resume_run(workspace, "alpha", run_id)
+
+            repaired = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            self.assertIsNone(repaired["lease"])
+            self.assertFalse(lease_path(workspace, "alpha", run_id, "B001").exists())
+            self.assertEqual(repaired["status"], "pending")
+            self.assertEqual(resumed["scheduledGroups"], [["B001"]])
+
     def test_retry_pending_restores_a_merge_candidate(self) -> None:
         """A failed promotion retry must not strand completed stage evidence."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -462,12 +532,22 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 branchName=delivery["branchName"],
                 commitSha=sealed["commitSha"],
             )
+            # Simulate the interruption window that previously left a
+            # candidate's durable lease metadata behind after its worker had
+            # already returned control to the Workflow.
+            interrupted = load_manifest(workspace, "alpha", run_id)
+            interrupted["batches"]["B001"]["lease"] = {"host": "interrupted-worker"}
+            save_manifest(workspace, "alpha", run_id, interrupted)
+            lease_path(workspace, "alpha", run_id, "B001").write_text("{}", encoding="utf-8")
             mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="promotion_transport_failure")
 
             resumed = resume_run(workspace, "alpha", run_id)
 
             self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
-            self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "ready_to_candidate")
+            resumed_batch = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            self.assertEqual(resumed_batch["status"], "ready_to_candidate")
+            self.assertIsNone(resumed_batch["lease"])
+            self.assertFalse(lease_path(workspace, "alpha", run_id, "B001").exists())
             self.assertEqual(resumed["mergeableBatches"], ["B001"])
 
     def test_legacy_failed_batch_can_enter_retry_pending(self) -> None:
