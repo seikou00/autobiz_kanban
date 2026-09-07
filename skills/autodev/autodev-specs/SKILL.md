@@ -4,10 +4,7 @@ description: Dev 阶段行为规格生成。
 version: v1.16.09032
 ---
 
-## 缺失产物处理
-```bash
-python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "${feature}" --plain
-```
+
 
 
 # /autodev-specs — Proposal + Behavior Specs
@@ -16,17 +13,17 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 ## 阶段定位
 
-`autodev-specs` 是 Dev 阶段的上下文边界，负责把上游需求输入转成稳定的行为契约。
+`autodev-specs` 是 Dev 阶段的上下文边界，负责把PRD.md输入转成稳定的行为契约。
 
-本阶段只回答：
+本阶段只做：
 
 - **为什么做**：沉淀到 `proposal.md`
 - **系统应该表现为什么行为**：沉淀到 `specs/**/*.md`
 
-本阶段不回答：
+本阶段不考虑：
 
-- **怎么实现 / 怎么拆编码任务**：交给后续设计与计划阶段
-- **怎么改代码**：交给后续编码阶段
+- **怎么实现 / 怎么拆编码任务**
+- **怎么改代码**
 
 ## 实现范围
 
@@ -42,7 +39,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/proposal.md`
 - `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/specs/<capability>/spec.md`
-- `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/SPECS_REVIEW.md`（回检结论，模板 `${pluginPath}/skills/autodev/autodev-specs/templates/specs-review.md`）
 
 同步维护（非阶段产物）：
 
@@ -51,7 +47,6 @@ python "${pluginPath}/hooks/inspect_skill_contract.py" autodev-specs --feature "
 禁止写入：
 
 - 业务代码、测试代码、配置、迁移脚本
-- 后续阶段报告
 
 ## 写入 checkpoint
 
@@ -67,25 +62,26 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 
 > 进入探索前先使用 write_todos 工具建立一份覆盖本轮宏观流程的任务清单，并随阶段推进实时更新状态。
 
-使用 task 工具，指定 Explore-autodev 角色进行探索。子代理按下面的要求返回结构化内容供主代理参考。
+使用 task 工具，指定 Explore-autodev 角色进行探索。子代理直接将下面的内容作为prompt。
+
+---
 
 探索时必须：
 
-- 从上游需求输入提取目标、用户角色、主流程、验收标准、非目标。
+- 从PRD.md中提取目标、用户角色、主流程、验收标准、非目标。
 - 从 `source-context.json` 提取全部 `SRC-NNN-RNNN`。`snapshot_only` 使用已保存快照，不重新索取；只有 `never_provided` 且影响行为时才列入信息缺口。
-- 阅读现有代码，识别已有接口、数据模型、权限、租户、审计、错误体、分页、状态流、配置和测试风格。
-- **只探索源码，不碰编译/生成产物**：`target/`、`build/`、`out/`、`bin/`、`*.class`、`*.jar/war/ear`、`__pycache__/`、`*.pyc`，以及一切 `.gitignore` 命中的路径都不是事实源。扫描优先 `git ls-files <pattern>` 找文件、`git grep <regex>` 搜内容，不要用裸 `find`/`grep` 做全库扫描。例外：某生成物本身就是问题对象时可读，但须标注「生成物」并回溯到其生成器/源码。
+- 阅读现有代码，识别已有接口、数据模型、权限。
 - 将上游需求改写为外部可观察行为，不要把实现猜测写成需求。
 - 识别 capabilities：一组可以独立命名、独立验收的能力边界，例如 `order-export`、`approval-reminder`。
 - 与用户对齐了术语或规范代码名时，按 `${pluginPath}/skills/references/domain-context.md` 当场回写会话工作区 `CONTEXT.md`；只收已对齐术语。
 
 接口/数据决策讨论触发：
 
-- 如果新增或修改 HTTP/API、函数入口、请求响应、错误码、权限、租户、审计、幂等、分页、异步行为，但接口形态还不准确，先讨论。
-- 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据语义还不准确，先讨论。
+- 如果新增或修改 HTTP/API、函数入口、请求响应、错误码、权限、分页、异步行为，但接口形态还不准确，作为待讨论点返回主代理。
+- 如果涉及表、字段、状态、枚举、索引、唯一约束、迁移、回滚、数据保留、历史兼容，但数据语义还不准确，作为待讨论点返回主代理。
 - 讨论时只提出影响实现路径或验收结果的关键问题，并给出当前建议、备选方案和影响面；不要机械问卷。
 
-探索结束时先生成待确认问题清单。需求、PRD 或用户材料中的「待补充」「待提供」「后续给出」如影响行为契约，逐项列入；无待确认项时写「无」并继续生成产物。
+探索结束时先生成待确认问题清单。需求或用户材料中的「待补充」「待提供」「后续给出」如影响行为契约，逐项列入；无待确认项时写「无」并继续生成产物。
 
 讨论输出：
 
@@ -100,18 +96,14 @@ python "${pluginPath}/hooks/update_checkpoint.py" --checkpoint specs_in_progress
 | API-001 | API | [接口入口/请求响应/错误码] | [建议] | [备选] | [影响任务/验收] | [问题] |
 | DATA-001 | Data | [表/字段/状态/约束] | [建议] | [备选] | [影响任务/验收] | [问题] |
 ```
+---
+
 
 ### 待确认问题裁定门
 
 - 仅裁定讨论表中的待确认条目；没有条目时直接生成产物。
 - 所有条目拿到用户裁定之前，禁止生成 proposal 与 specs。展示不等于裁定：清单列出来但没有逐条提问，等于没裁定。
-- 按 `ask-user-question.md` 协议用 `request_user_input` 逐条提问，每轮最多 3 项；`id` 与讨论表条目 ID 对应（如 `SPEC-001` → `spec_001`）。不设置 `autoResolutionMs`，必须等待明确答复；发起后停止执行，不得在同一轮继续生成产物。
-- 选项闭集：每条给 2–3 个互斥选项，语义只能取——①「按当前建议确认 (Recommended)」；②「采纳备选：<方案>」；③「需要调整」（用户给出修改意见，吸收后更新讨论表并重新裁定）；④「暂停，拿到材料后继续」（仅信息缺口型条目可用）。
-- 信息缺口型条目（缺接口文档 url、字段定义、外部约定等）：`question` 中写「若现在能提供，请在『其他』中粘贴链接或具体内容」；预设选项只从「调整方案移除该依赖」「暂停，拿到材料后继续」中取，不得使用「已准备好，稍后提供」或「后续补充并继续」。缺失材料只有三个出口：当场提供、移除依赖、暂停；不存在「先假设 / 先按默认方案 / 先占位」后推进的出口，不得以任何措辞重新引入。共享协议第 3 节的「后续补充并继续」模板在裁定阶段禁止使用。
-- **凡选中后条目仍处于待确认状态的选项都是非法选项**：「先占位」「后续补充」「稍后提供」「编码阶段再补」「以实际接口为准」等延后语义，按语义不按字面判定。
-- **禁止自行确认**：`已确认` 只能是用户裁定的结果。「这是外部接口细节」「不影响行为契约」「specs 阶段只关心 WHAT」都不是跳过裁定的理由。
-- **声称拥有 ≠ 提供**：用户仅声称「我有 / 稍后给」而未给出实体时该条未消解，追问一次索取内容，仍未提供则按「移除依赖 / 暂停」重发裁定。
-- **自由表达即退出结构化**：用户不点选项、而是直接给出实质回复时，当作该条的裁定内容吸收并更新，不得机械重复弹同一个结构化选择。
+- 逐条提问；`id` 与讨论表条目 ID 对应（如 `SPEC-001` → `spec_001`）。不设置 `autoResolutionMs`，必须等待明确答复；发起后停止执行，不得在同一轮继续生成产物。
 - 回写：拿到裁定后立即回写讨论表对应行，用户给出的链接/字段/方案必须先写进对应行才算「已确认」。
 - 消解自查：生成产物前确认讨论表无「待确认」单元格，回写内容无 TBD/待补充/待提供/占位，无对缺失材料的引用（「根据实际文档」「以实际接口为准」「编码阶段补充」等）；任一命中回到逐条裁定。
 - 全部条目裁定后直接生成 proposal 与 specs，不再确认 capability 切分或规格范围。
@@ -186,27 +178,23 @@ structure 与 final 两道门禁走同一条修复通道，主流程不自己跑
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase structure --feature "${feature}"
 ```
 
-按「门禁修复派发」执行，PASS 前不启动回检。
-
 本节完整协议由脚本按阶段渲染，必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节。
 
 ```bash
 python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
 ```
 
-回检结论必须写进 `SPECS_REVIEW.md`——只输出在回复里不算数。写之前先把「需用户裁定」条目逐条裁定完，本文件一次写成。
-
 回检提出的问题由主模型复核、修复并收口。修改本身改变了行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）时才重跑一轮回检；其余修改直接进入产物契约预检。
 
 ## 产物契约预检（机器校验）
 
-proposal、全部 specs、`SPECS_REVIEW.md` 生成且回检修改完成后执行：
+proposal、全部 specs生成且回检修改完成后执行：
 
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase final --feature "${feature}"
 ```
 
-按「门禁修复派发」执行，PASS 前不得推进 checkpoint。
+PASS 前不得推进 checkpoint。
 
 不以 `update_checkpoint.py` 代替产物契约预检。
 
@@ -216,7 +204,6 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase fi
 - 产物契约预检通过。
 - specs 只描述行为契约，不包含实现任务。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。
-- `SPECS_REVIEW.md` 的 `## Unresolved` 段为「无」。
 
 产物契约预检与回检修复均通过后推进 checkpoint：
 
