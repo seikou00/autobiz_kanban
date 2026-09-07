@@ -225,7 +225,6 @@ DRAFT_BUNDLE_COMMANDS = {
     "prepare-task-draft",
     "import-task-directory",
     "set-draft-task-detail",
-    "set-draft-task-details",
     "repair-draft-task",
     "repair-draft-tasks",
     "preflight-task-draft",
@@ -3007,159 +3006,6 @@ def _cmd_set_draft_task_detail(args: argparse.Namespace) -> int:
     ))
 
 
-def _draft_detail_entries(args: argparse.Namespace) -> list[tuple[str, dict[str, Any]]]:
-    """Parse a complete, ordered set of Draft task detail bodies.
-
-    The Workflow prepares detail proposals concurrently, but they must be
-    committed as one writer transaction.  Keep the public shape deliberately
-    small so callers cannot smuggle group-owned fields or arbitrary Draft data
-    through the batch path::
-
-        {"details": [{"taskId": "T001", "detail": {...}}, ...]}
-    """
-
-    body = _draft_detail_body(args)
-    unknown = sorted(set(body) - {"details"})
-    if unknown:
-        raise PlanWriterInputError(
-            "draft_task_details_field_unknown",
-            f"fields={','.join(unknown)}",
-        )
-    raw_entries = body.get("details")
-    if not isinstance(raw_entries, list) or not raw_entries:
-        raise PlanWriterInputError("draft_task_details_missing")
-
-    entries: list[tuple[str, dict[str, Any]]] = []
-    seen: set[str] = set()
-    for index, raw in enumerate(raw_entries, start=1):
-        if not isinstance(raw, dict):
-            raise PlanWriterInputError("draft_task_detail_entry_must_be_object", f"index={index}")
-        entry_unknown = sorted(set(raw) - {"taskId", "detail"})
-        if entry_unknown:
-            raise PlanWriterInputError(
-                "draft_task_detail_entry_field_unknown",
-                f"index={index};fields={','.join(entry_unknown)}",
-            )
-        task_id = raw.get("taskId")
-        detail = raw.get("detail")
-        if not isinstance(task_id, str) or not TASK_GROUP_TASK_ID_RE.fullmatch(task_id):
-            raise PlanWriterInputError("draft_task_detail_task_id_invalid", f"index={index};task={task_id}")
-        if task_id in seen:
-            raise PlanWriterInputError("draft_task_detail_task_id_duplicate", f"task={task_id}")
-        if not isinstance(detail, dict):
-            raise PlanWriterInputError("draft_task_detail_must_be_object", f"task={task_id}")
-        seen.add(task_id)
-        entries.append((task_id, detail))
-    return entries
-
-
-def _apply_draft_task_details(
-    workspace: Path,
-    feature: str,
-    entries: list[tuple[str, dict[str, Any]]],
-) -> WriterResult:
-    """Validate every full detail against one Draft snapshot, then commit once.
-
-    No task is marked ready and no Draft file is changed when even one entry is
-    invalid.  This preserves the all-or-nothing boundary required by the Plan
-    generation Workflow while reusing the same validation semantics as the
-    single-task command.
-    """
-
-    lock, data = _load_draft_bundle(workspace, feature)
-    if lock.get("status") == "finalized":
-        return fail("task_draft_finalized", path=_draft_plan_path(workspace, feature))
-    _draft_group_data(lock, feature)
-    feature_dir = _path(workspace, feature).parent
-    design_lock_errors = _draft_design_contract_errors(feature_dir, lock)
-    if design_lock_errors:
-        return WriterResult(ok=False, path=_draft_plan_path(workspace, feature), errors=design_lock_errors)
-    design_contract, design_errors = _current_design_contract(feature_dir)
-    if design_errors:
-        return WriterResult(ok=False, path=_draft_plan_path(workspace, feature), errors=design_errors)
-
-    candidate_data = copy.deepcopy(data)
-    code_workspaces = [item for item in lock.get("codeWorkspaces", []) if isinstance(item, str)]
-    errors: list[dict[str, Any]] = []
-    ready_task_ids: list[str] = []
-    for task_id, detail in entries:
-        try:
-            task = _find_task(candidate_data, task_id)
-            candidate = _normalize_draft_task_detail(task, detail)
-            candidate = _annotate_validation_test_plan(candidate, code_workspaces, candidate_data)
-
-            # Preserve the single-detail command's error precedence: callers
-            # first receive detail/granularity issues, then artifact references.
-            task_errors = _draft_task_validation_errors(
-                feature,
-                candidate,
-                code_workspaces,
-                defer_to_test_stages=defer_to_test_stages_enabled(candidate_data),
-            )
-            if not task_errors:
-                task_errors = validate_task_artifact_refs(
-                    feature_dir,
-                    candidate,
-                    cache=None,
-                    design_contract=design_contract,
-                    check_design_artifact=False,
-                )
-            if task_errors:
-                errors.extend(task_errors)
-                continue
-            task_items = _tasks(candidate_data)
-            task_items[task_items.index(task)] = candidate
-            ready_task_ids.append(task_id)
-        except PlanWriterInputError as exc:
-            detail_message = exc.detail or f"task={task_id}"
-            if "task=" not in detail_message:
-                detail_message = f"task={task_id};{detail_message}"
-            errors.append({"reason": exc.reason, "detail": detail_message})
-
-    expected_ids = {str(item.get("id")) for item in _tasks(data)}
-    provided_ids = {task_id for task_id, _ in entries}
-    missing_ids = sorted(expected_ids - provided_ids)
-    unexpected_ids = sorted(provided_ids - expected_ids)
-    if missing_ids:
-        errors.append({
-            "reason": "draft_task_details_incomplete",
-            "detail": f"taskIds={','.join(missing_ids)}",
-            "taskIds": missing_ids,
-        })
-    if unexpected_ids:
-        errors.append({
-            "reason": "draft_task_details_unknown_task",
-            "detail": f"taskIds={','.join(unexpected_ids)}",
-            "taskIds": unexpected_ids,
-        })
-    if errors:
-        report = _draft_validation_report(data, errors)
-        return WriterResult(
-            ok=False,
-            path=_draft_plan_path(workspace, feature),
-            errors=report["issues"],
-            data={"validation": report, "draft": _draft_summary(lock, data)},
-        )
-
-    ordered_ids = [str(item.get("id")) for item in _tasks(candidate_data)]
-    if set(ordered_ids) != provided_ids:
-        return fail("draft_task_details_task_set_mismatch", path=_draft_plan_path(workspace, feature))
-    lock["readyTaskIds"] = ordered_ids
-    lock["status"] = "ready"
-    write_result = _write_draft_bundle(workspace, feature, candidate_data, lock)
-    return with_result_data(
-        write_result,
-        taskIds=ordered_ids,
-        draft=_draft_summary(lock, candidate_data),
-    )
-
-
-def _cmd_set_draft_task_details(args: argparse.Namespace) -> int:
-    workspace, feature = _resolve(args)
-    entries = _draft_detail_entries(args)
-    return render_result(_apply_draft_task_details(workspace, feature, entries))
-
-
 def _draft_repair_entries(args: argparse.Namespace, *, single_task: bool) -> list[tuple[str, dict[str, Any]]]:
     body = _draft_detail_body(args)
     if single_task:
@@ -3961,15 +3807,6 @@ def _cmd_add_task_contract(args: argparse.Namespace) -> int:
                     "taskTemplateStatus": "deprecated_legacy_import_only",
                     "taskDetailTemplate": TASK_DETAIL_TEMPLATE_RELATIVE_PATH,
                     "taskDetailInputExample": _task_detail_input_example(),
-                    "atomicDetailBatch": {
-                        "command": "set-draft-task-details --body-stdin",
-                        "body": {
-                            "details": [
-                                {"taskId": "T001", "detail": "<task-detail-input object>"},
-                            ],
-                        },
-                        "semantics": "all_detail_entries_validate_before_any_draft_write",
-                    },
                     "taskGroupTemplate": TASK_GROUP_TEMPLATE_RELATIVE_PATH,
                     "taskGroupInputExample": _task_group_example(),
                     "taskGroupMatrixExceptionExample": _task_group_matrix_exception_example(),
@@ -5687,14 +5524,6 @@ def main(argv: list[str] | None = None) -> int:
     draft_detail_input.add_argument("--body-stdin", action="store_true")
     draft_detail_input.add_argument("--body-json")
     draft_detail.set_defaults(func=_cmd_set_draft_task_detail)
-
-    draft_details = sub.add_parser("set-draft-task-details")
-    _common(draft_details)
-    draft_details_input = draft_details.add_mutually_exclusive_group(required=True)
-    draft_details_input.add_argument("--body-file")
-    draft_details_input.add_argument("--body-stdin", action="store_true")
-    draft_details_input.add_argument("--body-json")
-    draft_details.set_defaults(func=_cmd_set_draft_task_details)
 
     repair_draft_task = sub.add_parser("repair-draft-task")
     _task_selector(repair_draft_task)

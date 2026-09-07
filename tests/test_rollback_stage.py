@@ -219,9 +219,6 @@ class RollbackStageTest(unittest.TestCase):
         batch_plan = self.feature_dir / "plans" / "B001" / "plan.json"
         batch_plan.parent.mkdir(parents=True)
         batch_plan.write_text("{}\n", encoding="utf-8")
-        plan_runtime = self.feature_dir / ".tmp" / "plan_generation" / "pg-stale" / "manifest.json"
-        plan_runtime.parent.mkdir(parents=True)
-        plan_runtime.write_text('{"status":"generating_details"}\n', encoding="utf-8")
         specs_dir = self.feature_dir / "specs" / "nested"
         specs_dir.mkdir(parents=True)
         (specs_dir / "requirements.md").write_text("delete\n", encoding="utf-8")
@@ -242,10 +239,8 @@ class RollbackStageTest(unittest.TestCase):
         self.assertFalse((self.feature_dir / "design.md").exists())
         self.assertFalse((self.feature_dir / "PLAN.md").exists())
         self.assertFalse(batch_plan.exists())
-        self.assertFalse(plan_runtime.exists())
         history = self.project / ".autobizdevops" / "rollback" / "history" / plan.rollback_id
         self.assertTrue((history / "artifacts" / "plans" / "B001" / "plan.json").is_file())
-        self.assertTrue((history / "artifacts" / ".tmp" / "plan_generation" / "pg-stale" / "manifest.json").is_file())
         records, _, _ = load_state_json_records(self.project)
         self.assertEqual(records[self.feature]["checkpoint"], "prd_done")
 

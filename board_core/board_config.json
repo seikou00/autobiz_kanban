@@ -683,8 +683,7 @@
         ],
         "rollback": {
           "archive": [
-            "plans",
-            ".tmp/plan_generation"
+            "plans"
           ]
         }
       },

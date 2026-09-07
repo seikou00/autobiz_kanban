@@ -40,65 +40,21 @@ plan.json + PLAN.md
 plan_done
 ```
 
-## 固定并行 Plan Workflow（强制）
+## Plan 生成契约
 
-进入 `/autodev-plan` 后，无论 capability 或候选 Task 数量是多少，**必须立即由仓库固定的 `plan-generation.workflow.js` 调度整个 Plan 产物生成**。它覆盖候选分组、Draft 创建、Task detail、工程命令、Draft 预检和正式发布；并行只发生在候选分组/Task detail 提案，Draft 与正式计划仍由 Workflow 内的唯一 coordinator 串行、原子写入。
-
-父会话只允许执行四件事：推进 `plan_in_progress`、解析实际代码 workspace、准备并启动 Workflow、在 Workflow 成功后运行 Plan 阶段门和推进 `plan_done`。父会话不得手工调用 `plan_writer.py`、`plan_generation_launcher.py` 来生成或修复任何 Plan 产物，也不存在串行回退路径。先准备固定脚本，得到 `workflowScriptPath` 和完整 `workflowArgs`：
-
-```bash
-python "${pluginPath}/hooks/plan_workflow_launcher.py" \
-  --workspace "${pluginWorkspace}" --feature "${feature}" \
-  --code-workspace "<ACTUAL_CODE_WORKSPACE>" --max-parallel 3 --json
-```
-
-只有 launcher 返回 `ok=true`、`useWorkflow=true`、`executionMode=fixed`、`canStartWorkflow=true` 且 `requiredAction=start_fixed_plan_generation_workflow` 时才能启动。将它**直接作为顶层 Workflow tool** 启动；传入的是该 tool 的原生参数对象，`args` 必须是 launcher 返回的完整对象，绝不能 `JSON.stringify`：
-
-```javascript
-// Workflow tool parameters — not JavaScript to run inside another workflow.
-{
-  scriptPath: launcher.workflowScriptPath,
-  args: launcher.workflowArgs
-}
-```
-
-不得创建 wrapper Workflow 再启动 Plan Workflow。若确实是在某个 workflow 脚本中调用子 workflow，平台签名是 `await workflow({ scriptPath: "…" }, childArgs)`；把 `args` 放进第一个 `{ scriptPath, args }` 对象会被忽略，但本阶段不允许这种 wrapper。
-
-`plan-generation.workflow.js` 是由 launcher 物化到 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/` 的唯一执行体。不得调用 Python launcher 代替 Workflow、不得改用插件源码路径、不得内联 JavaScript、不得重建或删改 `workflowArgs`；任一启动条件不满足时停止并处理 launcher 返回的恢复动作。
-
-Workflow 返回 `{ok:true, finalStatus:"finalized"}` 前，父会话不得执行本技能后续任何 `plan_writer.py`、`stage_gate.py` 或 `update_checkpoint.py --checkpoint plan_done` 命令。它返回 `needs_repair`、输入摘要失效或启动条件不满足时，保留 run/Draft/worker proposal；在修复上游输入或对应 proposal 后，以同一 launcher 输出重新启动**同一固定 Workflow**，由 `ensure` 复用可恢复的 run。禁止改为父会话串行补写。
-
-固定脚本按以下边界执行：
-
-1. Launcher 锁定 `design.md`、全部 specs、每个代码仓库 Git SHA/工作区状态和 writer/template 摘要，创建或恢复 `.tmp/plan_generation/<runId>/manifest.json`。
-2. 分组 worker 按 capability 并行，只向 `group-proposals/` 登记带 `snapshotDigest` 的提案；单一 reducer 收口 Scenario 覆盖、DAG、workspace、写集 owner 与稳定 Task ID，随后由 launcher 运行 `preflight-task-groups` 和 `prepare-task-draft`。
-3. Detail worker 按已经冻结的 `Txxx` 并行，只向 `detail-proposals/` 登记完整详情；launcher 使用 `set-draft-task-details` 对全部详情一次校验、一次提交。任一 detail 不合法时，Draft 保持原样。
-4. 单一 coordinator 配置工程命令、运行 Draft 预检与 `finalize-task-draft`；只有这一段可以生成正式 `plan.json`、Batch 计划和 `PLAN.md`。
-
-每次 worker 最多重试两次。超时或 worker 失败只重跑相应 partition / `Txxx`；`status` 可查看 pending 项，复用同一输入摘要时再次启动固定 Workflow 会继续原 `runId`。Design、spec、代码仓库或 writer/template 摘要变化时 run 变为 `invalidated`，禁止复用旧 proposal，必须回到相应上游阶段。预检/finalize 失败会保留 Draft 并进入 `needs_repair`，修复后恢复同一 run；禁止删除 Draft 或直接改正式 JSON。
-
-运行控制命令仅用于查看、取消或显式恢复，不直接写计划：
-
-```bash
-python "${pluginPath}/hooks/plan_generation_launcher.py" status --workspace "${pluginWorkspace}" --feature "${feature}" --run-id "<runId>"
-python "${pluginPath}/hooks/plan_generation_launcher.py" cancel --workspace "${pluginWorkspace}" --feature "${feature}" --run-id "<runId>" --lease-token "<leaseToken>"
-```
-
-## Workflow 内部的 Plan 生成契约
-
-以下拆分算法、writer 命令和修复规则是固定 Workflow 的 worker/coordinator 必须遵守的内部协议，供其 Agent 调用；**不是父会话可替代 Workflow 逐条执行的步骤**。
+以下拆分算法、writer 命令和修复规则由 `/autodev-plan` 直接执行。候选分组、Draft、工程命令、预检和正式发布都以 `plan_writer.py` 为唯一写入入口；任何失败保留当前 Draft，按错误提示修复后重试。
 
 #### 生成 plan.json + PLAN.md
 
 本阶段必须生成完整的 plan.json + PLAN.md，并同时生成全部 `plans/Bxxx/plan.json`。不得只生成第一批并等待 Code 跑完后再规划下一批。`plan.json` 只保存 feature 状态、任务集封口状态、批次索引、批次状态、lane 级 `compileProfiles`、可选 `qualityGateProfiles` 和跨批次项目验证，不得包含 `tasks`；每个 `plans/Bxxx/plan.json` 保存该批任务契约、task 状态、投影后的唯一 `compileCommand` 与可选 `qualityGateCommands`。`PLAN.md` 是从 `plan.json` 投影，并包含全部批次计划中的任务摘要；行为冲突以 `specs/**/*.md` 为准，技术冲突以 `design.md` 为准。
 
-生成或修改 `plan.json` / `PLAN.md` 必须由 Workflow 内部使用 `${pluginPath}/hooks/plan_writer.py` 完成。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
+生成或修改 `plan.json` / `PLAN.md` 必须使用 `${pluginPath}/hooks/plan_writer.py` 完成。不得直接整份写入或编辑这些 JSON；`PLAN.md` 必须由 `plan_writer.py render-md` 从 `plan.json` 生成。调试只使用 writer 的 `validate` / `show --summary`，不要把整份 JSON 打进上下文。运行 `init` 前必须先确认目标产物是否已存在；writer 默认拒绝覆盖已有非空产物，只有在明确需要重建并理解会丢弃旧内容时才传 `--force`。
 
 生成计划时必须完整读取 `${pluginPath}/skills/autodev/autodev-plan/templates/task-groups.json` 和 `${pluginPath}/skills/autodev/autodev-plan/templates/task-detail-input.json`。先定位本期实际涉及的全部代码仓库，对每个 `--code-workspace` 执行 `git rev-parse --show-toplevel`，以 Git 根目录名作为稳定 `workspaceRef`；前后端或同一 lane 涉及多个仓库时必须全部登记，不得因当前 cwd 位于某一仓库就遗漏其他仓库。再把最终候选分组表写入 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/task-groups.json`；分组表是 `id/title/deps/uiRequired/workspaceRef/specRefs/mergedScenarioRefs/apiIds/uiRefs/splitRationale/validationBoundary` 的唯一事实源。每个 group 必须且只能绑定一个实际实现仓库；一个行为需要修改多个仓库时必须拆成多个 TASK 并用 deps 表达顺序，禁止单 TASK 跨仓库。每个 `validationBoundary` 必须是具体、非空的公开 seam 与可执行校验边界，不得保留模板占位文本。禁止创建 `.tmp/plan_writer/tasks/Txxx.json` 或任何独立完整 task 副本。writer 会从分组表直接创建 `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/.tmp/plan_writer/draft/plan.json` 与 Draft `plans/Bxxx/plan.json`，调用方只补 task detail；正式根 `plan.json` 和 `plans/Bxxx/plan.json` 在 finalize 前不存在。
 
 候选分组必须先做可验证性判断：backend group 若只产出 Entity/PO/DO/DTO/Mapper、配置或脚手架等结构，且唯一校验是 `compile/build` 或文件存在检查，则不得独立成 TASK；在不跨 workspace/lane 且不突破粒度上限时，合并到最早消费它的下游行为 group，并重排 ID/deps。只有能在不依赖后续 TASK 的情况下，通过真实的 behavior/integration/static 契约测试验证的数据迁移、ORM、序列化或 Schema 契约，才可保留为独立 backend TASK。frontend group 可按 frontend validation profile 使用 compile/build/typecheck 验证页面工程能成功编译，但不得把该命令伪装成 behavior test。此判断必须在 `preflight-task-groups` 和创建 Draft 前完成，不得在 task detail 阶段用空 `validationCommands`、伪 `static_check` 或占位命令兜底。Plan 仍必须生成测试相关的 `validationTestPlan` 和 `testIntent`，但这些内容不表示 Code 阶段创建或执行测试。
 
-每次 Plan 会话准备 Draft 前只执行一次以下只读命令；该操作仅由固定 Workflow 的 coordinator 执行，并以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流。后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
+每次 Plan 会话准备 Draft 前只执行一次以下只读命令；以其 JSON 输出获取分组/详情模板路径、group-owned 字段、合法 validation kind、AC 覆盖规则和 Draft 工作流。后续复用该 contract，不重复查 `--help`，不得读取 writer 源码来发现参数或枚举值：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" add-task-contract
@@ -124,11 +80,10 @@ python "${pluginPath}/hooks/plan_writer.py" prepare-task-draft --feature "${feat
 
 每个候选分组应显式选择 `executionMode=code|verified_existing|external_dependency`，缺省仅兼容为 `code`。`verified_existing` 表示本 Feature 内已有实现，只允许复用现存可执行验证目标；`external_dependency` 表示行为与验证均由 Feature 外的系统或仓库负责，必须同时写 `externalDependency.system/owner/trackingRefs`，不得配置本地验证命令或待创建测试。外部依赖不是本地 no-code 实现，也不得借创建占位测试把它伪装成已验证。
 
-父会话不得使用串行模式按 Task ID 逐个写入详情。固定 Workflow 必须使用 `set-draft-task-details`，传入所有冻结 Task 的完整详情并作为一次原子提交。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验；Workflow 的原子提交会在全部 task 合格前保持整个 Draft 不变：
+按 Task ID 使用 `set-draft-task-detail` 逐个写入详情。详情不得包含 group-owned 字段，`acceptanceCriteria[].id`、`validationCommands[].id`、`scope.pages` 和 `scope.workspaceRoots` 也不得由调用方提供；writer 自动编号、从 `uiRefs.pageRefs` 投影 pages、根据 group `workspaceRef` 只投影该 TASK 对应的 workspace root，并在命令未显式提供时自动补正确的 `repo` 与 `cwd`。禁止为了通过校验把缺失的前端仓库替换成后端 workspace 或 Git 根 `.`。每个 detail 的 `nonGoals` 必须至少包含一条具体、非空的相邻行为或范围排除说明，不得写空数组、`无` 或保留模板占位文本。每次详情在写入 Draft Batch 前完成结构、AC 场景归属、2-6 条 implementation points、nonGoals、cwd/manifest 和 required AC 覆盖校验：
 
 ```bash
 python "${pluginPath}/hooks/plan_writer.py" set-draft-task-detail --feature "${feature}" --task-id T001 --body-stdin
-python "${pluginPath}/hooks/plan_writer.py" set-draft-task-details --feature "${feature}" --body-stdin
 ```
 
 Plan 阶段生成测试意图和验证命令契约，但不生成测试源码目标。测试目标不在 Code 阶段分配或创建；TASK 的 `testIntent` 供后续 UTest/E2E 阶段决定测试文件归属、复用策略和执行顺序。不得填写或推导 `create_in_code`，也不得依据测试文件是否存在来调整任务拆分。
@@ -277,7 +232,7 @@ UI 任务规则：
 - `preflight-task-groups` 成功后只运行一次 `prepare-task-draft`，并且必须带真实的 `--code-workspace`。缺少 workspace 时必须先确定业务代码目录，不得创建无 workspace 的 Draft；不得创建独立 `Txxx.json`，不得在每写 5 个 task 后提前 finalize。遇到 `missing_plan_task_split_rationale` 或 `invalid_plan_task_split_rationale` 时，回 Scenario 覆盖矩阵定位遗漏并重新分组。
 - 不得通过完整 task 的内容校验失败来探索如何拆分；拆分必须在覆盖矩阵、候选任务分组表和 `preflight-task-groups` 阶段完成。
 - 预检失败时读取 `validation.issues`，按每条 issue 的 `repairSuggestion` 执行修复。不要根据 SCN 编号连续性、标题相似度或 API 数量自行猜测应移动哪些 Scenario；不得把缺失 Scenario 添加到标题相近的任务；若要拆分，必须回到覆盖矩阵定位遗漏并重新分组。
-- 串行 `set-draft-task-detail` 成功后对应 task 才进入 ready；Workflow 的 `set-draft-task-details` 只在全部 task 成功时统一进入 ready。两种写入失败均不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
+- `set-draft-task-detail` 成功后对应 task 才进入 ready；失败的详情不落盘。`show-task-draft` 只看摘要，不读取或编辑 Draft JSON。
 - 分组 digest 变化时运行 `rebuild-task-draft`；writer 保留分组投影未变化的 ready task，重置其余 task。不得修改 group 后继续向旧 Draft 写详情。
 - 全部 task ready 后，**在 finalize 之前**必须配置工程命令（见下节），然后运行一次 `preflight-task-draft` 和一次 `finalize-task-draft`；未完整通过时正式根计划和批次均不存在。若预检失败，先按 `validation.issues` 定位并修复 Draft，再重新预检，不删除 Draft。
 - 对 finalized 计划不原地解封、不直接编辑 JSON（不得绕过 Draft lock 修改正式 Bundle）。先运行 `diagnose-plan-repair`：未开始执行且 Draft 完整时，运行 `reopen-finalized-draft --reason <reason>` 进入可修复状态；修复后使用 `finalize-task-draft --force` 重新物化并重算 `taskSetDigest`、`taskContractSha256ByTask`。若已开始执行，禁止覆盖正式计划并转入计划修订；只有 Draft 缺失或不可校验时才清理并全量重建。
@@ -315,7 +270,7 @@ finalize 后计划进入只读状态。发现问题需要先运行 `diagnose-pla
 - [ ] `plans/B001/plan.json` 起的批次计划已写入磁盘，每批最多 5 个任务，根 plan 不含 tasks
 - [ ] `${pluginWorkspace}/${projectDir}/.autobizdevops/features/${feature}/PLAN.md` 文件已写入磁盘，且从 `plan.json` 投影生成
 - [ ] 根 `plan.json` 与各批次计划共同作为任务 DAG 机器事实源，状态投影一致
-- [ ] 每个任务已通过 `set-draft-task-detail` 或原子 `set-draft-task-details`，详情符合 `templates/task-detail-input.json`，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果
+- [ ] 每个任务已通过 `set-draft-task-detail`，详情符合 `templates/task-detail-input.json`，并能清楚读出业务目标、规格/设计依据、涉及范围、执行要点、强验证命令和预期结果
 - [ ] 任务按用户可观察 vertical slice 拆分，不按代码层或文件层机械拆分；超过 15 个 task 时已检查是否误拆到代码步骤，没有为了压低任务数合并独立场景
 - [ ] 任务没有停留在泛泛描述；每个任务的执行要点至少有一条钉住真实锚点（文件#符号 / 真实入口 / design.md#API/DATA/D-xxx）
 - [ ] 每个任务的「验证命令」都能直接运行并自行判读，没有任何需要人参与的步骤
@@ -357,7 +312,7 @@ python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
 
 ## 完成
 
-只有固定 Workflow 已返回 `{ok:true, finalStatus:"finalized"}`，才由父会话执行以下最终阶段门与 checkpoint 推进。任何可恢复失败都回到同一 Workflow，不得补跑这些命令或手工修改计划。
+`finalize-task-draft` 成功后，执行以下最终阶段门与 checkpoint 推进。任何失败保留 Draft，修复后重跑对应的 writer 预检、阶段门和 checkpoint。
 
 ```bash
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "${feature}"
