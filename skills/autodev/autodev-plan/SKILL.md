@@ -1,7 +1,7 @@
 ---
 name: autodev-plan
 description: Dev 阶段技术设计与执行计划生成。
-version: v1.9.08312
+version: v1.9.0907
 ---
 
 ## 缺失产物处理
@@ -503,11 +503,7 @@ python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.plan --feature "
 
 #### 回检与修复
 
-本节完整协议由脚本按阶段渲染,必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节，也不得跳过该命令。
-
-```bash
-python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.plan
-```
+本节完整协议在 `${pluginPath}/skills/references/review-protocol-plan.md`，必须先读取并完整遵循该文件；不得凭记忆执行本节。
 
 回检导致产物变化时，重跑一次产物契约预检。
 

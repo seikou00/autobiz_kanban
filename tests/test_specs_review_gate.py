@@ -29,7 +29,11 @@ from artifact_check import (  # noqa: E402
     validate_specs_review_verdict,
 )
 from hooks.init_workspace import create_feature, init_workspace  # noqa: E402
-from hooks.render_review_protocol import render  # noqa: E402
+SPECS_PROTOCOL = ROOT / "skills" / "references" / "review-protocol-specs.md"
+
+
+def specs_protocol() -> str:
+    return SPECS_PROTOCOL.read_text(encoding="utf-8")
 
 
 FINDING_ROW = (
@@ -176,7 +180,7 @@ class SpecsReviewWiringTest(unittest.TestCase):
         self.assertTrue(review["required"])
 
     def test_protocol_tells_the_stage_to_persist_its_conclusions(self) -> None:
-        output = render("dev.specs")
+        output = specs_protocol()
 
         self.assertIn("SPECS_REVIEW.md", output)
         for section in ("## Verdict", "## Findings", "## Unresolved"):
@@ -184,7 +188,7 @@ class SpecsReviewWiringTest(unittest.TestCase):
         self.assertNotIn("## Review Baseline", output)
 
     def test_protocol_hands_the_five_review_items_to_critic(self) -> None:
-        output = render("dev.specs")
+        output = specs_protocol()
 
         for item in (
             "需求覆盖",
@@ -197,7 +201,7 @@ class SpecsReviewWiringTest(unittest.TestCase):
 
     def test_protocol_adjudicates_before_the_review_is_written(self) -> None:
         """裁定发生在写 SPECS_REVIEW.md 之前，不靠 final gate 反弹回来。"""
-        output = render("dev.specs")
+        output = specs_protocol()
 
         self.assertIn("裁定在写本文件之前完成", output)
         self.assertNotIn("尚未拿到答复的条目", output)
@@ -215,13 +219,13 @@ class SpecsReviewWiringTest(unittest.TestCase):
 
     def test_protocol_does_not_force_a_rerun_on_every_edit(self) -> None:
         """critic 提出的问题由主模型收口；只有行为契约变了才重跑回检。"""
-        output = render("dev.specs")
+        output = specs_protocol()
 
         self.assertIn("不必重新调用 critic", output)
         self.assertNotIn("specs_review_state.py", output)
 
     def test_protocol_fixes_the_critic_input_materials(self) -> None:
-        output = render("dev.specs")
+        output = specs_protocol()
 
         for material in (
             "PRD.md",

@@ -1,10 +1,8 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.16.09032
+version: v1.16.09072
 ---
-
-
 
 
 # /autodev-specs — Proposal + Behavior Specs
@@ -178,11 +176,7 @@ structure 与 final 两道门禁走同一条修复通道，主流程不自己跑
 python "${pluginPath}/hooks/stage_gate.py" validate --stage dev.specs --phase structure --feature "${feature}"
 ```
 
-本节完整协议由脚本按阶段渲染，必须先运行下面命令，并完整遵循其输出；不得凭记忆执行本节。
-
-```bash
-python "${pluginPath}/hooks/render_review_protocol.py" --stage dev.specs
-```
+通过之后，读取`${pluginPath}/skills/references/review-protocol-specs.md`进行specs的回检。
 
 回检提出的问题由主模型复核、修复并收口。修改本身改变了行为契约（新增或改写 Requirement/Scenario、调整 capability 分类、变更范围）时才重跑一轮回检；其余修改直接进入产物契约预检。
 
@@ -200,7 +194,7 @@ PASS 前不得推进 checkpoint。
 
 ## 完成条件
 
-- 「输入与输出」列出的三个产物都已生成，`specs/` 下至少存在一个 `spec.md`。
+- 「输入与输出」列出的产物都已生成，`specs/` 下至少存在一个 `spec.md`。
 - 产物契约预检通过。
 - specs 只描述行为契约，不包含实现任务。
 - `Open Questions` 每行都经逐条裁定门消解（`Status=已确认`），或本节正文只写「无」。

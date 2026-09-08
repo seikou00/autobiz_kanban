@@ -16,7 +16,8 @@ from __future__ import annotations
 from typing import Dict, NamedTuple
 
 
-# route 取值闭集。语义见 skills/references/review-protocol.md 的映射表。
+# route 取值闭集。语义见 skills/references/review-protocol-specs.md 与
+# review-protocol-plan.md 的「与机器预检的分工」映射表。
 ROUTE_FIX_CURRENT = "fix_current"      # 在当前阶段按 action 修
 ROUTE_RETURN_SPECS = "return_specs"    # 停止当前阶段，回 dev.specs
 ROUTE_RETURN_PLAN = "return_plan"      # 停止当前阶段，回 dev.plan
@@ -269,7 +270,7 @@ _SPECS: Dict[str, Repair] = {
         artifact="SPECS_REVIEW.md",
         problem="SPECS_REVIEW.md 不存在或为空——本阶段回检没有落盘",
         action=(
-            "先按 hooks/render_review_protocol.py --stage dev.specs 完整跑完回检，"
+            "先按 skills/references/review-protocol-specs.md 完整跑完回检，"
             "再把结论写进 SPECS_REVIEW.md，章节为 Verdict / Findings / Unresolved。"
         ),
     ),
