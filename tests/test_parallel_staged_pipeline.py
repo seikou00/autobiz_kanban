@@ -12,7 +12,7 @@ from hooks.json_writer_common import WriterResult
 from hooks.parallel_batch_scheduler import create_run as _create_run, mark_batch, schedule
 from hooks.parallel_batch_stage import complete_stage, defer_stage, fail_stage, gate_batch, record_test_failure, start_stage
 from hooks.parallel_evidence_aggregate import aggregate_evidence
-from hooks.parallel_merge_train import begin_e2e, build_candidate, finish_e2e, promote_candidate
+from hooks.parallel_merge_train import _remove_candidate, begin_e2e, build_candidate, finish_e2e, promote_candidate
 from hooks.parallel_runtime import acquire_lease, load_manifest, release_lease
 from hooks.parallel_stage_validation import owned_commands, run_owned_stage
 from hooks.parallel_validation_ownership import build_pipeline_contract, validation_ownership_errors
@@ -56,6 +56,43 @@ def _add_validation_intent(feature_dir: Path, *, asset_type: str = "unit_test") 
 
 
 class ParallelStagedPipelineTest(unittest.TestCase):
+    def test_candidate_cleanup_recovers_interrupted_initializing_worktree(self) -> None:
+        """A timed-out candidate build may leave Git's initializing lock behind."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = root / "wave-001"
+            candidate.mkdir()
+            first_remove = subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "fatal: cannot remove a locked working tree, lock reason: initializing\n"
+                    "use 'remove -f -f' to override or unlock first"
+                ),
+            )
+            calls: list[tuple[str, ...]] = []
+
+            def fake_git(_repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+                calls.append(args)
+                if args == ("worktree", "remove", "--force", str(candidate)):
+                    return first_remove
+                if args == ("worktree", "remove", "--force", "--force", str(candidate)):
+                    candidate.rmdir()
+                return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+            with patch("hooks.parallel_merge_train._git", side_effect=fake_git):
+                errors = _remove_candidate(
+                    root,
+                    candidate,
+                    "autodev-candidate/alpha/wave-001",
+                    recover_interrupted_initialization=True,
+                )
+
+        self.assertEqual(errors, [])
+        self.assertIn(("worktree", "remove", "--force", str(candidate)), calls)
+        self.assertIn(("worktree", "remove", "--force", "--force", str(candidate)), calls)
+
     def test_recorded_test_failure_allows_batch_gate_to_continue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))

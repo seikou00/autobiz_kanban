@@ -156,10 +156,35 @@ def _candidate_paths(workspace: Path, feature: str, run_id: str, repository_ref:
     return path, branch
 
 
-def _remove_candidate(repo: Path, path: Path, branch: str) -> list[str]:
+def _is_interrupted_worktree_initialization(result: subprocess.CompletedProcess[str]) -> bool:
+    output = (result.stderr or result.stdout or "").lower()
+    return (
+        "cannot remove a locked working tree" in output
+        and "lock reason: initializing" in output
+    )
+
+
+def _remove_candidate(
+    repo: Path,
+    path: Path,
+    branch: str,
+    *,
+    recover_interrupted_initialization: bool = False,
+) -> list[str]:
     errors: list[str] = []
     if path.exists():
         removed = _git(repo, "worktree", "remove", "--force", str(path))
+        if (
+            removed.returncode != 0
+            and recover_interrupted_initialization
+            and _is_interrupted_worktree_initialization(removed)
+        ):
+            # A candidate build is serialized by FileLock. Once this caller
+            # holds that lock, this Git-specific `initializing` marker can only
+            # be residue from an interrupted earlier build, not another plugin
+            # candidate construction in progress. Git explicitly requires a
+            # second force flag to remove this incomplete worktree.
+            removed = _git(repo, "worktree", "remove", "--force", "--force", str(path))
         if removed.returncode != 0:
             errors.append("worktree_remove_failed:" + (removed.stderr.strip() or removed.stdout.strip()))
     pruned = _git(repo, "worktree", "prune")
@@ -221,7 +246,12 @@ def build_candidate(
         # Repeat no shared-state mutations under the candidate-specific lock;
         # it serializes concurrent Workflow instances for this repository.
         if path.exists() or _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
-            cleanup_errors = _remove_candidate(repo, path, branch)
+            cleanup_errors = _remove_candidate(
+                repo,
+                path,
+                branch,
+                recover_interrupted_initialization=True,
+            )
             if cleanup_errors:
                 raise ValueError("parallel_merge_train_stale_candidate_cleanup_failed:" + ";".join(cleanup_errors))
         created = _git(repo, "worktree", "add", "-b", branch, str(path), current_head)

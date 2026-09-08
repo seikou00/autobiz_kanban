@@ -62,6 +62,24 @@ const SCHEDULER_RESULT_SCHEMA = {
   required: ["runId", "status", "scheduledGroups", "batchTaskIds", "batchWorkspaces"],
   additionalProperties: true
 };
+// Review can return either `parallel_batch_stage.py complete` evidence or a
+// `fail` transition. Keep that response structured so a failed Review cannot
+// lose the durable finding while passing through the agent boundary.
+const REVIEW_STAGE_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    batchId: { type: "string" },
+    stage: { type: "string" },
+    status: { enum: ["passed", "failed", "needs_triage"] },
+    nextStage: { type: "string" },
+    failureType: { type: "string" },
+    failure: { type: "object" },
+    evidenceId: { type: "string" },
+    evidence: { type: "object" }
+  },
+  required: ["status"],
+  additionalProperties: true
+};
 const VERIFICATION_SCHEMA = {
   type: "object",
   properties: {
@@ -771,7 +789,7 @@ function implementationReworkRequired(batchResult, failedStage, result) {
   const normalized = unwrap(result);
   const failure = unwrap(normalized.failure);
   const failureType = failure.type || normalized.failureType || "implementation";
-  const failureMessage = failure.message || normalized.message || normalized.error || "";
+  const failureMessage = implementationFailureMessage(normalized, failure);
   if (!usableString(failureMessage)) {
     throw new Error(`implementation_rework_failure_message_missing:${batchResult.batchId}:${failedStage}`);
   }
@@ -798,6 +816,71 @@ function implementationReworkRequired(batchResult, failedStage, result) {
       failureContext,
     },
   };
+}
+
+function implementationFailureMessage(normalized, failure) {
+  const direct = failure.message || normalized.message || normalized.error || "";
+  if (usableString(direct)) return direct;
+
+  // Some reviewers return the finding as structured review fields rather than
+  // the stage command's `failure.message`. Preserve every available detail as
+  // the repair brief; never invent a generic message for an empty finding.
+  const labels = {
+    file: "file",
+    lines: "lines",
+    expected: "expected",
+    actual: "actual",
+    impact: "impact",
+    suggestedFix: "suggestedFix",
+  };
+  const details = Object.entries(labels)
+    .map(([field, label]) => [label, failure[field]])
+    .filter(([, value]) => usableString(value))
+    .map(([label, value]) => `${label}: ${value}`);
+  return details.length ? details.join("\\n") : "";
+}
+
+async function recoverImplementationRework(batchResult, failedStage, result) {
+  try {
+    return implementationReworkRequired(batchResult, failedStage, result);
+  } catch (error) {
+    const expected = `implementation_rework_failure_message_missing:${batchResult.batchId}:${failedStage}`;
+    if (!error || error.message !== expected) throw error;
+
+    // The stage command persists its failure before the agent returns. If an
+    // agent response omitted that field, recover the exact, durable finding
+    // rather than marking the Batch retry_pending or asking Review again.
+    const scheduler = await readSchedulerState(
+      `recover-${failedStage}-finding-${batchResult.batchId}`,
+      "Batch 阶段"
+    );
+    const recovery = (scheduler && Array.isArray(scheduler.stageRecoveryBatches)
+      ? scheduler.stageRecoveryBatches
+      : []
+    ).find(item => item && item.batchId === batchResult.batchId);
+    const context = recovery && recovery.failureContext;
+    if (
+      !context
+      || context.failedStage !== failedStage
+      || !usableString(context.message)
+    ) {
+      throw error;
+    }
+    const normalized = unwrap(result);
+    const failure = unwrap(normalized.failure);
+    return implementationReworkRequired(batchResult, failedStage, {
+      ...normalized,
+      status: normalized.status || "failed",
+      failureType: context.failureType || normalized.failureType || "implementation",
+      nextStage: "implement",
+      failure: {
+        ...failure,
+        type: context.failureType || failure.type || "implementation",
+        message: context.message,
+        nextStage: "implement",
+      },
+    });
+  }
 }
 
 function withLatestBatchDelivery(batchResult, result) {
@@ -884,13 +967,13 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     `先执行 python "${stagePath}" start --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review。` +
     `只评审业务生产代码、生产配置、迁移和公开接口的实现；测试源码、fixture/mock 和测试环境由紧随其后的 UTest 阶段创建。即使 scope.paths、expectedFiles 或 writeSet 中出现测试路径，也不得因 sealed commit 缺少测试文件而判定 Review 不通过；可评估可测试性，但不得要求测试资产已存在。评审实现、接口边界、错误处理和与 TASK 验收条件的一致性；禁止修改源码、提交、合并或删除 Worktree。` +
     `通过后执行 python "${stagePath}" complete --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --metadata-json '${metadata}'。` +
-    `发现问题时必须先执行 python "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题：file:line、期望与实际行为、影响及建议修复>"，再返回该命令的 JSON。` +
-    `可由当前 Batch 生产代码修复时，返回 JSON 必须同时包含 status:"failed"、verdict:"FAIL"、failureType:"implementation"、nextStage:"implement" 及 failure；Workflow 会在同一 Worktree 修复、编译和封存一次，然后直接进入 UTest，不会再次执行 Review。` +
+    `发现问题时必须先执行 python "${stagePath}" fail --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --stage review --failure-type <implementation|documentation|needs_triage> --message "<具体问题：file:line、期望与实际行为、影响及建议修复>"。` +
+    `最终只能原样返回该命令的 stdout JSON：它必须包含 batchId、stage:"review"、status:"failed"、nextStage 及 failure:{type,message,nextStage}，其中 failure.message 必须非空。不得添加 verdict、顶层 failureType，或将 finding 拆成 file/lines/expected/actual/impact/suggestedFix 等自定义字段。可由当前 Batch 生产代码修复时，Workflow 会在同一 Worktree 修复、编译和封存一次，然后直接进入 UTest，不会再次执行 Review。` +
     `documentation 与 needs_triage 仍按原分类阻断，保留 Worktree。只返回 JSON。`,
-    { label: `stage-review-${batchId}`, phase: "Batch 阶段" }
+    { label: `stage-review-${batchId}`, phase: "Batch 阶段", schema: REVIEW_STAGE_RESULT_SCHEMA }
     ));
     if (requiresImplementationRework(review)) {
-      return implementationReworkRequired(batchResult, "review", review);
+      return recoverImplementationRework(batchResult, "review", review);
     }
     requireSuccess(review, `stage review ${batchId}`);
   }
@@ -1038,57 +1121,53 @@ async function continueRecoveredDelivery(recovery) {
   return runDeliveryReviewTestAndGate(repaired, options);
 }
 
-function candidateGroups(batchIds) {
-  const groups = {};
-  for (const batchId of batchIds) {
-    const ref = (batchWorkspaces[batchId] || {}).workspaceRef;
-    if (!usableString(ref)) throw new Error(`scheduler did not provide repository for ${batchId}`);
-    groups[ref] = groups[ref] || [];
-    groups[ref].push(batchId);
-  }
-  return groups;
-}
-
-async function validateAndPromoteWave(batchIds, wave) {
-  const groups = candidateGroups(batchIds);
-  const promoted = [];
-  for (const [repositoryRef, ids] of Object.entries(groups)) {
-    const batchArgs = ids.map(batchId => `--batch-id "${batchId}"`).join(" ");
+async function validateAndPromoteBatch(batchId, candidateSequence) {
+  const repositoryRef = (batchWorkspaces[batchId] || {}).workspaceRef;
+  if (!usableString(repositoryRef)) throw new Error(`scheduler did not provide repository for ${batchId}`);
+  const ids = [batchId];
+  const batchArgs = `--batch-id "${batchId}"`;
+  // `parallel_merge_train.py` uses --wave as a durable candidate-record key.
+  // It is a monotonically increasing candidate sequence here, never a set of
+  // Batch deliveries to merge together.
+  const wave = candidateSequence;
     // A changed main invalidates the entire candidate.  Rebuild from the
     // current head and rebuild the candidate; never rebase a previously-gated
     // candidate, because that would sever the evidence-to-SHA relationship.
     let promotion;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const builtRaw = unwrap(await agent(
-        `构建 Wave ${wave} 的 Merge Train 候选（第 ${attempt} 次）。执行 python "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave} ${batchArgs}。` +
-        `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。只返回 JSON。`,
-        { label: `build-candidate-${repositoryRef}-${wave}-${attempt}`, phase: "候选验证" }
+        `构建 Batch ${batchId} 的独立 Merge Train 候选（候选序号 ${wave}，第 ${attempt} 次）。执行 python "${mergeTrainPath}" build-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave} ${batchArgs}。` +
+        `候选创建失败时保留 delivery Worktree 并停止，禁止 rebase 或直接合并主分支。该命令在一次候选构建中只能执行一次：本地终端超时或中断时，禁止后台运行或再次执行 build-candidate；立即返回失败，由 Workflow 的受控恢复处理残留候选。只返回 JSON。`,
+        { label: `build-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选验证" }
       ));
 
-      // Retain conflicts during the normal drain.  Resolving them here would
-      // let one difficult Batch consume the wave while independent branches
-      // are still runnable; the explicit final-repair phase owns the one
-      // controlled resolution attempt after that drain finishes.
       let built = builtRaw;
       if (builtRaw && builtRaw.status === "candidate_conflicted") {
-        recordUnresolved({
-          kind: "merge_candidate",
-          repositoryRef,
-          wave,
-          batchIds: ids,
-          batchId: ids.length === 1 ? ids[0] : undefined,
-          status: "candidate_conflicted",
-          durable: true,
-          error: builtRaw.error || (builtRaw.conflictContext && builtRaw.conflictContext.errorMessage),
-          worktreePath: builtRaw.worktreePath || (builtRaw.conflictContext && builtRaw.conflictContext.candidateWorktree),
-          conflictedFiles: builtRaw.conflictedFiles || (builtRaw.conflictContext && builtRaw.conflictContext.conflictedFiles),
-        });
-        throw new Error(`Wave ${wave} retains merge conflict for final repair: ${JSON.stringify({
-          repositoryRef,
-          wave,
-          conflictedFiles: builtRaw.conflictedFiles || (builtRaw.conflictContext && builtRaw.conflictContext.conflictedFiles),
-          worktreePath: builtRaw.worktreePath || (builtRaw.conflictContext && builtRaw.conflictContext.candidateWorktree),
-        })}`);
+        // A candidate's conflict markers are tied to this exact base SHA.
+        // Resolve and promote it now, before other same-repository deliveries
+        // can advance main and make the retained conflict context stale.
+        const resolved = unwrap(await agent(
+          `立即修复刚产生的 Merge Train 冲突候选。执行 python "${mergeTrainPath}" resolve-candidate ` +
+          `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
+          `只能处理该既有候选 Worktree；成功时返回 status="built"，随后本 Workflow 会立即推广。不得创建新候选、修改 main 或继续其他 Batch。只返回 JSON。`,
+          { label: `resolve-conflicted-candidate-${repositoryRef}-${batchId}-${wave}`, phase: "候选验证" }
+        ));
+        if (!resolved || resolved.status !== "built" || resolved.success === false || hasFailureSignal(resolved)) {
+          recordUnresolved({
+            kind: "merge_candidate",
+            repositoryRef,
+            wave,
+            batchIds: ids,
+            batchId,
+            status: "needs_resolution",
+            durable: true,
+            error: resolved || builtRaw,
+            worktreePath: (resolved && resolved.worktreePath) || builtRaw.worktreePath || (builtRaw.conflictContext && builtRaw.conflictContext.candidateWorktree),
+            conflictedFiles: (resolved && resolved.conflictedFiles) || builtRaw.conflictedFiles || (builtRaw.conflictContext && builtRaw.conflictContext.conflictedFiles),
+          });
+          throw new Error(`immediate_candidate_resolution_failed:${repositoryRef}:${wave}:${errorText(resolved || builtRaw)}`);
+        }
+        built = resolved;
       }
 
       // Now require success on the built result
@@ -1100,7 +1179,7 @@ async function validateAndPromoteWave(batchIds, wave) {
           repositoryRef,
           wave,
           batchIds: ids,
-          batchId: ids.length === 1 ? ids[0] : undefined,
+          batchId,
           status: "build_failed",
           durable: false,
           error,
@@ -1111,7 +1190,7 @@ async function validateAndPromoteWave(batchIds, wave) {
       const rawPromotion = unwrap(await agent(
       `推广已完成业务 Review 且 UTest 已通过或已记录失败的候选 SHA ${built.candidateSha}。执行 python "${mergeTrainPath}" promote-candidate --allow-unverified --allow-stale --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
         `Batch 的 UTest 失败会作为显式 issue 随最终结果保留，但不打断后续流程；合并后唯一的可执行验证是 B-E2E。若返回 stale=true，必须停止本次推广并从当前 main 全量重建候选；禁止 rebase 或直接 merge。只返回 JSON。`,
-        { label: `promote-candidate-${repositoryRef}-${wave}-${attempt}`, phase: "候选验证" }
+        { label: `promote-candidate-${repositoryRef}-${batchId}-${wave}-${attempt}`, phase: "候选验证" }
       ));
       if (rawPromotion && rawPromotion.stale === true && attempt < 2) continue;
       if (rawPromotion && (rawPromotion.stale === true || rawPromotion.needsPlanRecovery === true || hasFailureSignal(rawPromotion))) {
@@ -1120,7 +1199,7 @@ async function validateAndPromoteWave(batchIds, wave) {
           repositoryRef,
           wave,
           batchIds: ids,
-          batchId: ids.length === 1 ? ids[0] : undefined,
+          batchId,
           status: rawPromotion.needsPlanRecovery ? "needs_plan_recovery" : rawPromotion.stale ? "stale" : "promotion_failed",
           durable: rawPromotion.needsPlanRecovery === true,
           error: rawPromotion.errors || rawPromotion.error || rawPromotion,
@@ -1136,7 +1215,7 @@ async function validateAndPromoteWave(batchIds, wave) {
           repositoryRef,
           wave,
           batchIds: ids,
-          batchId: ids.length === 1 ? ids[0] : undefined,
+          batchId,
           status: "promotion_failed",
           durable: false,
           error,
@@ -1145,16 +1224,14 @@ async function validateAndPromoteWave(batchIds, wave) {
       }
       break;
     }
-    promoted.push(promotion);
-  }
-  return promoted;
+  return promotion;
 }
 
 async function promoteReadyBatch(batchId) {
   const promotionWave = ++mergeSequence;
   phase("候选验证");
   try {
-    const promotions = await validateAndPromoteWave([batchId], promotionWave);
+    const promotions = [await validateAndPromoteBatch(batchId, promotionWave)];
     const promotedBatchIds = promotions.flatMap(mergedBatchIds);
     const missingPromotionBatchIds = promotions
       .filter(promotion => promotion && promotion.promoted === true && mergedBatchIds(promotion).length === 0)
@@ -1385,13 +1462,13 @@ async function runLifecycleChain(initialJob, claimedBatchIds, drainLabel) {
   while (job) {
     if (!canStartLifecycle()) return result;
     result = await runLifecycleSafely(job.batchId, job.source, job.execute, job.fallback);
-    // Dependencies are released only by an actual Merge Train promotion.  As
-    // soon as one Batch reaches that durable state, refresh the scheduler and
-    // reuse this just-freed execution slot for its newly runnable successor.
+    // Whether this Batch merged or failed into retry_pending, its execution
+    // slot is now free. Refresh immediately so an independent pending Batch
+    // can use it; only a real merge releases this Batch's own dependents.
     // Do not wait for unrelated jobs passed to the same `parallel()` call.
-    if (!result || result.status !== "merged") return result;
+    if (!result) return result;
     const state = await readSchedulerState(
-      `${drainLabel}-after-merge-${job.batchId}-${schedulerWaves}`,
+      `${drainLabel}-after-batch-${job.batchId}-${schedulerWaves}`,
       "Batch 阶段"
     );
     if (!state) return result;
@@ -1417,8 +1494,9 @@ async function drainRunnableLifecycles(drainLabel) {
       return { ranAny, reason: "no_runnable_independent_batches" };
     }
 
-    // A failed Batch is quarantined locally.  A successful merge continues in
-    // its own chain, so independent peers do not form a completion barrier.
+    // A failed Batch is quarantined locally and its slot is immediately reused
+    // by another eligible Batch. Successful merges use the same eager path,
+    // so independent peers never form a completion barrier.
     phase("Batch 阶段");
     try {
       await parallel(lifecycleJobs);

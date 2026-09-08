@@ -79,9 +79,13 @@ Use the top-level Workflow tool with this native parameter object (not from a wr
 ```
 
 The launcher must materialize the copied artifact script before this call. Do
-not use the plugin source, business repository path, or inline content. When
-resuming an existing run, pass only `resumeFromRunId` and do not resolve the
-artifact path again.
+not use the plugin source, business repository path, or inline content. Use
+`resumeFromRunId` only while the platform Workflow itself is interrupted or
+non-terminal. If the platform Workflow already returned a terminal result but
+the scheduler run still has `retry_pending` or stage-recovery Batches, start a
+fresh platform Workflow with the same launcher `scriptPath` and `args` (no
+`resumeFromRunId`). `scheduler ensure` then reuses the durable scheduler run
+and reads its current state instead of replaying a completed platform journal.
 
 The Workflow host workspace is not a Worktree source contract. The plugin
 resolves each repository from `codeWorkspaces` and provisions its own native
@@ -140,6 +144,10 @@ baseline commit per physical Git root.
    review, test, and merge while another Batch in the same frontier is still
    coding. Every Batch records its actual Worktree path and branch in the
    scheduler manifest; any overlap is handled as a real merge conflict.
+   A scheduler wave is only an execution-concurrency boundary: each Merge
+   Train candidate contains exactly one `--batch-id`. Its `--wave` value is a
+   unique candidate-record sequence, not a request to merge every Batch from
+   that scheduler wave together.
 3. Each Batch acquires a lease, implements only its assigned TASKs, then
    invokes `worktree_manager.py seal --purpose review` to create an uncompiled
    Review draft. It must not run `batch-compile` at this point. The draft is

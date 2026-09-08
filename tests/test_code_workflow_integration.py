@@ -109,7 +109,10 @@ def test_fixed_workflow_entrypoint():
         "drainRunnableLifecycles",
         "takeNextRunnableLifecycle",
         "runLifecycleChain",
-        "after-merge-${job.batchId}",
+        "validateAndPromoteBatch(batchId, promotionWave)",
+        "after-batch-${job.batchId}",
+        "resolve-conflicted-candidate",
+        "immediate_candidate_resolution_failed",
         "runFinalRepairAndReport",
         "queueRetryExhaustedBatchRepairs",
         "scheduler_snapshot_unavailable",
@@ -131,7 +134,8 @@ def test_fixed_workflow_entrypoint():
         "function isFailedVerdict",
         "function isFailedStatus",
         "function hasFailureSignal",
-        "failureType:\"implementation\"",
+        "failure.message 必须非空",
+        "不得添加 verdict",
         "--stage review --failure-type",
         "promotions.flatMap(mergedBatchIds)",
         "promotion_batch_ids_missing",
@@ -166,6 +170,9 @@ def test_fixed_workflow_entrypoint():
     missing = [check for check in checks if check not in content]
     if missing:
         print(f"✗ 固定脚本缺少执行协议: {', '.join(missing)}")
+        return False
+    if "function candidateGroups(" in content or "validateAndPromoteWave([batchId]" in content:
+        print("✗ Merge Train 候选仍可能按 Wave 聚合多个 Batch")
         return False
     route_start = content.find("start-route-run")
     task_prompt = content.find("以 taskContract.uiRequired 为唯一条件")
@@ -225,6 +232,25 @@ const repaired = context.implementationReworkRequired(
 );
 if (repaired.recovery.failureContext.message !== "src/auth.js:42 expected authorization before write") process.exit(6);
 if (repaired.recovery.failureContext.failedStage !== "review") process.exit(7);
+const structuredFinding = context.implementationReworkRequired(
+  { batchId: "B001", worktreePath: "/tmp/worktree", branchName: "batch", commitSha: "sha" },
+  "review",
+  {
+    status: "failed",
+    failureType: "implementation",
+    nextStage: "implement",
+    failure: {
+      file: "src/auth.js",
+      lines: "42",
+      expected: "authorization before write",
+      actual: "write is unguarded",
+      impact: "unauthorized mutation",
+      suggestedFix: "authorize before writing",
+    },
+  }
+);
+if (!structuredFinding.recovery.failureContext.message.includes("file: src/auth.js")) process.exit(8);
+if (!structuredFinding.recovery.failureContext.message.includes("suggestedFix: authorize before writing")) process.exit(9);
 let missingMessageRejected = false;
 try {
   context.implementationReworkRequired(
@@ -233,7 +259,26 @@ try {
     { status: "failed", failureType: "implementation", failure: { type: "implementation", nextStage: "implement" } }
   );
 } catch (_) { missingMessageRejected = true; }
-if (!missingMessageRejected) process.exit(8);
+if (!missingMessageRejected) process.exit(10);
+context.readSchedulerState = async () => ({
+  stageRecoveryBatches: [{
+    batchId: "B001",
+    failureContext: {
+      failedStage: "review",
+      failureType: "implementation",
+      message: "src/auth.js:42 expected authorization before write",
+    },
+  }],
+});
+(async () => {
+  const recovered = await context.recoverImplementationRework(
+    { batchId: "B001", worktreePath: "/tmp/worktree", branchName: "batch", commitSha: "sha" },
+    "review",
+    { status: "failed", failureType: "implementation", nextStage: "implement", failure: { type: "implementation", nextStage: "implement" } }
+  );
+  if (recovered.recovery.failureContext.message !== "src/auth.js:42 expected authorization before write") process.exit(11);
+  if (recovered.recovery.failureContext.failedStage !== "review") process.exit(12);
+})().catch(() => process.exit(13));
 '''
     result = run_command(["node", "-e", script, str(workflow_script)])
     if result["returncode"] != 0:
@@ -292,8 +337,8 @@ if (failed.batchIds.length !== 0 || failed.promoted === true) process.exit(6);
 
 
 def test_workflow_eager_dependent_dispatch():
-    """一个 Batch 合并后，应立即在该执行槽中接手新解锁的后继 Batch。"""
-    print("测试 7: 合并后即时调度")
+    """一个 Batch 结束后，应立即在该执行槽中接手独立的可运行 Batch。"""
+    print("测试 7: Batch 结束后即时调度")
     print("-" * 60)
 
     workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
@@ -313,7 +358,10 @@ let refreshes = 0;
 context.runnableScheduledBatchIds = () => scheduled;
 context.runnableStageRecoveries = () => [];
 context.runnableMergeableBatchIds = () => [];
-context.runInitialBatchLifecycle = async batchId => ({ batchId, status: "merged" });
+context.runInitialBatchLifecycle = async batchId => ({
+  batchId,
+  status: batchId === "B001" ? "retry_pending" : "merged",
+});
 context.runLifecycleSafely = async (batchId, source, execute) => {
   executed.push(`${source}:${batchId}`);
   return execute();
@@ -332,15 +380,15 @@ vm.runInContext(source.slice(start, end), context);
   const claimed = new Set();
   const first = context.takeNextRunnableLifecycle(claimed);
   await context.runLifecycleChain(first, claimed, "test");
-  if (executed.join(",") !== "initial:B001,initial:B002") process.exit(3);
-  if (refreshes !== 2) process.exit(4);
+if (executed.join(",") !== "initial:B001,initial:B002") process.exit(3);
+if (refreshes !== 2) process.exit(4);
 })().catch(() => process.exit(5));
 '''
     result = run_command(["node", "-e", script, str(workflow_script)])
     if result["returncode"] != 0:
-        print(f"✗ 合并后未即时调度后继 Batch: {result['stderr'] or result['stdout']}")
+        print(f"✗ Batch 结束后未即时调度可运行 Batch: {result['stderr'] or result['stdout']}")
         return False
-    print("✓ B001 合并后会立即刷新调度并接手 B002")
+    print("✓ B001 失败或合并后都会立即刷新调度并接手 B002")
     print()
     return True
 
