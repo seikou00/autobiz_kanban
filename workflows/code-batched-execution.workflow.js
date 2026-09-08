@@ -376,17 +376,38 @@ function retryPendingInScope(scheduler) {
 }
 
 phase("准备");
-let prepared = requireSchedulerResult(await agent(
-  `确保固定 Code DAG run。执行：python "${schedulerPath}" ensure ` +
-  `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
-  `--task-card-id "${taskCardId.trim()}" ` +
-  `--max-parallel ${maxParallel} ` +
-  `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs} ${workspaceRefArgs}。` +
-  `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。` +
-  `必要时允许 scheduler 创建 autodev baseline 提交；不得修改业务文件内容，` +
-  `且不得把 .cmbdevclaw 平台运行文件纳入提交。只返回该命令的 JSON 结果。`,
-  { label: "fixed-workflow-prepare", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
-), "scheduler ensure");
+let prepared;
+try {
+  prepared = requireSchedulerResult(await agent(
+    `确保固定 Code DAG run。执行：python "${schedulerPath}" ensure ` +
+    `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
+    `--task-card-id "${taskCardId.trim()}" ` +
+    `--max-parallel ${maxParallel} ` +
+    `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs} ${workspaceRefArgs}。` +
+    `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。` +
+    `必要时允许 scheduler 创建 autodev baseline 提交；不得修改业务文件内容，` +
+    `且不得把 .cmbdevclaw 平台运行文件纳入提交。只返回该命令的 JSON 结果。`,
+    { label: "fixed-workflow-prepare", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
+  ), "scheduler ensure");
+} catch (error) {
+  // There is no run identifier to recover when the control plane cannot be
+  // initialized.  Return an observable terminal result instead of exposing a
+  // raw Agent exception to the caller.
+  return {
+    ok: false,
+    feature,
+    runId: null,
+    finalStatus: "scheduler_prepare_failed",
+    e2eSkippedReason: "scheduler_run_not_initialized",
+    unresolved: {
+      batches: [],
+      mergeCandidates: [],
+      deferredIssues: [],
+      schedulerFailures: [{ phase: "prepare", error: String(error) }],
+    },
+    nextAction: "retry_scheduler_prepare",
+  };
+}
 
 const runId = prepared.runId;
 
@@ -402,7 +423,16 @@ async function recoverPendingRetries(scheduler, label) {
   ), label);
 }
 
-prepared = await recoverPendingRetries(prepared, "recover-pending-retries-after-ensure");
+let initialRetryRecoveryFailure = null;
+try {
+  prepared = await recoverPendingRetries(prepared, "recover-pending-retries-after-ensure");
+} catch (error) {
+  // An interrupted control-plane model call must not prevent the already
+  // schedulable, independent portion of this durable run from draining. The
+  // final repair boundary will make one more recovery attempt and report the
+  // original failure if it remains unavailable.
+  initialRetryRecoveryFailure = error;
+}
 let scheduledGroups = scopeGroups(prepared.scheduledGroups || []);
 let mergeableBatches = (prepared.mergeableBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
 let stageRecoveryBatches = (prepared.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(result.batchId)));
@@ -412,9 +442,177 @@ let batchWorkspaces = prepared.batchWorkspaces || {};
 const batchResults = [];
 const mergeResults = [];
 const cleanupResults = [];
+const lifecycleResults = [];
+const unresolvedRecords = [];
+const unresolvedRecordKeys = new Set();
+const quarantinedBatchIds = new Set();
+const schedulerFailures = [];
+const finalRepairResults = [];
 let schedulerWaves = 0;
 let mergeSequence = 0;
 let blockedBatches = (prepared.blockedBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
+let lastScheduler = prepared;
+
+function errorText(value) {
+  if (value instanceof Error) return value.message || String(value);
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch (_) {
+    return String(value);
+  }
+}
+
+function inWorkflowScope(batchId) {
+  return usableString(batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(batchId));
+}
+
+function activeUnresolvedRecords() {
+  return unresolvedRecords.filter(record => record && record.resolved !== true);
+}
+
+function recordUnresolved(record) {
+  const normalized = {
+    kind: "batch",
+    status: "unresolved",
+    durable: false,
+    ...record,
+  };
+  if (normalized.error !== undefined) normalized.error = errorText(normalized.error);
+  const key = [
+    normalized.kind,
+    normalized.batchId || "",
+    normalized.repositoryRef || "",
+    normalized.wave || "",
+    normalized.status || "",
+    normalized.error || "",
+  ].join("|");
+  if (!unresolvedRecordKeys.has(key)) {
+    unresolvedRecordKeys.add(key);
+    unresolvedRecords.push(normalized);
+  }
+  if (
+    inWorkflowScope(normalized.batchId)
+    && !["cleanup", "deferred_issue", "validation", "scheduler"].includes(normalized.kind)
+  ) {
+    quarantinedBatchIds.add(normalized.batchId);
+  }
+  return normalized;
+}
+
+function markBatchResolved(batchId) {
+  if (!usableString(batchId)) return;
+  quarantinedBatchIds.delete(batchId);
+  for (const record of unresolvedRecords) {
+    if (record && record.batchId === batchId && record.kind !== "cleanup") {
+      record.resolved = true;
+      record.resolvedAt = "workflow_recovered";
+    }
+  }
+}
+
+function markCandidateResolved(repositoryRef, wave) {
+  for (const record of unresolvedRecords) {
+    if (
+      record
+      && record.kind === "merge_candidate"
+      && record.repositoryRef === repositoryRef
+      && Number(record.wave) === Number(wave)
+    ) {
+      record.resolved = true;
+      record.resolvedAt = "workflow_recovered";
+    }
+  }
+}
+
+function observeLifecycleResult(batchId, source, value) {
+  const result = unwrap(value);
+  const status = result && typeof result === "object" ? result.status : undefined;
+  const observation = {
+    batchId,
+    source,
+    status: usableString(status) ? status : "unknown",
+    durable: result && result.durable === true,
+    error: result && (result.errorMessage || result.reason || result.cleanupError || result.error),
+  };
+  lifecycleResults.push(observation);
+  if (status === "merged") {
+    markBatchResolved(batchId);
+    return result;
+  }
+  if (
+    !result
+    || result.unparsedStructuredOutput === true
+    || ["retry_pending", "failed", "timeout", "blocked", "needs_resolution"].includes(status)
+    || hasFailureSignal(result)
+  ) {
+    recordUnresolved({
+      kind: "batch",
+      batchId,
+      status: observation.status,
+      durable: observation.durable,
+      error: observation.error || result,
+      source,
+      worktreePath: result && result.worktreePath,
+      branchName: result && result.branchName,
+    });
+  }
+  return result;
+}
+
+function recordSchedulerFailure(phaseName, error) {
+  const failure = { phase: phaseName, error: errorText(error) };
+  schedulerFailures.push(failure);
+  recordUnresolved({ kind: "scheduler", status: "unavailable", durable: false, ...failure });
+  return failure;
+}
+
+if (initialRetryRecoveryFailure) {
+  recordSchedulerFailure("recover-pending-retries-after-ensure", initialRetryRecoveryFailure);
+}
+
+function markSchedulerRecovered() {
+  for (const record of unresolvedRecords) {
+    if (record && record.kind === "scheduler" && record.resolved !== true) {
+      record.resolved = true;
+      record.resolvedAt = "scheduler_snapshot_recovered";
+    }
+  }
+}
+
+function applySchedulerState(scheduler) {
+  if (!scheduler || typeof scheduler !== "object") return;
+  lastScheduler = scheduler;
+  scheduledGroups = scopeGroups(scheduler.scheduledGroups || []);
+  mergeableBatches = (scheduler.mergeableBatches || []).filter(inWorkflowScope);
+  stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && inWorkflowScope(result.batchId));
+  retryPendingBatches = retryPendingInScope(scheduler);
+  batchTaskIds = scheduler.batchTaskIds || batchTaskIds;
+  batchWorkspaces = scheduler.batchWorkspaces || batchWorkspaces;
+  blockedBatches = (scheduler.blockedBatches || []).filter(inWorkflowScope);
+  for (const batchId of retryPendingBatches) {
+    recordUnresolved({ kind: "batch", batchId, status: "retry_pending", durable: true, source: "scheduler" });
+  }
+  for (const batchId of blockedBatches) {
+    recordUnresolved({ kind: "batch", batchId, status: "blocked", durable: true, source: "scheduler" });
+  }
+}
+
+async function readSchedulerState(label, phaseName = "准备") {
+  try {
+    const state = requireSchedulerResult(await agent(
+      `执行 python "${schedulerPath}" status --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${workspaceRefArgs}。` +
+      `这是只读调度快照；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。只返回 JSON。`,
+      { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
+    ), label);
+    applySchedulerState(state);
+    markSchedulerRecovered();
+    return state;
+  } catch (error) {
+    recordSchedulerFailure(label, error);
+    return null;
+  }
+}
 
 async function deferBatchForRetry(batchId, batchWorktree, batchBranch, reason) {
   const locationArgs = usableString(batchWorktree) && usableString(batchBranch)
@@ -429,7 +627,15 @@ async function deferBatchForRetry(batchId, batchWorktree, batchBranch, reason) {
     `只清理租约和更新调度状态，保留插件原生 worktree、草稿与阶段证据供自动恢复；不要创建 workflow、修改业务代码、包装 Git 或继续执行 TASK。只返回 JSON。`,
     { label: `defer-batch-retry-${batchId}`, phase: "Batch 阶段" }
   ), `defer batch retry ${batchId}`);
-  return { batchId, status: "retry_pending", reason: String(reason || "batch_execution_failed"), finalized };
+  return {
+    batchId,
+    status: "retry_pending",
+    reason: String(reason || "batch_execution_failed"),
+    finalized,
+    // The scheduler mark command completed successfully.  A later status
+    // snapshot still verifies this claim before the final report is emitted.
+    durable: true,
+  };
 }
 
 function mergedBatchIds(mergeResult) {
@@ -450,20 +656,54 @@ async function cleanupMergedWorktrees(batchIds, label) {
   const expected = [...new Set((Array.isArray(batchIds) ? batchIds : [])
     .filter(batchId => usableString(batchId)))];
   const batchArgs = expected.map(batchId => `--batch-id "${batchId}"`).join(" ");
-  const cleanup = requireSuccess(await agent(
-    `清理已交付 Batch 的插件原生 Worktree。执行 python "${lifecyclePath}" cleanup-merged ` +
-    `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${batchArgs}。` +
-    `只允许清理 manifest 中 status=merged 的 Batch：释放残留 lease、删除该 Worktree 与临时分支并更新 manifest；` +
-    `不得清理 failed、blocked 或 needs_resolution 的 Worktree。只返回 JSON。`,
-    { label, phase: "合并", schema: MERGED_CLEANUP_SCHEMA }
-  ), label);
-  const cleaned = new Set(Array.isArray(cleanup.cleanedBatchIds) ? cleanup.cleanedBatchIds : []);
-  const missing = expected.filter(batchId => !cleaned.has(batchId));
-  if (missing.length > 0) {
-    throw new Error(`merged_worktree_cleanup_incomplete:${missing.join(",")}`);
+  try {
+    const cleanup = requireSuccess(await agent(
+      `清理已交付 Batch 的插件原生 Worktree。执行 python "${lifecyclePath}" cleanup-merged ` +
+      `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${batchArgs}。` +
+      `只允许清理 manifest 中 status=merged 的 Batch：释放残留 lease、删除该 Worktree 与临时分支并更新 manifest；` +
+      `不得清理 failed、blocked 或 needs_resolution 的 Worktree。只返回 JSON。`,
+      { label, phase: "合并", schema: MERGED_CLEANUP_SCHEMA }
+    ), label);
+    const cleaned = new Set(Array.isArray(cleanup.cleanedBatchIds) ? cleanup.cleanedBatchIds : []);
+    const missing = expected.filter(batchId => !cleaned.has(batchId));
+    if (missing.length > 0) {
+      const incomplete = {
+        success: false,
+        cleanedBatchIds: Array.from(cleaned),
+        errors: [`merged_worktree_cleanup_incomplete:${missing.join(",")}`],
+      };
+      cleanupResults.push(incomplete);
+      for (const batchId of missing) {
+        recordUnresolved({
+          kind: "cleanup",
+          batchId,
+          status: "cleanup_pending",
+          durable: false,
+          error: incomplete.errors[0],
+        });
+      }
+      return incomplete;
+    }
+    cleanupResults.push(cleanup);
+    return cleanup;
+  } catch (error) {
+    const failure = {
+      success: false,
+      cleanedBatchIds: [],
+      errors: [errorText(error)],
+    };
+    cleanupResults.push(failure);
+    for (const batchId of expected) {
+      recordUnresolved({
+        kind: "cleanup",
+        batchId,
+        status: "cleanup_pending",
+        durable: false,
+        error,
+      });
+    }
+    return failure;
   }
-  cleanupResults.push(cleanup);
-  return cleanup;
 }
 
 function requiresImplementationRework(result) {
@@ -775,36 +1015,48 @@ async function validateAndPromoteWave(batchIds, wave) {
         { label: `build-candidate-${repositoryRef}-${wave}-${attempt}`, phase: "候选验证" }
       ));
 
-      // Handle conflict resolution if needed
+      // Retain conflicts during the normal drain.  Resolving them here would
+      // let one difficult Batch consume the wave while independent branches
+      // are still runnable; the explicit final-repair phase owns the one
+      // controlled resolution attempt after that drain finishes.
       let built = builtRaw;
       if (builtRaw && builtRaw.status === "candidate_conflicted") {
-        log(`Wave ${wave} 检测到冲突，尝试自动解决...`);
-        const resolved = unwrap(await agent(
-          `尝试解决 Wave ${wave} 的合并冲突。执行 python "${mergeTrainPath}" resolve-candidate --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
-          `若自动解决成功，返回 built 状态和新的 candidateSha；若需要人工介入，返回 needs_resolution 状态。只返回 JSON。`,
-          { label: `resolve-conflict-${repositoryRef}-${wave}`, phase: "冲突解决" }
-        ));
-
-        if (resolved && resolved.status === "built") {
-          log(`Wave ${wave} 冲突已自动解决，方法：${resolved.resolutionMethod || 'unknown'}`);
-          built = resolved;
-        } else if (resolved && resolved.status === "needs_resolution") {
-          // Manual intervention required - throw error with context
-          throw new Error(`Wave ${wave} 需要人工解决冲突: ${JSON.stringify({
-            repositoryRef,
-            wave,
-            conflictedFiles: resolved.conflictedFiles,
-            worktreePath: resolved.worktreePath,
-            reason: resolved.reason || resolved.error
-          })}`);
-        } else {
-          // Resolution failed entirely
-          throw new Error(`Wave ${wave} 冲突解决失败: ${JSON.stringify(resolved)}`);
-        }
+        recordUnresolved({
+          kind: "merge_candidate",
+          repositoryRef,
+          wave,
+          batchIds: ids,
+          batchId: ids.length === 1 ? ids[0] : undefined,
+          status: "candidate_conflicted",
+          durable: true,
+          error: builtRaw.error || (builtRaw.conflictContext && builtRaw.conflictContext.errorMessage),
+          worktreePath: builtRaw.worktreePath || (builtRaw.conflictContext && builtRaw.conflictContext.candidateWorktree),
+          conflictedFiles: builtRaw.conflictedFiles || (builtRaw.conflictContext && builtRaw.conflictContext.conflictedFiles),
+        });
+        throw new Error(`Wave ${wave} retains merge conflict for final repair: ${JSON.stringify({
+          repositoryRef,
+          wave,
+          conflictedFiles: builtRaw.conflictedFiles || (builtRaw.conflictContext && builtRaw.conflictContext.conflictedFiles),
+          worktreePath: builtRaw.worktreePath || (builtRaw.conflictContext && builtRaw.conflictContext.candidateWorktree),
+        })}`);
       }
 
       // Now require success on the built result
-      built = requireSuccess(built, `build candidate ${repositoryRef}`);
+      try {
+        built = requireSuccess(built, `build candidate ${repositoryRef}`);
+      } catch (error) {
+        recordUnresolved({
+          kind: "merge_candidate",
+          repositoryRef,
+          wave,
+          batchIds: ids,
+          batchId: ids.length === 1 ? ids[0] : undefined,
+          status: "build_failed",
+          durable: false,
+          error,
+        });
+        throw error;
+      }
 
       const rawPromotion = unwrap(await agent(
       `推广已完成业务 Review 且 UTest 已通过或已记录失败的候选 SHA ${built.candidateSha}。执行 python "${mergeTrainPath}" promote-candidate --allow-unverified --allow-stale --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${repositoryRef}" --wave ${wave}。` +
@@ -812,7 +1064,34 @@ async function validateAndPromoteWave(batchIds, wave) {
         { label: `promote-candidate-${repositoryRef}-${wave}-${attempt}`, phase: "候选验证" }
       ));
       if (rawPromotion && rawPromotion.stale === true && attempt < 2) continue;
-      promotion = requireSuccess(rawPromotion, `promote candidate ${repositoryRef}`);
+      if (rawPromotion && (rawPromotion.stale === true || rawPromotion.needsPlanRecovery === true || hasFailureSignal(rawPromotion))) {
+        recordUnresolved({
+          kind: "merge_candidate",
+          repositoryRef,
+          wave,
+          batchIds: ids,
+          batchId: ids.length === 1 ? ids[0] : undefined,
+          status: rawPromotion.needsPlanRecovery ? "needs_plan_recovery" : rawPromotion.stale ? "stale" : "promotion_failed",
+          durable: rawPromotion.needsPlanRecovery === true,
+          error: rawPromotion.errors || rawPromotion.error || rawPromotion,
+          worktreePath: rawPromotion.worktreePath,
+        });
+      }
+      try {
+        promotion = requireSuccess(rawPromotion, `promote candidate ${repositoryRef}`);
+      } catch (error) {
+        recordUnresolved({
+          kind: "merge_candidate",
+          repositoryRef,
+          wave,
+          batchIds: ids,
+          batchId: ids.length === 1 ? ids[0] : undefined,
+          status: "promotion_failed",
+          durable: false,
+          error,
+        });
+        throw error;
+      }
       break;
     }
     promoted.push({ repositoryRef, ids, ...promotion });
@@ -823,20 +1102,35 @@ async function validateAndPromoteWave(batchIds, wave) {
 async function promoteReadyBatch(batchId) {
   const promotionWave = ++mergeSequence;
   phase("候选验证");
-  const promotions = await validateAndPromoteWave([batchId], promotionWave);
-  mergeResults.push({ success: true, batchId, wave: promotionWave, promotions });
-  const promotedBatchIds = promotions.flatMap(mergedBatchIds);
-  const missingPromotionBatchIds = promotions
-    .filter(promotion => promotion && promotion.promoted === true && mergedBatchIds(promotion).length === 0)
-    .map(promotion => promotion.repositoryRef || "unknown");
-  if (missingPromotionBatchIds.length > 0) {
-    throw new Error(`promotion_batch_ids_missing:${missingPromotionBatchIds.join(",")}`);
+  try {
+    const promotions = await validateAndPromoteWave([batchId], promotionWave);
+    mergeResults.push({ success: true, batchId, wave: promotionWave, promotions });
+    const promotedBatchIds = promotions.flatMap(mergedBatchIds);
+    const missingPromotionBatchIds = promotions
+      .filter(promotion => promotion && promotion.promoted === true && mergedBatchIds(promotion).length === 0)
+      .map(promotion => promotion.repositoryRef || "unknown");
+    if (missingPromotionBatchIds.length > 0) {
+      throw new Error(`promotion_batch_ids_missing:${missingPromotionBatchIds.join(",")}`);
+    }
+    if (!promotedBatchIds.includes(batchId)) {
+      throw new Error(`promotion_batch_not_merged:${batchId}`);
+    }
+    await cleanupMergedWorktrees(promotedBatchIds, `cleanup-promoted-batch-${batchId}-${promotionWave}`);
+    markBatchResolved(batchId);
+    return { batchId, status: "merged", wave: promotionWave };
+  } catch (error) {
+    mergeResults.push({ success: false, batchId, wave: promotionWave, error: errorText(error) });
+    recordUnresolved({
+      kind: "merge_candidate",
+      batchId,
+      status: "promotion_failed",
+      durable: false,
+      error,
+      wave: promotionWave,
+      repositoryRef: (batchWorkspaces[batchId] || {}).workspaceRef,
+    });
+    throw error;
   }
-  if (!promotedBatchIds.includes(batchId)) {
-    throw new Error(`promotion_batch_not_merged:${batchId}`);
-  }
-  await cleanupMergedWorktrees(promotedBatchIds, `cleanup-promoted-batch-${batchId}-${promotionWave}`);
-  return { batchId, status: "merged", wave: promotionWave };
 }
 
 async function safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, reason) {
@@ -851,6 +1145,9 @@ async function safelyDeferBatchForRetry(batchId, batchWorktree, batchBranch, rea
       status: "retry_pending",
       reason: String(reason || "batch_execution_failed"),
       cleanupError: String(cleanupError),
+      // Do not claim that a model-side cleanup call changed the manifest.  The
+      // retained worktree/lease is intentionally left for scheduler recovery.
+      durable: false,
     };
   }
 }
@@ -940,144 +1237,566 @@ async function runMergeableBatchLifecycle(batchId) {
   }
 }
 
+async function runLifecycleSafely(batchId, source, execute, fallback = {}) {
+  try {
+    const result = await execute();
+    return observeLifecycleResult(batchId, source, result);
+  } catch (error) {
+    // `parallel()` must only receive resolving jobs.  If an unexpected Agent
+    // exception escaped a lifecycle helper, retain the worktree and turn it
+    // into the same retry contract used by expected Batch failures.
+    const deferred = await safelyDeferBatchForRetry(
+      batchId,
+      fallback.worktreePath || (batchWorkspaces[batchId] || {}).worktreePath,
+      fallback.branchName || (batchWorkspaces[batchId] || {}).branchName,
+      errorText(error)
+    );
+    return observeLifecycleResult(batchId, source, deferred);
+  }
+}
+
+function runnableScheduledBatchIds() {
+  return scopeGroups(scheduledGroups)
+    .flat()
+    .filter(batchId => !quarantinedBatchIds.has(batchId));
+}
+
+function runnableStageRecoveries() {
+  return stageRecoveryBatches
+    .filter(recovery => recovery && !quarantinedBatchIds.has(recovery.batchId));
+}
+
+function runnableMergeableBatchIds() {
+  return mergeableBatches.filter(batchId => !quarantinedBatchIds.has(batchId));
+}
+
+async function drainRunnableLifecycles(drainLabel) {
+  let ranAny = false;
+  for (;;) {
+    const scheduledBatchIds = runnableScheduledBatchIds();
+    const recoveries = runnableStageRecoveries();
+    const mergeable = runnableMergeableBatchIds();
+    const recoveredBatchIds = new Set(recoveries.map(item => item.batchId));
+    const mergeableBatchIds = new Set(mergeable);
+    const lifecycleJobs = [
+      ...scheduledBatchIds.map(batchId => () => runLifecycleSafely(
+        batchId,
+        "initial",
+        () => runInitialBatchLifecycle(batchId)
+      )),
+      ...recoveries
+        .filter(recovery => !mergeableBatchIds.has(recovery.batchId))
+        .map(recovery => () => runLifecycleSafely(
+          recovery.batchId,
+          "stage_recovery",
+          () => runRecoveredBatchLifecycle(recovery),
+          recovery
+        )),
+      ...mergeable
+        .filter(batchId => !recoveredBatchIds.has(batchId))
+        .map(batchId => () => runLifecycleSafely(
+          batchId,
+          "merge_candidate",
+          () => runMergeableBatchLifecycle(batchId)
+        )),
+    ];
+    if (!lifecycleJobs.length) {
+      return { ranAny, reason: "no_runnable_independent_batches" };
+    }
+    schedulerWaves += 1;
+    if (schedulerWaves > MAX_SCHEDULER_WAVES) {
+      recordUnresolved({
+        kind: "scheduler",
+        status: "wave_limit_exceeded",
+        durable: false,
+        error: `parallel_scheduler_wave_limit_exceeded:${schedulerWaves}`,
+      });
+      return { ranAny, reason: "wave_limit_exceeded" };
+    }
+
+    // The runnable unit is one Batch's complete delivery chain.  A failed
+    // Batch is quarantined locally, while all other jobs in this wave keep
+    // resolving and future independent waves continue to be released.
+    phase("Batch 阶段");
+    try {
+      await parallel(lifecycleJobs);
+    } catch (error) {
+      // This is defensive: each job above catches its own failures.  Keep an
+      // unexpected parallel-engine failure observable rather than aborting.
+      recordUnresolved({ kind: "scheduler", status: "parallel_execution_failed", durable: false, error });
+    }
+    ranAny = true;
+
+    // `status` schedules currently-independent work but deliberately leaves
+    // retry_pending records untouched.  Retries are deferred to the explicit
+    // final repair phase so a flaky Batch cannot starve peer branches.
+    const state = await readSchedulerState(`${drainLabel}-schedule-wave-${schedulerWaves}`);
+    if (!state) return { ranAny, reason: "scheduler_snapshot_unavailable" };
+  }
+}
+
+function manifestFromScheduler(scheduler = lastScheduler) {
+  return scheduler && scheduler.manifest && typeof scheduler.manifest === "object"
+    ? scheduler.manifest
+    : null;
+}
+
+function scopedManifestBatches(manifest) {
+  const batches = manifest && manifest.batches && typeof manifest.batches === "object"
+    ? manifest.batches
+    : {};
+  return Object.entries(batches).filter(([batchId]) => inWorkflowScope(batchId));
+}
+
+function unresolvedBatchDetails(scheduler = lastScheduler) {
+  const manifest = manifestFromScheduler(scheduler);
+  const byId = new Map();
+  const scopedBatches = scopedManifestBatches(manifest);
+  const batchMap = manifest && manifest.batches && typeof manifest.batches === "object" ? manifest.batches : {};
+  for (const [batchId, batch] of scopedBatches) {
+    if (!batch || batch.status === "merged") continue;
+    const dependencies = Array.isArray(batch.dependencies) ? batch.dependencies : [];
+    const blockedBy = dependencies.filter(dependency => {
+      const upstream = batchMap[dependency];
+      return !upstream || upstream.status !== "merged";
+    });
+    const blocks = scopedBatches
+      .filter(([candidateId, candidate]) => candidateId !== batchId && candidate && Array.isArray(candidate.dependencies) && candidate.dependencies.includes(batchId) && candidate.status !== "merged")
+      .map(([candidateId]) => candidateId);
+    const recovery = batch.recovery && typeof batch.recovery === "object" ? batch.recovery : {};
+    byId.set(batchId, {
+      batchId,
+      status: batch.status || "unknown",
+      error: batch.error || recovery.lastError,
+      retryAttempts: Number.isInteger(recovery.retryAttempts) ? recovery.retryAttempts : 0,
+      worktreePath: batch.worktreePath,
+      branchName: batch.branchName,
+      commitSha: batch.commitSha,
+      dependencies,
+      blockedBy,
+      blocks,
+      recoveryStatus: recovery.status,
+    });
+  }
+  for (const record of activeUnresolvedRecords()) {
+    if (!inWorkflowScope(record.batchId) || ["cleanup", "deferred_issue", "validation", "scheduler"].includes(record.kind)) continue;
+    const existing = byId.get(record.batchId) || { batchId: record.batchId, dependencies: [], blockedBy: [], blocks: [] };
+    if (existing.status === "merged") continue;
+    byId.set(record.batchId, {
+      ...existing,
+      status: existing.status || record.status || "unresolved",
+      error: existing.error || record.error,
+      worktreePath: existing.worktreePath || record.worktreePath,
+      branchName: existing.branchName || record.branchName,
+      durable: record.durable === true,
+    });
+  }
+  return [...byId.values()].sort((left, right) => left.batchId.localeCompare(right.batchId));
+}
+
+function unresolvedMergeCandidateDetails(scheduler = lastScheduler) {
+  const manifest = manifestFromScheduler(scheduler);
+  const trains = manifest && manifest.mergeTrains && typeof manifest.mergeTrains === "object"
+    ? manifest.mergeTrains
+    : {};
+  const byKey = new Map();
+  const add = candidate => {
+    const key = `${candidate.repositoryRef || "unknown"}|${candidate.wave || "unknown"}`;
+    const existing = byKey.get(key) || {};
+    byKey.set(key, { ...existing, ...candidate });
+  };
+  for (const [trainId, train] of Object.entries(trains)) {
+    if (!train || !["candidate_conflicted", "needs_resolution", "failed", "stale", "built"].includes(train.status)) continue;
+    const trainBatchIds = Array.isArray(train.batchIds) ? train.batchIds : [];
+    // A later retry can promote the same deliveries through a fresh Wave.
+    // Retain the older candidate for audit, but do not make that historical
+    // record look unfinished once every delivery it references has a durable
+    // merge commit.
+    if (
+      trainBatchIds.length > 0
+      && trainBatchIds.every(batchId => {
+        const batch = manifest && manifest.batches && manifest.batches[batchId];
+        return batch && batch.status === "merged" && usableString(batch.mergeCommitSha);
+      })
+    ) continue;
+    const ids = trainBatchIds.filter(inWorkflowScope);
+    if (allowedBatchIds.length && !ids.length) continue;
+    add({
+      trainId,
+      repositoryRef: train.repositoryRef,
+      wave: train.wave,
+      status: train.status,
+      error: train.error,
+      batchIds: ids,
+      worktreePath: train.worktreePath,
+      conflictedFiles: train.conflictContext && train.conflictContext.conflictedFiles,
+      cleanupErrors: train.cleanupErrors,
+    });
+  }
+  for (const record of activeUnresolvedRecords()) {
+    if (record.kind !== "merge_candidate") continue;
+    add({
+      repositoryRef: record.repositoryRef,
+      wave: record.wave,
+      status: record.status,
+      error: record.error,
+      batchIds: record.batchIds || (record.batchId ? [record.batchId] : []),
+      worktreePath: record.worktreePath,
+      conflictedFiles: record.conflictedFiles,
+      durable: record.durable === true,
+    });
+  }
+  return [...byKey.values()]
+    .filter(candidate => candidate.status !== "promoted")
+    .sort((left, right) => `${left.repositoryRef}|${left.wave}`.localeCompare(`${right.repositoryRef}|${right.wave}`));
+}
+
+function deferredIssueDetails(scheduler = lastScheduler, verification = null) {
+  const manifest = manifestFromScheduler(scheduler);
+  if (manifest && Array.isArray(manifest.deferredIssues)) return manifest.deferredIssues;
+  return verification && Array.isArray(verification.deferredIssues) ? verification.deferredIssues : [];
+}
+
+function allWorkflowDeliveriesMerged(scheduler = lastScheduler) {
+  const manifest = manifestFromScheduler(scheduler);
+  const batches = scopedManifestBatches(manifest);
+  return batches.length > 0
+    && batches.every(([, batch]) => batch && batch.status === "merged" && usableString(batch.mergeCommitSha))
+    && unresolvedBatchDetails(scheduler).length === 0
+    && unresolvedMergeCandidateDetails(scheduler).length === 0;
+}
+
+function completionReport({
+  finalStatus,
+  scheduler = lastScheduler,
+  e2e = null,
+  verification = null,
+  e2eSkippedReason = null,
+  nextAction = null,
+}) {
+  const batches = unresolvedBatchDetails(scheduler);
+  const mergeCandidates = unresolvedMergeCandidateDetails(scheduler);
+  const deferredIssues = deferredIssueDetails(scheduler, verification);
+  const cleanup = activeUnresolvedRecords().filter(record => record.kind === "cleanup");
+  const activeSchedulerFailures = activeUnresolvedRecords().filter(record => record.kind === "scheduler");
+  return {
+    ok: ["succeeded", "succeeded_with_issues", "repository_scope_completed"].includes(finalStatus),
+    feature,
+    runId,
+    batchResults,
+    mergeResults,
+    cleanupResults,
+    lifecycleResults,
+    e2e,
+    verification,
+    finalStatus,
+    retryPendingBatches: batches.filter(batch => batch.status === "retry_pending").map(batch => batch.batchId),
+    blockedBatches: batches.filter(batch => ["blocked", "needs_resolution"].includes(batch.status)).map(batch => batch.batchId),
+    deferredIssues,
+    e2eSkippedReason,
+    finalRepair: {
+      attempted: true,
+      results: finalRepairResults,
+    },
+    unresolved: {
+      batches,
+      mergeCandidates,
+      deferredIssues,
+      cleanup,
+      schedulerFailures: activeSchedulerFailures,
+      records: activeUnresolvedRecords(),
+    },
+    schedulerFailures,
+    nextAction: nextAction || (batches.length || mergeCandidates.length
+      ? "inspect_unresolved_batches_then_resume"
+      : "inspect_final_validation_failure"),
+  };
+}
+
+async function persistUndurableBatchFailures() {
+  const active = activeUnresolvedRecords();
+  const durableBatchIds = new Set(active
+    .filter(record => record.kind === "batch" && record.durable === true && inWorkflowScope(record.batchId))
+    .map(record => record.batchId));
+  for (const record of active) {
+    if (
+      record.durable === true
+      || !inWorkflowScope(record.batchId)
+      || !["batch", "merge_candidate"].includes(record.kind)
+      || durableBatchIds.has(record.batchId)
+    ) continue;
+    const result = await safelyDeferBatchForRetry(
+      record.batchId,
+      record.worktreePath || (batchWorkspaces[record.batchId] || {}).worktreePath,
+      record.branchName || (batchWorkspaces[record.batchId] || {}).branchName,
+      record.error || record.status
+    );
+    finalRepairResults.push({
+      kind: "persist_retry_marker",
+      batchId: record.batchId,
+      durable: result.durable === true,
+      status: result.status,
+      error: result.cleanupError,
+    });
+    if (result.durable === true) {
+      record.durable = true;
+      durableBatchIds.add(record.batchId);
+    } else {
+      record.finalRepairError = result.cleanupError || result.reason;
+    }
+  }
+}
+
+async function queueRetryExhaustedBatchRepairs() {
+  // A retry-exhausted Batch is deliberately quarantined during the normal
+  // drain.  Once every independent branch has had its chance to finish, give
+  // it one fresh, durable repair admission.  `mark-batch retry_pending` owns
+  // the retry counter reset for this explicit final-repair boundary.
+  for (const batch of unresolvedBatchDetails()) {
+    if (batch.status !== "blocked" || batch.recoveryStatus !== "retry_exhausted") continue;
+    const result = await safelyDeferBatchForRetry(
+      batch.batchId,
+      batch.worktreePath || (batchWorkspaces[batch.batchId] || {}).worktreePath,
+      batch.branchName || (batchWorkspaces[batch.batchId] || {}).branchName,
+      batch.error || "retry_exhausted_final_repair"
+    );
+    finalRepairResults.push({
+      kind: "requeue_retry_exhausted_batch",
+      batchId: batch.batchId,
+      status: result.status,
+      durable: result.durable === true,
+      error: result.cleanupError,
+    });
+    if (result.durable === true) {
+      quarantinedBatchIds.delete(batch.batchId);
+      for (const record of unresolvedRecords) {
+        if (record && record.batchId === batch.batchId && record.resolved !== true) {
+          record.resolved = true;
+          record.resolvedAt = "queued_for_final_repair";
+        }
+      }
+    }
+  }
+}
+
+async function attemptFinalCandidateRepair(record) {
+  if (!usableString(record.repositoryRef) || !Number.isFinite(Number(record.wave))) return;
+  const batchIds = Array.isArray(record.batchIds) && record.batchIds.length
+    ? record.batchIds
+    : (record.batchId ? [record.batchId] : []);
+  try {
+    const resolved = unwrap(await agent(
+      `所有独立 Batch 已排空。对保留的 Merge Train 候选作最后一次受控自动恢复：执行 python "${mergeTrainPath}" resolve-candidate ` +
+      `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${record.repositoryRef}" --wave ${record.wave}。` +
+      `只可处理该既有候选；不得创建新 Worktree、修改 main 或继续其他 Batch。无法自动解决时保留候选和冲突上下文。只返回 JSON。`,
+      { label: `final-repair-candidate-${record.repositoryRef}-${record.wave}`, phase: "最终修复与报告" }
+    ));
+    if (!resolved || resolved.status !== "built" || resolved.success === false) {
+      finalRepairResults.push({
+        kind: "resolve_candidate",
+        repositoryRef: record.repositoryRef,
+        wave: record.wave,
+        status: resolved && resolved.status || "failed",
+        error: resolved && (resolved.error || resolved.reason),
+      });
+      recordUnresolved({
+        kind: "merge_candidate",
+        repositoryRef: record.repositoryRef,
+        wave: record.wave,
+        batchIds,
+        batchId: batchIds.length === 1 ? batchIds[0] : undefined,
+        status: "needs_resolution",
+        durable: true,
+        error: resolved,
+        worktreePath: resolved && resolved.worktreePath,
+        conflictedFiles: resolved && resolved.conflictedFiles,
+      });
+      return;
+    }
+    const promotion = requireSuccess(await agent(
+      `推广已在最终修复阶段恢复的候选。执行 python "${mergeTrainPath}" promote-candidate --allow-unverified --allow-stale ` +
+      `--workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --repository-ref "${record.repositoryRef}" --wave ${record.wave}。` +
+      `仅推广这个已恢复候选；若 stale 或失败，保留其状态供最终报告。只返回 JSON。`,
+      { label: `final-promote-candidate-${record.repositoryRef}-${record.wave}`, phase: "最终修复与报告" }
+    ), `final promote candidate ${record.repositoryRef}`);
+    const promotedBatchIds = mergedBatchIds(promotion);
+    if (!promotedBatchIds.length) {
+      throw new Error(`final_promotion_batch_ids_missing:${record.repositoryRef}:${record.wave}`);
+    }
+    await cleanupMergedWorktrees(promotedBatchIds, `final-cleanup-candidate-${record.repositoryRef}-${record.wave}`);
+    for (const batchId of promotedBatchIds) markBatchResolved(batchId);
+    markCandidateResolved(record.repositoryRef, record.wave);
+    mergeResults.push({ success: true, batchIds: promotedBatchIds, wave: record.wave, repositoryRef: record.repositoryRef, finalRepair: true });
+    finalRepairResults.push({
+      kind: "resolve_candidate",
+      repositoryRef: record.repositoryRef,
+      wave: record.wave,
+      status: "promoted",
+      batchIds: promotedBatchIds,
+    });
+  } catch (error) {
+    finalRepairResults.push({
+      kind: "resolve_candidate",
+      repositoryRef: record.repositoryRef,
+      wave: record.wave,
+      status: "failed",
+      error: errorText(error),
+    });
+    recordUnresolved({
+      kind: "merge_candidate",
+      repositoryRef: record.repositoryRef,
+      wave: record.wave,
+      batchIds,
+      batchId: batchIds.length === 1 ? batchIds[0] : undefined,
+      status: "final_repair_failed",
+      durable: false,
+      error,
+    });
+  }
+}
+
+async function runFinalRepairAndReport() {
+  phase("最终修复与报告");
+  await readSchedulerState("final-repair-initial-snapshot", "最终修复与报告");
+  await persistUndurableBatchFailures();
+  await queueRetryExhaustedBatchRepairs();
+
+  // Candidate conflicts are retried only after independent work has drained.
+  // One attempt per candidate prevents a permanently conflicted candidate from
+  // monopolizing the run.
+  const attemptedCandidates = new Set();
+  for (const candidate of unresolvedMergeCandidateDetails()) {
+    if (!["candidate_conflicted", "needs_resolution", "resolve_failed"].includes(candidate.status)) continue;
+    const key = `${candidate.repositoryRef}|${candidate.wave}`;
+    if (attemptedCandidates.has(key)) continue;
+    attemptedCandidates.add(key);
+    await attemptFinalCandidateRepair(candidate);
+  }
+
+  let repairState = await readSchedulerState("final-repair-before-retry", "最终修复与报告");
+  if (repairState && retryPendingInScope(repairState).length > 0) {
+    try {
+      repairState = await recoverPendingRetries(repairState, "final-repair-resume-retry-pending");
+      applySchedulerState(repairState);
+      const rescheduled = new Set([
+        ...(Array.isArray(repairState.rescheduledRetryBatches) ? repairState.rescheduledRetryBatches : []),
+        ...scopeGroups(repairState.scheduledGroups || []).flat(),
+        ...(repairState.mergeableBatches || []),
+        ...(repairState.stageRecoveryBatches || []).map(item => item && item.batchId),
+      ].filter(inWorkflowScope));
+      for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);
+      finalRepairResults.push({
+        kind: "resume_retry_pending",
+        status: repairState.status,
+        rescheduledBatchIds: [...rescheduled],
+      });
+    } catch (error) {
+      recordSchedulerFailure("final-repair-resume-retry-pending", error);
+      finalRepairResults.push({ kind: "resume_retry_pending", status: "failed", error: errorText(error) });
+    }
+  }
+
+  // This is the only retry drain.  A new failure remains pending for the final
+  // report instead of recursively retrying forever in the same workflow run.
+  await drainRunnableLifecycles("final-repair");
+  return readSchedulerState("final-report-snapshot", "最终修复与报告");
+}
+
 // A resumed run can already contain merged deliveries from a prior interrupted
-// Workflow. Clear those first so a retry never inherits occupied branches.
+// Workflow. Cleanup is non-blocking: a temporary-worktree error never turns a
+// durable delivery back into a failed Batch.
 await cleanupMergedWorktrees([], "recover-merged-worktree-cleanup");
+applySchedulerState(prepared);
 
-if (retryPendingBatches.length > 0) {
-  return {
-    ok: false,
-    feature,
-    runId,
-    batchResults,
-    mergeResults,
-    cleanupResults,
-    retryPendingBatches,
-    finalStatus: "partial_retry_pending",
-    nextAction: "resume_retry_pending_batches",
-  };
-}
+// First drain every currently runnable branch without automatically resuming
+// failed work.  This lets siblings and their downstream waves finish even when
+// one model call, worktree, or merge candidate is unhealthy.
+await drainRunnableLifecycles("drain");
 
-if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !blockedBatches.length && !["verifying", "succeeded"].includes(prepared.status) && !prepared.waitingForRepositories && !hasWorkOutsideScope(prepared)) {
-  throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: prepared, batchResults, mergeResults }));
-}
-
-while (scheduledGroups.length > 0 || mergeableBatches.length > 0 || stageRecoveryBatches.length > 0) {
-  schedulerWaves += 1;
-  if (schedulerWaves > MAX_SCHEDULER_WAVES) {
-    throw new Error(JSON.stringify({ error: "parallel_scheduler_wave_limit_exceeded", runId, schedulerWaves, batchResults, mergeResults }));
-  }
-
-  // The runnable unit is one Batch's complete delivery chain.  Parallelism is
-  // therefore at the Batch boundary, not at a global code/review/test barrier:
-  // B001 may be reviewing while B002 is still coding, and may merge before it.
-  phase("Batch 阶段");
-  const scheduledBatchIds = scheduledGroups.flat();
-  const recoveredBatchIds = new Set(stageRecoveryBatches.map(item => item.batchId));
-  const mergeableBatchIds = new Set(mergeableBatches);
-  const lifecycleJobs = [
-    ...scheduledBatchIds.map(batchId => () => runInitialBatchLifecycle(batchId)),
-    ...stageRecoveryBatches
-      .filter(recovery => !mergeableBatchIds.has(recovery.batchId))
-      .map(recovery => () => runRecoveredBatchLifecycle(recovery)),
-    ...mergeableBatches
-      .filter(batchId => !recoveredBatchIds.has(batchId))
-      .map(batchId => () => runMergeableBatchLifecycle(batchId)),
-  ];
-  await parallel(lifecycleJobs);
-
-  let resumed = requireSchedulerResult(await agent(
-    `执行 python "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${workspaceRefArgs}。` +
-    `只返回 JSON。下游 Batch 必须仅在依赖已 merged 后才会出现在 scheduledGroups 中。`,
-    { label: `schedule-wave-${schedulerWaves + 1}`, phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
-  ), "scheduler resume");
-  resumed = await recoverPendingRetries(resumed, `recover-pending-retries-after-wave-${schedulerWaves}`);
-  scheduledGroups = scopeGroups(resumed.scheduledGroups || []);
-  mergeableBatches = (resumed.mergeableBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
-  stageRecoveryBatches = (resumed.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(result.batchId)));
-  retryPendingBatches = retryPendingInScope(resumed);
-  batchTaskIds = resumed.batchTaskIds || batchTaskIds;
-  batchWorkspaces = resumed.batchWorkspaces || batchWorkspaces;
-  blockedBatches = (resumed.blockedBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
-  if (retryPendingBatches.length > 0) {
-    return {
-      ok: false,
-      feature,
-      runId,
-      batchResults,
-      mergeResults,
-      cleanupResults,
-      retryPendingBatches,
-      finalStatus: "partial_retry_pending",
-      nextAction: "resume_retry_pending_batches",
-    };
-  }
-  if (!scheduledGroups.length && !mergeableBatches.length && !stageRecoveryBatches.length && !blockedBatches.length && !["verifying", "succeeded"].includes(resumed.status) && !resumed.waitingForRepositories && !hasWorkOutsideScope(resumed)) {
-    throw new Error(JSON.stringify({ error: "parallel_scheduler_stalled", runId, scheduler: resumed, batchResults, mergeResults }));
-  }
-}
-
-// A retry-exhausted Batch blocks only its dependent branch.  All unrelated
-// Batch lifecycles above have already been allowed to finish; do not start
-// E2E for an incomplete DAG and do not erase the recoverable Worktree.
-if (blockedBatches.length > 0) {
-  return {
-    ok: false,
-    feature,
-    runId,
-    batchResults,
-    mergeResults,
-    cleanupResults,
-    blockedBatches,
-    finalStatus: "partial_blocked",
-    nextAction: "inspect_retry_exhausted_batches_and_resume",
-  };
-}
+const finalScheduler = await runFinalRepairAndReport();
+if (finalScheduler) applySchedulerState(finalScheduler);
 
 if (coordinatorManaged) {
-  return {
-    ok: true,
-    feature,
-    runId,
-    batchResults,
-    mergeResults,
-    cleanupResults,
-    waitingForRepositories: true,
+  return completionReport({
+    finalStatus: allWorkflowDeliveriesMerged(finalScheduler) ? "repository_scope_completed" : "completed_with_unresolved",
+    scheduler: finalScheduler || lastScheduler,
+    e2eSkippedReason: "repository_coordinator_managed",
     nextAction: "repository_coordinator_next",
-  };
+  });
+}
+
+if (!allWorkflowDeliveriesMerged(finalScheduler)) {
+  const snapshotAvailable = Boolean(manifestFromScheduler(finalScheduler));
+  return completionReport({
+    finalStatus: "completed_with_unresolved",
+    scheduler: finalScheduler || lastScheduler,
+    e2eSkippedReason: snapshotAvailable ? "delivery_dag_incomplete" : "scheduler_snapshot_unavailable",
+    nextAction: "inspect_unresolved_batches_then_resume",
+  });
 }
 
 phase("最终验证");
-const e2eStarted = requireSuccess(await agent(
-  `所有 delivery Batch 已推广后，创建 B-E2E。执行 python "${mergeTrainPath}" begin-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-  `此命令只创建 main SHA 绑定的验证状态；它不运行 Batch compile 或 UTest。只返回 JSON。`,
-  { label: "begin-e2e-validation", phase: "最终验证" }
-), "begin e2e");
-const e2e = requireSuccess(await agent(
-  `在当前已合并 main 上执行唯一的 B-E2E 验证。Feature=${feature}，runId=${runId}。` +
-  `必须只在这些插件创建的临时验证 Worktree 中操作：${JSON.stringify(e2eStarted.worktrees || {})}；不得操作主 checkout。` +
-  `先收集可重现环境元数据：environment.version、environment.seedDataDigest、environment.dependencies（对象，含 DB/Redis/MQ 等实际版本或明确的 none），并将其与场景摘要一并作为 JSON metadata。` +
-  `执行 Plan/Feature 定义且未被 Batch UTest 覆盖的端到端场景；如有 projectValidationCommands，它们现在唯一归属 V-E2E，须在同一临时 Worktree 中由随后命令执行。不得重复执行 Batch test、compile 或 quality gate。随后执行 Plan 唯一归属 V-E2E 的命令：python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "V-E2E" --stage e2e_test --metadata-json '<含上述 environment 与场景摘要的 JSON>'。` +
-  `通过后执行 python "${mergeTrainPath}" finish-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --passed true --metadata-json '<同一份含 environment 的 JSON>'。` +
-  `失败时使用 --passed false 并记录失败摘要；失败会创建受控修复入口，禁止在 main 直接修复。只返回 JSON。`,
-  { label: "run-e2e-validation", phase: "最终验证" }
-), "e2e validation");
+let e2eStarted;
+let e2e;
+try {
+  e2eStarted = requireSuccess(await agent(
+    `所有 delivery Batch 已推广后，创建 B-E2E。执行 python "${mergeTrainPath}" begin-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
+    `此命令只创建 main SHA 绑定的验证状态；它不运行 Batch compile 或 UTest。只返回 JSON。`,
+    { label: "begin-e2e-validation", phase: "最终验证" }
+  ), "begin e2e");
+  e2e = requireSuccess(await agent(
+    `在当前已合并 main 上执行唯一的 B-E2E 验证。Feature=${feature}，runId=${runId}。` +
+    `必须只在这些插件创建的临时验证 Worktree 中操作：${JSON.stringify(e2eStarted.worktrees || {})}；不得操作主 checkout。` +
+    `先收集可重现环境元数据：environment.version、environment.seedDataDigest、environment.dependencies（对象，含 DB/Redis/MQ 等实际版本或明确的 none），并将其与场景摘要一并作为 JSON metadata。` +
+    `执行 Plan/Feature 定义且未被 Batch UTest 覆盖的端到端场景；如有 projectValidationCommands，它们现在唯一归属 V-E2E，须在同一临时 Worktree 中由随后命令执行。不得重复执行 Batch test、compile 或 quality gate。随后执行 Plan 唯一归属 V-E2E 的命令：python "${stageValidationPath}" run --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "V-E2E" --stage e2e_test --metadata-json '<含上述 environment 与场景摘要的 JSON>'。` +
+    `通过后执行 python "${mergeTrainPath}" finish-e2e --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --passed true --metadata-json '<同一份含 environment 的 JSON>'。` +
+    `失败时使用 --passed false 并记录失败摘要；失败会创建受控修复入口，禁止在 main 直接修复。只返回 JSON。`,
+    { label: "run-e2e-validation", phase: "最终验证" }
+  ), "e2e validation");
+} catch (error) {
+  recordUnresolved({ kind: "validation", status: "e2e_failed", durable: false, error });
+  return completionReport({
+    finalStatus: "completed_with_validation_failure",
+    scheduler: finalScheduler || lastScheduler,
+    e2e: e2e || { error: errorText(error) },
+    e2eSkippedReason: "e2e_execution_failed",
+    nextAction: "inspect_e2e_failure_and_use_controlled_repair",
+  });
+}
 void e2eStarted;
-const verification = requireSuccess(await agent(
-  `执行 python "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
-  `这是只读 evidence aggregate：禁止执行任何编译、测试或 E2E 命令。只返回 JSON。`,
-  { label: "aggregate-staged-evidence", phase: "最终验证", schema: VERIFICATION_SCHEMA }
-), "evidence aggregate");
 
-return {
-  ok: true,
-  feature,
-  runId,
-  batchResults,
-  mergeResults,
-  cleanupResults,
+let verification;
+try {
+  verification = unwrap(await agent(
+    `执行 python "${aggregatePath}" --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
+    `这是只读 evidence aggregate：禁止执行任何编译、测试或 E2E 命令。只返回 JSON。`,
+    { label: "aggregate-staged-evidence", phase: "最终验证", schema: VERIFICATION_SCHEMA }
+  ));
+  if (!verification || verification.unparsedStructuredOutput === true || hasFailureSignal(verification)) {
+    recordUnresolved({ kind: "validation", status: "evidence_aggregate_failed", durable: false, error: verification });
+    return completionReport({
+      finalStatus: "completed_with_validation_failure",
+      scheduler: finalScheduler || lastScheduler,
+      e2e,
+      verification,
+      nextAction: "inspect_evidence_aggregate_failure",
+    });
+  }
+} catch (error) {
+  recordUnresolved({ kind: "validation", status: "evidence_aggregate_failed", durable: false, error });
+  return completionReport({
+    finalStatus: "completed_with_validation_failure",
+    scheduler: finalScheduler || lastScheduler,
+    e2e,
+    verification: { error: errorText(error) },
+    nextAction: "inspect_evidence_aggregate_failure",
+  });
+}
+
+return completionReport({
+  finalStatus: verification.hasDeferredIssues ? "succeeded_with_issues" : "succeeded",
+  scheduler: finalScheduler || lastScheduler,
   e2e,
   verification,
-  finalStatus: verification.hasDeferredIssues ? "succeeded_with_issues" : "succeeded",
-  deferredIssues: Array.isArray(verification.deferredIssues) ? verification.deferredIssues : [],
-};
+  nextAction: verification.hasDeferredIssues ? "review_deferred_issues" : "completed",
+});

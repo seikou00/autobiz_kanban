@@ -223,7 +223,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                 },
             )
 
-    def test_resume_blocks_unresolved_merge_train(self) -> None:
+    def test_resume_reports_unresolved_merge_train_without_global_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -237,17 +237,23 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             )
             manifest = load_manifest(workspace, "alpha", created["runId"])
             manifest["mergeTrains"] = {
-                "default:wave-001": {"status": "needs_resolution"},
+                "default:wave-001": {
+                    "repositoryRef": "default",
+                    "wave": 1,
+                    "batchIds": ["B001"],
+                    "status": "needs_resolution",
+                },
             }
             save_manifest(workspace, "alpha", created["runId"], manifest)
 
             resumed = resume_run(workspace, "alpha", created["runId"])
 
-            self.assertEqual(resumed["status"], "needs_resolution")
+            self.assertEqual(resumed["status"], "running")
             self.assertTrue(resumed["recoveryRequired"])
+            self.assertEqual(resumed["unresolvedMergeTrains"], ["default:wave-001"])
             self.assertEqual(resumed["scheduledGroups"], [])
 
-    def test_ensure_preserves_needs_resolution_run(self) -> None:
+    def test_ensure_scopes_needs_resolution_batch_without_global_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -270,8 +276,9 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             )
 
             self.assertEqual(ensured["runId"], created["runId"])
-            self.assertEqual(ensured["status"], "needs_resolution")
+            self.assertEqual(ensured["status"], "running")
             self.assertTrue(ensured["recoveryRequired"])
+            self.assertEqual(ensured["unresolvedBatches"], ["B001"])
             self.assertEqual(ensured["scheduledGroups"], [])
 
     def test_ensure_blocks_merged_batch_without_a_merge_commit(self) -> None:
@@ -573,7 +580,7 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(manifest["status"], "running")
             self.assertEqual(manifest["batches"]["B001"]["status"], "pending")
 
-    def test_resume_preserves_conflicting_delivery(self) -> None:
+    def test_resume_scopes_conflicting_delivery_without_global_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace, feature_dir, repo = _workspace(root)
@@ -591,8 +598,9 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
 
             resumed = resume_run(workspace, "alpha", created["runId"])
 
-            self.assertEqual(resumed["status"], "needs_resolution")
+            self.assertEqual(resumed["status"], "running")
             self.assertTrue(resumed["recoveryRequired"])
+            self.assertEqual(resumed["unresolvedBatches"], ["B001"])
             self.assertEqual(resumed["scheduledGroups"], [])
 
     def test_final_verify_rejects_merged_batch_without_merge_commit(self) -> None:
@@ -1758,6 +1766,279 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(ready_batches(manifest), [])
             with self.assertRaisesRegex(ValueError, "parallel_batch_dependency_incomplete:B002:B001"):
                 acquire_lease(workspace, feature, run, "B002")
+
+    def test_expired_running_lease_recovers_without_blocking_independent_peer(self) -> None:
+        """Scheduler recovery must not depend on a failed worker writing retry state."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            _add_second_compile_only_batch(feature_dir)
+            second_path = feature_dir / "plans" / "B002" / "plan.json"
+            second = json.loads(second_path.read_text(encoding="utf-8"))
+            second["tasks"][0]["deps"] = []
+            second_path.write_text(json.dumps(second), encoding="utf-8")
+            root_path = feature_dir / "plan.json"
+            plan = json.loads(root_path.read_text(encoding="utf-8"))
+            next(entry for entry in plan["batches"] if entry["id"] == "B002")["deps"] = []
+            root_path.write_text(json.dumps(plan), encoding="utf-8")
+            _refresh_parallel_pipeline(feature_dir)
+            config_dir = workspace / ".autobiz"
+            config_dir.mkdir()
+            (config_dir / "runtime_config.json").write_text(
+                json.dumps({"parallelSchedulingMode": "optimistic", "maxParallel": 4}),
+                encoding="utf-8",
+            )
+
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            self.assertEqual(created["scheduledGroups"], [["B001", "B002"]])
+            lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+            worktree = _create_native_worktree(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                repo,
+                lease["ownerToken"],
+            )
+            self.assertTrue(worktree["success"], worktree)
+
+            # Simulate a model/process failure after it marked the Batch
+            # running, before it could call the Workflow's retry cleanup.
+            stale_lease_path = lease_path(workspace, "alpha", run_id, "B001")
+            stale_lease = json.loads(stale_lease_path.read_text(encoding="utf-8"))
+            stale_lease["expiresEpoch"] = 0
+            stale_lease_path.write_text(json.dumps(stale_lease), encoding="utf-8")
+
+            resumed = resume_run(workspace, "alpha", run_id)
+            manifest = load_manifest(workspace, "alpha", run_id)
+
+            self.assertEqual(resumed["status"], "running")
+            self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(resumed["scheduledGroups"], [["B001", "B002"]])
+            self.assertEqual(resumed["activeWorkers"], 0)
+            self.assertEqual(
+                resumed["reclaimedStaleBatches"],
+                [{"batchId": "B001", "reason": "lease_expired"}],
+            )
+            self.assertEqual(manifest["batches"]["B001"]["status"], "pending")
+            self.assertEqual(manifest["batches"]["B001"]["recovery"]["retryAttempts"], 1)
+            self.assertIsNone(manifest["batches"]["B001"]["lease"])
+            self.assertFalse(stale_lease_path.exists())
+
+    def test_resume_reconciles_retry_manifest_lease_when_lease_file_is_missing(self) -> None:
+        """A crash after lease unlink must be repaired from durable retry state."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            manifest = load_manifest(workspace, "alpha", run_id)
+            manifest["batches"]["B001"].update(
+                {
+                    "status": "retry_pending",
+                    "lease": {"batchId": "B001", "expiresAt": "2099-01-01T00:00:00Z"},
+                }
+            )
+            save_manifest(workspace, "alpha", run_id, manifest)
+
+            resumed = resume_run(workspace, "alpha", run_id)
+            persisted = load_manifest(workspace, "alpha", run_id)
+
+            self.assertEqual(resumed["status"], "running")
+            self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(resumed["scheduledGroups"], [["B001"]])
+            self.assertEqual(persisted["batches"]["B001"]["status"], "pending")
+            self.assertIsNone(persisted["batches"]["B001"]["lease"])
+            self.assertFalse(lease_path(workspace, "alpha", run_id, "B001").exists())
+
+    def test_expired_ready_candidate_lease_reenters_recovery_before_merge(self) -> None:
+        """A stale handoff lease cannot leave a candidate outside recovery."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            manifest = load_manifest(workspace, "alpha", run_id)
+            manifest["batches"]["B001"].update(
+                {
+                    "status": "ready_to_candidate",
+                    "commitSha": "draft-sha",
+                    "lease": {"batchId": "B001", "expiresAt": "2099-01-01T00:00:00Z"},
+                }
+            )
+            save_manifest(workspace, "alpha", run_id, manifest)
+            residual_lease = lease_path(workspace, "alpha", run_id, "B001")
+            residual_lease.parent.mkdir(parents=True, exist_ok=True)
+            residual_lease.write_text(json.dumps({"expiresEpoch": 0}), encoding="utf-8")
+
+            resumed = resume_run(workspace, "alpha", run_id)
+            persisted = load_manifest(workspace, "alpha", run_id)
+
+            self.assertEqual(
+                resumed["reclaimedStaleBatches"],
+                [{"batchId": "B001", "reason": "lease_expired"}],
+            )
+            self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(resumed["mergeableBatches"], ["B001"])
+            self.assertEqual(persisted["batches"]["B001"]["status"], "ready_to_candidate")
+            self.assertEqual(persisted["batches"]["B001"]["recovery"]["retryAttempts"], 1)
+            self.assertIsNone(persisted["batches"]["B001"]["lease"])
+            self.assertFalse(residual_lease.exists())
+
+    def test_unresolved_merge_train_isolates_independent_peer_and_dependent(self) -> None:
+        """A conflicted candidate must not freeze unrelated work or unlock its dependent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            _add_second_compile_only_batch(feature_dir)  # B002 remains dependent on B001.
+
+            second_path = feature_dir / "plans" / "B002" / "plan.json"
+            second = json.loads(second_path.read_text(encoding="utf-8"))
+            third = copy.deepcopy(second)
+            third["batchId"] = "B003"
+            third["title"] = "independent peer"
+            third["taskIds"] = ["T003"]
+            third["compileCommand"]["id"] = "BATCH-B003-COMPILE"
+            third_task = third["tasks"][0]
+            third_task.update(
+                {
+                    "id": "T003",
+                    "title": "deliver independent behavior",
+                    "deps": [],
+                    "specRefs": ["specs/independent/spec.md#REQ-003", "specs/independent/spec.md#SCN-003"],
+                    "acceptanceCriteria": [
+                        {
+                            "id": "AC-T003-01",
+                            "text": "independent behavior is observable",
+                            "scenarioRefs": ["specs/independent/spec.md#SCN-003"],
+                        }
+                    ],
+                }
+            )
+            third_task["validationCommands"][0].update(
+                {"id": "VAL-T003-01", "covers": ["AC-T003-01"]}
+            )
+            third_path = feature_dir / "plans" / "B003" / "plan.json"
+            third_path.parent.mkdir(parents=True)
+            third_path.write_text(json.dumps(third), encoding="utf-8")
+            root_path = feature_dir / "plan.json"
+            plan = json.loads(root_path.read_text(encoding="utf-8"))
+            plan["batches"].append(
+                {
+                    "id": "B003",
+                    "path": "plans/B003/plan.json",
+                    "title": "independent peer",
+                    "specRoots": ["specs/independent/spec.md"],
+                    "executionLane": "backend",
+                    "deps": [],
+                    "taskIds": ["T003"],
+                    "status": "todo",
+                }
+            )
+            root_path.write_text(json.dumps(plan), encoding="utf-8")
+            _refresh_parallel_pipeline(feature_dir)
+            config_dir = workspace / ".autobiz"
+            config_dir.mkdir()
+            (config_dir / "runtime_config.json").write_text(
+                json.dumps({"parallelSchedulingMode": "optimistic", "maxParallel": 4}),
+                encoding="utf-8",
+            )
+
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+            self.assertEqual(created["scheduledGroups"], [["B001", "B003"]])
+
+            lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+            delivery = _create_native_worktree(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                repo,
+                lease["ownerToken"],
+            )
+            self.assertTrue(delivery["success"], delivery)
+            worktree = Path(delivery["worktreePath"])
+            (worktree / "conflicted-delivery.txt").write_text("delivery\n", encoding="utf-8")
+            task_runner_git(worktree, "add", "conflicted-delivery.txt")
+            task_runner_git(worktree, "commit", "-m", "delivery")
+            commit_sha = _git(worktree, "rev-parse", "HEAD")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "sealed",
+                worktreePath=delivery["worktreePath"],
+                branchName=delivery["branchName"],
+                commitSha=commit_sha,
+                compileStatus="passed",
+            )
+            release_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"], final_status="sealed")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "ready_to_candidate",
+                worktreePath=delivery["worktreePath"],
+                branchName=delivery["branchName"],
+                commitSha=commit_sha,
+            )
+            manifest = load_manifest(workspace, "alpha", run_id)
+            manifest["mergeTrains"] = {
+                "default:wave-001": {
+                    "repositoryRef": "default",
+                    "wave": 1,
+                    "batchIds": ["B001"],
+                    "status": "candidate_conflicted",
+                    "worktreePath": str(worktree),
+                    "branchName": "candidate-conflicted",
+                    "error": "parallel_merge_train_conflict:B001",
+                }
+            }
+            save_manifest(workspace, "alpha", run_id, manifest)
+
+            resumed = resume_run(workspace, "alpha", run_id)
+            persisted = load_manifest(workspace, "alpha", run_id)
+
+            self.assertEqual(resumed["status"], "running")
+            self.assertTrue(resumed["recoveryRequired"])
+            self.assertEqual(resumed["unresolvedMergeTrains"], ["default:wave-001"])
+            self.assertEqual(resumed["scheduledGroups"], [["B003"]])
+            self.assertNotIn("B001", resumed["mergeableBatches"])
+            self.assertEqual(persisted["batches"]["B001"]["status"], "ready_to_candidate")
+            self.assertEqual(persisted["batches"]["B002"]["status"], "pending")
+            self.assertNotIn("B002", [batch_id for group in resumed["scheduledGroups"] for batch_id in group])
 
 if __name__ == "__main__":
     unittest.main()

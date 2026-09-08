@@ -11,6 +11,8 @@ import argparse
 import json
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +55,202 @@ _BOOTSTRAP_IGNORE_RULES = (
     ".autobizdevops/features/*/.parallel-runs/",
 )
 MAX_AUTOMATIC_BATCH_RECOVERY_ATTEMPTS = 2
+
+
+def _parse_timestamp_epoch(value: object) -> float | None:
+    """Parse one persisted UTC timestamp without making recovery fragile."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _lease_staleness_reason_locked(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    batch: dict[str, Any],
+    *,
+    now: float,
+    timeout_seconds: int,
+) -> str | None:
+    """Return why an active Batch has lost execution authority, if it has.
+
+    This helper runs while the scheduler owns the run lock and takes the
+    per-Batch lease lock before inspecting the bearer lease.  A valid lease is
+    intentionally left untouched: resuming a workflow must never steal work
+    from a worker that is still heartbeating.  Conversely, a missing, corrupt,
+    expired, or over-deadline lease has no safe worker authority
+    left and can be deterministically retried by the scheduler.
+    """
+    path = lease_path(workspace, feature, run_id, batch_id)
+    with FileLock(path.with_suffix(".lock")):
+        if not path.is_file():
+            return "lease_missing"
+        try:
+            lease = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+            return "lease_invalid"
+        if not isinstance(lease, dict):
+            path.unlink(missing_ok=True)
+            return "lease_invalid"
+        try:
+            expires_epoch = float(lease.get("expiresEpoch", 0))
+        except (TypeError, ValueError):
+            expires_epoch = 0
+        if expires_epoch <= now:
+            path.unlink(missing_ok=True)
+            return "lease_expired"
+
+        # A heartbeat that survives beyond the configured Batch deadline is
+        # still not allowed to reserve a scheduler slot forever.  `startedAt`
+        # is persisted in the manifest once implementation begins; the lease
+        # timestamp covers a worker that dies during initial provisioning.
+        started_epoch = _parse_timestamp_epoch(batch.get("startedAt"))
+        if started_epoch is None:
+            started_epoch = _parse_timestamp_epoch(lease.get("startedAt"))
+        if started_epoch is not None and now - started_epoch >= max(1, timeout_seconds):
+            path.unlink(missing_ok=True)
+            return "batch_timeout"
+    return None
+
+
+def _mark_retry_pending_locked(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    manifest: dict[str, Any],
+    batch_id: str,
+    batch: dict[str, Any],
+    *,
+    error: str,
+    previous_status: str | None = None,
+) -> bool:
+    """Persist one task-scoped recovery marker without delegating to a worker."""
+    previous = previous_status if previous_status is not None else str(batch.get("status") or "")
+    previous_recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+    retry_attempts = (
+        1
+        if previous == "blocked" and previous_recovery.get("status") == "retry_exhausted"
+        else int(previous_recovery.get("retryAttempts", 0)) + 1
+    )
+    resume_status = (
+        "ready_to_candidate"
+        if previous == "ready_to_candidate"
+        else "sealed"
+        if batch.get("commitSha")
+        else "pending"
+    )
+    batch.update(
+        {
+            "status": "retry_pending",
+            "error": error,
+            "activeStage": None,
+            "startedAt": None,
+            "completedAt": None,
+            "recovery": {
+                **previous_recovery,
+                "retryAttempts": retry_attempts,
+                "lastFailureAt": manifest.get("updatedAt"),
+                "lastError": error,
+                "resumeStatus": resume_status,
+                "status": "pending_retry",
+            },
+        }
+    )
+    return _clear_retry_lease_locked(workspace, feature, run_id, batch_id, batch)
+
+
+def _recover_stale_active_batches_locked(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    manifest: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Move orphaned leased/running Batches into durable retry recovery."""
+    now = time.time()
+    timeout_seconds = max(1, int(manifest.get("timeoutPerBatch", 3600)))
+    recovered: list[dict[str, str]] = []
+    for raw_batch_id, batch in manifest.get("batches", {}).items():
+        if not isinstance(batch, dict) or batch.get("status") not in {"leased", "running"}:
+            continue
+        batch_id = str(raw_batch_id)
+        reason = _lease_staleness_reason_locked(
+            workspace,
+            feature,
+            run_id,
+            batch_id,
+            batch,
+            now=now,
+            timeout_seconds=timeout_seconds,
+        )
+        if reason is None:
+            continue
+        _mark_retry_pending_locked(
+            workspace,
+            feature,
+            run_id,
+            manifest,
+            batch_id,
+            batch,
+            error=f"parallel_batch_recovery:{reason}",
+        )
+        recovered.append({"batchId": batch_id, "reason": reason})
+    return recovered
+
+
+def _unresolved_state(manifest: dict[str, Any]) -> tuple[list[str], list[str], set[str]]:
+    """Return retained, task-scoped manual work and the Batches it owns."""
+    unresolved_batches = sorted(
+        str(batch_id)
+        for batch_id, batch in manifest.get("batches", {}).items()
+        if isinstance(batch, dict) and batch.get("status") in {"needs_resolution", "conflict"}
+    )
+    unresolved_trains: list[str] = []
+    train_batch_ids: set[str] = set()
+    for key, train in (manifest.get("mergeTrains") or {}).items():
+        if not isinstance(train, dict) or train.get("status") not in {"candidate_conflicted", "needs_resolution"}:
+            continue
+        unresolved_trains.append(str(key))
+        train_batch_ids.update(
+            str(batch_id)
+            for batch_id in train.get("batchIds", [])
+            if isinstance(batch_id, str) and batch_id.strip()
+        )
+    return unresolved_batches, sorted(unresolved_trains), set(unresolved_batches) | train_batch_ids
+
+
+def _is_global_resolution_batch(batch: dict[str, Any]) -> bool:
+    """A promoted source whose Plan write failed is not an isolatable conflict."""
+    resolution = batch.get("resolution")
+    return isinstance(resolution, dict) and resolution.get("kind") == "plan_state_update"
+
+
+def _is_global_resolution_train(train: dict[str, Any]) -> bool:
+    """Do not schedule through a train that may already have promoted source."""
+    return bool(train.get("planWriterErrors")) or bool(train.get("promotedSha"))
+
+
+def _scoped_merge_train_keys(
+    manifest: dict[str, Any],
+    keys: list[str],
+    workspace_refs: list[str] | None,
+) -> list[str]:
+    if not workspace_refs:
+        return list(keys)
+    allowed = {str(ref).strip() for ref in workspace_refs if str(ref).strip()}
+    return [
+        key
+        for key in keys
+        if str(((manifest.get("mergeTrains") or {}).get(key, {}) or {}).get("repositoryRef") or "") in allowed
+    ]
 
 
 def _clear_retry_lease_locked(
@@ -595,8 +793,19 @@ def schedule(
                 drift=drift,
             )
             raise ValueError("parallel_plan_digest_changed:" + json.dumps(drift, ensure_ascii=False, sort_keys=True))
-        ready = ready_batches(manifest)
-        groups = resource_groups(manifest, ready)
+        # A retained per-Batch conflict (or one conflicted Merge Train) owns
+        # only the deliveries recorded in that retained state.  Keep those
+        # deliveries out of every runnable output so a resume cannot silently
+        # recreate their candidate, while allowing unrelated DAG branches to
+        # continue.  Dependency release remains enforced by `ready_batches`.
+        unresolved_batches, unresolved_trains, withheld_batches = _unresolved_state(manifest)
+        ready = [batch_id for batch_id in ready_batches(manifest) if batch_id not in withheld_batches]
+        # ``resource_groups`` treats ``None`` as "all batches" for callers
+        # that intentionally omit a scope.  The scheduler has already built
+        # an explicit readiness set, however, and an empty set must remain
+        # empty: otherwise a retained conflict can be accidentally re-added
+        # as a runnable group.
+        groups = resource_groups(manifest, ready) if ready else []
         if workspace_refs:
             known_refs = {
                 str(batch.get("workspaceRef") or batch.get("repositoryRef"))
@@ -613,8 +822,17 @@ def schedule(
             for group in groups
         ]
         scoped_groups = [group for group in scoped_groups if group]
-        scoped_mergeable = _scoped_batch_ids(manifest, mergeable_batches(manifest), workspace_refs)
-        scoped_stage_recovery = _scoped_batch_ids(manifest, stage_recovery_batches(manifest), workspace_refs)
+        mergeable = [batch_id for batch_id in mergeable_batches(manifest) if batch_id not in withheld_batches]
+        stage_recovery = [
+            batch_id
+            for batch_id in stage_recovery_batches(manifest)
+            if batch_id not in withheld_batches
+            and (manifest.get("batches", {}).get(batch_id, {}) or {}).get("lease") is None
+        ]
+        scoped_mergeable = _scoped_batch_ids(manifest, mergeable, workspace_refs)
+        scoped_stage_recovery = _scoped_batch_ids(manifest, stage_recovery, workspace_refs)
+        scoped_unresolved_batches = _scoped_batch_ids(manifest, unresolved_batches, workspace_refs)
+        scoped_unresolved_trains = _scoped_merge_train_keys(manifest, unresolved_trains, workspace_refs)
         max_parallel = int(manifest.get("maxParallel", 1))
         selected: list[list[str]] = []
         allowed_refs = {str(ref) for ref in workspace_refs or []}
@@ -644,7 +862,7 @@ def schedule(
             "readyBatches": scoped_ready,
             "allReadyBatches": ready,
             "mergeableBatches": scoped_mergeable,
-            "allMergeableBatches": mergeable_batches(manifest),
+            "allMergeableBatches": mergeable,
             "stageRecoveryBatches": [
                 {
                     "batchId": batch_id,
@@ -678,7 +896,7 @@ def schedule(
                     )
                 ]
             ],
-            "allStageRecoveryBatches": stage_recovery_batches(manifest),
+            "allStageRecoveryBatches": stage_recovery,
             "blockedBatches": sorted(
                 str(batch_id)
                 for batch_id, batch in manifest.get("batches", {}).items()
@@ -689,12 +907,17 @@ def schedule(
                 for batch_id, batch in manifest.get("batches", {}).items()
                 if isinstance(batch, dict) and batch.get("status") == "retry_pending"
             ),
+            "unresolvedBatches": scoped_unresolved_batches,
+            "allUnresolvedBatches": unresolved_batches,
+            "unresolvedMergeTrains": scoped_unresolved_trains,
+            "allUnresolvedMergeTrains": unresolved_trains,
+            "recoveryRequired": bool(scoped_unresolved_batches or scoped_unresolved_trains),
             "parallelGroups": scoped_groups,
             "allParallelGroups": groups,
             "scheduledGroups": selected,
             "workspaceRefs": sorted(set(workspace_refs or [])),
             "waitingForRepositories": bool(workspace_refs and not selected and not scoped_mergeable and (
-                groups or mergeable_batches(manifest) or active_outside_scope
+                groups or mergeable or active_outside_scope
             )),
             "maxParallel": max_parallel,
             "activeWorkers": active,
@@ -752,40 +975,22 @@ def mark_batch(workspace: Path, feature: str, run_id: str, batch_id: str, status
                 raise ValueError(f"parallel_batch_worktree_branch_required:{batch_id}")
             if current_git_branch(Path(candidate)) != expected_branch:
                 raise ValueError(f"parallel_batch_worktree_branch_mismatch:{batch_id}")
-        batch["status"] = status
         for key in ("worktreePath", "branchName", "commitSha", "compileStatus", "mergeCommitSha", "error"):
             if key in details:
                 batch[key] = details[key]
         if status == "retry_pending":
-            previous_recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
-            retry_attempts = (
-                1
-                if previous == "blocked" and previous_recovery.get("status") == "retry_exhausted"
-                else int(previous_recovery.get("retryAttempts", 0)) + 1
-            )
-            resume_status = (
-                "ready_to_candidate"
-                if previous == "ready_to_candidate"
-                else "sealed"
-                if batch.get("commitSha")
-                else "pending"
-            )
-            batch["recovery"] = {
-                **previous_recovery,
-                "retryAttempts": retry_attempts,
-                "lastFailureAt": manifest.get("updatedAt"),
-                "lastError": str(details.get("error") or batch.get("error") or "batch_execution_failed"),
-                "resumeStatus": resume_status,
-                "status": "pending_retry",
-            }
-            batch["completedAt"] = None
-            retry_lease_cleared = _clear_retry_lease_locked(
+            retry_lease_cleared = _mark_retry_pending_locked(
                 workspace,
                 feature,
                 run_id,
+                manifest,
                 batch_id,
                 batch,
+                error=str(details.get("error") or batch.get("error") or "batch_execution_failed"),
+                previous_status=str(previous or ""),
             )
+        else:
+            batch["status"] = status
         if status == "running" and not batch.get("startedAt"):
             batch["startedAt"] = details.get("startedAt") or manifest.get("updatedAt")
         if status in terminal:
@@ -819,6 +1024,7 @@ def resume_run(
     workspace_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Idempotently resume only batches that do not already own a result."""
+    stale_recovered: list[dict[str, str]] = []
     # A Git merge may have committed successfully immediately before the Plan
     # writer failed. Recover that metadata before evaluating the normal
     # needs-resolution gate, so an interrupted workflow can resume unattended.
@@ -862,6 +1068,14 @@ def resume_run(
                 continue
             if _clear_retry_lease_locked(workspace, feature, run_id, str(batch_id), batch):
                 retry_leases_cleared.append(str(batch_id))
+        # Persist lease metadata removal before running any later recovery
+        # checks.  The lease file and manifest are separate atomic files, so a
+        # process crash can never make their unlink/write one filesystem
+        # transaction; this immediate durable boundary minimizes that window,
+        # while the same loop reconciles the remaining one-sided state on the
+        # next resume.
+        if retry_leases_cleared:
+            save_manifest(workspace, feature, run_id, manifest)
         for batch_id in retry_leases_cleared:
             append_event(
                 workspace,
@@ -871,6 +1085,26 @@ def resume_run(
                 batchId=batch_id,
                 force=True,
                 reason="retry_resume_repair",
+            )
+        # This is deliberately scheduler-owned rather than a best-effort
+        # Workflow cleanup.  If a model/worker dies before it can write its
+        # own retry marker, its expired execution authority cannot keep the
+        # whole run's concurrency slots occupied forever.
+        stale_recovered = _recover_stale_active_batches_locked(
+            workspace,
+            feature,
+            run_id,
+            manifest,
+        )
+        active_stale_recovered = len(stale_recovered)
+        for item in stale_recovered:
+            append_event(
+                workspace,
+                feature,
+                run_id,
+                "batch_stale_lease_recovered",
+                batchId=item["batchId"],
+                reason=item["reason"],
             )
         invalid_deliveries: list[str] = []
         for batch_id, batch in manifest.get("batches", {}).items():
@@ -883,6 +1117,20 @@ def resume_run(
                 batch.update({"status": "blocked", "error": delivery_error})
                 invalid_deliveries.append(delivery_error)
         invalid_deliveries.extend(_source_repository_errors(manifest))
+        for batch_id, batch in manifest.get("batches", {}).items():
+            if (
+                isinstance(batch, dict)
+                and batch.get("status") == "needs_resolution"
+                and _is_global_resolution_batch(batch)
+            ):
+                invalid_deliveries.append(f"parallel_plan_state_recovery_required:{batch_id}")
+        for train_key, train in (manifest.get("mergeTrains") or {}).items():
+            if (
+                isinstance(train, dict)
+                and train.get("status") in {"candidate_conflicted", "needs_resolution"}
+                and _is_global_resolution_train(train)
+            ):
+                invalid_deliveries.append(f"parallel_merge_train_plan_recovery_required:{train_key}")
         if invalid_deliveries:
             manifest["status"] = "blocked"
             save_manifest(workspace, feature, run_id, manifest)
@@ -903,52 +1151,11 @@ def resume_run(
             }
         if manifest.get("status") in {"succeeded", "succeeded_with_issues", "verifying"}:
             return {"runId": run_id, "status": manifest.get("status"), "skipped": "terminal_run"}
-        unresolved = [
-            str(batch_id)
-            for batch_id, batch in manifest.get("batches", {}).items()
-            if isinstance(batch, dict) and batch.get("status") in {"needs_resolution", "conflict"}
-        ]
-        if unresolved:
-            manifest["status"] = "needs_resolution"
-            save_manifest(workspace, feature, run_id, manifest)
-            append_event(
-                workspace,
-                feature,
-                run_id,
-                "run_resume_blocked_needs_resolution",
-                batchIds=unresolved,
-            )
-            return {
-                "runId": run_id,
-                "status": "needs_resolution",
-                "scheduledGroups": [],
-                "mergeableBatches": mergeable_batches(manifest),
-                "recoveryRequired": True,
-                "errors": ["parallel_run_needs_resolution:" + ",".join(unresolved)],
-            }
-        unresolved_trains = [
-            key
-            for key, train in (manifest.get("mergeTrains") or {}).items()
-            if isinstance(train, dict) and train.get("status") in {"candidate_conflicted", "needs_resolution"}
-        ]
-        if unresolved_trains:
-            manifest["status"] = "needs_resolution"
-            save_manifest(workspace, feature, run_id, manifest)
-            append_event(
-                workspace,
-                feature,
-                run_id,
-                "run_resume_blocked_merge_train_resolution",
-                mergeTrains=unresolved_trains,
-            )
-            return {
-                "runId": run_id,
-                "status": "needs_resolution",
-                "scheduledGroups": [],
-                "mergeableBatches": mergeable_batches(manifest),
-                "recoveryRequired": True,
-                "errors": ["parallel_merge_train_needs_resolution:" + ",".join(sorted(unresolved_trains))],
-            }
+        # Ordinary delivery and candidate conflicts stay durable in their
+        # own records.  They are intentionally not a global resume gate:
+        # `schedule` filters those exact Batch IDs while independent work
+        # continues.  Plan-state recovery and shared-source integrity cases
+        # were handled above as genuine global blockers.
         invalid_deliveries = []
         for batch_id, batch in manifest.get("batches", {}).items():
             if not isinstance(batch, dict):
@@ -956,14 +1163,54 @@ def resume_run(
             if batch.get("mergeCommitSha"):
                 batch["status"] = "merged"
                 continue
-            # Keep an explicitly retryable Batch untouched until the recovery
-            # pass below can select its correct resume state.
-            if batch.get("status") == "retry_pending":
+            # Keep task-scoped terminal/recovery states intact.  In
+            # particular, a retry-exhausted Batch with a retained commit must
+            # not be silently resurrected as `sealed` on the next resume.
+            # Valid active leases are also left to their actual worker.
+            if batch.get("status") in {
+                "retry_pending",
+                "blocked",
+                "failed",
+                "cancelled",
+                "needs_resolution",
+                "conflict",
+                "leased",
+                "running",
+            }:
                 continue
             # A delivery that has already completed every stage remains a
             # Merge Train candidate across an interrupted Workflow. Validate
             # its immutable delivery before retaining that state.
             if batch.get("status") == "ready_to_candidate":
+                # A candidate should have released its worker authority before
+                # it becomes mergeable.  Recover a stale residual lease before
+                # delivery validation so a crashed handoff cannot strand this
+                # Batch outside both normal work and Merge Train recovery.
+                # Check the lease file as well as the manifest metadata: an
+                # interrupted prior write may have persisted only one side.
+                if batch.get("lease") is not None or lease_path(workspace, feature, run_id, str(batch_id)).is_file():
+                    reason = _lease_staleness_reason_locked(
+                        workspace,
+                        feature,
+                        run_id,
+                        str(batch_id),
+                        batch,
+                        now=time.time(),
+                        timeout_seconds=max(1, int(manifest.get("timeoutPerBatch", 3600))),
+                    )
+                    if reason is not None:
+                        _mark_retry_pending_locked(
+                            workspace,
+                            feature,
+                            run_id,
+                            manifest,
+                            str(batch_id),
+                            batch,
+                            error=f"parallel_batch_recovery:{reason}",
+                            previous_status="ready_to_candidate",
+                        )
+                        stale_recovered.append({"batchId": str(batch_id), "reason": reason})
+                        continue
                 delivery_error = _sealed_delivery_error(manifest, str(batch_id))
                 if delivery_error:
                     batch.update({"status": "blocked", "error": delivery_error})
@@ -1039,12 +1286,22 @@ def resume_run(
             retry_resumed.append(str(batch_id))
         manifest["status"] = "running"
         save_manifest(workspace, feature, run_id, manifest)
+        for item in stale_recovered[active_stale_recovered:]:
+            append_event(
+                workspace,
+                feature,
+                run_id,
+                "batch_stale_lease_recovered",
+                batchId=item["batchId"],
+                reason=item["reason"],
+            )
         append_event(workspace, feature, run_id, "run_resumed")
     for batch_id in retry_resumed:
         append_event(workspace, feature, run_id, "batch_retry_rescheduled", batchId=batch_id)
     for batch_id in retry_exhausted:
         append_event(workspace, feature, run_id, "batch_retry_exhausted", batchId=batch_id)
     result = schedule(workspace, feature, run_id, workspace_refs=workspace_refs)
+    result["reclaimedStaleBatches"] = stale_recovered
     result["rescheduledRetryBatches"] = retry_resumed
     result["retryExhaustedBatches"] = retry_exhausted
     return result
@@ -1087,33 +1344,10 @@ def ensure_run(
             active_run_id = get_active_run(workspace, feature)
             if active_run_id is None:
                 raise
-    active_manifest = load_manifest(workspace, feature, active_run_id)
-    if active_manifest.get("status") == "needs_resolution":
-        # A merge conflict is a retained native delivery, not a stale lock.
-        # Starting another run from a new base would conceal that delivery and
-        # could schedule downstream work against the wrong source state.
-        unresolved = [
-            batch
-            for batch in active_manifest.get("batches", {}).values()
-            if isinstance(batch, dict) and batch.get("status") in {"needs_resolution", "conflict"}
-        ]
-        if unresolved and all(
-            isinstance(batch.get("resolution"), dict)
-            and batch["resolution"].get("kind") == "plan_state_update"
-            for batch in unresolved
-        ):
-            result = resume_run(workspace, feature, active_run_id, workspace_refs=workspace_refs)
-            result["reused"] = True
-            return result
-        return {
-            "runId": active_run_id,
-            "status": "needs_resolution",
-            "scheduledGroups": [],
-            "mergeableBatches": mergeable_batches(active_manifest),
-            "reused": True,
-            "recoveryRequired": True,
-            "errors": ["parallel_run_needs_resolution"],
-        }
+    # Resume is also the scheduler-owned recovery boundary for retained
+    # per-Batch conflicts.  It preserves their worktrees and excludes their
+    # Batches from output, but must still release independent DAG branches.
+    # `resume_run` retains the stricter global plan/source-integrity gates.
     result = resume_run(workspace, feature, active_run_id, workspace_refs=workspace_refs)
     result["reused"] = True
     return result
