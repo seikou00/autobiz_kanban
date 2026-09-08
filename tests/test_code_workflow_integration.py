@@ -107,6 +107,9 @@ def test_fixed_workflow_entrypoint():
         "不得创建任何 workflow",
         "required: [\"batchId\", \"status\", \"compileStatus\", \"worktreePath\", \"branchName\", \"commitSha\"]",
         "drainRunnableLifecycles",
+        "takeNextRunnableLifecycle",
+        "runLifecycleChain",
+        "after-merge-${job.batchId}",
         "runFinalRepairAndReport",
         "queueRetryExhaustedBatchRepairs",
         "scheduler_snapshot_unavailable",
@@ -242,9 +245,109 @@ if (!missingMessageRejected) process.exit(8);
     return True
 
 
+def test_workflow_promotion_batch_attribution():
+    """成功推广缺少 batchIds 时，工作流仍应归属到其候选 Batch。"""
+    print("测试 6: 推广批次归属")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {};
+vm.createContext(context);
+const helperStart = source.indexOf("function normalizeStructuredOutput(");
+const inputStart = source.indexOf("const input = unwrap(args);");
+const promotionStart = source.indexOf("function mergedBatchIds(");
+const cleanupStart = source.indexOf("async function cleanupMergedWorktrees(");
+if (helperStart < 0 || inputStart < 0 || promotionStart < 0 || cleanupStart < 0) process.exit(2);
+vm.runInContext(source.slice(helperStart, inputStart), context);
+vm.runInContext(source.slice(promotionStart, cleanupStart), context);
+const complete = context.canonicalPromotionResult(
+  { success: true, promoted: true, batchIds: ["B001"] }, "default", ["B001"]
+);
+if (complete.batchIds.join(",") !== "B001" || complete.promotionResultIncomplete) process.exit(3);
+const wrapped = context.canonicalPromotionResult(
+  { success: true, promotions: [{ repositoryRef: "default", ids: ["B001"] }] }, "default", ["B001"]
+);
+if (wrapped.batchIds.join(",") !== "B001" || wrapped.promoted !== true || wrapped.promotionResultIncomplete) process.exit(4);
+const legacy = context.canonicalPromotionResult(
+  { success: true, candidateSha: "abc123" }, "default", ["B001"]
+);
+if (legacy.batchIds.join(",") !== "B001" || legacy.promoted !== true || !legacy.promotionResultIncomplete) process.exit(5);
+const failed = context.canonicalPromotionResult(
+  { success: false, error: "promotion failed" }, "default", ["B001"]
+);
+if (failed.batchIds.length !== 0 || failed.promoted === true) process.exit(6);
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ 推广批次归属错误: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ 推广结果缺少 batchIds 时会受控归属到当前候选 Batch")
+    print("✓ 失败推广不会被误判为已合并")
+    print()
+    return True
+
+
+def test_workflow_eager_dependent_dispatch():
+    """一个 Batch 合并后，应立即在该执行槽中接手新解锁的后继 Batch。"""
+    print("测试 7: 合并后即时调度")
+    print("-" * 60)
+
+    workflow_script = ROOT / "workflows" / "code-batched-execution.workflow.js"
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = {
+  schedulerWaves: 0,
+  MAX_SCHEDULER_WAVES: 10,
+  quarantinedBatchIds: new Set(),
+  recordUnresolved: () => {},
+};
+let scheduled = ["B001"];
+const executed = [];
+let refreshes = 0;
+context.runnableScheduledBatchIds = () => scheduled;
+context.runnableStageRecoveries = () => [];
+context.runnableMergeableBatchIds = () => [];
+context.runInitialBatchLifecycle = async batchId => ({ batchId, status: "merged" });
+context.runLifecycleSafely = async (batchId, source, execute) => {
+  executed.push(`${source}:${batchId}`);
+  return execute();
+};
+context.readSchedulerState = async () => {
+  refreshes += 1;
+  scheduled = refreshes === 1 ? ["B002"] : [];
+  return { status: "running" };
+};
+vm.createContext(context);
+const start = source.indexOf("function takeNextRunnableLifecycle(");
+const end = source.indexOf("async function drainRunnableLifecycles(");
+if (start < 0 || end < 0) process.exit(2);
+vm.runInContext(source.slice(start, end), context);
+(async () => {
+  const claimed = new Set();
+  const first = context.takeNextRunnableLifecycle(claimed);
+  await context.runLifecycleChain(first, claimed, "test");
+  if (executed.join(",") !== "initial:B001,initial:B002") process.exit(3);
+  if (refreshes !== 2) process.exit(4);
+})().catch(() => process.exit(5));
+'''
+    result = run_command(["node", "-e", script, str(workflow_script)])
+    if result["returncode"] != 0:
+        print(f"✗ 合并后未即时调度后继 Batch: {result['stderr'] or result['stdout']}")
+        return False
+    print("✓ B001 合并后会立即刷新调度并接手 B002")
+    print()
+    return True
+
+
 def test_skill_integration():
     """测试技能集成。"""
-    print("测试 6: 技能集成")
+    print("测试 8: 技能集成")
     print("-" * 60)
 
     skill_file = ROOT / "skills" / "autodev" / "autodev-code" / "SKILL.md"
@@ -290,6 +393,8 @@ def main():
         ("Workflow Launcher", test_workflow_launcher),
         ("Fixed Workflow Entrypoint", test_fixed_workflow_entrypoint),
         ("Structured Output Normalization", test_workflow_structured_output_normalization),
+        ("Promotion Batch Attribution", test_workflow_promotion_batch_attribution),
+        ("Eager Dependent Dispatch", test_workflow_eager_dependent_dispatch),
         ("Skill Integration", test_skill_integration),
     ]
 

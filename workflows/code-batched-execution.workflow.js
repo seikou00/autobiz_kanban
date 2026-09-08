@@ -652,6 +652,56 @@ function mergedBatchIds(mergeResult) {
   )];
 }
 
+function promotionWrapperBatchIds(promotion) {
+  // Some fixed-workflow runtimes preserve `promote-candidate`'s success at
+  // the outer level but wrap its per-repository result as
+  // `{ promotions: [{ repositoryRef, ids }] }`.  Those `ids` are trustworthy
+  // only with an explicit successful outer promotion; never read them from a
+  // failed/ambiguous wrapper or a ready-to-candidate input.
+  if (
+    !promotion
+    || promotion.success !== true
+    || hasFailureSignal(promotion)
+    || !Array.isArray(promotion.promotions)
+  ) return [];
+  return [...new Set(promotion.promotions.flatMap(item => {
+    const direct = mergedBatchIds(item);
+    if (direct.length > 0) return direct;
+    return Array.isArray(item && item.ids)
+      ? item.ids.filter(batchId => usableString(batchId))
+      : [];
+  }))];
+}
+
+function canonicalPromotionResult(rawPromotion, repositoryRef, candidateBatchIds) {
+  const promotion = unwrap(rawPromotion);
+  const reportedBatchIds = [...new Set([
+    ...mergedBatchIds(promotion),
+    ...promotionWrapperBatchIds(promotion),
+  ])];
+  const expectedBatchIds = [...new Set((Array.isArray(candidateBatchIds) ? candidateBatchIds : [])
+    .filter(batchId => usableString(batchId)))];
+  // `promote-candidate` has already completed successfully at this point.  A
+  // few older plugin/runtime copies returned only `{ success: true }` after
+  // the fast-forward and lost `batchIds` while serializing the response.  The
+  // candidate was built from this exact, immutable batch set, so use it solely
+  // as attribution for that successful promotion.  Do not apply this fallback
+  // to a failed or ambiguous command result.
+  const inferredBatchIds = reportedBatchIds.length === 0
+    && promotion
+    && promotion.success === true
+    && !hasFailureSignal(promotion)
+    ? expectedBatchIds
+    : [];
+  return {
+    ...promotion,
+    repositoryRef,
+    promoted: (promotion && promotion.promoted === true) || reportedBatchIds.length > 0 || inferredBatchIds.length > 0,
+    batchIds: reportedBatchIds.length > 0 ? reportedBatchIds : inferredBatchIds,
+    promotionResultIncomplete: inferredBatchIds.length > 0,
+  };
+}
+
 async function cleanupMergedWorktrees(batchIds, label) {
   const expected = [...new Set((Array.isArray(batchIds) ? batchIds : [])
     .filter(batchId => usableString(batchId)))];
@@ -1078,7 +1128,8 @@ async function validateAndPromoteWave(batchIds, wave) {
         });
       }
       try {
-        promotion = requireSuccess(rawPromotion, `promote candidate ${repositoryRef}`);
+        const successfulPromotion = requireSuccess(rawPromotion, `promote candidate ${repositoryRef}`);
+        promotion = canonicalPromotionResult(successfulPromotion, repositoryRef, ids);
       } catch (error) {
         recordUnresolved({
           kind: "merge_candidate",
@@ -1094,7 +1145,7 @@ async function validateAndPromoteWave(batchIds, wave) {
       }
       break;
     }
-    promoted.push({ repositoryRef, ids, ...promotion });
+    promoted.push(promotion);
   }
   return promoted;
 }
@@ -1104,7 +1155,6 @@ async function promoteReadyBatch(batchId) {
   phase("候选验证");
   try {
     const promotions = await validateAndPromoteWave([batchId], promotionWave);
-    mergeResults.push({ success: true, batchId, wave: promotionWave, promotions });
     const promotedBatchIds = promotions.flatMap(mergedBatchIds);
     const missingPromotionBatchIds = promotions
       .filter(promotion => promotion && promotion.promoted === true && mergedBatchIds(promotion).length === 0)
@@ -1117,6 +1167,10 @@ async function promoteReadyBatch(batchId) {
     }
     await cleanupMergedWorktrees(promotedBatchIds, `cleanup-promoted-batch-${batchId}-${promotionWave}`);
     markBatchResolved(batchId);
+    // Do not publish a success result until its durable batch attribution and
+    // cleanup checks have passed.  This prevents one promotion attempt from
+    // appearing as both successful and failed in the final workflow report.
+    mergeResults.push({ success: true, batchId, wave: promotionWave, promotions });
     return { batchId, status: "merged", wave: promotionWave };
   } catch (error) {
     mergeResults.push({ success: false, batchId, wave: promotionWave, error: errorText(error) });
@@ -1270,53 +1324,101 @@ function runnableMergeableBatchIds() {
   return mergeableBatches.filter(batchId => !quarantinedBatchIds.has(batchId));
 }
 
+function takeNextRunnableLifecycle(claimedBatchIds) {
+  const claimed = claimedBatchIds || new Set();
+  const scheduledBatchIds = runnableScheduledBatchIds();
+  const recoveries = runnableStageRecoveries();
+  const mergeable = runnableMergeableBatchIds();
+  const recoveredBatchIds = new Set(recoveries.map(item => item.batchId));
+  const mergeableBatchIds = new Set(mergeable);
+  const claim = job => {
+    if (!job || claimed.has(job.batchId)) return null;
+    claimed.add(job.batchId);
+    return job;
+  };
+
+  for (const batchId of scheduledBatchIds) {
+    const job = claim({
+      batchId,
+      source: "initial",
+      execute: () => runInitialBatchLifecycle(batchId),
+    });
+    if (job) return job;
+  }
+  for (const recovery of recoveries) {
+    if (mergeableBatchIds.has(recovery.batchId)) continue;
+    const job = claim({
+      batchId: recovery.batchId,
+      source: "stage_recovery",
+      execute: () => runRecoveredBatchLifecycle(recovery),
+      fallback: recovery,
+    });
+    if (job) return job;
+  }
+  for (const batchId of mergeable) {
+    if (recoveredBatchIds.has(batchId)) continue;
+    const job = claim({
+      batchId,
+      source: "merge_candidate",
+      execute: () => runMergeableBatchLifecycle(batchId),
+    });
+    if (job) return job;
+  }
+  return null;
+}
+
+function canStartLifecycle() {
+  schedulerWaves += 1;
+  if (schedulerWaves <= MAX_SCHEDULER_WAVES) return true;
+  recordUnresolved({
+    kind: "scheduler",
+    status: "wave_limit_exceeded",
+    durable: false,
+    error: `parallel_scheduler_wave_limit_exceeded:${schedulerWaves}`,
+  });
+  return false;
+}
+
+async function runLifecycleChain(initialJob, claimedBatchIds, drainLabel) {
+  let job = initialJob;
+  let result = null;
+  while (job) {
+    if (!canStartLifecycle()) return result;
+    result = await runLifecycleSafely(job.batchId, job.source, job.execute, job.fallback);
+    // Dependencies are released only by an actual Merge Train promotion.  As
+    // soon as one Batch reaches that durable state, refresh the scheduler and
+    // reuse this just-freed execution slot for its newly runnable successor.
+    // Do not wait for unrelated jobs passed to the same `parallel()` call.
+    if (!result || result.status !== "merged") return result;
+    const state = await readSchedulerState(
+      `${drainLabel}-after-merge-${job.batchId}-${schedulerWaves}`,
+      "Batch 阶段"
+    );
+    if (!state) return result;
+    job = takeNextRunnableLifecycle(claimedBatchIds);
+  }
+  return result;
+}
+
 async function drainRunnableLifecycles(drainLabel) {
   let ranAny = false;
   for (;;) {
-    const scheduledBatchIds = runnableScheduledBatchIds();
-    const recoveries = runnableStageRecoveries();
-    const mergeable = runnableMergeableBatchIds();
-    const recoveredBatchIds = new Set(recoveries.map(item => item.batchId));
-    const mergeableBatchIds = new Set(mergeable);
-    const lifecycleJobs = [
-      ...scheduledBatchIds.map(batchId => () => runLifecycleSafely(
-        batchId,
-        "initial",
-        () => runInitialBatchLifecycle(batchId)
-      )),
-      ...recoveries
-        .filter(recovery => !mergeableBatchIds.has(recovery.batchId))
-        .map(recovery => () => runLifecycleSafely(
-          recovery.batchId,
-          "stage_recovery",
-          () => runRecoveredBatchLifecycle(recovery),
-          recovery
-        )),
-      ...mergeable
-        .filter(batchId => !recoveredBatchIds.has(batchId))
-        .map(batchId => () => runLifecycleSafely(
-          batchId,
-          "merge_candidate",
-          () => runMergeableBatchLifecycle(batchId)
-        )),
-    ];
+    // Claim this snapshot in-memory before launching.  The scheduler's
+    // selection is read-only until a worker acquires its lease, so this avoids
+    // two concurrently completed chains starting the same pending Batch.
+    const claimedBatchIds = new Set();
+    const lifecycleJobs = [];
+    for (;;) {
+      const job = takeNextRunnableLifecycle(claimedBatchIds);
+      if (!job) break;
+      lifecycleJobs.push(() => runLifecycleChain(job, claimedBatchIds, drainLabel));
+    }
     if (!lifecycleJobs.length) {
       return { ranAny, reason: "no_runnable_independent_batches" };
     }
-    schedulerWaves += 1;
-    if (schedulerWaves > MAX_SCHEDULER_WAVES) {
-      recordUnresolved({
-        kind: "scheduler",
-        status: "wave_limit_exceeded",
-        durable: false,
-        error: `parallel_scheduler_wave_limit_exceeded:${schedulerWaves}`,
-      });
-      return { ranAny, reason: "wave_limit_exceeded" };
-    }
 
-    // The runnable unit is one Batch's complete delivery chain.  A failed
-    // Batch is quarantined locally, while all other jobs in this wave keep
-    // resolving and future independent waves continue to be released.
+    // A failed Batch is quarantined locally.  A successful merge continues in
+    // its own chain, so independent peers do not form a completion barrier.
     phase("Batch 阶段");
     try {
       await parallel(lifecycleJobs);
