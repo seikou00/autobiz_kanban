@@ -16,7 +16,8 @@ from __future__ import annotations
 from typing import Dict, NamedTuple
 
 
-# route 取值闭集。语义见 skills/references/review-protocol.md 的映射表。
+# route 取值闭集。语义见 skills/references/review-protocol-specs.md 与
+# review-protocol-plan.md 的「与机器预检的分工」映射表。
 ROUTE_FIX_CURRENT = "fix_current"      # 在当前阶段按 action 修
 ROUTE_RETURN_SPECS = "return_specs"    # 停止当前阶段，回 dev.specs
 ROUTE_RETURN_PLAN = "return_plan"      # 停止当前阶段，回 dev.plan
@@ -91,6 +92,11 @@ _ENTRY: Dict[str, Repair] = {
 # --------------------------------------------------------------------------
 
 _SPECS: Dict[str, Repair] = {
+    "invalid_source_context": Repair(
+        artifact="source-context.json / sources/",
+        problem="来源要求索引或快照不合法：{target}",
+        action="按预检详情修正 source-context.json 的来源、快照路径、原文条目或要求定义后重跑；已有快照时不要改成 never_provided。",
+    ),
     "missing_proposal": Repair(
         artifact="proposal.md",
         problem="proposal.md 不存在或为空",
@@ -124,27 +130,34 @@ _SPECS: Dict[str, Repair] = {
     "invalid_spec_missing_requirement": Repair(
         artifact="{target}",
         problem="{target} 没有任何合法 Requirement",
-        action="按「### Requirement [REQ-NNN]: <标题>」写出 Requirement（NNN 三位数字，方括号不能省）。",
+        action="按「### Requirement REQ-NNN: <标题>」写出 Requirement，NNN 使用三位数字。",
     ),
     "invalid_spec_missing_scenario": Repair(
         artifact="{target}",
         problem="{target} 没有任何合法 Scenario",
-        action="按「#### Scenario [SCN-NNN]: <标题>」补 Scenario，并归属到本文件已有的 Requirement 下。",
+        action="按「#### Scenario SCN-NNN: <标题>」补 Scenario，并归属到本文件已有的 Requirement 下。",
     ),
     "spec_contract_heading_malformed": Repair(
         artifact="{target}",
         problem="{target} 中的契约标题写法不规范，索引器读不到：{headings}",
         action=(
-            "把报错的标题改成规范写法：「### Requirement [REQ-NNN]: <标题>」/"
-            "「#### Scenario [SCN-NNN]: <标题>」。NNN 是三位数字，方括号和层级都不能省——"
-            "索引器只认这一种写法，其余写法会被静默跳过，该 Requirement 对下游覆盖检查等于不存在。"
+            "把报错的标题改成「### Requirement REQ-NNN: <标题>」/"
+            "「#### Scenario SCN-NNN: <标题>」。NNN 是三位数字，ID 外的方括号可有可无。"
+        ),
+    ),
+    "spec_id_width_invalid": Repair(
+        artifact="{target}",
+        problem="{target} 中的规格 ID {id} 不是三位数字",
+        action=(
+            "把 {id} 改为 {suggested}，并同步本文件 Source References 及其他引用。"
+            "该错误只处理位数，不要改操作分组或 Requirement 内容。"
         ),
     ),
     "spec_requirement_without_scenario": Repair(
         artifact="{target}",
         problem="{target} 中这些 Requirement 自身块内没有 Scenario：{requirements}",
         action=(
-            "为报错的每个 Requirement 补至少一个「#### Scenario [SCN-NNN]: <标题>」；"
+            "为报错的每个 Requirement 补至少一个「#### Scenario SCN-NNN: <标题>」；"
             "REMOVED Requirement 用 Scenario 描述旧入口被触发时的期望响应。"
         ),
     ),
@@ -152,7 +165,7 @@ _SPECS: Dict[str, Repair] = {
         artifact="{target}",
         problem="{target} 中这些 Scenario 不归属任何 Requirement：{scenarios}",
         action=(
-            "把报错的每个 Scenario 移到它所属的「### Requirement [REQ-NNN]:」标题之下；"
+            "把报错的每个 Scenario 移到它所属的「### Requirement REQ-NNN:」标题之下；"
             "Scenario 出现在首个 Requirement 之前或操作段标题正下方时不归属任何 Requirement。"
         ),
     ),
@@ -177,7 +190,36 @@ _SPECS: Dict[str, Repair] = {
         problem="{target} 中残留模板槽位：{placeholders}",
         action=(
             "把报错的模板槽位替换成实际内容。"
-            "`[REQ-NNN]` / `[SCN-NNN]` 是 ID 语法不算槽位，Markdown 链接也不算。"
+            "`REQ-NNN` / `SCN-NNN` 必须替换成三位数字 ID；Markdown 链接不算槽位。"
+        ),
+    ),
+    "spec_source_reference_missing": Repair(
+        artifact="specs/**/spec.md",
+        problem="这些含 spec 目标要求的来源未被任何 spec 保留：{target}",
+        action=(
+            "在相关 spec 的 `## Source References / 外部资料引用` 表补齐 SRC-NNN 与 REQ/SCN 映射；"
+            "同一来源的一组语义约束可映射到同一个 REQ/SCN。"
+        ),
+    ),
+    "spec_source_requirement_in_body": Repair(
+        artifact="{target}",
+        problem="{target} 的 Requirement/Scenario 正文堆放了来源要求 ID：{ids}",
+        action=(
+            "从行为正文移除 SRC-NNN-RNNN；在 Source References 表用 SRC-NNN 映射实际 REQ/SCN，"
+            "正文只保留对应的可验证行为。"
+        ),
+    ),
+    "spec_source_reference_unknown": Repair(
+        artifact="specs/**/spec.md",
+        problem="spec 引用了 PRD 外部资料索引中不存在的来源：{target}",
+        action="修正或移除这些 SRC-NNN；确有新资料时先回 PRD 登记稳定 ID，再重新生成 specs。",
+    ),
+    "spec_source_reference_incomplete": Repair(
+        artifact="specs/**/spec.md",
+        problem="这些来源引用缺少 Requirement/Scenario 映射或 Usage：{target}",
+        action=(
+            "含 spec 目标要求的来源补齐 REQ/SCN 与 Usage；无 spec 要求的来源可删除该行，"
+            "或保留 `-` 映射并填写 Usage。"
         ),
     ),
     "duplicate_spec_id_across_specs": Repair(

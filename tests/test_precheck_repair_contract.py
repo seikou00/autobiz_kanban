@@ -563,10 +563,13 @@ class RepresentativePlanFailuresTest(unittest.TestCase):
 class SkillWordingTest(unittest.TestCase):
     SPECS_SKILL = ROOT / "skills" / "autodev" / "autodev-specs" / "SKILL.md"
     PLAN_SKILL = ROOT / "skills" / "autodev" / "autodev-plan" / "SKILL.md"
-    REVIEW_PROTOCOL = ROOT / "skills" / "references" / "review-protocol.md"
+    REVIEW_PROTOCOLS = (
+        ROOT / "skills" / "references" / "review-protocol-specs.md",
+        ROOT / "skills" / "references" / "review-protocol-plan.md",
+    )
 
     def test_machine_precheck_is_named_as_such(self) -> None:
-        for path in (self.SPECS_SKILL, self.PLAN_SKILL, self.REVIEW_PROTOCOL):
+        for path in (self.SPECS_SKILL, self.PLAN_SKILL) + self.REVIEW_PROTOCOLS:
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("集中校验", text, f"{path.name} 仍在用含糊的「集中校验」")
             self.assertIn("产物契约预检（机器校验）", text, path.name)
@@ -586,9 +589,11 @@ class SkillWordingTest(unittest.TestCase):
                 self.assertNotIn(reason, text, f"{path.name} 不应枚举错误码 {reason}")
 
     def test_route_values_are_mapped_to_review_categories(self) -> None:
-        text = self.REVIEW_PROTOCOL.read_text(encoding="utf-8")
-        for route in repair_registry.ROUTES:
-            self.assertIn(route, text, f"review-protocol 缺 route 映射：{route}")
+        """预检会给这两个阶段派 route，两份协议都要能把它翻成分类。"""
+        for path in self.REVIEW_PROTOCOLS:
+            text = path.read_text(encoding="utf-8")
+            for route in repair_registry.ROUTES:
+                self.assertIn(route, text, f"{path.name} 缺 route 映射：{route}")
 
 
 if __name__ == "__main__":

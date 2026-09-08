@@ -1,10 +1,8 @@
 ---
 name: autodev-specs
 description: Dev 阶段行为规格生成。
-version: v1.16.09032
+version: v1.16.09072
 ---
-
-
 
 
 # /autodev-specs — Proposal + Behavior Specs
