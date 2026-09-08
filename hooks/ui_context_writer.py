@@ -81,6 +81,264 @@ def _structure_errors(data: dict[str, Any], feature: str) -> list[str]:
     ]
 
 
+def _visual_source_type_zh(source_type: str) -> str:
+    """将visualSource类型转换为中文"""
+    type_map = {
+        "high_fidelity_html": "高保真HTML",
+        "standard_html": "标准HTML",
+        "design_link": "设计链接",
+        "prototype_link": "原型链接",
+        "image": "图片",
+        "other": "其他"
+    }
+    return type_map.get(source_type, source_type)
+
+
+def _find_capability_by_visual_source(capabilities: list[dict], source_id: str) -> dict | None:
+    """根据visualSourceRef找到对应的capability"""
+    for cap in capabilities:
+        if isinstance(cap, dict):
+            refs = cap.get("visualSourceRefs", [])
+            if source_id in refs:
+                return cap
+    return None
+
+
+def _get_capability_display_name(capability: dict, pages: list[dict]) -> str:
+    """获取capability的显示名称（从关联页面推断中文名）"""
+    if not capability:
+        return "未关联"
+
+    cap_id = capability.get("capabilityId", "")
+    page_refs = capability.get("pageRefs", [])
+
+    # 如果有关联页面，用页面名称生成显示名
+    if page_refs and pages:
+        page_names = []
+        for page_ref in page_refs:
+            for page in pages:
+                if isinstance(page, dict) and page.get("pageId") == page_ref:
+                    page_name = page.get("name", "")
+                    if page_name:
+                        page_names.append(page_name)
+                    break
+
+        if page_names:
+            # 如果只有一个页面，直接用页面名
+            if len(page_names) == 1:
+                return f"{page_names[0]}相关功能"
+            # 多个页面，取第一个页面名并标注
+            else:
+                return f"{page_names[0]}等{len(page_names)}个页面功能"
+
+    # 如果没有页面信息，返回capability ID
+    return cap_id or "未关联"
+
+
+def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
+    """生成面向前端人员的UI_CONTEXT.md文档"""
+    lines = [
+        f"# UI Context - {feature}",
+        "",
+        "本文档基于 UI_CONTEXT.json 生成，聚焦前端开发关注的内容。",
+        "",
+    ]
+
+    # 基本信息
+    lines.extend([
+        "## 基本信息",
+        "",
+        f"- **功能ID**: {data.get('featureId', 'N/A')}",
+        f"- **UI需求**: {'是' if data.get('uiRequired') else '否'}",
+        f"- **决策状态**: {data.get('decisionStatus', 'N/A')}",
+        "",
+    ])
+
+    # 不适用原因（如果uiRequired为false）
+    if not data.get('uiRequired'):
+        reason = data.get('notApplicableReason', 'N/A')
+        lines.extend([
+            f"**不适用原因**: {reason}",
+            "",
+        ])
+        # 注意：不要立即返回，继续检查是否有visualSources等数据
+
+    # 页面列表
+    pages = data.get('pages', [])
+    if pages:
+        lines.extend([
+            "## 页面列表",
+            "",
+        ])
+        for page in pages:
+            page_id = page.get('pageId', 'N/A')
+            name = page.get('name', 'N/A')
+            goal = page.get('goal', 'N/A')
+            route_hint = page.get('routeHint', '')
+            states = page.get('states', [])
+
+            lines.append(f"### {page_id}: {name}")
+            lines.append("")
+            lines.append(f"**目标**: {goal}")
+            lines.append("")
+            if route_hint:
+                lines.append(f"**路由提示**: `{route_hint}`")
+                lines.append("")
+            if states:
+                lines.append(f"**状态**: {', '.join(states)}")
+                lines.append("")
+
+    # 交互列表
+    interactions = data.get('interactions', [])
+    if interactions:
+        lines.extend([
+            "## 交互列表",
+            "",
+        ])
+        for interaction in interactions:
+            interaction_id = interaction.get('interactionId', 'N/A')
+            page_id = interaction.get('pageId', 'N/A')
+            summary = interaction.get('summary', 'N/A')
+            state_refs = interaction.get('stateRefs', [])
+
+            lines.append(f"### {interaction_id}: {summary}")
+            lines.append("")
+            lines.append(f"**所属页面**: {page_id}")
+            lines.append("")
+            if state_refs:
+                lines.append(f"**关联状态**: {', '.join(state_refs)}")
+                lines.append("")
+
+    # 视觉资源与还原路径
+    visual_sources = data.get('visualSources', [])
+    capabilities = data.get('capabilities', [])
+
+    if visual_sources:
+        lines.extend([
+            "## 视觉资源与还原路径",
+            "",
+            "| 资源ID | 关联任务 | 类型 | 路径 | 还原路径 | 是否必需 |",
+            "| ------ | -------- | ---- | ---- | -------- | -------- |",
+        ])
+        for vs in visual_sources:
+            source_id = vs.get('sourceId', 'N/A')
+            vs_type = vs.get('type', 'N/A')
+            vs_type_zh = _visual_source_type_zh(vs_type)
+            path = vs.get('path', 'N/A')
+            route = vs.get('route', 'N/A')  # 保持英文
+            required = '是' if vs.get('required') else '否'
+
+            # 查找关联的任务并获取中文显示名
+            related_cap = _find_capability_by_visual_source(capabilities, source_id)
+            task_name = _get_capability_display_name(related_cap, pages)
+
+            lines.append(f"| {source_id} | {task_name} | {vs_type_zh} | `{path}` | `{route}` | {required} |")
+        lines.append("")
+
+        # 还原路径说明（保持英文，但用中文解释）
+        lines.extend([
+            "### 还原路径说明",
+            "",
+            "- **absolute-html**: 使用高保真HTML进行像素级还原",
+            "- **standard-html**: 使用标准HTML作为参考",
+            "- **spec-driven-ui**: 基于需求规格说明驱动UI开发",
+            "- **missing-html**: 缺少HTML资源",
+            "",
+        ])
+
+    # 能力与资源映射关系图
+    if capabilities:
+        lines.extend([
+            "## 能力与资源映射关系",
+            "",
+        ])
+
+        for cap in capabilities:
+            cap_id = cap.get('capabilityId', 'N/A')
+            ui_required = cap.get('uiRequired')
+            page_refs = cap.get('pageRefs', [])
+            interaction_refs = cap.get('interactionRefs', [])
+            visual_source_refs = cap.get('visualSourceRefs', [])
+            spec_refs = cap.get('specRefs', [])
+
+            lines.append(f"### {cap_id}")
+            lines.append("")
+
+            if ui_required is not None:
+                lines.append(f"**UI需求**: {'是' if ui_required else '否'}")
+                lines.append("")
+
+            if page_refs:
+                lines.append(f"**关联页面**: {', '.join(page_refs)}")
+                lines.append("")
+
+            if interaction_refs:
+                lines.append(f"**关联交互**: {', '.join(interaction_refs)}")
+                lines.append("")
+
+            if visual_source_refs:
+                lines.append(f"**视觉资源**: {', '.join(visual_source_refs)}")
+                lines.append("")
+
+                # 显示每个视觉资源的还原路径（保持英文）
+                for vs_ref in visual_source_refs:
+                    for vs in visual_sources:
+                        if vs.get('sourceId') == vs_ref:
+                            route = vs.get('route', 'N/A')
+                            vs_type = vs.get('type', 'N/A')
+                            vs_type_zh = _visual_source_type_zh(vs_type)
+                            path = vs.get('path', 'N/A')
+                            lines.append(f"  - `{vs_ref}`: `{route}` ({vs_type_zh}) → `{path}`")
+                lines.append("")
+            else:
+                lines.append("**视觉资源**: 无（使用规格驱动开发）")
+                lines.append("")
+
+            if spec_refs:
+                lines.append(f"**规格引用**: {', '.join(spec_refs)}")
+                lines.append("")
+
+    # 关系图总结
+    if capabilities or visual_sources:
+        lines.extend([
+            "## 任务-HTML-路径关系图",
+            "",
+            "```",
+        ])
+
+        for cap in capabilities:
+            cap_id = cap.get('capabilityId', 'N/A')
+            visual_source_refs = cap.get('visualSourceRefs', [])
+
+            lines.append(f"[能力] {cap_id}")
+
+            if visual_source_refs:
+                for vs_ref in visual_source_refs:
+                    for vs in visual_sources:
+                        if vs.get('sourceId') == vs_ref:
+                            route = vs.get('route', 'spec-driven-ui')
+                            path = vs.get('path', 'N/A')
+                            lines.append(f"  └─> [资源] {vs_ref}")
+                            lines.append(f"        ├─> [路径] {route}")
+                            lines.append(f"        └─> [文件] {path}")
+            else:
+                lines.append("  └─> [路径] spec-driven-ui (无高保真HTML)")
+
+            lines.append("")
+
+        lines.append("```")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _write_md(workspace: Path, feature: str, data: dict[str, Any]) -> None:
+    """写入UI_CONTEXT.md文件"""
+    md_path = _path(workspace, feature).parent / "UI_CONTEXT.md"
+    md_content = _generate_ui_context_md(data, feature)
+    md_path.write_text(md_content, encoding="utf-8")
+
+
 def _write(
     workspace: Path,
     feature: str,
@@ -102,6 +360,14 @@ def _write(
     if errors:
         return WriterResult(ok=False, path=path, errors=[{"reason": error} for error in errors])
     changed = atomic_write_json(path, data)
+
+    # 同时生成UI_CONTEXT.md
+    try:
+        _write_md(workspace, feature, data)
+    except Exception as exc:
+        # MD生成失败不影响JSON写入结果，但记录警告
+        print(f"Warning: Failed to generate UI_CONTEXT.md: {exc}", file=sys.stderr)
+
     return WriterResult(ok=True, path=path, changed=changed)
 
 
@@ -405,6 +671,200 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return render_result(WriterResult(ok=True, path=_path(workspace, feature), data={"summary": summary}))
 
 
+def _parse_md_section(lines: list[str], start_marker: str) -> tuple[int, list[str]]:
+    """提取Markdown中某个section的内容"""
+    start = -1
+    for i, line in enumerate(lines):
+        if line.strip().startswith(start_marker):
+            start = i
+            break
+    if start == -1:
+        return -1, []
+
+    # 找到下一个同级或更高级标题
+    level = len(start_marker.split()[0])  # ## 是2级
+    content = []
+    for i in range(start + 1, len(lines)):
+        line = lines[i]
+        if line.strip().startswith("#"):
+            # 检查标题级别
+            header_level = len(line.split()[0])
+            if header_level <= level:
+                break
+        content.append(line)
+
+    return start, content
+
+
+def _parse_pages_from_md(lines: list[str]) -> list[dict[str, Any]]:
+    """从MD解析页面列表"""
+    _, section = _parse_md_section(lines, "## 页面列表")
+    if not section:
+        return []
+
+    pages = []
+    current_page = None
+
+    for line in section:
+        line = line.strip()
+        if line.startswith("### "):
+            # 新页面: ### PAGE-001: 订单列表页
+            if current_page:
+                pages.append(current_page)
+            parts = line[4:].split(":", 1)
+            if len(parts) == 2:
+                page_id = parts[0].strip()
+                name = parts[1].strip()
+                current_page = {"pageId": page_id, "name": name, "goal": ""}
+        elif line.startswith("**目标**:") and current_page:
+            current_page["goal"] = line.split(":", 1)[1].strip()
+        elif line.startswith("**路由提示**:") and current_page:
+            route_hint = line.split(":", 1)[1].strip().strip("`")
+            if route_hint:
+                current_page["routeHint"] = route_hint
+        elif line.startswith("**状态**:") and current_page:
+            states_str = line.split(":", 1)[1].strip()
+            states = [s.strip() for s in states_str.split(",")]
+            if states:
+                current_page["states"] = states
+
+    if current_page:
+        pages.append(current_page)
+
+    return pages
+
+
+def _parse_interactions_from_md(lines: list[str]) -> list[dict[str, Any]]:
+    """从MD解析交互列表"""
+    _, section = _parse_md_section(lines, "## 交互列表")
+    if not section:
+        return []
+
+    interactions = []
+    current_interaction = None
+
+    for line in section:
+        line = line.strip()
+        if line.startswith("### "):
+            # 新交互: ### UIX-001: 点击订单行跳转到详情页
+            if current_interaction:
+                interactions.append(current_interaction)
+            parts = line[4:].split(":", 1)
+            if len(parts) == 2:
+                interaction_id = parts[0].strip()
+                summary = parts[1].strip()
+                current_interaction = {"interactionId": interaction_id, "summary": summary, "pageId": ""}
+        elif line.startswith("**所属页面**:") and current_interaction:
+            current_interaction["pageId"] = line.split(":", 1)[1].strip()
+        elif line.startswith("**关联状态**:") and current_interaction:
+            states_str = line.split(":", 1)[1].strip()
+            states = [s.strip() for s in states_str.split(",")]
+            if states:
+                current_interaction["stateRefs"] = states
+
+    if current_interaction:
+        interactions.append(current_interaction)
+
+    return interactions
+
+
+def _parse_capabilities_from_md(lines: list[str]) -> list[dict[str, Any]]:
+    """从MD解析能力列表"""
+    _, section = _parse_md_section(lines, "## 能力与资源映射关系")
+    if not section:
+        return []
+
+    capabilities = []
+    current_capability = None
+
+    for line in section:
+        line = line.strip()
+        if line.startswith("### ") and not line.startswith("### 还原路径说明"):
+            # 新能力: ### order-list-ui
+            if current_capability:
+                capabilities.append(current_capability)
+            capability_id = line[4:].strip()
+            current_capability = {
+                "capabilityId": capability_id,
+                "pageRefs": [],
+                "interactionRefs": [],
+                "visualSourceRefs": [],
+                "specRefs": []
+            }
+        elif line.startswith("**UI需求**:") and current_capability:
+            ui_req_str = line.split(":", 1)[1].strip()
+            current_capability["uiRequired"] = ui_req_str == "是"
+        elif line.startswith("**关联页面**:") and current_capability:
+            refs = line.split(":", 1)[1].strip()
+            if refs and refs != "无":
+                current_capability["pageRefs"] = [r.strip() for r in refs.split(",")]
+        elif line.startswith("**关联交互**:") and current_capability:
+            refs = line.split(":", 1)[1].strip()
+            if refs and refs != "无":
+                current_capability["interactionRefs"] = [r.strip() for r in refs.split(",")]
+        elif line.startswith("**视觉资源**:") and current_capability:
+            refs = line.split(":", 1)[1].strip()
+            if refs and not refs.startswith("无"):
+                current_capability["visualSourceRefs"] = [r.strip() for r in refs.split(",")]
+        elif line.startswith("**规格引用**:") and current_capability:
+            refs = line.split(":", 1)[1].strip()
+            if refs and refs != "无":
+                current_capability["specRefs"] = [r.strip() for r in refs.split(",")]
+
+    if current_capability:
+        capabilities.append(current_capability)
+
+    return capabilities
+
+
+def _cmd_sync_from_md(args: argparse.Namespace) -> int:
+    """从UI_CONTEXT.md同步内容到UI_CONTEXT.json"""
+    workspace, feature = _resolve(args)
+
+    # 读取MD文件
+    md_path = _path(workspace, feature).parent / "UI_CONTEXT.md"
+    if not md_path.exists():
+        return render_result(fail("md_file_not_found", f"UI_CONTEXT.md 不存在: {md_path}"))
+
+    try:
+        md_content = md_path.read_text(encoding="utf-8")
+        md_lines = md_content.split("\n")
+    except Exception as exc:
+        return render_result(fail("md_read_failed", str(exc)))
+
+    # 读取现有JSON数据（保留MD中没有的字段）
+    data = _load(workspace, feature)
+
+    # 解析MD中的基本信息
+    ui_required = None
+    for line in md_lines:
+        if "**UI需求**:" in line:
+            ui_required = "是" in line
+            break
+
+    if ui_required is not None:
+        data["uiRequired"] = ui_required
+
+    # 解析并更新pages、interactions、capabilities
+    try:
+        pages = _parse_pages_from_md(md_lines)
+        if pages:
+            data["pages"] = pages
+
+        interactions = _parse_interactions_from_md(md_lines)
+        if interactions:
+            data["interactions"] = interactions
+
+        capabilities = _parse_capabilities_from_md(md_lines)
+        if capabilities:
+            data["capabilities"] = capabilities
+    except Exception as exc:
+        return render_result(fail("md_parse_failed", f"解析MD失败: {exc}"))
+
+    # 写入JSON（会触发MD重新生成）
+    return render_result(_write(workspace, feature, data))
+
+
 def _resolve(args: argparse.Namespace) -> tuple[Path, str]:
     return resolve_workspace(args.workspace), resolve_feature(args.feature)
 
@@ -527,6 +987,10 @@ def main(argv: list[str] | None = None) -> int:
     _add_common(show)
     show.add_argument("--summary", action="store_true")
     show.set_defaults(func=_cmd_show)
+
+    sync = sub.add_parser("sync-from-md")
+    _add_common(sync)
+    sync.set_defaults(func=_cmd_sync_from_md)
 
     args = parser.parse_args(argv)
     try:
