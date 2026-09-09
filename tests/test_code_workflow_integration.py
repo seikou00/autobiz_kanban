@@ -189,6 +189,21 @@ def test_fixed_workflow_entrypoint():
     if "compileAlreadyPassed" in content:
         print("✗ rework 仍将已记录的编译失败误判为未通过")
         return False
+    rework_start = content.find("async function reworkDeliveryImplementation(")
+    rework_end = content.find("async function recordSingleRepairResolution(", rework_start)
+    rework_protocol = content[rework_start:rework_end]
+    rework_checks = [
+        "先清理陈旧 run，再开始任何修复",
+        "implementation_rework_stale_run",
+        "必须先完成全部陈旧 run 清理",
+        "严格按依赖拓扑逐个修复",
+        "当前 TASK 为 todo 时执行普通 task_runner.py start",
+        "只有 start-task-repair 启动的任务携带 --repair-mode",
+    ]
+    missing_rework = [check for check in rework_checks if check not in rework_protocol]
+    if missing_rework:
+        print(f"✗ rework 恢复协议缺少: {', '.join(missing_rework)}")
+        return False
     if "repository_coordinator" in launcher or "coordinatorManaged" in content:
         print("✗ 多仓库路径仍会拆分为 coordinator 子 Workflow")
         return False
