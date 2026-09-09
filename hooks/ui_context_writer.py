@@ -94,6 +94,63 @@ def _visual_source_type_zh(source_type: str) -> str:
     return type_map.get(source_type, source_type)
 
 
+def _capability_id_to_zh(cap_id: str) -> str:
+    """将capability ID转换为中文描述"""
+    # 常见的能力名称映射
+    mapping = {
+        "navigation-bar": "导航栏",
+        "product-module": "产品模块",
+        "scene-module": "场景模块",
+        "course-card": "课程卡片",
+        "category-filter": "分类筛选",
+        "scene-filter": "场景筛选",
+        "pagination": "分页",
+        "user-info": "用户信息",
+        "login": "登录",
+        "logout": "登出",
+        "register": "注册",
+        "profile": "个人资料",
+        "settings": "设置",
+        "dashboard": "仪表盘",
+        "search": "搜索",
+        "filter": "筛选",
+        "sort": "排序",
+        "header": "页头",
+        "footer": "页脚",
+        "sidebar": "侧边栏",
+        "menu": "菜单",
+        "form": "表单",
+        "button": "按钮",
+        "modal": "弹窗",
+        "dialog": "对话框",
+        "table": "表格",
+        "list": "列表",
+        "card": "卡片",
+        "tab": "标签页",
+        "breadcrumb": "面包屑",
+        "notification": "通知",
+        "alert": "警告",
+        "tooltip": "提示",
+        "dropdown": "下拉菜单",
+    }
+
+    # 尝试直接匹配
+    if cap_id in mapping:
+        return f"{mapping[cap_id]} ({cap_id})"
+
+    # 尝试部分匹配
+    for key, value in mapping.items():
+        if key in cap_id:
+            return f"{value}相关 ({cap_id})"
+
+    # 默认：将kebab-case转为更易读的格式
+    words = cap_id.split('-')
+    if len(words) > 1:
+        return f"{' '.join(words).title()} ({cap_id})"
+
+    return cap_id
+
+
 def _find_capability_by_visual_source(capabilities: list[dict], source_id: str) -> dict | None:
     """根据visualSourceRef找到对应的capability"""
     for cap in capabilities:
@@ -107,7 +164,7 @@ def _find_capability_by_visual_source(capabilities: list[dict], source_id: str) 
 def _get_capability_display_name(capability: dict, pages: list[dict]) -> str:
     """获取capability的显示名称（从关联页面推断中文名）"""
     if not capability:
-        return "未关联"
+        return "待Plan阶段关联"  # 改为更明确的提示
 
     cap_id = capability.get("capabilityId", "")
     page_refs = capability.get("pageRefs", [])
@@ -132,11 +189,16 @@ def _get_capability_display_name(capability: dict, pages: list[dict]) -> str:
                 return f"{page_names[0]}等{len(page_names)}个页面功能"
 
     # 如果没有页面信息，返回capability ID
-    return cap_id or "未关联"
+    return cap_id or "待Plan阶段关联"
 
 
 def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
-    """生成面向前端人员的UI_CONTEXT.md文档"""
+    """生成面向前端人员的UI_CONTEXT.md文档
+
+    文档结构固定为：
+    1. 视觉资源与还原路径
+    2. 页面与能力映射
+    """
     lines = [
         f"# UI Context - {feature}",
         "",
@@ -144,79 +206,19 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
         "",
     ]
 
-    # 基本信息
+    pages = data.get('pages', [])
+    visual_sources = data.get('visualSources', [])
+    capabilities = data.get('capabilities', [])
+    interactions = data.get('interactions', [])
+
+    # ========== 1. 视觉资源与还原路径 ==========
     lines.extend([
-        "## 基本信息",
-        "",
-        f"- **功能ID**: {data.get('featureId', 'N/A')}",
-        f"- **UI需求**: {'是' if data.get('uiRequired') else '否'}",
-        f"- **决策状态**: {data.get('decisionStatus', 'N/A')}",
+        "## 视觉资源与还原路径",
         "",
     ])
 
-    # 不适用原因（如果uiRequired为false）
-    if not data.get('uiRequired'):
-        reason = data.get('notApplicableReason', 'N/A')
-        lines.extend([
-            f"**不适用原因**: {reason}",
-            "",
-        ])
-        # 注意：不要立即返回，继续检查是否有visualSources等数据
-
-    # 页面列表
-    pages = data.get('pages', [])
-    if pages:
-        lines.extend([
-            "## 页面列表",
-            "",
-        ])
-        for page in pages:
-            page_id = page.get('pageId', 'N/A')
-            name = page.get('name', 'N/A')
-            goal = page.get('goal', 'N/A')
-            route_hint = page.get('routeHint', '')
-            states = page.get('states', [])
-
-            lines.append(f"### {page_id}: {name}")
-            lines.append("")
-            lines.append(f"**目标**: {goal}")
-            lines.append("")
-            if route_hint:
-                lines.append(f"**路由提示**: `{route_hint}`")
-                lines.append("")
-            if states:
-                lines.append(f"**状态**: {', '.join(states)}")
-                lines.append("")
-
-    # 交互列表
-    interactions = data.get('interactions', [])
-    if interactions:
-        lines.extend([
-            "## 交互列表",
-            "",
-        ])
-        for interaction in interactions:
-            interaction_id = interaction.get('interactionId', 'N/A')
-            page_id = interaction.get('pageId', 'N/A')
-            summary = interaction.get('summary', 'N/A')
-            state_refs = interaction.get('stateRefs', [])
-
-            lines.append(f"### {interaction_id}: {summary}")
-            lines.append("")
-            lines.append(f"**所属页面**: {page_id}")
-            lines.append("")
-            if state_refs:
-                lines.append(f"**关联状态**: {', '.join(state_refs)}")
-                lines.append("")
-
-    # 视觉资源与还原路径
-    visual_sources = data.get('visualSources', [])
-    capabilities = data.get('capabilities', [])
-
     if visual_sources:
         lines.extend([
-            "## 视觉资源与还原路径",
-            "",
             "| 资源ID | 关联任务 | 类型 | 路径 | 还原路径 | 是否必需 |",
             "| ------ | -------- | ---- | ---- | -------- | -------- |",
         ])
@@ -225,7 +227,7 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
             vs_type = vs.get('type', 'N/A')
             vs_type_zh = _visual_source_type_zh(vs_type)
             path = vs.get('path', 'N/A')
-            route = vs.get('route', 'N/A')  # 保持英文
+            route = vs.get('route', 'N/A')
             required = '是' if vs.get('required') else '否'
 
             # 查找关联的任务并获取中文显示名
@@ -235,7 +237,7 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
             lines.append(f"| {source_id} | {task_name} | {vs_type_zh} | `{path}` | `{route}` | {required} |")
         lines.append("")
 
-        # 还原路径说明（保持英文，但用中文解释）
+        # 还原路径说明
         lines.extend([
             "### 还原路径说明",
             "",
@@ -245,89 +247,110 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
             "- **missing-html**: 缺少HTML资源",
             "",
         ])
-
-    # 能力与资源映射关系图
-    if capabilities:
+    else:
         lines.extend([
-            "## 能力与资源映射关系",
+            "暂无视觉资源。",
             "",
         ])
 
-        for cap in capabilities:
-            cap_id = cap.get('capabilityId', 'N/A')
-            ui_required = cap.get('uiRequired')
-            page_refs = cap.get('pageRefs', [])
-            interaction_refs = cap.get('interactionRefs', [])
-            visual_source_refs = cap.get('visualSourceRefs', [])
-            spec_refs = cap.get('specRefs', [])
+    # ========== 2. 页面与能力映射 ==========
+    lines.extend([
+        "## 页面与能力映射",
+        "",
+    ])
 
-            lines.append(f"### {cap_id}")
-            lines.append("")
+    if pages:
+        # 构建能力到视觉资源的映射
+        capability_to_resources = {}
+        if capabilities:
+            for cap in capabilities:
+                cap_id = cap.get('capabilityId', '')
+                visual_source_refs = cap.get('visualSourceRefs', [])
+                if cap_id:
+                    capability_to_resources[cap_id] = visual_source_refs
 
-            if ui_required is not None:
-                lines.append(f"**UI需求**: {'是' if ui_required else '否'}")
-                lines.append("")
+        # 构建页面到能力的映射
+        page_to_capabilities = {}
+        if capabilities:
+            for cap in capabilities:
+                cap_id = cap.get('capabilityId', '')
+                page_refs = cap.get('pageRefs', [])
+                for page_ref in page_refs:
+                    if page_ref not in page_to_capabilities:
+                        page_to_capabilities[page_ref] = []
+                    page_to_capabilities[page_ref].append(cap_id)
 
-            if page_refs:
-                lines.append(f"**关联页面**: {', '.join(page_refs)}")
-                lines.append("")
+        # 按页面组织交互列表
+        interactions_by_page = {}
+        for interaction in interactions:
+            page_id = interaction.get('pageId', 'N/A')
+            if page_id not in interactions_by_page:
+                interactions_by_page[page_id] = []
+            interactions_by_page[page_id].append(interaction)
 
-            if interaction_refs:
-                lines.append(f"**关联交互**: {', '.join(interaction_refs)}")
-                lines.append("")
-
-            if visual_source_refs:
-                lines.append(f"**视觉资源**: {', '.join(visual_source_refs)}")
-                lines.append("")
-
-                # 显示每个视觉资源的还原路径（保持英文）
-                for vs_ref in visual_source_refs:
-                    for vs in visual_sources:
-                        if vs.get('sourceId') == vs_ref:
-                            route = vs.get('route', 'N/A')
-                            vs_type = vs.get('type', 'N/A')
-                            vs_type_zh = _visual_source_type_zh(vs_type)
-                            path = vs.get('path', 'N/A')
-                            lines.append(f"  - `{vs_ref}`: `{route}` ({vs_type_zh}) → `{path}`")
-                lines.append("")
-            else:
-                lines.append("**视觉资源**: 无（使用规格驱动开发）")
-                lines.append("")
-
-            if spec_refs:
-                lines.append(f"**规格引用**: {', '.join(spec_refs)}")
-                lines.append("")
-
-    # 关系图总结
-    if capabilities or visual_sources:
+        # 页面表格
         lines.extend([
-            "## 任务-HTML-路径关系图",
-            "",
-            "```",
+            "| 页面ID | 页面名称 | 页面目标 | 路由提示 | 状态 |",
+            "| ------ | -------- | -------- | -------- | ---- |",
         ])
 
-        for cap in capabilities:
-            cap_id = cap.get('capabilityId', 'N/A')
-            visual_source_refs = cap.get('visualSourceRefs', [])
+        for page in pages:
+            page_id = page.get('pageId', 'N/A')
+            name = page.get('name', 'N/A')
+            goal = page.get('goal', 'N/A')
+            route_hint = page.get('routeHint', '')
+            states = page.get('states', [])
 
-            lines.append(f"[能力] {cap_id}")
+            route_hint_display = f"`{route_hint}`" if route_hint else '-'
+            states_display = ', '.join(states) if states else '-'
 
-            if visual_source_refs:
-                for vs_ref in visual_source_refs:
-                    for vs in visual_sources:
-                        if vs.get('sourceId') == vs_ref:
-                            route = vs.get('route', 'spec-driven-ui')
-                            path = vs.get('path', 'N/A')
-                            lines.append(f"  └─> [资源] {vs_ref}")
-                            lines.append(f"        ├─> [路径] {route}")
-                            lines.append(f"        └─> [文件] {path}")
-            else:
-                lines.append("  └─> [路径] spec-driven-ui (无高保真HTML)")
+            lines.append(f"| {page_id} | {name} | {goal} | {route_hint_display} | {states_display} |")
 
-            lines.append("")
-
-        lines.append("```")
         lines.append("")
+
+        # 每个页面的详细信息（能力和交互）
+        for page in pages:
+            page_id = page.get('pageId', 'N/A')
+            name = page.get('name', 'N/A')
+
+            lines.append(f"### {page_id}: {name}")
+            lines.append("")
+
+            # 该页面关联的能力
+            if page_id in page_to_capabilities:
+                cap_ids = page_to_capabilities[page_id]
+                cap_descriptions = []
+                for cap_id in cap_ids:
+                    cap_zh = _capability_id_to_zh(cap_id)
+                    # 查找该能力关联的资源
+                    resources = capability_to_resources.get(cap_id, [])
+                    if resources:
+                        resource_str = ', '.join(resources)
+                        cap_descriptions.append(f"{cap_zh} → [{resource_str}]")
+                    else:
+                        cap_descriptions.append(cap_zh)
+
+                lines.append(f"**关联能力**: {' | '.join(cap_descriptions)}")
+                lines.append("")
+
+            # 该页面的交互列表
+            if page_id in interactions_by_page:
+                lines.append("**交互列表**:")
+                lines.append("")
+                for interaction in interactions_by_page[page_id]:
+                    interaction_id = interaction.get('interactionId', 'N/A')
+                    summary = interaction.get('summary', 'N/A')
+                    state_refs = interaction.get('stateRefs', [])
+
+                    lines.append(f"- **{interaction_id}**: {summary}")
+                    if state_refs:
+                        lines.append(f"  - 关联状态: {', '.join(state_refs)}")
+                lines.append("")
+    else:
+        lines.extend([
+            "暂无页面定义。",
+            "",
+        ])
 
     return "\n".join(lines)
 
