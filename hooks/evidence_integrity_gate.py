@@ -29,6 +29,7 @@ from evidence_store import (  # noqa: E402
 )
 from evidence_kernel import check_record_artifacts  # noqa: E402
 from plan_json import (  # noqa: E402
+    batch_compile_is_not_configured_for_frontend,
     blocked_tasks,
     defer_to_test_stages_enabled,
     failed_tasks,
@@ -304,9 +305,13 @@ def _check_batch_completion(
         if not isinstance(compile_result, dict):
             errors.append(f"{batch_id}.batch_compile_contract_missing")
             continue
-        if compile_result.get("status") not in {"passed", "failed"}:
-            status = compile_result.get("status")
-            errors.append(f"{batch_id}.batch_compile_not_recorded:{status}")
+        compile_status = compile_result.get("status")
+        if compile_status == "skipped":
+            if not batch_compile_is_not_configured_for_frontend(batch):
+                errors.append(f"{batch_id}.batch_compile_skip_not_allowed")
+            continue
+        if compile_status not in {"passed", "failed"}:
+            errors.append(f"{batch_id}.batch_compile_not_recorded:{compile_status}")
             continue
         command_id = compile_result.get("commandId")
         if not isinstance(command_id, str) or not command_id.strip():

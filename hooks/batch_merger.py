@@ -465,8 +465,8 @@ def merge_run(
             batch_compile = plan_batch.get("batchCompile") if isinstance(plan_batch, dict) else None
             # Compile is recorded for delivery diagnostics but is temporarily
             # non-blocking.  A missing/unfinished compile still cannot be
-            # merged; an executed pass or failure may proceed.
-            if isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed"}:
+            # merged; a recorded pass, failure, or frontend skip may proceed.
+            if isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed", "skipped"}:
                 plan_result = mark_parallel_batch_tasks_merged(
                     workspace,
                     feature,

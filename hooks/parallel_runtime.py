@@ -704,7 +704,7 @@ def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, own
                     and isinstance(states.get("review"), dict)
                     and states["review"].get("status") == "pending"
                 )
-                if batch.get("status") != "sealed" or (batch.get("compileStatus") not in {"passed", "failed"} and not review_draft):
+                if batch.get("status") != "sealed" or (batch.get("compileStatus") not in {"passed", "failed", "skipped"} and not review_draft):
                     raise ValueError(f"parallel_batch_not_ready_to_release:{batch_id}")
                 commit_sha = batch.get("commitSha")
                 if not isinstance(commit_sha, str) or not commit_sha.strip():

@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 
 from hooks.evidence_store import EvidenceStoreError, append_evidence  # noqa: E402
 from hooks.evidence_integrity_gate import check_code_done  # noqa: E402
-from hooks.plan_json import task_contract_sha256, task_set_digest  # noqa: E402
+from hooks.plan_json import PlanJsonError, load_plan_bundle, task_contract_sha256, task_set_digest  # noqa: E402
 from hooks import evidence_integrity_gate as evidence_integrity_gate_module  # noqa: E402
 from hooks import plan_writer as plan_writer_module  # noqa: E402
 from hooks import task_runner as task_runner_module  # noqa: E402
@@ -340,6 +340,37 @@ def _configure_defer_to_test_stages(feature_dir: Path, *, always_fail: bool = Fa
     _refresh_parallel_pipeline(feature_dir)
 
 
+def _configure_frontend_without_batch_compile(feature_dir: Path) -> None:
+    """Turn the single-Batch fixture into a frontend lane with no compiler."""
+
+    batch = _read_batch(feature_dir)
+    batch["executionLane"] = "frontend"
+    batch["compileCommand"] = None
+    for task in batch["tasks"]:
+        task["uiRequired"] = True
+        task["scope"]["pages"] = ["PAGE-001"]
+        task["uiRefs"] = {
+            "pageRefs": ["PAGE-001"],
+            "interactionRefs": ["UIX-001"],
+            "visualSourceRefs": [],
+            "frontendRoute": "spec-driven-ui",
+        }
+        task.update({
+            "implementationEvidenceIds": [],
+            "latestImplementationEvidenceId": None,
+            "validationEvidenceIds": [],
+            "implementationRevision": 0,
+        })
+    _write_batch(feature_dir, batch)
+
+    root_path = feature_dir / "plan.json"
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    root["batches"][0]["executionLane"] = "frontend"
+    root["compileProfiles"] = {"frontend": {"commands": []}}
+    root_path.write_text(json.dumps(root, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _refresh_parallel_pipeline(feature_dir)
+
+
 def _add_second_compile_only_batch(feature_dir: Path) -> None:
     first = _read_batch(feature_dir)
     second_task = copy.deepcopy(first["tasks"][0])
@@ -546,6 +577,47 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(revalidated_batch["batchCompile"]["status"], "passed")
             self.assertEqual(revalidated_batch["batchCompile"]["repairAttempts"], 0)
 
+    def test_frontend_batch_without_compile_command_records_skipped_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_frontend_without_batch_compile(feature_dir)
+
+            started = _start(workspace, code)
+            (code / "implemented.ts").write_text("export const implemented = true;\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            self.assertEqual(_read_batch(feature_dir)["batchCompile"]["status"], "skipped")
+
+            compiled = _run(
+                "batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            compile_payload = json.loads(compiled.stdout)
+            self.assertEqual(compile_payload["compileStatus"], "skipped")
+            self.assertEqual(compile_payload["requiredAction"], "code_done_ready")
+            self.assertEqual(
+                compile_payload["skipReason"],
+                "batch_compile_not_configured_for_frontend",
+            )
+            completed_batch = _read_batch(feature_dir)
+            self.assertEqual(completed_batch["batchCompile"]["commandId"], None)
+            self.assertEqual(completed_batch["batchCompile"]["requestedCodeWorkspaces"], [])
+            self.assertEqual(completed_batch["tasks"][0]["status"], "done")
+
+            revalidated = _run(
+                "revalidate-batch-compile", "--workspace", str(workspace), "--feature", "alpha",
+                "--batch-id", "B001", "--code-workspace", str(code),
+            )
+            self.assertEqual(revalidated.returncode, 0, revalidated.stdout + revalidated.stderr)
+            revalidated_payload = json.loads(revalidated.stdout)
+            self.assertEqual(revalidated_payload["compileStatus"], "skipped")
+            self.assertTrue(revalidated_payload["wasRevalidation"])
+
     def test_multiple_batches_reject_direct_task_start_without_parallel_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
@@ -704,6 +776,45 @@ class TaskRunnerTest(unittest.TestCase):
             mark_parallel.assert_called_once()
             compiled_batch = _read_batch(feature_dir)
             self.assertEqual(compiled_batch["batchCompile"]["status"], "passed")
+            self.assertEqual(compiled_batch["tasks"][0]["status"], "implemented")
+
+    def test_parallel_frontend_compile_skip_continues_to_utest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_frontend_without_batch_compile(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.ts").write_text("export const implemented = true;\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
+                result = task_runner_module._integrate_batch_compile_result(
+                    workspace,
+                    "alpha",
+                    "B001",
+                    {
+                        "compileStatus": "skipped",
+                        "skipReason": "batch_compile_not_configured_for_frontend",
+                    },
+                    parallel_run_id="cw-test-001",
+                )
+
+            self.assertEqual(result["compileStatus"], "skipped")
+            self.assertEqual(result["requiredAction"], "run_utest")
+            mark_parallel.assert_called_once_with(
+                workspace,
+                "alpha",
+                "cw-test-001",
+                "B001",
+                "sealed",
+                compileStatus="skipped",
+            )
+            compiled_batch = _read_batch(feature_dir)
+            self.assertEqual(compiled_batch["batchCompile"]["status"], "skipped")
             self.assertEqual(compiled_batch["tasks"][0]["status"], "implemented")
 
     def test_parallel_compile_failure_is_recorded_without_blocking_delivery(self) -> None:
@@ -1497,6 +1608,30 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertNotEqual(started.returncode, 0)
             self.assertIn("compileProfiles.backend.compile_command_missing", started.stdout)
             self.assertEqual(list((feature_dir / ".task-runs").glob("T001/*.json")), [])
+
+    def test_backend_batch_cannot_bypass_compile_with_skipped_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, feature_dir, _ = _workspace(Path(tmp))
+            batch = _read_batch(feature_dir)
+            batch["batchCompile"] = {
+                "status": "skipped",
+                "commandId": None,
+                "output": None,
+                "failureCategory": None,
+                "diagnosticPaths": [],
+                "repairOwnerTaskIds": [],
+                "repairTaskId": None,
+                "repairAttempts": 0,
+                "maxRepairAttempts": 3,
+                "requestedCodeWorkspaces": [],
+                "workspaceSnapshotSha256": None,
+                "implementationEvidenceByTask": {},
+                "implementationRevisionByTask": {},
+            }
+            _write_batch(feature_dir, batch)
+
+            with self.assertRaisesRegex(PlanJsonError, "B001.batchCompile.skipped_not_allowed"):
+                load_plan_bundle(feature_dir)
 
     def test_start_ignores_task_test_manifest_in_compile_only_code_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

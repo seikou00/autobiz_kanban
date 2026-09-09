@@ -388,6 +388,46 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             self.assertTrue(compile_lease["ownerToken"])
             release_lease(workspace, "alpha", run_id, "B001", compile_lease["ownerToken"], final_status="pending")
 
+    def test_skipped_frontend_compile_can_seal_and_release_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            (worktree / "delivery.ts").write_text("export const delivered = true;\n", encoding="utf-8")
+            _git(worktree, "add", "delivery.ts")
+            _git(worktree, "commit", "-m", "review draft")
+            draft_commit = _git_output(worktree, "rev-parse", "HEAD")
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "sealed",
+                worktreePath=str(worktree),
+                branchName=provisioned["branchName"],
+                commitSha=draft_commit,
+                compileStatus="skipped",
+            )
+            lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+            sealed = seal_parallel_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                worktree,
+                lease["ownerToken"],
+                purpose="implementation",
+            )
+            self.assertTrue(sealed["success"], sealed)
+            self.assertEqual(sealed["commitSha"], draft_commit)
+            release_lease(workspace, "alpha", run_id, "B001", lease["ownerToken"], final_status="sealed")
+            batch = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+            self.assertEqual(batch["status"], "sealed")
+            self.assertIsNone(batch["lease"])
+
     def test_plan_ownership_is_required_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))

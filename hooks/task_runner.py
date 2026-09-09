@@ -33,6 +33,7 @@ from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve
 from hooks.plan_json import (  # noqa: E402
     BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
     PlanBundle,
+    batch_compile_is_not_configured_for_frontend,
     defer_to_test_stages_enabled,
     find_task,
     load_plan_bundle,
@@ -3055,7 +3056,7 @@ def _run_batch_compile(
         force: 如果为 True，即使批次已通过也强制重新编译
 
     返回: {
-        "compileStatus": "passed" | "failed",
+        "compileStatus": "passed" | "failed" | "skipped",
         "commandId": str,
         "output": str (失败时),
         "failureCategory": str (失败时)
@@ -3097,6 +3098,12 @@ def _run_batch_compile(
         return {
             "compileStatus": "passed",
             "commandId": batch_compile.get("commandId", ""),
+        }
+
+    if compile_status == "skipped":
+        return {
+            "compileStatus": "skipped",
+            "skipReason": "batch_compile_not_configured_for_frontend",
         }
 
     if compile_status == "failed":
@@ -3165,6 +3172,12 @@ def _run_batch_compile(
             f"batch_compile_implementation_evidence_missing:{batch_id}",
             taskIds=invalid_implementation_bindings,
         )
+
+    if batch_compile_is_not_configured_for_frontend(batch):
+        return {
+            "compileStatus": "skipped",
+            "skipReason": "batch_compile_not_configured_for_frontend",
+        }
 
     requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
     if len(requested_workspaces) != 1:
@@ -3284,7 +3297,7 @@ def run_batch_compile(
     修复使用 ``revalidate_batch_compile``，不复用这个初始编译入口。
 
     返回: {
-        "compileStatus": "passed" | "failed",
+        "compileStatus": "passed" | "failed" | "skipped",
         "commandId": str,
         "output": str (失败时),
         "failureCategory": str (失败时)
@@ -3333,7 +3346,7 @@ def revalidate_batch_compile(
     强制重新执行编译，即使批次之前已通过。
 
     返回: {
-        "compileStatus": "passed" | "failed",
+        "compileStatus": "passed" | "failed" | "skipped",
         "commandId": str,
         "output": str (失败时),
         "failureCategory": str (失败时),
@@ -3407,7 +3420,7 @@ def _integrate_batch_compile_result(
         )
 
     compile_status = compile_result.get("compileStatus")
-    if compile_status == "passed":
+    if compile_status in {"passed", "skipped"}:
         if parallel_run_id is not None:
             mark_parallel_batch(
                 workspace,
@@ -3415,13 +3428,14 @@ def _integrate_batch_compile_result(
                 parallel_run_id,
                 batch_id,
                 "sealed",
-                compileStatus="passed",
+                compileStatus=compile_status,
             )
             return {
-                "compileStatus": "passed",
+                "compileStatus": compile_status,
                 "requiredAction": "run_utest",
                 "batchId": batch_id,
                 "parallelRunId": parallel_run_id,
+                **({"skipReason": compile_result.get("skipReason")} if compile_status == "skipped" else {}),
             }
         # A non-parallel Batch has no independent delivery merge barrier.
         try:
@@ -3439,9 +3453,10 @@ def _integrate_batch_compile_result(
         except PlanWriterInputError as exc:
             raise TaskRunnerError(f"plan_writer_error:{exc}") from exc
         return {
-            "compileStatus": "passed",
+            "compileStatus": compile_status,
             "requiredAction": "code_done_ready",
             "batchId": batch_id,
+            **({"skipReason": compile_result.get("skipReason")} if compile_status == "skipped" else {}),
             "continuation": {"action": "code_done_ready", "completedBatchId": batch_id},
         }
     else:
@@ -3678,7 +3693,7 @@ def _compile_result_is_recorded_success(result: dict[str, Any], parallel_run_id:
     protocol level once its result and evidence have been durably recorded.
     Infrastructure failures still arrive here as exceptions instead.
     """
-    return result.get("compileStatus") == "passed" or (
+    return result.get("compileStatus") in {"passed", "skipped"} or (
         parallel_run_id is not None
         and result.get("compileStatus") == "failed"
         and result.get("requiredAction") == "recorded_continue"

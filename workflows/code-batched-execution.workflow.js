@@ -905,8 +905,8 @@ async function compileAndSealDelivery(batchResult) {
     `Batch ${batchId} 已通过业务 Review，现在才执行本 Batch 的首次编译和正式封存。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。` +
     `依次执行：1) 用 batch_lease_manager.py acquire 获取 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"、--ttl-seconds ${timeoutPerBatch}、--lease-guard）；插件会在每个携带该 token 的 task_runner/worktree_manager 命令边界续租；禁止自行运行 heartbeat、run_in_background、&、nohup 或 Start-Process；随后 mark-batch 为 running；` +
     `2) 用同一 token 执行 task_runner.py batch-compile（--workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 token> --workspace-ref "${batchWorkspaceRef}"）；` +
-    `3) 无论编译结果为 passed 还是 failed，都必须保留 task_runner 输出并记录其 compileStatus。编译失败是已记录的非阻断诊断：不得启动 compile repair、不得返回 failed/timeout；在确认失败 JSON 已写入后，执行带 --owner-token <真实 token> --require-lease-guard 的 lease check，继续 worktree_manager.py seal 封存同一版本，并以 final-status sealed 释放同一 lease。只有编译命令未能产生结构化结果、无法写入状态、lease 无效或 seal/release 失败才中断。不得编辑代码、重新 Review 或运行 UTest。` +
-    `返回 {batchId,status:"success",compileStatus:"passed"|"failed",worktreePath,branchName,commitSha}。`,
+    `3) 无论编译结果为 passed、failed 或 skipped，都必须保留 task_runner 输出并记录其 compileStatus。前端未配置批次编译命令时，task_runner 会返回 skipped；不得臆造前端 build/typecheck。编译失败是已记录的非阻断诊断：不得启动 compile repair、不得返回 failed/timeout；在确认结果 JSON 已写入后，执行带 --owner-token <真实 token> --require-lease-guard 的 lease check，继续 worktree_manager.py seal 封存同一版本，并以 final-status sealed 释放同一 lease。只有编译命令未能产生结构化结果、无法写入状态、lease 无效或 seal/release 失败才中断。不得编辑代码、重新 Review 或运行 UTest。` +
+    `返回 {batchId,status:"success",compileStatus:"passed"|"failed"|"skipped",worktreePath,branchName,commitSha}。`,
     { label: `post-review-compile-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
   ), `post-review compile ${batchId}`);
 }
@@ -976,7 +976,7 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     }
     requireSuccess(review, `stage review ${batchId}`);
   }
-  if (compileAlreadyRecorded && !["passed", "failed"].includes(batchResult.compileStatus)) {
+  if (compileAlreadyRecorded && !["passed", "failed", "skipped"].includes(batchResult.compileStatus)) {
     throw new Error(`compile_record_missing_for_delivery:${batchId}`);
   }
   if (!compileAlreadyRecorded) {
@@ -1042,8 +1042,8 @@ async function reworkDeliveryImplementation(recovery) {
     `依次执行：1) 用 batch_lease_manager.py acquire 获取真实 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"、--ttl-seconds ${timeoutPerBatch}、--lease-guard）。插件在每个携带 token 的 task_runner/worktree_manager 命令边界续租；禁止自行启动后台 heartbeat；随后 mark-batch 为 running；` +
     `2) 对需要修复的 TASK（仅 ${JSON.stringify(taskIds)}）读取其 latestImplementationEvidenceId，并使用 task_runner.py start-task-repair --prior-evidence-id <该真实 ID> --parallel-run-id "${runId}" --lease-token <真实 token> --code-workspace "${batchWorktree}" --workspace-ref "${batchWorkspaceRef}"；` +
     `3) 修复生产代码后，用 finish-implementation --repair-mode 和该 start 返回的真实 task run-id 记录新的 implementation evidence；` +
-    `4) 必须用 python "${taskRunnerPath}" revalidate-batch-compile（不是 batch-compile 缓存结果），并携带 --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 token> --workspace-ref "${batchWorkspaceRef}"，在同一 worktree 强制重新实际编译。无论 compileStatus 为 passed 还是 failed，都必须保留 task_runner 输出并确认该状态已写入；编译失败是已记录的非阻断诊断，不得启动 compile repair 或返回 failed/timeout。确认结果已记录后，用同一 token 执行 batch_lease_manager.py check --require-lease-guard，再用 worktree_manager.py seal 产生新的 commitSha，并以 final-status sealed 释放同一 lease。只有编译命令未能产生结构化结果、无法写入状态、lease 无效或 seal/release 失败才中断。` +
-    `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；其他命令失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",compileStatus:"passed"|"failed",worktreePath,branchName,commitSha}。`,
+    `4) 必须用 python "${taskRunnerPath}" revalidate-batch-compile（不是 batch-compile 缓存结果），并携带 --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 token> --workspace-ref "${batchWorkspaceRef}"。已配置命令时在同一 worktree 强制重新实际编译；前端未配置批次编译命令时会直接返回 skipped，不得臆造前端 build/typecheck。无论 compileStatus 为 passed、failed 或 skipped，都必须保留 task_runner 输出并确认该状态已写入；编译失败是已记录的非阻断诊断，不得启动 compile repair 或返回 failed/timeout。确认结果已记录后，用同一 token 执行 batch_lease_manager.py check --require-lease-guard，再用 worktree_manager.py seal 产生新的 commitSha，并以 final-status sealed 释放同一 lease。只有编译命令未能产生结构化结果、无法写入状态、lease 无效或 seal/release 失败才中断。` +
+    `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；其他命令失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",compileStatus:"passed"|"failed"|"skipped",worktreePath,branchName,commitSha}。`,
     { label: `rework-implement-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
   ), `implementation rework ${batchId}`);
 }

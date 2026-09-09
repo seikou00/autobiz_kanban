@@ -287,7 +287,7 @@ def seal_parallel_batch(
         )
         ready_for_delivery = (
             batch.get("status") in {"sealed", "leased"}
-            and batch.get("compileStatus") in {"passed", "failed"}
+            and batch.get("compileStatus") in {"passed", "failed", "skipped"}
         )
         if not (ready_for_review if review_draft else ready_for_delivery):
             return {"success": False, "error": f"parallel_batch_not_ready_to_seal:{batch_id}"}

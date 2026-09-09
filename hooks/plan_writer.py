@@ -55,6 +55,7 @@ from hooks.plan_json import (  # noqa: E402
     TASK_EXECUTION_MODES,
     TASK_VALIDATION_KINDS,
     VISUAL_SOURCE_ID_RE,
+    batch_compile_is_not_configured_for_frontend,
     batch_plan_path,
     defer_to_test_stages_enabled,
     load_plan_bundle,
@@ -1058,7 +1059,7 @@ def _batch_status(
     if any(status == "failed" for status in statuses):
         return "failed"
     if statuses and all(status == "done" for status in statuses):
-        compile_recorded = isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed"}
+        compile_recorded = isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed", "skipped"}
         return "done" if compile_recorded else "in_progress"
     if any(status in {"in_progress", "implemented", "validating", "done"} for status in statuses):
         return "in_progress"
@@ -4861,7 +4862,11 @@ def record_task_implementation(
             }
         elif all_implemented and batch_compile is None:
             batch_plan["batchCompile"] = {
-                "status": "pending",
+                "status": (
+                    "skipped"
+                    if batch_compile_is_not_configured_for_frontend(batch_plan)
+                    else "pending"
+                ),
                 "commandId": None,
                 "output": None,
                 "failureCategory": None,
@@ -4908,7 +4913,7 @@ def update_batch_compile_status(
     更新批次编译状态。
 
     compile_result: {
-        "compileStatus": "passed" | "failed",
+        "compileStatus": "passed" | "failed" | "skipped",
         "commandId": str,
         "output": str (失败时),
         "failureCategory": str (失败时)
@@ -4929,11 +4934,19 @@ def update_batch_compile_status(
             return fail("batch_compile_not_initialized", batch_id, path=_path(workspace, feature))
 
         compile_status = compile_result.get("compileStatus")
-        if compile_status not in {"passed", "failed"}:
+        if compile_status not in {"passed", "failed", "skipped"}:
             return fail("invalid_compile_status", compile_status, path=_path(workspace, feature))
 
+        command_id = compile_result.get("commandId")
+        compile_command = batch_plan.get("compileCommand")
+        if compile_status == "skipped":
+            if not batch_compile_is_not_configured_for_frontend(batch_plan):
+                return fail("batch_compile_skip_not_allowed", batch_id, path=_path(workspace, feature))
+            if command_id is not None:
+                return fail("batch_compile_skip_command_forbidden", command_id, path=_path(workspace, feature))
+
         current_status = batch_compile.get("status")
-        if current_status == "passed" and compile_status == "passed":
+        if current_status == compile_status and compile_status in {"passed", "skipped"}:
             return _write(workspace, feature, data)
         if current_status != "pending":
             return fail(
@@ -4942,9 +4955,7 @@ def update_batch_compile_status(
                 path=_path(workspace, feature),
             )
 
-        command_id = compile_result.get("commandId")
-        compile_command = batch_plan.get("compileCommand")
-        if not (
+        if compile_status != "skipped" and not (
             isinstance(compile_command, dict)
             and compile_command.get("kind") == "compile"
             and compile_command.get("required") is True
@@ -4953,7 +4964,7 @@ def update_batch_compile_status(
             return fail("batch_compile_command_invalid", command_id, path=_path(workspace, feature))
 
         batch_compile["status"] = compile_status
-        batch_compile["commandId"] = command_id
+        batch_compile["commandId"] = None if compile_status == "skipped" else command_id
         batch_compile["repairAttempts"] = int(batch_compile.get("repairAttempts", 0))
         batch_compile["maxRepairAttempts"] = BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
         batch_compile["repairTaskId"] = None
@@ -4982,17 +4993,17 @@ def update_batch_compile_status(
             batch_compile["failureCategory"] = None
             batch_compile["diagnosticPaths"] = []
             batch_compile["repairOwnerTaskIds"] = []
-            batch_compile["requestedCodeWorkspaces"] = list(
-                compile_result.get("requestedCodeWorkspaces", [])
+            batch_compile["requestedCodeWorkspaces"] = (
+                [] if compile_status == "skipped" else list(compile_result.get("requestedCodeWorkspaces", []))
             )
-            batch_compile["workspaceSnapshotSha256"] = compile_result.get(
-                "workspaceSnapshotSha256"
+            batch_compile["workspaceSnapshotSha256"] = (
+                None if compile_status == "skipped" else compile_result.get("workspaceSnapshotSha256")
             )
-            batch_compile["implementationEvidenceByTask"] = dict(
-                compile_result.get("implementationEvidenceByTask", {})
+            batch_compile["implementationEvidenceByTask"] = (
+                {} if compile_status == "skipped" else dict(compile_result.get("implementationEvidenceByTask", {}))
             )
-            batch_compile["implementationRevisionByTask"] = dict(
-                compile_result.get("implementationRevisionByTask", {})
+            batch_compile["implementationRevisionByTask"] = (
+                {} if compile_status == "skipped" else dict(compile_result.get("implementationRevisionByTask", {}))
             )
 
         return _write(workspace, feature, data)
@@ -5118,11 +5129,14 @@ def mark_batch_tasks_done_after_compile(
             return fail("batch_not_found", batch_id, path=_path(workspace, feature))
 
         batch_compile = batch_plan.get("batchCompile")
-        if not isinstance(batch_compile, dict) or batch_compile.get("status") not in {"passed", "failed"}:
+        if not isinstance(batch_compile, dict) or batch_compile.get("status") not in {"passed", "failed", "skipped"}:
             return fail("batch_compile_not_recorded", batch_id, path=_path(workspace, feature))
         command_id = batch_compile.get("commandId")
         compile_command = batch_plan.get("compileCommand")
-        if not (
+        if batch_compile.get("status") == "skipped":
+            if not batch_compile_is_not_configured_for_frontend(batch_plan) or command_id is not None:
+                return fail("batch_compile_skip_invalid", batch_id, path=_path(workspace, feature))
+        elif not (
             isinstance(compile_command, dict)
             and compile_command.get("kind") == "compile"
             and compile_command.get("required") is True
@@ -5148,7 +5162,7 @@ def mark_batch_tasks_done_after_compile(
             if normalize_status(task.get("status")) == "implemented":
                 task["status"] = "done"
                 # 不使用虚拟 evidence，保留真实 implementation evidence；
-                # compile 的 passed/failed 结果都已单独保存在 batchCompile。
+                # compile 的 passed/failed/skipped 结果都已单独保存在 batchCompile。
                 updated_count += 1
 
         entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
@@ -5179,7 +5193,7 @@ def mark_parallel_batch_tasks_merged(
     """Complete a parallel Batch only after its sealed delivery is merged.
 
     Batch compile remains recorded diagnostic evidence.  A completed compile,
-    whether passed or failed, does not replace the merge barrier that moves
+    whether passed, failed, or skipped, does not replace the merge barrier that moves
     parallel Tasks from ``implemented`` to ``done``.
     """
     if not merge_commit_sha:
@@ -5195,7 +5209,7 @@ def mark_parallel_batch_tasks_merged(
         if not isinstance(batch_plan, dict):
             return fail("batch_not_found", batch_id, path=_path(workspace, feature))
         batch_compile = batch_plan.get("batchCompile")
-        if not isinstance(batch_compile, dict) or batch_compile.get("status") not in {"passed", "failed"}:
+        if not isinstance(batch_compile, dict) or batch_compile.get("status") not in {"passed", "failed", "skipped"}:
             return fail("batch_compile_not_recorded", batch_id, path=_path(workspace, feature))
         existing_commit = batch_plan.get("mergeCommitSha")
         if isinstance(existing_commit, str) and existing_commit and existing_commit != merge_commit_sha:

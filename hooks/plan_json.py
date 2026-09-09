@@ -83,7 +83,7 @@ IMPLEMENTATION_SCOPES = {"full_stack", "backend_only", "frontend_only"}
 TASK_SET_STATUSES = {"collecting", "finalized"}
 FEATURE_STATUSES = {"todo", "in_progress", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
-BATCH_COMPILE_STATUSES = {"pending", "repairing", "failed", "passed"}
+BATCH_COMPILE_STATUSES = {"pending", "repairing", "failed", "passed", "skipped"}
 BATCH_COMPILE_MAX_REPAIR_ATTEMPTS = 3
 PARALLEL_EXECUTION_STAGES = {"parallel", "proto", "global", "integration"}
 VALIDATION_DEFERRAL_REASONS = {
@@ -161,6 +161,17 @@ def normalize_status(status: Any) -> str:
 
 def task_execution_lane(task: dict[str, Any]) -> str:
     return "frontend" if task.get("uiRequired") is True else "backend"
+
+
+def batch_compile_is_not_configured_for_frontend(batch: dict[str, Any]) -> bool:
+    """Return whether a frontend Batch explicitly has no batch-compile command.
+
+    A missing command is only a supported configuration for the frontend lane.
+    Backend Batches retain their required compile contract, so a malformed empty
+    command object cannot accidentally bypass it.
+    """
+
+    return batch.get("executionLane") == "frontend" and batch.get("compileCommand") is None
 
 
 def implementation_scope_task_errors(scope: Any, tasks: list[dict[str, Any]]) -> list[str]:
@@ -617,7 +628,7 @@ def _validate_tasks_container(
             errors.append(f"{task_id}.latestPassEvidenceId_invalid")
         if require_all_done:
             # 新策略：defer_to_test_stages 下任务 done 不强制要求 completion evidence
-            # 而是依赖 batchCompile.status == passed 作为完成证据
+            # 而是依赖已记录的 batchCompile 结果（后端 passed、前端可为 skipped）
             validation_deferred = isinstance(disposition, dict)
             defer_to_test = defer_to_test_stages
 
@@ -1285,6 +1296,7 @@ def _validate_compile_profiles(
             continue
         if (
             require_backend_compile
+            and lane == "backend"
             and not any(
                 isinstance(command, dict)
                 and command.get("required") is True
@@ -1302,6 +1314,8 @@ def _validate_compile_profiles(
             )
     if require_initial_status:
         for lane in sorted(used_lanes):
+            if lane != "backend":
+                continue
             profile = profiles.get(lane)
             commands = profile.get("commands") if isinstance(profile, dict) else None
             configured = (
@@ -1350,8 +1364,9 @@ def _validate_batch_execution_commands(
     require_backend_compile: bool,
 ) -> None:
     compile_command = data.get("compileCommand")
+    compile_required = require_backend_compile and data.get("executionLane") == "backend"
     if compile_command is None:
-        if require_backend_compile:
+        if compile_required:
             errors.append(f"batch_compile_contract_requires_rebuild:{batch_id}.compileCommand")
     else:
         _validate_compile_command(
@@ -1360,7 +1375,7 @@ def _validate_batch_execution_commands(
             context=f"{batch_id}.compileCommand",
             command_id_required=True,
         )
-    if require_backend_compile and not (
+    if compile_required and not (
         isinstance(compile_command, dict)
         and compile_command.get("required") is True
         and compile_command.get("kind") == "compile"
@@ -1395,11 +1410,13 @@ def _validate_batch_compile(
             errors.append(f"{batch_id}.batchCompile_unexpected")
         return
     compile_command = data.get("compileCommand")
-    if not (
+    compile_not_configured_for_frontend = batch_compile_is_not_configured_for_frontend(data)
+    has_required_compile_command = (
         isinstance(compile_command, dict)
         and compile_command.get("kind") == "compile"
         and compile_command.get("required") is True
-    ) and (
+    )
+    if not has_required_compile_command and not compile_not_configured_for_frontend and (
         require_all_done or data.get("taskSetStatus") == "finalized"
     ):
         errors.append(f"{batch_id}.batchCompile.required_compile_command_missing")
@@ -1414,6 +1431,8 @@ def _validate_batch_compile(
     status = compile_state.get("status")
     if status not in BATCH_COMPILE_STATUSES:
         errors.append(f"{batch_id}.batchCompile.status_invalid")
+    elif status == "skipped" and not compile_not_configured_for_frontend:
+        errors.append(f"{batch_id}.batchCompile.skipped_not_allowed")
     attempts = compile_state.get("repairAttempts", 0)
     maximum = compile_state.get("maxRepairAttempts", BATCH_COMPILE_MAX_REPAIR_ATTEMPTS)
     if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
@@ -1434,6 +1453,8 @@ def _validate_batch_compile(
         not isinstance(compile_command, dict) or compile_command.get("id") != command_id
     ):
         errors.append(f"{batch_id}.batchCompile.commandId_not_required_compile")
+    if status == "skipped" and command_id is not None:
+        errors.append(f"{batch_id}.batchCompile.commandId_forbidden_when_skipped")
 
     for field in ("output", "failureCategory"):
         value = compile_state.get(field)
@@ -1500,7 +1521,18 @@ def _validate_batch_compile(
             errors.append(f"{batch_id}.batchCompile.implementationEvidenceByTask_incomplete")
         if not isinstance(revision_by_task, dict) or set(revision_by_task) != known_task_ids:
             errors.append(f"{batch_id}.batchCompile.implementationRevisionByTask_incomplete")
-    if require_all_done and status != "passed":
+    if status == "skipped":
+        if compile_state.get("output") is not None or compile_state.get("failureCategory") is not None:
+            errors.append(f"{batch_id}.batchCompile.output_forbidden_when_skipped")
+        if diagnostic_paths or owner_ids or requested_workspaces:
+            errors.append(f"{batch_id}.batchCompile.diagnostics_forbidden_when_skipped")
+        if snapshot_sha256 is not None:
+            errors.append(f"{batch_id}.batchCompile.workspaceSnapshot_forbidden_when_skipped")
+        if evidence_by_task or revision_by_task:
+            errors.append(f"{batch_id}.batchCompile.implementation_bindings_forbidden_when_skipped")
+        if attempts != 0:
+            errors.append(f"{batch_id}.batchCompile.repairAttempts_forbidden_when_skipped")
+    if require_all_done and status not in {"passed", "skipped"}:
         errors.append(f"{batch_id}.batchCompile.status_not_passed")
 
 
