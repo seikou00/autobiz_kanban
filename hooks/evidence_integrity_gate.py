@@ -304,12 +304,9 @@ def _check_batch_completion(
         if not isinstance(compile_result, dict):
             errors.append(f"{batch_id}.batch_compile_contract_missing")
             continue
-        if compile_result.get("status") != "passed":
+        if compile_result.get("status") not in {"passed", "failed"}:
             status = compile_result.get("status")
-            if status == "failed":
-                errors.append(f"{batch_id}.batch_compile_failed")
-            else:
-                errors.append(f"{batch_id}.batch_compile_not_passed:{status}")
+            errors.append(f"{batch_id}.batch_compile_not_recorded:{status}")
             continue
         command_id = compile_result.get("commandId")
         if not isinstance(command_id, str) or not command_id.strip():

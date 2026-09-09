@@ -1210,6 +1210,8 @@ class JsonWriterTests(unittest.TestCase):
             )
             self.assertNotEqual(stale.returncode, 0)
             self.assertIn("task_group_changed_after_draft_created", stale.stdout)
+            self.assertIn("affectedGroupFields=T002:title", stale.stdout)
+            self.assertIn("then_refill_resetTaskIds_only", stale.stdout)
 
             rebuilt = _run(
                 "plan_writer.py", "rebuild-task-draft", "--workspace", str(workspace),
@@ -1219,6 +1221,35 @@ class JsonWriterTests(unittest.TestCase):
             payload = json.loads(rebuilt.stdout)
             self.assertEqual(payload["preservedTaskIds"], ["T001"])
             self.assertEqual(payload["resetTaskIds"], ["T002"])
+            self.assertEqual(payload["rebuildGuidance"]["action"], "refill_reset_task_details_only")
+            self.assertEqual(payload["rebuildGuidance"]["preservedTaskCount"], 1)
+            self.assertEqual(payload["rebuildGuidance"]["resetTaskCount"], 1)
+
+    def test_plan_writer_treats_equivalent_touch_prefixes_as_same_draft_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir = _workspace(root)
+            _write_specs(feature_dir)
+            code_repo, _ = _named_code_workspace(root, "repo")
+            task = _plan_task_body()
+            task["workspaceRef"] = "repo"
+            group_file = _write_task_groups(root / "task-groups.json", [task])
+            group_data = json.loads(group_file.read_text(encoding="utf-8"))
+            group_data["groups"][0]["touches"] = ["src/cap.py"]
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+            prepared = _run(
+                "plan_writer.py", "prepare-task-draft", "--workspace", str(workspace),
+                "--feature", "alpha", "--group-file", str(group_file),
+                "--code-workspace", str(code_repo),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+
+            group_data["groups"][0]["touches"] = ["repo:src/cap.py"]
+            group_file.write_text(json.dumps(group_data), encoding="utf-8")
+            shown = _run(
+                "plan_writer.py", "show-task-draft", "--workspace", str(workspace), "--feature", "alpha",
+            )
+            self.assertEqual(shown.returncode, 0, shown.stdout + shown.stderr)
 
     def test_plan_writer_rebuild_repairs_legacy_draft_without_code_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

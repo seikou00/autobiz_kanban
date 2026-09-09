@@ -906,8 +906,8 @@ async function compileAndSealDelivery(batchResult) {
     `Batch ${batchId} 已通过业务 Review，现在才执行本 Batch 的首次编译和正式封存。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。` +
     `依次执行：1) 用 batch_lease_manager.py acquire 获取 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"）；随后 mark-batch 为 running；` +
     `2) 用同一 token 执行 task_runner.py batch-compile（--workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 token> --workspace-ref "${batchWorkspaceRef}"）；` +
-    `3) 编译通过后执行 lease check，再用 worktree_manager.py seal 封存该已编译版本，最后以 final-status sealed 释放同一 lease。不得编辑代码、重新 Review 或运行 UTest；失败时保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。` +
-    `返回 {batchId,status:"success",compileStatus:"passed",worktreePath,branchName,commitSha}。`,
+    `3) 无论编译结果为 passed 还是 failed，都必须保留 task_runner 输出并记录其 compileStatus。编译失败是已记录的非阻断诊断：不得启动 compile repair、不得返回 failed/timeout；在确认失败 JSON 已写入后，继续执行 lease check、worktree_manager.py seal 封存同一版本，并以 final-status sealed 释放同一 lease。只有编译命令未能产生结构化结果、无法写入状态、lease 无效或 seal/release 失败才中断。不得编辑代码、重新 Review 或运行 UTest。` +
+    `返回 {batchId,status:"success",compileStatus:"passed"|"failed",worktreePath,branchName,commitSha}。`,
     { label: `post-review-compile-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
   ), `post-review compile ${batchId}`);
 }

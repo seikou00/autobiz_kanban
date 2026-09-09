@@ -104,6 +104,8 @@ finalize 会通过事务一次性写入根 `plan.json`、所有 Batch 计划与 
 - `repairTarget=task_detail`：只修对应详情，使用 `repair-draft-task` / `repair-draft-tasks` 后重跑预检。
 - `repairTarget=draft_integrity`：按错误恢复；不得为了规避错误删除 `.tmp/plan_writer`、删除 Draft 或全量重填 task。
 
+Draft 已创建后，`specRefs`、`touches`、`deps`、`workspaceRef`、`splitRationale`、`validationBoundary` 等均为 group-owned 字段。只有返回 `repairTarget=task_group` 时才编辑候选分组并 rebuild；`scope.paths`、implementationPoints、acceptanceCriteria、task validationCommands 等 `task_detail` 问题不得改动候选分组。rebuild 的返回值是唯一的重填清单：**只**重填 `resetTaskIds`，不得重填 `preservedTaskIds`。若发现 specs 或 design 本身需要改动，停止 Plan，回到对应上游阶段；不得在 Plan/Draft 阶段直接修改它们。
+
 已 finalized 且尚未执行的计划，先运行 `diagnose-plan-repair`；仅在允许修复时使用 `reopen-finalized-draft --reason <reason>`，局部修复后 `finalize-task-draft --force`。返回 `plan_revision_required` 时转入计划修订；只有 `full_rebuild_required` 才能全量重建。
 
 ## 阶段门与完成

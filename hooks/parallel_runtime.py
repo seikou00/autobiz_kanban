@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import socket
 import time
 import uuid
@@ -77,6 +76,11 @@ def runs_root(workspace: Path, feature: str) -> Path:
     return feature_dir(workspace, feature) / ".parallel-runs"
 
 
+def global_worktrees_root(workspace: Path) -> Path:
+    """Return the cross-feature home for plugin-owned delivery worktrees."""
+    return workspace / ".autobizdevops" / "worktrees"
+
+
 def run_dir(workspace: Path, feature: str, run_id: str) -> Path:
     _safe_id(run_id)
     return runs_root(workspace, feature) / run_id
@@ -87,17 +91,24 @@ def manifest_path(workspace: Path, feature: str, run_id: str) -> Path:
 
 
 def generate_run_id(workspace: Path | None = None, feature: str | None = None) -> str:
-    """Generate the operator-facing `cw-YYYYMMDD-NNN` run identifier."""
-    date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    """Generate a globally unique `cw-YYYYMMDD-HHMMSS-mmm` run identifier."""
+    now = datetime.now(timezone.utc)
+    stem = now.strftime("cw-%Y%m%d-%H%M%S-") + f"{now.microsecond // 1000:03d}"
     if workspace is None or feature is None:
-        return f"cw-{date}-001"
-    pattern = re.compile(rf"^cw-{date}-(\d{{3}})$")
-    sequence = 0
-    for path in runs_root(workspace, feature).glob("*"):
-        match = pattern.fullmatch(path.name)
-        if match:
-            sequence = max(sequence, int(match.group(1)))
-    return f"cw-{date}-{sequence + 1:03d}"
+        return stem
+    # The global creation lock in ``create_manifest`` makes a collision
+    # unlikely; retain a deterministic suffix as a recovery guard for clocks
+    # with millisecond precision or callers that use this helper directly.
+    existing = {
+        path.name
+        for path in (workspace / ".autobizdevops" / "features").glob("*/.parallel-runs/*")
+    }
+    candidate = stem
+    sequence = 1
+    while candidate in existing or (global_worktrees_root(workspace) / candidate).exists():
+        candidate = f"{stem}-{sequence:03d}"
+        sequence += 1
+    return candidate
 
 
 def plan_digest(bundle: PlanBundle) -> str:
@@ -322,13 +333,17 @@ def create_manifest(
         raise ValueError("parallel_repository_binding_missing:" + ",".join(missing))
     root = runs_root(workspace, feature)
     root.mkdir(parents=True, exist_ok=True)
-    with FileLock(root / ".run-id.lock"):
-        run_id = _safe_id(run_id or generate_run_id(workspace, feature))
-        target = run_dir(workspace, feature, run_id)
-        if target.exists():
-            raise ValueError(f"parallel_run_exists:{run_id}")
-        target.joinpath("batches").mkdir(parents=True, exist_ok=False)
-        target.joinpath("leases").mkdir()
+    global_lock = workspace / ".autobizdevops" / ".parallel-run-id.lock"
+    with FileLock(global_lock):
+        with FileLock(root / ".run-id.lock"):
+            run_id = _safe_id(run_id or generate_run_id(workspace, feature))
+            target = run_dir(workspace, feature, run_id)
+            if target.exists():
+                raise ValueError(f"parallel_run_exists:{run_id}")
+            if (global_worktrees_root(workspace) / run_id).exists():
+                raise ValueError(f"parallel_global_run_exists:{run_id}")
+            target.joinpath("batches").mkdir(parents=True, exist_ok=False)
+            target.joinpath("leases").mkdir()
     entries: dict[str, Any] = {}
     for entry in bundle.root.get("batches", []):
         batch_id = str(entry["id"])
@@ -649,7 +664,7 @@ def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, own
 
     # A worker may only release a delivery after ``seal`` has persisted its
     # immutable commit.  The initial Review draft is intentionally uncompiled;
-    # it becomes a normal sealed delivery only after the post-Review compile.
+    # a failed post-Review compile is recorded but is temporarily non-blocking.
     path = lease_path(workspace, feature, run_id, batch_id)
     with run_lock(workspace, feature, run_id):
         with FileLock(path.with_suffix(".lock")):
@@ -667,7 +682,7 @@ def release_lease(workspace: Path, feature: str, run_id: str, batch_id: str, own
                     and isinstance(states.get("review"), dict)
                     and states["review"].get("status") == "pending"
                 )
-                if batch.get("status") != "sealed" or (batch.get("compileStatus") != "passed" and not review_draft):
+                if batch.get("status") != "sealed" or (batch.get("compileStatus") not in {"passed", "failed"} and not review_draft):
                     raise ValueError(f"parallel_batch_not_ready_to_release:{batch_id}")
                 commit_sha = batch.get("commitSha")
                 if not isinstance(commit_sha, str) or not commit_sha.strip():

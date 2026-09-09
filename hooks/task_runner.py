@@ -3446,10 +3446,23 @@ def _integrate_batch_compile_result(
                 feature,
                 parallel_run_id,
                 batch_id,
-                "compile_failed",
+                # Batch compile is diagnostic-only for the parallel delivery
+                # flow.  Preserve its failed status and evidence, but keep
+                # the sealed worktree available for UTest and Merge Train.
+                "sealed",
                 compileStatus="failed",
                 error=str(compile_result.get("failureCategory", "compile_failed")),
             )
+            return {
+                "compileStatus": "failed",
+                "requiredAction": "recorded_continue",
+                "batchId": batch_id,
+                "parallelRunId": parallel_run_id,
+                "commandId": compile_result.get("commandId"),
+                "output": compile_result.get("output", ""),
+                "failureCategory": compile_result.get("failureCategory", ""),
+                "diagnosticPaths": compile_result.get("diagnosticPaths", []),
+            }
         refreshed = load_plan_bundle(_feature_dir(workspace, feature))
         refreshed_batch = refreshed.batches.get(batch_id)
         batch_compile = (
@@ -3665,9 +3678,16 @@ def _cmd_batch_compile(args: argparse.Namespace) -> int:
             lease_token=args.lease_token,
             workspace_ref=args.workspace_ref,
         )
-        # 根据编译状态返回正确的退出码
+        # A parallel delivery records a failed batch compile as diagnostic
+        # evidence and continues to UTest/Merge Train.  Its command itself
+        # succeeded at recording that result, so do not make the host abort
+        # the surrounding Workflow merely because the compiler exited nonzero.
         compile_status = result.get("compileStatus")
-        success = compile_status == "passed"
+        success = compile_status == "passed" or (
+            args.parallel_run_id is not None
+            and compile_status == "failed"
+            and result.get("requiredAction") == "recorded_continue"
+        )
         return _emit(
             success,
             **result,

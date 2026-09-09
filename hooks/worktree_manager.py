@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.parallel_runtime import append_event, check_lease, load_manifest, run_dir, run_lock, save_manifest
+from hooks.parallel_runtime import append_event, check_lease, global_worktrees_root, load_manifest, run_lock, save_manifest
 from hooks.commit_message import CommitMessageError, build_commit_message, normalize_task_card_id
 from hooks.plan_write_ownership import is_test_asset_path
 from hooks.repository_snapshot import (
@@ -58,12 +58,40 @@ def _native_worktree_path(
     repository_ref: str,
     batch_id: str,
 ) -> Path:
-    return (
-        run_dir(artifact_workspace, feature, run_id)
-        / "worktrees"
-        / _branch_component(repository_ref)
-        / _branch_component(batch_id)
-    ).resolve()
+    # Batch IDs are globally unique inside a Run.  Keeping paths outside the
+    # Feature's run journal makes the physical worktree identity obvious and
+    # keeps a new ``cw-*`` run independent from unfinished cleanup of another.
+    _ = feature, repository_ref
+    return (global_worktrees_root(artifact_workspace) / _branch_component(run_id) / _branch_component(batch_id)).resolve()
+
+
+def _can_reclaim_orphaned_branch(
+    manifest: dict[str, Any],
+    batch_id: str,
+    git_root: Path,
+    branch_name: str,
+    expected_head: str,
+) -> bool:
+    """Return whether an interrupted ``worktree add -b`` left a safe-to-delete branch.
+
+    Git can create the branch before checkout creation completes.  Reclaiming
+    is safe only when no registered worktree checks out the branch, no other
+    manifest Batch owns it, and it still points at this Run's frozen base.
+    """
+    branch_head = _git(git_root, "rev-parse", "--verify", branch_name)
+    if branch_head.returncode != 0 or branch_head.stdout.strip() != expected_head:
+        return False
+    for other_batch_id, other_batch in (manifest.get("batches") or {}).items():
+        if (
+            str(other_batch_id) != batch_id
+            and isinstance(other_batch, dict)
+            and str(other_batch.get("branchName") or "") == branch_name
+        ):
+            return False
+    listed = _git(git_root, "worktree", "list", "--porcelain")
+    if listed.returncode != 0:
+        return False
+    return f"branch refs/heads/{branch_name}" not in listed.stdout.splitlines()
 
 
 def provision_parallel_worktree(
@@ -74,9 +102,11 @@ def provision_parallel_worktree(
 ) -> dict[str, Any]:
     """Create or reuse the native Git worktree assigned to one Batch.
 
-    Provisioning is idempotent for a live Batch, but stale paths and branches
-    are rejected rather than overwritten.  This prevents an interrupted run
-    from silently attaching a Batch to another checkout.
+    Provisioning is idempotent for a live Batch.  If an interruption occurs
+    after ``git worktree add`` but before the manifest is saved, the expected
+    worktree is safely rebound only after Git metadata and branch checks prove
+    it belongs to this Batch.  Other stale paths and branches are rejected
+    rather than overwritten.
     """
     with run_lock(artifact_workspace, feature, run_id):
         try:
@@ -122,37 +152,69 @@ def provision_parallel_worktree(
         )
         target = _native_worktree_path(artifact_workspace, feature, run_id, repository_ref, batch_id)
         if target.exists():
-            return {"success": False, "error": f"parallel_worktree_path_occupied:{target}"}
-        if _git(git_root, "show-ref", "--verify", f"refs/heads/{branch_name}").returncode == 0:
-            return {"success": False, "error": f"parallel_worktree_branch_occupied:{branch_name}"}
-        target.parent.mkdir(parents=True, exist_ok=True)
-        created = _git(git_root, "worktree", "add", "-b", branch_name, str(target), head)
-        if created.returncode != 0:
-            return {"success": False, "error": f"parallel_worktree_create_failed:{created.stderr.strip()}"}
-        batch.update({
-            "worktreePath": str(target),
-            "branchName": branch_name,
-            "worktreeOwner": "plugin",
-        })
-        save_manifest(artifact_workspace, feature, run_id, manifest)
+            candidate = target
+            # ``git worktree add`` and ``save_manifest`` are separate durable
+            # operations.  A timeout or process termination between them
+            # leaves a valid linked worktree with no manifest binding.  Never
+            # overwrite an occupied directory: adopt it only when Git proves
+            # it is precisely the checkout that this Batch would create.
+            try:
+                from hooks.parallel_batch_scheduler import assert_batch_worktree_isolated
+
+                assert_batch_worktree_isolated(manifest, batch_id, candidate)
+                if resolve_git_root(candidate) != candidate:
+                    raise ValueError("not_worktree_root")
+                if current_git_branch(candidate) != branch_name:
+                    raise ValueError("unexpected_branch")
+            except (ValueError, OSError):
+                return {"success": False, "error": f"parallel_worktree_path_occupied:{candidate}"}
+            batch.update({
+                "worktreePath": str(candidate),
+                "branchName": branch_name,
+                "worktreeOwner": "plugin",
+            })
+            save_manifest(artifact_workspace, feature, run_id, manifest)
+            reconciled = True
+        else:
+            reconciled = False
+        reclaimed_orphaned_branch = False
+        if not reconciled and _git(git_root, "show-ref", "--verify", f"refs/heads/{branch_name}").returncode == 0:
+            if not _can_reclaim_orphaned_branch(manifest, batch_id, git_root, branch_name, head):
+                return {"success": False, "error": f"parallel_worktree_branch_occupied:{branch_name}"}
+            removed = _git(git_root, "branch", "-D", branch_name)
+            if removed.returncode != 0:
+                return {"success": False, "error": f"parallel_worktree_orphaned_branch_reclaim_failed:{removed.stderr.strip()}"}
+            reclaimed_orphaned_branch = True
+        if not reconciled:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            created = _git(git_root, "worktree", "add", "-b", branch_name, str(target), head)
+            if created.returncode != 0:
+                return {"success": False, "error": f"parallel_worktree_create_failed:{created.stderr.strip()}"}
+            batch.update({
+                "worktreePath": str(target),
+                "branchName": branch_name,
+                "worktreeOwner": "plugin",
+            })
+            save_manifest(artifact_workspace, feature, run_id, manifest)
     append_event(
         artifact_workspace,
         feature,
         run_id,
-        "worktree_provisioned",
+        "worktree_reconciled" if reconciled else "worktree_provisioned",
         batchId=batch_id,
         repositoryRef=repository_ref,
-        path=str(target),
+        path=str(candidate) if reconciled else str(target),
         branch=branch_name,
         owner="plugin",
+        reclaimedOrphanedBranch=reclaimed_orphaned_branch,
     )
     return {
         "success": True,
         "batchId": batch_id,
         "repositoryRef": repository_ref,
-        "worktreePath": str(target),
+        "worktreePath": str(candidate) if reconciled else str(target),
         "branchName": branch_name,
-        "reused": False,
+        "reused": reconciled,
     }
 
 
@@ -223,7 +285,7 @@ def seal_parallel_batch(
         )
         ready_for_delivery = (
             batch.get("status") in {"sealed", "leased"}
-            and batch.get("compileStatus") == "passed"
+            and batch.get("compileStatus") in {"passed", "failed"}
         )
         if not (ready_for_review if review_draft else ready_for_delivery):
             return {"success": False, "error": f"parallel_batch_not_ready_to_seal:{batch_id}"}

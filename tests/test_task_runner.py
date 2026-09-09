@@ -11,6 +11,7 @@ import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -705,6 +706,47 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(compiled_batch["batchCompile"]["status"], "passed")
             self.assertEqual(compiled_batch["tasks"][0]["status"], "implemented")
 
+    def test_parallel_compile_failure_is_recorded_without_blocking_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            evidence_id = json.loads(finished.stdout)["implementationEvidenceId"]
+            compile_result = {
+                "compileStatus": "failed",
+                "commandId": "BATCH-B001-COMPILE",
+                "output": "compile failed",
+                "failureCategory": "implementation",
+                "diagnosticPaths": ["src/example.py"],
+                "repairOwnerTaskIds": ["T001"],
+                "requestedCodeWorkspaces": [str(code.resolve())],
+                "workspaceSnapshotSha256": "c" * 64,
+                "implementationEvidenceByTask": {"T001": evidence_id},
+                "implementationRevisionByTask": {"T001": 1},
+            }
+            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
+                result = task_runner_module._integrate_batch_compile_result(
+                    workspace,
+                    "alpha",
+                    "B001",
+                    compile_result,
+                    parallel_run_id="cw-test-001",
+                )
+
+            self.assertEqual(result["compileStatus"], "failed")
+            self.assertEqual(result["requiredAction"], "recorded_continue")
+            mark_parallel.assert_called_once_with(
+                workspace, "alpha", "cw-test-001", "B001", "sealed",
+                compileStatus="failed", error="implementation",
+            )
+            self.assertEqual(_read_batch(feature_dir)["batchCompile"]["status"], "failed")
+
             merged = plan_writer_module.mark_parallel_batch_tasks_merged(
                 workspace,
                 "alpha",
@@ -716,6 +758,25 @@ class TaskRunnerTest(unittest.TestCase):
             completed_batch = _read_batch(feature_dir)
             self.assertEqual(completed_batch["tasks"][0]["status"], "done")
             self.assertEqual(completed_batch["mergeCommitSha"], "a" * 40)
+
+    def test_parallel_compile_failure_returns_success_after_it_is_recorded(self) -> None:
+        args = SimpleNamespace(
+            workspace="/unused",
+            feature="alpha",
+            batch_id="B001",
+            code_workspace=["/unused-repository"],
+            parallel_run_id="cw-test-001",
+            lease_token="lease-token",
+            workspace_ref="default",
+        )
+        recorded = {"compileStatus": "failed", "requiredAction": "recorded_continue"}
+        with patch("hooks.task_runner._resolve", return_value=(Path("/unused"), "alpha", [Path("/unused-repository")])), patch(
+            "hooks.task_runner.run_batch_compile", return_value=recorded
+        ), patch("hooks.task_runner._emit", return_value=0) as emit:
+            exit_code = task_runner_module._cmd_batch_compile(args)
+
+        self.assertEqual(exit_code, 0)
+        emit.assert_called_once_with(True, **recorded)
 
     def test_parallel_batch_compile_requires_a_passed_review(self) -> None:
         pending_manifest = {

@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import copy
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from hooks.parallel_final_verify import verify_final
 from hooks.parallel_runtime import (
     acquire_lease,
     check_lease,
+    generate_run_id,
     lease_path,
     load_manifest,
     plan_digest,
@@ -119,6 +122,20 @@ def _seal_native_worktree(
 
 
 class ParallelBatchRuntimeTest(unittest.TestCase):
+    def test_generated_run_id_contains_time_and_disambiguates_same_millisecond(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "artifacts"
+            fixed_now = datetime(2026, 9, 9, 1, 2, 3, 456_000, tzinfo=timezone.utc)
+            with patch("hooks.parallel_runtime.datetime") as clock:
+                clock.now.return_value = fixed_now
+                first = generate_run_id(workspace, "alpha")
+                (workspace / ".autobizdevops" / "features" / "beta" / ".parallel-runs" / first).mkdir(parents=True)
+                second = generate_run_id(workspace, "alpha")
+
+            self.assertEqual(first, "cw-20260909-010203-456")
+            self.assertEqual(second, "cw-20260909-010203-456-001")
+            self.assertRegex(first, re.compile(r"^cw-\d{8}-\d{6}-\d{3}$"))
+
     def test_current_branch_uses_legacy_git_compatible_plumbing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))
@@ -924,6 +941,80 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertTrue(removed["removed"])
             self.assertFalse(worktree.exists())
             self.assertIsNotNone(load_manifest(workspace, "alpha", run_id)["batches"]["B001"].get("worktreeRemovedAt"))
+
+    def test_plugin_worktree_manager_reconciles_worktree_created_before_manifest_save(self) -> None:
+        """A retry adopts only the exact native worktree left by an interrupted provision."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+                workflow_workspace=root / "artifact-host",
+            )
+            run_id = scheduled["runId"]
+            first = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(first["success"], first)
+            worktree = Path(first["worktreePath"])
+            self.assertEqual(
+                worktree,
+                (workspace / ".autobizdevops" / "worktrees" / run_id / "B001").resolve(),
+            )
+            try:
+                # Simulate termination after `git worktree add` and before
+                # `save_manifest`: Git has the checkout but the run record
+                # has no binding to reuse.
+                manifest = load_manifest(workspace, "alpha", run_id)
+                batch = manifest["batches"]["B001"]
+                batch["worktreePath"] = None
+                batch["branchName"] = None
+                batch.pop("worktreeOwner", None)
+                save_manifest(workspace, "alpha", run_id, manifest)
+
+                reconciled = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(reconciled["success"], reconciled)
+                self.assertTrue(reconciled["reused"])
+                self.assertEqual(reconciled["worktreePath"], str(worktree))
+                restored = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+                self.assertEqual(restored["worktreePath"], str(worktree))
+                self.assertEqual(restored["branchName"], reconciled["branchName"])
+            finally:
+                removed = remove_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(removed["success"], removed)
+
+    def test_plugin_worktree_manager_reclaims_unbound_branch_left_by_interrupted_provision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace, feature_dir, repo = _workspace(root)
+            _configure_defer_to_test_stages(feature_dir)
+            scheduled = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+                workflow_workspace=root / "artifact-host",
+            )
+            run_id = scheduled["runId"]
+            manifest = load_manifest(workspace, "alpha", run_id)
+            head = manifest["repositories"]["default"]["headSha"]
+            branch = f"autodev/alpha/{run_id}/B001"
+            subprocess.run(["git", "branch", branch, head], cwd=repo, check=True)
+
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            self.assertTrue(provisioned["success"], provisioned)
+            self.assertFalse(provisioned["reused"])
+            self.assertEqual(provisioned["branchName"], branch)
+            try:
+                self.assertEqual(_git(repo, "rev-parse", branch), head)
+                self.assertTrue(Path(provisioned["worktreePath"]).is_dir())
+            finally:
+                removed = remove_parallel_worktree(workspace, "alpha", run_id, "B001")
+                self.assertTrue(removed["success"], removed)
 
     @unittest.skip("native-rebase merger removed; candidate Merge Train coverage is in test_parallel_staged_pipeline")
     def test_native_rebase_mode_auto_merges_parallel_deliveries(self) -> None:

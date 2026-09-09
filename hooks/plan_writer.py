@@ -75,7 +75,7 @@ from hooks.plan_granularity import (  # noqa: E402
     validate_plan_task_granularity_item,
     validate_plan_task_grouping_item,
 )
-from hooks.plan_write_ownership import write_ownership_violations  # noqa: E402
+from hooks.plan_write_ownership import normalize_owned_path, write_ownership_violations  # noqa: E402
 from hooks.repository_snapshot import (  # noqa: E402
     RepositorySnapshotError,
     resolve_git_root,
@@ -912,9 +912,29 @@ def _task_group_preflight_errors(feature_dir: Path, data: dict[str, Any]) -> lis
 
 
 def _task_group_digest(data: dict[str, Any]) -> str:
+    # A candidate group may spell an owned path as ``Repo:path``, ``Repo/path``
+    # or a repository-relative path.  They identify the same write set, so a
+    # cosmetic prefix change must not invalidate an otherwise unchanged Draft.
+    groups: list[Any] = []
+    raw_groups = data.get("groups")
+    if isinstance(raw_groups, list):
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, dict):
+                groups.append(raw_group)
+                continue
+            group = copy.deepcopy(raw_group)
+            touches = group.get("touches")
+            if isinstance(touches, list):
+                workspace_ref = group.get("workspaceRef")
+                normalized = [
+                    path for value in touches
+                    if (path := normalize_owned_path(value, workspace_ref)) is not None
+                ]
+                group["touches"] = sorted(set(normalized))
+            groups.append(group)
     payload = {
         "featureId": data.get("featureId"),
-        "groups": data.get("groups"),
+        "groups": groups if isinstance(raw_groups, list) else raw_groups,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -958,9 +978,9 @@ def _task_group_projection(item: dict[str, Any]) -> dict[str, Any]:
     ):
         raw = item.get("touches") if isinstance(item.get("touches"), list) else item["scope"].get("paths", [])
         result["touches"] = sorted({
-            str(path).replace("\\", "/").strip("/")
+            normalized
             for path in raw
-            if isinstance(path, str) and path.strip()
+            if (normalized := normalize_owned_path(path, item.get("workspaceRef"))) is not None
         })
     return result
 
@@ -1035,14 +1055,11 @@ def _batch_status(
     batch_compile: dict[str, Any] | None = None,
 ) -> str:
     statuses = [normalize_status(task.get("status")) for task in batch_tasks]
-    if (
-        any(status == "failed" for status in statuses)
-        or (isinstance(batch_compile, dict) and batch_compile.get("status") == "failed")
-    ):
+    if any(status == "failed" for status in statuses):
         return "failed"
     if statuses and all(status == "done" for status in statuses):
-        compile_passed = isinstance(batch_compile, dict) and batch_compile.get("status") == "passed"
-        return "done" if compile_passed else "in_progress"
+        compile_recorded = isinstance(batch_compile, dict) and batch_compile.get("status") in {"passed", "failed"}
+        return "done" if compile_recorded else "in_progress"
     if any(status in {"in_progress", "implemented", "validating", "done"} for status in statuses):
         return "in_progress"
     return "todo"
@@ -1462,7 +1479,37 @@ def _load_draft_bundle(workspace: Path, feature: str) -> tuple[dict[str, Any], d
     return lock, data
 
 
-def _draft_group_data(lock: dict[str, Any], feature: str) -> dict[str, Any]:
+def _draft_group_change_summary(
+    group_data: dict[str, Any],
+    task_items: list[dict[str, Any]],
+) -> str:
+    """Describe the Draft tasks that cannot be safely reused after a group edit."""
+
+    tasks_by_id = {
+        str(task.get("id")): task
+        for task in task_items
+        if isinstance(task, dict) and isinstance(task.get("id"), str)
+    }
+    changes: list[str] = []
+    for group in _task_groups(group_data):
+        task_id = str(group.get("id"))
+        task = tasks_by_id.get(task_id)
+        if task is None:
+            changes.append(f"{task_id}:missing_draft_task")
+            continue
+        expected = _task_group_projection(group)
+        actual = _task_group_projection(task)
+        fields = [field for field, value in expected.items() if actual.get(field) != value]
+        if fields:
+            changes.append(f"{task_id}:{','.join(fields)}")
+    return ",".join(changes) if changes else "unknown_group_change"
+
+
+def _draft_group_data(
+    lock: dict[str, Any],
+    feature: str,
+    task_items: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     group_file = lock.get("groupFile")
     if not isinstance(group_file, str) or not group_file:
         raise PlanWriterInputError("task_draft_group_file_missing")
@@ -1470,9 +1517,15 @@ def _draft_group_data(lock: dict[str, Any], feature: str) -> dict[str, Any]:
     actual = _task_group_digest(data)
     expected = lock.get("groupingDigest")
     if actual != expected:
+        changed = (
+            _draft_group_change_summary(data, task_items)
+            if task_items is not None
+            else "unknown_group_change"
+        )
         raise PlanWriterInputError(
             "task_group_changed_after_draft_created",
-            f"expected={expected};actual={actual};run=rebuild-task-draft",
+            f"expected={expected};actual={actual};affectedGroupFields={changed};"
+            "run=rebuild-task-draft;then_refill_resetTaskIds_only",
         )
     return data
 
@@ -2929,7 +2982,7 @@ def _cmd_set_draft_task_detail(args: argparse.Namespace) -> int:
     lock, data = _load_draft_bundle(workspace, feature)
     if lock.get("status") == "finalized":
         return render_result(fail("task_draft_finalized", path=_draft_plan_path(workspace, feature)))
-    _draft_group_data(lock, feature)
+    _draft_group_data(lock, feature, _tasks(data))
     feature_dir = _path(workspace, feature).parent
     design_lock_errors = _draft_design_contract_errors(feature_dir, lock)
     if design_lock_errors:
@@ -3048,7 +3101,7 @@ def _apply_draft_task_repairs(
     lock, data = _load_draft_bundle(workspace, feature)
     if lock.get("status") == "finalized":
         return fail("task_draft_finalized", path=_draft_plan_path(workspace, feature))
-    group_data = _draft_group_data(lock, feature)
+    group_data = _draft_group_data(lock, feature, _tasks(data))
     feature_dir = _path(workspace, feature).parent
     design_lock_errors = _draft_design_contract_errors(feature_dir, lock)
     if design_lock_errors:
@@ -3250,7 +3303,7 @@ def _draft_preflight(
     feature: str,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     lock, data = _load_draft_bundle(workspace, feature)
-    group_data = _draft_group_data(lock, feature)
+    group_data = _draft_group_data(lock, feature, _tasks(data))
     design_lock_errors = _draft_design_contract_errors(_path(workspace, feature).parent, lock)
     if design_lock_errors:
         return lock, data, group_data, design_lock_errors
@@ -3292,7 +3345,7 @@ def _cmd_preflight_task_draft(args: argparse.Namespace) -> int:
 def _cmd_show_task_draft(args: argparse.Namespace) -> int:
     workspace, feature = _resolve(args)
     lock, data = _load_draft_bundle(workspace, feature)
-    _draft_group_data(lock, feature)
+    _draft_group_data(lock, feature, _tasks(data))
     return render_result(WriterResult(
         ok=True,
         path=_draft_plan_path(workspace, feature),
@@ -3396,7 +3449,7 @@ def _cmd_reopen_finalized_draft(args: argparse.Namespace) -> int:
             f"status={lock.get('status')}",
             path=_draft_plan_path(workspace, feature),
         ))
-    _draft_group_data(lock, feature)
+    _draft_group_data(lock, feature, _tasks(data))
     feature_dir = _path(workspace, feature).parent
     design_contract, design_errors = _current_design_contract(feature_dir)
     if design_errors:
@@ -3595,6 +3648,15 @@ def _cmd_rebuild_task_draft(args: argparse.Namespace) -> int:
         result,
         preservedTaskIds=preserved,
         resetTaskIds=reset,
+        rebuildGuidance={
+            "action": "refill_reset_task_details_only",
+            "preservedTaskCount": len(preserved),
+            "resetTaskCount": len(reset),
+            "nextStep": (
+                "只对 resetTaskIds 调用 set-draft-task-detail；"
+                "preservedTaskIds 的既有详情已保留，不要全量重填"
+            ),
+        },
         draft=_draft_summary(lock, data),
     ))
 
@@ -5042,7 +5104,7 @@ def mark_batch_tasks_done_after_compile(
     parallel: bool = False,
 ) -> WriterResult:
     """
-    编译通过后，将批次中所有 implemented 状态的任务标记为 done。
+    编译已执行并记录结果后，将批次中所有 implemented 状态的任务标记为 done。
     仅在 defer_to_test_stages 策略下使用。
     """
     with _plan_lock(workspace, feature):
@@ -5056,8 +5118,8 @@ def mark_batch_tasks_done_after_compile(
             return fail("batch_not_found", batch_id, path=_path(workspace, feature))
 
         batch_compile = batch_plan.get("batchCompile")
-        if not isinstance(batch_compile, dict) or batch_compile.get("status") != "passed":
-            return fail("batch_compile_not_passed", batch_id, path=_path(workspace, feature))
+        if not isinstance(batch_compile, dict) or batch_compile.get("status") not in {"passed", "failed"}:
+            return fail("batch_compile_not_recorded", batch_id, path=_path(workspace, feature))
         command_id = batch_compile.get("commandId")
         compile_command = batch_plan.get("compileCommand")
         if not (
@@ -5085,8 +5147,8 @@ def mark_batch_tasks_done_after_compile(
                 continue
             if normalize_status(task.get("status")) == "implemented":
                 task["status"] = "done"
-                # 新策略：不使用虚拟 evidence，保留真实 implementation evidence
-                # done gate 将直接检查 batchCompile.status == passed
+                # 不使用虚拟 evidence，保留真实 implementation evidence；
+                # compile 的 passed/failed 结果都已单独保存在 batchCompile。
                 updated_count += 1
 
         entries = [entry for entry in data.get("batches", []) if isinstance(entry, dict)]
@@ -5116,10 +5178,9 @@ def mark_parallel_batch_tasks_merged(
 ) -> WriterResult:
     """Complete a parallel Batch only after its sealed delivery is merged.
 
-    A successful compile proves the Worktree can build, but it does not prove
-    the source checkout contains the implementation.  The scheduler uses this
-    transition as the only path from ``implemented`` to ``done`` for parallel
-    Batch execution.
+    Batch compile remains recorded diagnostic evidence.  A completed compile,
+    whether passed or failed, does not replace the merge barrier that moves
+    parallel Tasks from ``implemented`` to ``done``.
     """
     if not merge_commit_sha:
         return fail("parallel_merge_commit_sha_required", batch_id, path=_path(workspace, feature))
@@ -5134,8 +5195,8 @@ def mark_parallel_batch_tasks_merged(
         if not isinstance(batch_plan, dict):
             return fail("batch_not_found", batch_id, path=_path(workspace, feature))
         batch_compile = batch_plan.get("batchCompile")
-        if not isinstance(batch_compile, dict) or batch_compile.get("status") != "passed":
-            return fail("batch_compile_not_passed", batch_id, path=_path(workspace, feature))
+        if not isinstance(batch_compile, dict) or batch_compile.get("status") not in {"passed", "failed"}:
+            return fail("batch_compile_not_recorded", batch_id, path=_path(workspace, feature))
         existing_commit = batch_plan.get("mergeCommitSha")
         if isinstance(existing_commit, str) and existing_commit and existing_commit != merge_commit_sha:
             return fail("parallel_batch_merge_commit_mismatch", batch_id, path=_path(workspace, feature))
