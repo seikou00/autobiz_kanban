@@ -317,14 +317,13 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
                     cap_descriptions.append(cap_zh)
                 capabilities_display = '<br>'.join(cap_descriptions)
 
-            # 构建交互列表字符串
+            # 构建交互列表字符串（不显示ID）
             interactions_display = '-'
             if page_id in interactions_by_page:
                 interaction_items = []
                 for interaction in interactions_by_page[page_id]:
-                    interaction_id = interaction.get('interactionId', 'N/A')
                     summary = interaction.get('summary', 'N/A')
-                    interaction_items.append(f"{interaction_id}: {summary}")
+                    interaction_items.append(summary)
                 interactions_display = '<br>'.join(interaction_items)
 
             lines.append(f"| {page_id} | {name} | {goal} | {route_hint_display} | {states_display} | {capabilities_display} | {interactions_display} |")
