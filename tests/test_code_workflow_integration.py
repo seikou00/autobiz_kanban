@@ -119,11 +119,12 @@ def test_fixed_workflow_entrypoint():
         "errorMessage",
         "--ttl-seconds ${timeoutPerBatch}",
         "heartbeat",
-        "heartbeatDirectory",
-        "后续编码和草稿封存全程保持 heartbeat 运行",
-        "Start-Process",
+        "--lease-guard",
+        "--require-lease-guard",
+        "命令边界续租",
+        "独立 shell 子进程存活与否不再作为 Batch 失败条件",
+        "禁止自行运行 batch_lease_manager.py heartbeat",
         "仅 valid=true 才可继续",
-        "停止 heartbeat",
         "git symbolic-ref --quiet --short HEAD",
         "LEASE_TOKEN",
         "reclaim --workspace",
@@ -173,6 +174,9 @@ def test_fixed_workflow_entrypoint():
         return False
     if "function candidateGroups(" in content or "validateAndPromoteWave([batchId]" in content:
         print("✗ Merge Train 候选仍可能按 Wave 聚合多个 Batch")
+        return False
+    if "--with-heartbeat" in content or "--require-heartbeat" in content:
+        print("✗ 固定脚本仍依赖旧的后台 heartbeat 参数")
         return False
     route_start = content.find("start-route-run")
     task_prompt = content.find("以 taskContract.uiRequired 为唯一条件")

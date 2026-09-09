@@ -85,7 +85,7 @@ def _lease_staleness_reason_locked(
     This helper runs while the scheduler owns the run lock and takes the
     per-Batch lease lock before inspecting the bearer lease.  A valid lease is
     intentionally left untouched: resuming a workflow must never steal work
-    from a worker that is still heartbeating.  Conversely, a missing, corrupt,
+    from a worker that is still renewing its lease.  Conversely, a missing, corrupt,
     expired, or over-deadline lease has no safe worker authority
     left and can be deterministically retried by the scheduler.
     """
@@ -109,7 +109,7 @@ def _lease_staleness_reason_locked(
             path.unlink(missing_ok=True)
             return "lease_expired"
 
-        # A heartbeat that survives beyond the configured Batch deadline is
+        # A lease that survives beyond the configured Batch deadline is
         # still not allowed to reserve a scheduler slot forever.  `startedAt`
         # is persisted in the manifest once implementation begins; the lease
         # timestamp covers a worker that dies during initial provisioning.

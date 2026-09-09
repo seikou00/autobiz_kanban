@@ -54,7 +54,7 @@ from hooks.plan_writer import (  # noqa: E402
     set_task_execution_status,
     update_batch_compile_status,
 )
-from hooks.parallel_runtime import check_lease, load_manifest  # noqa: E402
+from hooks.parallel_runtime import load_manifest, renew_lease  # noqa: E402
 from hooks.parallel_batch_scheduler import (  # noqa: E402
     assert_batch_worktree_isolated,
     mark_batch as mark_parallel_batch,
@@ -185,8 +185,13 @@ def _assert_parallel_context(
     entry = manifest.get("batches", {}).get(batch_id)
     if not isinstance(entry, dict):
         raise TaskRunnerError(f"parallel_batch_not_found:{batch_id}")
-    if not check_lease(workspace, feature, parallel_run_id, batch_id, lease_token):
-        raise TaskRunnerError(f"parallel_batch_lease_invalid:{batch_id}")
+    try:
+        # The agent executor has no persistent child-process guarantee.  Renew
+        # the durable lease whenever a lease-bearing plugin command crosses a
+        # workflow boundary instead of relying on a background daemon.
+        renew_lease(workspace, feature, parallel_run_id, batch_id, lease_token)
+    except ValueError as exc:
+        raise TaskRunnerError(f"parallel_batch_lease_invalid:{batch_id}") from exc
     if code_workspace is not None:
         requested = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
         if len(requested) == 1:

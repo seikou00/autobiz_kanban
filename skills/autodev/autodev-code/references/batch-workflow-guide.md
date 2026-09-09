@@ -206,10 +206,13 @@ Within its plugin-provisioned native Git Worktree, a Batch agent must:
 - pass `--workspace`, `--parallel-run-id`, and `--lease-token` to every
   `task_runner.py` command;
 - acquire the Batch lease with the scheduler's `timeoutPerBatch` as
-  `--ttl-seconds`, then run `batch_lease_manager.py heartbeat` in the
-  background throughout implementation, batch compile, and sealing; renew no
-  less often than every five minutes and verify both heartbeat liveness and
-  `check --owner-token` before compile and before seal;
+  `--ttl-seconds <timeoutPerBatch> --lease-guard`. Agent command sandboxes do not preserve child
+  processes, so the plugin renews the durable lease at each lease-bearing
+  `task_runner.py` and `worktree_manager.py` command boundary instead of
+  requiring a background daemon. Agents must not start a heartbeat through
+  shell backgrounding, `run_in_background`, `&`, `nohup`, or `Start-Process`.
+  Before compile and before seal, run
+  `check --owner-token <token> --require-lease-guard`;
 - pass the plugin-provisioned Worktree as `--code-workspace`;
 - complete all assigned TASKs, draft-seal with `--purpose review`, and wait for
   the Workflow's Review stage;
@@ -238,9 +241,10 @@ state.
   `parallel_batch_lifecycle.py monitor` to inspect a run.
 - The scheduler timeout and lease TTL are distinct unless the fixed Workflow
   explicitly passes `--ttl-seconds ${timeoutPerBatch}`. Do not rely on the
-  lease CLI's 15-minute default for a Batch allowed to run longer. Stop the
-  heartbeat only after sealing, immediately before release; every failure
-  path must stop it and release the lease as `failed`.
+  lease CLI's 15-minute default for a Batch allowed to run longer. A lease
+  naturally expires if the agent cannot reach another lease-bearing plugin
+  command before its TTL; every failure path must still release the lease with
+  its prescribed final status.
 - A candidate conflict, failed Batch stage, plan digest change, or failed B-E2E
   blocks the run. Do not use `ours`, `theirs`, `git merge -s ours`,
   `--no-verify`, or direct edits in the shared checkout to bypass it.

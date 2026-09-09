@@ -44,6 +44,7 @@ from hooks.parallel_batch_scheduler import (
 from hooks.plan_json import PlanBundle, load_plan_bundle
 from hooks.plan_json import task_set_digest
 from hooks.worktree_manager import provision_parallel_worktree, remove_parallel_worktree, seal_parallel_batch
+from hooks.task_runner import _assert_parallel_context
 from tests.test_task_runner import (
     _add_second_compile_only_batch,
     _configure_defer_to_test_stages,
@@ -1750,29 +1751,35 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             time.sleep(1.05)
             self.assertTrue(reclaim_lease(workspace, feature, run, "B001"))
 
-    def test_lease_heartbeat_renews_and_exits_with_cleanup(self) -> None:
+    def test_lease_guard_does_not_require_a_background_child_process(self) -> None:
+        """A completed acquire command remains valid without a shell child."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             feature = "alpha"
-            run = "cw-20260819-000002-test"
+            run = "cw-20260819-000002-managed"
             state_path = workspace / ".autobizdevops" / "state.json"
             state_path.parent.mkdir(parents=True)
             state_path.write_text(json.dumps({"features": {feature: {"checkpoint": "code_in_progress"}}}), encoding="utf-8")
             run_dir = workspace / ".autobizdevops" / "features" / feature / ".parallel-runs" / run
             (run_dir / "leases").mkdir(parents=True)
-            manifest = {
-                "runId": run,
-                "batches": {"B001": {"status": "pending", "lease": None}},
-            }
-            (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-            lease = acquire_lease(workspace, feature, run, "B001", ttl_seconds=10)
-            pid_file = workspace / "heartbeat.pid"
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"runId": run, "batches": {"B001": {"status": "pending", "lease": None}}}),
+                encoding="utf-8",
+            )
             manager = Path(__file__).resolve().parents[1] / "hooks" / "batch_lease_manager.py"
-            result = subprocess.run(
+            legacy = subprocess.run(
+                [sys.executable, str(manager), "heartbeat"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(legacy.returncode, 2)
+            self.assertIn("invalid choice: 'heartbeat'", legacy.stderr)
+            acquired = subprocess.run(
                 [
                     sys.executable,
                     str(manager),
-                    "heartbeat",
+                    "acquire",
                     "--workspace",
                     str(workspace),
                     "--feature",
@@ -1781,24 +1788,76 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
                     run,
                     "--batch-id",
                     "B001",
-                    "--owner-token",
-                    lease["ownerToken"],
                     "--ttl-seconds",
-                    "10",
-                    "--interval-seconds",
-                    "1",
-                    "--max-seconds",
-                    "1",
-                    "--pid-file",
-                    str(pid_file),
+                    "3",
+                    "--lease-guard",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=10,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(pid_file.exists())
-            self.assertTrue(check_lease(workspace, feature, run, "B001", lease["ownerToken"]))
+            self.assertEqual(acquired.returncode, 0, acquired.stderr)
+            payload = json.loads(acquired.stdout)
+            token = payload["lease"]["ownerToken"]
+            self.assertEqual(payload["leaseGuard"]["mode"], "command_boundary_renewal")
+
+            try:
+                first_expiry = json.loads(lease_path(workspace, feature, run, "B001").read_text(encoding="utf-8"))["expiresEpoch"]
+                time.sleep(1.1)
+                checked = subprocess.run(
+                    [
+                        sys.executable,
+                        str(manager),
+                        "check",
+                        "--workspace",
+                        str(workspace),
+                        "--feature",
+                        feature,
+                        "--run-id",
+                        run,
+                        "--batch-id",
+                        "B001",
+                        "--owner-token",
+                        token,
+                        "--require-lease-guard",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+                checked_payload = json.loads(checked.stdout)
+                self.assertTrue(checked_payload["valid"])
+                self.assertEqual(checked_payload["leaseGuard"]["mode"], "command_boundary_renewal")
+                _assert_parallel_context(workspace, feature, run, "B001", token)
+                renewed_expiry = json.loads(lease_path(workspace, feature, run, "B001").read_text(encoding="utf-8"))["expiresEpoch"]
+                self.assertGreater(renewed_expiry, first_expiry)
+            finally:
+                released = subprocess.run(
+                    [
+                        sys.executable,
+                        str(manager),
+                        "release",
+                        "--workspace",
+                        str(workspace),
+                        "--feature",
+                        feature,
+                        "--run-id",
+                        run,
+                        "--batch-id",
+                        "B001",
+                        "--owner-token",
+                        token,
+                        "--final-status",
+                        "pending",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(released.returncode, 0, released.stderr)
+
+            self.assertEqual(load_manifest(workspace, feature, run)["batches"]["B001"]["status"], "pending")
 
     def test_force_reclaim_cli_does_not_require_worker_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

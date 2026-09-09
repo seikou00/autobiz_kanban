@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hooks.parallel_runtime import append_event, check_lease, global_worktrees_root, load_manifest, run_lock, save_manifest
+from hooks.parallel_runtime import append_event, global_worktrees_root, load_manifest, renew_lease, run_lock, save_manifest
 from hooks.commit_message import CommitMessageError, build_commit_message, normalize_task_card_id
 from hooks.plan_write_ownership import is_test_asset_path
 from hooks.repository_snapshot import (
@@ -267,7 +267,9 @@ def seal_parallel_batch(
     """Commit a Batch worktree for Review or after its required compile."""
     if purpose not in {"review", "implementation"}:
         return {"success": False, "error": f"parallel_batch_seal_purpose_invalid:{purpose}"}
-    if not check_lease(artifact_workspace, feature, run_id, batch_id, owner_token):
+    try:
+        renew_lease(artifact_workspace, feature, run_id, batch_id, owner_token)
+    except ValueError:
         return {"success": False, "error": f"parallel_batch_lease_invalid:{batch_id}"}
     with run_lock(artifact_workspace, feature, run_id):
         try:

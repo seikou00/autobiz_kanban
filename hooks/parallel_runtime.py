@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import socket
 import time
 import uuid
 from contextlib import contextmanager
@@ -33,7 +31,6 @@ from hooks.plan_json import (
 
 RUN_SCHEMA_VERSION = 2
 DEFAULT_TTL_SECONDS = 15 * 60
-HEARTBEAT_SECONDS = 30
 BASE_DELIVERY_STAGES = ("prepare", "implement", "review", "test")
 
 
@@ -519,7 +516,16 @@ def lease_path(workspace: Path, feature: str, run_id: str, batch_id: str) -> Pat
     return run_dir(workspace, feature, run_id) / "leases" / f"{batch_id}.json"
 
 
-def acquire_lease(workspace: Path, feature: str, run_id: str, batch_id: str, *, ttl_seconds: int = DEFAULT_TTL_SECONDS, owner_token: str | None = None) -> dict[str, Any]:
+def acquire_lease(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    batch_id: str,
+    *,
+    ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    owner_token: str | None = None,
+    lease_guard: bool = False,
+) -> dict[str, Any]:
     with run_lock(workspace, feature, run_id):
         manifest = load_manifest(workspace, feature, run_id)
         batch = manifest.get("batches", {}).get(batch_id)
@@ -571,10 +577,10 @@ def acquire_lease(workspace: Path, feature: str, run_id: str, batch_id: str, *, 
                 "runId": run_id,
                 "batchId": batch_id,
                 "ownerToken": token,
-                "pid": os.getpid(),
-                "host": socket.gethostname(),
                 "startedAt": utc_now(),
-                "heartbeatAt": utc_now(),
+                "renewedAt": utc_now(),
+                "ttlSeconds": ttl_seconds,
+                "guardMode": "command_boundary_renewal" if lease_guard else None,
                 "expiresAt": datetime.fromtimestamp(now + ttl_seconds, timezone.utc).isoformat().replace("+00:00", "Z"),
                 "expiresEpoch": now + ttl_seconds,
             }
@@ -609,11 +615,24 @@ def check_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner
         return False
     if float(lease.get("expiresEpoch", 0)) <= time.time():
         return False
-    # The token and heartbeat are the authority used by worker processes.  A
-    # scheduler may acquire a lease in one process and launch the worker in a
-    # second process, so PID liveness is used by reclaim_lease rather than as
-    # a hard validity check here.
+    # A lease is a durable time-bound capability, not the lifetime of the CLI
+    # process that acquired it.  Batch agents run each command in an isolated
+    # sandbox, where the acquiring process necessarily exits before the next
+    # command starts.
     return True
+
+
+def lease_guard_active(workspace: Path, feature: str, run_id: str, batch_id: str, owner_token: str) -> bool:
+    """Return whether this live lease opted into command-boundary renewal."""
+    path = lease_path(workspace, feature, run_id, batch_id)
+    try:
+        lease = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        check_lease(workspace, feature, run_id, batch_id, owner_token)
+        and lease.get("guardMode") == "command_boundary_renewal"
+    )
 
 
 def reclaim_lease(workspace: Path, feature: str, run_id: str, batch_id: str, *, force: bool = False) -> bool:
@@ -626,11 +645,6 @@ def reclaim_lease(workspace: Path, feature: str, run_id: str, batch_id: str, *, 
     except (OSError, json.JSONDecodeError):
         lease = {}
     stale = force or not isinstance(lease, dict) or float(lease.get("expiresEpoch", 0)) <= time.time()
-    if not stale and lease.get("host") == socket.gethostname() and isinstance(lease.get("pid"), int):
-        try:
-            os.kill(int(lease["pid"]), 0)
-        except OSError:
-            stale = True
     if not stale:
         return False
     with FileLock(path.with_suffix(".lock")):
@@ -646,14 +660,22 @@ def reclaim_lease(workspace: Path, feature: str, run_id: str, batch_id: str, *, 
     return True
 
 
-def renew_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner_token: str, *, ttl_seconds: int = DEFAULT_TTL_SECONDS) -> dict[str, Any]:
+def renew_lease(workspace: Path, feature: str, run_id: str, batch_id: str, owner_token: str, *, ttl_seconds: int | None = None) -> dict[str, Any]:
     if not check_lease(workspace, feature, run_id, batch_id, owner_token):
         raise ValueError(f"parallel_batch_lease_invalid:{batch_id}")
     path = lease_path(workspace, feature, run_id, batch_id)
     now = time.time()
     with FileLock(path.with_suffix(".lock")):
         lease = json.loads(path.read_text(encoding="utf-8"))
-        lease.update({"heartbeatAt": utc_now(), "expiresAt": datetime.fromtimestamp(now + ttl_seconds, timezone.utc).isoformat().replace("+00:00", "Z"), "expiresEpoch": now + ttl_seconds})
+        effective_ttl = ttl_seconds if ttl_seconds is not None else int(lease.get("ttlSeconds", DEFAULT_TTL_SECONDS))
+        if effective_ttl <= 0:
+            raise ValueError("parallel_batch_lease_ttl_invalid")
+        lease.update({
+            "renewedAt": utc_now(),
+            "ttlSeconds": effective_ttl,
+            "expiresAt": datetime.fromtimestamp(now + effective_ttl, timezone.utc).isoformat().replace("+00:00", "Z"),
+            "expiresEpoch": now + effective_ttl,
+        })
         atomic_write_json(path, lease)
     return lease
 
