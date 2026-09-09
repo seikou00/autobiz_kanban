@@ -1318,6 +1318,73 @@ def resume_run(
     return result
 
 
+def manual_resume_run(
+    workspace: Path,
+    feature: str,
+    run_id: str,
+    workspace_refs: list[str] | None = None,
+) -> dict[str, Any]:
+    """Explicitly re-admit retryable Batches after an operator intervention.
+
+    Automatic retries deliberately stop after a small bounded budget.  A user
+    asking the Code workflow to continue is a separate admission decision, not
+    another automatic retry: retain the failed Worktree and evidence, reset the
+    automatic counter, then let ``resume_run`` perform its normal integrity
+    checks and scheduling.  This never revives merge conflicts, cancellation,
+    or generic blocked states because those need a more specific repair path.
+    """
+    manually_queued: list[str] = []
+    with run_lock(workspace, feature, run_id):
+        manifest = load_manifest(workspace, feature, run_id)
+        if manifest.get("status") in {"cleaned", "rolled_back"}:
+            return {
+                "runId": run_id,
+                "status": manifest.get("status"),
+                "manualRetryBatches": [],
+                "skipped": "terminal_run",
+            }
+        for raw_batch_id, batch in manifest.get("batches", {}).items():
+            if not isinstance(batch, dict):
+                continue
+            batch_id = str(raw_batch_id)
+            recovery = batch.get("recovery") if isinstance(batch.get("recovery"), dict) else {}
+            retryable = (
+                batch.get("status") in {"retry_pending", "failed"}
+                or (
+                    batch.get("status") == "blocked"
+                    and recovery.get("status") == "retry_exhausted"
+                )
+            )
+            if not retryable:
+                continue
+            batch["recovery"] = {
+                **recovery,
+                "retryAttempts": 0,
+                "manualRetryAttempts": int(recovery.get("manualRetryAttempts", 0)) + 1,
+                "lastManualRetryAt": manifest.get("updatedAt"),
+                "status": "manual_retry_queued",
+            }
+            _mark_retry_pending_locked(
+                workspace,
+                feature,
+                run_id,
+                manifest,
+                batch_id,
+                batch,
+                error=str(batch.get("error") or recovery.get("lastError") or "operator_requested_retry"),
+                previous_status=str(batch.get("status") or ""),
+            )
+            manually_queued.append(batch_id)
+        if manually_queued:
+            manifest["status"] = "running"
+            save_manifest(workspace, feature, run_id, manifest)
+    for batch_id in manually_queued:
+        append_event(workspace, feature, run_id, "batch_manual_retry_queued", batchId=batch_id)
+    result = resume_run(workspace, feature, run_id, workspace_refs=workspace_refs)
+    result["manualRetryBatches"] = manually_queued
+    return result
+
+
 def ensure_run(
     workspace: Path,
     feature: str,
@@ -1372,11 +1439,11 @@ def _emit(ok: bool, **payload: Any) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Schedule parallel Code batch runs")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("validate", "create", "ensure", "status", "resume", "list"):
+    for name in ("validate", "create", "ensure", "status", "resume", "manual-resume", "list"):
         item = subparsers.add_parser(name)
         item.add_argument("--workspace")
         item.add_argument("--feature", required=True)
-        if name in {"status", "resume"}:
+        if name in {"status", "resume", "manual-resume"}:
             item.add_argument("--run-id", required=True)
         if name in {"create", "ensure"}:
             item.add_argument("--max-parallel", type=int, default=4)
@@ -1384,7 +1451,7 @@ def main(argv: list[str] | None = None) -> int:
             item.add_argument("--code-workspace", action="append", required=True, help="workspaceRef=/path; single-ref runs may pass /path")
             item.add_argument("--allow-bootstrap", action="store_true", help="explicitly allow Git initialization or a baseline commit for a dirty source repository")
             item.add_argument("--task-card-id", required=True, help="task card selected before the workflow starts")
-        if name in {"status", "resume", "ensure"}:
+        if name in {"status", "resume", "manual-resume", "ensure"}:
             item.add_argument("--workspace-ref", action="append", dest="workspace_refs", help="only schedule batches for these workspaceRef values")
     mark = subparsers.add_parser("mark-batch")
     mark.add_argument("--workspace")
@@ -1435,6 +1502,8 @@ def main(argv: list[str] | None = None) -> int:
             return _emit(True, manifest=load_manifest(workspace, feature, args.run_id), **schedule(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
         if args.command == "resume":
             return _emit(True, **resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
+        if args.command == "manual-resume":
+            return _emit(True, **manual_resume_run(workspace, feature, args.run_id, workspace_refs=args.workspace_refs))
         if args.command == "list":
             return _emit(True, runs=list_runs(workspace, feature))
         details = {key: value for key, value in vars(args).items() if key in {"commit_sha", "merge_commit_sha", "worktree_path", "branch_name", "compile_status", "error"} and value is not None}

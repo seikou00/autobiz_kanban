@@ -293,6 +293,8 @@ const pluginPath = input.pluginPath;
 const artifactWorkspace = input.artifactWorkspace || input.workspace;
 const codeWorkspaces = input.codeWorkspaces || (input.codeWorkspace ? { default: input.codeWorkspace } : null);
 const taskCardId = input.taskCardId;
+const resumeMode = input.resumeMode === "manual" ? "manual" : "automatic";
+const resumeRunId = input.resumeRunId;
 const workflowHostGitRoot = input.workflowHostGitRoot;
 const maxParallel = Number.isInteger(input.maxParallel) && input.maxParallel > 0
   ? input.maxParallel
@@ -357,13 +359,21 @@ function retryPendingBatchesOf(scheduler) {
 phase("准备");
 let prepared;
 try {
+  const prepareCommand = resumeMode === "manual"
+    ? `python "${schedulerPath}" manual-resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${resumeRunId}"`
+    : `python "${schedulerPath}" ensure ` +
+      `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
+      `--task-card-id "${taskCardId.trim()}" ` +
+      `--max-parallel ${maxParallel} ` +
+      `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs}`;
+  if (resumeMode === "manual" && !usableString(resumeRunId)) {
+    throw new Error("manual_resume_run_id_missing");
+  }
   prepared = requireSchedulerResult(await agent(
-    `确保固定 Code DAG run。执行：python "${schedulerPath}" ensure ` +
-    `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
-    `--task-card-id "${taskCardId.trim()}" ` +
-    `--max-parallel ${maxParallel} ` +
-    `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs}。` +
-    `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。` +
+    `确保固定 Code DAG run。执行：${prepareCommand}。` +
+    (resumeMode === "manual"
+      ? `这是用户请求的人工恢复：只重排 scheduler 已识别的 retryable Batch，保留既有 Worktree、证据和 runId；不得恢复 needs_resolution、冲突或取消的 Batch。`
+      : `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。`) +
     `必要时允许 scheduler 创建 autodev baseline 提交；不得修改业务文件内容，` +
     `且不得把 .cmbdevclaw 平台运行文件纳入提交。只返回该命令的 JSON 结果。`,
     { label: "fixed-workflow-prepare", phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }

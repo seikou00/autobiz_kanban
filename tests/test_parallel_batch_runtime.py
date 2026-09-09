@@ -36,6 +36,7 @@ from hooks.parallel_batch_scheduler import (
     assert_batch_worktree_isolated,
     create_run as _create_run,
     ensure_run,
+    manual_resume_run,
     mark_batch,
     resume_run,
     schedule,
@@ -484,6 +485,35 @@ class ParallelBatchRuntimeTest(unittest.TestCase):
             self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
             self.assertEqual(load_manifest(workspace, "alpha", run_id)["batches"]["B001"]["status"], "pending")
             self.assertEqual(resumed["scheduledGroups"], [["B001"]])
+
+    def test_manual_resume_resets_retry_exhausted_batch(self) -> None:
+        """An explicit user retry is a fresh admission, not a third automatic retry."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            created = create_run(
+                workspace,
+                "alpha",
+                max_parallel=4,
+                timeout_seconds=60,
+                code_workspaces=[str(repo)],
+            )
+            run_id = created["runId"]
+
+            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="first_failure")
+            resume_run(workspace, "alpha", run_id)
+            mark_batch(workspace, "alpha", run_id, "B001", "retry_pending", error="second_failure")
+            exhausted = resume_run(workspace, "alpha", run_id)
+            self.assertEqual(exhausted["retryExhaustedBatches"], ["B001"])
+
+            resumed = manual_resume_run(workspace, "alpha", run_id)
+            batch = load_manifest(workspace, "alpha", run_id)["batches"]["B001"]
+
+            self.assertEqual(resumed["manualRetryBatches"], ["B001"])
+            self.assertEqual(resumed["rescheduledRetryBatches"], ["B001"])
+            self.assertEqual(batch["status"], "pending")
+            self.assertEqual(batch["recovery"]["manualRetryAttempts"], 1)
+            self.assertEqual(batch["recovery"]["retryAttempts"], 1)
 
     def test_resume_repairs_legacy_retry_pending_lease(self) -> None:
         """Resume must repair retry records written before atomic lease cleanup."""

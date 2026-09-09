@@ -27,6 +27,8 @@ from hooks.parallel_batch_scheduler import validate_plan_for_parallel  # noqa: E
 from hooks.parallel_runtime import (  # noqa: E402
     batch_workspace_ref,
     batch_write_set,
+    get_active_run,
+    load_manifest,
     plan_digest,
     resource_groups,
     select_runnable_batches,
@@ -409,16 +411,14 @@ def analyze_batches(
 
         bundle = load_plan_bundle(feat_dir)
         batch_entries = [entry for entry in bundle.root.get("batches", []) if isinstance(entry, dict)]
-        valid_batches: list[dict] = []
+        all_batches: list[dict] = []
         for entry in batch_entries:
             batch_id = str(entry.get("id", ""))
             if not BATCH_ID_RE.fullmatch(batch_id):
                 continue
             status = str(entry.get("status", "")).lower()
-            if status in {"done", "failed"}:
-                continue
             batch_plan = bundle.batches.get(batch_id, {})
-            valid_batches.append({
+            all_batches.append({
                 "id": batch_id,
                 "title": entry.get("title") or batch_plan.get("title"),
                 "lane": entry.get("executionLane", entry.get("lane", "unknown")),
@@ -435,8 +435,40 @@ def analyze_batches(
                 ],
                 "writeSet": list(batch_write_set(batch_plan)),
             })
+        valid_batches = [batch for batch in all_batches if batch["status"] not in {"done", "failed"}]
 
-        if not valid_batches:
+        # A failed Plan projection must not hide a live scheduler manifest.
+        # The manifest is the durable owner of retry/lease/worktree state, so a
+        # user-triggered continuation has to enter the fixed workflow even when
+        # no Plan batch is currently considered pending.
+        active_run_id = get_active_run(artifact_workspace, feature)
+        active_manifest = (
+            load_manifest(artifact_workspace, feature, active_run_id)
+            if active_run_id is not None
+            else None
+        )
+        recovery_batch_ids = {
+            str(batch_id)
+            for batch_id, batch in (active_manifest or {}).get("batches", {}).items()
+            if isinstance(batch, dict)
+            and (
+                batch.get("status") in {"retry_pending", "failed"}
+                or (
+                    batch.get("status") == "blocked"
+                    and isinstance(batch.get("recovery"), dict)
+                    and batch["recovery"].get("status") == "retry_exhausted"
+                )
+            )
+        }
+        recovery_batches = [batch for batch in all_batches if batch["id"] in recovery_batch_ids]
+        manual_resume = bool(active_run_id and recovery_batches)
+        visible_batch_ids = {batch["id"] for batch in valid_batches}
+        launch_batches = [
+            *valid_batches,
+            *(batch for batch in recovery_batches if batch["id"] not in visible_batch_ids),
+        ]
+
+        if not launch_batches:
             return {
                 "useWorkflow": False,
                 "strategy": "complete",
@@ -450,12 +482,13 @@ def analyze_batches(
             }
 
         validation = validate_plan_for_parallel(artifact_workspace, feature)
-        if not validation.get("canParallel"):
+        recovery_plan_is_valid = manual_resume and validation.get("reason") == "no_pending_batches" and not validation.get("errors")
+        if not validation.get("canParallel") and not recovery_plan_is_valid:
             return {
                 "useWorkflow": False,
                 "strategy": "blocked",
-                "batchCount": len(valid_batches),
-                "batches": valid_batches,
+                "batchCount": len(launch_batches),
+                "batches": launch_batches,
                 "workflowScript": None,
                 "reason": f"parallel_plan_invalid:{validation.get('reason')}",
                 "requiresPlanRepair": True,
@@ -469,8 +502,8 @@ def analyze_batches(
             return {
                 "useWorkflow": False,
                 "strategy": "blocked",
-                "batchCount": len(valid_batches),
-                "batches": valid_batches,
+                "batchCount": len(launch_batches),
+                "batches": launch_batches,
                 "workflowScript": None,
                 "reason": "fixed_workflow_script_not_found",
                 "canStartWorkflow": False,
@@ -507,8 +540,8 @@ def analyze_batches(
         common_result = {
             "useWorkflow": True,
             "strategy": "fixed",
-            "batchCount": len(valid_batches),
-            "batches": valid_batches,
+            "batchCount": len(launch_batches),
+            "batches": launch_batches,
             "artifactWorkspace": str(artifact_workspace),
             **runtime_script,
             "workflowScriptPath": runtime_script["workflowScript"],
@@ -520,7 +553,7 @@ def analyze_batches(
             "workspaceContractPath": workspace_contract["workspaceContractPath"],
             "planDigest": plan_digest(bundle),
             "batchExecutionPlan": _batch_execution_plan(
-                valid_batches,
+                launch_batches,
                 workspace_contract["codeWorkspaces"],
                 artifact_workspace,  # Pass artifact_workspace to load runtime config
             ),
@@ -546,9 +579,15 @@ def analyze_batches(
                 "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
                 "runtimeConfig": runtime_config,
                 "taskCardId": selected_task_card_id,
+                "resumeMode": "manual" if manual_resume else "automatic",
+                "resumeRunId": active_run_id if manual_resume else None,
             },
-            "reason": f"fixed_workflow_for_pending_batches:{len(valid_batches)}",
-            "requiredAction": "start_fixed_workflow",
+            "reason": (
+                f"fixed_workflow_for_manual_recovery:{active_run_id}:{','.join(sorted(recovery_batch_ids))}"
+                if manual_resume
+                else f"fixed_workflow_for_pending_batches:{len(launch_batches)}"
+            ),
+            "requiredAction": "resume_fixed_workflow" if manual_resume else "start_fixed_workflow",
         }
     except Exception as exc:
         return {

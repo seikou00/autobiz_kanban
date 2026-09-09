@@ -125,6 +125,8 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 },
             },
             "taskCardId": "Z990692-294",
+            "resumeMode": "automatic",
+            "resumeRunId": None,
         })
         self.assertEqual(result["codeWorkspaceSource"], "plan_json")
         self.assertEqual(result["workspaceContractPath"], str((feature_dir / "plan.json").resolve()))
@@ -219,6 +221,51 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         self.assertFalse(result["useWorkflow"])
         self.assertEqual(result["requiredAction"], "provide_code_workspace_mapping")
         self.assertTrue(result["reason"].startswith("code_workspace_mapping_missing:"))
+
+    def test_launcher_reenters_active_run_when_plan_batch_is_failed(self) -> None:
+        """A failed Plan projection cannot hide a retry-exhausted scheduler run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_path = root / "plugin"
+            artifact_workspace = root / "artifacts"
+            code_workspace = root / "business-code"
+            feature_dir = artifact_workspace / ".autobizdevops" / "features" / "resume"
+            (plugin_path / "workflows").mkdir(parents=True)
+            (plugin_path / "workflows" / "code-batched-execution.workflow.js").write_text(
+                "export const meta = {};", encoding="utf-8"
+            )
+            code_workspace.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=code_workspace, check=True)
+            feature_dir.mkdir(parents=True)
+            (artifact_workspace / ".autobizdevops" / "state.json").write_text("{}", encoding="utf-8")
+            (feature_dir / "plan.json").write_text("{}", encoding="utf-8")
+            bundle = PlanBundle(
+                root={
+                    "codeWorkspaces": {"api": str(code_workspace)},
+                    "batches": [{"id": "B001", "status": "failed", "workspaceRef": "api", "deps": []}],
+                },
+                batches={"B001": {"tasks": [{"workspaceRef": "api"}]}},
+                tasks=[],
+                task_batches={},
+            )
+            with mock.patch("hooks.workflow_launcher.load_plan_bundle", return_value=bundle), mock.patch(
+                "hooks.workflow_launcher.validate_plan_for_parallel",
+                return_value={"canParallel": False, "reason": "no_pending_batches", "errors": []},
+            ), mock.patch("hooks.workflow_launcher.get_active_run", return_value="cw-resume-001"), mock.patch(
+                "hooks.workflow_launcher.load_manifest",
+                return_value={
+                    "runId": "cw-resume-001",
+                    "batches": {"B001": {"status": "blocked", "recovery": {"status": "retry_exhausted"}}},
+                },
+            ):
+                result = analyze_batches("resume", plugin_path, artifact_workspace, "Z990692-294")
+
+        self.assertTrue(result["useWorkflow"])
+        self.assertTrue(result["canStartWorkflow"])
+        self.assertEqual(result["requiredAction"], "resume_fixed_workflow")
+        self.assertEqual(result["workflowArgs"]["resumeMode"], "manual")
+        self.assertEqual(result["workflowArgs"]["resumeRunId"], "cw-resume-001")
+        self.assertEqual(result["batches"][0]["id"], "B001")
 
     def test_launcher_blocks_when_static_workflow_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
