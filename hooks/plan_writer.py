@@ -56,6 +56,7 @@ from hooks.plan_json import (  # noqa: E402
     TASK_VALIDATION_KINDS,
     VISUAL_SOURCE_ID_RE,
     batch_compile_is_not_configured_for_frontend,
+    batch_compile_skip_is_allowed,
     batch_plan_path,
     defer_to_test_stages_enabled,
     load_plan_bundle,
@@ -4939,8 +4940,9 @@ def update_batch_compile_status(
 
         command_id = compile_result.get("commandId")
         compile_command = batch_plan.get("compileCommand")
+        skip_reason = compile_result.get("skipReason")
         if compile_status == "skipped":
-            if not batch_compile_is_not_configured_for_frontend(batch_plan):
+            if not batch_compile_skip_is_allowed(batch_plan, skip_reason):
                 return fail("batch_compile_skip_not_allowed", batch_id, path=_path(workspace, feature))
             if command_id is not None:
                 return fail("batch_compile_skip_command_forbidden", command_id, path=_path(workspace, feature))
@@ -4965,6 +4967,7 @@ def update_batch_compile_status(
 
         batch_compile["status"] = compile_status
         batch_compile["commandId"] = None if compile_status == "skipped" else command_id
+        batch_compile["skipReason"] = skip_reason if compile_status == "skipped" else None
         batch_compile["repairAttempts"] = int(batch_compile.get("repairAttempts", 0))
         batch_compile["maxRepairAttempts"] = BATCH_COMPILE_MAX_REPAIR_ATTEMPTS
         batch_compile["repairTaskId"] = None
@@ -5134,7 +5137,7 @@ def mark_batch_tasks_done_after_compile(
         command_id = batch_compile.get("commandId")
         compile_command = batch_plan.get("compileCommand")
         if batch_compile.get("status") == "skipped":
-            if not batch_compile_is_not_configured_for_frontend(batch_plan) or command_id is not None:
+            if not batch_compile_skip_is_allowed(batch_plan, batch_compile.get("skipReason")) or command_id is not None:
                 return fail("batch_compile_skip_invalid", batch_id, path=_path(workspace, feature))
         elif not (
             isinstance(compile_command, dict)

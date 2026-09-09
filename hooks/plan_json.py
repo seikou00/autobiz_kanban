@@ -85,6 +85,7 @@ FEATURE_STATUSES = {"todo", "in_progress", "failed", "done"}
 BATCH_STATUSES = {"todo", "in_progress", "failed", "done"}
 BATCH_COMPILE_STATUSES = {"pending", "repairing", "failed", "passed", "skipped"}
 BATCH_COMPILE_MAX_REPAIR_ATTEMPTS = 3
+WORKFLOW_BATCH_COMPILE_SKIP_REASON = "workflow_batch_compile_disabled"
 PARALLEL_EXECUTION_STAGES = {"parallel", "proto", "global", "integration"}
 VALIDATION_DEFERRAL_REASONS = {
     "environment_failure",
@@ -172,6 +173,13 @@ def batch_compile_is_not_configured_for_frontend(batch: dict[str, Any]) -> bool:
     """
 
     return batch.get("executionLane") == "frontend" and batch.get("compileCommand") is None
+
+
+def batch_compile_skip_is_allowed(batch: dict[str, Any], skip_reason: object) -> bool:
+    """Return whether a skipped compile state is explicitly authorized."""
+    return batch_compile_is_not_configured_for_frontend(batch) or (
+        skip_reason == WORKFLOW_BATCH_COMPILE_SKIP_REASON
+    )
 
 
 def implementation_scope_task_errors(scope: Any, tasks: list[dict[str, Any]]) -> list[str]:
@@ -1429,10 +1437,15 @@ def _validate_batch_compile(
         return
 
     status = compile_state.get("status")
+    skip_reason = compile_state.get("skipReason")
     if status not in BATCH_COMPILE_STATUSES:
         errors.append(f"{batch_id}.batchCompile.status_invalid")
-    elif status == "skipped" and not compile_not_configured_for_frontend:
+    elif status == "skipped" and not batch_compile_skip_is_allowed(data, skip_reason):
         errors.append(f"{batch_id}.batchCompile.skipped_not_allowed")
+    if skip_reason is not None and (not isinstance(skip_reason, str) or not skip_reason.strip()):
+        errors.append(f"{batch_id}.batchCompile.skipReason_invalid")
+    elif status != "skipped" and skip_reason is not None:
+        errors.append(f"{batch_id}.batchCompile.skipReason_forbidden")
     attempts = compile_state.get("repairAttempts", 0)
     maximum = compile_state.get("maxRepairAttempts", BATCH_COMPILE_MAX_REPAIR_ATTEMPTS)
     if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:

@@ -33,6 +33,7 @@ from hooks.json_writer_common import atomic_write_json, resolve_feature, resolve
 from hooks.plan_json import (  # noqa: E402
     BATCH_COMPILE_MAX_REPAIR_ATTEMPTS,
     PlanBundle,
+    WORKFLOW_BATCH_COMPILE_SKIP_REASON,
     batch_compile_is_not_configured_for_frontend,
     defer_to_test_stages_enabled,
     find_task,
@@ -3362,6 +3363,59 @@ def run_batch_compile(
         )
 
 
+def skip_batch_compile(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    code_workspace: Path | list[Path],
+    *,
+    parallel_run_id: str | None = None,
+    lease_token: str | None = None,
+    workspace_ref: str | None = None,
+) -> dict[str, Any]:
+    """Record the fixed Workflow's temporary opt-out without running a compiler."""
+    try:
+        bundle = load_plan_bundle(_feature_dir(workspace, feature))
+    except ValueError as exc:
+        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
+    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
+    batch = bundle.batches.get(batch_id)
+    batch_compile = batch.get("batchCompile") if isinstance(batch, dict) else None
+    status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
+    if status == "skipped":
+        if parallel_run_id is not None:
+            mark_parallel_batch(
+                workspace,
+                feature,
+                parallel_run_id,
+                batch_id,
+                "sealed",
+                compileStatus="skipped",
+            )
+        return {
+            "compileStatus": "skipped",
+            "skipReason": batch_compile.get("skipReason") or "batch_compile_not_configured_for_frontend",
+            "requiredAction": "run_utest",
+            "reusedRecordedCompile": True,
+        }
+    if status != "pending":
+        raise TaskRunnerError(f"batch_compile_skip_requires_pending:{batch_id}:{status}")
+    with _task_run_lock(_feature_dir(workspace, feature)):
+        _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
+        return _integrate_batch_compile_result(
+            workspace,
+            feature,
+            batch_id,
+            {
+                "compileStatus": "skipped",
+                "skipReason": WORKFLOW_BATCH_COMPILE_SKIP_REASON,
+                "commandId": None,
+            },
+            parallel_run_id=parallel_run_id,
+        )
+
+
 def record_interrupted_batch_compile(
     workspace: Path,
     feature: str,
@@ -3868,6 +3922,23 @@ def _cmd_record_interrupted_batch_compile(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
+def _cmd_skip_batch_compile(args: argparse.Namespace) -> int:
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        result = skip_batch_compile(
+            workspace,
+            feature,
+            args.batch_id,
+            code_workspace,
+            parallel_run_id=args.parallel_run_id,
+            lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
+        )
+        return _emit(_compile_result_is_recorded_success(result, args.parallel_run_id), **result)
+    except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
+        return _emit_error(exc)
+
+
 def _cmd_revalidate_batch_compile(args: argparse.Namespace) -> int:
     """处理 revalidate-batch-compile 子命令"""
     try:
@@ -3964,6 +4035,16 @@ def main(argv: list[str] | None = None) -> int:
     interrupted_batch_compile.add_argument("--workspace-ref")
     interrupted_batch_compile.add_argument("--reason", required=True)
     interrupted_batch_compile.set_defaults(func=_cmd_record_interrupted_batch_compile)
+
+    skip_batch_compile_parser = subparsers.add_parser("skip-batch-compile")
+    skip_batch_compile_parser.add_argument("--workspace")
+    skip_batch_compile_parser.add_argument("--feature")
+    skip_batch_compile_parser.add_argument("--batch-id", required=True)
+    skip_batch_compile_parser.add_argument("--code-workspace", required=True, action="append")
+    skip_batch_compile_parser.add_argument("--parallel-run-id", required=True)
+    skip_batch_compile_parser.add_argument("--lease-token", required=True)
+    skip_batch_compile_parser.add_argument("--workspace-ref")
+    skip_batch_compile_parser.set_defaults(func=_cmd_skip_batch_compile)
 
     revalidate_batch_compile = subparsers.add_parser("revalidate-batch-compile")
     revalidate_batch_compile.add_argument("--workspace")

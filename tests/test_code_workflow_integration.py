@@ -161,14 +161,12 @@ def test_fixed_workflow_entrypoint():
         "record-test-failure",
         'testStatus:\\"deferred\\"',
         "--purpose review",
-        "compileAndSealDelivery",
-        "record-interrupted-batch-compile",
-        "workflow_interrupted",
-        "revalidate-batch-compile",
-        "compileAlreadyRecorded",
-        '!["passed", "failed", "skipped"].includes(batchResult.compileStatus)',
-        "无论 compileStatus 为 passed、failed 或 skipped",
-        "前端未配置批次编译命令",
+        "skipBatchCompileForDelivery",
+        "skip-batch-compile",
+        "workflow_batch_compile_disabled",
+        "compileSkipRecorded",
+        'batchResult.compileStatus !== "skipped"',
+        "临时停用所有 Batch compile",
         "parallel_git_index_lock_busy",
         "parallel_git_index_lock_recovery_failed",
         "SINGLE_REPAIRABLE_STAGES",
@@ -188,6 +186,12 @@ def test_fixed_workflow_entrypoint():
         return False
     if "compileAlreadyPassed" in content:
         print("✗ rework 仍将已记录的编译失败误判为未通过")
+        return False
+    delivery_start = content.find("async function skipBatchCompileForDelivery(")
+    delivery_end = content.find("async function runBatchUtestAndSeal(", delivery_start)
+    delivery_protocol = content[delivery_start:delivery_end]
+    if '"${taskRunnerPath}" batch-compile' in delivery_protocol or '"${taskRunnerPath}" revalidate-batch-compile' in content:
+        print("✗ 固定 Workflow 仍会执行 Batch compile")
         return False
     rework_start = content.find("async function reworkDeliveryImplementation(")
     rework_end = content.find("async function recordSingleRepairResolution(", rework_start)
@@ -215,10 +219,10 @@ def test_fixed_workflow_entrypoint():
     if route_start < 0 or task_prompt < 0 or route_start < task_prompt:
         print("✗ Route resolver 未绑定到前端 Task Agent 协议")
         return False
-    review_prompt = content.find("对已草稿封存、尚未编译的 Batch")
-    compile_prompt = content.find("已通过业务 Review，现在才执行本 Batch 的首次编译")
-    if review_prompt < 0 or compile_prompt < 0:
-        print("✗ Review 与编译的固定顺序缺失")
+    review_prompt = content.find("对已草稿封存的 Batch")
+    compile_skip_prompt = content.find("已通过业务 Review。当前插件已临时停用所有 Batch compile")
+    if review_prompt < 0 or compile_skip_prompt < 0:
+        print("✗ Review 与编译跳过记录的固定顺序缺失")
         return False
     print("✓ 多 Batch 使用固定 workflow 脚本")
     print("✓ 每个 Batch 独立完成 review、UTest、合并并重新调度")

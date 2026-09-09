@@ -817,6 +817,55 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(compiled_batch["batchCompile"]["status"], "skipped")
             self.assertEqual(compiled_batch["tasks"][0]["status"], "implemented")
 
+    def test_parallel_workflow_compile_opt_out_is_recorded_as_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, _code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            batch = _read_batch(feature_dir)
+            batch["batchCompile"] = {
+                "status": "pending",
+                "commandId": None,
+                "output": None,
+                "failureCategory": None,
+                "diagnosticPaths": [],
+                "repairOwnerTaskIds": [],
+                "repairTaskId": None,
+                "repairAttempts": 0,
+                "maxRepairAttempts": 3,
+                "requestedCodeWorkspaces": [],
+                "workspaceSnapshotSha256": None,
+                "implementationEvidenceByTask": {},
+                "implementationRevisionByTask": {},
+            }
+            _write_batch(feature_dir, batch)
+            _refresh_parallel_pipeline(feature_dir)
+
+            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
+                result = task_runner_module._integrate_batch_compile_result(
+                    workspace,
+                    "alpha",
+                    "B001",
+                    {
+                        "compileStatus": "skipped",
+                        "skipReason": task_runner_module.WORKFLOW_BATCH_COMPILE_SKIP_REASON,
+                        "commandId": None,
+                    },
+                    parallel_run_id="cw-test-001",
+                )
+
+            self.assertEqual(result["compileStatus"], "skipped")
+            self.assertEqual(result["skipReason"], "workflow_batch_compile_disabled")
+            mark_parallel.assert_called_once_with(
+                workspace, "alpha", "cw-test-001", "B001", "sealed", compileStatus="skipped"
+            )
+            compiled_batch = _read_batch(feature_dir)
+            self.assertEqual(compiled_batch["batchCompile"]["status"], "skipped")
+            self.assertEqual(
+                compiled_batch["batchCompile"]["skipReason"],
+                "workflow_batch_compile_disabled",
+            )
+            load_plan_bundle(feature_dir)
+
     def test_parallel_compile_failure_is_recorded_without_blocking_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, code = _workspace(Path(tmp))
