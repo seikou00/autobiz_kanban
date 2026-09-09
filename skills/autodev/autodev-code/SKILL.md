@@ -237,16 +237,9 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 
 `batch-compile` 只编译生产代码，不运行 TASK 测试，也不创建测试资产。它属于 Review 后的交付步骤，不属于实现阶段；长时间编译仍通过宿主异步命令执行并持续获取同一后台任务结果，不得重复启动编译。
 
-- 返回 `compileStatus=passed` 后，parallel Batch 的 TASK 保持 `implemented`，已提交 Worktree 状态为 `sealed`，下一步是 UTest，绝不重新执行 Review。Batch 在同一 Worktree 生成并执行 UTest（随后重新 `seal`），并仅在声明 `qualityGateCommands` 时执行 `quality_gate`，才进入 `ready_to_candidate`；UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
-- 返回 `requiredAction=start_batch_compile_repair` 时，必须从 `repairOwnerTaskIds` 选择 runner 允许的责任 TASK，由模型根据 `diagnosticPaths`、`diagnosticSummary` 和编译输出修复生产代码。推荐先执行下列命令建立 repair run，再修改代码：
+- 在固定并行 Workflow 中，`compileStatus=passed` 或 `compileStatus=failed` 都是已记录的诊断结果：parallel Batch 的 TASK 保持 `implemented`，已提交 Worktree 状态为 `sealed`，下一步都是 UTest，绝不重新执行 Review，也不得因编译失败启动 compile repair。Batch 在同一 Worktree 生成并执行 UTest（随后重新 `seal`），并仅在声明 `qualityGateCommands` 时执行 `quality_gate`，才进入 `ready_to_candidate`；UTest 通过时记录通过 evidence，最终失败时记录非阻断 issue 与真实 runner Evidence，并继续后续流程。`parallel_merge_train.py` 会 fast-forward 推广该批已完成 Review/UTest 记录的同一候选 SHA，随后才写入 `mergeCommitSha`、将 TASK/Batch 标记为 `done` 并释放下游。
 
-```bash
-python "${pluginPath}/hooks/task_runner.py" start-batch-compile-repair --feature "${feature}" --batch-id "<BATCH_ID>" --task-id "<REPAIR_OWNER_TASK_ID>" --code-workspace "<BUSINESS_REPO>"
-```
-
-如果模型已先完成生产代码修复，再执行 `start-batch-compile-repair`，不得回滚修复：runner 会以失败编译快照为基线收编真实文件差异，并在返回中设置 `adoptedPreStartChanges=true`。随后即使不再修改文件，也必须用返回的 runId 执行 `finish-implementation`，生成新的 implementation evidence，再重新执行同一批次的 `batch-compile`。收编仍受 workspace 边界和测试文件禁改规则约束。
-
-不得让用户手工修改，不得自行执行 `mvn compile`、前端 build/typecheck 或其他旁路编译，也不得在 repair 中创建/修改测试或执行测试命令。每批最多 3 次编译 repair；达到上限后按 `escalate_batch_compile_repair_exhausted` 阻断，不得开启第 4 次或绕过状态。
+不得让用户手工修改，不得自行执行 `mvn compile`、前端 build/typecheck 或其他旁路编译，也不得在 repair 中创建/修改测试或执行测试命令。编译状态只能由固定 Workflow 的 `batch-compile` 或 `revalidate-batch-compile` 记录；无法生成结构化结果、无法写入证据、lease 无效或 seal/release 失败才会中断流程。
 
 ### 单任务修复协议
 

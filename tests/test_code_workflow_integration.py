@@ -163,6 +163,8 @@ def test_fixed_workflow_entrypoint():
         "--purpose review",
         "compileAndSealDelivery",
         "revalidate-batch-compile",
+        "compileAlreadyRecorded",
+        "无论 compileStatus 为 passed 还是 failed",
         "SINGLE_REPAIRABLE_STAGES",
         "recordSingleRepairResolution",
         "single_repair_accepted",
@@ -177,6 +179,9 @@ def test_fixed_workflow_entrypoint():
         return False
     if "--with-heartbeat" in content or "--require-heartbeat" in content:
         print("✗ 固定脚本仍依赖旧的后台 heartbeat 参数")
+        return False
+    if "compileAlreadyPassed" in content:
+        print("✗ rework 仍将已记录的编译失败误判为未通过")
         return False
     route_start = content.find("start-route-run")
     task_prompt = content.find("以 taskContract.uiRequired 为唯一条件")

@@ -778,6 +778,29 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         emit.assert_called_once_with(True, **recorded)
 
+    def test_parallel_revalidate_compile_failure_returns_success_after_it_is_recorded(self) -> None:
+        args = SimpleNamespace(
+            workspace="/unused",
+            feature="alpha",
+            batch_id="B001",
+            code_workspace=["/unused-repository"],
+            parallel_run_id="cw-test-001",
+            lease_token="lease-token",
+            workspace_ref="default",
+        )
+        recorded = {
+            "compileStatus": "failed",
+            "requiredAction": "recorded_continue",
+            "wasRevalidation": True,
+        }
+        with patch("hooks.task_runner._resolve", return_value=(Path("/unused"), "alpha", [Path("/unused-repository")])), patch(
+            "hooks.task_runner.revalidate_batch_compile", return_value=recorded
+        ), patch("hooks.task_runner._emit", return_value=0) as emit:
+            exit_code = task_runner_module._cmd_revalidate_batch_compile(args)
+
+        self.assertEqual(exit_code, 0)
+        emit.assert_called_once_with(True, **recorded)
+
     def test_parallel_batch_compile_requires_a_passed_review(self) -> None:
         pending_manifest = {
             "batches": {

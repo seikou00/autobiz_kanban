@@ -940,7 +940,7 @@ async function runBatchUtestAndSeal(batchResult) {
 async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
   const reviewResolvedByRepair = options.reviewResolvedByRepair === true;
   const testResolvedByRepair = options.testResolvedByRepair === true;
-  const compileAlreadyPassed = options.compileAlreadyPassed === true;
+  const compileAlreadyRecorded = options.compileAlreadyRecorded === true;
   const batchId = batchResult.batchId;
   const batchWorktree = batchResult.worktreePath;
   const batchBranch = batchResult.branchName;
@@ -976,7 +976,10 @@ async function runDeliveryReviewTestAndGate(batchResult, options = {}) {
     }
     requireSuccess(review, `stage review ${batchId}`);
   }
-  if (!compileAlreadyPassed) {
+  if (compileAlreadyRecorded && !["passed", "failed"].includes(batchResult.compileStatus)) {
+    throw new Error(`compile_record_missing_for_delivery:${batchId}`);
+  }
+  if (!compileAlreadyRecorded) {
     batchResult = await compileAndSealDelivery(batchResult);
   }
   if (!testResolvedByRepair) {
@@ -1039,8 +1042,8 @@ async function reworkDeliveryImplementation(recovery) {
     `依次执行：1) 用 batch_lease_manager.py acquire 获取真实 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"、--ttl-seconds ${timeoutPerBatch}、--lease-guard）。插件在每个携带 token 的 task_runner/worktree_manager 命令边界续租；禁止自行启动后台 heartbeat；随后 mark-batch 为 running；` +
     `2) 对需要修复的 TASK（仅 ${JSON.stringify(taskIds)}）读取其 latestImplementationEvidenceId，并使用 task_runner.py start-task-repair --prior-evidence-id <该真实 ID> --parallel-run-id "${runId}" --lease-token <真实 token> --code-workspace "${batchWorktree}" --workspace-ref "${batchWorkspaceRef}"；` +
     `3) 修复生产代码后，用 finish-implementation --repair-mode 和该 start 返回的真实 task run-id 记录新的 implementation evidence；` +
-    `4) 必须用 python "${taskRunnerPath}" revalidate-batch-compile（不是 batch-compile 缓存结果），并携带 --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 token> --workspace-ref "${batchWorkspaceRef}"，在同一 worktree 重新实际编译；通过后先用同一 token 执行 batch_lease_manager.py check --require-lease-guard，再用 worktree_manager.py seal 产生新的 commitSha，再以 final-status sealed 释放同一 lease。` +
-    `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；任何失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",compileStatus:"passed",worktreePath,branchName,commitSha}。`,
+    `4) 必须用 python "${taskRunnerPath}" revalidate-batch-compile（不是 batch-compile 缓存结果），并携带 --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 token> --workspace-ref "${batchWorkspaceRef}"，在同一 worktree 强制重新实际编译。无论 compileStatus 为 passed 还是 failed，都必须保留 task_runner 输出并确认该状态已写入；编译失败是已记录的非阻断诊断，不得启动 compile repair 或返回 failed/timeout。确认结果已记录后，用同一 token 执行 batch_lease_manager.py check --require-lease-guard，再用 worktree_manager.py seal 产生新的 commitSha，并以 final-status sealed 释放同一 lease。只有编译命令未能产生结构化结果、无法写入状态、lease 无效或 seal/release 失败才中断。` +
+    `不得创建新分支/Worktree、不得合并、不得运行非本 Batch 的验证；其他命令失败保留 Worktree 并以 final-status pending 释放 lease，让 Workflow 标记为 retry_pending。返回 {batchId,status:"success",compileStatus:"passed"|"failed",worktreePath,branchName,commitSha}。`,
     { label: `rework-implement-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
   ), `implementation rework ${batchId}`);
 }
@@ -1102,8 +1105,8 @@ async function runDeliveryWithImplementationRepair(batchResult) {
     delivery = repaired;
     await recordSingleRepairResolution(staged.recovery, repaired);
     options = staged.failedStage === "review"
-      ? { reviewResolvedByRepair: true, compileAlreadyPassed: true }
-      : { reviewResolvedByRepair: true, testResolvedByRepair: true, compileAlreadyPassed: true };
+      ? { reviewResolvedByRepair: true, compileAlreadyRecorded: true }
+      : { reviewResolvedByRepair: true, testResolvedByRepair: true, compileAlreadyRecorded: true };
   }
 }
 
@@ -1115,8 +1118,8 @@ async function continueRecoveredDelivery(recovery) {
   await recordSingleRepairResolution(recovery, repaired);
   const failedStage = recovery.failureContext.failedStage;
   const options = failedStage === "review"
-    ? { reviewResolvedByRepair: true, compileAlreadyPassed: true }
-    : { reviewResolvedByRepair: true, testResolvedByRepair: true, compileAlreadyPassed: true };
+    ? { reviewResolvedByRepair: true, compileAlreadyRecorded: true }
+    : { reviewResolvedByRepair: true, testResolvedByRepair: true, compileAlreadyRecorded: true };
   return runDeliveryReviewTestAndGate(repaired, options);
 }
 

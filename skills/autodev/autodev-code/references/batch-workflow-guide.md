@@ -160,9 +160,11 @@ baseline commit per physical Git root.
 5. Each Review draft first performs production-code-only `review`. Only a
    passed Review may run the first `batch-compile` and formally seal that
    delivery. A Review source bug returns to that Batch's implement repair,
-   followed by `revalidate-batch-compile` and a new seal; the Review is then
-   recorded as resolved. The resulting compiled delivery performs UTest in the
-   same Worktree and re-seals the test assets. Any final UTest failure is
+   followed by forced `revalidate-batch-compile` and a new seal; either
+   `passed` or `failed` compile status is recorded as diagnostic evidence and
+   does not block UTest. The Review is then recorded as resolved. The resulting
+   delivery performs UTest in the same Worktree and re-seals the test assets.
+   Any final UTest failure is
    retained with its runner Evidence as a non-blocking issue and proceeds to
    later stages without restarting implementation, Review, or UTest. It
    performs `quality_gate` only if the Batch declares static-check commands.

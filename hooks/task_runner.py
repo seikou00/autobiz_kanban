@@ -3670,6 +3670,21 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
 
 
+def _compile_result_is_recorded_success(result: dict[str, Any], parallel_run_id: str | None) -> bool:
+    """Return whether a compile outcome may advance the parallel Workflow.
+
+    Compilation is diagnostic-only after Review in the fixed parallel delivery
+    flow.  A failed compiler invocation is therefore successful at the command
+    protocol level once its result and evidence have been durably recorded.
+    Infrastructure failures still arrive here as exceptions instead.
+    """
+    return result.get("compileStatus") == "passed" or (
+        parallel_run_id is not None
+        and result.get("compileStatus") == "failed"
+        and result.get("requiredAction") == "recorded_continue"
+    )
+
+
 def _cmd_batch_compile(args: argparse.Namespace) -> int:
     """处理 batch-compile 子命令"""
     try:
@@ -3687,12 +3702,7 @@ def _cmd_batch_compile(args: argparse.Namespace) -> int:
         # evidence and continues to UTest/Merge Train.  Its command itself
         # succeeded at recording that result, so do not make the host abort
         # the surrounding Workflow merely because the compiler exited nonzero.
-        compile_status = result.get("compileStatus")
-        success = compile_status == "passed" or (
-            args.parallel_run_id is not None
-            and compile_status == "failed"
-            and result.get("requiredAction") == "recorded_continue"
-        )
+        success = _compile_result_is_recorded_success(result, args.parallel_run_id)
         return _emit(
             success,
             **result,
@@ -3714,9 +3724,10 @@ def _cmd_revalidate_batch_compile(args: argparse.Namespace) -> int:
             lease_token=args.lease_token,
             workspace_ref=args.workspace_ref,
         )
-        # 根据编译状态返回正确的退出码
-        compile_status = result.get("compileStatus")
-        success = compile_status == "passed"
+        # Revalidation is the same diagnostic gate as the first parallel
+        # compile.  Its forced execution prevents a stale result, but a
+        # recorded failure must not interrupt Review -> UTest delivery.
+        success = _compile_result_is_recorded_success(result, args.parallel_run_id)
         return _emit(
             success,
             **result,
