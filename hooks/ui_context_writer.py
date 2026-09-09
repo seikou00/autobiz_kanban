@@ -304,20 +304,17 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
             route_hint_display = f"`{route_hint}`" if route_hint else '-'
             states_display = ', '.join(states) if states else '-'
 
-            # 构建关联能力字符串
+            # 构建关联能力字符串（仅中文）
             capabilities_display = '-'
             if page_id in page_to_capabilities:
                 cap_ids = page_to_capabilities[page_id]
                 cap_descriptions = []
                 for cap_id in cap_ids:
                     cap_zh = _capability_id_to_zh(cap_id)
-                    # 查找该能力关联的资源
-                    resources = capability_to_resources.get(cap_id, [])
-                    if resources:
-                        resource_str = ', '.join(resources)
-                        cap_descriptions.append(f"{cap_zh}→[{resource_str}]")
-                    else:
-                        cap_descriptions.append(cap_zh)
+                    # 只提取中文描述部分（去掉括号中的英文ID）
+                    if '(' in cap_zh:
+                        cap_zh = cap_zh.split('(')[0].strip()
+                    cap_descriptions.append(cap_zh)
                 capabilities_display = '<br>'.join(cap_descriptions)
 
             # 构建交互列表字符串
