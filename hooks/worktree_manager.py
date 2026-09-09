@@ -15,6 +15,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,8 +31,15 @@ from hooks.repository_snapshot import (
     PLATFORM_RUNTIME_DIRECTORY,
     RepositorySnapshotError,
     current_git_branch,
-    git_status_porcelain,
     resolve_git_root,
+)
+
+
+GIT_INDEX_LOCK_RETRY_ATTEMPTS = 4
+GIT_INDEX_LOCK_RETRY_DELAY_SECONDS = 3
+_GIT_INDEX_LOCK_ERROR_RE = re.compile(
+    r"(?:unable to create .*index\.lock.*(?:file exists|exists)|index\.lock.*(?:file exists|exists))",
+    re.IGNORECASE,
 )
 
 
@@ -44,6 +52,112 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
     )
+
+
+def _git_index_lock_path(worktree: Path) -> Path | None:
+    """Resolve this linked worktree's own index lock without mutating Git state."""
+
+    result = _git(worktree, "rev-parse", "--git-path", "index.lock")
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    candidate = Path(result.stdout.strip())
+    return candidate if candidate.is_absolute() else (worktree / candidate).resolve()
+
+
+def _git_index_lock_error(result: subprocess.CompletedProcess[str]) -> bool:
+    return result.returncode != 0 and bool(
+        _GIT_INDEX_LOCK_ERROR_RE.search(f"{result.stderr}\n{result.stdout}")
+    )
+
+
+def _git_index_lock_failure(
+    worktree: Path,
+    *,
+    operation: str,
+    result: subprocess.CompletedProcess[str],
+    attempts: int,
+    forced_cleanup_attempted: bool = False,
+) -> dict[str, Any]:
+    lock_path = _git_index_lock_path(worktree)
+    return {
+        "success": False,
+        "error": "parallel_git_index_lock_busy",
+        "retryable": True,
+        "retryAfterSeconds": GIT_INDEX_LOCK_RETRY_DELAY_SECONDS,
+        "retryAttempts": attempts,
+        "forcedCleanupAttempted": forced_cleanup_attempted,
+        "gitOperation": operation,
+        "lockPath": str(lock_path) if lock_path is not None else None,
+        "lockExists": bool(lock_path and lock_path.exists()),
+        "gitError": result.stderr.strip() or result.stdout.strip(),
+    }
+
+
+def _git_with_index_lock_retry(
+    worktree: Path,
+    *args: str,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any] | None, dict[str, Any] | None]:
+    """Wait for, then recover, this Batch worktree's stale Git index lock.
+
+    Linked worktrees have distinct indexes, so a lock here belongs to this
+    specific Batch checkout.  The fixed Workflow assigns exactly one writer
+    agent to it.  A lock that survives the bounded grace period is therefore
+    stale state from an interrupted Git command and can be removed before a
+    final retry of the original operation.
+    """
+
+    operation = "git " + " ".join(args)
+    result: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(1, GIT_INDEX_LOCK_RETRY_ATTEMPTS + 1):
+        result = _git(worktree, *args)
+        if not _git_index_lock_error(result):
+            return result, None, None
+        if attempt < GIT_INDEX_LOCK_RETRY_ATTEMPTS:
+            time.sleep(GIT_INDEX_LOCK_RETRY_DELAY_SECONDS)
+    assert result is not None
+    lock_path = _git_index_lock_path(worktree)
+    if lock_path is None or not lock_path.is_file():
+        return result, _git_index_lock_failure(
+            worktree,
+            operation=operation,
+            result=result,
+            attempts=GIT_INDEX_LOCK_RETRY_ATTEMPTS,
+        ), None
+    try:
+        lock_path.unlink()
+    except OSError as exc:
+        failure = _git_index_lock_failure(
+            worktree,
+            operation=operation,
+            result=result,
+            attempts=GIT_INDEX_LOCK_RETRY_ATTEMPTS,
+            forced_cleanup_attempted=True,
+        )
+        failure.update({
+            "error": "parallel_git_index_lock_recovery_failed",
+            "recoveryError": str(exc),
+        })
+        return result, failure, None
+
+    recovery = {
+        "lockPath": str(lock_path),
+        "waitedSeconds": (GIT_INDEX_LOCK_RETRY_ATTEMPTS - 1) * GIT_INDEX_LOCK_RETRY_DELAY_SECONDS,
+        "retryAttempts": GIT_INDEX_LOCK_RETRY_ATTEMPTS,
+        "gitOperation": operation,
+        "action": "removed_stale_index_lock_and_retried",
+    }
+    result = _git(worktree, *args)
+    if not _git_index_lock_error(result):
+        return result, None, recovery
+    failure = _git_index_lock_failure(
+        worktree,
+        operation=operation,
+        result=result,
+        attempts=GIT_INDEX_LOCK_RETRY_ATTEMPTS + 1,
+        forced_cleanup_attempted=True,
+    )
+    failure["indexLockRecovery"] = recovery
+    return result, failure, recovery
 
 
 def _branch_component(value: str) -> str:
@@ -242,13 +356,24 @@ def _unstage_platform_runtime(worktree: Path) -> dict[str, Any] | None:
     Batch agent runs.  A previous command may already have staged that state,
     so an exclude pathspec on ``git add`` alone is insufficient.
     """
-    staged = _git(worktree, "diff", "--cached", "--name-only", "--", PLATFORM_RUNTIME_DIRECTORY)
+    staged, lock_failure, _ = _git_with_index_lock_retry(
+        worktree,
+        "diff",
+        "--cached",
+        "--name-only",
+        "--",
+        PLATFORM_RUNTIME_DIRECTORY,
+    )
+    if lock_failure is not None:
+        return lock_failure
     if staged.returncode != 0:
         return {"success": False, "error": f"parallel_batch_staged_runtime_check_failed:{staged.stderr.strip()}"}
     paths = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
     if not paths:
         return None
-    reset = _git(worktree, "reset", "--", *paths)
+    reset, lock_failure, _ = _git_with_index_lock_retry(worktree, "reset", "--", *paths)
+    if lock_failure is not None:
+        return lock_failure
     if reset.returncode != 0:
         return {"success": False, "error": f"parallel_batch_unstage_runtime_failed:{reset.stderr.strip()}"}
     return None
@@ -272,6 +397,7 @@ def seal_parallel_batch(
     except ValueError:
         return {"success": False, "error": f"parallel_batch_lease_invalid:{batch_id}"}
     with run_lock(artifact_workspace, feature, run_id):
+        index_lock_recoveries: list[dict[str, Any]] = []
         try:
             manifest, batch, repository_ref, git_root = _parallel_binding(artifact_workspace, feature, run_id, batch_id)
         except ValueError as exc:
@@ -317,7 +443,19 @@ def seal_parallel_batch(
         runtime_error = _unstage_platform_runtime(worktree)
         if runtime_error:
             return runtime_error
-        status = git_status_porcelain(worktree)
+        status, lock_failure, lock_recovery = _git_with_index_lock_retry(
+            worktree,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
+        )
+        if lock_failure is not None:
+            return lock_failure
+        if lock_recovery is not None:
+            index_lock_recoveries.append(lock_recovery)
         if status.returncode != 0:
             return {"success": False, "error": f"parallel_worktree_status_failed:{status.stderr.strip()}"}
         changed = [line[3:] for line in status.stdout.splitlines() if len(line) > 3]
@@ -340,7 +478,7 @@ def seal_parallel_batch(
         if forbidden:
             return {"success": False, "error": "parallel_batch_artifact_changes_forbidden", "files": forbidden}
         if changed:
-            staged = _git(
+            staged, lock_failure, lock_recovery = _git_with_index_lock_retry(
                 worktree,
                 "add",
                 "-A",
@@ -348,9 +486,13 @@ def seal_parallel_batch(
                 ".",
                 f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
             )
+            if lock_failure is not None:
+                return lock_failure
+            if lock_recovery is not None:
+                index_lock_recoveries.append(lock_recovery)
             if staged.returncode != 0:
                 return {"success": False, "error": f"parallel_batch_stage_failed:{staged.stderr.strip()}"}
-            committed = _git(
+            committed, lock_failure, lock_recovery = _git_with_index_lock_retry(
                 worktree,
                 "commit",
                 "-m",
@@ -359,6 +501,10 @@ def seal_parallel_batch(
                 ".",
                 f":(exclude){PLATFORM_RUNTIME_DIRECTORY}**",
             )
+            if lock_failure is not None:
+                return lock_failure
+            if lock_recovery is not None:
+                index_lock_recoveries.append(lock_recovery)
             if committed.returncode != 0:
                 return {"success": False, "error": f"parallel_batch_commit_failed:{committed.stderr.strip()}"}
         sha = _git(worktree, "rev-parse", "HEAD")
@@ -373,6 +519,7 @@ def seal_parallel_batch(
             "previousCommitSha": previous_commit_sha if isinstance(previous_commit_sha, str) and previous_commit_sha else None,
             "changedFiles": list(changed),
             "purpose": seal_purpose,
+            "indexLockRecoveries": index_lock_recoveries,
         }
         save_manifest(artifact_workspace, feature, run_id, manifest)
     append_event(artifact_workspace, feature, run_id, "batch_sealed", batchId=batch_id, commitSha=sha.stdout.strip(), changedFiles=changed)
@@ -383,6 +530,7 @@ def seal_parallel_batch(
         "previousCommitSha": previous_commit_sha if isinstance(previous_commit_sha, str) and previous_commit_sha else None,
         "changedFiles": changed,
         "purpose": seal_purpose,
+        "indexLockRecoveries": index_lock_recoveries,
     }
 
 

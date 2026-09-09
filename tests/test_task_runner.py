@@ -870,6 +870,62 @@ class TaskRunnerTest(unittest.TestCase):
             self.assertEqual(completed_batch["tasks"][0]["status"], "done")
             self.assertEqual(completed_batch["mergeCommitSha"], "a" * 40)
 
+    def test_parallel_compile_environment_timeout_is_recorded_without_blocking_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, code = _workspace(Path(tmp))
+            _configure_defer_to_test_stages(feature_dir)
+            started = _start(workspace, code)
+            (code / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+            finished = _run(
+                "finish-implementation", "--workspace", str(workspace), "--feature", "alpha",
+                "--task-id", "T001", "--code-workspace", str(code),
+                "--run-id", started["runId"],
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            timeout = task_runner_module.TaskRunnerError(
+                "validation_environment_unavailable:BATCH-B001-COMPILE:command_timeout",
+                errorCategory="environment_failure",
+                failureCategory="command_timeout",
+                detail="timeoutSeconds=300;output=",
+            )
+            with patch("hooks.task_runner._run_validation", side_effect=timeout):
+                compile_result = task_runner_module._run_batch_compile(
+                    workspace,
+                    "alpha",
+                    "B001",
+                    code,
+                )
+
+            self.assertEqual(compile_result["compileStatus"], "failed")
+            self.assertEqual(compile_result["errorCategory"], "environment_failure")
+            self.assertEqual(compile_result["failureCategory"], "command_timeout")
+            self.assertIn("batch_compile_environment_failure:command_timeout", compile_result["output"])
+            with patch("hooks.task_runner.mark_parallel_batch") as mark_parallel:
+                result = task_runner_module._integrate_batch_compile_result(
+                    workspace,
+                    "alpha",
+                    "B001",
+                    compile_result,
+                    parallel_run_id="cw-test-001",
+                )
+
+            self.assertEqual(result["compileStatus"], "failed")
+            self.assertEqual(result["requiredAction"], "recorded_continue")
+            self.assertEqual(result["errorCategory"], "environment_failure")
+            mark_parallel.assert_called_once_with(
+                workspace,
+                "alpha",
+                "cw-test-001",
+                "B001",
+                "sealed",
+                compileStatus="failed",
+                error="command_timeout",
+            )
+            batch = _read_batch(feature_dir)
+            self.assertEqual(batch["batchCompile"]["status"], "failed")
+            self.assertEqual(batch["batchCompile"]["failureCategory"], "command_timeout")
+            self.assertEqual(batch["tasks"][0]["status"], "implemented")
+
     def test_parallel_compile_failure_returns_success_after_it_is_recorded(self) -> None:
         args = SimpleNamespace(
             workspace="/unused",

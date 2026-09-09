@@ -388,6 +388,50 @@ class ParallelStagedPipelineTest(unittest.TestCase):
             self.assertTrue(compile_lease["ownerToken"])
             release_lease(workspace, "alpha", run_id, "B001", compile_lease["ownerToken"], final_status="pending")
 
+    def test_seal_cleans_stale_index_lock_after_bounded_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, feature_dir, repo = _workspace(Path(tmp))
+            _enable_pipeline(feature_dir)
+            created = create_run(workspace, "alpha", max_parallel=1, timeout_seconds=60, code_workspaces=[str(repo)])
+            run_id = created["runId"]
+            provisioned = provision_parallel_worktree(workspace, "alpha", run_id, "B001")
+            worktree = Path(provisioned["worktreePath"])
+            lease = acquire_lease(workspace, "alpha", run_id, "B001", ttl_seconds=60)
+            mark_batch(
+                workspace,
+                "alpha",
+                run_id,
+                "B001",
+                "running",
+                worktreePath=str(worktree),
+                branchName=provisioned["branchName"],
+            )
+            (worktree / "delivery.txt").write_text("delivery\n", encoding="utf-8")
+            raw_lock_path = _git_output(worktree, "rev-parse", "--git-path", "index.lock")
+            lock_path = Path(raw_lock_path)
+            if not lock_path.is_absolute():
+                lock_path = worktree / lock_path
+            lock_path.write_text("stale or externally-held lock\n", encoding="utf-8")
+
+            with patch("hooks.worktree_manager.GIT_INDEX_LOCK_RETRY_DELAY_SECONDS", 0):
+                sealed = seal_parallel_batch(
+                    workspace,
+                    "alpha",
+                    run_id,
+                    "B001",
+                    worktree,
+                    lease["ownerToken"],
+                    purpose="review",
+                )
+
+            self.assertTrue(sealed["success"], sealed)
+            self.assertFalse(lock_path.exists())
+            self.assertEqual(len(sealed["indexLockRecoveries"]), 1)
+            recovery = sealed["indexLockRecoveries"][0]
+            self.assertEqual(Path(recovery["lockPath"]), lock_path)
+            self.assertEqual(recovery["retryAttempts"], 4)
+            self.assertEqual(recovery["action"], "removed_stale_index_lock_and_retried")
+
     def test_skipped_frontend_compile_can_seal_and_release_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, feature_dir, repo = _workspace(Path(tmp))

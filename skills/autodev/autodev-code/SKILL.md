@@ -241,6 +241,8 @@ python "${pluginPath}/hooks/task_runner.py" batch-compile --feature "${feature}"
 
 不得让用户手工修改，不得自行执行 `mvn compile`、前端 build/typecheck 或其他旁路编译，也不得在 repair 中创建/修改测试或执行测试命令。编译状态只能由固定 Workflow 的 `batch-compile` 或 `revalidate-batch-compile` 记录；无法生成结构化结果、无法写入证据、lease 无效或 seal/release 失败才会中断流程。
 
+`worktree_manager.py seal` 若遇到同一 linked worktree 的 `index.lock`，会先做有限次短暂重试；锁持续存在时，由插件仅清理 Git 为该 linked worktree 解析出的 `index.lock` 并重试原命令，成功则在 `indexLockRecoveries` 中留痕。受控清理后仍不能写入时才返回 `parallel_git_index_lock_busy` 或 `parallel_git_index_lock_recovery_failed`，以 `final-status pending` 释放租约，并由同一 `runId` 的 scheduler `resume` 重试该 Batch。
+
 ### 单任务修复协议
 
 当某个已完成的 TASK 需要修复时（例如回检发现问题），使用单任务修复流程。

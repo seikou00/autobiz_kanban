@@ -3209,6 +3209,27 @@ def _run_batch_compile(
         )
 
     command_id = str(compile_command.get("id", ""))
+    requested_paths = [str(path.resolve()) for path in requested_workspaces]
+    workspace_state = _repository_state(repositories)
+    workspace_snapshot_sha256 = _repository_state_sha256(workspace_state)
+    implementation_evidence_by_task = {
+        str(task.get("id")): str(task.get("latestImplementationEvidenceId"))
+        for task in batch_tasks
+        if isinstance(task, dict) and isinstance(task.get("id"), str)
+    }
+    implementation_revision_by_task = {
+        str(task.get("id")): int(task.get("implementationRevision", 0))
+        for task in batch_tasks
+        if isinstance(task, dict) and isinstance(task.get("id"), str)
+    }
+    fallback_task_id = next(
+        (
+            str(task.get("id"))
+            for task in reversed(batch_tasks)
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        ),
+        "",
+    )
     try:
         exit_code, output = _run_validation(
             compile_command,
@@ -3216,19 +3237,6 @@ def _run_batch_compile(
             batch_id=batch_id,
             task_id="__batch_compile__",
         )
-        requested_paths = [str(path.resolve()) for path in requested_workspaces]
-        workspace_state = _repository_state(repositories)
-        workspace_snapshot_sha256 = _repository_state_sha256(workspace_state)
-        implementation_evidence_by_task = {
-            str(task.get("id")): str(task.get("latestImplementationEvidenceId"))
-            for task in batch_tasks
-            if isinstance(task, dict) and isinstance(task.get("id"), str)
-        }
-        implementation_revision_by_task = {
-            str(task.get("id")): int(task.get("implementationRevision", 0))
-            for task in batch_tasks
-            if isinstance(task, dict) and isinstance(task.get("id"), str)
-        }
         if exit_code == 0:
             return {
                 "compileStatus": "passed",
@@ -3240,14 +3248,6 @@ def _run_batch_compile(
                 "implementationRevisionByTask": implementation_revision_by_task,
             }
         diagnostic_paths = _validation_diagnostic_paths(output, compile_command, repositories)
-        fallback_task_id = next(
-            (
-                str(task.get("id"))
-                for task in reversed(batch_tasks)
-                if isinstance(task, dict) and isinstance(task.get("id"), str)
-            ),
-            "",
-        )
         repair_owner_ids = _validation_repair_owner_task_ids(
             feature_dir,
             batch,
@@ -3270,8 +3270,40 @@ def _run_batch_compile(
             "implementationEvidenceByTask": implementation_evidence_by_task,
             "implementationRevisionByTask": implementation_revision_by_task,
         }
-    except TaskRunnerError:
-        raise
+    except TaskRunnerError as exc:
+        # A compiler timeout, unavailable toolchain, or dependency-network
+        # outage is still a meaningful post-Review diagnostic.  Persist it as
+        # a failed Batch compile so the parallel delivery can seal the reviewed
+        # code and continue to UTest; invalid plan/command contracts remain
+        # hard failures and are deliberately re-raised.
+        if exc.details.get("errorCategory") != "environment_failure":
+            raise
+        failure_category = str(exc.details.get("failureCategory") or "environment_failure")
+        detail = str(exc.details.get("detail") or str(exc))
+        output = (
+            f"batch_compile_environment_failure:{failure_category}\n"
+            f"{detail}"
+        )
+        repair_owner_ids = _validation_repair_owner_task_ids(
+            feature_dir,
+            batch,
+            fallback_task_id,
+            [],
+        )
+        return {
+            "compileStatus": "failed",
+            "commandId": command_id,
+            "output": output,
+            "failureCategory": failure_category,
+            "errorCategory": "environment_failure",
+            "diagnosticPaths": [],
+            "repairOwnerTaskIds": repair_owner_ids,
+            "requestedCodeWorkspaces": requested_paths,
+            "workspaceSnapshotSha256": workspace_snapshot_sha256,
+            "workspaceState": workspace_state,
+            "implementationEvidenceByTask": implementation_evidence_by_task,
+            "implementationRevisionByTask": implementation_revision_by_task,
+        }
     except Exception as exc:
         raise TaskRunnerError(
             f"batch_compile_execution_failed:{exc}",
@@ -3481,6 +3513,7 @@ def _integrate_batch_compile_result(
                 "commandId": compile_result.get("commandId"),
                 "output": compile_result.get("output", ""),
                 "failureCategory": compile_result.get("failureCategory", ""),
+                "errorCategory": compile_result.get("errorCategory"),
                 "diagnosticPaths": compile_result.get("diagnosticPaths", []),
             }
         refreshed = load_plan_bundle(_feature_dir(workspace, feature))
@@ -3504,6 +3537,7 @@ def _integrate_batch_compile_result(
             "commandId": compile_result.get("commandId"),
             "output": compile_result.get("output", ""),
             "failureCategory": compile_result.get("failureCategory", ""),
+            "errorCategory": compile_result.get("errorCategory"),
             "diagnosticPaths": compile_result.get("diagnosticPaths", []),
             "repairOwnerTaskIds": compile_result.get("repairOwnerTaskIds", []),
             "repairAttempts": attempts,

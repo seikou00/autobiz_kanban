@@ -167,6 +167,8 @@ def test_fixed_workflow_entrypoint():
         '!["passed", "failed", "skipped"].includes(batchResult.compileStatus)',
         "无论 compileStatus 为 passed、failed 或 skipped",
         "前端未配置批次编译命令",
+        "parallel_git_index_lock_busy",
+        "parallel_git_index_lock_recovery_failed",
         "SINGLE_REPAIRABLE_STAGES",
         "recordSingleRepairResolution",
         "single_repair_accepted",
