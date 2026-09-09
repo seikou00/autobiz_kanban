@@ -29,6 +29,7 @@ from hooks.parallel_runtime import (  # noqa: E402
     batch_write_set,
     plan_digest,
     resource_groups,
+    select_runnable_batches,
 )
 from hooks.plan_json import BATCH_ID_RE, load_plan_bundle, plan_json_path  # noqa: E402
 from hooks.repository_snapshot import RepositorySnapshotError, resolve_git_root  # noqa: E402
@@ -116,8 +117,10 @@ def resolve_code_workspace_contract(
         # The plugin creates linked native Git worktrees from each repository
         # binding.  The workflow host may therefore be an artifact directory;
         # it no longer needs to be the business repository root.
-        # The repository coordinator still turns multi-root contracts into one
-        # child Workflow per root so each child has a single repository scope.
+        # A fixed workflow receives the complete mapping.  Its Batch agents
+        # provision native worktrees from the individual bindings, so a
+        # multi-root plan remains one workflow run rather than a fan-out of
+        # platform workflows.
         "workflowHostGitRoot": git_roots[0] if len(git_roots) == 1 else None,
         "workflowHostGitRoots": git_roots,
         "repositoryCount": len(git_roots),
@@ -201,12 +204,12 @@ def _load_runtime_config(artifact_workspace: Path) -> dict[str, Any]:
     return config
 
 
-def _find_write_set_overlap(batches_in_wave: list[str], by_id: dict[str, Any]) -> list[str]:
-    """Find files that are modified by multiple batches in the same wave."""
+def _find_write_set_overlap(batch_ids: list[str], by_id: dict[str, Any]) -> list[str]:
+    """Find files modified by more than one Batch in a preview selection."""
     all_files: set[str] = set()
     overlapping: set[str] = set()
 
-    for batch_id in batches_in_wave:
+    for batch_id in batch_ids:
         batch = by_id.get(batch_id, {})
         write_set = batch.get("writeSet", [])
         if isinstance(write_set, list):
@@ -224,10 +227,10 @@ def _batch_execution_plan(
 ) -> dict[str, Any]:
     """Render the scheduler's deterministic preflight view for the caller.
 
-    It deliberately stays a preview: a later scheduler resume can change the
-    remaining waves after a merge failure or plan repair.  The initial order,
-    dependencies, write-set serialization, and parallelism limit all use the
-    same resource grouping logic as the runtime scheduler.
+    It deliberately stays a preview: a later scheduler refresh can change the
+    runnable set after a merge, worker completion, failure, or plan repair.
+    The initial dispatch uses the same dynamic slot-selection logic as the
+    runtime scheduler; compatibility groups remain audit-only hints.
     """
     # Load runtime config
     runtime_config = _load_runtime_config(artifact_workspace) if artifact_workspace else {}
@@ -255,6 +258,17 @@ def _batch_execution_plan(
         },
         "runtimeConfig": runtime_config,  # Pass config to resource_groups
     }
+    initial_ready = sorted(
+        batch_id
+        for batch_id in remaining
+        if all(dependency in completed for dependency in by_id[batch_id].get("deps", []))
+    )
+    initial_dispatch = select_runnable_batches(
+        preview_manifest,
+        initial_ready,
+        [],
+        max_parallel,
+    )
     waves: list[dict[str, Any]] = []
     while remaining:
         ready = sorted(
@@ -319,12 +333,16 @@ def _batch_execution_plan(
         )
     else:
         notes.append(
-            "保守模式：同一仓库的重叠写集会拆分为串行 Wave；原生 Git Worktree 仅隔离 checkout，不绕过该规则。"
+            "保守模式：同一仓库的重叠写集不会与 active Batch 同时启动；槽位释放后会立即重新选择安全的依赖就绪 Batch。原生 Git Worktree 仅隔离 checkout，不绕过该规则。"
         )
 
     return {
         "schemaVersion": 2,
         "maxParallel": max_parallel,
+        "initialDispatch": {
+            "batchIds": initial_dispatch,
+            "rule": "dependency_ready_and_safe_within_available_parallel_slots",
+        },
         "parallelSchedulingMode": runtime_config.get("parallelSchedulingMode", "conservative"),
         "deliveryStages": ["prepare", "implement", "review", "test"],
         "optionalDeliveryStage": {
@@ -354,6 +372,9 @@ def _batch_execution_plan(
             }
             for batch in batches
         ],
+        # Kept for callers that render the old preview contract. These are an
+        # audit projection, not runtime launch barriers; `initialDispatch` and
+        # scheduler refreshes describe the actual dynamic behavior.
         "waves": waves,
         "notes": notes,
     }
@@ -508,65 +529,26 @@ def analyze_batches(
         }
         runtime_config = _load_runtime_config(artifact_workspace)
         max_parallel = runtime_config["maxParallel"]
-        if workspace_contract["repositoryCount"] == 1:
-            # This is the complete payload for the platform workflow call.
-            # Returning it avoids models reconstructing a workflow or guessing
-            # a code workspace from the artifact directory.
-            return {
-                **common_result,
-                "executionMode": "fixed",
-                "workflowArgs": {
-                    "feature": feature,
-                    "pluginPath": str(script_root),
-                    "artifactWorkspace": str(artifact_workspace),
-                    "codeWorkspaces": workspace_contract["codeWorkspaces"],
-                    "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
-                    "maxParallel": max_parallel,
-                    "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
-                    "runtimeConfig": runtime_config,  # Pass full config to workflow
-                    "taskCardId": selected_task_card_id,
-                },
-                "reason": f"fixed_workflow_for_pending_batches:{len(valid_batches)}",
-                "requiredAction": "start_fixed_workflow",
-            }
-
-        coordinator_path = script_root / "hooks" / "repository_workflow_coordinator.py"
-        if not coordinator_path.is_file():
-            return {
-                **common_result,
-                "useWorkflow": False,
-                "strategy": "blocked",
-                "executionMode": "repository_coordinated",
-                "reason": "repository_workflow_coordinator_not_found",
-                "canStartWorkflow": False,
-                "requiredAction": "restore_repository_workflow_coordinator",
-            }
-        # The parent Code session invokes this coordinator before each DAG
-        # wave. It returns child workflow args with exactly one physical Git
-        # root. The plugin provisions the native worktree for that binding;
-        # the workflow host itself is not a repository-routing contract.
+        # This is the complete payload for one platform workflow, whether the
+        # plan has one or many physical Git roots.  The scheduler owns the
+        # cross-repository DAG and the fixed script's `parallel()` starts an
+        # independent agent per runnable Batch.
         return {
             **common_result,
-            "strategy": "repository_coordinated",
-            "executionMode": "repository_coordinated",
+            "executionMode": "fixed",
             "workflowArgs": {
                 "feature": feature,
                 "pluginPath": str(script_root),
                 "artifactWorkspace": str(artifact_workspace),
                 "codeWorkspaces": workspace_contract["codeWorkspaces"],
+                "workflowHostGitRoot": workspace_contract["workflowHostGitRoot"],
                 "maxParallel": max_parallel,
                 "timeoutPerBatch": DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
                 "runtimeConfig": runtime_config,
                 "taskCardId": selected_task_card_id,
             },
-            "repositoryCoordinator": {
-                "path": str(coordinator_path),
-                "prepareCommand": "prepare",
-                "nextCommand": "next",
-                "workflowInvocation": "launch_each_repository_workflow_in_parallel",
-            },
-            "reason": f"repository_coordinated_workflow_for_pending_batches:{len(valid_batches)}",
-            "requiredAction": "start_repository_coordinator",
+            "reason": f"fixed_workflow_for_pending_batches:{len(valid_batches)}",
+            "requiredAction": "start_fixed_workflow",
         }
     except Exception as exc:
         return {

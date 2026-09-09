@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import contextlib
-import io
 import tempfile
 import subprocess
 import unittest
@@ -10,82 +8,10 @@ from pathlib import Path
 from unittest import mock
 
 from hooks.plan_json import PlanBundle
-import hooks.repository_workflow_coordinator as repository_coordinator
-from hooks.repository_workflow_coordinator import _repository_requests
 from hooks.workflow_launcher import analyze_batches
 
 
 class WorkflowLauncherPathContractTest(unittest.TestCase):
-    def test_repository_coordinator_prepare_allows_controlled_bootstrap(self) -> None:
-        workspace = Path("/tmp/artifacts")
-        with mock.patch.object(repository_coordinator, "resolve_workspace", return_value=workspace), mock.patch.object(
-            repository_coordinator, "resolve_feature", return_value="multi"
-        ), mock.patch.object(
-            repository_coordinator,
-            "ensure_run",
-            return_value={"runId": "cw-20260827-001", "scheduledGroups": []},
-        ) as ensure, mock.patch.object(
-            repository_coordinator,
-            "_result",
-            return_value={"ok": True, "runId": "cw-20260827-001"},
-        ):
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                exit_code = repository_coordinator.main(
-                    [
-                        "prepare",
-                        "--workspace",
-                        str(workspace),
-                        "--feature",
-                        "multi",
-                        "--code-workspace",
-                        "api=/srv/api",
-                        "--code-workspace",
-                        "web=/srv/web",
-                        "--task-card-id",
-                        "Z990692-294",
-                    ]
-                )
-
-        self.assertEqual(exit_code, 0)
-        ensure.assert_called_once_with(
-            workspace,
-            "multi",
-            max_parallel=4,
-            timeout_seconds=3600,
-            code_workspaces=["api=/srv/api", "web=/srv/web"],
-            allow_bootstrap=True,
-            task_card_id="Z990692-294",
-        )
-
-    def test_repository_coordinator_groups_batches_by_physical_git_root(self) -> None:
-        manifest = {
-            "maxParallel": 4,
-            "timeoutPerBatch": 3600,
-            "repositories": {
-                "api": {"gitRoot": "/srv/api"},
-                "web": {"gitRoot": "/srv/web"},
-                "web-components": {"gitRoot": "/srv/web"},
-            },
-            "batches": {
-                "B001": {"repositoryRef": "api"},
-                "B002": {"repositoryRef": "web"},
-                "B003": {"repositoryRef": "web-components"},
-            },
-        }
-        requests = _repository_requests(
-            manifest,
-            {"scheduledGroups": [["B001", "B002", "B003"]]},
-            feature="multi",
-            plugin_path="/plugin",
-            artifact_workspace="/artifacts",
-        )
-
-        self.assertEqual([item["workflowHostGitRoot"] for item in requests], ["/srv/api", "/srv/web"])
-        self.assertEqual(requests[0]["batchIds"], ["B001"])
-        self.assertEqual(requests[1]["batchIds"], ["B002", "B003"])
-        self.assertEqual(requests[1]["workflowArgs"]["repositoryRefs"], ["web", "web-components"])
-        self.assertTrue(requests[1]["workflowArgs"]["coordinatorManaged"])
 
     def test_launcher_never_falls_back_to_serial_on_plan_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,7 +139,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
         validate.assert_called_once_with(artifact_workspace.resolve(), "three-paths")
         self.assertFalse((code_workspace / ".autobizdevops" / "features" / "three-paths" / "plan.json").exists())
 
-    def test_launcher_returns_repository_coordinator_for_multiple_worktree_sources(self) -> None:
+    def test_launcher_uses_one_fixed_workflow_for_multiple_worktree_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plugin_path = root / "plugin"
@@ -222,9 +148,7 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
             web = root / "web"
             feature_dir = artifact_workspace / ".autobizdevops" / "features" / "multi"
             (plugin_path / "workflows").mkdir(parents=True)
-            (plugin_path / "hooks").mkdir(parents=True)
             (plugin_path / "workflows" / "code-batched-execution.workflow.js").write_text("export const meta = {};", encoding="utf-8")
-            (plugin_path / "hooks" / "repository_workflow_coordinator.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
             for repo in (api, web):
                 repo.mkdir()
                 subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -250,18 +174,19 @@ class WorkflowLauncherPathContractTest(unittest.TestCase):
                 result = analyze_batches("multi", plugin_path, artifact_workspace, "Z990692-294")
 
         self.assertTrue(result["useWorkflow"])
-        self.assertEqual(result["strategy"], "repository_coordinated")
-        self.assertEqual(result["executionMode"], "repository_coordinated")
-        self.assertEqual(result["requiredAction"], "start_repository_coordinator")
+        self.assertEqual(result["strategy"], "fixed")
+        self.assertEqual(result["executionMode"], "fixed")
+        self.assertEqual(result["requiredAction"], "start_fixed_workflow")
         self.assertTrue(result["canStartWorkflow"])
         self.assertIsNone(result["workflowHostGitRoot"])
         self.assertEqual(result["workflowHostGitRoots"], [str(api.resolve()), str(web.resolve())])
-        self.assertEqual(result["repositoryCoordinator"]["prepareCommand"], "prepare")
         self.assertEqual(result["workflowArgs"]["codeWorkspaces"], {
             "api": str(api.resolve()),
             "web": str(web.resolve()),
         })
+        self.assertIsNone(result["workflowArgs"]["workflowHostGitRoot"])
         self.assertEqual(result["workflowArgs"]["taskCardId"], "Z990692-294")
+        self.assertNotIn("repositoryCoordinator", result)
 
     def test_launcher_blocks_without_code_workspace_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

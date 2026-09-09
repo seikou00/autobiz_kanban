@@ -1,5 +1,7 @@
 # 乐观并行执行 MVP 实施文档
 
+> 历史 MVP 设计记录，保留用于解释乐观模式与 Merge Train 的来由，并非当前调度行为的规范。当前实现由单一固定 Workflow 的 scheduler 驱动：每次状态刷新都会在可用 `maxParallel` 槽位内，按依赖、运行中任务安全性和特殊阶段约束动态补位；不会等待整个 Wave 完成。`--wave` 仅保留为 Merge Train 候选记录的唯一序号。
+
 ## 一、背景与目标
 
 ### 1.1 当前问题
@@ -487,9 +489,11 @@ class ConflictResolutionAgent:
 
 ---
 
-### 3.4 Coordinator 集成
+### 3.4 已废弃：按仓库拆分的 Coordinator
 
-**文件**: `hooks/repository_workflow_coordinator.py`
+> 此方案已废弃。多 Git 根 Batch 现在在一次固定 Workflow 中，由 `parallel()`
+> 创建各自的 Batch agent；每个 agent 仍从自身 Git 根创建原生 Worktree，并按仓库
+> 独立走 Merge Train。不得再创建按仓库拆分的子 Workflow。
 
 **改动点：处理 Merge Train 返回的新状态（_process_ready_batches 方法）**
 
@@ -998,7 +1002,7 @@ autobiz cleanup-worktrees
 - [ ] 单元测试：冲突检测
 
 ### Week 3: Coordinator 集成
-- [ ] 修改 `repository_workflow_coordinator.py`：处理 `candidate_conflicted`
+- [ ] 验证多 Git 根 Batch 在同一固定 Workflow 中的 agent 并行和独立 Merge Train
 - [ ] 实现 `ConflictResolutionAgent`（MVP 版，返回 manual_required）
 - [ ] 集成测试：完整流程
 
@@ -1077,7 +1081,7 @@ MVP 稳定后，可考虑：
 | `parallel_runtime.py` | 40 | 20 | 60 |
 | `parallel_merge_train.py` | 120 | 30 | 150 |
 | `conflict_resolution_agent.py` | 80 | 0 | 80 |
-| `repository_workflow_coordinator.py` | 50 | 20 | 70 |
+| 固定 Workflow 多仓库调度 | 0 | 0 | 0 |
 | `workflow_launcher.py` | 30 | 10 | 40 |
 | 测试代码 | 200 | 0 | 200 |
 | 文档 | 100 | 0 | 100 |
@@ -1116,7 +1120,7 @@ MVP 稳定后，可考虑：
 ### 修改的现有文件
 1. `hooks/parallel_runtime.py` - 调度规则改造
 2. `hooks/parallel_merge_train.py` - 冲突状态与检测
-3. `hooks/repository_workflow_coordinator.py` - 冲突处理集成
+3. `workflows/code-batched-execution.workflow.js` - 多仓库 Batch agent 并行
 4. `hooks/workflow_launcher.py` - 预览逻辑修复
 
 ### 新增文件

@@ -187,6 +187,12 @@ def test_fixed_workflow_entrypoint():
     if "compileAlreadyPassed" in content:
         print("✗ rework 仍将已记录的编译失败误判为未通过")
         return False
+    if "repository_coordinator" in launcher or "coordinatorManaged" in content:
+        print("✗ 多仓库路径仍会拆分为 coordinator 子 Workflow")
+        return False
+    if "await parallel(lifecycleJobs)" not in content:
+        print("✗ 固定 Workflow 未在内部并行启动 Batch agent")
+        return False
     route_start = content.find("start-route-run")
     task_prompt = content.find("以 taskContract.uiRequired 为唯一条件")
     if route_start < 0 or task_prompt < 0 or route_start < task_prompt:
@@ -360,8 +366,8 @@ const fs = require("fs");
 const vm = require("vm");
 const source = fs.readFileSync(process.argv[1], "utf8");
 const context = {
-  schedulerWaves: 0,
-  MAX_SCHEDULER_WAVES: 10,
+  schedulerCycles: 0,
+  MAX_SCHEDULER_CYCLES: 10,
   quarantinedBatchIds: new Set(),
   recordUnresolved: () => {},
 };

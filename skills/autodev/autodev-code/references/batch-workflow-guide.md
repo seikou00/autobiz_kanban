@@ -17,15 +17,13 @@ python "${pluginPath}/hooks/workflow_launcher.py" \
   --json
 ```
 
-For a single physical Git root, start the returned fixed script path only
-when all of these are true. For multiple physical Git roots, require
-`executionMode=repository_coordinated` and
-`requiredAction=start_repository_coordinator`: run the coordinator `prepare`,
-launch every returned `repositoryWorkflows` entry from its own
-`workflowHostGitRoot`, wait for all child Workflows in that DAG wave, then run
-the coordinator `next`. Repeat until `allMerged=true`, then invoke coordinator
-`begin-e2e`, run B-E2E only in its returned temporary worktrees, invoke
-`finish-e2e`, and finally invoke `final-verify` exactly once. The launcher copies the fixed plugin script into
+For one or more physical Git roots, start the returned fixed script path once
+when all of these are true. Pass the complete launcher `workflowArgs` mapping
+to that one Workflow. It creates a shared scheduler run and uses `parallel()`
+to start one agent chain for each independently runnable Batch; each chain
+provisions its own repository-native Worktree. The fixed Workflow performs
+B-E2E and final verification after all delivery Batches are promoted. The
+launcher copies the fixed plugin script into
 `artifactWorkspace/.cmbdevclaw/workflows/<feature>/` before the platform call and returns
 its `workflowScriptPath` plus `workflowScriptSha256`.
 `workflowScriptSource` identifies the immutable source. `workflowArgs` is the
@@ -34,25 +32,19 @@ complete argument object for the Workflow call; do not reconstruct it.
 - `useWorkflow=true`
 - `canStartWorkflow=true`
 - validation reason is `parallel_plan_valid` or `single_batch_workflow_valid`
-- single physical root: `executionMode=fixed` and
+- any number of physical roots: `executionMode=fixed` and
   `requiredAction=start_fixed_workflow`
-- multiple physical roots: `executionMode=repository_coordinated` and
-  `requiredAction=start_repository_coordinator`
 
 The launcher reads the mandatory top-level `plan.json.codeWorkspaces` mapping
-and returns `codeWorkspaces`, optional `workflowHostGitRoot` metadata, and
-`executionIsolation=native_git_worktrees` for a single physical Git root. For
-multiple physical roots it instead returns
-`executionMode=repository_coordinated` and a repository coordinator contract.
+and returns the complete `codeWorkspaces` mapping, optional
+`workflowHostGitRoot` metadata, and `executionIsolation=native_git_worktrees`.
 `artifactWorkspace` is only the artifact/state directory and must never be
 reused as a code workspace by guesswork. The plugin creates linked native
 checkouts from each `codeWorkspaces` binding, so the host may be launched from
-the artifact directory. A fixed Workflow can cover one Git root (multiple
-logical refs to that same root are allowed). Multiple independent repositories
-are launched as child Workflows by the coordinator, using the same fixed script
-and one shared scheduler run. The launcher returns
-`requiredAction=start_repository_coordinator`; it does not treat a multi-root
-mapping as a Plan error. A missing or invalid mapping is a Plan error: stop and
+the artifact directory. A fixed Workflow can cover multiple Git roots (and
+multiple logical refs may share a root). It uses one shared scheduler run and
+starts parallel Batch agents inside the same Workflow. A multi-root mapping is
+not a Plan error. A missing or invalid mapping is a Plan error: stop and
 repair the Plan. There is no CLI workspace override or legacy mapping fallback.
 
 There is no `task_runner.py code-session` command and no
@@ -88,11 +80,9 @@ fresh platform Workflow with the same launcher `scriptPath` and `args` (no
 and reads its current state instead of replaying a completed platform journal.
 
 The Workflow host workspace is not a Worktree source contract. The plugin
-resolves each repository from `codeWorkspaces` and provisions its own native
-Worktree. A coordinator child must
-contain exactly one physical Git root and only the returned `repositoryRefs` /
-`batchIds`; it must not receive another repository's workspace mapping. The
-artifact workspace remains independent and only stores Feature state.
+resolves every repository from the complete `codeWorkspaces` mapping and
+provisions its own native Worktree for each Batch. The artifact workspace
+remains independent and only stores Feature state.
 
 ## Execution Contract
 
@@ -104,8 +94,8 @@ Route 解析不属于 Code Session 的全局前置步骤。Batch Agent 必须先
 Agent 内完成 Route 解析、清单、parser（如适用）和 `FRONTEND_ROUTE.json`
 回检。这样同一批次中的后端 Task 不会被其他 Task 的 UI 产物阻塞。
 
-The fixed script starts with scheduler `ensure` and then runs a DAG in
-merge-gated waves. `ensure` creates the first durable run or reuses an active
+The fixed script starts with scheduler `ensure` and then runs a merge-gated,
+dynamic-slot DAG. `ensure` creates the first durable run or reuses an active
 run only after validating every sealed native delivery. A `needs_resolution`
 run or a missing sealed worktree remains fail-closed; do not create a new run
 to bypass it.
@@ -119,7 +109,7 @@ evidence already passed, and written its
 merge commit; no worker-facing command may
 set this status.
 
-The fixed Workflow passes `--allow-bootstrap` to `ensure`. When the source
+The fixed Workflow passes `--allow-bootstrap` to `ensure`. When a source
 repository has uncommitted business changes, the scheduler automatically creates
 one `autodev: bootstrap <feature> baseline` commit before native worktrees
 are provisioned. This is the only automatic source-branch commit before Batch
@@ -128,26 +118,24 @@ the dirty check and baseline commit. Direct CLI uses of `ensure` do not enable
 bootstrap by default and return `parallel_code_workspace_bootstrap_required`
 instead of modifying the repository.
 
-The multi-repository coordinator uses the same controlled bootstrap policy:
-`repository_workflow_coordinator.py prepare` passes `allow_bootstrap=True` to
-the shared scheduler before child Workflows are launched. This keeps dirty
-repositories from failing only because they entered through the coordinator;
-the bootstrap still excludes platform runtime files and records one explicit
-baseline commit per physical Git root.
+The same controlled bootstrap policy applies to every repository binding in a
+multi-root run. Platform runtime files are excluded and the scheduler records
+one explicit baseline commit per physical Git root before Batch worktrees are
+provisioned.
 
-1. The scheduler selects pending Batches whose dependencies are all `merged`.
-   That frontier is not a global delivery barrier: each selected Batch provisions
-   or reuses its own native linked Worktree from the frozen repository head.
-2. The current frontier runs concurrently with `parallel()` up to
-   `maxParallel`. Every Batch independently runs code → Review → compile/seal
+1. The scheduler selects pending Batches whose dependencies are all `merged`,
+   whose write sets are safe with every leased/running Batch, and for which a
+   `maxParallel` slot is free. A completed Batch immediately triggers a fresh
+   selection, so no unrelated Batch completion barrier exists.
+2. The selected tasks run concurrently with `parallel()` up to `maxParallel`.
+   Every Batch independently runs code → Review → compile/seal
    → UTest → quality gate → Merge Train promotion. A fast Batch may therefore
    review, test, and merge while another Batch in the same frontier is still
    coding. Every Batch records its actual Worktree path and branch in the
-   scheduler manifest; any overlap is handled as a real merge conflict.
-   A scheduler wave is only an execution-concurrency boundary: each Merge
-   Train candidate contains exactly one `--batch-id`. Its `--wave` value is a
-   unique candidate-record sequence, not a request to merge every Batch from
-   that scheduler wave together.
+   scheduler manifest. In conservative mode, same-repository write-set overlap
+   is excluded before launch; optimistic mode records that risk for Merge Train
+   handling. Each Merge Train candidate contains exactly one `--batch-id`; its
+   `--wave` value is only a unique candidate-record sequence.
 3. Each Batch acquires a lease, implements only its assigned TASKs, then
    invokes `worktree_manager.py seal --purpose review` to create an uncompiled
    Review draft. It must not run `batch-compile` at this point. The draft is
@@ -185,8 +173,8 @@ baseline commit per physical Git root.
    content-bound evidence only; it never runs a duplicate compile/test command.
 
 Independent Batches run in parallel, including independent Batches in the same
-repository. A dependency chain naturally advances one merged wave at a time,
-which is the required serial behavior.
+repository. A dependency chain advances only after its upstream merge commit,
+while unrelated ready work fills available slots immediately.
 
 An execution-stage failure is recorded as `retry_pending`, not terminal
 `failed`. Scheduler `resume` reclaims its lease and reschedules the Batch in
@@ -254,8 +242,8 @@ state.
   `parallel_batch_lifecycle.py cleanup-merged` before releasing downstream
   Batches. It removes only plugin-owned deliveries whose manifest status is
   `merged`, including an orphaned lease, native worktree, and temporary branch.
-  A cleanup failure blocks the next wave and is retried at the start of the
-  next Workflow. `failed`, `blocked`, and `needs_resolution` deliveries stay
+  A cleanup failure is retried at the start of the next Workflow. `failed`,
+  `blocked`, and `needs_resolution` deliveries stay
   intact for diagnosis and recovery. Explicitly rolled-back terminal runs use
   `parallel_batch_lifecycle.py cleanup` to remove all remaining resources.
 - Platform-owned `.cmbdevclaw/workflows/**` journal, state, and toolstream

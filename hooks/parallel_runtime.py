@@ -793,7 +793,11 @@ def stage_recovery_batches(manifest: dict[str, Any]) -> list[str]:
 
 
 def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None) -> list[list[str]]:
-    """Build execution waves from stage and physical write sets.
+    """Build compatibility groups for previews and audit output.
+
+    These groups are not dispatch barriers. The scheduler uses
+    :func:`select_runnable_batches` on every state refresh so a freed slot can
+    immediately receive another dependency-ready, non-conflicting Batch.
 
     Behavior depends on parallelSchedulingMode in runtime config:
     - optimistic: Ignores write-set conflicts for parallel stage, groups by maxParallel
@@ -820,7 +824,7 @@ def resource_groups(manifest: dict[str, Any], batch_ids: list[str] | None = None
     frontier_rank = min(stage_rank(batch_id) for batch_id in ids)
     frontier = [batch_id for batch_id in ids if stage_rank(batch_id) == frontier_rank]
 
-    # Critical phases: always single-batch waves
+    # Critical phases remain individually serial in preview output.
     if frontier_rank != stages["parallel"]:
         return [[batch_id] for batch_id in frontier]
 
@@ -844,41 +848,107 @@ def _optimistic_grouping(batch_ids: list[str], max_parallel: int) -> list[list[s
     return waves
 
 
-def _conservative_grouping(batch_ids: list[str], by_id: dict[str, Any]) -> list[list[str]]:
-    """Conservative grouping: serialize batches with write-set conflicts.
+def batch_write_sets_conflict(manifest: dict[str, Any], left: str, right: str) -> bool:
+    """Return whether two Batch deliveries may write the same source path.
 
-    This is the original behavior, kept for backward compatibility.
+    Different physical repositories never conflict. In the same repository an
+    omitted write set is deliberately treated as conflicting, because native
+    worktrees isolate checkouts but not later delivery/merge risk.
     """
-    def normalized_paths(batch_id: str) -> tuple[str, ...]:
-        raw = by_id.get(batch_id, {}).get("writeSet")
+    by_id = manifest.get("batches", {})
+    a = by_id.get(left, {}) if isinstance(by_id, dict) else {}
+    b = by_id.get(right, {}) if isinstance(by_id, dict) else {}
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return True
+    left_repo = a.get("gitRoot") or a.get("repositoryRef") or a.get("workspaceRef")
+    right_repo = b.get("gitRoot") or b.get("repositoryRef") or b.get("workspaceRef")
+    if left_repo != right_repo:
+        return False
+
+    def normalized_paths(batch: dict[str, Any]) -> tuple[str, ...]:
+        raw = batch.get("writeSet")
         if not isinstance(raw, list):
             return ()
         return tuple(sorted({str(path).replace("\\", "/").strip("/") for path in raw if str(path).strip()}))
 
-    def overlaps(left: str, right: str) -> bool:
-        if left in {".", ""} or right in {".", ""}:
+    def overlaps(first: str, second: str) -> bool:
+        if first in {".", ""} or second in {".", ""}:
             return True
-        if left == right:
+        if first == second:
             return True
-        return left.startswith(right + "/") or right.startswith(left + "/")
+        return first.startswith(second + "/") or second.startswith(first + "/")
 
-    def conflicts(left: str, right: str) -> bool:
-        a = by_id.get(left, {})
-        b = by_id.get(right, {})
-        left_repo = a.get("gitRoot") or a.get("repositoryRef") or a.get("workspaceRef")
-        right_repo = b.get("gitRoot") or b.get("repositoryRef") or b.get("workspaceRef")
-        if left_repo != right_repo:
-            return False
-        left_paths = normalized_paths(left)
-        right_paths = normalized_paths(right)
-        if not left_paths or not right_paths:
-            return True
-        return any(overlaps(path_a, path_b) for path_a in left_paths for path_b in right_paths)
+    left_paths = normalized_paths(a)
+    right_paths = normalized_paths(b)
+    if not left_paths or not right_paths:
+        return True
+    return any(overlaps(path_a, path_b) for path_a in left_paths for path_b in right_paths)
+
+
+def select_runnable_batches(
+    manifest: dict[str, Any],
+    batch_ids: list[str],
+    active_batch_ids: list[str],
+    slots: int,
+) -> list[str]:
+    """Select a dynamic, capacity-bounded set of safe Batch launches.
+
+    ``batch_ids`` contains only dependency-ready pending Batches and
+    ``active_batch_ids`` contains leased/running Batches. The selection is
+    recomputed whenever a worker completes, so it has no completion barrier:
+    every free slot is immediately offered to another eligible Batch. Critical
+    stages stay globally serial; conservative parallel mode additionally
+    rejects conflicts with both active and newly selected Batches.
+    """
+    if slots <= 0:
+        return []
+    by_id = manifest.get("batches", {})
+    if not isinstance(by_id, dict):
+        return []
+    candidates = sorted({batch_id for batch_id in batch_ids if isinstance(batch_id, str) and batch_id in by_id})
+    active = sorted({batch_id for batch_id in active_batch_ids if isinstance(batch_id, str) and batch_id in by_id})
+    if not candidates:
+        return []
+
+    stages = {"proto": 0, "global": 1, "parallel": 2, "integration": 3}
+
+    def stage_rank(batch_id: str) -> int:
+        batch = by_id.get(batch_id, {})
+        return stages.get(str(batch.get("executionStage", "parallel")) if isinstance(batch, dict) else "parallel", 2)
+
+    # A proto/global/integration Batch owns the execution lane alone. Do not
+    # launch ordinary work while it is running, nor launch such a Batch until
+    # every earlier ordinary worker has drained.
+    if any(stage_rank(batch_id) != stages["parallel"] for batch_id in active):
+        return []
+    frontier_rank = min(stage_rank(batch_id) for batch_id in candidates)
+    frontier = [batch_id for batch_id in candidates if stage_rank(batch_id) == frontier_rank]
+    if frontier_rank != stages["parallel"]:
+        return [] if active else frontier[:1]
+
+    config = manifest.get("runtimeConfig", {})
+    optimistic = isinstance(config, dict) and config.get("parallelSchedulingMode") == "optimistic"
+    if optimistic:
+        return frontier[:slots]
+
+    selected: list[str] = []
+    for batch_id in frontier:
+        if any(batch_write_sets_conflict(manifest, batch_id, running) for running in [*active, *selected]):
+            continue
+        selected.append(batch_id)
+        if len(selected) == slots:
+            break
+    return selected
+
+
+def _conservative_grouping(batch_ids: list[str], by_id: dict[str, Any]) -> list[list[str]]:
+    """Return compatibility groups for previews and audit output."""
+    manifest = {"batches": by_id}
 
     waves: list[list[str]] = []
     for batch_id in batch_ids:
         for wave in waves:
-            if not any(conflicts(batch_id, existing) for existing in wave):
+            if not any(batch_write_sets_conflict(manifest, batch_id, existing) for existing in wave):
                 wave.append(batch_id)
                 break
         else:

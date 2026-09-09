@@ -3,7 +3,7 @@ export const meta = {
   description: "Staged Batch DAG with per-Batch Review/UTest, merge train, and E2E-only finalization",
   whenToUse: "由 workflow_launcher.py 在存在合法待执行 Batch 时调用",
   phases: [
-    { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 波次" },
+    { title: "准备", detail: "创建或恢复 scheduler run 并计算当前可执行 DAG 集合" },
     { title: "Batch 阶段", detail: "编码 → review → 编译/封存 → test；Review 可定向修复一次，UTest 失败记录后继续" },
     { title: "候选验证", detail: "Merge Train 合成并推广已完成 Review 与 UTest 记录的候选 SHA" },
     { title: "最终验证", detail: "合并后运行 B-E2E，最终只聚合既有证据、不重复执行命令" }
@@ -11,7 +11,7 @@ export const meta = {
 };
 
 const DEFAULT_MAX_PARALLEL = 4;
-const MAX_SCHEDULER_WAVES = 100;
+const MAX_SCHEDULER_CYCLES = 100;
 // Review findings can receive one targeted implementation repair. Batch UTest
 // failures are durable non-blocking evidence: record them and continue to the
 // quality gate / Merge Train so independent Batch work is never interrupted.
@@ -294,13 +294,6 @@ const artifactWorkspace = input.artifactWorkspace || input.workspace;
 const codeWorkspaces = input.codeWorkspaces || (input.codeWorkspace ? { default: input.codeWorkspace } : null);
 const taskCardId = input.taskCardId;
 const workflowHostGitRoot = input.workflowHostGitRoot;
-const repositoryRefs = Array.isArray(input.repositoryRefs)
-  ? input.repositoryRefs.filter(ref => usableString(ref))
-  : [];
-const allowedBatchIds = Array.isArray(input.batchIds)
-  ? input.batchIds.filter(batchId => usableString(batchId))
-  : [];
-const coordinatorManaged = input.coordinatorManaged === true;
 const maxParallel = Number.isInteger(input.maxParallel) && input.maxParallel > 0
   ? input.maxParallel
   : DEFAULT_MAX_PARALLEL;
@@ -330,13 +323,6 @@ if (!usableString(taskCardId) || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskCardId
 if (usableString(workflowHostGitRoot) && !absolutePath(workflowHostGitRoot)) {
   throw new Error("invalid_workflow_repository_root");
 }
-if (coordinatorManaged && (!repositoryRefs.length || !allowedBatchIds.length)) {
-  throw new Error("repository_coordinator_scope_required");
-}
-if (coordinatorManaged && Object.keys(codeWorkspaces).some(ref => !repositoryRefs.includes(ref))) {
-  throw new Error("repository_coordinator_workspace_ref_scope_mismatch");
-}
-
 const schedulerPath = joinPath(pluginPath, "hooks/parallel_batch_scheduler.py");
 const leasePath = joinPath(pluginPath, "hooks/batch_lease_manager.py");
 const taskRunnerPath = joinPath(pluginPath, "hooks/task_runner.py");
@@ -354,42 +340,18 @@ const aggregatePath = joinPath(pluginPath, "hooks/parallel_evidence_aggregate.py
 const codeWorkspaceArgs = Object.entries(codeWorkspaces)
   .map(([workspaceRef, path]) => `--code-workspace "${workspaceRef}=${path}"`)
   .join(" ");
-const workspaceRefArgs = repositoryRefs
-  .map(workspaceRef => `--workspace-ref "${workspaceRef}"`)
-  .join(" ");
 
-function scopeGroups(groups) {
-  const allowed = new Set(allowedBatchIds);
+function normalizeScheduledGroups(groups) {
   return (Array.isArray(groups) ? groups : [])
-    .map(group => (Array.isArray(group) ? group.filter(batchId => !allowed.size || allowed.has(batchId)) : []))
+    .map(group => (Array.isArray(group) ? group.filter(usableString) : []))
     .filter(group => group.length > 0);
 }
 
-function hasWorkOutsideScope(scheduler) {
-  if (!allowedBatchIds.length || !scheduler || typeof scheduler !== "object") return false;
-  const allowed = new Set(allowedBatchIds);
-  const candidates = [
-    scheduler.scheduledGroups,
-    scheduler.allReadyBatches,
-    scheduler.allMergeableBatches,
-    scheduler.allStageRecoveryBatches,
-    scheduler.allParallelGroups,
-    scheduler.retryPendingBatches,
-    scheduler.blockedBatches,
-  ];
-  return candidates.some(value => {
-    const ids = Array.isArray(value)
-      ? value.flatMap(item => Array.isArray(item) ? item : [item])
-      : [];
-    return ids.some(batchId => usableString(batchId) && !allowed.has(batchId));
-  });
-}
-
-function retryPendingInScope(scheduler) {
+function retryPendingBatchesOf(scheduler) {
   const retryPending = scheduler && Array.isArray(scheduler.retryPendingBatches)
     ? scheduler.retryPendingBatches
     : [];
-  return retryPending.filter(batchId => usableString(batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(batchId)));
+  return retryPending.filter(usableString);
 }
 
 phase("准备");
@@ -400,7 +362,7 @@ try {
     `--workspace "${artifactWorkspace}" --feature "${feature}" ` +
     `--task-card-id "${taskCardId.trim()}" ` +
     `--max-parallel ${maxParallel} ` +
-    `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs} ${workspaceRefArgs}。` +
+    `--timeout-seconds ${timeoutPerBatch} --allow-bootstrap ${codeWorkspaceArgs}。` +
     `已有可恢复 run 时必须返回其原 runId，不得创建第二个 run。` +
     `必要时允许 scheduler 创建 autodev baseline 提交；不得修改业务文件内容，` +
     `且不得把 .cmbdevclaw 平台运行文件纳入提交。只返回该命令的 JSON 结果。`,
@@ -429,12 +391,12 @@ try {
 const runId = prepared.runId;
 
 async function recoverPendingRetries(scheduler, label) {
-  if (!retryPendingInScope(scheduler).length) return scheduler;
+  if (!retryPendingBatchesOf(scheduler).length) return scheduler;
   // A normal ensure/resume already performs this transition.  One immediate,
   // explicit retry makes the Workflow resilient to an interrupted lease
   // handoff while still letting the scheduler remain the sole state owner.
   return requireSchedulerResult(await agent(
-    `执行 python "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${workspaceRefArgs}。` +
+    `执行 python "${schedulerPath}" resume --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
     `恢复所有 retry_pending Batch，并在返回前清理其残留 lease；只返回 JSON。`,
     { label, phase: "准备", schema: SCHEDULER_RESULT_SCHEMA }
   ), label);
@@ -450,10 +412,10 @@ try {
   // original failure if it remains unavailable.
   initialRetryRecoveryFailure = error;
 }
-let scheduledGroups = scopeGroups(prepared.scheduledGroups || []);
-let mergeableBatches = (prepared.mergeableBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
-let stageRecoveryBatches = (prepared.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(result.batchId)));
-let retryPendingBatches = retryPendingInScope(prepared);
+let scheduledGroups = normalizeScheduledGroups(prepared.scheduledGroups || []);
+let mergeableBatches = (prepared.mergeableBatches || []).filter(usableString);
+let stageRecoveryBatches = (prepared.stageRecoveryBatches || []).filter(result => result && usableString(result.batchId));
+let retryPendingBatches = retryPendingBatchesOf(prepared);
 let batchTaskIds = prepared.batchTaskIds || {};
 let batchWorkspaces = prepared.batchWorkspaces || {};
 const batchResults = [];
@@ -465,9 +427,9 @@ const unresolvedRecordKeys = new Set();
 const quarantinedBatchIds = new Set();
 const schedulerFailures = [];
 const finalRepairResults = [];
-let schedulerWaves = 0;
+let schedulerCycles = 0;
 let mergeSequence = 0;
-let blockedBatches = (prepared.blockedBatches || []).filter(batchId => !allowedBatchIds.length || allowedBatchIds.includes(batchId));
+let blockedBatches = (prepared.blockedBatches || []).filter(usableString);
 let lastScheduler = prepared;
 
 function errorText(value) {
@@ -480,8 +442,8 @@ function errorText(value) {
   }
 }
 
-function inWorkflowScope(batchId) {
-  return usableString(batchId) && (!allowedBatchIds.length || allowedBatchIds.includes(batchId));
+function isValidBatchId(batchId) {
+  return usableString(batchId);
 }
 
 function activeUnresolvedRecords() {
@@ -509,7 +471,7 @@ function recordUnresolved(record) {
     unresolvedRecords.push(normalized);
   }
   if (
-    inWorkflowScope(normalized.batchId)
+    isValidBatchId(normalized.batchId)
     && !["cleanup", "deferred_issue", "validation", "scheduler"].includes(normalized.kind)
   ) {
     quarantinedBatchIds.add(normalized.batchId);
@@ -600,13 +562,13 @@ function markSchedulerRecovered() {
 function applySchedulerState(scheduler) {
   if (!scheduler || typeof scheduler !== "object") return;
   lastScheduler = scheduler;
-  scheduledGroups = scopeGroups(scheduler.scheduledGroups || []);
-  mergeableBatches = (scheduler.mergeableBatches || []).filter(inWorkflowScope);
-  stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && inWorkflowScope(result.batchId));
-  retryPendingBatches = retryPendingInScope(scheduler);
+  scheduledGroups = normalizeScheduledGroups(scheduler.scheduledGroups || []);
+  mergeableBatches = (scheduler.mergeableBatches || []).filter(isValidBatchId);
+  stageRecoveryBatches = (scheduler.stageRecoveryBatches || []).filter(result => result && isValidBatchId(result.batchId));
+  retryPendingBatches = retryPendingBatchesOf(scheduler);
   batchTaskIds = scheduler.batchTaskIds || batchTaskIds;
   batchWorkspaces = scheduler.batchWorkspaces || batchWorkspaces;
-  blockedBatches = (scheduler.blockedBatches || []).filter(inWorkflowScope);
+  blockedBatches = (scheduler.blockedBatches || []).filter(isValidBatchId);
   for (const batchId of retryPendingBatches) {
     recordUnresolved({ kind: "batch", batchId, status: "retry_pending", durable: true, source: "scheduler" });
   }
@@ -618,7 +580,7 @@ function applySchedulerState(scheduler) {
 async function readSchedulerState(label, phaseName = "准备") {
   try {
     const state = requireSchedulerResult(await agent(
-      `执行 python "${schedulerPath}" status --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" ${workspaceRefArgs}。` +
+      `执行 python "${schedulerPath}" status --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}"。` +
       `这是只读调度快照；不得恢复 retry_pending、修改业务代码、创建 Worktree 或运行 TASK。只返回 JSON。`,
       { label, phase: phaseName, schema: SCHEDULER_RESULT_SCHEMA }
     ), label);
@@ -1377,7 +1339,7 @@ async function runLifecycleSafely(batchId, source, execute, fallback = {}) {
 }
 
 function runnableScheduledBatchIds() {
-  return scopeGroups(scheduledGroups)
+  return normalizeScheduledGroups(scheduledGroups)
     .flat()
     .filter(batchId => !quarantinedBatchIds.has(batchId));
 }
@@ -1435,13 +1397,13 @@ function takeNextRunnableLifecycle(claimedBatchIds) {
 }
 
 function canStartLifecycle() {
-  schedulerWaves += 1;
-  if (schedulerWaves <= MAX_SCHEDULER_WAVES) return true;
+  schedulerCycles += 1;
+  if (schedulerCycles <= MAX_SCHEDULER_CYCLES) return true;
   recordUnresolved({
     kind: "scheduler",
-    status: "wave_limit_exceeded",
+    status: "cycle_limit_exceeded",
     durable: false,
-    error: `parallel_scheduler_wave_limit_exceeded:${schedulerWaves}`,
+    error: `parallel_scheduler_cycle_limit_exceeded:${schedulerCycles}`,
   });
   return false;
 }
@@ -1458,7 +1420,7 @@ async function runLifecycleChain(initialJob, claimedBatchIds, drainLabel) {
     // Do not wait for unrelated jobs passed to the same `parallel()` call.
     if (!result) return result;
     const state = await readSchedulerState(
-      `${drainLabel}-after-batch-${job.batchId}-${schedulerWaves}`,
+      `${drainLabel}-after-batch-${job.batchId}-${schedulerCycles}`,
       "Batch 阶段"
     );
     if (!state) return result;
@@ -1500,7 +1462,7 @@ async function drainRunnableLifecycles(drainLabel) {
     // `status` schedules currently-independent work but deliberately leaves
     // retry_pending records untouched.  Retries are deferred to the explicit
     // final repair phase so a flaky Batch cannot starve peer branches.
-    const state = await readSchedulerState(`${drainLabel}-schedule-wave-${schedulerWaves}`);
+    const state = await readSchedulerState(`${drainLabel}-schedule-cycle-${schedulerCycles}`);
     if (!state) return { ranAny, reason: "scheduler_snapshot_unavailable" };
   }
 }
@@ -1515,7 +1477,7 @@ function scopedManifestBatches(manifest) {
   const batches = manifest && manifest.batches && typeof manifest.batches === "object"
     ? manifest.batches
     : {};
-  return Object.entries(batches).filter(([batchId]) => inWorkflowScope(batchId));
+  return Object.entries(batches).filter(([batchId]) => isValidBatchId(batchId));
 }
 
 function unresolvedBatchDetails(scheduler = lastScheduler) {
@@ -1549,7 +1511,7 @@ function unresolvedBatchDetails(scheduler = lastScheduler) {
     });
   }
   for (const record of activeUnresolvedRecords()) {
-    if (!inWorkflowScope(record.batchId) || ["cleanup", "deferred_issue", "validation", "scheduler"].includes(record.kind)) continue;
+    if (!isValidBatchId(record.batchId) || ["cleanup", "deferred_issue", "validation", "scheduler"].includes(record.kind)) continue;
     const existing = byId.get(record.batchId) || { batchId: record.batchId, dependencies: [], blockedBy: [], blocks: [] };
     if (existing.status === "merged") continue;
     byId.set(record.batchId, {
@@ -1589,8 +1551,7 @@ function unresolvedMergeCandidateDetails(scheduler = lastScheduler) {
         return batch && batch.status === "merged" && usableString(batch.mergeCommitSha);
       })
     ) continue;
-    const ids = trainBatchIds.filter(inWorkflowScope);
-    if (allowedBatchIds.length && !ids.length) continue;
+    const ids = trainBatchIds.filter(isValidBatchId);
     add({
       trainId,
       repositoryRef: train.repositoryRef,
@@ -1650,7 +1611,7 @@ function completionReport({
   const cleanup = activeUnresolvedRecords().filter(record => record.kind === "cleanup");
   const activeSchedulerFailures = activeUnresolvedRecords().filter(record => record.kind === "scheduler");
   return {
-    ok: ["succeeded", "succeeded_with_issues", "repository_scope_completed"].includes(finalStatus),
+    ok: ["succeeded", "succeeded_with_issues"].includes(finalStatus),
     feature,
     runId,
     batchResults,
@@ -1686,12 +1647,12 @@ function completionReport({
 async function persistUndurableBatchFailures() {
   const active = activeUnresolvedRecords();
   const durableBatchIds = new Set(active
-    .filter(record => record.kind === "batch" && record.durable === true && inWorkflowScope(record.batchId))
+    .filter(record => record.kind === "batch" && record.durable === true && isValidBatchId(record.batchId))
     .map(record => record.batchId));
   for (const record of active) {
     if (
       record.durable === true
-      || !inWorkflowScope(record.batchId)
+      || !isValidBatchId(record.batchId)
       || !["batch", "merge_candidate"].includes(record.kind)
       || durableBatchIds.has(record.batchId)
     ) continue;
@@ -1844,16 +1805,16 @@ async function runFinalRepairAndReport() {
   }
 
   let repairState = await readSchedulerState("final-repair-before-retry", "最终修复与报告");
-  if (repairState && retryPendingInScope(repairState).length > 0) {
+  if (repairState && retryPendingBatchesOf(repairState).length > 0) {
     try {
       repairState = await recoverPendingRetries(repairState, "final-repair-resume-retry-pending");
       applySchedulerState(repairState);
       const rescheduled = new Set([
         ...(Array.isArray(repairState.rescheduledRetryBatches) ? repairState.rescheduledRetryBatches : []),
-        ...scopeGroups(repairState.scheduledGroups || []).flat(),
+        ...normalizeScheduledGroups(repairState.scheduledGroups || []).flat(),
         ...(repairState.mergeableBatches || []),
         ...(repairState.stageRecoveryBatches || []).map(item => item && item.batchId),
-      ].filter(inWorkflowScope));
+      ].filter(isValidBatchId));
       for (const batchId of rescheduled) quarantinedBatchIds.delete(batchId);
       finalRepairResults.push({
         kind: "resume_retry_pending",
@@ -1885,15 +1846,6 @@ await drainRunnableLifecycles("drain");
 
 const finalScheduler = await runFinalRepairAndReport();
 if (finalScheduler) applySchedulerState(finalScheduler);
-
-if (coordinatorManaged) {
-  return completionReport({
-    finalStatus: allWorkflowDeliveriesMerged(finalScheduler) ? "repository_scope_completed" : "completed_with_unresolved",
-    scheduler: finalScheduler || lastScheduler,
-    e2eSkippedReason: "repository_coordinator_managed",
-    nextAction: "repository_coordinator_next",
-  });
-}
 
 if (!allWorkflowDeliveriesMerged(finalScheduler)) {
   const snapshotAvailable = Boolean(manifestFromScheduler(finalScheduler));

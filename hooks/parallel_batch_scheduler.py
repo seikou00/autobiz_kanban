@@ -38,6 +38,7 @@ from hooks.parallel_runtime import (
     stage_recovery_batches,
     ready_batches,
     resource_groups,
+    select_runnable_batches,
     run_lock,
     save_manifest,
 )
@@ -849,11 +850,21 @@ def schedule(
             and str(item.get("workspaceRef") or item.get("repositoryRef")) not in allowed_refs
         ) if workspace_refs else 0
         slots = max(0, max_parallel - active)
-        if groups and slots > 0:
-            # ``resource_groups`` returns dependency-safe waves.  Only the
-            # first wave is released; later waves wait for a real merge.
-            selected.append(_scoped_batch_ids(manifest, groups[0][:slots], workspace_refs))
-            selected = [group for group in selected if group]
+        active_batch_ids = sorted(
+            str(batch_id)
+            for batch_id, item in manifest.get("batches", {}).items()
+            if isinstance(item, dict) and item.get("status") in {"leased", "running"}
+        )
+        runnable = select_runnable_batches(
+            manifest,
+            _scoped_batch_ids(manifest, ready, workspace_refs),
+            active_batch_ids,
+            slots,
+        )
+        if runnable:
+            # Keep the nested response shape for fixed-workflow compatibility;
+            # it is now one dynamic dispatch batch, not a completion barrier.
+            selected.append(runnable)
         manifest["scheduledAt"] = manifest.get("updatedAt")
         save_manifest(workspace, feature, run_id, manifest)
         return {
