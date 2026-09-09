@@ -288,10 +288,10 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
                 interactions_by_page[page_id] = []
             interactions_by_page[page_id].append(interaction)
 
-        # 页面表格
+        # 页面表格（包含能力列）
         lines.extend([
-            "| 页面ID | 页面名称 | 页面目标 | 路由提示 | 状态 |",
-            "| ------ | -------- | -------- | -------- | ---- |",
+            "| 页面ID | 页面名称 | 页面目标 | 路由提示 | 状态 | 关联能力 | 交互 |",
+            "| ------ | -------- | -------- | -------- | ---- | -------- | ---- |",
         ])
 
         for page in pages:
@@ -304,19 +304,8 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
             route_hint_display = f"`{route_hint}`" if route_hint else '-'
             states_display = ', '.join(states) if states else '-'
 
-            lines.append(f"| {page_id} | {name} | {goal} | {route_hint_display} | {states_display} |")
-
-        lines.append("")
-
-        # 每个页面的详细信息（能力和交互）
-        for page in pages:
-            page_id = page.get('pageId', 'N/A')
-            name = page.get('name', 'N/A')
-
-            lines.append(f"### {page_id}: {name}")
-            lines.append("")
-
-            # 该页面关联的能力
+            # 构建关联能力字符串
+            capabilities_display = '-'
             if page_id in page_to_capabilities:
                 cap_ids = page_to_capabilities[page_id]
                 cap_descriptions = []
@@ -326,26 +315,24 @@ def _generate_ui_context_md(data: dict[str, Any], feature: str) -> str:
                     resources = capability_to_resources.get(cap_id, [])
                     if resources:
                         resource_str = ', '.join(resources)
-                        cap_descriptions.append(f"{cap_zh} → [{resource_str}]")
+                        cap_descriptions.append(f"{cap_zh}→[{resource_str}]")
                     else:
                         cap_descriptions.append(cap_zh)
+                capabilities_display = '<br>'.join(cap_descriptions)
 
-                lines.append(f"**关联能力**: {' | '.join(cap_descriptions)}")
-                lines.append("")
-
-            # 该页面的交互列表
+            # 构建交互列表字符串
+            interactions_display = '-'
             if page_id in interactions_by_page:
-                lines.append("**交互列表**:")
-                lines.append("")
+                interaction_items = []
                 for interaction in interactions_by_page[page_id]:
                     interaction_id = interaction.get('interactionId', 'N/A')
                     summary = interaction.get('summary', 'N/A')
-                    state_refs = interaction.get('stateRefs', [])
+                    interaction_items.append(f"{interaction_id}: {summary}")
+                interactions_display = '<br>'.join(interaction_items)
 
-                    lines.append(f"- **{interaction_id}**: {summary}")
-                    if state_refs:
-                        lines.append(f"  - 关联状态: {', '.join(state_refs)}")
-                lines.append("")
+            lines.append(f"| {page_id} | {name} | {goal} | {route_hint_display} | {states_display} | {capabilities_display} | {interactions_display} |")
+
+        lines.append("")
     else:
         lines.extend([
             "暂无页面定义。",
