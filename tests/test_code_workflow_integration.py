@@ -162,6 +162,8 @@ def test_fixed_workflow_entrypoint():
         'testStatus:\\"deferred\\"',
         "--purpose review",
         "compileAndSealDelivery",
+        "record-interrupted-batch-compile",
+        "workflow_interrupted",
         "revalidate-batch-compile",
         "compileAlreadyRecorded",
         '!["passed", "failed", "skipped"].includes(batchResult.compileStatus)',

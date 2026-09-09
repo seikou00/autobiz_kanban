@@ -945,6 +945,61 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         emit.assert_called_once_with(True, **recorded)
 
+    def test_interrupted_parallel_compile_returns_success_after_diagnostic_is_recorded(self) -> None:
+        args = SimpleNamespace(
+            workspace="/unused",
+            feature="alpha",
+            batch_id="B001",
+            code_workspace=["/unused-repository"],
+            parallel_run_id="cw-test-001",
+            lease_token="lease-token",
+            workspace_ref="default",
+            reason="workflow host terminated the compile command",
+        )
+        recorded = {
+            "compileStatus": "failed",
+            "failureCategory": "workflow_interrupted",
+            "requiredAction": "recorded_continue",
+        }
+        with patch("hooks.task_runner._resolve", return_value=(Path("/unused"), "alpha", [Path("/unused-repository")])), patch(
+            "hooks.task_runner.record_interrupted_batch_compile", return_value=recorded
+        ) as record, patch("hooks.task_runner._emit", return_value=0) as emit:
+            exit_code = task_runner_module._cmd_record_interrupted_batch_compile(args)
+
+        self.assertEqual(exit_code, 0)
+        record.assert_called_once_with(
+            Path("/unused"), "alpha", "B001", [Path("/unused-repository")],
+            parallel_run_id="cw-test-001", lease_token="lease-token", workspace_ref="default",
+            reason="workflow host terminated the compile command",
+        )
+        emit.assert_called_once_with(True, **recorded)
+
+    def test_interrupted_compile_reuses_a_result_written_before_host_timeout(self) -> None:
+        bundle = SimpleNamespace(batches={
+            "B001": {
+                "batchCompile": {
+                    "status": "failed",
+                    "commandId": "BATCH-B001-COMPILE",
+                    "failureCategory": "command_timeout",
+                    "errorCategory": "environment_failure",
+                },
+            },
+        })
+        with patch("hooks.task_runner.load_plan_bundle", return_value=bundle), patch(
+            "hooks.task_runner._require_parallel_workflow_for_multi_batch"
+        ), patch("hooks.task_runner._assert_parallel_context"), patch(
+            "hooks.task_runner._assert_parallel_compile_after_review"
+        ):
+            result = task_runner_module.record_interrupted_batch_compile(
+                Path("/unused"), "alpha", "B001", Path("/unused-repository"),
+                parallel_run_id="cw-test-001", lease_token="lease-token",
+                workspace_ref="default", reason="workflow host timed out after task_runner returned",
+            )
+
+        self.assertEqual(result["compileStatus"], "failed")
+        self.assertEqual(result["failureCategory"], "command_timeout")
+        self.assertTrue(result["reusedRecordedCompile"])
+
     def test_parallel_revalidate_compile_failure_returns_success_after_it_is_recorded(self) -> None:
         args = SimpleNamespace(
             workspace="/unused",

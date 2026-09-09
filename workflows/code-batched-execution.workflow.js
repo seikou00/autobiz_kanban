@@ -873,14 +873,48 @@ async function compileAndSealDelivery(batchResult) {
   if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef)) {
     throw new Error(`post_review_compile_context_missing:${batchId}`);
   }
-  return requireSuccess(await agent(
+  const compiled = unwrap(await agent(
     `Batch ${batchId} 已通过业务 Review，现在才执行本 Batch 的首次编译和正式封存。只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作。` +
     `依次执行：1) 用 batch_lease_manager.py acquire 获取 lease token（workspace="${artifactWorkspace}"、feature="${feature}"、run-id="${runId}"、batch-id="${batchId}"、--ttl-seconds ${timeoutPerBatch}、--lease-guard）；插件会在每个携带该 token 的 task_runner/worktree_manager 命令边界续租；禁止自行运行 heartbeat、run_in_background、&、nohup 或 Start-Process；随后 mark-batch 为 running；` +
     `2) 用同一 token 执行 task_runner.py batch-compile（--workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 token> --workspace-ref "${batchWorkspaceRef}"）；` +
-    `3) 无论编译结果为 passed、failed 或 skipped，都必须保留 task_runner 输出并记录其 compileStatus。前端未配置批次编译命令时，task_runner 会返回 skipped；不得臆造前端 build/typecheck。编译失败（包含 command_timeout、工具链或依赖网络环境故障）是已记录的非阻断诊断：不得启动 compile repair、不得返回 failed/timeout；在确认结果 JSON 已写入后，执行带 --owner-token <真实 token> --require-lease-guard 的 lease check，继续 worktree_manager.py seal 封存同一版本，并以 final-status sealed 释放同一 lease。seal 遇到 index.lock 时会先等待，再仅清理该 linked worktree 已超时未释放的 index.lock 并重试；成功时在 JSON 的 indexLockRecoveries 中留痕。清理后仍失败才以 final-status pending 释放 lease 并让同一 run 的 resume 重试。只有编译命令未能产生结构化结果、无法写入状态、lease 无效或 seal/release 失败才中断。不得编辑代码、重新 Review 或运行 UTest。` +
+    `3) 无论编译结果为 passed、failed 或 skipped，都必须保留 task_runner 输出并记录其 compileStatus。前端未配置批次编译命令时，task_runner 会返回 skipped；不得臆造前端 build/typecheck。编译失败（包含 command_timeout、工具链或依赖网络环境故障）是已记录的非阻断诊断：不得启动 compile repair、不得返回 failed/timeout；在确认结果 JSON 已写入后，执行带 --owner-token <真实 token> --require-lease-guard 的 lease check，继续 worktree_manager.py seal 封存同一版本，并以 final-status sealed 释放同一 lease。seal 遇到 index.lock 时会先等待，再仅清理该 linked worktree 已超时未释放的 index.lock 并重试；成功时在 JSON 的 indexLockRecoveries 中留痕。若编译命令未能产生结构化结果，Workflow 会另行记录 workflow_interrupted 编译诊断并继续封存；只有该记录、lease、seal/release 失败才中断。不得编辑代码、重新 Review 或运行 UTest。` +
     `返回 {batchId,status:"success",compileStatus:"passed"|"failed"|"skipped",worktreePath,branchName,commitSha}。`,
     { label: `post-review-compile-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
-  ), `post-review compile ${batchId}`);
+  ));
+  if (
+    compiled
+    && compiled.status === "success"
+    && ["passed", "failed", "skipped"].includes(compiled.compileStatus)
+  ) {
+    return compiled;
+  }
+  return recordInterruptedCompileAndSeal(batchResult, errorText(compiled), "post-review compile");
+}
+
+async function recordInterruptedCompileAndSeal(batchResult, interruption, operation) {
+  const batchId = batchResult.batchId;
+  const batchWorktree = batchResult.worktreePath;
+  const batchBranch = batchResult.branchName;
+  const batchWorkspace = batchWorkspaces[batchId] || {};
+  const batchWorkspaceRef = batchWorkspace.workspaceRef;
+  if (!usableString(batchWorktree) || !usableString(batchBranch) || !usableString(batchWorkspaceRef)) {
+    throw new Error(`interrupted_compile_context_missing:${batchId}`);
+  }
+  // The host may terminate the agent command before task_runner can write its
+  // own compile JSON. That is a failed diagnostic, not a reason to strand
+  // sibling deliveries. Record the exact interruption and seal the reviewed
+  // (or reworked) commit without re-running the compiler.
+  return requireSuccess(await agent(
+    `Batch ${batchId} 的 ${operation} 未返回可用结构化结果，现将该中断记录为非阻断编译失败并继续封存。` +
+    `只能在既有原生 worktree "${batchWorktree}"、分支 "${batchBranch}" 内操作，不得重新执行 Maven/Gradle/npm 或修改业务代码。` +
+    `依次执行：1) python "${leasePath}" acquire --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --ttl-seconds ${timeoutPerBatch} --lease-guard，并保存真实 ownerToken；` +
+    `2) python "${schedulerPath}" mark-batch --workspace "${artifactWorkspace}" --feature "${feature}" --run-id "${runId}" --batch-id "${batchId}" --status running --worktree-path "${batchWorktree}" --branch-name "${batchBranch}"；` +
+    `3) python "${taskRunnerPath}" record-interrupted-batch-compile --workspace "${artifactWorkspace}" --feature "${feature}" --batch-id "${batchId}" --code-workspace "${batchWorktree}" --parallel-run-id "${runId}" --lease-token <真实 ownerToken> --workspace-ref "${batchWorkspaceRef}" --reason ${JSON.stringify(interruption)}；` +
+    `4) 用同一 token 执行 lease check --require-lease-guard，再执行 worktree_manager.py --json seal（artifact workspace、feature、runId、batchId、repo="${batchWorktree}"、同一 ownerToken）；最后以 final-status sealed release lease。` +
+    `若编译结果此前已由 task_runner 写入，该命令必须复用原 compileStatus；否则保留 workflow_interrupted 编译诊断并返回 compileStatus:"failed"。无论哪种情况，status 都必须为 "success"；只有 lease、记录或 seal/release 失败才返回 failed/timeout。` +
+    `返回 {batchId,status:"success",compileStatus:"passed"|"failed"|"skipped",worktreePath,branchName,commitSha}。`,
+    { label: `record-interrupted-compile-${batchId}`, phase: "Batch 阶段", schema: BATCH_RESULT_SCHEMA }
+  ), `record interrupted compile ${batchId}`);
 }
 
 async function runBatchUtestAndSeal(batchResult) {

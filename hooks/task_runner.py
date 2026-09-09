@@ -3362,6 +3362,96 @@ def run_batch_compile(
         )
 
 
+def record_interrupted_batch_compile(
+    workspace: Path,
+    feature: str,
+    batch_id: str,
+    code_workspace: Path | list[Path],
+    *,
+    parallel_run_id: str | None = None,
+    lease_token: str | None = None,
+    workspace_ref: str | None = None,
+    reason: str,
+) -> dict[str, Any]:
+    """Persist an interrupted post-Review compile as a non-blocking diagnostic.
+
+    The workflow host can kill an agent command before ``batch-compile`` gets
+    a chance to emit its own JSON.  The source result is then unknowable, but
+    the interruption itself is durable diagnostic evidence.  Record that fact
+    against the declared compile command so the reviewed delivery can be
+    sealed and continue through UTest and Merge Train.
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise TaskRunnerError("interrupted_batch_compile_reason_required")
+    try:
+        bundle = load_plan_bundle(_feature_dir(workspace, feature))
+    except ValueError as exc:
+        raise TaskRunnerError(f"invalid_plan_json:{exc}") from exc
+    _require_parallel_workflow_for_multi_batch(bundle, parallel_run_id=parallel_run_id)
+    _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
+    _assert_parallel_compile_after_review(workspace, feature, parallel_run_id, batch_id)
+    batch = bundle.batches.get(batch_id)
+    if not isinstance(batch, dict):
+        raise TaskRunnerError(f"batch_not_found:{batch_id}")
+    batch_compile = batch.get("batchCompile")
+    status = batch_compile.get("status") if isinstance(batch_compile, dict) else None
+    if status in {"passed", "failed", "skipped"}:
+        # The first agent may have persisted a valid task_runner result but
+        # lost its own response while the host was timing out.  Keep that
+        # original result; the caller only still needs to seal the commit.
+        return {
+            "compileStatus": status,
+            "commandId": batch_compile.get("commandId"),
+            "failureCategory": batch_compile.get("failureCategory"),
+            "errorCategory": batch_compile.get("errorCategory"),
+            "requiredAction": "run_utest" if status in {"passed", "skipped"} else "recorded_continue",
+            "reusedRecordedCompile": True,
+        }
+    if status != "pending":
+        raise TaskRunnerError(f"batch_compile_interruption_requires_pending:{batch_id}:{status}")
+    compile_command = batch.get("compileCommand")
+    if not isinstance(compile_command, dict) or compile_command.get("kind") != "compile" or compile_command.get("required") is not True:
+        raise TaskRunnerError(f"batch_compile_command_not_found:{batch_id}")
+    command_id = compile_command.get("id")
+    if not isinstance(command_id, str) or not command_id.strip():
+        raise TaskRunnerError(f"batch_compile_command_id_missing:{batch_id}")
+    requested_workspaces = [code_workspace] if isinstance(code_workspace, Path) else list(code_workspace)
+    repositories = _resolve_repositories(requested_workspaces, workspace_ref)
+    workspace_state = _repository_state(repositories)
+    batch_tasks = [task for task in batch.get("tasks", []) if isinstance(task, dict)]
+    compile_result = {
+        "compileStatus": "failed",
+        "commandId": command_id,
+        "output": "batch_compile_interrupted_by_workflow_host:\n" + reason.strip(),
+        "failureCategory": "workflow_interrupted",
+        "errorCategory": "workflow_interrupted",
+        "diagnosticPaths": [],
+        "repairOwnerTaskIds": [],
+        "requestedCodeWorkspaces": [str(path.resolve()) for path in requested_workspaces],
+        "workspaceSnapshotSha256": _repository_state_sha256(workspace_state),
+        "workspaceState": workspace_state,
+        "implementationEvidenceByTask": {
+            str(task.get("id")): str(task.get("latestImplementationEvidenceId"))
+            for task in batch_tasks
+            if isinstance(task.get("id"), str) and isinstance(task.get("latestImplementationEvidenceId"), str)
+        },
+        "implementationRevisionByTask": {
+            str(task.get("id")): int(task.get("implementationRevision", 0))
+            for task in batch_tasks
+            if isinstance(task.get("id"), str)
+        },
+    }
+    with _task_run_lock(_feature_dir(workspace, feature)):
+        _assert_parallel_context(workspace, feature, parallel_run_id, batch_id, lease_token, code_workspace)
+        return _integrate_batch_compile_result(
+            workspace,
+            feature,
+            batch_id,
+            compile_result,
+            parallel_run_id=parallel_run_id,
+        )
+
+
 def revalidate_batch_compile(
     workspace: Path,
     feature: str,
@@ -3760,6 +3850,24 @@ def _cmd_batch_compile(args: argparse.Namespace) -> int:
         return _emit_error(exc)
 
 
+def _cmd_record_interrupted_batch_compile(args: argparse.Namespace) -> int:
+    try:
+        workspace, feature, code_workspace = _resolve(args)
+        result = record_interrupted_batch_compile(
+            workspace,
+            feature,
+            args.batch_id,
+            code_workspace,
+            parallel_run_id=args.parallel_run_id,
+            lease_token=args.lease_token,
+            workspace_ref=args.workspace_ref,
+            reason=args.reason,
+        )
+        return _emit(_compile_result_is_recorded_success(result, args.parallel_run_id), **result)
+    except (TaskRunnerError, EvidenceStoreError, ValueError) as exc:
+        return _emit_error(exc)
+
+
 def _cmd_revalidate_batch_compile(args: argparse.Namespace) -> int:
     """处理 revalidate-batch-compile 子命令"""
     try:
@@ -3845,6 +3953,17 @@ def main(argv: list[str] | None = None) -> int:
     batch_compile.add_argument("--lease-token")
     batch_compile.add_argument("--workspace-ref")
     batch_compile.set_defaults(func=_cmd_batch_compile)
+
+    interrupted_batch_compile = subparsers.add_parser("record-interrupted-batch-compile")
+    interrupted_batch_compile.add_argument("--workspace")
+    interrupted_batch_compile.add_argument("--feature")
+    interrupted_batch_compile.add_argument("--batch-id", required=True)
+    interrupted_batch_compile.add_argument("--code-workspace", required=True, action="append")
+    interrupted_batch_compile.add_argument("--parallel-run-id", required=True)
+    interrupted_batch_compile.add_argument("--lease-token", required=True)
+    interrupted_batch_compile.add_argument("--workspace-ref")
+    interrupted_batch_compile.add_argument("--reason", required=True)
+    interrupted_batch_compile.set_defaults(func=_cmd_record_interrupted_batch_compile)
 
     revalidate_batch_compile = subparsers.add_parser("revalidate-batch-compile")
     revalidate_batch_compile.add_argument("--workspace")
